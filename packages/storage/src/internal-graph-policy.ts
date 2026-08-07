@@ -72,6 +72,33 @@ export function isReservedInternalGraphUriV1(graphUri: string): boolean {
 }
 
 /**
+ * True when an OPAQUE SPARQL Update program mentions the system-record reserved
+ * sub-namespace anywhere in its text.
+ *
+ * This is deliberately a substring scan and NOT a SPARQL parser, so state its
+ * strength honestly. It over-refuses: an update that merely names the prefix in
+ * a comment or a string literal is rejected too. That is the right direction to
+ * be wrong in, because the sub-namespace is the node's own and no legitimate
+ * caller has a reason to spell it — the materializer builds its commands from
+ * `SYSTEM_RECORD_V1_*` constants and dispatches them over the lane's own path,
+ * never through the public `update()`.
+ *
+ * What it does NOT do is stop a caller who deliberately hides the IRI behind a
+ * `PREFIX` declaration or a `\u` escape. Nothing enforceable at this layer
+ * would: an in-process caller can import the module directly. The guard exists
+ * to close the accidental and legacy-caller route that the reviewer identified
+ * — `DROP SILENT GRAPH <…:system-record-v1:state>` written literally — not to
+ * be a security boundary against code already running inside the process.
+ *
+ * Scoped to the system-record subtree only. The wider
+ * `ATOMIC_GRAPH_REPLACE_STAGING_PREFIX` must stay writable, because the
+ * adapter's own atomic-replace path builds updates that name staging graphs.
+ */
+export function opaqueUpdateMentionsReservedSystemRecordV1(sparql: string): boolean {
+  return sparql.includes(SYSTEM_RECORD_V1_INTERNAL_PREFIX);
+}
+
+/**
  * True for an EPHEMERAL per-operation staging graph — the pre-B2 meaning of the
  * internal prefix.
  *

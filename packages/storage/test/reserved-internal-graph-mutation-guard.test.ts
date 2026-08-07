@@ -109,6 +109,46 @@ describe('reserved internal graph mutation guard', () => {
       ).rejects.toThrow(ReservedInternalGraphWriteError);
     });
 
+    describe('the opaque update() channel', () => {
+      // The structured guards above only see graph terms the caller passed as
+      // arguments, so raw SPARQL was the one route left to a hardcoded reserved
+      // IRI. These assert on DISPATCH, not merely on a thrown error: the point
+      // is that no byte leaves.
+      for (const graph of RESERVED) {
+        for (const verb of [
+          (g: string) => `DROP SILENT GRAPH <${g}>`,
+          (g: string) => `INSERT DATA { GRAPH <${g}> { <urn:s> <urn:p> "o" } }`,
+          (g: string) => `DELETE WHERE { GRAPH <${g}> { ?s ?p ?o } }`,
+        ]) {
+          const sparql = verb(graph);
+          const label = `${sparql.split(' ')[0]} ${graph.split(':').pop()}`;
+          it(`refuses ${label} without dispatching`, async () => {
+            const fetchSpy = stubFetch();
+            await expect(newStore().update(sparql)).rejects.toThrow(
+              ReservedInternalGraphWriteError,
+            );
+            expect(fetchSpy).not.toHaveBeenCalled();
+          });
+        }
+      }
+
+      it('leaves ordinary opaque updates, and staging-graph cleanup, dispatching', async () => {
+        // The refusal is scoped to the system-record subtree. The wider
+        // atomic-replace staging prefix MUST stay writable — the adapter's own
+        // replaceGraph builds updates that name staging graphs, so a guard on
+        // the whole internal namespace would break atomic replace.
+        const fetchSpy = stubFetch();
+        const staging = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
+
+        await expect(
+          newStore().update('INSERT DATA { GRAPH <urn:ordinary> { <urn:s> <urn:p> "o" } }'),
+        ).resolves.toBeUndefined();
+        await expect(newStore().update(`DROP SILENT GRAPH <${staging}>`)).resolves.toBeUndefined();
+
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
+      });
+    });
+
     it('still allows ephemeral staging graphs so atomic-replace cleanup works', async () => {
       const fetchSpy = stubFetch();
       const staging = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
@@ -125,17 +165,6 @@ describe('reserved internal graph mutation guard', () => {
       const fetchSpy = stubFetch();
       await expect(
         newStore().dropGraph('did:dkg:context-graph:example'),
-      ).resolves.toBeUndefined();
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-    });
-
-    it('does not guard opaque update(), which rotates the epoch instead', async () => {
-      // Documented boundary, asserted so it is a decision rather than an
-      // oversight: scanning opaque SPARQL for reserved IRIs is evadable, so
-      // Stack C migrates raw callers instead.
-      const fetchSpy = stubFetch();
-      await expect(
-        newStore().update!(`DROP SILENT GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}>`),
       ).resolves.toBeUndefined();
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });

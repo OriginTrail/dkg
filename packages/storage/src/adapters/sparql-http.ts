@@ -49,8 +49,10 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
+  ReservedInternalGraphWriteError,
   assertNotReservedInternalGraphV1,
   isInternalGraphUriV1,
+  opaqueUpdateMentionsReservedSystemRecordV1,
 } from '../internal-graph-policy.js';
 import {
   ManagedOxigraphBackendUnownedError,
@@ -465,12 +467,12 @@ export class SparqlHttpStore implements TripleStore {
    * enumerate: no legitimate iterate-and-drop loop can reach one, only a
    * hardcoded IRI can.
    *
-   * `update()` is deliberately NOT guarded. Its argument is an opaque SPARQL
-   * program, and scanning it for reserved IRIs would be exactly the evadable
-   * best-effort string check that `ChangelogStore.assertNoReservedRef` already
-   * documents as insufficient. Opaque updates instead rotate the
-   * materialization epoch; Stack C audits and migrates the remaining raw
-   * callers before any of this behaviour is enabled.
+   * The opaque `update()` channel is guarded separately and more bluntly, on
+   * the request text rather than on graph terms, because there are no terms to
+   * inspect. That guard over-refuses by design and does not claim to survive a
+   * caller who hides the IRI; `opaqueUpdateMentionsReservedSystemRecordV1`
+   * states its exact strength. Opaque updates also rotate the materialization
+   * epoch, and Stack C audits the remaining raw callers.
    */
   private assertGenericMutationScope(
     graphs: Iterable<string | undefined>,
@@ -803,6 +805,18 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
+    // The raw channel is the one place a hardcoded reserved IRI could still
+    // reach persistent system-record state, since the structured guards below
+    // only see graph terms the caller passed as arguments. Refuse conservatively
+    // on the text; see `opaqueUpdateMentionsReservedSystemRecordV1` for exactly
+    // how strong this is and is not.
+    if (opaqueUpdateMentionsReservedSystemRecordV1(sparql)) {
+      throw new ReservedInternalGraphWriteError(
+        'urn:dkg:internal:atomic-graph-replace:system-record-v1:*',
+        'update',
+        'SparqlHttpStore',
+      );
+    }
     await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
