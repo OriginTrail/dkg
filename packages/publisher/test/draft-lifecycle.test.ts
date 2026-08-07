@@ -522,11 +522,17 @@ describe('Working Memory Assertion Lifecycle', () => {
     ]);
   });
 
-  it('a completed marker whose assertion was later discarded is a no-op, not a refusal', async () => {
+  it('a completed marker with no active lifecycle is a no-op, not a refusal', async () => {
     // Regression: a successful migration leaves a `completed` marker behind
-    // forever. If the assertion is later discarded, the next chat-memory
+    // forever. If the active lifecycle is later cleared, the next chat-memory
     // initialization runs migration BEFORE create — misclassifying that as a
     // fresh legacy draft made it refuse, permanently blocking createAssertion.
+    //
+    // NOTE on how this state actually arises: `assertionDiscard` does NOT
+    // produce it. Discard is predicate-scoped and leaves `contentScopeVersion`
+    // in place, so a discarded migrated draft classifies as
+    // already-graph-scoped. The real producer is a partial failure of a
+    // non-atomic per-subject delete sweep (see the orphan-event case below).
     const name = 'legacy-completed-then-discarded';
     const metaGraph = contextGraphMetaUri(CG_ID);
     const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
@@ -563,6 +569,170 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
       expect.objectContaining({ subject: 'urn:test:fresh' }),
     ]);
+  });
+
+  for (const markerState of ['completed', undefined] as const) {
+    it(
+      `orphan lifecycle event rows are not a legacy draft (marker: ${markerState ?? 'none'}) — `
+      + 'migration must no-op so create can sweep them',
+      async () => {
+        // The lifecycle query intentionally spans the active subject AND its
+        // `…/event/{id}` provenance children. Counting both made an orphan
+        // event row read as "a draft exists", so the classifier fell through
+        // to the eligibility gate, found no state/layer rows, and refused —
+        // permanently, since the daemon runs migration ahead of create and
+        // create is the only thing that sweeps those orphans away.
+        //
+        // Reachable via a partial failure of `assertionCreateUnlocked`'s
+        // non-atomic per-subject stale-event sweep: the active subject is
+        // deleted, then the process dies before its event children are.
+        const name = `legacy-orphan-event-${markerState ?? 'none'}`;
+        const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
+        const metaGraph = contextGraphMetaUri(CG_ID);
+        const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+        const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+        await store.insert([
+          // An orphan event child with NO rows on the active lifecycle subject.
+          {
+            subject: `${lifecycle}/event/orphaned`,
+            predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+            object: 'http://dkg.io/ontology/AssertionCreated',
+            graph: metaGraph,
+          },
+        ]);
+        if (markerState) {
+          await store.createGraph(backupGraph);
+          await store.insert([{
+            subject: sourceGraph,
+            predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
+            object: `"${markerState}"`,
+            graph: backupGraph,
+          }]);
+        }
+
+        const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+        expect(result.status).toBe('not-needed');
+
+        // The daemon's create-after-migrate path stays open.
+        await publisher.assertionCreate(CG_ID, name, AGENT);
+        await publisher.assertionWrite(CG_ID, name, AGENT, [
+          { subject: 'urn:test:after-orphan', predicate: 'http://schema.org/text', object: '"ok"' },
+        ]);
+        expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+          expect.objectContaining({ subject: 'urn:test:after-orphan' }),
+        ]);
+      },
+    );
+  }
+
+  // The content gate is a data-integrity boundary distinct from the
+  // eligibility gate: it stops unsafe legacy triples entering the
+  // graph-scoped draft. The draft below is OTHERWISE eligible, so only the
+  // content can be what rejects it.
+  //
+  // Only the reserved-namespace half is exercised end-to-end. The oversized
+  // literal half of `validateMigratableContent` cannot be reached through
+  // this harness: `OxigraphStore.insert` applies the same MUTF-8 limit, so an
+  // oversized literal cannot be seeded into a legacy graph in the first
+  // place. That guard remains as defense for stores written by an older,
+  // looser version, and `assertQuadLiteralsMutf8Safe` is covered directly in
+  // core.
+  it('refuses to migrate legacy content carrying a reserved protocol-namespace subject', async () => {
+    const name = 'legacy-content-reserved-subject';
+    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    await store.insert([
+      {
+        subject: 'urn:dkg:file:keccak256:deadbeef',
+        predicate: 'http://schema.org/text',
+        object: '"smuggled"',
+        graph: sourceGraph,
+      },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"created"', graph: metaGraph },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph: metaGraph },
+    ]);
+
+    await expect(
+      publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
+        allocateKaNumber: async () => ({
+          number: 97n,
+          reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/97`,
+        }),
+      }),
+    ).rejects.toThrow();
+
+    // Rejected BEFORE any metadata rewrite: the legacy lifecycle is intact
+    // and no `prepared` marker was stamped.
+    const stateIntact = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${lifecycle}> <http://dkg.io/ontology/state> "created" } }`,
+    );
+    expect(stateIntact.type === 'boolean' && stateIntact.value).toBe(true);
+    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+    const markerStamped = await store.query(
+      `ASK { GRAPH <${backupGraph}> { ?s <http://dkg.io/ontology/legacyWorkingMemoryMigrationState> ?o } }`,
+    );
+    expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
+  });
+
+  it('a prepared marker resumes idempotently after the graph-scoped draft already exists', async () => {
+    // Crash-recovery coverage for the OTHER side of the prepared window: the
+    // draft was already created and its content copied, but the process died
+    // before `completeMarker`. The rerun must resume, not re-allocate a new
+    // identity, and must not duplicate the copied content.
+    const name = 'legacy-resume-post-apply';
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+    const publicQuads = [
+      { subject: 'urn:test:resume:1', predicate: 'http://schema.org/text', object: '"copied"' },
+    ];
+
+    // Build a draft that is genuinely graph-scoped WITH a minted number, then
+    // rewind ONLY the marker to `prepared` — exactly the durable state a
+    // crash before completeMarker leaves behind (graph-scoped metadata
+    // present, content already copied into the target WM graph).
+    await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+      allocateKaNumber: async () => ({
+        number: 77n,
+        reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/77`,
+      }),
+    });
+    await publisher.assertionWrite(CG_ID, name, AGENT, publicQuads);
+    await store.createGraph(backupGraph);
+    await store.insert([{
+      subject: sourceGraph,
+      predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
+      object: '"prepared"',
+      graph: backupGraph,
+    }]);
+
+    let allocations = 0;
+    const result = await publisher.migrateLegacyRootScopedWorkingMemory(
+      CG_ID,
+      name,
+      AGENT,
+      undefined,
+      {
+        allocateKaNumber: async () => {
+          allocations += 1;
+          return { number: 77n, reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/77` };
+        },
+      },
+    );
+
+    expect(result.status).toBe('resumed');
+    // Already graph-scoped, so no second identity may be minted.
+    expect(allocations).toBe(0);
+    // Content survives exactly once — the resume must not duplicate it.
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual(
+      publicQuads.map((quad) => expect.objectContaining(quad)),
+    );
+    const completed = await store.query(
+      `ASK { GRAPH <${backupGraph}> { <${sourceGraph}> `
+      + '<http://dkg.io/ontology/legacyWorkingMemoryMigrationState> "completed" } }',
+    );
+    expect(completed.type === 'boolean' && completed.value).toBe(true);
   });
 
   // The eligibility gate refuses a created/WM draft that is not purely local.

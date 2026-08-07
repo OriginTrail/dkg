@@ -7393,22 +7393,22 @@ export class DKGPublisher implements Publisher {
   private legacyWmMigrationHost(): LegacyWmMigrationHost {
     return {
       store: this.store,
-      validateOptionalSubGraph: (subGraphName) =>
-        DKGPublisher.validateOptionalSubGraph(subGraphName),
-      ensureSubGraphRegistered: (contextGraphId, subGraphName) =>
-        this.ensureSubGraphRegistered(contextGraphId, subGraphName),
-      loadAssertionScopedQuads: (graphUri) => this.assertionScopedQuads(graphUri),
-      loadPrivateDraftQuads: (contextGraphId, agentAddress, name, subGraphName) =>
-        this.privateStore.getKnowledgeAssetPrivateDraftTriples(
-          contextGraphId,
-          agentAddress,
-          name,
-          subGraphName,
-        ),
-      validateMigratableContent: (publicQuads, privateQuads) => {
+      prepareSubGraph: async (contextGraphId, subGraphName) => {
+        DKGPublisher.validateOptionalSubGraph(subGraphName);
+        await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+      },
+      loadMigratableContent: async (sourceGraph, request) => {
+        const publicQuads = await this.assertionScopedQuads(sourceGraph);
+        const privateQuads = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+          request.contextGraphId,
+          request.agentAddress,
+          request.name,
+          request.subGraphName,
+        );
         rejectUserAuthoredProtocolMetadata(publicQuads);
         rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
         rejectOversizedRdfLiterals(privateQuads, 'legacyWorkingMemoryMigration.privateQuads');
+        return { publicQuads, privateQuads };
       },
       canSelfAllocateGraphIdentity: (agentAddress) =>
         this.kaAllocator !== undefined && isAllocatableKaAuthorV1(agentAddress),

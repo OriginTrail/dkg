@@ -82,18 +82,18 @@ export interface LegacyWmMigrationResult {
  */
 export interface LegacyWmMigrationHost {
   store: Pick<TripleStore, 'query' | 'insert' | 'createGraph' | 'deleteByPattern'>;
-  validateOptionalSubGraph(subGraphName: string | undefined): void;
-  ensureSubGraphRegistered(contextGraphId: string, subGraphName: string | undefined): Promise<void>;
-  /** All quads reachable from the assertion-scoped graph family of `graphUri`. */
-  loadAssertionScopedQuads(graphUri: string): Promise<Quad[]>;
-  loadPrivateDraftQuads(
-    contextGraphId: string,
-    agentAddress: string,
-    name: string,
-    subGraphName: string | undefined,
-  ): Promise<Quad[]>;
-  /** Content gate: throws unless the legacy content may enter the graph-scoped boundary. */
-  validateMigratableContent(publicQuads: Quad[], privateQuads: Quad[]): void;
+  /** Validate the sub-graph name and assert it is registered. */
+  prepareSubGraph(contextGraphId: string, subGraphName: string | undefined): Promise<void>;
+  /**
+   * Read the legacy draft's public + private content AND gate it, throwing
+   * unless it may enter the graph-scoped assertion boundary. Read and gate
+   * are one primitive because the migration must never hold un-validated
+   * legacy content.
+   */
+  loadMigratableContent(
+    sourceGraph: string,
+    request: LegacyWmMigrationRequest,
+  ): Promise<{ publicQuads: Quad[]; privateQuads: Quad[] }>;
   /** Whether the publisher can mint a KA number itself for this author. */
   canSelfAllocateGraphIdentity(agentAddress: string): boolean;
   createGraphScopedDraft(
@@ -120,17 +120,37 @@ export interface LegacyWmMigrationHost {
 }
 
 /**
+ * Which mutating steps this run still owes, decided ONCE by the classifier.
+ *
+ * A `prepared` marker says preparation happened but not which later steps
+ * did, so resume progress used to be re-derived inside the mutating phase.
+ * Naming the steps here keeps that decision in the classifier; the apply
+ * phase only executes what it is handed.
+ *
+ * Deliberately derived, not persisted: the durable marker vocabulary stays
+ * `prepared`/`completed`, so markers written by already-shipped nodes keep
+ * resuming correctly. Every step is idempotent, which is what makes deriving
+ * them from observed state sound.
+ */
+export interface LegacyWmMigrationSteps {
+  /** Copy lifecycle rows to the backup graph and stamp `prepared`. */
+  prepareBackup: boolean;
+  /** Clear legacy metadata and mint the graph-scoped draft identity. */
+  createGraphScopedDraft: boolean;
+}
+
+/**
  * The typed migration phases a request can classify into. Refusals throw.
  *
  * The two `not-needed` reasons differ in what they may report: an
  * already-migrated draft echoes its recorded marker counts/target, while a
- * draft that never existed (or was since discarded) reports nothing — its
- * marker rows, if any survived a crash, describe an assertion that is gone.
+ * draft with no active lifecycle reports nothing — its marker rows, if any
+ * survived, describe an assertion that is gone.
  */
 export type LegacyWmMigrationPlan =
   | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' }
-  | { phase: 'eligible-fresh' }
-  | { phase: 'prepared-resume' };
+  | { phase: 'eligible-fresh'; steps: LegacyWmMigrationSteps }
+  | { phase: 'prepared-resume'; steps: LegacyWmMigrationSteps };
 
 interface MigrationUris {
   lifecycle: string;
@@ -165,9 +185,15 @@ export function toLifecycleRow(binding: Record<string, string | undefined>): Lif
   return s && p && o != null ? { s, p, o } : null;
 }
 
-/** The complete lifecycle picture the classifier decides from. */
+/**
+ * The complete lifecycle picture the classifier decides from.
+ *
+ * Deliberately carries NO total-row count. `loadLifecycleRows` returns the
+ * active lifecycle subject AND its `…/event/{id}` provenance children, and
+ * every decision here is about the active subject only — a count spanning
+ * both reads as "a draft exists" when only orphan event rows survive.
+ */
 export interface LifecycleSummary {
-  rowCount: number;
   activeRows: LifecycleRow[];
   scopeVersions: Set<string>;
   isGraphScoped: boolean;
@@ -278,7 +304,6 @@ export function summarizeLifecycle(
   );
   const scopeVersions = activeValues(`${DKG}contentScopeVersion`);
   return {
-    rowCount: lifecycleRows.length,
     activeRows,
     scopeVersions,
     isGraphScoped: scopeVersions.size === 1
@@ -304,10 +329,13 @@ export function summarizeLifecycle(
  * 2. an unrecognized marker state refuses rather than guessing;
  * 3. a `prepared` marker resumes — preparation deliberately clears the legacy
  *    rows, so zero rows there means "resume", not "nothing to do";
- * 4. no active lifecycle at all means there is nothing to migrate, whether we
- *    never saw a draft or a completed migration's assertion was since
- *    discarded (that case must stay a no-op, or a later `createAssertion`
- *    would be blocked forever by its own success marker);
+ * 4. no rows on the ACTIVE lifecycle subject means there is nothing to
+ *    migrate — whether a draft was never created, or one was cleared and only
+ *    orphan `…/event/{id}` provenance rows survive. This must stay a no-op:
+ *    the daemon runs migration ahead of `createAssertion`, so refusing here
+ *    would permanently block the create that would otherwise sweep those
+ *    orphans away (and, after any successful migration, the `completed`
+ *    marker is durable forever);
  * 5. otherwise the draft must pass the full local-draft eligibility gate.
  *
  * `loadSeal` is a thunk so the seal ASK is only issued for a draft that has
@@ -332,9 +360,14 @@ export async function classifyLegacyWmMigration(
     );
   }
   if (markerState === 'prepared') {
-    return { phase: 'prepared-resume' };
+    // Preparation already happened; what remains depends on how far the
+    // interrupted run got, which the lifecycle shape reports.
+    return {
+      phase: 'prepared-resume',
+      steps: { prepareBackup: false, createGraphScopedDraft: !summary.isGraphScoped },
+    };
   }
-  if (summary.rowCount === 0) {
+  if (summary.activeRows.length === 0) {
     return { phase: 'not-needed', reason: 'no-legacy-draft' };
   }
   if (
@@ -350,7 +383,10 @@ export async function classifyLegacyWmMigration(
       `Legacy WM migration refused for ${input.contextGraphId}/${input.name}: only an active, local created/WM draft is eligible`,
     );
   }
-  return { phase: 'eligible-fresh' };
+  return {
+    phase: 'eligible-fresh',
+    steps: { prepareBackup: true, createGraphScopedDraft: !summary.isGraphScoped },
+  };
 }
 
 /** Is the legacy source graph carrying any assertion seal? */
@@ -418,10 +454,10 @@ async function applyGraphScopedDraft(
   request: LegacyWmMigrationRequest,
   uris: MigrationUris,
   lifecycleRows: LifecycleRow[],
-  isGraphScoped: boolean,
+  createGraphScopedDraft: boolean,
   publicQuads: Quad[],
 ): Promise<string> {
-  if (!isGraphScoped) {
+  if (createGraphScopedDraft) {
     for (const subject of new Set(lifecycleRows.map((row) => row.s))) {
       await host.store.deleteByPattern({ graph: uris.metaGraph, subject });
     }
@@ -501,8 +537,7 @@ export async function runLegacyWorkingMemoryMigration(
   host: LegacyWmMigrationHost,
   request: LegacyWmMigrationRequest,
 ): Promise<LegacyWmMigrationResult> {
-  host.validateOptionalSubGraph(request.subGraphName);
-  await host.ensureSubGraphRegistered(request.contextGraphId, request.subGraphName);
+  await host.prepareSubGraph(request.contextGraphId, request.subGraphName);
 
   const uris = migrationUris(request);
   const marker = await loadMigrationMarker(host.store, uris);
@@ -533,14 +568,10 @@ export async function runLegacyWorkingMemoryMigration(
   // Load and gate the content BEFORE any mutation: a draft whose legacy
   // content cannot enter the graph-scoped assertion boundary must fail
   // while its active metadata is still untouched.
-  const publicQuads = await host.loadAssertionScopedQuads(uris.sourceGraph);
-  const privateQuads = await host.loadPrivateDraftQuads(
-    request.contextGraphId,
-    request.agentAddress,
-    request.name,
-    request.subGraphName,
+  const { publicQuads, privateQuads } = await host.loadMigratableContent(
+    uris.sourceGraph,
+    request,
   );
-  host.validateMigratableContent(publicQuads, privateQuads);
 
   // Both remaining phases mutate, so both need a graph-scoped identity lane
   // before anything is written.
@@ -550,7 +581,7 @@ export async function runLegacyWorkingMemoryMigration(
     throw identityAllocatorRequired(request.contextGraphId, request.name);
   }
 
-  if (plan.phase === 'eligible-fresh') {
+  if (plan.steps.prepareBackup) {
     await prepareBackup(host, uris, lifecycleRows, {
       publicQuads: publicQuads.length,
       privateQuads: privateQuads.length,
@@ -562,7 +593,7 @@ export async function runLegacyWorkingMemoryMigration(
     request,
     uris,
     lifecycleRows,
-    summary.isGraphScoped,
+    plan.steps.createGraphScopedDraft,
     publicQuads,
   );
   await completeMarker(host.store, uris, targetGraph);

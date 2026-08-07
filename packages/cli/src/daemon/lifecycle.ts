@@ -86,6 +86,8 @@ import {
   OperationTracker,
   handleNodeUIRequest,
   ChatMemoryManager,
+  AGENT_CONTEXT_GRAPH,
+  CHAT_TURNS_ASSERTION,
   LogPushWorker,
   OtlpLogWorker,
   initTelemetry,
@@ -3205,10 +3207,21 @@ export async function runDaemonInner(
     }
   });
 
+  // The chat-memory identifiers are declared ONCE and drive both the manager
+  // and the legacy-migration policy, so the assertion allowed to storage-
+  // upgrade is always the assertion the manager actually writes to.
+  const chatMemoryIds = {
+    contextGraphId: AGENT_CONTEXT_GRAPH,
+    assertionName: CHAT_TURNS_ASSERTION,
+  };
   // The chat-memory glue (query/create/write surface + the legacy chat-WM
   // migration behind `createAssertion`) lives in `buildMemoryToolContext` so
   // the daemon-wiring contract stays unit-testable without a real agent.
-  const agentToolsContext = buildMemoryToolContext(agent, emitMemoryGraphChanged);
+  const agentToolsContext = buildMemoryToolContext(
+    agent,
+    emitMemoryGraphChanged,
+    chatMemoryIds,
+  );
   // See `resolveMemoryAgentAddress` for the write/read-URI invariant
   // this encodes (issue #277). The helper is exported purely so the
   // daemon-wiring contract stays unit-testable without a real agent.
@@ -3216,7 +3229,11 @@ export async function runDaemonInner(
   const memoryManager = new ChatMemoryManager(
     agentToolsContext,
     config.llm ?? { apiKey: '' },
-    { agentAddress: memoryAgentAddress },
+    {
+      agentAddress: memoryAgentAddress,
+      contextGraphId: chatMemoryIds.contextGraphId,
+      assertionName: chatMemoryIds.assertionName,
+    },
   );
   log('Memory manager ready');
   if (config.llm) log('Memory enrichment LLM ready');

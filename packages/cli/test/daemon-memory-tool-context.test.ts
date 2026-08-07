@@ -16,6 +16,8 @@
 import { describe, it, expect } from 'vitest';
 import { buildMemoryToolContext, type MemoryToolContextAgent } from '../src/daemon.js';
 
+const CHAT_IDS = { contextGraphId: 'agent-context', assertionName: 'chat-turns' };
+
 interface RecordingAgent extends MemoryToolContextAgent {
   order: string[];
   migrateCalls: unknown[][];
@@ -69,7 +71,7 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
       'FIRST and forwards the same resolved agentAddress to both operations',
     async () => {
       const agent = makeAgent();
-      const tools = buildMemoryToolContext(agent, () => {});
+      const tools = buildMemoryToolContext(agent, () => {}, CHAT_IDS);
 
       const result = await tools.createAssertion('agent-context', 'chat-turns', AGENT_OPTS);
 
@@ -90,7 +92,7 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
 
   it('forwards subGraphName alongside agentAddress through the migration call', async () => {
     const agent = makeAgent();
-    const tools = buildMemoryToolContext(agent, () => {});
+    const tools = buildMemoryToolContext(agent, () => {}, CHAT_IDS);
 
     await tools.createAssertion('agent-context', 'chat-turns', {
       subGraphName: 'sub-a',
@@ -108,7 +110,7 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
       'migration is scoped to exactly the chat-turns WM draft (#2149)',
     async () => {
       const agent = makeAgent();
-      const tools = buildMemoryToolContext(agent, () => {});
+      const tools = buildMemoryToolContext(agent, () => {}, CHAT_IDS);
 
       await tools.createAssertion('agent-context', 'other-assertion', AGENT_OPTS);
       await tools.createAssertion('other-graph', 'chat-turns', AGENT_OPTS);
@@ -124,7 +126,7 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
         throw new Error('assertion already exists');
       },
     });
-    const tools = buildMemoryToolContext(agent, () => {});
+    const tools = buildMemoryToolContext(agent, () => {}, CHAT_IDS);
 
     const result = await tools.createAssertion('agent-context', 'chat-turns', AGENT_OPTS);
 
@@ -141,7 +143,7 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
           throw new Error('legacy backup graph already exists');
         },
       });
-      const tools = buildMemoryToolContext(agent, () => {});
+      const tools = buildMemoryToolContext(agent, () => {}, CHAT_IDS);
 
       await expect(
         tools.createAssertion('agent-context', 'chat-turns', AGENT_OPTS),
@@ -160,7 +162,7 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
         throw refusal;
       },
     });
-    const tools = buildMemoryToolContext(agent, () => {});
+    const tools = buildMemoryToolContext(agent, () => {}, CHAT_IDS);
 
     await expect(
       tools.createAssertion('agent-context', 'chat-turns', AGENT_OPTS),
@@ -168,10 +170,36 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
     expect(agent.createCalls).toHaveLength(0);
   });
 
+  it(
+    'the migration policy follows the CONFIGURED chat-memory identifiers, not the ' +
+      'package defaults — an overridden manager migrates its own assertion',
+    async () => {
+      const agent = makeAgent();
+      const tools = buildMemoryToolContext(agent, () => {}, {
+        contextGraphId: 'custom-context',
+        assertionName: 'custom-turns',
+      });
+
+      // The configured pair migrates...
+      await tools.createAssertion('custom-context', 'custom-turns', AGENT_OPTS);
+      expect(agent.migrateCalls).toEqual([[
+        'custom-context',
+        'custom-turns',
+        AGENT_OPTS,
+      ]]);
+
+      // ...and the package DEFAULT pair no longer does, because it is not
+      // what this manager writes to.
+      await tools.createAssertion('agent-context', 'chat-turns', AGENT_OPTS);
+      expect(agent.migrateCalls).toHaveLength(1);
+      expect(agent.createCalls).toHaveLength(2);
+    },
+  );
+
   it('writeAssertion forwards agentAddress and emits one wm memory-graph-changed event', async () => {
     const agent = makeAgent();
     const events: any[] = [];
-    const tools = buildMemoryToolContext(agent, (event) => events.push(event));
+    const tools = buildMemoryToolContext(agent, (event) => events.push(event), CHAT_IDS);
 
     const result = await tools.writeAssertion(
       'agent-context',
