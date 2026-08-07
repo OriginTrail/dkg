@@ -43,30 +43,6 @@ export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 200_000;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 96 * 1024 * 1024;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS = 500;
 
-/**
- * Ceiling for a SINGLE subject's row group, deliberately NOT raised with the
- * snapshot build caps.
- *
- * Whole-subject windows are the consistency unit of the plan lane (#1788): a
- * seal/head row-group must be served atomically, so a subject larger than this
- * can never be served coherently and a bounded refusal is the correct answer.
- * That is a statement about row-group atomicity, not about how much a snapshot
- * may materialize, so it stays pinned at the historical 64,000 while the
- * snapshot caps move.
- */
-export const SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS = 64_000;
-
-/**
- * Retained-heap ceiling for PLAN SCALARS (subject IRIs + row counts), also
- * deliberately NOT raised with the snapshot build caps.
- *
- * A plan is control-plane state whose whole purpose is to be far smaller than
- * the rows it describes. Letting it grow with the snapshot ceiling would triple
- * the retained plan (~250k subjects) for no benefit, so it stays at the
- * historical 32 MiB.
- */
-export const SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
-
 export interface SyncRowSnapshotLoadLimits {
   maxRows: number;
   maxBytesEstimate: number;

@@ -6,10 +6,15 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
-import { SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS } from '../src/sync/responder/snapshot-cache.js';
+import {
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
+  SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
+} from '../src/sync/responder/snapshot-cache.js';
 import {
   createResponderFreshSwmMetaPlanMemo,
+  FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
   FRESH_SWM_META_PLAN_MAX_SUBJECTS,
+  FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS,
 } from '../src/sync/responder/graph-plan.js';
 import {
   DKG_NS,
@@ -26,7 +31,7 @@ import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 
 /**
  * #1847 — SWM meta lane ceiling. A CG whose `_meta` crossed
- * SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS (64,000) raw rows became permanently
+ * the legacy 64,000-row snapshot build limit became permanently
  * unsyncable for TTL-filtered sessions: the bounded snapshot applied its budget
  * to the RAW graph before the TTL filter, and `readSwmMetaPage` passed
  * `params.cutoffIso == null` POSITIONALLY as `fallbackOnPerSnapshotBudget`, so
@@ -43,6 +48,13 @@ const TINY_SNAPSHOT_BUDGET = {
   maxRows: 1_000_000,
   maxBytesEstimate: Number.MAX_SAFE_INTEGER,
   maxSnapshotRows: 1,
+  maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
+} as const;
+
+const PLAN_FORCED_SNAPSHOT_BUDGET = {
+  maxRows: 1_000_000,
+  maxBytesEstimate: Number.MAX_SAFE_INTEGER,
+  maxSnapshotRows: 60_000,
   maxSnapshotBytesEstimate: Number.MAX_SAFE_INTEGER,
 } as const;
 
@@ -122,7 +134,16 @@ function forbidSwmMetaSortOrOffsetQueries(store: OxigraphStore) {
   };
 }
 
-describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
+describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', () => {
+  it('keeps plan-only ceilings pinned below the snapshot materialization caps', () => {
+    expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS).toBe(64_000);
+    expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
+    expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS)
+      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
+    expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE)
+      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+  });
+
   it('serves a 64,000+-row _meta with a small fresh subset completely at DEFAULT budgets (the fifa-world-cup-2026 shape)', async () => {
     const cgId = 'meta-ceiling-fifa';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
@@ -621,36 +642,34 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
     await store.close();
   }, 120_000);
 
-  it('keeps a bounded refusal ONLY for a single pathological subject exceeding the hard build cap', async () => {
+  it('keeps a bounded refusal for a single subject above the independent row-group cap', async () => {
     const cgId = 'meta-ceiling-monster';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const fresh = freshIso();
     const store = new OxigraphStore();
-    // ONE fresh subject carrying SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS + 1 rows.
+    // ONE fresh subject carrying the plan lane's subject-window cap + 1 rows.
     // Whole-subject windows are the consistency unit of the plan lane (they are
     // what keeps a seal/head row-group atomic per #1788), so this single
-    // row-group can never be served coherently within the hard build cap — a
-    // bounded refusal, at DEFAULT budgets, is the correct answer. Ordinary
-    // multi-row subjects under a shrunken session budget are covered by the
-    // paged tests above.
-    //
-    // The seed is sized off the CONSTANT, not a literal: the subject must
-    // exceed the build cap to be forced into the plan lane at all, and only
-    // there does the pinned SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS check fire.
-    // Hard-coding 64,000 here is exactly how this test silently stopped
-    // exercising the refusal when the build cap was raised to 200,000.
+    // row-group can never be served coherently. A local 60,000-row snapshot
+    // budget forces plan mode independently of the production build cap, so a
+    // future snapshot-cap change cannot make this regression test expensive or
+    // silently stop exercising the row-group refusal.
     const subject = 'urn:monster';
     const monsterQuads: Quad[] = [
       { graph: metaGraph, subject, predicate: `${DKG_NS}publishedAt`, object: `"${fresh}"^^<${XSD_DT}>` },
     ];
-    for (let index = 1; index <= SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS; index += 1) {
+    for (let index = 1; index <= FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS; index += 1) {
       monsterQuads.push({
         graph: metaGraph, subject, predicate: `${DKG_NS}note`, object: `"filler-${index}"`,
       });
     }
     await insertChunked(store, monsterQuads);
 
-    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    const cap = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 500,
+      snapshotBudget: PLAN_FORCED_SNAPSHOT_BUDGET,
+    });
 
     await expect(cap.invoke({
       contextGraphId: cgId,
@@ -659,7 +678,16 @@ describe('SWM meta lane above the 64,000-row snapshot ceiling (#1847)', () => {
       offset: 0,
       limit: 500,
       syncSessionId: 'monster-session',
-    })).rejects.toThrow(/per-snapshot rows budget/);
+    })).rejects.toMatchObject({
+      // The protocol boundary deliberately converts the internal
+      // SyncRowSnapshotBudgetError into a quiet retryable response while
+      // preserving its typed budget details in the message.
+      name: 'QuietRetryableHandlerError',
+      message: expect.stringContaining(
+        `actual=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS + 1}, ` +
+        `limit=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS}`,
+      ),
+    });
     await store.close();
   }, 120_000);
 

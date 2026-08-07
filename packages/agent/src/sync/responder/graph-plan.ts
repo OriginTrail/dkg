@@ -21,8 +21,6 @@ import type { SyncRow, SyncRowListMemo } from './snapshot-cache.js';
 import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
-  SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS,
-  SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS,
 } from './snapshot-cache.js';
 import { bytesToHex } from '@noble/hashes/utils.js';
@@ -2757,6 +2755,21 @@ async function readSwmMetaRowsPage(
 const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
 
 /**
+ * Ceiling for one subject row-group in the fresh-SWM plan lane. Whole-subject
+ * windows are its consistency unit (#1788), so an oversized subject cannot be
+ * served atomically and receives a bounded refusal. This limit is intentionally
+ * independent of snapshot materialization limits.
+ */
+export const FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS = 64_000;
+
+/**
+ * Retained-heap ceiling for fresh-SWM plan scalars (subject IRIs + row counts).
+ * A plan is control-plane state and must remain much smaller than the rows it
+ * describes, independently of snapshot materialization limits.
+ */
+export const FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
+
+/**
  * Hard cardinality cap for a TTL meta session plan's admitted subjects, across
  * all candidate graphs of the phase. The discovery queries are LIMIT-bounded to
  * this cap (plus one sentinel row), so plan construction can never materialize
@@ -2765,7 +2778,7 @@ const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
  * plan. Sizing: every admitted subject serves at least one row, so this cap
  * alone admits sessions far past the point where they run plan-paged, while
  * the retained plan stays a few megabytes at worst (also capped by the fixed
- * build byte estimate below, which bounds pathological IRI lengths).
+ * plan byte estimate below, which bounds pathological IRI lengths).
  */
 export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
 
@@ -2773,7 +2786,7 @@ export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
  * Discover the TTL-admitted subjects of one SWM meta graph with two
  * small-result queries (no payload rows, no sort, no OFFSET), each bounded by
  * construction: LIMIT (remaining subject allowance + 1 sentinel) and the fixed
- * snapshot-build response byte cap. Crossing either bound is a typed
+ * plan response byte cap. Crossing either bound is a typed
  * per-snapshot budget refusal — the plan lane's one remaining bounded refusal
  * besides the single-oversized-subject case.
  *
@@ -2962,16 +2975,16 @@ async function buildFreshSwmMetaPlan(
     for (const entry of subjects) {
       bytesEstimate += estimateStringRowHeapBytes(entry.subject, '', '', graph);
     }
-    // Pinned to SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE: a plan holds scalars
+    // Pinned to FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE: a plan holds scalars
     // (subject IRI + row count), so its ceiling is independent of how large a
     // materialized snapshot may be.
-    if (bytesEstimate > SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE) {
+    if (bytesEstimate > FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE) {
       throw snapshotBudgetError({
         key: budgetKey,
         reason: 'snapshot_bytes',
         rows: subjects.length,
         bytesEstimate,
-        limit: SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE,
+        limit: FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE,
       });
     }
     entries.push({
@@ -3120,16 +3133,16 @@ async function readFreshSwmMetaRowsPageFromPlan(
         continue;
       }
       if (window.length === 0) windowStart = beforeWindow;
-      // Pinned to SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS, NOT the snapshot
+      // Pinned to FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS, NOT the snapshot
       // build cap: this guards row-group atomicity (#1788), not materialization
       // size, so it must not drift when the snapshot caps move.
-      if (subject.rowCount > SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS) {
+      if (subject.rowCount > FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS) {
         throw snapshotBudgetError({
           key: budgetKey,
           reason: 'snapshot_rows',
           rows: subject.rowCount,
           bytesEstimate: 0,
-          limit: SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS,
+          limit: FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS,
         });
       }
       window.push(subject);

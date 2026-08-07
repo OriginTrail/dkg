@@ -7,8 +7,6 @@ import {
   type SyncRowListMemo,
 } from '../src/sync/responder/graph-plan.js';
 import {
-  SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS,
-  SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
 } from '../src/sync/responder/snapshot-cache.js';
@@ -80,18 +78,6 @@ describe('sync responder snapshot budget defaults', () => {
       .toBeLessThan(SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT);
   });
 
-  it('keeps the row-group atomicity and plan-scalar ceilings pinned to their own constants', () => {
-    // These two guard different things from snapshot materialization size and
-    // must NOT drift with the build caps: the first is #1788 row-group
-    // atomicity, the second bounds control-plane scalars.
-    expect(SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS).toBe(64_000);
-    expect(SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
-    expect(SYNC_RESPONDER_MAX_SINGLE_SUBJECT_ROWS)
-      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
-    expect(SYNC_RESPONDER_PLAN_MAX_BYTES_ESTIMATE)
-      .toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
-  });
-
   it('resolves memo build limits to the build caps under default budgets', () => {
     // snapshotLoadLimits is min(BUILD_CAP, configured). Under production
     // defaults the build cap must be the binding one, or the raise is inert.
@@ -104,6 +90,51 @@ describe('sync responder snapshot budget defaults', () => {
     expect(memo.snapshotLoadLimits?.maxRows).toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS);
     expect(memo.snapshotLoadLimits?.maxBytesEstimate)
       .toBe(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+  });
+
+  it('keeps a 64,001-row durable-meta graph on the memoized snapshot lane', async () => {
+    const contextGraphId = 'snapshot-cap-regression';
+    const rawRowCount = 64_001;
+    const querySources: string[] = [];
+    const store = {
+      query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
+        const source = options?.source ?? 'unknown';
+        querySources.push(source);
+        if (source === 'sync.responder.readDurableMetaGraphSnapshot') {
+          return {
+            type: 'bindings' as const,
+            bindings: Array.from({ length: rawRowCount }, (_, index) => ({
+              s: `did:dkg:activity:${contextGraphId}:${index}`,
+              p: `${DKG_NS}status`,
+              o: '"confirmed"',
+            })),
+          };
+        }
+        if (source === 'sync.responder.readDurableMetaRowsPage') {
+          throw new Error('store-paged durable-meta fallback must not run');
+        }
+        throw new Error(`unexpected durable-meta query source: ${source}`);
+      }),
+    } as unknown as OxigraphStore;
+    const memo = createResponderSyncRowListMemo(120_000, 64, {
+      phase: 'durable_meta',
+      budget: createSyncResponderSnapshotBudget(
+        resolveSyncResponderSnapshotBudgetOptions(undefined, {}),
+      ),
+    });
+    const readPage = (offset: number) => readDurableMetaPage({
+      store,
+      contextGraphId,
+      registeredSubGraphNames: [],
+      offset,
+      limit: 500,
+      rowListMemo: memo,
+      rowListCacheKey: 'durable-meta:64k-regression',
+    });
+
+    await expect(readPage(0)).resolves.toHaveLength(500);
+    await expect(readPage(500)).resolves.toHaveLength(500);
+    expect(querySources).toEqual(['sync.responder.readDurableMetaGraphSnapshot']);
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {
