@@ -898,6 +898,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
     let completion!: ReturnType<typeof verifyRfc64PublicCatalogInventoryCompletenessV1>;
     let activatedTripleCount = 0;
     let semanticMutationAttempted = false;
+    const restoreExactPredecessorAfterFailure = async (
+      cause: unknown,
+      failureStage: 'semantic transition' | 'catalog applied-head precommit',
+    ): Promise<void> => {
+      if (!semanticMutationAttempted) return;
+      try {
+        await restoreSemanticTransitionV1(this.options.store, transitionJournal);
+      } catch (rollbackCause) {
+        fail(
+          'catalog-native-receiver-activation',
+          `${failureStage} failed and its exact predecessor rollback also failed`,
+          new AggregateError([cause, rollbackCause]),
+        );
+      }
+    };
     try {
       for (const removal of plannedRemovals) {
         throwIfAborted(signal);
@@ -948,17 +963,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
         );
       }
     } catch (cause) {
-      if (semanticMutationAttempted) {
-        try {
-          await restoreSemanticTransitionV1(this.options.store, transitionJournal);
-        } catch (rollbackCause) {
-          fail(
-            'catalog-native-receiver-activation',
-            'semantic transition failed and its exact predecessor rollback also failed',
-            new AggregateError([cause, rollbackCause]),
-          );
-        }
-      }
+      await restoreExactPredecessorAfterFailure(cause, 'semantic transition');
       if (signal?.aborted && cause === signal.reason) throw cause;
       if (cause instanceof Rfc64PublicCatalogNativeReceiverErrorV1) throw cause;
       fail(
@@ -982,17 +987,7 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       }), precommitSignal);
       throwIfAborted(precommitSignal);
     } catch (cause) {
-      if (semanticMutationAttempted) {
-        try {
-          await restoreSemanticTransitionV1(this.options.store, transitionJournal);
-        } catch (rollbackCause) {
-          fail(
-            'catalog-native-receiver-activation',
-            'catalog applied-head precommit failed and its exact predecessor rollback also failed',
-            new AggregateError([cause, rollbackCause]),
-          );
-        }
-      }
+      await restoreExactPredecessorAfterFailure(cause, 'catalog applied-head precommit');
       if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
       fail(
         'catalog-native-receiver-activation',
