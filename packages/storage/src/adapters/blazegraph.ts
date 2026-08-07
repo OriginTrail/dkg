@@ -33,6 +33,7 @@ import {
 } from '../atomic-graph-replace.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
+import { parseNQuadLine } from '../nquads-text.js';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -745,23 +746,6 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   }
 
   return quads;
-}
-
-function parseNQuadLine(line: string): DKGQuad | undefined {
-  const match = line.match(
-    /^(<[^>]+>|_:\S+)\s+(<[^>]+>)\s+(<[^>]+>|_:\S+|"(?:[^"\\]|\\.)*"(?:@\S+|\^\^<[^>]+>)?)\s*(?:(<[^>]+>)\s*)?\.$/,
-  );
-  if (!match) return undefined;
-  return {
-    subject: stripAngle(match[1]),
-    predicate: stripAngle(match[2]),
-    object: match[3].startsWith('<') ? stripAngle(match[3]) : match[3],
-    graph: match[4] ? stripAngle(match[4]) : '',
-  };
-}
-
-function stripAngle(s: string): string {
-  return s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
 }
 
 function escapeUri(uri: string): string {
