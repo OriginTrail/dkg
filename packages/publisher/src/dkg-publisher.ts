@@ -54,7 +54,6 @@ import {
   VM_CURRENT_ASSERTION_PRED,
   SHARE_OPERATION_ID_PRED,
   PROMOTE_OPERATION_INTENT_PRED,
-  stripOptionalLiteral,
   toHex,
   buildScopedMinimalMeta,
   resolveUalByBatchId,
@@ -87,6 +86,7 @@ import {
   type CASCondition,
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
+import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
   type LegacyWmMigrationHost,

@@ -2597,8 +2597,13 @@ export class DKGAgent extends DKGAgentBase {
     } => {
       const author = explicitAuthor ?? agentAddress;
       const isEvmAuthor = /^0x[a-fA-F0-9]{40}$/.test(author);
+      // The allocator MUST consume `author`'s lane, never the outer default:
+      // the number is minted into the reserved UAL the lifecycle is stamped
+      // with, so allocating from a different address strands the draft under
+      // one author with an identity from another (finalize then fails with
+      // KaIdNamespaceMismatch, OT-RFC-43 §F2).
       const allocateKaNumber = agent.kaNumberAllocator && isEvmAuthor
-        ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, agentAddress)
+        ? () => reconcileAndAllocateKaNumber(agent.kaNumberAllocator!, agent.chain, agent.reconciledKaAuthors, author)
         : undefined;
       return { author, allocateKaNumber };
     };

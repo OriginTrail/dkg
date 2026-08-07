@@ -44,8 +44,8 @@ import {
   SHARE_OPERATION_ID_PRED,
   SWM_CURRENT_ASSERTION_PRED,
   VM_CURRENT_ASSERTION_PRED,
-  stripOptionalLiteral,
 } from './metadata.js';
+import { stripOptionalLiteral } from './sparql-binding-literal.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const STATE_PRED = `${DKG}legacyWorkingMemoryMigrationState`;
@@ -145,7 +145,22 @@ interface MigrationMarker {
   preservedPrivate: number;
 }
 
-type LifecycleRow = Record<string, string | undefined>;
+/**
+ * A complete lifecycle/event metadata row. SPARQL binding optionality is
+ * resolved once, at the query boundary in `toLifecycleRow`, so every phase
+ * downstream operates on a strict model instead of re-asserting non-null.
+ */
+export interface LifecycleRow {
+  s: string;
+  p: string;
+  o: string;
+}
+
+/** Narrow one raw SPARQL binding to a complete row, or drop it. */
+export function toLifecycleRow(binding: Record<string, string | undefined>): LifecycleRow | null {
+  const { s, p, o } = binding;
+  return s && p && o != null ? { s, p, o } : null;
+}
 
 interface LifecycleScope {
   activeRows: LifecycleRow[];
@@ -227,7 +242,7 @@ async function loadLifecycleRows(
     } } LIMIT ${MAX_LIFECYCLE_ROWS + 1}`,
   );
   const rows = result.type === 'bindings'
-    ? result.bindings.filter((row) => row['s'] && row['p'] && row['o'] != null)
+    ? result.bindings.map(toLifecycleRow).filter((row): row is LifecycleRow => row !== null)
     : [];
   if (rows.length > MAX_LIFECYCLE_ROWS) {
     throw migrationRefused(
@@ -242,11 +257,11 @@ export function classifyLifecycleScope(
   lifecycleRows: LifecycleRow[],
   lifecycle: string,
 ): LifecycleScope {
-  const activeRows = lifecycleRows.filter((row) => row['s'] === lifecycle);
+  const activeRows = lifecycleRows.filter((row) => row.s === lifecycle);
   const scopeVersions = new Set(
     activeRows
-      .filter((row) => row['p'] === `${DKG}contentScopeVersion`)
-      .map((row) => stripOptionalLiteral(row['o']))
+      .filter((row) => row.p === `${DKG}contentScopeVersion`)
+      .map((row) => stripOptionalLiteral(row.o))
       .filter((value): value is string => value !== undefined),
   );
   return {
@@ -306,21 +321,21 @@ async function prepareBackup(
 ): Promise<void> {
   const stateValues = new Set(
     scope.activeRows
-      .filter((row) => row['p'] === `${DKG}state`)
-      .map((row) => stripOptionalLiteral(row['o']))
+      .filter((row) => row.p === `${DKG}state`)
+      .map((row) => stripOptionalLiteral(row.o))
       .filter((value): value is string => value !== undefined),
   );
   const layerValues = new Set(
     scope.activeRows
-      .filter((row) => row['p'] === `${DKG}memoryLayer`)
-      .map((row) => stripOptionalLiteral(row['o']))
+      .filter((row) => row.p === `${DKG}memoryLayer`)
+      .map((row) => stripOptionalLiteral(row.o))
       .filter((value): value is string => value !== undefined),
   );
   const hasDurableOrInFlightState = scope.activeRows.some((row) =>
-    row['p'] === SWM_CURRENT_ASSERTION_PRED
-    || row['p'] === VM_CURRENT_ASSERTION_PRED
-    || row['p'] === SHARE_OPERATION_ID_PRED
-    || row['p'] === PROMOTE_OPERATION_INTENT_PRED,
+    row.p === SWM_CURRENT_ASSERTION_PRED
+    || row.p === VM_CURRENT_ASSERTION_PRED
+    || row.p === SHARE_OPERATION_ID_PRED
+    || row.p === PROMOTE_OPERATION_INTENT_PRED,
   );
   const sealPredicates = [...new Set(Object.values(ASSERTION_SEAL_PREDICATES))]
     .map((predicate) => `<${assertSafeIri(predicate)}>`)
@@ -349,9 +364,9 @@ async function prepareBackup(
   await host.store.createGraph(uris.backupGraph);
   await host.store.insert([
     ...lifecycleRows.map((row) => ({
-      subject: row['s']!,
-      predicate: row['p']!,
-      object: row['o']!,
+      subject: row.s,
+      predicate: row.p,
+      object: row.o,
       graph: uris.backupGraph,
     })),
     {
@@ -389,7 +404,7 @@ async function applyGraphScopedDraft(
   publicQuads: Quad[],
 ): Promise<string> {
   if (!isGraphScoped) {
-    for (const subject of new Set(lifecycleRows.map((row) => row['s']!))) {
+    for (const subject of new Set(lifecycleRows.map((row) => row.s))) {
       await host.store.deleteByPattern({ graph: uris.metaGraph, subject });
     }
     await host.createGraphScopedDraft(

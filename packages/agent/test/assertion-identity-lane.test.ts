@@ -17,6 +17,37 @@ const EVM_AUTHOR = '0xbb765f337e251c1f18dfbec1a45ca56001b15e54';
 const DEFAULT_EVM = '0x1111111111111111111111111111111111111111';
 const PEER_ID = '12D3KooWFHUALUrdSfrVHSxtCRCJC9xvxS7nYfM6T1sbYVak9HTu';
 
+/**
+ * A recording allocator/chain pair standing in for the real KA-number lane.
+ * `allocate(author)` is the call that consumes an author's sequence, so
+ * capturing its argument is what proves WHICH lane a mint came from.
+ */
+function recordingAllocator() {
+  const allocatedFor: string[] = [];
+  const reconciledFor: string[] = [];
+  return {
+    allocatedFor,
+    reconciledFor,
+    kaNumberAllocator: {
+      allocate: (author: string) => {
+        allocatedFor.push(author);
+        return { number: 7n };
+      },
+      reconcile: (author: string) => {
+        reconciledFor.push(author);
+      },
+      markReconciled: () => {},
+    },
+    chain: {
+      chainId: 31337,
+      getMaxKaNumberForAuthor: async (author: string) => {
+        reconciledFor.push(author);
+        return 0n;
+      },
+    },
+  };
+}
+
 function makeBareAgent(fields: Record<string, unknown>): any {
   const agent = Object.create(DKGAgent.prototype);
   Object.assign(agent, {
@@ -78,6 +109,57 @@ describe('DKGAgent assertion identity lane — create + legacy-WM migrate', () =
       expect(typeof opts?.allocateKaNumber).toBe('function');
     },
   );
+
+  it(
+    'INVOKING the allocator callback mints in the EXPLICIT author\'s lane, not the ' +
+      'default agent\'s — a callback that closes over the wrong address strands the ' +
+      'draft under one author with an identity minted from another (KaIdNamespaceMismatch)',
+    async () => {
+      const rec = recordingPublisher();
+      const alloc = recordingAllocator();
+      const agent = makeBareAgent({
+        defaultAgentAddress: DEFAULT_EVM,
+        kaNumberAllocator: alloc.kaNumberAllocator,
+        chain: alloc.chain,
+        publisher: rec.publisher,
+      });
+
+      await agent.assertion.create('agent-context', 'chat-turns', { agentAddress: EVM_AUTHOR });
+      await agent.assertion.migrateLegacyRootScopedWorkingMemory('agent-context', 'chat-turns', {
+        agentAddress: EVM_AUTHOR,
+      });
+
+      const createAllocate = (rec.createCalls[0] as any[])[4].allocateKaNumber;
+      const migrateAllocate = (rec.migrateCalls[0] as any[])[4].allocateKaNumber;
+      const createIdentity = await createAllocate();
+      const migrateIdentity = await migrateAllocate();
+
+      // Every consumed lane must be the explicit author's, on BOTH operations.
+      expect(alloc.allocatedFor).toEqual([EVM_AUTHOR, EVM_AUTHOR]);
+      expect(alloc.allocatedFor).not.toContain(DEFAULT_EVM);
+      expect(alloc.reconciledFor.every((a) => a === EVM_AUTHOR)).toBe(true);
+      // ...and the reserved UAL it derives must carry that same author.
+      expect(createIdentity.reservedUal).toBe(`did:dkg:31337/${EVM_AUTHOR.toLowerCase()}/7`);
+      expect(migrateIdentity.reservedUal).toBe(`did:dkg:31337/${EVM_AUTHOR.toLowerCase()}/7`);
+    },
+  );
+
+  it('with no explicit author the allocator mints in the default agent\'s lane', async () => {
+    const rec = recordingPublisher();
+    const alloc = recordingAllocator();
+    const agent = makeBareAgent({
+      defaultAgentAddress: DEFAULT_EVM,
+      kaNumberAllocator: alloc.kaNumberAllocator,
+      chain: alloc.chain,
+      publisher: rec.publisher,
+    });
+
+    await agent.assertion.create('agent-context', 'chat-turns');
+    await (rec.createCalls[0] as any[])[4].allocateKaNumber();
+
+    expect((rec.createCalls[0] as any[])[2]).toBe(DEFAULT_EVM);
+    expect(alloc.allocatedFor).toEqual([DEFAULT_EVM]);
+  });
 
   it('create and migrate resolve the identical author + allocator for the same opts', async () => {
     const rec = recordingPublisher();
