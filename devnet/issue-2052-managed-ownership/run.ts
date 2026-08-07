@@ -687,34 +687,23 @@ async function main(): Promise<void> {
     // No owned-client socket probe. The pool moved to Stack B3 with the class
     // that owns it; measuring it here would exercise a capability that no B2
     // production path can reach.
-    // ---- Predecessor matrix: every manifest entry, against the live store.
+    // ---- Reserved-state conformance: ONE probe, against the current binary.
     //
-    // HONEST FRAMING, because the artifact previously overstated this. No
-    // predecessor is checked out, built or executed: every row runs the CURRENT
-    // binary, so the rows are identical by construction and the manifest's real
-    // role is to pin WHICH commits must keep the property. `executedAgainst`
-    // says so in the artifact itself rather than only in prose that the uploaded
-    // evidence does not carry.
-    // ONCE, against the current binary — not once per manifest entry.
-    //
-    // This used to iterate the manifest and emit a `pass` per pinned commit,
-    // which published green PREDECESSOR verdicts that were never measured: no
-    // predecessor is checked out or built, so every row ran this same binary
-    // and the rows were identical by construction. `executedAgainst` made the
-    // caveat visible but did not make the verdicts evidence.
-    //
-    // The manifest keeps its real job — a reviewed, pinned inventory of the
-    // commits that must retain the property, with every commit proven to
-    // resolve — and the behavioural probe is reported once, honestly, as
-    // current-binary conformance.
+    // Reported once and honestly. An earlier revision iterated the manifest and
+    // emitted a `pass` per pinned commit, which published green PREDECESSOR
+    // verdicts that nothing measured — no predecessor is checked out or built,
+    // so every row ran this same binary and the rows were identical by
+    // construction. The manifest keeps its real job, a reviewed inventory of the
+    // commits that must retain the property with each proven to resolve, and
+    // carries no pass/fail field to be misread.
     {
       const failures: string[] = [];
 
-      // The deletion probe below is destructive, so re-seed before EACH entry.
-      // Without this it was one-shot: entry 1's `dropGraph` either failed (as it
-      // must) or emptied the graph, after which entries 2 and 3 read
-      // before=0/after=0, `after < before` was false, and they PASSED. Only the
-      // first row could ever detect a deletion.
+      // The deletion probe below is destructive, so seed immediately before it.
+      // This is also why the old per-entry loop could not work: the first row's
+      // `dropGraph` either failed (as it must) or emptied the graph, after which
+      // later rows read before=0/after=0, `after < before` was false, and they
+      // PASSED. Only the first row could ever detect a deletion.
       await sparqlUpdate(server.updateEndpoint, `INSERT DATA {\n${triples}\n}`);
 
       const listed = await full.listGraphs();

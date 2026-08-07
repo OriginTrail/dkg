@@ -13,13 +13,20 @@ name: System-record managed ownership evidence
 #      a second OS process is spawned, the first is dead and the second alive,
 #      the replacement serves the same data, and the store resumes on it.
 #   2. The capability fail-closed matrix over the real store composition.
-#   3. Owned-pool socket ownership: destroy leaves nothing behind.
-#   4. Reserved internal state is invisible to enumeration and undeletable by
-#      generic mutation, as a supported predecessor binary would see it.
+#   3. Reserved internal state is invisible to enumeration, unserved by
+#      `hasGraph`, and undeletable by generic mutation including an unscoped
+#      `deleteByPattern`.
 #
-# What it does NOT prove: predecessor entries run against the CURRENT binary,
-# not against each pinned commit — no predecessor is checked out or built. The
-# full-state CAS has not landed, so no verified apply is dispatched here.
+# What it does NOT prove:
+#   - Nothing here measures a connection pool. B2 owns none; the owned client
+#     moved to Stack B3, which is where the first byte is dispatched.
+#   - `pinnedPredecessors` is an INVENTORY, not a set of verdicts. No predecessor
+#     is checked out or built — every check runs the current binary — so the
+#     manifest records WHICH commits must retain the property, and the measured
+#     half is one conformance probe against this build.
+#   - The full-state CAS has not landed, so no verified apply is dispatched.
+#   - Raw `update()` can still reach reserved state through a split prefix/local
+#     IRI. Inert in B2 (nothing writes reserved state) and gated in Stack C.
 
 on:
   push:

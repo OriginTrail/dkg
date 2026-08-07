@@ -49,10 +49,8 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
-  ReservedInternalGraphWriteError,
   assertNotReservedInternalGraphV1,
   isInternalGraphUriV1,
-  opaqueUpdateMentionsReservedSystemRecordV1,
 } from '../internal-graph-policy.js';
 import {
   ManagedOxigraphBackendUnownedError,
@@ -461,18 +459,29 @@ export class SparqlHttpStore implements TripleStore {
    * adapter is the only always-on choke point for the managed endpoint that
    * actually holds reserved state.
    *
-   * Reserved graphs are writable only through the materializer's structured,
-   * generation-bound command path, which derives its own scope and never calls
-   * these public methods. A hard throw is safe because reserved graphs never
+   * Reserved graphs are unreachable through every mutation that names its graph
+   * terms as arguments. A hard throw is safe because reserved graphs never
    * enumerate: no legitimate iterate-and-drop loop can reach one, only a
    * hardcoded IRI can.
    *
-   * The opaque `update()` channel is guarded separately and more bluntly, on
-   * the request text rather than on graph terms, because there are no terms to
-   * inspect. That guard over-refuses by design and does not claim to survive a
-   * caller who hides the IRI; `opaqueUpdateMentionsReservedSystemRecordV1`
-   * states its exact strength. Opaque updates also rotate the materialization
-   * epoch, and Stack C audits the remaining raw callers.
+   * `update()` is NOT guarded, and that is a scoped claim rather than an
+   * oversight. Its argument is an opaque SPARQL program, so there are no graph
+   * terms to inspect, and a lexical scan of the text is not a boundary: a
+   * `PREFIX dkg: <urn:dkg:internal:atomic-graph-replace:>` declaration plus
+   * `DROP SILENT GRAPH dkg:system-record-v1:state` is valid SPARQL that names
+   * the reserved graph without the reserved string ever appearing. A revision of
+   * this file shipped that scan; it was reverted once the split-prefix form was
+   * demonstrated deleting a seeded reserved graph, because a check that looks
+   * like a boundary and is not is worse than a documented gap.
+   *
+   * Closing it for real needs either a SPARQL AST with prefix/base resolution
+   * validating every resolved write target, or the migration of the raw callers
+   * — both Stack C, which is also where the materializer is first activated.
+   * Nothing in B2 writes reserved state (the lane defers every apply and no
+   * production path here even names these graphs), so the gap is inert in this
+   * stack. `reserved-internal-graph-mutation-guard.test.ts` pins BOTH the
+   * literal and split-prefix routes as known-open, so Stack C inherits a failing
+   * expectation rather than a forgotten one.
    */
   private assertGenericMutationScope(
     graphs: Iterable<string | undefined>,
@@ -600,12 +609,12 @@ export class SparqlHttpStore implements TripleStore {
   /**
    * Compose the clean-generation handoff from its two owners.
    *
-   * The adapter owns exactly the connection pool: it is the only component that
-   * can destroy the retired generation's sockets and await the requests issued
-   * over them. Process facts — the child exited, the port was released, a
-   * replacement is the proven listener — belong to the supervisor, which holds
-   * the `ChildProcess`. Splitting them here keeps the ORDER in one place while
-   * letting each half assert only what it can actually observe.
+   * Process facts — the child exited, the port was released, a replacement is
+   * the proven listener — belong to the supervisor, which holds the
+   * `ChildProcess`. The connection-pool half belongs to whoever owns the pool,
+   * which in B2 is nobody: see the empty steps below. Composing them here keeps
+   * the ORDER in one place while letting each half assert only what it can
+   * actually observe.
    */
   private buildChildHandoff(
     supervisor: ManagedOxigraphSupervisorHandoffV1,
@@ -637,12 +646,13 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   /**
-   * Dispatch one verified apply against an explicitly named child generation.
+   * Decide one verified apply against an explicitly named child generation.
    *
-   * The generation is rechecked immediately before any byte can leave, and the
-   * request goes through a pool owned by exactly that generation, so a stale
-   * facade cannot reach a replacement listener even if it somehow retained a
-   * reference.
+   * B2 dispatches NO bytes: every path below returns `capability-lost` or
+   * `deferred`. What it does establish is the decision order — ownership, then
+   * terminality, then the generation the caller was bound to — so that when B3
+   * adds the send, the send is already gated on a generation rechecked at the
+   * last moment rather than on a snapshot taken when the session opened.
    */
   private async executeSystemRecordApply(
     _proof: unknown,
@@ -805,18 +815,8 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    // The raw channel is the one place a hardcoded reserved IRI could still
-    // reach persistent system-record state, since the structured guards below
-    // only see graph terms the caller passed as arguments. Refuse conservatively
-    // on the text; see `opaqueUpdateMentionsReservedSystemRecordV1` for exactly
-    // how strong this is and is not.
-    if (opaqueUpdateMentionsReservedSystemRecordV1(sparql)) {
-      throw new ReservedInternalGraphWriteError(
-        'urn:dkg:internal:atomic-graph-replace:system-record-v1:*',
-        'update',
-        'SparqlHttpStore',
-      );
-    }
+    // Deliberately unguarded — see `assertGenericMutationScope` for the scope of
+    // that decision and why a lexical scan was reverted rather than expanded.
     await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
