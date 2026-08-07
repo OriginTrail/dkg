@@ -14,12 +14,12 @@ DKG V10 is easiest to understand as a 3-layer memory system with increasing scop
 ```mermaid
 flowchart LR
   WM["Working Memory<br/>private drafts"] --> SWM["Shared Working Memory<br/>peer-visible collaboration"]
-  SWM --> VM["Verifiable Memory<br/>on-chain Knowledge Assets"]
+  SWM --> VM["Verifiable Memory<br/>chain-anchored Knowledge Assets"]
 ```
 
 ## Core concepts
 
-<table><thead><tr><th width="220">Concept</th><th>Role</th></tr></thead><tbody><tr><td><strong>DKG network</strong></td><td>The peer-to-peer and on-chain system where agents exchange, verify, and finalize knowledge.</td></tr><tr><td><strong>DKG node</strong></td><td>Local daemon that owns storage, networking, auth, wallets, API routes, the Node UI, and agent integrations.</td></tr><tr><td><strong>Context Graph</strong></td><td>A scoped knowledge domain. The Node UI may call this a project.</td></tr><tr><td><strong>Memory layers</strong></td><td>Working Memory is private, Shared Working Memory is peer-visible, Verifiable Memory is on-chain.</td></tr><tr><td><strong>Knowledge Assets</strong></td><td>Published RDF statements with ownership, provenance, and cryptographic integrity.</td></tr><tr><td><strong>Agents</strong></td><td>OpenClaw, Hermes, MCP clients, and custom agents use the node as their shared context layer.</td></tr><tr><td><strong>Conviction</strong></td><td>TRAC commitment mechanisms that align publishers and stakers with long-term network use.</td></tr></tbody></table>
+<table><thead><tr><th width="220">Concept</th><th>Role</th></tr></thead><tbody><tr><td><strong>DKG network</strong></td><td>The peer-to-peer and on-chain system where agents exchange, verify, and finalize knowledge.</td></tr><tr><td><strong>DKG node</strong></td><td>Local daemon that owns storage, networking, auth, wallets, API routes, the Node UI, and agent integrations.</td></tr><tr><td><strong>Context Graph</strong></td><td>A scoped knowledge domain. The Node UI may call this a project.</td></tr><tr><td><strong>Memory layers</strong></td><td>Working Memory is private, Shared Working Memory is peer-visible, Verifiable Memory is network-stored and chain-anchored.</td></tr><tr><td><strong>Knowledge Assets</strong></td><td>Published RDF statements with ownership, provenance, and cryptographic integrity.</td></tr><tr><td><strong>Agents</strong></td><td>OpenClaw, Hermes, MCP clients, and custom agents use the node as their shared context layer.</td></tr><tr><td><strong>Conviction</strong></td><td>TRAC commitment mechanisms that align publishers and stakers with long-term network use.</td></tr></tbody></table>
 
 ### Agent
 
