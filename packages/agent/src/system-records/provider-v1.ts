@@ -36,6 +36,22 @@ export interface SystemRecordProviderArtifactV1 {
   readonly canonicalBytes: Uint8Array;
 }
 
+export function systemRecordProviderArtifactKeyV1(
+  artifact: Pick<SystemRecordProviderArtifactV1, 'objectKind' | 'objectDigest'>,
+): string {
+  return `${artifact.objectKind}:${artifact.objectDigest}`;
+}
+
+export function cloneSystemRecordProviderArtifactV1(
+  artifact: SystemRecordProviderArtifactV1,
+): SystemRecordProviderArtifactV1 {
+  return Object.freeze({
+    objectKind: artifact.objectKind,
+    objectDigest: artifact.objectDigest,
+    canonicalBytes: Uint8Array.from(artifact.canonicalBytes),
+  });
+}
+
 export interface SystemRecordProviderRepositoryV1 {
   resolve(
     request: SystemRecordRequestHeaderV1,

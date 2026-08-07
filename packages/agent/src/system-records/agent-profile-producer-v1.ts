@@ -35,13 +35,14 @@ import {
   verifySignedSystemRecordEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileAuthorityTransitionV1,
+  type AgentProfileForkResolutionV1,
+  type AgentProfileHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type CanonicalRfc3339SecondsV1,
   type Digest32V1,
   type NetworkIdV1,
   type OwnedSubjectTableObjectV1,
-  type SignedAgentProfileAuthorityTransitionEnvelopeV1,
-  type SignedAgentProfileForkResolutionEnvelopeV1,
   type SignedAgentProfileHeadEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryRowV1,
@@ -54,7 +55,11 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
-import type { SystemRecordProviderArtifactV1 } from './provider-v1.js';
+import {
+  cloneSystemRecordProviderArtifactV1,
+  systemRecordProviderArtifactKeyV1,
+  type SystemRecordProviderArtifactV1,
+} from './provider-v1.js';
 
 const UTF8 = new TextEncoder();
 
@@ -94,6 +99,9 @@ export interface AgentProfileProducerPublicationV1 {
 }
 
 export interface AgentProfileProducerPublicationCommitV1 {
+  /** Snapshot preconditions reserved before materialization begins. */
+  readonly expectedHeadDigest: Digest32V1 | null;
+  readonly expectedRootDescriptorDigest: Digest32V1 | null;
   readonly artifacts: readonly SystemRecordProviderArtifactV1[];
   readonly inventory: SystemRecordInventoryTreeSnapshotV1;
   readonly rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1;
@@ -109,6 +117,7 @@ export interface AgentProfileProducerPublicationStoreV1 {
     inventory: SystemRecordInventoryTreeSnapshotV1 | null;
     currentHead: SignedAgentProfileHeadEnvelopeV1 | null;
   }>;
+  /** Atomically verify and reserve the expected snapshot until commit or abort. */
   prepareCommit(
     input: AgentProfileProducerPublicationCommitV1,
   ): AgentProfileProducerPublicationCommitLeaseV1 | Promise<AgentProfileProducerPublicationCommitLeaseV1>;
@@ -345,12 +354,15 @@ export function createAgentProfileProducerV1(
       inventoryUpdate,
     });
     const artifactsByKey = new Map(
-      artifacts.map((artifact) => [artifactKey(artifact.objectKind, artifact.objectDigest), artifact]),
+      artifacts.map((artifact) => [systemRecordProviderArtifactKeyV1(artifact), artifact]),
     );
     const verifiedClosure = await buildAgentProfileVerificationClosureV1(headDigest, {
       nowMs: Date.parse(issuedAt),
       resolve: async ({ objectKind, digest }) => {
-        const artifact = artifactsByKey.get(artifactKey(objectKind, digest));
+        const artifact = artifactsByKey.get(systemRecordProviderArtifactKeyV1({
+          objectKind,
+          objectDigest: digest,
+        }));
         return artifact === undefined
           ? undefined
           : {
@@ -359,13 +371,21 @@ export function createAgentProfileProducerV1(
               canonicalBytes: Uint8Array.from(artifact.canonicalBytes),
             };
       },
-      verifyAuthorityEnvelope: verifyAgentProfileAuthorityEnvelopeV1,
+      verifyAuthorityEnvelope: (envelope) => verifySignedSystemRecordEnvelopeV1<
+        AgentProfileHeadObjectV1 | AgentProfileAuthorityTransitionV1 | AgentProfileForkResolutionV1
+      >(envelope),
       verifyCurrentBundle: (_candidate, canonicalBundleBytes) =>
         Buffer.from(canonicalBundleBytes).equals(Buffer.from(bundle)),
     });
     signal.throwIfAborted();
 
-    const commitLease = await options.store.prepareCommit({ artifacts, inventory, rootEnvelope });
+    const commitLease = await options.store.prepareCommit({
+      expectedHeadDigest: previous?.objectDigest ?? null,
+      expectedRootDescriptorDigest: snapshot.inventory?.descriptorDigest ?? null,
+      artifacts,
+      inventory,
+      rootEnvelope,
+    });
     let committed = false;
     try {
       signal.throwIfAborted();
@@ -477,10 +497,10 @@ function freezeArtifact(
   objectDigest: Digest32V1,
   bytes: Uint8Array,
 ): SystemRecordProviderArtifactV1 {
-  return Object.freeze({
+  return cloneSystemRecordProviderArtifactV1({
     objectKind,
     objectDigest,
-    canonicalBytes: Uint8Array.from(bytes),
+    canonicalBytes: bytes,
   });
 }
 
@@ -583,40 +603,6 @@ function normalizePublicationTimestampV1(
   return canonical;
 }
 
-function verifyAgentProfileAuthorityEnvelopeV1(
-  envelope: SignedAgentProfileHeadEnvelopeV1
-    | SignedAgentProfileAuthorityTransitionEnvelopeV1
-    | SignedAgentProfileForkResolutionEnvelopeV1,
-): Promise<boolean> {
-  if (isAgentProfileHeadEnvelopeV1(envelope)) {
-    return verifySignedSystemRecordEnvelopeV1(envelope);
-  }
-  if (isAgentProfileAuthorityTransitionEnvelopeV1(envelope)) {
-    return verifySignedSystemRecordEnvelopeV1(envelope);
-  }
-  return verifySignedSystemRecordEnvelopeV1(envelope);
-}
-
-function isAgentProfileHeadEnvelopeV1(
-  envelope: SignedAgentProfileHeadEnvelopeV1
-    | SignedAgentProfileAuthorityTransitionEnvelopeV1
-    | SignedAgentProfileForkResolutionEnvelopeV1,
-): envelope is SignedAgentProfileHeadEnvelopeV1 {
-  return envelope.object.objectType === 'agent-profile-head';
-}
-
-function isAgentProfileAuthorityTransitionEnvelopeV1(
-  envelope: SignedAgentProfileHeadEnvelopeV1
-    | SignedAgentProfileAuthorityTransitionEnvelopeV1
-    | SignedAgentProfileForkResolutionEnvelopeV1,
-): envelope is SignedAgentProfileAuthorityTransitionEnvelopeV1 {
-  return envelope.object.objectType === 'authority-transition';
-}
-
-function artifactKey(kind: SystemRecordObjectKindV1, digest: string): string {
-  return `${kind}:${digest}`;
-}
-
 function assertAdvertisedIdentity(
   rootSubject: string,
   quads: readonly Readonly<Quad>[],
@@ -633,9 +619,9 @@ function assertAdvertisedIdentity(
     ],
   ]);
   for (const [predicate, object] of expected) {
-    const matches = quads.filter((quad) =>
-      quad.subject === rootSubject && quad.predicate === predicate && quad.object === object);
-    if (matches.length !== 1) {
+    const advertised = quads.filter((quad) =>
+      quad.subject === rootSubject && quad.predicate === predicate);
+    if (advertised.length !== 1 || advertised[0]?.object !== object) {
       throw new Error(`profile projection does not bind the signed ${predicate.slice(DKG.length)}`);
     }
   }

@@ -24,6 +24,10 @@ describe('prepared agent profile V1', () => {
       predicate: 'https://dkg.network/ontology#lastSeen',
       object: '"2026-08-07T12:00:00.000Z"',
     }));
+    expect(prepared.quads).toContainEqual(expect.objectContaining({
+      predicate: 'http://www.w3.org/ns/prov#atTime',
+      object: '"2026-08-07T12:00:00.000Z"',
+    }));
   });
 
   it('does not call the clock when the caller already supplied lastSeen', () => {
@@ -36,6 +40,10 @@ describe('prepared agent profile V1', () => {
     }, now);
     expect(now).not.toHaveBeenCalled();
     expect(prepared.lastSeen).toBe('2026-08-07T11:00:00.000Z');
+    expect(prepared.quads).toContainEqual(expect.objectContaining({
+      predicate: 'http://www.w3.org/ns/prov#atTime',
+      object: '"2026-08-07T11:00:00.000Z"',
+    }));
   });
 
   it('publishes a clone of the exact prepared profile quads', async () => {

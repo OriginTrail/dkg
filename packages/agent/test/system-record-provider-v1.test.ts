@@ -80,6 +80,23 @@ describe('system-record provider V1', () => {
     expect(provider.stats().queued).toBe(0);
   });
 
+  it('resets before repository lookup when success-frame admission is exhausted', async () => {
+    const resolve = vi.fn(async () => null);
+    const tryReserve = vi.fn(() => null);
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: { resolve },
+      frameAdmission: { tryReserve },
+    });
+    const exchange = fixtureExchange(bundleRequest());
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('reset-memory-capacity');
+    expect(exchange.reset).toHaveBeenCalledWith('memory-capacity');
+    expect(tryReserve).toHaveBeenCalledWith(SYSTEM_RECORD_MAX_FRAME_BYTES);
+    expect(resolve).not.toHaveBeenCalled();
+    expect(provider.stats()).toMatchObject({ active: 0, queued: 0 });
+  });
+
   it('bounds slow headers, response-rate exhaustion, malformed frames, and close', async () => {
     const provider = createSystemRecordProviderV1({
       networkId: NETWORK,

@@ -99,6 +99,51 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().inventory?.descriptor.totalRows).toBe('1');
   });
 
+  it('rejects a concurrent stale writer before installing or replacing the winning head', async () => {
+    const fixture = await producerFixture();
+    const install = vi.fn();
+    const firstProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+    const secondProducer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+    const laterPublication = await publicationFor(
+      fixture.prepared,
+      fixture.evmSigner.address,
+      '2026-08-07T12:01:00Z',
+    );
+
+    const outcomes = await Promise.allSettled([
+      produce(firstProducer, fixture.prepared, fixture.publication),
+      produce(secondProducer, fixture.prepared, laterPublication),
+    ]);
+    const fulfilled = outcomes.filter(
+      (outcome): outcome is PromiseFulfilledResult<Awaited<ReturnType<typeof produce>>> =>
+        outcome.status === 'fulfilled',
+    );
+    const rejected = outcomes.filter(
+      (outcome): outcome is PromiseRejectedResult => outcome.status === 'rejected',
+    );
+
+    expect(fulfilled).toHaveLength(1);
+    expect(rejected).toHaveLength(1);
+    expect(String(rejected[0]!.reason)).toMatch(/prepared commit|snapshot is stale/);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(fixture.store.snapshot().currentHead?.objectDigest)
+      .toBe(fulfilled[0]!.value.headDigest);
+  });
+
   it('rejects ordinary update authority and schema changes without replacing the head', async () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
@@ -369,6 +414,38 @@ describe('agent-profile system-record producer V1', () => {
     });
 
     await expect(producer.prepare(mismatched)).rejects.toThrow(/does not bind the signed/);
+    expect(fence).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['peerId', '"12D3KooWRhLYc1qpzVncrVpMkykB3ML1PoQ9G9gX9X9G9gX9X9G"'],
+    ['agentAddress', `"0x${'33'.repeat(20)}"`],
+    ['publicKey', '"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="'],
+  ])('rejects a conflicting advertised %s before fencing publication', async (field, object) => {
+    const fixture = await producerFixture();
+    const fence = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence,
+      install: () => {},
+    });
+    const conflicting = Object.freeze({
+      ...fixture.prepared,
+      quads: Object.freeze([
+        ...fixture.prepared.quads,
+        Object.freeze({
+          subject: fixture.prepared.rootEntity,
+          predicate: `https://dkg.network/ontology#${field}`,
+          object,
+          graph: fixture.prepared.quads[0]!.graph,
+        }),
+      ]),
+    });
+
+    await expect(producer.prepare(conflicting)).rejects.toThrow(/does not bind the signed/);
     expect(fence).not.toHaveBeenCalled();
   });
 });
