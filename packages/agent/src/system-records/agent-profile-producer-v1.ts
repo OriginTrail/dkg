@@ -55,7 +55,10 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 
 import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
-import type { PreparedAgentProfileV1 } from '../profile.js';
+import {
+  agentProfileAdvertisedIdentityV1,
+  type PreparedAgentProfileV1,
+} from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import {
   cloneSystemRecordProviderArtifactV1,
@@ -673,20 +676,26 @@ function assertAdvertisedIdentity(
   peerSigner: SystemRecordPeerSignerV1,
   evmAddress: string,
 ): void {
-  const DKG = 'https://dkg.network/ontology#';
-  const expected = new Map<string, string>([
-    [`${DKG}peerId`, `"${peerSigner.peerId}"`],
-    [`${DKG}agentAddress`, `"${evmAddress}"`],
-    [
-      `${DKG}publicKey`,
-      `"${Buffer.from(peerSigner.publicKey, 'base64url').toString('base64')}"`,
-    ],
-  ]);
-  for (const [predicate, object] of expected) {
+  const identity = agentProfileAdvertisedIdentityV1({
+    peerId: peerSigner.peerId,
+    publicKey: Buffer.from(peerSigner.publicKey, 'base64url').toString('base64'),
+    agentAddress: evmAddress,
+  });
+  if (identity.rootEntity !== rootSubject
+    || identity.publicKey === undefined
+    || identity.agentAddress === undefined) {
+    throw new Error('profile projection does not bind the signed root identity');
+  }
+  const expected = [
+    ['peerId', identity.peerId],
+    ['agentAddress', identity.agentAddress],
+    ['publicKey', identity.publicKey],
+  ] as const;
+  for (const [field, fact] of expected) {
     const advertised = quads.filter((quad) =>
-      quad.subject === rootSubject && quad.predicate === predicate);
-    if (advertised.length !== 1 || advertised[0]?.object !== object) {
-      throw new Error(`profile projection does not bind the signed ${predicate.slice(DKG.length)}`);
+      quad.subject === rootSubject && quad.predicate === fact.predicate);
+    if (advertised.length !== 1 || advertised[0]?.object !== fact.object) {
+      throw new Error(`profile projection does not bind the signed ${field}`);
     }
   }
 }

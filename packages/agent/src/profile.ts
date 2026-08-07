@@ -149,6 +149,38 @@ export interface AgentProfileConfig {
   encryptionKeyProof?: string;
 }
 
+export interface AgentProfileIdentityFactV1 {
+  readonly predicate: string;
+  readonly object: string;
+}
+
+export interface AgentProfileAdvertisedIdentityV1 {
+  readonly rootEntity: string;
+  readonly peerId: AgentProfileIdentityFactV1;
+  readonly publicKey?: AgentProfileIdentityFactV1;
+  readonly agentAddress?: AgentProfileIdentityFactV1;
+}
+
+/** Canonical RDF identity terms shared by the profile builder and signed-record binder. */
+export function agentProfileAdvertisedIdentityV1(
+  config: Pick<AgentProfileConfig, 'peerId' | 'publicKey' | 'agentAddress'>,
+): AgentProfileAdvertisedIdentityV1 {
+  const rootEntity = `did:dkg:agent:${canonicalAgentDidSubject(config.agentAddress ?? config.peerId)}`;
+  return Object.freeze({
+    rootEntity,
+    peerId: Object.freeze({ predicate: `${DKG}peerId`, object: `"${config.peerId}"` }),
+    ...(config.publicKey === undefined ? {} : {
+      publicKey: Object.freeze({ predicate: `${DKG}publicKey`, object: `"${config.publicKey}"` }),
+    }),
+    ...(config.agentAddress === undefined ? {} : {
+      agentAddress: Object.freeze({
+        predicate: `${DKG}agentAddress`,
+        object: `"${canonicalAgentDidSubject(config.agentAddress)}"`,
+      }),
+    }),
+  });
+}
+
 export interface PreparedAgentProfileV1 {
   readonly quads: readonly Readonly<Quad>[];
   readonly rootEntity: string;
@@ -197,8 +229,8 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   // A-12: normalise the DID subject so profile + endorsement subjects
   // converge for the same wallet regardless of the source casing. See
   // `canonicalAgentDidSubject` for rationale.
-  const didSubject = canonicalAgentDidSubject(config.agentAddress ?? config.peerId);
-  const entity = `did:dkg:agent:${didSubject}`;
+  const identity = agentProfileAdvertisedIdentityV1(config);
+  const entity = identity.rootEntity;
   const quads: Quad[] = [];
   const role = config.nodeRole ?? 'edge';
   const profileTimestamp = config.lastSeen ?? new Date().toISOString();
@@ -217,17 +249,17 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   }
 
   // DKG P2P properties
-  q(entity, `${DKG}peerId`, `"${config.peerId}"`);
+  q(entity, identity.peerId.predicate, identity.peerId.object);
   q(entity, `${DKG}nodeRole`, `"${role}"`);
 
-  if (config.publicKey) {
-    q(entity, `${DKG}publicKey`, `"${config.publicKey}"`);
+  if (identity.publicKey !== undefined) {
+    q(entity, identity.publicKey.predicate, identity.publicKey.object);
   }
   if (config.relayAddress) {
     q(entity, `${DKG}relayAddress`, `"${config.relayAddress}"`);
   }
-  if (config.agentAddress) {
-    q(entity, `${DKG}agentAddress`, `"${canonicalAgentDidSubject(config.agentAddress)}"`);
+  if (identity.agentAddress !== undefined) {
+    q(entity, identity.agentAddress.predicate, identity.agentAddress.object);
   }
   // Distributed phonebook (PR feat/chain-agents-cg-phonebook).
   // Note: properties `dkg:multiaddr` and `dkg:lastSeen` are emitted on
