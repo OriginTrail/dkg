@@ -149,6 +149,31 @@ export interface AgentProfileConfig {
   encryptionKeyProof?: string;
 }
 
+export interface PreparedAgentProfileV1 {
+  readonly quads: readonly Readonly<Quad>[];
+  readonly rootEntity: string;
+  /** Exact freshness value already embedded in `quads`. */
+  readonly lastSeen: string;
+}
+
+/**
+ * Snapshot all time-dependent profile input once. The same immutable quads can
+ * then be handed to the legacy publisher and to a signed-record producer.
+ */
+export function prepareAgentProfileV1(
+  config: AgentProfileConfig,
+  now: () => Date = () => new Date(),
+): PreparedAgentProfileV1 {
+  const lastSeen = config.lastSeen ?? now().toISOString();
+  const built = buildAgentProfile({ ...config, lastSeen });
+  const quads = built.quads.map((quad) => Object.freeze({ ...quad }));
+  return Object.freeze({
+    quads: Object.freeze(quads),
+    rootEntity: built.rootEntity,
+    lastSeen,
+  });
+}
+
 /**
  * Builds RDF quads for an agent profile KA using the ERC-8004 aligned ontology.
  *

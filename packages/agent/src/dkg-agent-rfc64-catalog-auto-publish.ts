@@ -20,10 +20,9 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import { ethers } from 'ethers';
-
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { createEvmPersonalMessageSignerV1 } from './evm-message-signer-v1.js';
 import type {
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogSuccessorAssetInputV1,
@@ -119,38 +118,12 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     this: DKGAgent,
     authorAddress: EvmAddressV1,
   ): Rfc64CatalogAuthorSignerV1 {
-    const custodialKey = this.getCustodialAgentPrivateKey(authorAddress);
-    if (custodialKey !== undefined) {
-      const wallet = new ethers.Wallet(
-        custodialKey.startsWith('0x') ? custodialKey : `0x${custodialKey}`,
-      );
-      if (wallet.address.toLowerCase() !== authorAddress) {
-        throw new Error('RFC-64 custodial author key does not match the confirmed seal');
-      }
-      return Object.freeze({
-        address: authorAddress,
-        signMessage: (message: Uint8Array) => wallet.signMessage(message),
-      });
-    }
-    const signMessageAs = this.chain.signMessageAs?.bind(this.chain);
-    const signMessage = this.chain.signMessage?.bind(this.chain);
-    return Object.freeze({
+    return createEvmPersonalMessageSignerV1({
       address: authorAddress,
-      signMessage: async (message: Uint8Array) => {
-        const compact = signMessageAs !== undefined
-          ? await signMessageAs(authorAddress, message)
-          : signMessage !== undefined
-            ? await signMessage(message)
-            : (() => { throw new Error('RFC-64 configured chain has no message signer'); })();
-        const signature = ethers.Signature.from({
-          r: ethers.hexlify(compact.r),
-          yParityAndS: ethers.hexlify(compact.vs),
-        }).serialized;
-        if (ethers.verifyMessage(message, signature).toLowerCase() !== authorAddress) {
-          throw new Error('RFC-64 configured publisher cannot sign for the confirmed KA author');
-        }
-        return signature;
-      },
+      custodialPrivateKey: this.getCustodialAgentPrivateKey(authorAddress),
+      signMessageAs: this.chain.signMessageAs?.bind(this.chain),
+      signMessage: this.chain.signMessage?.bind(this.chain),
+      purpose: 'RFC-64 catalog author',
     });
   }
 
