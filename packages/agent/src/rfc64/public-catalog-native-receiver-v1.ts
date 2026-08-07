@@ -963,10 +963,21 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       }), precommitSignal);
       throwIfAborted(precommitSignal);
     } catch (cause) {
+      if (semanticMutationAttempted) {
+        try {
+          await restoreSemanticTransitionV1(this.options.store, transitionJournal);
+        } catch (rollbackCause) {
+          fail(
+            'catalog-native-receiver-activation',
+            'catalog applied-head precommit failed and its exact predecessor rollback also failed',
+            new AggregateError([cause, rollbackCause]),
+          );
+        }
+      }
       if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
       fail(
         'catalog-native-receiver-activation',
-        'finalized VM precommit rejected the exact activated inventory',
+        'catalog applied-head precommit rejected the exact activated inventory',
         cause,
       );
     }

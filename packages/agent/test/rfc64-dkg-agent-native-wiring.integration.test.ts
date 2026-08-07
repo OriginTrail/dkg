@@ -2186,83 +2186,11 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     })).toBeNull();
   }, 60_000);
 
-  it('keeps production RFC-64 catalog activation in SWM without materializing VM', async () => {
+  it('leaves the applied head null for finalized-chain policy in the dormant SWM-only lane', async () => {
     const kaNumber = 7n;
-    const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
-    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH_ID)).toLowerCase();
-    const fixture = Object.freeze({
-      accessPolicy: 0,
-      active: true,
-      assertedAtChainId: NATIVE_DEPLOYMENT.assertedAtChainId,
-      assertedAtKav10Address: KAV10,
-      knowledgeAssetStorageAddress: KA_STORAGE,
-      assets: Object.freeze([Object.freeze({
-        assertionRoot: ASSERTION_ROOT,
-        assertionVersion: '1',
-        authorAddress: AUTHOR,
-        kaId,
-        publisherAddress: `0x${'66'.repeat(20)}` as EvmAddressV1,
-      })]),
-      blockHash: FINALIZED_BLOCK_HASH,
-      blockNumberQuantity: '0x7b',
-      contextGraphStorageAddress: CONTEXT_GRAPH_STORAGE,
-      nameHash: nameHash as Digest32V1,
-      networkId: NETWORK_ID,
-      onChainContextGraphId: ON_CHAIN_CONTEXT_GRAPH_ID,
-      ownerAddress: AUTHOR,
-      publishPolicy: 1,
-    } satisfies FinalizedVmLoopbackFixtureConfigV1);
-    const finalizedRpc = createFinalizedVmLoopbackRpcV1(fixture);
-    const contextGraphInterface = new ethers.Interface([
-      'function getNameHash(uint256 contextGraphId) view returns (bytes32)',
-    ]);
-    expect(() => finalizedRpc.respond('eth_call', [{
-      to: KAV10,
-      data: contextGraphInterface.encodeFunctionData(
-        'getNameHash',
-        [BigInt(ON_CHAIN_CONTEXT_GRAPH_ID)],
-      ),
-    }, 'finalized'])).toThrow('context graph target');
-    const callsBeforeRuntime = finalizedRpc.calls.length;
-    const rpc = await rpcHarness.start((call, response) => {
-      try {
-        sendJsonRpcResult(response, call, finalizedRpc.respond(call.method, call.params));
-      } catch (cause) {
-        sendJsonRpcError(
-          response,
-          call,
-          -32602,
-          cause instanceof Error ? cause.message : String(cause),
-        );
-      }
-    });
-    const authorChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
-    const receiverChain = new FinalizedVmLoopbackMockChainAdapterV1(fixture);
-    const created = await receiverChain.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 1,
-      nameHash,
-    });
-    expect(created.contextGraphId.toString()).toBe(ON_CHAIN_CONTEXT_GRAPH_ID);
     const [author, receiver] = await Promise.all([
-      startNativeAgent(
-        'vm-author',
-        NATIVE_DEPLOYMENT,
-        undefined,
-        undefined,
-        { rpcUrl: rpc.url, chainAdapter: authorChain },
-      ),
-      startNativeAgent(
-        'vm-receiver',
-        NATIVE_DEPLOYMENT,
-        undefined,
-        undefined,
-        {
-          rpcUrl: rpc.url,
-          chainAdapter: receiverChain,
-          initialSubscription: CONTEXT_GRAPH_ID,
-        },
-      ),
+      startNativeAgent('finalized-policy-author', NATIVE_DEPLOYMENT),
+      startNativeAgent('finalized-policy-receiver', NATIVE_DEPLOYMENT),
     ]);
     const policy = finalizedPublicCatalogPolicy();
     for (const agent of [author, receiver]) {
@@ -2272,16 +2200,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         roster: null,
       });
     }
-    await receiver.awaitInitialChainPoll();
-    const storeQuery = vi.spyOn((receiver as any).store, 'query');
-    await expect(receiver.getContextGraphOnChainId(CONTEXT_GRAPH_ID)).resolves.toBe(
-      ON_CHAIN_CONTEXT_GRAPH_ID,
-    );
-    await expect(receiver.getContextGraphOnChainId(nameHash)).resolves.toBe(
-      ON_CHAIN_CONTEXT_GRAPH_ID,
-    );
-    expect(storeQuery.mock.calls.some(([query]) => String(query).includes('OnChainId'))).toBe(false);
-    storeQuery.mockRestore();
     await connectBothWays(author, receiver);
 
     const scope = {
@@ -2338,30 +2256,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     );
     expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
       successor.headObjectDigest,
-    )).toBeNull();
+    )).toEqual({
+      catalogHeadDigest: successor.headObjectDigest,
+      errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
+      errorCode: 'catalog-native-receiver-activation',
+    });
     await expect((receiver as any).store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
-    )).resolves.toMatchObject({
-      type: 'bindings',
-      bindings: expect.arrayContaining([
-        expect.objectContaining({ s: 'https://example.org/alice' }),
-      ]),
-    });
+    )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
     await expect((receiver as any).store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
     )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,
-    })).toMatchObject({
-      currentCatalogHeadDigest: successor.headObjectDigest,
-      inventoryRowCount: '1',
-    });
-    const finalizedCallTargets = finalizedRpc.calls.slice(callsBeforeRuntime)
-      .filter(({ method }) => method === 'eth_call')
-      .map(({ params }) => (params[0] as { readonly to?: string }).to?.toLowerCase());
-    expect(finalizedCallTargets).not.toContain(KA_STORAGE);
-    expect(finalizedCallTargets).not.toContain(KAV10);
+    })).toBeNull();
   }, 60_000);
 
   registerM0RecoveryScenario('curated-parity', rfc64M0RecoveryTitle('curated-parity'), async () => {

@@ -1326,7 +1326,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       rejectingReceiver,
     )).rejects.toMatchObject({
       code: 'catalog-native-receiver-activation',
-      message: expect.stringContaining('finalized VM precommit rejected'),
+      message: expect.stringContaining('catalog applied-head precommit rejected'),
     });
     expect(partialPrecommit).toHaveBeenCalledOnce();
     const [rejectedPlan, rejectedSignal] = partialPrecommit.mock.calls[0]!;
@@ -1354,7 +1354,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       fixture.scopeDigest,
       AUTHOR,
     )?.currentCatalogHeadDigest).toBe(fixture.successor.head.objectDigest);
-    await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
+    await expect(fixture.receiverStore.countQuads()).resolves.toBe(16);
 
     const repaired = await fixture.synchronizeAny(
       fixture.multiAssetAnnouncement,
@@ -1445,7 +1445,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     compareAndSwapAppliedCatalogHeadV1.mockClear();
     await expect(fixture.synchronizeGoverned(receiver)).rejects.toMatchObject({
       code: 'catalog-native-receiver-activation',
-      message: expect.stringContaining('finalized VM precommit rejected'),
+      message: expect.stringContaining('catalog applied-head precommit rejected'),
     });
 
     expect(getOnChainContextGraphId).not.toHaveBeenCalled();

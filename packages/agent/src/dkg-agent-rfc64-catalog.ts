@@ -76,6 +76,7 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
+  type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
 import {
@@ -763,6 +764,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
+        const beforeAppliedHeadCommit:
+          Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 =
+          async (plan, signal) => {
+            signal.throwIfAborted();
+            const acceptedPolicy = this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
+            if (acceptedPolicy.policy.source.kind === 'finalized-chain') {
+              throw new Error(
+                'RFC-64 SWM-only catalog activation does not yet admit finalized-chain policies',
+              );
+            }
+          };
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,
           contentTransport: clients.contentTransport,
@@ -770,6 +783,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           inventory: persistence.inventory,
           kaBundles: persistence.kaBundles,
           store: this.store,
+          beforeAppliedHeadCommit,
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         const reconciler = createRfc64BoundedPublicRootCatalogNativeReconcilerV1({
