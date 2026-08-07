@@ -5,7 +5,7 @@
  * daemon cannot read chain truth for one of them, publishing must fail
  * closed instead of falling back to plaintext.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
@@ -378,6 +378,69 @@ describe('DKGAgent._resolveEncryptInlinePayload policy lookup', () => {
 });
 
 describe('DKGAgent._publish inline encryption routing', () => {
+  it('uses chain-confirmed V2 encryption to attach the catalog when local meta is stale', async () => {
+    const authorAddress = '0x1111111111111111111111111111111111111111';
+    const reservedKaId = (BigInt(authorAddress) << 96n) | 1n;
+    const encryptInlinePayload = async (plaintext: Uint8Array) => plaintext;
+    const encryptInlineChunked = async () => ({
+      ciphertextChunksRoot: new Uint8Array(32),
+      ciphertextChunkCount: 1,
+      totalCiphertextBytes: 1,
+    });
+    const publisherPublish = recorder(async () => ({
+      status: 'tentative',
+      kaId: reservedKaId.toString(),
+    }));
+    const agentLike = {
+      log: {
+        info: recorder(() => undefined),
+        warn: recorder(() => undefined),
+        error: recorder(() => undefined),
+        debug: recorder(() => undefined),
+      },
+      subscribedContextGraphs: new Set(['private-cg']),
+      contextGraphExists: recorder(async () => true),
+      createV10ACKProvider: recorder(() => undefined),
+      getContextGraphOnChainId: recorder(async () => '4'),
+      isPrivateContextGraph: recorder(async () => false),
+      chain: {
+        chainId: 'base:8453',
+        isV10Ready: () => true,
+        getEvmChainId: async () => 8453n,
+        getKnowledgeAssetsLifecycleAddress: async () =>
+          '0x2222222222222222222222222222222222222222',
+      },
+      peerId: 'peer-1',
+      publisher: { publish: publisherPublish },
+      _buildPrecomputedAttestationForSelection: recorder(async () => ({
+        expectedMerkleRoot: new Uint8Array(32),
+        authorAddress,
+        signature: { r: new Uint8Array(32), vs: new Uint8Array(32) },
+        schemeVersion: 1,
+        reservedKaId,
+      })),
+      _resolveEncryptInlinePayload: recorder(async () => encryptInlinePayload),
+      _resolveEncryptInlineChunked: recorder(async () => encryptInlineChunked),
+      broadcastPublish: recorder(async () => undefined),
+      emitPublicProjectionAfterPublish: recorder(async () => undefined),
+    } as any;
+
+    await (DKGAgent.prototype as any)._publish.call(
+      agentLike,
+      'private-cg',
+      [{ subject: 'urn:test:s', predicate: 'urn:test:p', object: '"value"', graph: '' }],
+    );
+
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
+    expect(publisherPublish.calls.at(-1)?.[0]).toEqual(expect.objectContaining({
+      contextGraphId: 'private-cg',
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      encryptInlinePayload,
+      encryptInlineChunked,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
+    }));
+  });
+
   it('does not trust caller accessPolicy=public to bypass chain-confirmed encryption resolution', async () => {
     const encryptInlinePayload = recorder(async (plaintext: Uint8Array) => plaintext);
     const encryptInlineChunked = recorder(() => undefined);
@@ -756,6 +819,65 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
       }),
     ]);
   });
+
+  it('uses chain-confirmed V2 encryption to attach the catalog when local meta is stale', async () => {
+    const agentLike = makeSwmPublishAgentLike('4');
+    const encryptInlinePayload = async (plaintext: Uint8Array) => plaintext;
+    const encryptInlineChunked = async () => ({
+      ciphertextChunksRoot: new Uint8Array(32),
+      ciphertextChunkCount: 1,
+      totalCiphertextBytes: 1,
+    });
+    agentLike._resolveEncryptInlinePayload = recorder(async () => encryptInlinePayload);
+    agentLike._resolveEncryptInlineChunked = recorder(async () => encryptInlineChunked);
+
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
+      '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal',
+      'all',
+      { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
+    );
+
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([]);
+    const publishOptions = agentLike.publisher.publishFromSharedMemory.calls.at(-1)?.[2];
+    expect(publishOptions).toEqual(expect.objectContaining({
+      onChainContextGraphId: '4',
+      encryptInlinePayload,
+      encryptInlineChunked,
+      trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(
+        '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/TrueSeal',
+      ),
+    }));
+  });
+
+  it('keeps local-meta catalog mutation for legacy private SWM publishes', async () => {
+    const agentLike = makeSwmPublishAgentLike('4');
+    agentLike.isPrivateContextGraph = recorder(async () => true);
+    agentLike._ensureCuratedCatalogInSwm = recorder(async (
+      _contextGraphId: string,
+      selection: 'all' | { rootEntities: string[] },
+    ) => selection);
+
+    await (DKGAgent.prototype as any).publishFromSharedMemory.call(
+      agentLike,
+      'private-cg',
+      'all',
+    );
+
+    expect(agentLike.isPrivateContextGraph.calls).toEqual([['private-cg']]);
+    expect(agentLike._ensureCuratedCatalogInSwm.calls.at(-1)?.slice(0, 2)).toEqual([
+      'private-cg',
+      'all',
+    ]);
+    expect(agentLike.publisher.publishFromSharedMemory.calls.at(-1)).toEqual([
+      'private-cg',
+      'all',
+      expect.objectContaining({
+        onChainContextGraphId: '4',
+        trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys('private-cg'),
+      }),
+    ]);
+  });
 });
 
 const QUEUED_TEST_AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -800,6 +922,15 @@ function makeQueuedAgentHarness(options: {
   };
   agentLike.afterConfirmedGraphScopedVmPublishV1 =
     (DKGAgent.prototype as any).afterConfirmedGraphScopedVmPublishV1;
+  agentLike.observeRfc64ConfirmedVmV1 =
+    (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
+  agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => ({
+    status: 'dormant',
+    action: 'remove',
+    attempts: 0,
+    headObjectDigest: null,
+    error: null,
+  }));
   if (options.onChainContextGraphId !== undefined) {
     agentLike.getContextGraphOnChainId = recorder(
       async () => options.onChainContextGraphId,
@@ -930,6 +1061,52 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       String(call[1]).includes('RFC-64 catalog advancement failed')
       && String(call[1]).includes('simulated RFC-64 catalog failure')
     ))).toBe(true);
+  });
+
+  it('starts independent confirmed-VM observers without serial catalog blocking', async () => {
+    const { agentLike } = makeQueuedAgentHarness({
+      peerId: 'did:dkg:agent:queued-parallel-observers',
+      ual: 'did:dkg:local/queued-parallel-observers',
+      publishStatus: 'confirmed',
+    });
+    let releaseCatalog!: () => void;
+    const catalogGate = new Promise<void>((resolve) => { releaseCatalog = resolve; });
+    agentLike.recordConfirmedRfc64PublicCatalogAssetV1 = recorder(
+      async () => catalogGate,
+    );
+    const removal = recorder(async () => ({
+      status: 'absent',
+      action: 'remove',
+      attempts: 1,
+      headObjectDigest: null,
+      error: null,
+    }));
+    agentLike.removeRfc64SwmAuthorInventoryShadowV1 = removal;
+    const snapshotQuads = [{
+      subject: 'urn:test:queued-parallel-observers',
+      predicate: 'http://schema.org/name',
+      object: '"Queued Public"',
+      graph: '',
+    }];
+    const request = await makeQueuedPublishRequest({
+      contextGraphId: 'public-cg',
+      name: 'queued-parallel-observers-ka',
+      shareOperationId: 'share-op-parallel-observers',
+      intentByte: 'af',
+      quads: snapshotQuads,
+    });
+
+    const pending = (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+      agentLike,
+      request,
+      { contextGraphId: request.contextGraphId, quads: snapshotQuads },
+    );
+    await vi.waitFor(() => {
+      expect(agentLike.recordConfirmedRfc64PublicCatalogAssetV1.calls).toHaveLength(1);
+      expect(removal.calls).toHaveLength(1);
+    });
+    releaseCatalog();
+    await expect(pending).resolves.toMatchObject({ status: 'confirmed' });
   });
 
   it('keeps the V2 snapshot exact while passing a detached catalog capability', async () => {

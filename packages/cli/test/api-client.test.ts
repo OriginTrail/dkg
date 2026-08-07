@@ -459,6 +459,60 @@ describe('ApiClient', () => {
   });
 
   describe('POST endpoints', () => {
+    it('subscribeToContextGraph() forwards explicit sync lifetime', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-selected', syncMode: 'on-demand' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-selected', {
+        includeSharedMemory: true,
+        syncMode: 'on-demand',
+      });
+
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/subscribe`);
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-selected',
+        includeWorkspace: true,
+        syncMode: 'on-demand',
+      });
+    });
+
+    it('subscribeToContextGraph() preserves the omitted-options legacy contract', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-legacy-direct', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribeToContextGraph('cg-legacy-direct');
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-legacy-direct',
+        syncMode: 'always-on',
+      });
+    });
+
+    it('subscribe() keeps the legacy restart-durable lifetime explicit', async () => {
+      const { fetch, calls } = createTrackingFetch({
+        ok: true,
+        status: 200,
+        body: { subscribed: 'cg-legacy', syncMode: 'always-on' },
+      });
+      globalThis.fetch = fetch;
+
+      await client.subscribe('cg-legacy', { includeWorkspace: true });
+
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({
+        contextGraphId: 'cg-legacy',
+        includeWorkspace: true,
+        syncMode: 'always-on',
+      });
+    });
+
     it('sendChat() sends correct body', async () => {
       const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body: { delivered: true } });
       globalThis.fetch = fetch;

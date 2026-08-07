@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.12",
+  "version": "10.0.13",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -13,6 +13,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./rfc64/public-catalog-activation-config-v1": {
+      "types": "./dist/rfc64/public-catalog-activation-config-v1.d.ts",
+      "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
+      "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
+    },
     "./package.json": "./package.json",
     "./dist/rfc64/author-catalog-producer.js": "./dist/rfc64/author-catalog-producer.js",
     "./dist/rfc64/catalog-row-authorship.js": "./dist/rfc64/catalog-row-authorship.js",
@@ -23,6 +28,10 @@
     "./dist/rfc64/inventory-v1/scalars.js": "./dist/rfc64/inventory-v1/scalars.js",
     "./dist/rfc64/inventory-v1/sql.js": "./dist/rfc64/inventory-v1/sql.js",
     "./dist/rfc64/inventory-v1/statements.js": "./dist/rfc64/inventory-v1/statements.js",
+    "./dist/rfc64/public-catalog-activation-config-v1.js": "./dist/rfc64/public-catalog-activation-config-v1.js",
+    "./dist/rfc64/swm-author-inventory-producer-v1.js": "./dist/rfc64/swm-author-inventory-producer-v1.js",
+    "./dist/rfc64/control-envelope-signer-v1.js": null,
+    "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
     "./dist/rfc64/control-object-store-v1.js": null,
     "./dist/rfc64/catalog-access-policy-v1.js": null,
@@ -31,6 +40,13 @@
     "./dist/rfc64/catalog-transport-authorization-v1.js": null,
     "./dist/rfc64/catalog-transport-wire-v1-internal.js": null,
     "./dist/rfc64/durable-file-store-v1.js": null,
+    "./dist/rfc64/inventory-v1/exact-record.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-auth-v1.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-commit-plan.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-mutation.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-persistence.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-sql-codec.js": null,
+    "./dist/rfc64/inventory-v1/swm-author-inventory-contracts.js": null,
     "./dist/rfc64/finalized-vm-agent-precommit-v1.js": null,
     "./dist/rfc64/finalized-vm-composer-v1.js": null,
     "./dist/rfc64/finalized-vm-runtime-v1.js": null,

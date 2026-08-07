@@ -31,7 +31,12 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
-import type { ContextGraphDiscoveryMetadata, ContextGraphSub } from './dkg-agent-types.js';
+import type {
+  ContextGraphDiscoveryMetadata,
+  ContextGraphSub,
+  ContextGraphSubInput,
+} from './dkg-agent-types.js';
+import { normalizeContextGraphSubscriptionTransition } from './context-graph-subscription-policy.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 export type GossipPhaseCallback = (phase: string, status: 'start' | 'end') => void;
@@ -195,15 +200,17 @@ export class GossipPublishHandler {
 
   private setContextGraphSubscription(
     id: string,
-    next: ContextGraphSub,
+    next: ContextGraphSubInput,
     options?: { persist?: boolean },
   ): void {
+    const previous = this.subscribedContextGraphs.get(id);
+    const normalized = normalizeContextGraphSubscriptionTransition(previous, next);
     const setter = this.callbacks.setContextGraphSubscription;
     if (setter) {
-      setter(id, next, options);
+      setter(id, normalized, options);
       return;
     }
-    this.subscribedContextGraphs.set(id, next);
+    this.subscribedContextGraphs.set(id, normalized);
   }
 
   private recordDiscoveredContextGraph(id: string, metadata: ContextGraphDiscoveryMetadata): void {

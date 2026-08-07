@@ -68,6 +68,7 @@ import {
   tryReplaceGraphAndSubjectAtomically,
   type Quad,
   type TripleStore,
+  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 
@@ -1934,6 +1935,24 @@ async function activateExactPublicProjection(
       'store lacks atomic named-graph and author-seal replacement',
     );
   }
+  // #2079: `derivePublicSwmGraph` resolves to the byte-identical URI the
+  // catch-up materialization witness keys on, and this is a REPLACE — so the
+  // count gate cannot see it, and a standing memo would certify content that is
+  // gone. Activation merges its selected CGs into `syncContextGraphs`, so where
+  // `rfc64PublicCatalog` is enabled the two lanes land on the same graph by
+  // construction; and the catalog seal writes `{scope}/_meta` rather than the
+  // SWM head, so the version guard does not intervene.
+  //
+  // This site was missed for four review rounds because the tripwire in
+  // `swm-materialization-witness.ts` named `tryReplaceGraphAtomically`, and this
+  // path uses `tryReplaceGraphAndSubjectAtomically`. That comment now names the
+  // shape rather than one token.
+  //
+  // Best-effort, like every other invalidate: never fail an activation that has
+  // already committed in order to drop a memo.
+  await invalidateSwmMaterializationWitness(store, swmGraph, {
+    source: 'rfc64-public-catalog-native-activation.witnessInvalidate',
+  }).catch(() => {});
 
   let readBack;
   try {

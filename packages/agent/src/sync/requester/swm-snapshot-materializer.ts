@@ -20,6 +20,11 @@ import {
   workspacePublicQuadsDigest,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  invalidateSwmMaterializationWitness,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+} from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -118,6 +123,35 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
 }): SharedMemorySnapshotMaterializer {
+  // #2079 operator override, default ON. Blank is UNSET, not false:
+  // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for
+  // "not configured", and reading it as false would silently disable the memo
+  // for a fleet that never asked. Read inside the factory rather than at module
+  // scope so it takes effect on the next sync round after a restart.
+  //
+  // There is deliberately NO capability probe here. An earlier revision tested
+  // `typeof deps.store.replaceSubject !== 'function'`, on the theory that
+  // `sparql-http` with `atomicUpdates:false` could never hold a witness and
+  // would otherwise pay the ASK forever. BOTH halves were false:
+  //
+  //   - every adapter and all three decorators DEFINE `replaceSubject` and
+  //     throw `UnsupportedTripleStoreCapabilityError` INSIDE it, so the typeof
+  //     is always "function" — the probe could never fire;
+  //   - that config gates `replaceGraph` on the same `atomicUpdates` flag, so
+  //     no writer can populate a SWM assertion graph at all. The graph stays
+  //     empty, the count gate returns first, and the ASK is never reached.
+  //     There was no cost to avoid.
+  //
+  // A latch on the first `false` from the write is the shape that WOULD work,
+  // but not as currently wired: that call is `.catch(() => false)`, so a
+  // transient endpoint error is indistinguishable from a capability refusal and
+  // would disable the memo process-wide on a blip.
+  const witnessUsable = (() => {
+    const raw = process.env['DKG_SWM_MATERIALIZATION_WITNESS']?.trim();
+    if (!raw) return true;
+    return raw !== '0' && raw.toLowerCase() !== 'false';
+  })();
+
   return {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
       withKeyedLocks(deps.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
@@ -162,6 +196,29 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       if (countResult.type !== 'bindings' || countResult.bindings.length === 0) return false;
       const present = Number.parseInt(literalValue(countResult.bindings[0]?.['n']) ?? '0', 10);
       if (!Number.isFinite(present) || present !== expected) return false;
+      // 1b) Witness fast path (#2079): a bound-subject ASK recording that THIS
+      // node already read this graph back and matched this exact digest. It is
+      // a memo of the measurement in step 2 — never an independent claim — so
+      // it is only reachable in a state where step 2 would also return true.
+      //
+      // Deliberately AFTER the count gate, not instead of it. Three paths
+      // remove an assertion graph outside this lock — the SWM TTL sweep, VM
+      // promote/publish/update (a different lock map), and the chain-reset
+      // wipe, whose scoped delete spares `urn:dkg:local:*` and so leaves the
+      // witness standing over a wiped store. The count catches all three for
+      // free. Measured, also skipping the count buys a further 1.5–10.5%,
+      // which is not worth trading self-healing for. Do not reorder these.
+      if (
+        witnessUsable
+        && await readSwmMaterializationWitness(
+          deps.store,
+          descriptor.assertionGraph,
+          descriptor.publicQuadsDigest,
+          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessAsk' },
+        )
+      ) {
+        return true;
+      }
       // 2) Content binding: a matching count does not prove the stored graph
       // is THIS descriptor's content — all versions of a graph-scoped KA share
       // one graph URI, so an older version of equal size would otherwise pass
@@ -175,7 +232,26 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       );
       if (contentResult.type !== 'quads') return false;
       const stored = contentResult.quads.map((quad) => ({ ...quad, graph: '' }));
-      return workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      const matches = workspacePublicQuadsDigest(stored) === descriptor.publicQuadsDigest;
+      if (matches && witnessUsable) {
+        // Written HERE — from the branch that just computed the digest over
+        // this node's own store content and matched it — and nowhere else.
+        // That is what makes the witness sound: it cannot record anything a
+        // peer asserted, and there is no crash window in which a witness
+        // exists for content that was never verified, because the content was
+        // read before this line runs.
+        //
+        // Best-effort: a failed or unsupported write costs one recomputation
+        // next round, so it must never fail the check that just succeeded.
+        await writeSwmMaterializationWitness(
+          deps.store,
+          descriptor.assertionGraph,
+          descriptor.publicQuadsDigest,
+
+          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.witnessWrite' },
+        ).catch(() => false);
+      }
+      return matches;
     },
 
     replaceGraph: async (graphUri, quads) => {
@@ -189,6 +265,35 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         priority: 'background',
         source: 'agent.sharedMemorySync.materializeSnapshot',
       });
+      // #2079: the content just changed, so any witness for it now describes
+      // bytes that are gone. Defence in depth, NOT the thing that makes an
+      // equal-count replace safe — be precise about this, because the
+      // difference decides whether the read may ever stop binding the digest.
+      //
+      // What actually makes v1 → v2 safe is that the witness READ binds the
+      // digest as well as the subject: a standing v1 row cannot match an ASK
+      // for v2's digest, so the check falls through to the CONSTRUCT and the
+      // write then evicts v1 atomically. That holds with or without this call,
+      // and it is the property the tests pin.
+      //
+      // Where the digest binding does NOT cover, and this call is the only
+      // cover: witness(v1) + content(v2) + a descriptor still naming v1. The
+      // binding protects the (old witness, new descriptor) direction; it does
+      // nothing for (old witness, old descriptor, new content), because there
+      // the ASK's digest and the witness's digest agree while the store has
+      // moved on. That asymmetry is why this is not merely hygiene.
+      //
+      // It is nevertheless BEST EFFORT — `.catch` below — so the residual is
+      // real rather than zero: a swallowed failure, or a crash between the
+      // replace and this line, reaches exactly that state. It is bounded by the
+      // count gate whenever the replace also changed the quad count, and by the
+      // next successful verify otherwise. Ordering is after the replace because
+      // invalidating first would drop a still-valid memo on a replace that then
+      // throws; neither order removes the window.
+      await invalidateSwmMaterializationWitness(deps.store, graphUri, {
+        priority: 'background',
+        source: 'agent.sharedMemorySync.materializeSnapshot.witnessInvalidate',
+      }).catch(() => {});
       deps.invalidateListContextGraphsCache();
     },
 

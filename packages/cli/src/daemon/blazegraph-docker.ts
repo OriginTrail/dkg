@@ -340,7 +340,7 @@ function createBlazegraphContainerSpec(containerName: string): BlazegraphContain
       const warnings: string[] = [];
       if (!status.durableStorage) {
         warnings.push(
-          `  WARNING: Reused container "${containerName}" does not use the expected named Docker volume ` +
+          `  WARNING: Reused container "${containerName}" is not confirmed to use the expected named Docker volume ` +
           `"${volumeName}" at ${dataPath}. ` +
           'DKG will not recreate it automatically because that could discard Blazegraph data; back up the journal before migrating or recreating the container.',
         );
@@ -612,7 +612,7 @@ export async function provisionBlazegraphDocker(
         warnForLegacyContainerConfiguration(inspectInfo, containerSpec, log);
         throw new Error(
           `Cannot safely recreate stopped legacy container "${containerName}" after docker start failed ` +
-          `(${startResult.stderr.trim() || 'unknown'}): its Blazegraph journal is not in the expected ` +
+          `(${startResult.stderr.trim() || 'unknown'}): its Blazegraph journal could not be confirmed in the expected ` +
           `named volume "${containerSpec.volumeName}". Back up and migrate it before retrying.`,
         );
       }

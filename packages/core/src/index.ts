@@ -67,6 +67,7 @@ export {
 export * from './author-catalog-codec.js';
 export * from './author-catalog-objects.js';
 export * from './author-catalog-directory.js';
+export * from './swm-author-inventory-v1.js';
 export * from './event-bus.js';
 export * from './backpressure-observability.js';
 export {
@@ -385,7 +386,6 @@ export {
   type PositiveDecimalU64V1,
   type SealTripleCountV1,
   type CanonicalIsoUtcMillisV1,
-  type CanonicalDeterministicUalV1,
   type CanonicalGraphScopedAuthorSealV1,
   type CanonicalGraphScopedAuthorSealCoordinateV1,
   type CanonicalGraphScopedAuthorSealRowV1,

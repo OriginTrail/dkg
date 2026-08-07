@@ -909,6 +909,7 @@ jobs:
             --filter @origintrail-official/dkg-adapter-elizaos \
             --filter @origintrail-official/dkg-adapter-hermes \
             --filter @origintrail-official/dkg-adapter-openclaw \
+            --filter @origintrail-official/dkg-adapter-prime-agent \
             --filter @origintrail-official/dkg-demo \
             run test
 

@@ -53,8 +53,9 @@ import {
 
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../../..');
 
-function runDevnetBlazegraphSmoke(metadata: string): {
+function runDevnetBlazegraphSmoke(metadata: string, namespaceStatus = '201'): {
   status: number | null;
+  stdout: string;
   stderr: string;
   dockerArgs: string[] | null;
 } {
@@ -72,9 +73,16 @@ function runDevnetBlazegraphSmoke(metadata: string): {
       resolve(REPO_ROOT, 'packages/cli/test/fixtures/devnet-blazegraph-smoke.sh'),
       root,
       capture,
-    ], { encoding: 'utf-8' });
+    ], {
+      encoding: 'utf-8',
+      env: {
+        ...process.env,
+        DEVNET_BLAZEGRAPH_SMOKE_NAMESPACE_STATUS: namespaceStatus,
+      },
+    });
     return {
       status: result.status,
+      stdout: result.stdout,
       stderr: result.stderr,
       dockerArgs: existsSync(capture)
         ? readFileSync(capture, 'utf-8').trim().split('\n')
@@ -305,7 +313,7 @@ describe('provisionBlazegraphDocker', () => {
     expect(calls.some((call) => call[0] === 'run')).toBe(false);
     expect(logs.some((message) => (
       message.includes('WARNING: Reused container')
-      && message.includes(`expected named Docker volume "dkg-blazegraph-mynode-data" at ${BLAZEGRAPH_DATA_PATH}`)
+      && message.includes(`is not confirmed to use the expected named Docker volume "dkg-blazegraph-mynode-data" at ${BLAZEGRAPH_DATA_PATH}`)
       && message.includes('will not recreate it automatically')
     ))).toBe(true);
     expect(logs.some((message) => (
@@ -421,11 +429,44 @@ describe('provisionBlazegraphDocker', () => {
       fetch: globalThis.fetch,
       isPortFree: async () => true,
       log: (message) => logs.push(message),
-    })).rejects.toThrow(/Cannot safely recreate stopped legacy container.*Back up and migrate/s);
+    })).rejects.toThrow(
+      /Cannot safely recreate stopped legacy container.*journal could not be confirmed.*Back up and migrate/s,
+    );
 
     expect(calls.some((call) => call[0] === 'rm')).toBe(false);
     expect(calls.some((call) => call[0] === 'run')).toBe(false);
     expect(logs.some((message) => message.includes('will not recreate it automatically'))).toBe(true);
+  });
+
+  it('does not claim a journal policy when docker inspect JSON is malformed', async () => {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        {
+          when: (a) => a[0] === 'inspect',
+          respond: () => ({ stdout: '{not-json', stderr: '', exitCode: 0 }),
+        },
+        {
+          when: (a) => a[0] === 'start',
+          respond: () => ({ stdout: '', stderr: 'inspect unavailable', exitCode: 1 }),
+        },
+      ],
+    });
+    const logs: string[] = [];
+
+    await expect(provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: globalThis.fetch,
+      isPortFree: async () => true,
+      log: (message) => logs.push(message),
+    })).rejects.toThrow(/journal could not be confirmed in the expected named volume/s);
+
+    expect(calls.some((call) => call[0] === 'rm')).toBe(false);
+    expect(logs.some((message) => (
+      message.includes('is not confirmed to use the expected named Docker volume')
+      && !message.includes('does not use the expected named Docker volume')
+    ))).toBe(true);
   });
 
   it('reattaches a persisted volume without recreating its existing namespace', async () => {
@@ -510,7 +551,7 @@ describe('provisionBlazegraphDocker', () => {
     );
   });
 
-  it('executes the devnet Docker path with the exact shared image and loopback port mapping', () => {
+  it('executes the devnet Docker path with the shared image, bounded logs, and loopback port', () => {
     const image = 'example/blazegraph@sha256:smoke';
     const result = runDevnetBlazegraphSmoke(JSON.stringify({
       image,
@@ -524,10 +565,42 @@ describe('provisionBlazegraphDocker', () => {
       '-d',
       '--name',
       'devnet-blazegraph-smoke',
+      '--log-driver',
+      'local',
+      '--log-opt',
+      'max-size=200m',
+      '--log-opt',
+      'max-file=20',
       '-p',
       '127.0.0.1:19099:80',
       image,
     ]);
+    expect(result.stdout).toContain('Created Blazegraph namespace: node3');
+    expect(result.stdout).toContain('Created Blazegraph namespace: node4');
+  });
+
+  it('treats an existing devnet Blazegraph namespace as an idempotent success', () => {
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({
+      image: 'example/blazegraph@sha256:smoke',
+      containerPort: 80,
+      dataPath: '/data',
+    }), '409');
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('Blazegraph namespace already exists: node3');
+    expect(result.stdout).not.toContain('Created Blazegraph namespace: node3');
+  });
+
+  it('warns instead of claiming a failed devnet namespace creation succeeded', () => {
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({
+      image: 'example/blazegraph@sha256:smoke',
+      containerPort: 80,
+      dataPath: '/data',
+    }), '500');
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('WARNING: Failed to create Blazegraph namespace: node3 (HTTP 500)');
+    expect(result.stdout).not.toContain('Created Blazegraph namespace: node3');
   });
 
   it('fails closed before docker run when devnet image metadata is invalid', () => {

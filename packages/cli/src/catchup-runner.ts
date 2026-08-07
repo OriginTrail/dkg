@@ -7,12 +7,14 @@ import {
   normalizeDurableSyncResult,
   normalizeSyncAdmissionSource,
   type DKGAgent,
+  type CatchupPassDecisionReason,
   type DurableProgressSummary,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
+  type SwmSnapshotCoverage,
   type SyncPeerResolution,
 } from '@origintrail-official/dkg-agent';
-import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC, createOperationContext } from '@origintrail-official/dkg-core';
 
 const SYNC_PROTOCOL_CHECK_ATTEMPTS = 3;
 const SYNC_PROTOCOL_CHECK_DELAY_MS = 500;
@@ -109,6 +111,29 @@ export interface CatchupJobResult {
       /** A resolvable curator never cleanly answered this plane; see
        * `catchupPlaneProvenByUnanimousEmpty`. */
       authorityUnanswered?: boolean;
+      /**
+       * Public-SWM snapshot coverage for this graph, selected WHOLE from one
+       * peer round by `selectSwmSnapshotCoverage`. The counts, the peer they
+       * are attributed to and the missing sample are never mixed across peers.
+       */
+      swmCoverage?: SwmSnapshotCoverage;
+      /** Snapshot phases that yielded on the local clock — see the agent-side field. */
+      snapshotPlaneIncomplete: number;
+      /** Extra passes over the peer set beyond the first. */
+      continuationPasses: number;
+      /**
+       * Why the bounded repeat stopped, as the policy's own closed union — so a
+       * new reason cannot reach the terminal message unnoticed.
+       */
+      continuationStopReason?: CatchupPassDecisionReason;
+      /**
+       * `bytesReceived` split into its replay half (metadata + aggregate data,
+       * which every pass re-fetches in full) and its useful half (snapshot
+       * content), so the cost of repeating the walk stays measurable instead of
+       * being merged into one scalar. The two sum to `bytesReceived`.
+       */
+      replayPhaseBytesReceived: number;
+      snapshotPhaseBytesReceived: number;
     };
   };
 }
@@ -1117,6 +1142,16 @@ class WorkerCatchupRunner implements CatchupRunner {
             ),
           },
         );
+      }
+      case 'logCatchupPass': {
+        // The pass loop runs inside the Worker, which has no logger of its own,
+        // so the line is FORMATTED there — where the coverage records live — and
+        // only emitted here. Deliberately `info`: an operator diagnosing a job
+        // that will not converge needs this without raising the log level, and a
+        // catch-up emits at most a handful of these.
+        const [message] = args as [string];
+        agent.log.info(createOperationContext('sync'), message);
+        return null;
       }
       case 'finalizeCatchup': {
         const [contextGraphId] = args as [string, number, number];
