@@ -20,6 +20,8 @@ interface SyncOnConnectContext {
   knownCorePeerIds: Set<string>;
   knownCorePeerIdsV2?: Set<string>;
   getSyncContextGraphs: () => string[];
+  /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
+  getDurableSyncContextGraphs?: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
@@ -135,6 +137,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     knownCorePeerIds,
     knownCorePeerIdsV2 = new Set<string>(),
     getSyncContextGraphs,
+    getDurableSyncContextGraphs,
     getSharedMemorySyncContextGraphs,
     syncFromPeer,
     refreshMetaSyncedFlags,
@@ -242,36 +245,48 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       return 'skipped-no-sync';
     }
 
-    logInfo(ctx, `Syncing from peer ${shortPeer}...`);
-    const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
-    const synced = await syncFromPeer(remotePeer);
-    const syncedAccounting = recordSyncAccounting(synced, 'durable');
-    logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
-    if (syncedAccounting.deferredByBackpressure) {
-      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
-      return finishSyncAccounting();
-    }
-    // A backoff-worthy per-CG failure must NOT stop the remaining lanes: the
-    // failure is already recorded (the peer will not be stamped fresh), and
-    // stopping here starves CG discovery and shared-memory sync of a peer
-    // that is demonstrably reachable — the small-CG-behind-a-poison-transfer
-    // starvation this accounting exists to prevent. Only a peer that never
-    // answered any round and produced no progress stops the fanout, because
-    // every later lane would just re-dial the same dead peer.
-    if (syncedAccounting.peerUnreachable && !syncedAccounting.madeProgress) {
-      logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer}: durable sync could not reach the peer`);
-      return finishSyncAccounting();
-    }
-    if (syncedAccounting.backoffWorthyFailure) {
-      logInfo(ctx, `Durable sync from peer ${shortPeer} hit backoff-worthy pressure; continuing remaining sync-on-connect lanes`);
-    }
-
-    const syncScope = new Set<string>([
+    const durableContextGraphIds = getDurableSyncContextGraphs?.() ?? [
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
       ...(getSyncContextGraphs() ?? []),
-    ]);
-    await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));
+    ];
+    logInfo(ctx, `Syncing from peer ${shortPeer}...`);
+    const knownCgsBefore = new Set(getSyncContextGraphs() ?? []);
+    if (durableContextGraphIds.length > 0) {
+      const synced = getDurableSyncContextGraphs
+        ? await syncFromPeer(remotePeer, durableContextGraphIds)
+        : await syncFromPeer(remotePeer);
+      const syncedAccounting = recordSyncAccounting(synced, 'durable');
+      logInfo(ctx, `Synced ${syncedAccounting.insertedTriples} data triples from peer ${shortPeer}`);
+      if (syncedAccounting.deferredByBackpressure) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer} after local admission deferral`);
+        return finishSyncAccounting();
+      }
+      // A backoff-worthy per-CG failure must NOT stop the remaining lanes: the
+      // failure is already recorded (the peer will not be stamped fresh), and
+      // stopping here starves CG discovery and shared-memory sync of a peer
+      // that is demonstrably reachable — the small-CG-behind-a-poison-transfer
+      // starvation this accounting exists to prevent. Only a peer that never
+      // answered any round and produced no progress stops the fanout, because
+      // every later lane would just re-dial the same dead peer.
+      if (syncedAccounting.peerUnreachable && !syncedAccounting.madeProgress) {
+        logInfo(ctx, `Stopping sync-on-connect fanout for peer ${shortPeer}: durable sync could not reach the peer`);
+        return finishSyncAccounting();
+      }
+      if (syncedAccounting.backoffWorthyFailure) {
+        logInfo(ctx, `Durable sync from peer ${shortPeer} hit backoff-worthy pressure; continuing remaining sync-on-connect lanes`);
+      }
+    } else {
+      // An empty automatic scope is a completed no-op. Stamp the peer fresh so
+      // the reconciler does not repeatedly wake an Edge that selected no CGs.
+      cleanDurableDetailedRound = true;
+      logInfo(ctx, `Skipping automatic durable sync from ${shortPeer}: no Context Graphs are eligible`);
+    }
+
+    const syncScope = new Set<string>(durableContextGraphIds);
+    if (syncScope.size > 0) {
+      await runNonTransportStep(() => refreshMetaSyncedFlags(syncScope));
+    }
 
     await runNonTransportStep(() => discoverContextGraphsFromStore());
 

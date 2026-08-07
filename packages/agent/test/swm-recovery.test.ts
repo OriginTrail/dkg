@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+} from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -561,6 +565,15 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
       { subject: 'urn:rootless:a', predicate: STATUS, object: '"stale"', graph: assertionGraph },
       { subject: 'urn:rootless:old', predicate: 'urn:p', object: '"must-disappear"', graph: assertionGraph },
     ]);
+    // #2079: recovery REPLACES this graph, so a catch-up materialization
+    // witness for it would describe content that is gone — and a replace can
+    // leave the quad count unchanged, which is exactly what the count gate
+    // cannot see. This lane is lane-disjoint from the public one in automatic
+    // operation, but the ungated `recover-shared-memory` route reaches it, and
+    // that route exists to repair a corrupt local copy — the worst moment to
+    // leave a stale memo standing.
+    await writeSwmMaterializationWitness(store, assertionGraph, 'sha256:stale-witness');
+    expect(await readSwmMaterializationWitness(store, assertionGraph, 'sha256:stale-witness')).toBe(true);
     const snapshotStore = new MemorySnapshotStore();
     let snapshotFetches = 0;
     let dataFetches = 0;
@@ -603,6 +616,11 @@ describe('recoverContextGraphSwm (fetch → verify → replace)', () => {
     });
     expect(snapshotFetches).toBe(1);
     expect(dataFetches).toBe(0);
+    // #2079: the replace above must have dropped the memo. The witness lives in
+    // `urn:dkg:local:*`, untouched by the graph replace itself, so only the
+    // explicit invalidate in the recovery lane can clear it — which is what
+    // makes this discriminate.
+    expect(await readSwmMaterializationWitness(store, assertionGraph, 'sha256:stale-witness')).toBe(false);
     const recovered = await store.query(
       `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertionGraph}> { ?s ?p ?o } }`,
     );

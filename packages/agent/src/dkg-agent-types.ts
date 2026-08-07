@@ -1396,6 +1396,12 @@ export interface DKGAgentConfig {
   syncReconcilerEnabled?: boolean;
   /** Emergency switch for all peer-connect sync triggers. Env DKG_SYNC_ON_CONNECT_ENABLED wins. */
   syncOnConnectEnabled?: boolean;
+  /**
+   * Include `agents` and `ontology` in automatic peer-connect/reconciler
+   * durable sync. Defaults true on Core and false on Edge. Explicit catch-up
+   * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
+   */
+  syncSystemContextGraphsOnConnect?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
@@ -1600,7 +1606,7 @@ export interface DKGAgentConfig {
   };
   /** Cross-agent query access configuration. */
   queryAccess?: QueryAccessConfig;
-  /** Additional context graph IDs to sync on peer connect (beyond system context graphs). */
+  /** User-selected context graph IDs to sync automatically on peer connect. */
   syncContextGraphs?: string[];
   /** TTL for shared memory data in milliseconds. Expired operations are periodically cleaned up. Default: 48 hours. Set to 0 to disable. */
   sharedMemoryTtlMs?: number;

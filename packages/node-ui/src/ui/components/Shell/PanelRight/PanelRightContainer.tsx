@@ -39,6 +39,7 @@ import { NetworkTab } from './NetworkTab.js';
 import { SessionsTab } from './SessionsTab.js';
 import {
   compareLocalAgentIntegrations,
+  getLocalAgentConversationStateKey,
   markLocalAgentIntegrationDisconnected,
   resolveLocalAgentConversation,
   resolveLocalAgentSelectionState,
@@ -600,6 +601,37 @@ export function PanelRight() {
             : message,
         ),
       );
+      const resolvedPrimeSessionId = integrationId === 'prime-agent'
+        ? result.sessionId?.trim()
+        : undefined;
+      if (
+        resolvedPrimeSessionId
+        && resolvedPrimeSessionId !== conversation.sessionId
+        && selectedIntegrationIdRef.current === integrationId
+        && selectedSessionIdRef.current === conversation.sessionId
+      ) {
+        const nextConversationKey = getLocalAgentConversationStateKey(
+          integrationId,
+          resolvedPrimeSessionId,
+        );
+        // Preserve the just-finished transcript while moving the routing pin
+        // to the replacement Prime session. The API retries only the explicit
+        // PRIME_AGENT_NO_SESSION miss, which is a pre-delivery failure, so this
+        // migration cannot duplicate an executed turn.
+        setLocalMessagesByConversation((prev) => ({
+          ...prev,
+          [nextConversationKey]: mergeLocalAgentMessages(
+            prev[nextConversationKey] ?? [],
+            prev[conversationKey] ?? [],
+          ),
+        }));
+        setLocalHistoryLoadedByConversation((prev) => ({
+          ...prev,
+          [nextConversationKey]: prev[conversationKey] ?? true,
+        }));
+        setSelectedIntegration(integrationId, { sessionId: resolvedPrimeSessionId });
+        setConnectNotice(`${integration.name} restarted; switched chat to the live session.`);
+      }
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
@@ -685,6 +717,7 @@ export function PanelRight() {
     clearCompletedAttachmentsForConversation,
     setLocalInputForConversation,
     setLocalSendingForConversation,
+    setSelectedIntegration,
     stage,
     updateLocalMessages,
   ]);
