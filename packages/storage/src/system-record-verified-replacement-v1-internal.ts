@@ -35,16 +35,6 @@ import {
   type OwnedSubjectTableObjectV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import {
-  isManagedOxigraphOwnershipLeaseV1,
-  readManagedOxigraphOwnershipSnapshotV1,
-  type ManagedOxigraphOwnershipLeaseV1,
-} from './managed-oxigraph-ownership-v1-internal.js';
-import {
-  createSystemRecordLaneActivationRegistryV1,
-  type SystemRecordLaneActivationIssuerV1,
-  type SystemRecordLaneActivationReaderV1,
-} from './system-record-lane-activation-v1-internal.js';
 import type { Quad } from './triple-store.js';
 
 declare const VERIFIED_REPLACEMENT_HANDLE_BRAND: unique symbol;
@@ -149,8 +139,6 @@ export type SystemRecordAtomicChargeCategoryV1 =
 export interface SystemRecordVerifiedReplacementRegistryV1 {
   readonly issuer: SystemRecordVerifiedReplacementIssuerV1;
   readonly consumer: SystemRecordVerifiedReplacementConsumerV1;
-  readonly activationIssuer: SystemRecordLaneActivationIssuerV1;
-  readonly activationReader: SystemRecordLaneActivationReaderV1;
 }
 
 interface RegisteredReplacementV1 {
@@ -165,7 +153,6 @@ type RuntimeReservationPhaseV1 = 'proof' | 'facts' | 'recovery' | 'released';
 
 interface RuntimeReservationV1 {
   readonly registryIdentity: object;
-  readonly accountantIdentity: object;
   readonly identity: object;
   readonly bytes: number;
   readonly admittedDeadlineMs: number;
@@ -174,14 +161,13 @@ interface RuntimeReservationV1 {
   recoveryOwnership?: object;
 }
 
-interface SystemRecordRuntimeAccountantV1 {
-  readonly identity: object;
-  accountedBytes: number;
-  liveAtomicReservation: RuntimeReservationV1 | null;
+export interface SystemRecordRuntimeReservationGateV1 {
+  acquire(owner: object, bytes: number): void;
+  release(owner: object, bytes: number): void;
 }
 
-interface SystemRecordVerifiedReplacementRegistryDepsV1 {
-  readonly accountant: SystemRecordRuntimeAccountantV1;
+export interface SystemRecordVerifiedReplacementRegistryDepsV1 {
+  readonly reservationGate: SystemRecordRuntimeReservationGateV1;
   readonly assertAvailable?: () => void;
 }
 
@@ -195,23 +181,6 @@ const ATOMIC_CHARGE_CATEGORIES = new Set<SystemRecordAtomicChargeCategoryV1>([
   'response',
   'prepared',
 ]);
-
-const createSystemRecordRuntimeAccountantV1 = (): SystemRecordRuntimeAccountantV1 => ({
-  identity: Object.freeze(Object.create(null) as object),
-  accountedBytes: 0,
-  liveAtomicReservation: null,
-});
-
-/**
- * Production reservations are process-wide, not per adapter or per ownership lease.
- * Test-only registries created directly below receive an isolated accountant so suites
- * cannot leak mutable process state into one another.
- */
-const PRODUCTION_RUNTIME_ACCOUNTANT = createSystemRecordRuntimeAccountantV1();
-const PRODUCTION_REGISTRIES = new WeakMap<
-  ManagedOxigraphOwnershipLeaseV1,
-  SystemRecordVerifiedReplacementRegistryV1
->();
 
 /** Refuse structural facts even when they embed a separately valid authority capability. */
 export function assertAuthenticSystemRecordVerifiedReplacementFactsV1(
@@ -604,26 +573,19 @@ function bindingsEqual(
  * Create one non-interchangeable issuer/consumer pair. Only the consumer half belongs
  * in the storage executor; only the issuer half belongs in the verifier closure.
  */
-function createSystemRecordVerifiedReplacementRegistryWithDepsV1(
+export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
   deps: SystemRecordVerifiedReplacementRegistryDepsV1,
 ): SystemRecordVerifiedReplacementRegistryV1 {
   const registryIdentity = Object.freeze(Object.create(null) as object);
-  const { accountant } = deps;
-  const activation = createSystemRecordLaneActivationRegistryV1(deps.assertAvailable);
+  const { reservationGate } = deps;
 
   const reserveAtomic = (
     admittedDeadlineMs: number,
     decodedBytes: number,
   ): RuntimeReservationV1 => {
     deps.assertAvailable?.();
-    if (accountant.liveAtomicReservation !== null
-        || accountant.accountedBytes + SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES
-          > SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES) {
-      throw new Error('system-record atomic transient reservation is already live');
-    }
     const reservation: RuntimeReservationV1 = {
       registryIdentity,
-      accountantIdentity: accountant.identity,
       identity: Object.freeze(Object.create(null) as object),
       bytes: SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
       admittedDeadlineMs,
@@ -635,8 +597,7 @@ function createSystemRecordVerifiedReplacementRegistryWithDepsV1(
       },
       phase: 'proof',
     };
-    accountant.accountedBytes += reservation.bytes;
-    accountant.liveAtomicReservation = reservation;
+    reservationGate.acquire(reservation.identity, reservation.bytes);
     return reservation;
   };
 
@@ -644,19 +605,13 @@ function createSystemRecordVerifiedReplacementRegistryWithDepsV1(
     if (reservation.registryIdentity !== registryIdentity || reservation.phase === 'released') {
       throw new Error('system-record atomic transient reservation was already released');
     }
-    if (reservation.accountantIdentity !== accountant.identity
-        || accountant.liveAtomicReservation !== reservation
-        || accountant.accountedBytes < reservation.bytes) {
-      throw new Error('system-record atomic transient accountant state is inconsistent');
-    }
+    reservationGate.release(reservation.identity, reservation.bytes);
     reservation.phase = 'released';
     reservation.charges.decoded = 0;
     reservation.charges.request = 0;
     reservation.charges.response = 0;
     reservation.charges.prepared = 0;
     reservation.recoveryOwnership = undefined;
-    accountant.accountedBytes -= reservation.bytes;
-    accountant.liveAtomicReservation = null;
   };
 
   const registeredHandle = (handle: unknown): RegisteredReplacementV1 => {
@@ -919,12 +874,7 @@ function createSystemRecordVerifiedReplacementRegistryWithDepsV1(
     },
   });
 
-  return Object.freeze({
-    issuer,
-    consumer,
-    activationIssuer: activation.issuer,
-    activationReader: activation.reader,
-  });
+  return Object.freeze({ issuer, consumer });
 }
 
 /**
@@ -933,44 +883,31 @@ function createSystemRecordVerifiedReplacementRegistryWithDepsV1(
  * adapter and future lifecycle verifier shares one process-wide accountant.
  */
 export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordVerifiedReplacementRegistryV1 {
-  return createSystemRecordVerifiedReplacementRegistryWithDepsV1({
-    accountant: createSystemRecordRuntimeAccountantV1(),
+  return createSystemRecordVerifiedReplacementRegistryForRuntimeV1({
+    reservationGate: createIsolatedReservationGateV1(),
   });
 }
 
-/**
- * Resolve the single runtime bound to an authentic daemon ownership lease.
- *
- * A persisted option, copied object, or structural look-alike cannot create a runtime.
- * The returned pair is intentionally internal to the package: storage retains only the
- * consumer while the later agent lifecycle captures the issuer in its verifier closure.
- */
-export function resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
-  lease: ManagedOxigraphOwnershipLeaseV1,
-): SystemRecordVerifiedReplacementRegistryV1 {
-  if (!isManagedOxigraphOwnershipLeaseV1(lease)) {
-    throw new Error('system-record runtime requires an authentic managed Oxigraph ownership lease');
-  }
-  const ownership = readManagedOxigraphOwnershipSnapshotV1(lease);
-  if (ownership?.queryEndpoint === undefined || ownership.updateEndpoint === undefined) {
-    throw new Error('system-record runtime requires an endpoint-bound managed Oxigraph ownership lease');
-  }
-  const existing = PRODUCTION_REGISTRIES.get(lease);
-  if (existing !== undefined) return existing;
-
-  const runtime = createSystemRecordVerifiedReplacementRegistryWithDepsV1({
-    accountant: PRODUCTION_RUNTIME_ACCOUNTANT,
-    assertAvailable: () => {
-      const snapshot = readManagedOxigraphOwnershipSnapshotV1(lease);
-      if (!snapshot?.ready || snapshot.terminal
-          || snapshot.queryEndpoint !== ownership.queryEndpoint
-          || snapshot.updateEndpoint !== ownership.updateEndpoint) {
-        throw new Error('system-record runtime ownership lease is not ready');
+function createIsolatedReservationGateV1(): SystemRecordRuntimeReservationGateV1 {
+  let liveOwner: object | null = null;
+  let accountedBytes = 0;
+  return Object.freeze({
+    acquire(owner: object, bytes: number): void {
+      if (liveOwner !== null
+          || accountedBytes + bytes > SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES) {
+        throw new Error('system-record atomic transient reservation is already live');
       }
+      liveOwner = owner;
+      accountedBytes += bytes;
+    },
+    release(owner: object, bytes: number): void {
+      if (liveOwner !== owner || accountedBytes < bytes) {
+        throw new Error('system-record atomic transient accountant state is inconsistent');
+      }
+      liveOwner = null;
+      accountedBytes -= bytes;
     },
   });
-  PRODUCTION_REGISTRIES.set(lease, runtime);
-  return runtime;
 }
 
 function retainedVerifiedFactsBytes(

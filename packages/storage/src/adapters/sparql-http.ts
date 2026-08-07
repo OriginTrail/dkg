@@ -69,7 +69,7 @@ import {
   type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
 import { createSystemRecordAtomicApplyExecutorV1 } from '../system-record-atomic-apply-executor-v1-internal.js';
-import { resolveOwnedSystemRecordVerifiedReplacementRuntimeV1 } from '../system-record-verified-replacement-v1-internal.js';
+import { resolveOwnedSystemRecordRuntimeV1 } from '../system-record-runtime-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -592,7 +592,7 @@ export class SparqlHttpStore implements TripleStore {
         // registry, and all authentic leases share one process-wide accountant.
         // The issuer remains outside the store and has no production caller in
         // this default-unused stack; the later lifecycle verifier captures it.
-        const { consumer, activationReader } = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
+        const { consumer } = resolveOwnedSystemRecordRuntimeV1(
           this.ownershipLease,
         );
         const atomicExecutor = createSystemRecordAtomicApplyExecutorV1({
@@ -605,7 +605,6 @@ export class SparqlHttpStore implements TripleStore {
         const owner = createSystemRecordLaneControllerV1({
           lease: this.ownershipLease,
           handoff: this.buildChildHandoff(this.supervisorHandoff),
-          activationReader,
           executor: {
             applyVerified: (proof, childGeneration) =>
               this.executeSystemRecordApplyLegacy(proof, childGeneration),

@@ -7,7 +7,6 @@ import {
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
-import { resolveOwnedSystemRecordVerifiedReplacementRuntimeV1 } from '../src/system-record-verified-replacement-v1-internal.js';
 
 let server: Server;
 let queryEndpoint: string;
@@ -79,15 +78,12 @@ describe('sparql-http managed epoch handoff', () => {
     const store = new SparqlHttpStore(options);
     const controller = store.getSystemRecordLaneControllerV1();
     expect(controller).toBeDefined();
-    const activation = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
-      ownership.lease,
-    ).activationIssuer.issue({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
 
-    const first = await controller!.open(activation);
+    const first = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
     expect(epoch).toBe('1');
     await first.close('disable');
     expect(epoch).toBe('2');
-    const second = await controller!.open(activation);
+    const second = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
     expect(epoch).toBe('3');
     expect(requests.map((request) => request.path)).toEqual([
       '/query', '/update', '/query',

@@ -10,7 +10,6 @@ import {
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
-import { resolveOwnedSystemRecordVerifiedReplacementRuntimeV1 } from '../src/system-record-verified-replacement-v1-internal.js';
 
 let QUERY_ENDPOINT: string;
 let UPDATE_ENDPOINT: string;
@@ -116,9 +115,7 @@ describe('managed Oxigraph mutation admission V1', () => {
   async function activate(): Promise<void> {
     const controller = store.getSystemRecordLaneControllerV1?.();
     expect(controller).toBeDefined();
-    await controller!.open(resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
-      ownership.lease,
-    ).activationIssuer.issue({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' }));
+    await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
   }
 
   function holdAgentsExclusive(): {
@@ -334,13 +331,11 @@ describe('managed Oxigraph mutation admission V1', () => {
   it('restores the zero-metadata scheduler fast path after a successful disable', async () => {
     const controller = store.getSystemRecordLaneControllerV1?.();
     expect(controller).toBeDefined();
-    const session = await controller!.open(resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
-      ownership.lease,
-    ).activationIssuer.issue({
+    const session = await controller!.open({
       networkId: 'testnet',
       kinds: ['agents'],
       mode: 'shadow',
-    }));
+    });
     await session.close('disable');
 
     const before = externalStorePriorityScheduler.snapshot;

@@ -79,6 +79,8 @@ describe('system-record reserved-state snapshot decoder', () => {
       appliedState: { stableKeyHash: STABLE_KEY, stateRevision: '4' },
       capacityState: { revision: '7' },
       materializationEpoch: '2',
+      appliedTupleEpoch: '2',
+      requiresRematerialization: false,
     });
     if (decoded.state !== 'present') throw new Error('expected present state');
     expect(decoded.expectedRootClaimQuads).toEqual(canonical.rootClaims);
@@ -101,6 +103,8 @@ describe('system-record reserved-state snapshot decoder', () => {
     expect(decoded).toMatchObject({
       state: 'present',
       materializationEpoch: '2',
+      appliedTupleEpoch: '1',
+      requiresRematerialization: true,
       appliedState: { materializationEpoch: '1' },
       receipt: { materializationEpoch: '1' },
     });
@@ -117,6 +121,18 @@ describe('system-record reserved-state snapshot decoder', () => {
       stableKeyHash: STABLE_KEY,
       materializationEpoch: '2',
       quads: [...future.record, ...future.capacity, ...currentEpoch, ...future.receipt],
+    })).toThrow(/epoch binding/);
+  });
+
+  it('rejects split applied-state and receipt epochs', () => {
+    const prior = tuple({ appliedState: state({ materializationEpoch: '1' }) });
+    const current = tuple();
+
+    expect(() => decodeSystemRecordAppliedSnapshotV1({
+      networkId: NETWORK,
+      stableKeyHash: STABLE_KEY,
+      materializationEpoch: '2',
+      quads: [...prior.record, ...prior.capacity, ...current.epoch, ...current.receipt],
     })).toThrow(/epoch binding/);
   });
 
@@ -166,6 +182,11 @@ describe('system-record reserved-state snapshot decoder', () => {
       ...canonical.record[0],
       predicate: canonical.capacity[0].predicate,
       object: canonical.capacity[0].object,
+    }])).toThrow(/fixed canonical RDF schema/);
+    expect(() => decode([...all, {
+      ...canonical.epoch[0],
+      predicate: SYSTEM_RECORD_V1_PREDICATES.root,
+      object: ROOT,
     }])).toThrow(/fixed canonical RDF schema/);
     expect(() => decode(all.map((quad) => quad === canonical.record[0]
       ? { ...quad, object: '"not-json"^^<urn:dkg:system-record-v1:canonical-json>' }

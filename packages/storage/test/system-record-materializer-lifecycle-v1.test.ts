@@ -540,6 +540,32 @@ describe('system-record lane session lifecycle V1', () => {
       expect(handoff.calls).toEqual([]);
     });
 
+    it('rejects proxied activation records and kinds before invoking traps', async () => {
+      const controller = build();
+      let objectTrapCalls = 0;
+      const activation = new Proxy({ ...ACTIVATION }, {
+        getPrototypeOf: () => {
+          objectTrapCalls += 1;
+          throw new Error('activation proxy trap ran');
+        },
+      });
+      await expect(controller.open(activation)).rejects.toThrow(/plain data object/);
+      expect(objectTrapCalls).toBe(0);
+
+      let kindsTrapCalls = 0;
+      const kinds = new Proxy(['agents'], {
+        ownKeys: () => {
+          kindsTrapCalls += 1;
+          throw new Error('kinds proxy trap ran');
+        },
+      });
+      await expect(controller.open({ ...ACTIVATION, kinds } as never)).rejects.toThrow(
+        /closed \[agents\] tuple/,
+      );
+      expect(kindsTrapCalls).toBe(0);
+      expect(handoff.calls).toEqual([]);
+    });
+
     it('rejects unknown activation fields and a non-closed kinds tuple', async () => {
       const controller = build();
       await expect(controller.open({ ...ACTIVATION, extra: true } as never)).rejects.toThrow(
