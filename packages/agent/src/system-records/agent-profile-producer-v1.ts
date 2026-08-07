@@ -205,15 +205,16 @@ export function createAgentProfileProducerV1(
     }
     const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
     const validUntil = normalizePublicationTimestampV1(publication.validUntil, 'validUntil');
-    const assertionFinalizedAt = normalizePublicationTimestampV1(
+    normalizePublicationTimestampV1(
       publication.seal.assertionFinalizedAt,
       'assertionFinalizedAt',
     );
+    const assertionFinalizedAtMs = Date.parse(publication.seal.assertionFinalizedAt);
     const verifierNowMs = producerNowMs(options.nowMs?.() ?? Date.now());
     if (Date.parse(issuedAt) > verifierNowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS) {
       throw new Error('agent-profile issuedAt exceeds the future clock-skew bound');
     }
-    if (Date.parse(issuedAt) < Date.parse(assertionFinalizedAt)) {
+    if (Date.parse(issuedAt) < assertionFinalizedAtMs) {
       throw new Error('agent-profile issuedAt predates assertion finalization');
     }
     if (Date.parse(validUntil) <= Date.parse(issuedAt)) {

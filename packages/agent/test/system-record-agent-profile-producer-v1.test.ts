@@ -912,6 +912,40 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
+  it('preserves millisecond finalization precision in the issue-time ordering check', async () => {
+    const fixture = await producerFixture();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+    const finalizedWithinSecond = {
+      ...fixture.publication,
+      seal: {
+        ...fixture.publication.seal,
+        assertionFinalizedAt: '2026-08-07T12:00:00.999Z',
+      },
+    } as AgentProfilePublicationBindingV1;
+
+    await expect(produce(producer, fixture.prepared, finalizedWithinSecond))
+      .rejects.toThrow(/issuedAt predates assertion finalization/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+
+    await expect(produce(producer, fixture.prepared, {
+      ...finalizedWithinSecond,
+      issuedAt: '2026-08-07T12:00:01Z',
+    })).resolves.toMatchObject({ version: '0' });
+    expect(install).toHaveBeenCalledOnce();
+    expect(fixture.store.snapshot().currentHead?.object.issuedAt).toBe('2026-08-07T12:00:01Z');
+  });
+
   it.each([
     [
       'a foreign UAL network',
