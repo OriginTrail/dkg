@@ -38,17 +38,22 @@ import {
   probePrimeAgentChannelHealth,
   type PrimeAgentChannelTarget,
   type PrimeAgentChatPayload,
-  type PrimeAgentPersistTurnPayload,
+  type PrimeAgentPersistTurnRequest,
 } from '../prime-agent.js';
 import {
-  pipeDurableLocalAgentTurnSseStream,
-  type DurableLocalAgentTurn,
-} from '../local-agent-sse.js';
+  pipePrimeAgentTurnSseStream,
+  type PrimeAgentStreamTurn,
+} from '../prime-agent-turn-stream.js';
 import { persistDurableChatTurn } from '../chat-turn-persistence.js';
 
 type PrimeAgentPersistRouteResult = {
   statusCode: number;
   body: Record<string, unknown>;
+};
+
+type PrimeAgentDurableTurnPayload = Omit<PrimeAgentPersistTurnRequest, 'sessionId'> & {
+  /** DKG-owned id used verbatim by chat-memory persistence. */
+  memorySessionId: string;
 };
 
 function ensurePrimeAgentIntegrationEnabled(
@@ -176,15 +181,15 @@ function timeoutBody(
   };
 }
 
-function buildPrimeAgentPersistPayload(
+function buildPrimeAgentDurableTurnPayload(
   payload: PrimeAgentChatPayload,
   target: PrimeAgentChannelTarget,
   assistantReply: string,
   state: 'stored' | 'failed' = 'stored',
   failureReason?: string,
-): PrimeAgentPersistTurnPayload {
-  return {
-    sessionId: primeAgentDkgSessionId(target.sessionId),
+): PrimeAgentDurableTurnPayload {
+  return toPrimeAgentDurableTurnPayload({
+    sessionId: target.sessionId,
     userMessage: payload.text,
     assistantReply,
     correlationId: payload.correlationId,
@@ -192,14 +197,25 @@ function buildPrimeAgentPersistPayload(
     persistenceState: state,
     ...(failureReason ? { failureReason } : {}),
     metadata: { source: 'prime-agent-channel' },
+  });
+}
+
+/** The only raw/external-session to durable-memory conversion boundary. */
+function toPrimeAgentDurableTurnPayload(
+  payload: PrimeAgentPersistTurnRequest,
+): PrimeAgentDurableTurnPayload {
+  const { sessionId, ...turn } = payload;
+  return {
+    ...turn,
+    memorySessionId: primeAgentDkgSessionId(sessionId),
   };
 }
 
 async function persistPrimeAgentTurn(
   ctx: RequestContext,
-  payload: PrimeAgentPersistTurnPayload,
+  payload: PrimeAgentDurableTurnPayload,
 ): Promise<PrimeAgentPersistRouteResult> {
-  const sessionId = primeAgentDkgSessionId(payload.sessionId);
+  const sessionId = payload.memorySessionId;
   const turnId = payload.turnId || payload.correlationId || randomUUID();
   try {
     const outcome = await persistDurableChatTurn({
@@ -229,7 +245,7 @@ async function persistPrimeAgentTurn(
   }
 }
 
-function primeAgentStreamFailureReason(streamed: DurableLocalAgentTurn): string | undefined {
+function primeAgentStreamFailureReason(streamed: PrimeAgentStreamTurn): string | undefined {
   if (typeof streamed.errorEvent?.error === 'string' && streamed.errorEvent.error.trim()) {
     return streamed.errorEvent.error.trim();
   }
@@ -353,7 +369,10 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       const assistantReply = parsed && typeof parsed === 'object' && typeof (parsed as { text?: unknown }).text === 'string'
         ? (parsed as { text: string }).text
         : text;
-      const persisted = await persistPrimeAgentTurn(ctx, buildPrimeAgentPersistPayload(payload, target, assistantReply));
+      const persisted = await persistPrimeAgentTurn(
+        ctx,
+        buildPrimeAgentDurableTurnPayload(payload, target, assistantReply),
+      );
       if (persisted.statusCode >= 400) return jsonResponse(res, persisted.statusCode, persisted.body);
       return jsonResponse(res, 200, {
         ...(parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : { text }),
@@ -444,7 +463,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
       });
 
-      await pipeDurableLocalAgentTurnSseStream(
+      await pipePrimeAgentTurnSseStream(
         req,
         res,
         (transportRes.body as any).getReader(),
@@ -453,7 +472,7 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
           const persistenceState = failureReason ? 'failed' : 'stored';
           const persisted = await persistPrimeAgentTurn(
             ctx,
-            buildPrimeAgentPersistPayload(
+            buildPrimeAgentDurableTurnPayload(
               payload,
               target,
               streamed.text,
@@ -533,10 +552,10 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
     }
     const payload = normalizePrimeAgentPersistTurnPayload(parsed);
     if ('error' in payload) return jsonResponse(res, 400, { error: payload.error });
-    const result = await persistPrimeAgentTurn(ctx, {
-      ...payload,
-      sessionId: primeAgentDkgSessionId(payload.sessionId),
-    });
+    const result = await persistPrimeAgentTurn(
+      ctx,
+      toPrimeAgentDurableTurnPayload(payload),
+    );
     return jsonResponse(res, result.statusCode, result.body);
   }
 }

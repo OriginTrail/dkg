@@ -286,7 +286,8 @@ export interface PrimeAgentChatPayload {
 
 export type PrimeAgentTurnPersistenceState = 'stored' | 'failed' | 'pending';
 
-export interface PrimeAgentPersistTurnPayload {
+/** External `/persist-turn` request before raw session normalization. */
+export interface PrimeAgentPersistTurnRequest {
   sessionId: string;
   userMessage: string;
   assistantReply: string;
@@ -363,7 +364,7 @@ export function normalizePrimeAgentChatPayload(raw: unknown): PrimeAgentChatPayl
   };
 }
 
-export function normalizePrimeAgentPersistTurnPayload(raw: unknown): PrimeAgentPersistTurnPayload | { error: string } {
+export function normalizePrimeAgentPersistTurnPayload(raw: unknown): PrimeAgentPersistTurnRequest | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'Invalid payload' };
   const r = raw as Record<string, unknown>;
   const sessionId = typeof r.sessionId === 'string' ? r.sessionId.trim() : '';
@@ -411,7 +412,7 @@ export function normalizePrimeAgentPersistTurnPayload(raw: unknown): PrimeAgentP
     persistenceState,
     ...(failureReason ? { failureReason } : {}),
     ...(toolCalls && toolCalls.length > 0
-      ? { toolCalls: toolCalls as NonNullable<PrimeAgentPersistTurnPayload['toolCalls']> }
+      ? { toolCalls: toolCalls as NonNullable<PrimeAgentPersistTurnRequest['toolCalls']> }
       : {}),
     ...(r.metadata && typeof r.metadata === 'object' && !Array.isArray(r.metadata)
       ? { metadata: r.metadata as Record<string, unknown> }
