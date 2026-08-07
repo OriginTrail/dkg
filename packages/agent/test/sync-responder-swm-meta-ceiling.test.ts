@@ -6,6 +6,7 @@ import {
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import { createSyncResponderSnapshotBudget } from '../src/sync/responder/snapshot-budget.js';
+import { estimateStringRowHeapBytes } from '../src/sync/memory-telemetry.js';
 import {
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE,
   SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -551,6 +552,101 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
     await store.close();
   });
 
+  it('refuses fresh-SWM plan scalar growth at the plan byte cap, independent of snapshot caps', async () => {
+    const cgId = `plan-bytes-${'g'.repeat(2_048)}`;
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const subjects = Array.from(
+      { length: 16_000 },
+      (_, index) => `urn:plan-subject:${String(index).padStart(5, '0')}`,
+    );
+    const planBytesEstimate = subjects.reduce(
+      (sum, subject) => sum + estimateStringRowHeapBytes(subject, '', '', metaGraph),
+      0,
+    );
+    expect(planBytesEstimate).toBeGreaterThan(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE);
+    expect(planBytesEstimate).toBeLessThan(SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE);
+
+    const store = new OxigraphStore();
+    await store.insert([{
+      graph: metaGraph,
+      subject: 'urn:plan-seed',
+      predicate: `${DKG_NS}publishedAt`,
+      object: `"${freshIso()}"^^<${XSD_DT}>`,
+    }]);
+    const originalQuery = store.query.bind(store);
+    const planResponseCaps: number[] = [];
+    let failPlanResponse = false;
+    store.query = (async (sparql: string, options?: unknown) => {
+      const queryOptions = options as { source?: string; maxResponseBytes?: number } | undefined;
+      const source = queryOptions?.source;
+      if (
+        source === 'sync.responder.readFreshSwmMetaSubjects' ||
+        source === 'sync.responder.readFreshSwmMetaHeadSubjects'
+      ) {
+        planResponseCaps.push(queryOptions?.maxResponseBytes ?? 0);
+        if (failPlanResponse) {
+          throw new StoreResponseTooLargeError(
+            FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE * 2,
+            FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE * 2 + 1,
+          );
+        }
+        return {
+          type: 'bindings' as const,
+          bindings: source === 'sync.responder.readFreshSwmMetaSubjects'
+            ? subjects.map((subject) => ({ s: subject }))
+            : [],
+        };
+      }
+      if (source === 'sync.responder.countFreshSwmMetaSubjectRows') {
+        planResponseCaps.push(queryOptions?.maxResponseBytes ?? 0);
+        const requestedSubjects = [...sparql.matchAll(/<(urn:plan-subject:[^>]+)>/g)]
+          .map((match) => match[1] as string);
+        return {
+          type: 'bindings' as const,
+          bindings: requestedSubjects.map((subject) => ({ s: subject, count: '1' })),
+        };
+      }
+      return originalQuery(sparql, options as never);
+    }) as OxigraphStore['query'];
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    await expect(cap.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'plan-byte-cap-session',
+    })).rejects.toMatchObject({
+      name: 'QuietRetryableHandlerError',
+      message: expect.stringContaining(`limit=${FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE}`),
+    });
+    expect(planResponseCaps.length).toBeGreaterThan(2);
+    expect(new Set(planResponseCaps)).toEqual(new Set([
+      FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE * 2,
+    ]));
+
+    // The store-cap translation must report the same PLAN heap ceiling, not
+    // the larger snapshot materialization ceiling.
+    failPlanResponse = true;
+    const storeCapHandler = registerTestSyncHandler(store, {
+      sharedMemoryTtlMs: TTL_MS,
+      syncPageSize: 500,
+    });
+    await expect(storeCapHandler.invoke({
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'plan-byte-store-cap-session',
+    })).rejects.toMatchObject({
+      name: 'QuietRetryableHandlerError',
+      message: expect.stringContaining(`limit=${FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE}`),
+    });
+    await store.close();
+  }, 120_000);
+
   it('refuses a fresh subject set beyond the plan cardinality cap as a TYPED bounded refusal, via LIMIT-bounded discovery', async () => {
     const cgId = 'meta-ceiling-cardinality';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
@@ -665,29 +761,33 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
     }
     await insertChunked(store, monsterQuads);
 
-    const cap = registerTestSyncHandler(store, {
-      sharedMemoryTtlMs: TTL_MS,
-      syncPageSize: 500,
-      snapshotBudget: PLAN_FORCED_SNAPSHOT_BUDGET,
-    });
-
-    await expect(cap.invoke({
-      contextGraphId: cgId,
-      includeSharedMemory: true,
-      phase: 'meta',
-      offset: 0,
-      limit: 500,
-      syncSessionId: 'monster-session',
-    })).rejects.toMatchObject({
-      // The protocol boundary deliberately converts the internal
-      // SyncRowSnapshotBudgetError into a quiet retryable response while
-      // preserving its typed budget details in the message.
-      name: 'QuietRetryableHandlerError',
-      message: expect.stringContaining(
-        `actual=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS + 1}, ` +
-        `limit=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS}`,
-      ),
-    });
+    for (const [sessionSuffix, snapshotBudget] of [
+      ['default', undefined],
+      ['forced-plan', PLAN_FORCED_SNAPSHOT_BUDGET],
+    ] as const) {
+      const cap = registerTestSyncHandler(store, {
+        sharedMemoryTtlMs: TTL_MS,
+        syncPageSize: 500,
+        ...(snapshotBudget ? { snapshotBudget } : {}),
+      });
+      await expect(cap.invoke({
+        contextGraphId: cgId,
+        includeSharedMemory: true,
+        phase: 'meta',
+        offset: 0,
+        limit: 500,
+        syncSessionId: `monster-session-${sessionSuffix}`,
+      })).rejects.toMatchObject({
+        // The protocol boundary deliberately converts the internal
+        // SyncRowSnapshotBudgetError into a quiet retryable response while
+        // preserving its typed budget details in the message.
+        name: 'QuietRetryableHandlerError',
+        message: expect.stringContaining(
+          `actual=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS + 1}, ` +
+          `limit=${FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS}`,
+        ),
+      });
+    }
     await store.close();
   }, 120_000);
 
