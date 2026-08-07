@@ -101,7 +101,7 @@ declare const validatedContentBrand: unique symbol;
  * as its own phase (rather than folding it into the loader) is what makes it
  * visible in the orchestration.
  */
-export type ValidatedMigratableContent = RawMigratableContent & {
+type ValidatedMigratableContent = RawMigratableContent & {
   readonly [validatedContentBrand]: true;
 };
 
@@ -110,7 +110,7 @@ export type ValidatedMigratableContent = RawMigratableContent & {
  * rules and brands the result; throwing leaves the draft untouched because
  * this happens before any mutation.
  */
-export function validateMigratableContent(
+function validateMigratableContent(
   host: Pick<LegacyWmMigrationHost, 'assertContentMigratable'>,
   raw: RawMigratableContent,
 ): ValidatedMigratableContent {

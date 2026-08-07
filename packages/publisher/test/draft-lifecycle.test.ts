@@ -108,6 +108,59 @@ describe('Working Memory Assertion Lifecycle', () => {
   let store: OxigraphStore;
   let publisher: DKGPublisher;
 
+  // ── Legacy-WM migration fixtures (#2149) ─────────────────────────────
+  // The migration cases below are about MIGRATION STATES, so the URI and
+  // marker-vocabulary construction lives here once. Changing the durable
+  // marker vocabulary should touch these helpers, not every case.
+  const LEGACY_MIGRATION_STATE_PRED = 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState';
+
+  /** The graph URIs one legacy-WM migration reads and writes. */
+  const legacyMigrationUris = (name: string, agent = AGENT) => {
+    const metaGraph = contextGraphMetaUri(CG_ID);
+    return {
+      metaGraph,
+      lifecycle: assertionLifecycleUri(CG_ID, agent, name),
+      sourceGraph: contextGraphAssertionUri(CG_ID, agent, name),
+      backupGraph: `${metaGraph}/legacy-wm-backup/${encodeURIComponent(agent.toLowerCase())}`
+        + `/${encodeURIComponent(name)}`,
+    };
+  };
+
+  /** Stamp the durable restart marker a partially-applied migration leaves. */
+  const stampMigrationMarker = async (
+    name: string,
+    state: 'prepared' | 'completed',
+    extra: Array<{ predicate: string; object: string }> = [],
+  ): Promise<void> => {
+    const { sourceGraph, backupGraph } = legacyMigrationUris(name);
+    await store.createGraph(backupGraph);
+    await store.insert([
+      { subject: sourceGraph, predicate: LEGACY_MIGRATION_STATE_PRED, object: `"${state}"`, graph: backupGraph },
+      ...extra.map((row) => ({ subject: sourceGraph, ...row, graph: backupGraph })),
+    ]);
+  };
+
+  /** Does the marker report the migration as finished? */
+  const migrationMarkerCompleted = async (name: string): Promise<boolean> => {
+    const { sourceGraph, backupGraph } = legacyMigrationUris(name);
+    const result = await store.query(
+      `ASK { GRAPH <${backupGraph}> { <${sourceGraph}> <${LEGACY_MIGRATION_STATE_PRED}> "completed" } }`,
+    );
+    return result.type === 'boolean' && result.value;
+  };
+
+  /** An allocator that mints one fixed KA number, recording each call. */
+  const recordingAllocator = (number: bigint, agent = AGENT) => {
+    const calls: number[] = [];
+    return {
+      calls,
+      allocateKaNumber: async () => {
+        calls.push(1);
+        return { number, reservedUal: `did:dkg:31337/${agent.toLowerCase()}/${number}` };
+      },
+    };
+  };
+
   const createPublisher = async (
     writeLocks?: Map<string, Promise<void>>,
     publisherStore: OxigraphStore = store,
@@ -410,23 +463,15 @@ describe('Working Memory Assertion Lifecycle', () => {
 
   it('resumes a prepared legacy WM migration after active metadata was removed', async () => {
     const name = 'legacy-chat-resume';
-    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+    const { sourceGraph, backupGraph } = legacyMigrationUris(name);
     await store.createGraph(sourceGraph);
-    await store.createGraph(backupGraph);
+    await stampMigrationMarker(name, 'prepared');
     await store.insert([
       {
         subject: 'urn:test:chat:resume',
         predicate: 'http://schema.org/text',
         object: '"recover me"',
         graph: sourceGraph,
-      },
-      {
-        subject: sourceGraph,
-        predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
-        object: '"prepared"',
-        graph: backupGraph,
       },
     ]);
 
@@ -448,11 +493,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
       expect.objectContaining({ subject: 'urn:test:chat:resume', object: '"recover me"' }),
     ]);
-    const completed = await store.query(
-      `ASK { GRAPH <${backupGraph}> { <${sourceGraph}> `
-      + '<http://dkg.io/ontology/legacyWorkingMemoryMigrationState> "completed" } }',
-    );
-    expect(completed.type === 'boolean' && completed.value).toBe(true);
+    expect(await migrationMarkerCompleted(name)).toBe(true);
   });
 
   it('refuses to migrate a legacy SWM lifecycle and leaves it untouched', async () => {
@@ -534,24 +575,10 @@ describe('Working Memory Assertion Lifecycle', () => {
     // already-graph-scoped. The real producer is a partial failure of a
     // non-atomic per-subject delete sweep (see the orphan-event case below).
     const name = 'legacy-completed-then-discarded';
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
-    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
-    await store.createGraph(backupGraph);
-    await store.insert([
-      {
-        subject: sourceGraph,
-        predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
-        object: '"completed"',
-        graph: backupGraph,
-      },
-      {
-        subject: sourceGraph,
-        predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationCopiedPublic',
-        object: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>',
-        graph: backupGraph,
-      },
-    ]);
+    await stampMigrationMarker(name, 'completed', [{
+      predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationCopiedPublic',
+      object: '"5"^^<http://www.w3.org/2001/XMLSchema#integer>',
+    }]);
 
     const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
 
@@ -587,10 +614,7 @@ describe('Working Memory Assertion Lifecycle', () => {
         // non-atomic per-subject stale-event sweep: the active subject is
         // deleted, then the process dies before its event children are.
         const name = `legacy-orphan-event-${markerState ?? 'none'}`;
-        const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
-        const metaGraph = contextGraphMetaUri(CG_ID);
-        const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
-        const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+        const { lifecycle, metaGraph } = legacyMigrationUris(name);
         await store.insert([
           // An orphan event child with NO rows on the active lifecycle subject.
           {
@@ -600,15 +624,7 @@ describe('Working Memory Assertion Lifecycle', () => {
             graph: metaGraph,
           },
         ]);
-        if (markerState) {
-          await store.createGraph(backupGraph);
-          await store.insert([{
-            subject: sourceGraph,
-            predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
-            object: `"${markerState}"`,
-            graph: backupGraph,
-          }]);
-        }
+        if (markerState) await stampMigrationMarker(name, markerState);
 
         const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
         expect(result.status).toBe('not-needed');
@@ -639,9 +655,7 @@ describe('Working Memory Assertion Lifecycle', () => {
   // core.
   it('refuses to migrate legacy content carrying a reserved protocol-namespace subject', async () => {
     const name = 'legacy-content-reserved-subject';
-    const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
+    const { lifecycle, metaGraph, sourceGraph, backupGraph } = legacyMigrationUris(name);
     await store.insert([
       {
         subject: 'urn:dkg:file:keccak256:deadbeef',
@@ -655,10 +669,7 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     await expect(
       publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
-        allocateKaNumber: async () => ({
-          number: 97n,
-          reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/97`,
-        }),
+        allocateKaNumber: recordingAllocator(97n).allocateKaNumber,
       }),
     ).rejects.toThrow();
 
@@ -668,9 +679,8 @@ describe('Working Memory Assertion Lifecycle', () => {
       `ASK { GRAPH <${metaGraph}> { <${lifecycle}> <http://dkg.io/ontology/state> "created" } }`,
     );
     expect(stateIntact.type === 'boolean' && stateIntact.value).toBe(true);
-    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
     const markerStamped = await store.query(
-      `ASK { GRAPH <${backupGraph}> { ?s <http://dkg.io/ontology/legacyWorkingMemoryMigrationState> ?o } }`,
+      `ASK { GRAPH <${backupGraph}> { ?s <${LEGACY_MIGRATION_STATE_PRED}> ?o } }`,
     );
     expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
   });
@@ -683,16 +693,11 @@ describe('Working Memory Assertion Lifecycle', () => {
     // move that content — so it is asserted on an EMPTY target graph rather
     // than one already holding the data.
     const name = 'legacy-resume-pre-copy';
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
-    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
+    const { sourceGraph } = legacyMigrationUris(name);
 
     // Graph-scoped metadata exists (the draft was already minted)...
     await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
-      allocateKaNumber: async () => ({
-        number: 88n,
-        reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/88`,
-      }),
+      allocateKaNumber: recordingAllocator(88n).allocateKaNumber,
     });
     // ...but the legacy content is still sitting in the old name-keyed graph,
     // and the target WM graph is empty.
@@ -703,13 +708,7 @@ describe('Working Memory Assertion Lifecycle', () => {
       graph: sourceGraph,
     }]);
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([]);
-    await store.createGraph(backupGraph);
-    await store.insert([{
-      subject: sourceGraph,
-      predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
-      object: '"prepared"',
-      graph: backupGraph,
-    }]);
+    await stampMigrationMarker(name, 'prepared');
 
     // No allocator passed: once the identity exists, resuming must not need one.
     const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
@@ -720,11 +719,7 @@ describe('Working Memory Assertion Lifecycle', () => {
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
       expect.objectContaining({ subject: 'urn:test:uncopied', object: '"must be preserved"' }),
     ]);
-    const completed = await store.query(
-      `ASK { GRAPH <${backupGraph}> { <${sourceGraph}> `
-      + '<http://dkg.io/ontology/legacyWorkingMemoryMigrationState> "completed" } }',
-    );
-    expect(completed.type === 'boolean' && completed.value).toBe(true);
+    expect(await migrationMarkerCompleted(name)).toBe(true);
   });
 
   it('a prepared marker resumes idempotently after the graph-scoped draft already exists', async () => {
@@ -733,9 +728,6 @@ describe('Working Memory Assertion Lifecycle', () => {
     // before `completeMarker`. The rerun must resume, not re-allocate a new
     // identity, and must not duplicate the copied content.
     const name = 'legacy-resume-post-apply';
-    const metaGraph = contextGraphMetaUri(CG_ID);
-    const sourceGraph = contextGraphAssertionUri(CG_ID, AGENT, name);
-    const backupGraph = `${metaGraph}/legacy-wm-backup/${encodeURIComponent(AGENT.toLowerCase())}/${encodeURIComponent(name)}`;
     const publicQuads = [
       { subject: 'urn:test:resume:1', predicate: 'http://schema.org/text', object: '"copied"' },
     ];
@@ -745,46 +737,28 @@ describe('Working Memory Assertion Lifecycle', () => {
     // crash before completeMarker leaves behind (graph-scoped metadata
     // present, content already copied into the target WM graph).
     await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
-      allocateKaNumber: async () => ({
-        number: 77n,
-        reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/77`,
-      }),
+      allocateKaNumber: recordingAllocator(77n).allocateKaNumber,
     });
     await publisher.assertionWrite(CG_ID, name, AGENT, publicQuads);
-    await store.createGraph(backupGraph);
-    await store.insert([{
-      subject: sourceGraph,
-      predicate: 'http://dkg.io/ontology/legacyWorkingMemoryMigrationState',
-      object: '"prepared"',
-      graph: backupGraph,
-    }]);
+    await stampMigrationMarker(name, 'prepared');
 
-    let allocations = 0;
+    const resumeAllocator = recordingAllocator(77n);
     const result = await publisher.migrateLegacyRootScopedWorkingMemory(
       CG_ID,
       name,
       AGENT,
       undefined,
-      {
-        allocateKaNumber: async () => {
-          allocations += 1;
-          return { number: 77n, reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/77` };
-        },
-      },
+      { allocateKaNumber: resumeAllocator.allocateKaNumber },
     );
 
     expect(result.status).toBe('resumed');
     // Already graph-scoped, so no second identity may be minted.
-    expect(allocations).toBe(0);
+    expect(resumeAllocator.calls).toHaveLength(0);
     // Content survives exactly once — the resume must not duplicate it.
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual(
       publicQuads.map((quad) => expect.objectContaining(quad)),
     );
-    const completed = await store.query(
-      `ASK { GRAPH <${backupGraph}> { <${sourceGraph}> `
-      + '<http://dkg.io/ontology/legacyWorkingMemoryMigrationState> "completed" } }',
-    );
-    expect(completed.type === 'boolean' && completed.value).toBe(true);
+    expect(await migrationMarkerCompleted(name)).toBe(true);
   });
 
   // The eligibility gate refuses a created/WM draft that is not purely local.
@@ -827,10 +801,7 @@ describe('Working Memory Assertion Lifecycle', () => {
 
       await expect(
         publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
-          allocateKaNumber: async () => ({
-            number: 99n,
-            reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/99`,
-          }),
+          allocateKaNumber: recordingAllocator(99n).allocateKaNumber,
         }),
       ).rejects.toMatchObject({ code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
 
@@ -871,10 +842,7 @@ describe('Working Memory Assertion Lifecycle', () => {
 
     await expect(
       publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
-        allocateKaNumber: async () => ({
-          number: 98n,
-          reservedUal: `did:dkg:31337/${AGENT.toLowerCase()}/98`,
-        }),
+        allocateKaNumber: recordingAllocator(98n).allocateKaNumber,
       }),
     ).rejects.toMatchObject({ code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
 
