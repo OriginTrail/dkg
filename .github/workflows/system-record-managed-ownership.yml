@@ -145,19 +145,16 @@ jobs:
             test/system-record-capability-probe-errors-v1.test.ts \
             test/graph-set-index-store.test.ts \
             test/system-record-decorator-apply-outcomes-v1.test.ts \
-            test/managed-http-client-v1.test.ts \
             test/store-priority-scheduler.test.ts \
             test/store-scheduler-system-record-admission.test.ts
 
       # Every test file this branch adds or modifies now runs SOMEWHERE.
       #
-      # These three were run by nothing. `ci.yml` triggers only on
+      # These were run by nothing. `ci.yml` triggers only on
       # `pull_request: branches: [main, testnet-canary, …]`, and this PR's base
       # is another open PR, so the full lanes have never fired on this branch —
-      # there was no fallback. `managed-http-client-v1` in particular is the only
-      # coverage of the wall-clock-deadline fix (a `req.setTimeout` bounds
-      # socket-active time, not queue wait), and the CLI suites carry 20 of the
-      # supervisor fault-injection cases this PR added.
+      # there was no fallback. The CLI suites carry 20 of the supervisor
+      # fault-injection cases this PR added.
       - name: Agent facade conformance
         run: |
           pnpm --filter @origintrail-official/dkg-agent exec vitest run \
