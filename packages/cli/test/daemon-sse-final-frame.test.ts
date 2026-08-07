@@ -62,6 +62,7 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     const req = new EventEmitter() as any;
     const res = makeRes();
     const { reader, state } = makeReader([
+      ': keepalive\n\n',
       'data: {"type":"delta","text":"He"}\n\n',
       'data: {"type":"final","text":"Hello!","correlationId":"c1"}\n\n',
     ]);
@@ -77,6 +78,55 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
     // Every byte still reached the browser before we closed.
     expect(res.chunks.join('')).toContain('"type":"final"');
     expect(res.chunks.join('')).toContain('"type":"delta"');
+    expect(res.chunks.join('')).toContain(': keepalive');
+  });
+
+  it('forwards a keepalive comment split mid-word across reads', async () => {
+    // With 15s keepalives on multi-minute turns, comments split across reads
+    // are a routine wire shape, not an edge case.
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const { reader, state } = makeReader([
+      ': keepal',
+      'ive\n\n',
+      'data: {"type":"final","text":"done","correlationId":"c1"}\n\n',
+    ]);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+    // Byte-exact: a tail re-send regression would still satisfy toContain by
+    // carrying the straddled comment bytes twice.
+    expect(
+      Buffer.concat(res.byteChunks).equals(Buffer.from(
+        ': keepalive\n\ndata: {"type":"final","text":"done","correlationId":"c1"}\n\n',
+        'utf8',
+      )),
+    ).toBe(true);
+  });
+
+  it('detects a final frame whose chunk begins with a straddled comment separator', async () => {
+    // The comment's closing blank line arrives glued to the final frame.
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const { reader, state } = makeReader([
+      'data: {"type":"delta","text":"He"}\n\n: keepalive\n',
+      '\ndata: {"type":"final","text":"Hello!","correlationId":"c1"}\n\n',
+    ]);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+    // Byte-exact for the same reason as the mid-word split above.
+    expect(
+      Buffer.concat(res.byteChunks).equals(Buffer.from(
+        'data: {"type":"delta","text":"He"}\n\n: keepalive\n'
+          + '\ndata: {"type":"final","text":"Hello!","correlationId":"c1"}\n\n',
+        'utf8',
+      )),
+    ).toBe(true);
   });
 
   it('detects a final frame split across chunk boundaries', async () => {
@@ -90,6 +140,28 @@ describe('local-agent SSE proxy: terminal frame handling', () => {
 
     await pipeOpenClawStream(req, res, reader);
 
+    expect(res.writableEnded).toBe(true);
+    expect(state.cancelled).toBe(1);
+  });
+
+  it.each([
+    [
+      'comment text split across reads',
+      [': keepal', 'ive\n\n', 'data: {"type":"final","text":"done"}\n\n'],
+    ],
+    [
+      'comment terminator split into the final-frame read',
+      [': keepalive\n', '\ndata: {"type":"final","text":"done"}\n\n'],
+    ],
+  ])('forwards a %s and still detects the terminal frame', async (_name, frames) => {
+    const req = new EventEmitter() as any;
+    const res = makeRes();
+    const { reader, state } = makeReader(frames);
+
+    await pipeOpenClawStream(req, res, reader);
+
+    expect(res.chunks.join('')).toContain(': keepalive\n\n');
+    expect(res.chunks.join('')).toContain('"type":"final"');
     expect(res.writableEnded).toBe(true);
     expect(state.cancelled).toBe(1);
   });

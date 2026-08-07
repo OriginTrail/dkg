@@ -162,6 +162,14 @@ describe('runDaemonInner wires sync options into DKGAgent.create', () => {
     expect(createArg.syncGlobalQueueLimit).toBe(0);
   });
 
+  it('passes the automatic system Context Graph sync override through unchanged', async () => {
+    const createArg = await captureCreateArg({
+      syncSystemContextGraphsOnConnect: false,
+    });
+
+    expect(createArg.syncSystemContextGraphsOnConnect).toBe(false);
+  });
+
   it('passes snapshot limits and Context Graph priorities through unchanged', async () => {
     const syncResponderSnapshotLimits = {
       global: { rows: 500, bytesEstimate: 600 },

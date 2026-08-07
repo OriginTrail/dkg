@@ -260,7 +260,7 @@ export function ConnectedAgentsTab(props: {
     localHistoryLoaded,
     localMessagesCount: localMessages.length,
   });
-  const inputDisabled = localSending || !selected?.chatReady;
+  const inputDisabled = localSending || !selected?.chatReady || selected.busy === true;
   // Single source of truth for "is the user allowed to fire a send right
   // now". Both the button click AND the keyboard Enter / Cmd+Enter
   // handlers gate on this — earlier the button correctly disabled while
@@ -387,7 +387,7 @@ export function ConnectedAgentsTab(props: {
                 {integration.id === 'prime-agent' && (
                   <>
                     <p className="v10-local-agent-copy">
-                      Connect a local Prime Agent through the node, then this tab becomes the persistent chat surface for it. Unlike the other agents, Prime Agent publishes a bridge per live session, and the node talks to the most recently active one.
+                      Connect a local Prime Agent through the node, then this tab becomes the persistent chat surface for it. Prime Agent publishes a bridge per live session; the first chat pins one session, and you can switch explicitly when several are live.
                     </p>
                     {/*
                       Sessions are ephemeral by nature, so "none live" is normal
@@ -403,7 +403,7 @@ export function ConnectedAgentsTab(props: {
                           ? 'No live session. Start a Prime Agent session, then refresh — the extension publishes its bridge on session start.'
                           : integration.sessionCount === 1
                           ? '1 live session.'
-                          : `${integration.sessionCount} live sessions — the most recently active one is used.`}
+                          : `${integration.sessionCount} live sessions — choose which session this chat should use.`}
                       </p>
                     )}
                     {integration.connectSupported && (
@@ -459,6 +459,34 @@ export function ConnectedAgentsTab(props: {
                   : showingStoredSessions
                   ? `${selected.name} has saved sessions on this node. Open one from Sessions or reconnect from the + tab to resume live chat here.`
                   : `${selected.name} is temporarily unavailable. Refresh after it recovers to resume chatting here.`}
+              </div>
+            )}
+
+            {selected.id === 'prime-agent' && selected.busy === true && (
+              <div
+                className="v10-local-agent-warning connecting"
+                role="status"
+                data-testid="prime-agent-active-turn-status"
+              >
+                {selected.detail}
+              </div>
+            )}
+
+            {selected.id === 'prime-agent' && (selected.liveSessions?.length ?? 0) > 1 && (
+              <div className="v10-composer-target" data-testid="prime-agent-session-picker">
+                <span className="v10-local-agent-target-label">Prime session</span>
+                <Select
+                  className="v10-local-agent-target-select"
+                  value={selectedSessionId ?? selected.defaultSessionId ?? ''}
+                  onChange={(sessionId) => onSelectIntegration(selected.id, { sessionId })}
+                  options={selected.liveSessions!.map((session, index) => ({
+                    value: session.sessionId,
+                    label: session.sessionName?.trim()
+                      || `${index === 0 ? 'Most recent' : `Session ${index + 1}`} · ${session.sessionId.slice(0, 8)}…`,
+                  }))}
+                  ariaLabel="Prime Agent session"
+                  disabled={localSending || selected.busy === true}
+                />
               </div>
             )}
 
