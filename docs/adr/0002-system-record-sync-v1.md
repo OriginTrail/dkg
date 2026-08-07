@@ -741,9 +741,16 @@ was one stack when this ADR was written. Where a statement below assigns a capab
 (the activation issuer/validator, and the producer/receiver structured consume closures)
 are in neither stack yet and belong to a later one.
 
-Stack B2 exposes a passive controller. Merely discovering it performs no work; an
+The B layer exposes a passive controller. Merely discovering it performs no work; an
 explicit non-serializable activation lease opens a generation-bound session. Callers
-never supply graph URIs, reserved-state quads, or local CAS values:
+never supply graph URIs, reserved-state quads, or local CAS values.
+
+This is the SHIPPED public contract — identical in B2 and B3, and `inspectAppliedState`
+is deliberately not on it. An earlier revision of this ADR listed it here, which
+described neither stack: B3 performs the bounded revalidation read INTERNALLY, as a
+step of `applyVerified` (`system-record-inspection-v1-internal.ts`), and does not export
+it. Exposing it would hand callers a second, unsequenced route to reserved state, which
+is exactly what "callers never supply graph URIs or local CAS values" exists to prevent.
 
 ```ts
 interface SystemRecordLaneControllerV1 {
@@ -751,11 +758,10 @@ interface SystemRecordLaneControllerV1 {
 }
 
 interface SystemRecordLaneSessionV1 {
-  inspectAppliedState(
-    recordKey: string,
-    proof?: VerifiedAgentProfileReplacementV1,
-    options?: QueryOptions,
-  ): Promise<SystemRecordAppliedStateInspectionV1>;
+  readonly state: SystemRecordLaneStateV1;
+  readonly activationGeneration: string;
+  // B2: fail-closed, dispatches nothing. B3: the full-state CAS, which
+  // revalidates internally before it commits.
   applyVerified(proof: VerifiedAgentProfileReplacementV1, options?: QueryOptions):
     Promise<SystemRecordApplyOutcomeV1>;
   close(mode: 'disable' | 'shutdown'): Promise<void>;
