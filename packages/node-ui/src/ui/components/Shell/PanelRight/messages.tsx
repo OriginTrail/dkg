@@ -1,4 +1,5 @@
 import React from 'react';
+import { ThinkingOrb } from 'thinking-orbs';
 import type { LocalAgentHistoryMessage } from '../../../api.js';
 import { MarkdownMessage } from '../../chat/MarkdownMessage.js';
 import { buildAttachmentSummary } from './attachments.js';
@@ -160,13 +161,21 @@ export function renderMessageContent(
   // true, content: '' }`. The inline streaming caret lives inside the
   // last text node, so with no content yet there is nothing to anchor
   // it to and the row would render blank. Show an explicit animated
-  // "Thinking…" indicator until the first token arrives, at which
+  // "Connecting dots..." indicator until the first token arrives, at which
   // point this falls through to the markdown path (whose inline caret
   // then takes over). `role=status`/`aria-live` announces it to AT.
   if (role === 'assistant' && streaming && normalized.trim() === '' && !normalizedFailure) {
     return (
       <span className="v10-chat-thinking" role="status" aria-live="polite">
-        Thinking…
+        <ThinkingOrb
+          aria-hidden="true"
+          className="v10-chat-thinking-orb"
+          state="connecting"
+          size={64}
+          style={{ width: 28, height: 28 }}
+          theme="auto"
+        />
+        <span>Connecting dots...</span>
       </span>
     );
   }
@@ -205,4 +214,3 @@ export function renderMessageContent(
     </span>
   );
 }
-
