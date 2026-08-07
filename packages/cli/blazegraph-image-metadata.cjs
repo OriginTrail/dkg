@@ -65,8 +65,10 @@ function parseBlazegraphImageMetadata(value, source = 'Blazegraph image metadata
   }
 
   const dataPath = typeof value.dataPath === 'string' ? value.dataPath.trim() : '';
-  if (!dataPath.startsWith('/') || dataPath.includes(',')) {
-    throw new Error(`${source}: dataPath must be an absolute container path without commas`);
+  if (!dataPath.startsWith('/') || /[\s,]/.test(dataPath)) {
+    throw new Error(
+      `${source}: dataPath must be an absolute container path without commas or whitespace`,
+    );
   }
 
   return { image, containerPort, dataPath };
@@ -94,7 +96,7 @@ function readBlazegraphImageMetadata(filePath) {
 function formatBlazegraphImageMetadata(metadata) {
   const parsed = parseBlazegraphImageMetadata(metadata);
   return Object.entries(parsed)
-    // Values may themselves contain '=' (dataPath only bans commas), so
+    // Values may themselves contain '=' (dataPath bans commas and whitespace), so
     // consumers must split on the FIRST '=' only — or use field mode, which
     // prints bare values and has no delimiter at all.
     .map(([key, value]) => `${key}=${value}`)
