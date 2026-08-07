@@ -82,6 +82,17 @@ describe('system-record compact inventory rows', () => {
     expect(() => encodeSystemRecordInventoryRowV1(NETWORK, {
       ...row(PEER_A), quarantined: true,
     })).toThrow(/conflict evidence/);
+    const contradictoryTerminal = {
+      ...row(PEER_A), tombstone: true, quarantined: true, conflictEvidenceDigest: EVIDENCE,
+    };
+    expect(() => encodeSystemRecordInventoryRowV1(NETWORK, contradictoryTerminal))
+      .toThrow(/tombstone.*quarantine/);
+    const contradictoryTerminalBytes = encodeSystemRecordInventoryRowV1(NETWORK, {
+      ...row(PEER_A), quarantined: true, conflictEvidenceDigest: EVIDENCE,
+    });
+    contradictoryTerminalBytes[contradictoryTerminalBytes.byteLength - 1] |= 0b001;
+    expect(() => decodeSystemRecordInventoryRowV1(NETWORK, contradictoryTerminalBytes))
+      .toThrow(/tombstone.*quarantine/);
     const quarantinedWithoutEvidence = encodeSystemRecordInventoryRowV1(NETWORK, row(PEER_A));
     quarantinedWithoutEvidence[quarantinedWithoutEvidence.byteLength - 1] |= 0b010;
     expect(() => decodeSystemRecordInventoryRowV1(NETWORK, quarantinedWithoutEvidence))

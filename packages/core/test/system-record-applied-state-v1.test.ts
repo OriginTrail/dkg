@@ -95,6 +95,10 @@ describe('system-record applied-state codecs', () => {
       ownedSubjectCount: '0',
       accountedBytes: computeSystemRecordAccountedBytesV1(80, 1).toString(),
     })).toThrow(/canonical empty/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), ownedSubjectTableBytes: '0',
+      accountedBytes: computeSystemRecordAccountedBytesV1(0, 4096).toString(),
+    })).toThrow(/nonempty projection\/table/);
 
     const capacity = {
       objectType: 'system-record-capacity-state', kind: 'agents', networkId: 'otp:20430',

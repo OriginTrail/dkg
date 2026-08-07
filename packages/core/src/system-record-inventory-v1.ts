@@ -1726,10 +1726,15 @@ function validateInventoryRow(row: unknown, networkId?: NetworkIdV1): SystemReco
   assertCanonicalDigest(validated.headDigest);
   if (hasConflictEvidence) {
     assertCanonicalDigest(validated.conflictEvidenceDigest);
-    if (!validated.quarantined) throw new Error('conflict evidence may appear only on quarantined rows');
   }
   if (typeof validated.tombstone !== 'boolean' || typeof validated.quarantined !== 'boolean') {
     throw new Error('inventory row flags must be booleans');
+  }
+  if (validated.tombstone && (validated.quarantined || hasConflictEvidence)) {
+    throw new Error('tombstone inventory rows cannot advertise quarantine or conflict evidence');
+  }
+  if (hasConflictEvidence && !validated.quarantined) {
+    throw new Error('conflict evidence may appear only on quarantined rows');
   }
   if (validated.quarantined && !hasConflictEvidence) {
     throw new Error('quarantined inventory rows require conflict evidence');

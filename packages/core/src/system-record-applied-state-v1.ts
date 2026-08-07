@@ -225,7 +225,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
   const projectionQuads = boundedU64(state.projectionQuads, SYSTEM_RECORD_MAX_PROJECTION_QUADS, 'projectionQuads');
   assertCanonicalDigest(state.ownedSubjectTableDigest);
   const ownedCount = boundedU64(state.ownedSubjectCount, SYSTEM_RECORD_MAX_OWNED_SUBJECTS, 'ownedSubjectCount');
-  boundedU64(
+  const ownedSubjectTableBytes = boundedU64(
     state.ownedSubjectTableBytes,
     SYSTEM_RECORD_OBJECT_CAPS_V1['owned-subject-table'],
     'ownedSubjectTableBytes',
@@ -314,7 +314,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     maxBytes: SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES,
   });
   const expectedAccounted = BigInt(computeSystemRecordAccountedBytesV1(
-    Number(parseCanonicalDecimalU64(state.ownedSubjectTableBytes)),
+    Number(ownedSubjectTableBytes),
     Number(projectionBytes),
     Number(pendingBytes),
   ));
@@ -328,6 +328,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     throw new Error('tombstone applied state must commit the canonical empty projection/table');
   }
   if (state.status === 'active' && (projectionBytes === 0n || projectionQuads === 0n || ownedCount === 0n
+    || ownedSubjectTableBytes === 0n
     || state.projectionDigest === SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1
     || state.ownedSubjectTableDigest === EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1)) {
     throw new Error('active applied state must commit a nonempty projection/table');
