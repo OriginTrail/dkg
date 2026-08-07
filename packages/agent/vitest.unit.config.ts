@@ -152,6 +152,10 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-snapshot-materializer.test.ts",
+      // #2079 — the already-materialized witness: the warm-path win, the count
+      // gate that keeps it self-healing, and the digest binding that makes an
+      // equal-count version change safe.
+      "test/swm-materialization-witness.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
     ],
     testTimeout: 60_000,
