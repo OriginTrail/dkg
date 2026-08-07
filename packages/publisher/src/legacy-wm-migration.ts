@@ -644,12 +644,17 @@ export async function runLegacyWorkingMemoryMigration(
     }),
   );
 
-  // Both remaining phases mutate, so both need a graph-scoped identity lane
-  // before anything is written.
-  const canAllocateGraphIdentity = request.allocateKaNumber !== undefined
-    || host.canSelfAllocateGraphIdentity(request.agentAddress);
-  if (!summary.isGraphScoped && !canAllocateGraphIdentity) {
-    throw identityAllocatorRequired(request.contextGraphId, request.name);
+  // Identity requirement reads off the PLAN, not off `summary`: only
+  // `resume-copy` finds the draft already minted, so it is the one phase that
+  // needs no allocator. (Equivalent to the old `!summary.isGraphScoped` test —
+  // `migrate-fresh` cannot be graph-scoped, since step 1 returns `not-needed`
+  // for that — but derived from the transition model rather than beside it.)
+  if (plan.phase !== 'resume-copy') {
+    const canAllocateGraphIdentity = request.allocateKaNumber !== undefined
+      || host.canSelfAllocateGraphIdentity(request.agentAddress);
+    if (!canAllocateGraphIdentity) {
+      throw identityAllocatorRequired(request.contextGraphId, request.name);
+    }
   }
 
   // One exhaustive dispatch over the transition: each phase performs the

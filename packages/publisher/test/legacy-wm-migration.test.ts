@@ -459,6 +459,54 @@ describe('Legacy root-scoped WM migration', () => {
     expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
   });
 
+  it('refuses to migrate unsafe PRIVATE legacy content, before touching metadata', async () => {
+    // The private half of the content gate. The store rejects an oversized
+    // literal at insert, so an unsafe private draft cannot be seeded through
+    // the normal API — the read is stubbed instead, which is the only way to
+    // reach this migration boundary. Without this, deleting the privateQuads
+    // rejection would not redden a single test.
+    const name = 'legacy-content-private-unsafe';
+    const { lifecycle, metaGraph, backupGraph, sourceGraph } = legacyMigrationUris(name);
+    await store.insert([
+      {
+        subject: 'urn:test:private-gate',
+        predicate: 'http://schema.org/text',
+        object: '"benign public"',
+        graph: sourceGraph,
+      },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"created"', graph: metaGraph },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph: metaGraph },
+    ]);
+
+    const privateStore = (publisher as any).privateStore;
+    const original = privateStore.getKnowledgeAssetPrivateDraftTriples.bind(privateStore);
+    privateStore.getKnowledgeAssetPrivateDraftTriples = async () => [{
+      subject: 'urn:test:private-oversized',
+      predicate: 'http://schema.org/text',
+      object: `"${'x'.repeat(70_000)}"`,
+      graph: '',
+    }];
+    try {
+      await expect(
+        publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT, undefined, {
+          allocateKaNumber: recordingAllocator(96n).allocateKaNumber,
+        }),
+      ).rejects.toThrow();
+    } finally {
+      privateStore.getKnowledgeAssetPrivateDraftTriples = original;
+    }
+
+    // Rejected before any mutation: lifecycle intact, no marker stamped.
+    const stateIntact = await store.query(
+      `ASK { GRAPH <${metaGraph}> { <${lifecycle}> <http://dkg.io/ontology/state> "created" } }`,
+    );
+    expect(stateIntact.type === 'boolean' && stateIntact.value).toBe(true);
+    const markerStamped = await store.query(
+      `ASK { GRAPH <${backupGraph}> { ?s <${LEGACY_MIGRATION_STATE_PRED}> ?o } }`,
+    );
+    expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
+  });
+
   it('a prepared marker resumes the CONTENT COPY when the draft exists but data was not copied', async () => {
     // The riskiest crash window: `prepareBackup` ran, `createGraphScopedDraft`
     // minted graph-scoped metadata, and the process died BEFORE
