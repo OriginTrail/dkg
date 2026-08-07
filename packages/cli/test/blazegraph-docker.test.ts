@@ -43,6 +43,9 @@ import {
   isDockerAvailable,
   BLAZEGRAPH_IMAGE,
   BLAZEGRAPH_CONTAINER_PORT,
+  BLAZEGRAPH_DATA_PATH,
+  BLAZEGRAPH_LOG_MAX_SIZE,
+  BLAZEGRAPH_LOG_MAX_FILE,
   BLAZEGRAPH_NAMESPACE_XML_TEMPLATE,
   type DockerRunner,
   type DockerCommandResult,
@@ -134,6 +137,20 @@ function dockerInspectRunning(hostPort = 9999): DockerCommandResult {
             [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: String(hostPort) }],
           },
         },
+        Mounts: [{
+          Type: 'volume',
+          Name: 'dkg-blazegraph-mynode-data',
+          Destination: BLAZEGRAPH_DATA_PATH,
+        }],
+        HostConfig: {
+          LogConfig: {
+            Type: 'local',
+            Config: {
+              'max-size': BLAZEGRAPH_LOG_MAX_SIZE,
+              'max-file': BLAZEGRAPH_LOG_MAX_FILE,
+            },
+          },
+        },
       },
     ]),
     stderr: '',
@@ -151,8 +168,37 @@ function dockerInspectStopped(): DockerCommandResult {
             [`${BLAZEGRAPH_CONTAINER_PORT}/tcp`]: [{ HostIp: '0.0.0.0', HostPort: '9999' }],
           },
         },
+        Mounts: [{
+          Type: 'volume',
+          Name: 'dkg-blazegraph-mynode-data',
+          Destination: BLAZEGRAPH_DATA_PATH,
+        }],
+        HostConfig: {
+          LogConfig: {
+            Type: 'local',
+            Config: {
+              'max-size': BLAZEGRAPH_LOG_MAX_SIZE,
+              'max-file': BLAZEGRAPH_LOG_MAX_FILE,
+            },
+          },
+        },
       },
     ]),
+    stderr: '',
+    exitCode: 0,
+  };
+}
+
+function dockerInspectLegacy(running: boolean, hostPort = 10001): DockerCommandResult {
+  return {
+    stdout: JSON.stringify([{
+      State: { Running: running },
+      NetworkSettings: {
+        Ports: {
+          '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: String(hostPort) }],
+        },
+      },
+    }]),
     stderr: '',
     exitCode: 0,
   };
@@ -165,6 +211,12 @@ function mockFetch(handler: (url: string, init?: any) => Response | Promise<Resp
     return handler(String(input), init);
   }) as typeof globalThis.fetch;
   return { fn, calls };
+}
+
+function valuesForDockerFlag(args: readonly string[], flag: string): string[] {
+  return args.flatMap((arg, index) => (
+    arg === flag && typeof args[index + 1] === 'string' ? [args[index + 1]] : []
+  ));
 }
 
 describe('provisionBlazegraphDocker', () => {
@@ -226,33 +278,22 @@ describe('provisionBlazegraphDocker', () => {
     expect(httpCalls.some((c) => c.url.endsWith('/bigdata/status'))).toBe(true);
   });
 
-  it('reuses the mapped host port from a legacy 8080/tcp container', async () => {
+  it('warns about legacy storage and logs while reusing its mapped host port', async () => {
     const legacyHostPort = 10001;
-    const legacyInspect: DockerCommandResult = {
-      stdout: JSON.stringify([{
-        State: { Running: true },
-        NetworkSettings: {
-          Ports: {
-            '8080/tcp': [{ HostIp: '127.0.0.1', HostPort: String(legacyHostPort) }],
-          },
-        },
-      }]),
-      stderr: '',
-      exitCode: 0,
-    };
     const { runner, calls } = mockDocker({
       matchers: [
         { when: (a) => a[0] === '--version', respond: dockerVersionOk },
-        { when: (a) => a[0] === 'inspect', respond: () => legacyInspect },
+        { when: (a) => a[0] === 'inspect', respond: () => dockerInspectLegacy(true, legacyHostPort) },
       ],
     });
     const { fn, calls: httpCalls } = mockFetch(() => new Response('ok', { status: 200 }));
+    const logs: string[] = [];
 
     const result = await provisionBlazegraphDocker({
       namespace: 'mynode',
       docker: runner,
       fetch: fn,
-      log: () => {},
+      log: (message) => logs.push(message),
     });
 
     expect(result.reused).toBe(true);
@@ -262,6 +303,16 @@ describe('provisionBlazegraphDocker', () => {
     );
     expect(httpCalls[0]?.url).toBe(`http://127.0.0.1:${legacyHostPort}/bigdata/status`);
     expect(calls.some((call) => call[0] === 'run')).toBe(false);
+    expect(logs.some((message) => (
+      message.includes('WARNING: Reused container')
+      && message.includes(`expected named Docker volume "dkg-blazegraph-mynode-data" at ${BLAZEGRAPH_DATA_PATH}`)
+      && message.includes('will not recreate it automatically')
+    ))).toBe(true);
+    expect(logs.some((message) => (
+      message.includes('WARNING: Reused container')
+      && message.includes('does not use the bounded local log policy')
+      && message.includes('4 GB rotation budget')
+    ))).toBe(true);
   });
 
   it('creates the namespace when reusing a container with no existing namespace', async () => {
@@ -334,9 +385,10 @@ describe('provisionBlazegraphDocker', () => {
         { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
       ],
     });
-    const { fn } = mockFetch((url) => {
+    const { fn, calls: httpCalls } = mockFetch((url) => {
       if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
-      if (url.endsWith('/bigdata/namespace')) return new Response(null, { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 200 });
+      if (url.endsWith('/bigdata/namespace')) return new Response('unexpected', { status: 500 });
       return new Response(null, { status: 200 });
     });
     const result = await provisionBlazegraphDocker({
@@ -347,11 +399,67 @@ describe('provisionBlazegraphDocker', () => {
       log: () => {},
     });
     expect(result.reused).toBe(false);
+    expect(result.namespaceCreated).toBe(false);
     expect(calls.some((c) => c[0] === 'rm')).toBe(true);
     expect(calls.some((c) => c[0] === 'run')).toBe(true);
+    expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
   });
 
-  it('auto-bumps to the next free loopback port and uses the multi-architecture image', async () => {
+  it('does not delete a stopped legacy container when `docker start` fails', async () => {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: () => dockerInspectLegacy(false) },
+        { when: (a) => a[0] === 'start', respond: () => ({ stdout: '', stderr: 'legacy config drift', exitCode: 1 }) },
+      ],
+    });
+    const logs: string[] = [];
+
+    await expect(provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: globalThis.fetch,
+      isPortFree: async () => true,
+      log: (message) => logs.push(message),
+    })).rejects.toThrow(/Cannot safely recreate stopped legacy container.*Back up and migrate/s);
+
+    expect(calls.some((call) => call[0] === 'rm')).toBe(false);
+    expect(calls.some((call) => call[0] === 'run')).toBe(false);
+    expect(logs.some((message) => message.includes('will not recreate it automatically'))).toBe(true);
+  });
+
+  it('reattaches a persisted volume without recreating its existing namespace', async () => {
+    const { runner, calls } = mockDocker({
+      matchers: [
+        { when: (a) => a[0] === '--version', respond: dockerVersionOk },
+        { when: (a) => a[0] === 'inspect', respond: dockerInspectNotFound },
+        { when: (a) => a[0] === 'run', respond: () => ({ stdout: 'container-id', stderr: '', exitCode: 0 }) },
+      ],
+    });
+    const { fn, calls: httpCalls } = mockFetch((url) => {
+      if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 200 });
+      if (url.endsWith('/bigdata/namespace')) return new Response('unexpected', { status: 500 });
+      return new Response(null, { status: 200 });
+    });
+
+    const result = await provisionBlazegraphDocker({
+      namespace: 'mynode',
+      docker: runner,
+      fetch: fn,
+      isPortFree: async () => true,
+      log: () => {},
+    });
+
+    expect(result.reused).toBe(false);
+    expect(result.namespaceCreated).toBe(false);
+    expect(valuesForDockerFlag(calls.find((call) => call[0] === 'run') ?? [], '--mount')).toEqual([
+      `type=volume,source=dkg-blazegraph-mynode-data,target=${BLAZEGRAPH_DATA_PATH}`,
+    ]);
+    expect(httpCalls.some((call) => call.url.endsWith('/bigdata/namespace'))).toBe(false);
+  });
+
+  it('auto-bumps the port and provisions durable data with bounded local-driver logs', async () => {
     const takenPorts = new Set([9999, 10000]);
     const { runner, calls } = mockDocker({
       matchers: [
@@ -361,6 +469,7 @@ describe('provisionBlazegraphDocker', () => {
     });
     const { fn } = mockFetch((url) => {
       if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 404 });
       if (url.endsWith('/bigdata/namespace')) return new Response(null, { status: 200 });
       return new Response(null, { status: 200 });
     });
@@ -372,15 +481,30 @@ describe('provisionBlazegraphDocker', () => {
       log: () => {},
     });
     expect(result.port).toBe(10001);
+    expect(result.namespaceCreated).toBe(true);
     const runCall = calls.find((c) => c[0] === 'run');
+    expect(BLAZEGRAPH_LOG_MAX_SIZE).toBe('200m');
+    expect(BLAZEGRAPH_LOG_MAX_FILE).toBe('20');
     expect(runCall).toBeDefined();
-    expect(runCall).toContain(`127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`);
-    expect(runCall?.at(-1)).toBe(BLAZEGRAPH_IMAGE);
+    const runArgs = runCall ?? [];
+    expect(valuesForDockerFlag(runArgs, '-p')).toEqual([
+      `127.0.0.1:10001:${BLAZEGRAPH_CONTAINER_PORT}`,
+    ]);
+    expect(valuesForDockerFlag(runArgs, '--mount')).toEqual([
+      `type=volume,source=dkg-blazegraph-mynode-data,target=${BLAZEGRAPH_DATA_PATH}`,
+    ]);
+    expect(valuesForDockerFlag(runArgs, '--log-driver')).toEqual(['local']);
+    expect(valuesForDockerFlag(runArgs, '--log-opt')).toEqual([
+      `max-size=${BLAZEGRAPH_LOG_MAX_SIZE}`,
+      `max-file=${BLAZEGRAPH_LOG_MAX_FILE}`,
+    ]);
+    expect(runArgs.at(-1)).toBe(BLAZEGRAPH_IMAGE);
     const metadata = JSON.parse(
       readFileSync(resolve(REPO_ROOT, 'blazegraph-image.json'), 'utf-8'),
-    ) as { image: string; containerPort: number };
+    ) as { image: string; containerPort: number; dataPath: string };
     expect(BLAZEGRAPH_IMAGE).toBe(metadata.image);
     expect(BLAZEGRAPH_CONTAINER_PORT).toBe(metadata.containerPort);
+    expect(BLAZEGRAPH_DATA_PATH).toBe(metadata.dataPath);
     expect(runtimeAssetPaths('blazegraph-image.json')[0]).toBe(
       resolve(REPO_ROOT, 'blazegraph-image.json'),
     );
@@ -388,7 +512,11 @@ describe('provisionBlazegraphDocker', () => {
 
   it('executes the devnet Docker path with the exact shared image and loopback port mapping', () => {
     const image = 'example/blazegraph@sha256:smoke';
-    const result = runDevnetBlazegraphSmoke(JSON.stringify({ image, containerPort: 80 }));
+    const result = runDevnetBlazegraphSmoke(JSON.stringify({
+      image,
+      containerPort: 80,
+      dataPath: '/data',
+    }));
 
     expect(result.status, result.stderr).toBe(0);
     expect(result.dockerArgs).toEqual([
@@ -462,6 +590,7 @@ describe('provisionBlazegraphDocker', () => {
     });
     const { fn } = mockFetch((url) => {
       if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 404 });
       if (url.endsWith('/bigdata/namespace')) return new Response('namespace exists already', { status: 409 });
       return new Response(null, { status: 200 });
     });
@@ -486,6 +615,7 @@ describe('provisionBlazegraphDocker', () => {
     });
     const { fn, calls: httpCalls } = mockFetch((url) => {
       if (url.endsWith('/bigdata/status')) return new Response('ok', { status: 200 });
+      if (url.includes('/sparql/properties')) return new Response(null, { status: 404 });
       if (url.endsWith('/bigdata/namespace')) return new Response(null, { status: 200 });
       return new Response(null, { status: 200 });
     });
