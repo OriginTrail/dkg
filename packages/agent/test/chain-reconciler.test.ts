@@ -42,6 +42,22 @@ function makeDeps(overrides: Partial<ChainReconcilerDeps> = {}): {
   return { deps, persisted, attempted };
 }
 
+function recoveryTarget(
+  ordinal: number,
+  overrides: Partial<OrdinalRecoveryTarget> = {},
+): OrdinalRecoveryTarget {
+  return {
+    localCgId: 'cg',
+    onChainCgId: '1',
+    ordinal,
+    ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
+    merkleRoot: `0x${ordinal.toString(16).padStart(64, '0')}`,
+    kaId: String(ordinal),
+    reason: 'no-swm',
+    ...overrides,
+  };
+}
+
 describe('reconcileContextGraph — sweep', () => {
   it('reconciles [watermark, head) and advances + persists the watermark', async () => {
     const { deps, persisted, attempted } = makeDeps({ getKCCount: async () => 3 });
@@ -236,12 +252,7 @@ describe('reconcileContextGraph — sweep', () => {
         if (ordinal === 0) return { status: 'already', blockNumber: 100 };
         return {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-            kaId: String(ordinal),
-            reason: 'no-swm',
-          },
+          recovery: recoveryTarget(ordinal),
         };
       },
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
@@ -272,12 +283,7 @@ describe('reconcileContextGraph — sweep', () => {
       maxOrdinalsPerPass: 10,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         const ordinals = targets.map((target) => target.ordinal);
@@ -316,12 +322,7 @@ describe('reconcileContextGraph — sweep', () => {
       maxOrdinalsPerPass: 1,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         recoveryCalls.push(targets.map((target) => target.ordinal));
@@ -349,12 +350,7 @@ describe('reconcileContextGraph — sweep', () => {
   });
 
   it('schedules another pass when recovery alone reports immediate work', async () => {
-    const target: OrdinalRecoveryTarget = {
-      ordinal: 0,
-      ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/0',
-      kaId: '0',
-      reason: 'no-swm',
-    };
+    const target = recoveryTarget(0);
     const { deps } = makeDeps({
       getKCCount: async () => 1,
       maxOrdinalsPerPass: 1,
@@ -382,12 +378,7 @@ describe('reconcileContextGraph — sweep', () => {
       maxOrdinalsPerPass: 2,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         const ordinals = targets.map((target) => target.ordinal);
@@ -449,12 +440,7 @@ describe('reconcileContextGraph — sweep', () => {
         if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
         return {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/0',
-            kaId: '0',
-            reason: 'no-swm',
-          },
+          recovery: recoveryTarget(ordinal),
         };
       },
       recoverPendingOrdinals: async (_cg, _onchain, targets) => ({
@@ -491,12 +477,7 @@ describe('reconcileContextGraph — sweep', () => {
         if (ordinal !== 0) return { status: 'reconciled', blockNumber: 100 };
         return {
           status: 'pending',
-          recovery: {
-            ordinal,
-            ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-            kaId: String(ordinal),
-            reason: 'no-swm',
-          },
+          recovery: recoveryTarget(ordinal),
         };
       },
       recoverPendingOrdinals: async () => ({
@@ -594,12 +575,7 @@ describe('reconcileContextGraph — sweep', () => {
       isTargetCurrent: async () => current,
       reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
         status: 'pending',
-        recovery: {
-          ordinal,
-          ual: `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${ordinal}`,
-          kaId: String(ordinal),
-          reason: 'no-swm',
-        },
+        recovery: recoveryTarget(ordinal),
       }),
       recoverPendingOrdinals: async (_cg, _onchain, targets) => {
         // The rebind lands while the long recovery await is in flight. The
