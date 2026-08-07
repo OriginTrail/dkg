@@ -162,19 +162,6 @@ describe('managed backend ownership at mutation dispatch', () => {
     await plain.close().catch(() => undefined);
   });
 
-  it('still serves READS while ownership is not provable', async () => {
-    // Deliberate scope limit. Refusing reads too would turn every child respawn
-    // into a total store outage — the same reasoning that made a failed lane
-    // shutdown leave the child alive rather than kill the daemon's whole store.
-    const store = await managedStore();
-    ownership.invalidate('child-exit');
-
-    await expect(store.query('ASK { ?s ?p ?o }')).resolves.toBeDefined();
-    expect(requests).toHaveLength(1);
-
-    await store.close().catch(() => undefined);
-  });
-
   it('refuses a READ with ZERO I/O once ownership is terminal', async () => {
     // The foreign-listener case. `port-release-unproven` means the supervisor
     // could not prove our child released the bind and will never bind another,
@@ -190,15 +177,39 @@ describe('managed backend ownership at mutation dispatch', () => {
     await store.close().catch(() => undefined);
   });
 
-  it('still serves reads during a recoverable NOT-READY window', async () => {
-    // The deliberate asymmetry, and the reason this guard is keyed on TERMINAL
-    // rather than on liveness. A child being replaced is not-ready but not
-    // terminal: the supervisor is about to revive it, a read fails at the
-    // transport anyway, and refusing here would turn every respawn into a total
-    // store outage on every managed node.
+  for (const reason of ['child-exit', 'child-revive'] as const) {
+    it(`refuses a READ with ZERO I/O during a recoverable ${reason} window`, async () => {
+      // This test previously asserted the OPPOSITE — that a not-ready read is
+      // served — on the argument that it "fails at the transport anyway". That
+      // argument was wrong, and this is the counter-example: an unexpected child
+      // exit is NON-terminal, and if another process binds the port during the
+      // backoff/revive window the read succeeds against a foreign server and its
+      // answer is accepted as node state.
+      //
+      // Refusing here is bounded and self-clearing — it lasts until
+      // `bindReadyGeneration()` proves the replacement — which is exactly the
+      // transient condition consumers' retry-with-backoff branches exist for.
+      const store = await managedStore();
+      ownership.invalidate(reason);
+
+      await expect(store.query('ASK { ?s ?p ?o }')).rejects.toThrow(
+        /not the proven ready listener/,
+      );
+      expect(requests).toEqual([]);
+
+      await store.close().catch(() => undefined);
+    });
+  }
+
+  it('serves reads again once a replacement generation is proven', async () => {
+    // The bound on the refusal above, and what makes it transient rather than
+    // an outage: there is no state to clear, so recovery is automatic.
     const store = await managedStore();
     ownership.invalidate('child-exit');
+    await expect(store.query('ASK { ?s ?p ?o }')).rejects.toThrow();
+    expect(requests).toEqual([]);
 
+    ownership.bindReadyGeneration();
     await expect(store.query('ASK { ?s ?p ?o }')).resolves.toBeDefined();
     expect(requests).toHaveLength(1);
 

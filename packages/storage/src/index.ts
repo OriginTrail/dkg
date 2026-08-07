@@ -56,7 +56,6 @@ export {
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLeaseV1,
   isManagedOxigraphOwnershipLiveV1,
-  isManagedOxigraphOwnershipTerminalV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipInvalidationV1,

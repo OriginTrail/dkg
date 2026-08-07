@@ -714,8 +714,49 @@ async function main(): Promise<void> {
       const served: string[] = [];
       for (const graph of manifest.reservedGraphs) {
         if (await full.hasGraph(graph)) served.push(graph);
+        // Adapter-only too, for the same reason as the enumeration pair above:
+        // `hasGraph` asked the backend directly and answered `true` for reserved
+        // state whenever the graph-set index was disabled, so measuring only the
+        // indexed composition left the always-on layer unfalsifiable.
+        if (await plain.hasGraph(graph)) served.push(`adapter:${graph}`);
       }
       if (served.length > 0) failures.push(`served reserved graphs: ${served.join(', ')}`);
+
+      // An unscoped `deleteByPattern` binds `?g_ctx` across EVERY named graph,
+      // so it reaches reserved state while sailing past the scope guard, whose
+      // body is `if (graph)`. A reserved-prefix FILTER closes that — and this
+      // proves the BEHAVIOUR against real Oxigraph rather than string-matching
+      // the generated update: an ordinary row that matches the same pattern
+      // must be deleted while the reserved rows survive.
+      const decoyGraph = 'urn:dkg:gate:unscoped-delete-decoy';
+      const decoySubject = 'urn:dkg:gate:decoy-subject';
+      const decoyPredicate = 'urn:dkg:gate:decoy-predicate';
+      await sparqlUpdate(
+        server.updateEndpoint,
+        `INSERT DATA { GRAPH <${decoyGraph}> { <${decoySubject}> <${decoyPredicate}> "decoy" . } }`,
+      );
+      const reservedBefore: Record<string, number> = {};
+      for (const graph of manifest.reservedGraphs) {
+        reservedBefore[graph] = await countQuadsInGraph(server.queryEndpoint, graph);
+      }
+      // Deliberately UNSCOPED (no `graph`) and matching only by predicate, so
+      // the pattern is one a reserved row could match too.
+      await full
+        .deleteByPattern({ predicate: decoyPredicate })
+        .catch(() => undefined);
+      const decoyAfter = await countQuadsInGraph(server.queryEndpoint, decoyGraph);
+      if (decoyAfter !== 0) {
+        failures.push(`unscoped deleteByPattern did not delete the ordinary row (${decoyAfter} left)`);
+      }
+      for (const graph of manifest.reservedGraphs) {
+        const after = await countQuadsInGraph(server.queryEndpoint, graph);
+        if (after < reservedBefore[graph]) {
+          failures.push(
+            `unscoped deleteByPattern deleted reserved rows in ${graph} ` +
+              `(${reservedBefore[graph]} -> ${after})`,
+          );
+        }
+      }
 
       // Failed atomic-replace cleanup must not delete persistent reserved state.
       const deleted: string[] = [];

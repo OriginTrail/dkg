@@ -48,13 +48,15 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
-import { assertNotReservedInternalGraphV1 } from '../internal-graph-policy.js';
+import {
+  assertNotReservedInternalGraphV1,
+  isInternalGraphUriV1,
+} from '../internal-graph-policy.js';
 import {
   ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLiveV1,
-  isManagedOxigraphOwnershipTerminalV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphSupervisorHandoffV1,
@@ -413,32 +415,30 @@ export class SparqlHttpStore implements TripleStore {
    * would have converted a self-healing respawn into a mandatory node restart.
    */
   /**
-   * Refuse a managed-store READ whose backend may not be ours.
+   * Refuse a managed-store READ whose backend we cannot prove is ours.
    *
-   * Narrower than the mutation guard, deliberately. Writes refuse whenever
-   * ownership is not provable; reads refuse only when it is **terminal**:
+   * SAME predicate as the mutation guard: live, i.e. the supervisor-owned
+   * child is the proven ready listener. An earlier revision refused only on
+   * TERMINAL, arguing that a not-ready read "fails at the transport anyway" so
+   * refusing would convert every respawn into a store outage. That argument is
+   * wrong, and the counter-example is the whole reason the lease exists:
    *
-   * - A child being replaced is not-ready but not terminal. A read there fails
-   *   at the transport anyway and the supervisor is about to revive, so
-   *   refusing would convert every respawn into a store outage.
-   * - Terminal means the supervisor could not prove our child released the bind
-   *   and will never bind another. Whatever answers may not be ours — and a
-   *   foreign answer does not stay local: `finalized-assertion-author` reads the
-   *   store to build the assertion whose merkle root goes ON-CHAIN, and the sync
-   *   responder serves store reads TO PEERS. A wrong read is laundered into
-   *   irreversible artifacts and into other nodes.
+   *   an unexpected child exit records `child-exit`, which is NON-terminal. If
+   *   another process binds the port during the backoff/revive window the read
+   *   does not fail at the transport — it SUCCEEDS, against a foreign server,
+   *   and that answer is accepted as this node’s state.
    *
-   * KNOWN LIMIT, and it must be closed before the lane is activated: today the
-   * supervisor cannot distinguish "a foreign process took the bind" from "our
-   * own child is still shutting down". Under `memoryLimits` the tracked child is
-   * `systemd-run`, not oxigraph, so the real listener is a grandchild and
-   * `resolveListenOwner` fails closed on an exited child — reporting our own
-   * process as unattributable. This guard is correct-and-inert today because
-   * `port-release-unproven` has no production trigger (the lane has no
-   * production caller, and the only other path is daemon shutdown, where the
-   * port is dead anyway). It becomes load-bearing — and its false-positive cost
-   * becomes real — when a later stack activates the lane. See the activation
-   * gates in the PR description.
+   * Port takeover is precisely the case ownership exists to make untrustworthy,
+   * and a foreign answer does not stay local: `finalized-assertion-author` reads
+   * the store to build the assertion whose merkle root goes ON-CHAIN, and the
+   * sync responder serves store reads TO PEERS.
+   *
+   * The outage objection does not survive once the two windows are told apart.
+   * A not-ready refusal is BOUNDED and self-clearing — it lasts until
+   * `bindReadyGeneration()` proves the replacement — which is exactly the
+   * transient condition every consumer’s retry-with-backoff branch is built
+   * for. The retry-storm hazard belongs to the TERMINAL case, which is
+   * permanent, and which has no production trigger today.
    */
   /**
    * Production disposal for the memoized lane controller.
@@ -457,11 +457,11 @@ export class SparqlHttpStore implements TripleStore {
 
   private assertManagedBackendReadable(operation: string): void {
     if (!this.ownershipLease) return;
-    if (!isManagedOxigraphOwnershipTerminalV1(this.ownershipLease)) return;
+    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
     throw new ManagedOxigraphBackendUnownedError(
       `sparql-http.${operation}`,
-      true,
+      snapshot?.terminal ?? false,
       snapshot?.lastInvalidation,
     );
   }
@@ -1037,6 +1037,18 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    // Reserved and staging state is invisible here for the same reason it is
+    // invisible to `listGraphs`, and it has to be enforced at THIS layer:
+    // `graphSetIndex` is optional, so a store built without it — or an adapter
+    // used directly — otherwise asks the backend and answers `true`, revealing
+    // that reserved state exists. `internal-graph-policy.ts` already claimed
+    // this ("reserved graphs never enumerate: no legitimate iterate-and-drop
+    // loop can reach one"), and the claim held only for the indexed
+    // composition.
+    //
+    // Prefix-wide, matching `listGraphs`' own filter: an unrecognised internal
+    // name must be hidden too rather than leaked.
+    if (isInternalGraphUriV1(graphUri)) return false;
     const r = await this.query(
       `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
       { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
