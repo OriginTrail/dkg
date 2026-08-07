@@ -16,6 +16,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
+  SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
   assertCanonicalRfc3339SecondsV1,
   buildSystemRecordProviderSignatureMessageV1,
@@ -132,6 +133,8 @@ export interface CreateAgentProfileProducerOptionsV1 {
   readonly peerSigner: SystemRecordPeerSignerV1;
   readonly evmSigner: EvmPersonalMessageSignerV1;
   readonly store: AgentProfileProducerPublicationStoreV1;
+  /** Independent verifier clock; publication timestamps are untrusted input. */
+  readonly nowMs?: () => number;
   /** Storage-runtime bridge: fence before publish, install before advertisement. */
   readonly fence: (
     prepared: PreparedAgentProfileV1,
@@ -174,6 +177,10 @@ export function createAgentProfileProducerV1(
     }
     const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
     const validUntil = normalizePublicationTimestampV1(publication.validUntil, 'validUntil');
+    const verifierNowMs = producerNowMs(options.nowMs?.() ?? Date.now());
+    if (Date.parse(issuedAt) > verifierNowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS) {
+      throw new Error('agent-profile issuedAt exceeds the future clock-skew bound');
+    }
     if (Date.parse(validUntil) <= Date.parse(issuedAt)) {
       throw new Error('agent-profile validUntil must be later than issuedAt');
     }
@@ -364,7 +371,7 @@ export function createAgentProfileProducerV1(
       artifacts.map((artifact) => [systemRecordProviderArtifactKeyV1(artifact), artifact]),
     );
     const verifiedClosure = await buildAgentProfileVerificationClosureV1(headDigest, {
-      nowMs: Date.parse(issuedAt),
+      nowMs: verifierNowMs,
       resolve: async ({ objectKind, digest }) => {
         const reference = {
           objectKind,
@@ -427,9 +434,10 @@ export function createAgentProfileProducerV1(
   return Object.freeze({
     async prepare(prepared: PreparedAgentProfileV1): Promise<AgentProfileProducerLeaseV1> {
       if (active) throw new Error('agent-profile producer is busy');
-      const projectionQuads = validateAndProject(prepared);
+      const preparedSnapshot = snapshotPreparedProfileV1(prepared);
+      const projectionQuads = validateAndProject(preparedSnapshot);
       assertAdvertisedIdentity(
-        prepared.rootEntity,
+        preparedSnapshot.rootEntity,
         projectionQuads,
         options.peerSigner,
         options.evmSigner.address,
@@ -437,7 +445,7 @@ export function createAgentProfileProducerV1(
       active = true;
       const controller = new AbortController();
       try {
-        await options.fence(prepared, controller.signal);
+        await options.fence(preparedSnapshot, controller.signal);
       } catch (error) {
         active = false;
         throw error;
@@ -451,7 +459,7 @@ export function createAgentProfileProducerV1(
           state = 'completing';
           try {
             return await completePrepared(
-              prepared,
+              preparedSnapshot,
               projectionQuads,
               publication,
               controller.signal,
@@ -538,9 +546,6 @@ function applyInventoryUpdate(
 function validateAndProject(
   prepared: PreparedAgentProfileV1,
 ): readonly Readonly<Quad>[] {
-  if (!Object.isFrozen(prepared) || !Object.isFrozen(prepared.quads)) {
-    throw new Error('prepared profile must be immutable');
-  }
   const projected = prepared.quads.map((quad) => {
     const kind = classifyAgentProfileOwnedSubjectV1(prepared.rootEntity, quad.subject);
     if (kind === null || !isAllowedAgentProfilePredicateV1(kind, quad.predicate)) {
@@ -555,6 +560,26 @@ function validateAndProject(
     }
   }
   return Object.freeze(projected);
+}
+
+function snapshotPreparedProfileV1(prepared: PreparedAgentProfileV1): PreparedAgentProfileV1 {
+  if (!Array.isArray(prepared.quads)
+    || typeof prepared.rootEntity !== 'string'
+    || typeof prepared.lastSeen !== 'string') {
+    throw new TypeError('prepared profile has an invalid structural shape');
+  }
+  return Object.freeze({
+    quads: Object.freeze(prepared.quads.map((quad) => Object.freeze({ ...quad }))),
+    rootEntity: prepared.rootEntity,
+    lastSeen: prepared.lastSeen,
+  });
+}
+
+function producerNowMs(value: number): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error('agent-profile producer clock returned an invalid value');
+  }
+  return value;
 }
 
 function ownedSubjects(

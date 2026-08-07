@@ -8,6 +8,7 @@ import {
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import {
+  SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
   buildSystemRecordSignatureMessageV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileAuthorityTransitionDigestV1,
@@ -423,6 +424,35 @@ describe('agent-profile system-record producer V1', () => {
     expect(fresh.currentHead?.object.version).toBe('0');
   });
 
+  it('defensively snapshots a structurally valid mutable prepared profile', async () => {
+    const fixture = await producerFixture();
+    const fence = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence,
+      install: () => {},
+    });
+    const mutable = {
+      quads: fixture.prepared.quads.map((quad) => ({ ...quad })),
+      rootEntity: fixture.prepared.rootEntity,
+      lastSeen: fixture.prepared.lastSeen,
+    };
+
+    const lease = await producer.prepare(mutable);
+    mutable.quads.length = 0;
+    mutable.rootEntity = 'urn:mutated-after-prepare';
+    await expect(lease.complete(fixture.publication)).resolves.toMatchObject({ version: '0' });
+    expect(fence).toHaveBeenCalledWith(
+      expect.objectContaining({ rootEntity: fixture.prepared.rootEntity }),
+      expect.any(AbortSignal),
+    );
+    expect(fixture.store.snapshot().currentHead?.object.rootSubject)
+      .toBe(fixture.prepared.rootEntity);
+  });
+
   it('fails closed when the publication seal is not for the exact prepared bytes', async () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
@@ -438,6 +468,93 @@ describe('agent-profile system-record producer V1', () => {
       seal: { ...fixture.publication.seal, assertionMerkleRoot: `0x${'cd'.repeat(32)}` },
     } as AgentProfilePublicationBindingV1;
     await expect(produce(producer, fixture.prepared, tampered)).rejects.toThrow(/exact public projection/);
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
+  it.each([
+    [
+      'a non-confirmed publication',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        publicationStatus: 'tentative',
+      }),
+      /requires a confirmed publication/,
+    ],
+    [
+      'a different author address',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: { ...publication.seal, authorAddress: new ethers.Wallet(OTHER_PRIVATE_KEY).address.toLowerCase() },
+      }),
+      /exact public projection/,
+    ],
+    [
+      'a wrong public triple count',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: { ...publication.seal, publicTripleCount: '999' },
+      }),
+      /exact public projection/,
+    ],
+    [
+      'private triples',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: { ...publication.seal, privateTripleCount: '1' },
+      }),
+      /exact public projection/,
+    ],
+    [
+      'a private Merkle root',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: { ...publication.seal, privateMerkleRoot: `0x${'cd'.repeat(32)}` },
+      }),
+      /exact public projection/,
+    ],
+  ])('rejects publication binding with %s before installation', async (_label, mutate, expected) => {
+    const fixture = await producerFixture();
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+    const publication = mutate(fixture.publication) as unknown as AgentProfilePublicationBindingV1;
+
+    await expect(produce(producer, fixture.prepared, publication)).rejects.toThrow(expected);
+    expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
+  it('rejects a future-dated publication against an independent producer clock', async () => {
+    const fixture = await producerFixture();
+    const install = vi.fn();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const nowMs = Date.parse('2026-08-07T12:00:00Z');
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      nowMs: () => nowMs,
+      fence: () => {},
+      install,
+    });
+    const issuedAt = new Date(nowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS + 1_000)
+      .toISOString()
+      .replace('.000Z', 'Z');
+
+    await expect(produce(
+      producer,
+      fixture.prepared,
+      await publicationFor(fixture.prepared, fixture.evmSigner.address, issuedAt),
+    )).rejects.toThrow(/future clock-skew bound/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
