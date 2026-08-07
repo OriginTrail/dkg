@@ -10,6 +10,7 @@ import {
   getPrimeAgentChannelTargets,
   isPrimeAgentLoopbackUrl,
   normalizePrimeAgentChatPayload,
+  normalizePrimeAgentPersistTurnPayload,
   probePrimeAgentChannelHealth,
   readPrimeAgentSessions,
   transportPatchFromPrimeAgentTarget,
@@ -592,6 +593,84 @@ describe('/api/prime-agent-channel/stream', () => {
     );
   });
 
+  it('persists a bridge error followed by final as failed before releasing terminal frames', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      streamFrames: [
+        'data: {"type":"delta","text":"partial"}\n\n',
+        'data: {"type":"error","error":"provider failed","code":"PRIME_AGENT_PROVIDER_ERROR"}\n\n',
+        'data: {"type":"final","text":"partial","correlationId":"c-fail"}\n\n',
+      ],
+    });
+    writeDescriptor('s1', bridge.url);
+    let persisted = false;
+    const memoryManager = makeMemoryManager();
+    memoryManager.storeChatExchange.mockImplementation(async (...args: any[]) => {
+      persisted = true;
+      memoryManager.stored.push(args);
+    });
+    const res = makeJsonResponse();
+    const writes: string[] = [];
+    const originalWrite = res.write;
+    res.write = (chunk: string | Uint8Array) => {
+      const value = typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+      if (value.includes('"type":"error"') || value.includes('"type":"final"')) {
+        expect(persisted).toBe(true);
+      }
+      writes.push(value);
+      return originalWrite(chunk);
+    };
+
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/stream', { text: 'hi', correlationId: 'c-fail' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/stream',
+      memoryManager,
+    } as any);
+
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledWith(
+      'prime-agent:dkg-ui:s1',
+      'hi',
+      'partial',
+      undefined,
+      expect.objectContaining({
+        turnId: 'c-fail',
+        persistenceState: 'failed',
+        failureReason: 'provider failed',
+      }),
+    );
+    expect(res.body.indexOf('"type":"error"')).toBeLessThan(res.body.indexOf('"type":"final"'));
+    expect(writes.join('')).toContain('prime-agent:dkg-ui:s1');
+  });
+
+  it('emits a persistence error instead of final when durable storage fails', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's1',
+      streamFrames: [
+        'data: {"type":"delta","text":"answer"}\n\n',
+        'data: {"type":"final","text":"answer","correlationId":"c-store-fail"}\n\n',
+      ],
+    });
+    writeDescriptor('s1', bridge.url);
+    const memoryManager = makeMemoryManager();
+    memoryManager.storeChatExchange.mockRejectedValueOnce(new Error('write failed'));
+    const res = makeJsonResponse();
+
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/stream', { text: 'hi', correlationId: 'c-store-fail' }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/stream',
+      memoryManager,
+    } as any);
+
+    expect(res.body).toContain('PRIME_AGENT_UI_PERSISTENCE_ERROR');
+    expect(res.body).not.toContain('"type":"final"');
+  });
+
   it('persists an adapter-reported turn through the shared chat memory manager', async () => {
     const memoryManager = makeMemoryManager();
     const res = makeJsonResponse();
@@ -622,6 +701,82 @@ describe('/api/prime-agent-channel/stream', () => {
       undefined,
       expect.objectContaining({ turnId: 'turn-1', persistenceState: 'stored' }),
     );
+  });
+
+  it('serializes concurrent persistence reports for the same turn', async () => {
+    let state: 'stored' | null = null;
+    let releaseStore!: () => void;
+    let markStoreStarted!: () => void;
+    const storeGate = new Promise<void>((resolve) => { releaseStore = resolve; });
+    const storeStarted = new Promise<void>((resolve) => { markStoreStarted = resolve; });
+    const memoryManager = {
+      getChatTurnPersistenceState: vi.fn(async () => state),
+      storeChatExchange: vi.fn(async () => {
+        markStoreStarted();
+        await storeGate;
+        state = 'stored';
+      }),
+      recordChatTurnPersistenceTransition: vi.fn(async () => {}),
+    };
+    const payload = {
+      sessionId: 's1',
+      userMessage: 'hello',
+      assistantReply: 'hi there',
+      turnId: 'turn-race',
+    };
+    const invoke = (res: ReturnType<typeof makeJsonResponse>) => handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', payload),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/persist-turn',
+      memoryManager,
+    } as any);
+    const firstRes = makeJsonResponse();
+    const secondRes = makeJsonResponse();
+    const first = invoke(firstRes);
+    await storeStarted;
+    const second = invoke(secondRes);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(memoryManager.getChatTurnPersistenceState).toHaveBeenCalledTimes(1);
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledTimes(1);
+    releaseStore();
+    await Promise.all([first, second]);
+
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledTimes(1);
+    expect(memoryManager.getChatTurnPersistenceState).toHaveBeenCalledTimes(2);
+    expect([JSON.parse(firstRes.body), JSON.parse(secondRes.body)]).toContainEqual(
+      expect.objectContaining({ duplicate: true, turnId: 'turn-race' }),
+    );
+  });
+
+  it('rejects an explicit unknown persistence state', async () => {
+    expect(normalizePrimeAgentPersistTurnPayload({
+      sessionId: 's1',
+      userMessage: 'hello',
+      assistantReply: 'hi',
+      persistenceState: 'complete',
+    })).toEqual({ error: 'Invalid "persistenceState"' });
+
+    const memoryManager = makeMemoryManager();
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', {
+        sessionId: 's1',
+        userMessage: 'hello',
+        assistantReply: 'hi',
+        persistenceState: 'complete',
+      }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/persist-turn',
+      memoryManager,
+    } as any);
+
+    expect(res.statusCode).toBe(400);
+    expect(memoryManager.storeChatExchange).not.toHaveBeenCalled();
   });
 });
 

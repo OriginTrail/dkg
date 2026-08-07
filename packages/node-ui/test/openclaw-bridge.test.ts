@@ -934,11 +934,11 @@ describe('OpenClaw bridge behavioral tests', () => {
       const result = await fetchLocalAgentIntegrations();
       const prime = result.integrations.find((item) => item.id === 'prime-agent');
       expect(prime?.activeSessionId).toBe('019f-session-a');
-      expect(prime?.defaultSessionId).toBe('019f-session-a');
+      expect(prime?.defaultSessionId).toBe('prime-agent:dkg-ui:019f-session-a');
       expect(prime?.busy).toBe(true);
       expect(prime?.liveSessions?.map((session) => session.sessionId)).toEqual([
-        '019f-session-a',
-        '019f-session-b',
+        'prime-agent:dkg-ui:019f-session-a',
+        'prime-agent:dkg-ui:019f-session-b',
       ]);
       expect(prime?.statusLabel).toBe('Still working');
       expect(prime?.detail).toContain('browser stream disconnected');

@@ -47,6 +47,16 @@ type PrimeAgentPersistRouteResult = {
   body: Record<string, unknown>;
 };
 
+type PrimeAgentStreamResult = {
+  text: string;
+  terminal: boolean;
+  finalEvent?: Record<string, unknown>;
+  errorEvent?: Record<string, unknown>;
+};
+
+const primeAgentPersistTurnInflight = new Map<string, Promise<PrimeAgentPersistRouteResult>>();
+const PRIME_AGENT_SSE_FRAME_SCAN_LIMIT = 1_000_000;
+
 function ensurePrimeAgentIntegrationEnabled(
   config: RequestContext['config'],
   res: RequestContext['res'],
@@ -189,9 +199,34 @@ async function persistPrimeAgentTurn(
   ctx: RequestContext,
   payload: PrimeAgentPersistTurnPayload,
 ): Promise<PrimeAgentPersistRouteResult> {
-  const { memoryManager } = ctx;
   const sessionId = primeAgentDkgSessionId(payload.sessionId);
   const turnId = payload.turnId || payload.correlationId || randomUUID();
+  const key = `${sessionId}\n${turnId}`;
+  const previous = primeAgentPersistTurnInflight.get(key);
+  const waitForPrevious = previous
+    ? previous.then(() => undefined, () => undefined)
+    : Promise.resolve();
+  const operation = waitForPrevious.then(() => persistPrimeAgentTurnUnlocked(ctx, {
+    ...payload,
+    sessionId,
+    turnId,
+  }));
+  primeAgentPersistTurnInflight.set(key, operation);
+  try {
+    return await operation;
+  } finally {
+    if (primeAgentPersistTurnInflight.get(key) === operation) {
+      primeAgentPersistTurnInflight.delete(key);
+    }
+  }
+}
+
+async function persistPrimeAgentTurnUnlocked(
+  ctx: RequestContext,
+  payload: PrimeAgentPersistTurnPayload & { turnId: string },
+): Promise<PrimeAgentPersistRouteResult> {
+  const { memoryManager } = ctx;
+  const { sessionId, turnId } = payload;
   try {
     let existingState: PrimeAgentPersistTurnPayload['persistenceState'] | null = null;
     try {
@@ -259,7 +294,7 @@ function parsePrimeAgentSseEvent(frame: string): Record<string, unknown> | null 
 async function pipePrimeAgentStreamAndCollect(
   ctx: RequestContext,
   reader: { read: () => Promise<{ done: boolean; value?: Uint8Array }>; cancel: () => Promise<unknown>; releaseLock: () => void },
-): Promise<{ text: string; terminal: boolean }> {
+): Promise<PrimeAgentStreamResult> {
   const { req, res } = ctx;
   let clientGone = false;
   const cancelUpstream = () => {
@@ -275,32 +310,50 @@ async function pipePrimeAgentStreamAndCollect(
   res.on('error', cancelUpstream);
 
   const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
   let frameBuffer = '';
   let text = '';
   let terminal = false;
+  let finalEvent: Record<string, unknown> | undefined;
+  let errorEvent: Record<string, unknown> | undefined;
 
-  const inspectChunk = (chunk: Uint8Array): boolean => {
-    frameBuffer += decoder.decode(chunk, { stream: true });
-    const separator = /\r?\n\r?\n/;
-    let consumed = 0;
-    let match = separator.exec(frameBuffer.slice(consumed));
+  const forwardFrame = async (frame: string, separator: string): Promise<void> => {
+    if (clientGone || res.writableEnded) return;
+    await writeOpenClawStreamChunk(res, encoder.encode(`${frame}${separator}`));
+  };
+
+  const inspectBufferedFrames = async (): Promise<boolean> => {
+    const separatorPattern = /\r?\n\r?\n/;
+    let match = separatorPattern.exec(frameBuffer);
     while (match) {
-      const separatorStart = consumed + match.index;
-      const frame = frameBuffer.slice(consumed, separatorStart);
-      const frameEnd = separatorStart + match[0].length;
+      const frame = frameBuffer.slice(0, match.index);
+      const separator = match[0];
+      frameBuffer = frameBuffer.slice(match.index + separator.length);
       const event = parsePrimeAgentSseEvent(frame);
       if (event?.type === 'delta' && typeof event.text === 'string') {
         text += event.text;
+        await forwardFrame(frame, separator);
+      } else if (event?.type === 'error') {
+        // Hold a terminal error until the following final frame arrives so the
+        // failed turn can be made durable before the browser observes failure.
+        errorEvent = event;
       } else if (event?.type === 'final') {
         if (typeof event.text === 'string') text = event.text;
+        finalEvent = event;
         terminal = true;
         return true;
+      } else {
+        await forwardFrame(frame, separator);
       }
-      consumed = frameEnd;
-      match = separator.exec(frameBuffer.slice(consumed));
+      match = separatorPattern.exec(frameBuffer);
     }
-    frameBuffer = frameBuffer.slice(consumed);
-    if (frameBuffer.length > 1_000_000) frameBuffer = '';
+    if (frameBuffer.length > PRIME_AGENT_SSE_FRAME_SCAN_LIMIT) {
+      // Preserve streaming and bound memory even for a malformed giant frame.
+      // Once flushed, that frame is intentionally no longer eligible to be
+      // interpreted as a terminal persistence signal.
+      await forwardFrame(frameBuffer, '');
+      frameBuffer = '';
+    }
     return false;
   };
 
@@ -309,20 +362,56 @@ async function pipePrimeAgentStreamAndCollect(
       const { done, value } = await reader.read();
       if (done || clientGone) break;
       if (value !== undefined) {
-        const sawTerminal = inspectChunk(value);
-        await writeOpenClawStreamChunk(res, value);
+        frameBuffer += decoder.decode(value, { stream: true });
+        const sawTerminal = await inspectBufferedFrames();
         if (clientGone) break;
         if (sawTerminal) {
-          if (!res.writableEnded) res.end();
-          cancelUpstream();
+          void reader.cancel().catch(() => {});
           break;
         }
+      }
+    }
+    if (!clientGone && !terminal) {
+      frameBuffer += decoder.decode();
+      if (frameBuffer) {
+        const event = parsePrimeAgentSseEvent(frameBuffer);
+        if (event?.type === 'error') {
+          errorEvent = event;
+        } else if (event?.type === 'final') {
+          if (typeof event.text === 'string') text = event.text;
+          finalEvent = event;
+          terminal = true;
+        } else {
+          await forwardFrame(frameBuffer, '');
+        }
+        frameBuffer = '';
       }
     }
   } finally {
     reader.releaseLock();
   }
-  return { text, terminal };
+  return { text, terminal, finalEvent, errorEvent };
+}
+
+async function writePrimeAgentSseEvent(
+  res: RequestContext['res'],
+  event: Record<string, unknown>,
+): Promise<void> {
+  if (res.writableEnded || (res as { destroyed?: boolean }).destroyed) return;
+  await writeOpenClawStreamChunk(
+    res,
+    new TextEncoder().encode(`data: ${JSON.stringify(event)}\n\n`),
+  );
+}
+
+function primeAgentStreamFailureReason(streamed: PrimeAgentStreamResult): string | undefined {
+  if (typeof streamed.errorEvent?.error === 'string' && streamed.errorEvent.error.trim()) {
+    return streamed.errorEvent.error.trim();
+  }
+  if (typeof streamed.errorEvent?.code === 'string' && streamed.errorEvent.code.trim()) {
+    return streamed.errorEvent.code.trim();
+  }
+  return streamed.finalEvent?.timedOut === true ? 'Prime Agent turn timed out.' : undefined;
 }
 
 async function readPayload(
@@ -532,7 +621,49 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
 
       const streamed = await pipePrimeAgentStreamAndCollect(ctx, (transportRes.body as any).getReader());
       if (streamed.terminal) {
-        await persistPrimeAgentTurn(ctx, buildPrimeAgentPersistPayload(payload, target, streamed.text)).catch(() => undefined);
+        const failureReason = primeAgentStreamFailureReason(streamed);
+        const persistenceState = failureReason ? 'failed' : 'stored';
+        const persisted = await persistPrimeAgentTurn(
+          ctx,
+          buildPrimeAgentPersistPayload(
+            payload,
+            target,
+            streamed.text,
+            persistenceState,
+            failureReason,
+          ),
+        );
+        if (persisted.statusCode >= 400) {
+          await writePrimeAgentSseEvent(res, {
+            type: 'error',
+            error: 'Prime Agent UI chat persistence failed',
+            code: 'PRIME_AGENT_UI_PERSISTENCE_ERROR',
+            details: persisted.body.error,
+            correlationId: payload.correlationId,
+          });
+          if (!res.writableEnded) res.end();
+          return;
+        }
+
+        // The bridge sends `error` followed by `final` for terminal failures.
+        // Release both only after the failed turn is durable, and release a
+        // successful final only after the stored turn is durable.
+        if (streamed.errorEvent) {
+          await writePrimeAgentSseEvent(res, streamed.errorEvent);
+        }
+        await writePrimeAgentSseEvent(res, {
+          ...(streamed.finalEvent ?? {}),
+          type: 'final',
+          text: streamed.text,
+          correlationId: payload.correlationId,
+          sessionId: primeAgentDkgSessionId(target.sessionId),
+          turnId: String(persisted.body.turnId ?? payload.correlationId),
+        });
+      } else if (streamed.errorEvent) {
+        // Preserve a malformed bridge stream that ended after `error` without
+        // the required terminal frame; without a final there is no complete
+        // exchange to persist, but the client still needs the bridge failure.
+        await writePrimeAgentSseEvent(res, streamed.errorEvent);
       }
       if (!res.writableEnded) res.end();
       return;

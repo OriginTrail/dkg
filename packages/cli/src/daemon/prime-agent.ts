@@ -329,10 +329,12 @@ export function normalizePrimeAgentPersistTurnPayload(raw: unknown): PrimeAgentP
   const assistantReply = typeof r.assistantReply === 'string' ? r.assistantReply : '';
   const correlationId = typeof r.correlationId === 'string' ? r.correlationId.trim() : '';
   const turnId = typeof r.turnId === 'string' ? r.turnId.trim() : '';
-  const persistenceState =
-    r.persistenceState === 'failed' || r.persistenceState === 'pending'
+  const persistenceState = r.persistenceState === undefined
+    ? 'stored'
+    : r.persistenceState === 'stored' || r.persistenceState === 'failed' || r.persistenceState === 'pending'
       ? r.persistenceState
-      : 'stored';
+      : null;
+  if (!persistenceState) return { error: 'Invalid "persistenceState"' };
   const failureReason = typeof r.failureReason === 'string' ? r.failureReason.trim() : '';
   const toolCalls = Array.isArray(r.toolCalls)
     ? r.toolCalls.filter((entry): entry is { name: string; args: Record<string, unknown>; result: unknown } =>

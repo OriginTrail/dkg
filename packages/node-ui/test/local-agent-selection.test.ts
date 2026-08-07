@@ -20,7 +20,7 @@ const pinnedIntegration = {
   id: 'prime-agent',
   name: 'Prime Agent',
   persistentChat: true,
-  defaultSessionId: '019f-session-a',
+  defaultSessionId: 'prime-agent:dkg-ui:019f-session-a',
 } as unknown as LocalAgentIntegration;
 
 describe('prime-agent session pin plumbing', () => {
@@ -30,27 +30,27 @@ describe('prime-agent session pin plumbing', () => {
       sessionId: null,
       defaultSessionId: pinnedIntegration.defaultSessionId,
     });
-    expect(conversation.sessionId).toBe('019f-session-a');
-    expect(conversation.stateKey).toBe('019f-session-a');
+    expect(conversation.sessionId).toBe('prime-agent:dkg-ui:019f-session-a');
+    expect(conversation.stateKey).toBe('prime-agent:dkg-ui:019f-session-a');
   });
 
   it('lets a sticky selection win over the pin, and a cleared selection fall back to it', () => {
     expect(
       resolveLocalAgentConversation({
         integrationId: 'prime-agent',
-        sessionId: '019f-session-b',
-        defaultSessionId: '019f-session-a',
+        sessionId: 'prime-agent:dkg-ui:019f-session-b',
+        defaultSessionId: 'prime-agent:dkg-ui:019f-session-a',
       }).sessionId,
-    ).toBe('019f-session-b');
+    ).toBe('prime-agent:dkg-ui:019f-session-b');
     // The self-heal re-homes a dead-pinned conversation by resolving against
     // the refreshed pin as an explicit session — same resolution shape.
     expect(
       resolveLocalAgentConversation({
         integrationId: 'prime-agent',
         sessionId: null,
-        defaultSessionId: '019f-session-c',
+        defaultSessionId: 'prime-agent:dkg-ui:019f-session-c',
       }).sessionId,
-    ).toBe('019f-session-c');
+    ).toBe('prime-agent:dkg-ui:019f-session-c');
   });
 
   it('selection state carries the pin into the selected conversation', () => {
@@ -61,7 +61,7 @@ describe('prime-agent session pin plumbing', () => {
       localMessagesByConversation: {},
       sessions: [],
     });
-    expect(state.selectedConversation?.sessionId).toBe('019f-session-a');
+    expect(state.selectedConversation?.sessionId).toBe('prime-agent:dkg-ui:019f-session-a');
   });
 
   it('sends the pin-resolved conversation sessionId in the outgoing request body', async () => {
