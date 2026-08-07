@@ -364,3 +364,38 @@ export function recordShadowObservation(home: string, obs: {
     appendFileSync(`${dir}/shadow-observations.jsonl`, JSON.stringify(rec) + "\n");
   } catch { /* observation must never break serving */ }
 }
+
+// ── settlement support ───────────────────────────────────────────────────────
+// Exposed for the settlement module (V2-B5). Kept here because provider key
+// custody and journal I/O live here and must not be duplicated: two code paths
+// signing with two notions of "the provider key" is how a close statement ends
+// up signed by a key the leg receipts were not.
+
+/** The provider's public PEM — what a buyer verifies close statements against. */
+export function providerPublicPem(home: string): string {
+  return providerKeys(home).publicPem;
+}
+
+/** Sign `material` under a domain with the provider key. Same key as leg receipts. */
+export function providerSign(home: string, domain: string, material: string): string {
+  const preimage = Buffer.concat([Buffer.from(domain + "\n"), Buffer.from(material)]);
+  return edSign(null, preimage, createPrivateKey(providerKeys(home).privatePem)).toString("base64");
+}
+
+/** Read the durable journal as parsed records, replaying nothing. For settlement
+ *  replay, which must derive state from journal + chain, never from live balance. */
+export function readJournal(home: string): Array<Record<string, unknown>> {
+  const p = journalPath(home);
+  if (!existsSync(p)) return [];
+  const out: Array<Record<string, unknown>> = [];
+  for (const line of readFileSync(p, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    try { out.push(JSON.parse(line)); } catch { /* skip a torn tail line */ }
+  }
+  return out;
+}
+
+/** Append a settlement/withdrawal record durably (fsync before returning). */
+export function appendJournal(home: string, record: Record<string, unknown>): void {
+  durableAppend(home, record);
+}
