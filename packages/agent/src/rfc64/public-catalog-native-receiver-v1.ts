@@ -496,6 +496,25 @@ export class Rfc64PublicCatalogNativeReceiverV1 {
       fail('catalog-native-receiver-catalog', 'verified genesis objects could not be staged', cause);
     }
 
+    const precommitSignal = signal ?? new AbortController().signal;
+    try {
+      throwIfAborted(precommitSignal);
+      await this.options.beforeAppliedHeadCommit?.(Object.freeze({
+        catalogScope: trustedCatalogScope,
+        catalogHeadDigest: head.objectDigest as Digest32V1,
+        inventoryDigest,
+        rows: Object.freeze([]),
+      }), precommitSignal);
+      throwIfAborted(precommitSignal);
+    } catch (cause) {
+      if (precommitSignal.aborted && cause === precommitSignal.reason) throw cause;
+      fail(
+        'catalog-native-receiver-activation',
+        'catalog applied-head precommit rejected the exact empty inventory',
+        cause,
+      );
+    }
+
     let appliedHeadStatus: 'applied' | 'existing';
     if (replay) {
       appliedHeadStatus = 'existing';

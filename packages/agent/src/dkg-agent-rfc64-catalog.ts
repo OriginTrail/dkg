@@ -47,7 +47,10 @@ import {
   type SignedAuthorCatalogDirectoryNodeEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
-import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+import {
+  resolveRpcUrls,
+  verifyControlEnvelopeIssuerSignatureV1,
+} from '@origintrail-official/dkg-chain';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { Rfc64AuthorCatalogEip191SignerV1 } from './rfc64/author-catalog-producer.js';
@@ -76,9 +79,9 @@ import {
 import {
   Rfc64PublicCatalogNativeReceiverErrorV1,
   Rfc64PublicCatalogNativeReceiverV1,
-  type Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1,
   type Rfc64PublicCatalogNativeSynchronizationEvidenceV1,
 } from './rfc64/public-catalog-native-receiver-v1.js';
+import { createRfc64FinalizedPolicyAgentPrecommitV1 } from './rfc64/finalized-policy-agent-precommit-v1.js';
 import {
   createRfc64BoundedPublicRootCatalogNativeReconcilerV1,
   type Rfc64BoundedPublicRootCatalogDeploymentResolverV1,
@@ -764,18 +767,18 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       },
       readKaBundleByDigest: persistence.kaBundles.readKaBundleByDigest,
       createReconciler: (clients: Readonly<Rfc64PublicCatalogReconcilerClientsV1>) => {
-        const beforeAppliedHeadCommit:
-          Rfc64PublicCatalogNativeBeforeAppliedHeadCommitHandlerV1 =
-          async (plan, signal) => {
-            signal.throwIfAborted();
-            const acceptedPolicy = this.requireRfc64PublicCatalogServiceV1()
-              .acceptedPolicySnapshotForCatalogScope(plan.catalogScope);
-            if (acceptedPolicy.policy.source.kind === 'finalized-chain') {
-              throw new Error(
-                'RFC-64 SWM-only catalog activation does not yet admit finalized-chain policies',
-              );
-            }
-          };
+        const chainConfig = this.config.chainConfig;
+        const beforeAppliedHeadCommit = createRfc64FinalizedPolicyAgentPrecommitV1({
+          acceptedPolicySnapshotForCatalogScope: (scope) =>
+            this.requireRfc64PublicCatalogServiceV1()
+              .acceptedPolicySnapshotForCatalogScope(scope),
+          rpcEndpoints: chainConfig === undefined
+            ? null
+            : resolveRpcUrls(chainConfig.rpcUrl, chainConfig.rpcUrls),
+          getOnChainContextGraphId: (contextGraphId, signal) =>
+            this.getContextGraphOnChainId(contextGraphId, { signal }),
+          getEvmChainId: () => this.chain.getEvmChainId(),
+        });
         const nativeReceiver = new Rfc64PublicCatalogNativeReceiverV1({
           headTransport: clients.headTransport,
           contentTransport: clients.contentTransport,

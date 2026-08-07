@@ -2187,7 +2187,6 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
   }, 60_000);
 
   it('leaves the applied head null for finalized-chain policy in the dormant SWM-only lane', async () => {
-    const kaNumber = 7n;
     const [author, receiver] = await Promise.all([
       startNativeAgent('finalized-policy-author', NATIVE_DEPLOYMENT),
       startNativeAgent('finalized-policy-receiver', NATIVE_DEPLOYMENT),
@@ -2223,50 +2222,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     expect(genesis.announcedPeers).toEqual([receiver.peerId]);
     await receiver.whenRfc64PublicCatalogReceiverIdleV1();
-    const successor = await author.publishAuthorCatalogExactSetSuccessorV1({
-      previousHead: {
-        objectDigest: genesis.headObjectDigest,
-        signatureVariantDigest: genesis.signatureVariantDigest,
-      },
-      author: AUTHOR_WALLET,
-      catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
-      assets: [{
-        assertionCoordinate: 'finalized-vm-production-wire' as never,
-        projectionBytes: PROJECTION,
-        seal: await authorSeal(kaNumber),
-      }],
-      deployment: NATIVE_DEPLOYMENT,
-      issuedAt: SUCCESSOR_ISSUED_AT,
-      peers: [receiver.peerId],
-    });
-    expect(successor.announcedPeers).toEqual([receiver.peerId]);
-    await receiver.whenRfc64PublicCatalogReceiverIdleV1();
-
-    const swmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.SharedWorkingMemory,
-      AUTHOR,
-      Number(kaNumber),
-    );
-    const vmGraph = contextGraphLayerUri(
-      CONTEXT_GRAPH_ID,
-      MemoryLayer.VerifiableMemory,
-      AUTHOR,
-      Number(kaNumber),
-    );
     expect(receiver.readRfc64PublicCatalogReconciliationFailureV1(
-      successor.headObjectDigest,
+      genesis.headObjectDigest,
     )).toEqual({
-      catalogHeadDigest: successor.headObjectDigest,
+      catalogHeadDigest: genesis.headObjectDigest,
       errorName: 'Rfc64PublicCatalogNativeReceiverErrorV1',
       errorCode: 'catalog-native-receiver-activation',
     });
-    await expect((receiver as any).store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
-    )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
-    await expect((receiver as any).store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
-    )).resolves.toMatchObject({ type: 'bindings', bindings: [] });
     expect(receiver.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: computeAuthorCatalogScopeDigestV1(scope),
       authorAddress: AUTHOR,

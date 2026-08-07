@@ -1385,7 +1385,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     await expect(fixture.receiverStore.countQuads()).resolves.toBe(32);
   }, 30_000);
 
-  it('keeps the governed successor head unapplied when an explicit VM precommit lacks RPC', async () => {
+  it('keeps the governed genesis head unapplied when an explicit VM precommit lacks RPC', async () => {
     const fixture = await setupLiveReceiver();
     const compareAndSwapAppliedCatalogHeadV1 = vi.fn(
       fixture.receiverPersistence.inventory.compareAndSwapAppliedCatalogHeadV1.bind(
@@ -1441,9 +1441,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
       compareAndSwapAppliedCatalogHeadV1,
     }, undefined, undefined, fixture.receiverStore, precommit);
 
-    await fixture.bootstrapGoverned(receiver);
-    compareAndSwapAppliedCatalogHeadV1.mockClear();
-    await expect(fixture.synchronizeGoverned(receiver)).rejects.toMatchObject({
+    await expect(fixture.bootstrapGoverned(receiver)).rejects.toMatchObject({
       code: 'catalog-native-receiver-activation',
       message: expect.stringContaining('catalog applied-head precommit rejected'),
     });
@@ -1455,7 +1453,7 @@ describe('RFC-64 Gate 1 native successor to public SWM', () => {
     expect(fixture.receiverPersistence.inventory.readAppliedCatalogHeadV1(
       computeAuthorCatalogScopeDigestV1(fixture.governedScope),
       AUTHOR,
-    )?.currentCatalogHeadDigest).toBe(fixture.governedGenesis.head.objectDigest);
+    )).toBeNull();
   }, 30_000);
 });
 
