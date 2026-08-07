@@ -746,6 +746,9 @@ function validateConflictEvidence(value: unknown): AgentProfileConflictEvidenceV
         `fork conflict entry ${index}`,
       );
       const sequence = u64(row.authoritySequence, 'authoritySequence');
+      if (sequence > SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX) {
+        fail('system-record-history', 'fork conflict authority sequence exceeds the V1 limit');
+      }
       const version = u64(row.version, 'version');
       const objectDigests = digestArray(
         row.objectDigests,
@@ -763,7 +766,9 @@ function validateConflictEvidence(value: unknown): AgentProfileConflictEvidenceV
       );
       const prior = u64(row.priorAuthoritySequence, 'priorAuthoritySequence');
       const next = u64(row.nextAuthoritySequence, 'nextAuthoritySequence');
-      if (next !== prior + 1n) fail('system-record-history', 'transition conflict tuple must increment by one');
+      if (next !== prior + 1n || next > SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX) {
+        fail('system-record-history', 'transition conflict tuple must increment within the V1 sequence limit');
+      }
       const objectDigests = digestArray(
         row.objectDigests,
         'objectDigests',
@@ -1673,12 +1678,17 @@ export function evaluateAuthorityTransitionAgainstAcceptedStateV1(
     ? undefined
     : validateAgentProfileHeadObjectV1(acceptedState.current);
   const historicalRoots = validateAcceptedRootHistoryV1(acceptedState, current, lineage);
-  if (current !== undefined
-    && BigInt(lineage.length) !== parseCanonicalDecimalU64(current.authoritySequence)) {
+  if (current === undefined) {
+    if (acceptedState.disposition !== 'discoverable' || lineage.length !== 0) {
+      return { decision: 'reject', reason: 'absent state cannot retain authority history or quarantine' };
+    }
+    return { decision: 'reject', reason: 'transition has no accepted predecessor' };
+  }
+  if (BigInt(lineage.length) !== parseCanonicalDecimalU64(current.authoritySequence)) {
     return { decision: 'reject', reason: 'accepted authority state has incomplete transition lineage' };
   }
-  if (current !== undefined
-    && (current.networkId !== validatedTransition.networkId || current.peerId !== validatedTransition.peerId)) {
+  if (current.networkId !== validatedTransition.networkId
+    || current.peerId !== validatedTransition.peerId) {
     return { decision: 'reject', reason: 'stable record key changed' };
   }
   const digestValue = computeAgentProfileAuthorityTransitionDigestV1(validatedTransition);
@@ -1696,9 +1706,6 @@ export function evaluateAuthorityTransitionAgainstAcceptedStateV1(
   }
   if (acceptedState.disposition === 'head-fork-quarantined') {
     return { decision: 'reject', reason: 'unresolved head fork cannot advance authority sequence' };
-  }
-  if (current === undefined) {
-    return { decision: 'reject', reason: 'transition has no accepted predecessor' };
   }
   if (historicalRoots.includes(validatedTransition.nextRoot)
     || validatedTransition.nextRoot === current.rootSubject) {

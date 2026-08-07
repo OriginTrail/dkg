@@ -139,6 +139,23 @@ describe('system-record V1 object codecs', () => {
       ...evidence,
       entries: [{ ...evidence.entries[0], objectDigests: digestIterator }, evidence.entries[1]],
     } as unknown as typeof evidence)).toThrow(/closed digests/);
+
+    for (const entry of [
+      { type: 'fork', authoritySequence: '15', version: '0', objectDigests: [DIGEST_A, DIGEST_B] },
+      {
+        type: 'transition', priorAuthoritySequence: '14', nextAuthoritySequence: '15',
+        objectDigests: [DIGEST_A, DIGEST_B],
+      },
+      {
+        type: 'transition', priorAuthoritySequence: '15', nextAuthoritySequence: '16',
+        objectDigests: [DIGEST_A, DIGEST_B],
+      },
+    ] as const) {
+      expect(() => canonicalizeAgentProfileConflictEvidenceV1({
+        ...evidence,
+        entries: [entry],
+      } as never)).toThrow(/V1.*limit/i);
+    }
   });
 
   it('rejects null optionals, wrong peer-key binding, unsafe timestamps, and high-s signatures', async () => {
@@ -494,6 +511,40 @@ describe('system-record V1 object codecs', () => {
       nowMs: Date.parse('2026-08-08T00:00:00Z'), acceptedTransition: transition,
     })).toEqual({ decision: 'accept' });
 
+    const absent = {
+      disposition: 'discoverable' as const,
+      transitionLineage: [],
+      historicalRoots: [],
+    };
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      absent,
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({ decision: 'reject', reason: 'transition has no accepted predecessor' });
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      { ...absent, disposition: 'transition-equivocation-quarantined' },
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({
+      decision: 'reject',
+      reason: 'absent state cannot retain authority history or quarantine',
+    });
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      {
+        ...absent,
+        transitionLineage: [{
+          priorAuthoritySequence: '0',
+          nextAuthoritySequence: '1',
+          transitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+        }],
+      },
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({
+      decision: 'reject',
+      reason: 'absent state cannot retain authority history or quarantine',
+    });
+
     const tombstone: AgentProfileHeadObjectV1 = {
       objectType: 'agent-profile-head', kind: 'agents', state: 'tombstone',
       networkId: NETWORK, peerId: fixture.peerId, peerPublicKey: fixture.peerPublicKey,
@@ -616,6 +667,35 @@ describe('system-record V1 object codecs', () => {
     expect(evaluateAgentProfileHeadAdvanceV1(
       { current: tombstone, disposition: 'discoverable', transitionLineage: [], historicalRoots: [] },
       higherVersionTombstone,
+      { nowMs, tombstonePredecessor: initial },
+    )).toEqual({ decision: 'stale' });
+
+    const equalVersionTombstone = {
+      ...tombstone,
+      issuedAt: '2026-08-07T11:55:00Z' as const,
+    };
+    const sameVersionByDigest = [tombstone, equalVersionTombstone].sort((left, right) =>
+      computeAgentProfileHeadObjectDigestV1(left)
+        .localeCompare(computeAgentProfileHeadObjectDigestV1(right)));
+    const [lowerDigestTombstone, higherDigestTombstone] = sameVersionByDigest;
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        current: higherDigestTombstone,
+        disposition: 'discoverable',
+        transitionLineage: [],
+        historicalRoots: [],
+      },
+      lowerDigestTombstone,
+      { nowMs, tombstonePredecessor: initial },
+    )).toEqual({ decision: 'accept' });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        current: lowerDigestTombstone,
+        disposition: 'discoverable',
+        transitionLineage: [],
+        historicalRoots: [],
+      },
+      higherDigestTombstone,
       { nowMs, tombstonePredecessor: initial },
     )).toEqual({ decision: 'stale' });
   });
