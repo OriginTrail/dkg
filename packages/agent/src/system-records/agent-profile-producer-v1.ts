@@ -195,10 +195,11 @@ export function createAgentProfileProducerV1(
   const completePrepared = async (
     prepared: PreparedAgentProfileV1,
     projectionQuads: readonly Readonly<Quad>[],
-    publication: AgentProfilePublicationBindingV1,
+    inputPublication: AgentProfilePublicationBindingV1,
     signal: AbortSignal,
   ): Promise<AgentProfileProducerPublicationV1> => {
     signal.throwIfAborted();
+    const publication = snapshotPublicationBindingV1(inputPublication);
     if (publication.publicationStatus !== 'confirmed') {
       throw new Error('agent-profile system record requires a confirmed publication');
     }
@@ -630,6 +631,19 @@ function snapshotPreparedProfileV1(prepared: PreparedAgentProfileV1): PreparedAg
     ),
     rootEntity: prepared.rootEntity,
     lastSeen: prepared.lastSeen,
+  });
+}
+
+function snapshotPublicationBindingV1(
+  publication: AgentProfilePublicationBindingV1,
+): AgentProfilePublicationBindingV1 {
+  return Object.freeze({
+    publicationStatus: publication.publicationStatus,
+    assertionCoordinate: publication.assertionCoordinate,
+    seal: Object.freeze({ ...publication.seal }),
+    issuedAt: publication.issuedAt,
+    validUntil: publication.validUntil,
+    projectionSchemaDigest: publication.projectionSchemaDigest,
   });
 }
 

@@ -119,6 +119,49 @@ describe('agent-profile system-record producer V1', () => {
     }, new AbortController().signal)).resolves.toBeNull();
   });
 
+  it('accepts the signed projection for advertised skills and hosted context graphs', async () => {
+    const fixture = await producerFixture();
+    const prepared = prepareAgentProfileV1({
+      peerId: fixture.peerSigner.peerId,
+      publicKey: Buffer.from(fixture.peerSigner.publicKey, 'base64url').toString('base64'),
+      agentAddress: fixture.evmSigner.address,
+      name: 'Feature profile fixture',
+      framework: 'Hermes',
+      nodeRole: 'edge',
+      lastSeen: '2026-08-07T12:00:00.000Z',
+      skills: [{
+        skillType: 'ImageAnalysis',
+        pricePerCall: 1,
+        currency: 'TRAC',
+        successRate: 0.99,
+        pricingModel: 'PerInvocation',
+      }],
+      contextGraphsServed: ['public-image-analysis'],
+    });
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+
+    await expect(produce(
+      producer,
+      prepared,
+      await publicationFor(prepared, fixture.evmSigner.address, '2026-08-07T12:00:00Z'),
+    )).resolves.toMatchObject({ version: '0', authoritySequence: '0' });
+    const installedSubjects = new Set(
+      install.mock.calls[0]![0].projectionQuads.map((quad) => quad.subject),
+    );
+    expect(installedSubjects).toContain(`${prepared.rootEntity}/.well-known/genid/cap1`);
+    expect(installedSubjects).toContain(`${prepared.rootEntity}/.well-known/genid/offering1`);
+    expect(installedSubjects).toContain(`${prepared.rootEntity}/.well-known/genid/hosting`);
+  });
+
   it('advances one COW path for an ordinary same-authority heartbeat', async () => {
     const fixture = await producerFixture();
     const producer = createAgentProfileProducerV1({
@@ -689,6 +732,42 @@ describe('agent-profile system-record producer V1', () => {
     );
     expect(fixture.store.snapshot().currentHead?.object.rootSubject)
       .toBe(fixture.prepared.rootEntity);
+  });
+
+  it('defensively snapshots the publication binding across later signing awaits', async () => {
+    const fixture = await producerFixture();
+    const originalFinalizedAt = fixture.publication.seal.assertionFinalizedAt;
+    const mutableSeal = { ...fixture.publication.seal };
+    const mutablePublication = {
+      ...fixture.publication,
+      seal: mutableSeal,
+    } as AgentProfilePublicationBindingV1;
+    let peerSignatureCount = 0;
+    const peerSign = vi.fn(async (message: Uint8Array) => {
+      peerSignatureCount += 1;
+      if (peerSignatureCount === 2) {
+        mutableSeal.assertionFinalizedAt = '2026-08-07T12:15:00.000Z';
+      }
+      return fixture.peerSigner.sign(message);
+    });
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+
+    await expect(produce(producer, fixture.prepared, mutablePublication))
+      .resolves.toMatchObject({ version: '0' });
+    expect(mutableSeal.assertionFinalizedAt).not.toBe(originalFinalizedAt);
+    expect(install.mock.calls[0]![0].head.graphScopedAuthorSeal.assertionFinalizedAt)
+      .toBe(originalFinalizedAt);
+    expect(fixture.store.snapshot().currentHead?.object.graphScopedAuthorSeal.assertionFinalizedAt)
+      .toBe(originalFinalizedAt);
   });
 
   it('fails closed when the publication seal is not for the exact prepared bytes', async () => {

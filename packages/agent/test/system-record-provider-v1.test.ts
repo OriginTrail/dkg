@@ -267,6 +267,37 @@ describe('system-record provider V1', () => {
     expect(response.payload).toHaveLength(0);
   });
 
+  it('refuses a root descriptor for another network', async () => {
+    const foreignInventory = buildSystemRecordInventoryTreeV1('base:1', []);
+    const foreignRootEnvelope = Object.freeze({
+      object: foreignInventory.descriptor,
+      objectDigest: foreignInventory.descriptorDigest,
+      providerPeerId: '12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf',
+      signatureSuite: 'ed25519-v1' as const,
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const admission = frameAdmission();
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: repository({
+        objectKind: 'root-descriptor',
+        objectDigest: foreignInventory.descriptorDigest,
+        canonicalBytes: canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(
+          foreignRootEnvelope,
+        ),
+      }),
+      frameAdmission: admission,
+    });
+    const exchange = fixtureExchange(rootRequest('b'.repeat(32)));
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('served');
+    const response = decodeSystemRecordResponseFrameV1(exchange.written[0]!);
+    expect(response.header).toMatchObject({ status: 'internal', payloadBytes: '0' });
+    expect(response.payload).toHaveLength(0);
+    expect(admission.active()).toBe(0);
+    expect(provider.stats()).toMatchObject({ served: 1, active: 0, queued: 0 });
+  });
+
   it('serves the root descriptor and its requested inventory object', async () => {
     const inventory = buildSystemRecordInventoryTreeV1(NETWORK, []);
     const rootEnvelope = Object.freeze({
