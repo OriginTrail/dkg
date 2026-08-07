@@ -743,11 +743,90 @@ describe('/send', () => {
     bridge.onAgentEnd();
   });
 
+  it('quarantines when a pending turn fails between its tagged user message and marker', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never, 'sess-between-carriers', {
+      turnIdleTimeoutMs: 5_000,
+      turnHardTimeoutMs: 70,
+    });
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const pending = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'validate me', correlationId: 'c-between-carriers' }),
+    });
+    await until(() => sent.length === 1);
+    const taggedPrompt = sent.at(-1);
+    const prepared = bridge.onBeforeAgentStart({ prompt: taggedPrompt });
+    expect(prepared).toBeDefined();
+
+    let abortCount = 0;
+    const ctx = {
+      sessionManager: { getSessionId: () => 'sess-between-carriers' },
+      abort: () => { abortCount += 1; },
+    };
+    bridge.onAgentStart(ctx);
+    bridge.onMessageStart({
+      message: { role: 'user', content: [{ type: 'text', text: taggedPrompt }] },
+    });
+
+    // The absolute deadline lands after the own tagged prompt opened the run,
+    // but before Prime emits its cached ownership marker. Failure-time
+    // provenance must poison the assembling run without relying on the marker.
+    expect((await pending).status).toBe(503);
+    bridge.onBeforeProviderRequest(ctx);
+    expect(abortCount).toBe(1);
+    bridge.onAgentEnd();
+  });
+
+  it('ignores a replayed historical ownership marker', () => {
+    let abortCount = 0;
+    const ctx = {
+      sessionManager: { getSessionId: () => 'sess-test' },
+      abort: () => { abortCount += 1; },
+    };
+    bridge.onAgentStart(ctx);
+    bridge.onMessageStart({
+      message: {
+        role: 'custom',
+        customType: 'dkg.bridge.turn-owner',
+        content: '',
+        details: { ownershipToken: 'completed-historical-turn' },
+      },
+    });
+    bridge.onBeforeProviderRequest(ctx);
+    expect(abortCount).toBe(0);
+    bridge.onAgentEnd();
+  });
+
+  it('does not let a later user message clear a stale-action quarantine', () => {
+    const stalePrompt = '\u2063dkg-bridge-turn:stale-token\u2063dead request';
+    let abortCount = 0;
+    const ctx = {
+      sessionManager: { getSessionId: () => 'sess-test' },
+      abort: () => { abortCount += 1; },
+    };
+    bridge.onAgentStart(ctx);
+    bridge.onMessageStart({
+      message: { role: 'user', content: [{ type: 'text', text: stalePrompt }] },
+    });
+    // Prime supports injecting a steer into an active run. It is fresh user
+    // content, but cannot make the already-present stale bridge action safe.
+    bridge.onMessageStart({
+      message: { role: 'user', content: [{ type: 'text', text: 'operator steer' }] },
+    });
+    bridge.onBeforeProviderRequest(ctx);
+    expect(abortCount).toBe(1);
+    bridge.onAgentEnd();
+  });
+
   it('quarantines an orphaned tagged action from a predecessor bridge generation', async () => {
     // A queued tagged action can outlive the bridge instance that created it
     // (reload/resume builds a successor with no memory of the token). Its
     // commit must be sanitized and aborted, not executed as an unowned ghost.
-    const orphanPrompt = '⁣dkg-bridge-turn:token-from-a-previous-bridge⁣do the thing';
+    const orphanPrompt = '\u2063dkg-bridge-turn:token-from-a-previous-bridge\u2063do the thing';
     let abortCount = 0;
     const ctx = {
       sessionManager: { getSessionId: () => 'sess-test' },

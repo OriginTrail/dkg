@@ -306,6 +306,13 @@ class SessionBridge {
   // preparation hook. Local turns and agent.continue() retries have no marker.
   #activeRunTurn: PendingTurn | undefined;
   #runHasFreshPrompt = false;
+  // Records that the current run was opened by a still-pending bridge turn.
+  // If that turn fails before its cached ownership marker arrives, the run
+  // must be poisoned at failure time rather than relying on marker ordering.
+  #freshPromptFromTurn: PendingTurn | undefined;
+  // Once stale bridge content is observed in a run, no later user message in
+  // that same run may clear the quarantine. Reset only at agent_start.
+  #runQuarantineLatched = false;
   // A terminal HTTP verdict must stop Prime from continuing that logical turn
   // in the background. Retry starts have no before_agent_start; abort them
   // until a genuinely fresh prompt boundary supersedes the failed run.
@@ -476,6 +483,8 @@ class SessionBridge {
     }
     this.#activeRunTurn = undefined;
     this.#runHasFreshPrompt = false;
+    this.#freshPromptFromTurn = undefined;
+    this.#runQuarantineLatched = false;
     this.#failedRunQuarantined = false;
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
@@ -731,7 +740,8 @@ class SessionBridge {
         // notifying listeners or persisting it. Mutate only the content so the
         // internal tag never reaches the terminal transcript or the model.
         message.content = sanitized.message.content;
-        if (sanitized.tagged.ownershipToken !== this.#turn?.ownershipToken) {
+        const turn = this.#turn;
+        if (sanitized.tagged.ownershipToken !== turn?.ownershipToken) {
           // A tagged action is bridge-originated by construction, so any token
           // other than the pending turn's own belongs to a request that is
           // already gone: failed before its commit, superseded, or issued by a
@@ -741,9 +751,16 @@ class SessionBridge {
           // already received a terminal failure produce side effects.
           this.#runHasFreshPrompt = false;
           this.#failedRunQuarantined = true;
+          this.#runQuarantineLatched = true;
           return;
         }
+        if (this.#runQuarantineLatched) return;
+        this.#freshPromptFromTurn = turn;
       }
+      // A steer or other user message can arrive after stale bridge content
+      // but before provider I/O. Quarantine is a per-run latch: only the next
+      // agent_start may establish a clean prompt boundary.
+      if (this.#runQuarantineLatched) return;
       this.#runHasFreshPrompt = true;
       this.#failedRunQuarantined = false;
       return;
@@ -759,13 +776,10 @@ class SessionBridge {
       this.#armTurnTimers(turn);
       return;
     }
-    // Markers are only ever cached on bridge-prepared actions, so one that
-    // does not belong to the pending turn identifies a stale action exactly
-    // like a foreign tag does above. The absolute deadline can fire between
-    // the user message and this cached marker; whichever carrier lands after
-    // the failure re-asserts the quarantine.
-    this.#runHasFreshPrompt = false;
-    this.#failedRunQuarantined = true;
+    // Historical markers remain in Prime's event stream and may be replayed
+    // during resume/fork. An unrecognized marker is therefore not sufficient
+    // evidence of a live stale action. The tagged user carrier quarantines
+    // stale commits; #failTurn handles the deadline window between carriers.
   }
 
   onContext(event: ContextEvent): { messages: AgentMessageLike[] } | undefined {
@@ -837,6 +851,8 @@ class SessionBridge {
   onAgentStart(ctx?: ExtensionCtxLike): void {
     this.#activeRunTurn = undefined;
     this.#runHasFreshPrompt = false;
+    this.#freshPromptFromTurn = undefined;
+    this.#runQuarantineLatched = false;
     this.#agentActive = true;
     this.#abortActiveAgent = typeof ctx?.abort === 'function' ? () => ctx.abort!() : undefined;
     // Election stamp, once per turn — agent_start fires for locally-typed and
@@ -856,6 +872,7 @@ class SessionBridge {
     this.#agentActive = false;
     this.#abortActiveAgent = undefined;
     this.#runHasFreshPrompt = false;
+    this.#freshPromptFromTurn = undefined;
     const turn = this.#activeRunTurn;
     this.#activeRunTurn = undefined;
     if (!turn) return;
@@ -940,8 +957,18 @@ class SessionBridge {
       });
       this.#clearTurn(turn);
     }
+    if (!ownsActiveRun && this.#freshPromptFromTurn === turn) {
+      // The tagged user carrier opened this run while the request was still
+      // pending, but the request failed before its cached marker committed.
+      // Poison the assembling run now; replayed foreign markers stay no-ops.
+      this.#freshPromptFromTurn = undefined;
+      this.#runHasFreshPrompt = false;
+      this.#failedRunQuarantined = true;
+      this.#runQuarantineLatched = true;
+    }
     if (!ownsActiveRun) return;
     this.#failedRunQuarantined = true;
+    this.#runQuarantineLatched = true;
     // Keep #agentActive true until the actual agent_end so the bridge does not
     // admit a successor into a run that has not reached a boundary yet.
     try {
