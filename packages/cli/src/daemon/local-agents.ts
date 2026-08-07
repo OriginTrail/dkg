@@ -1072,6 +1072,9 @@ export async function refreshLocalAgentIntegrationFromUi(
     const health = await probePrimeAgentChannelHealth(bridgeAuthToken, { timeoutMs: 3_000 });
     const live = health.sessions.find((session) => session.sessionId === health.target)
       ?? health.sessions[0];
+    // Keep the UI conversation pin on the descriptor-order head, matching the
+    // Connect path. The health probe may fall through to an older survivor for
+    // transport readiness without silently moving the operator to that chat.
     const metadata = {
       sessionCount: health.sessionCount,
       activeSessionId: health.sessions[0]?.sessionId ?? null,

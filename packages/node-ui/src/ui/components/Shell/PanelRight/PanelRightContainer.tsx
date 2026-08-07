@@ -28,7 +28,12 @@ import { buildChatContextEntries } from './chat-context.js';
 import { ADD_AGENT_TAB_ID, STATIC_DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS } from './constants.js';
 import { formatLocalTimestamp, toIsoTimestamp } from './format.js';
 import { formatLocalAgentErrorMessage } from './local-agent-errors.js';
-import { adoptLocalAgentTurnId, mapHistoryMessage, mergeLocalAgentMessages } from './messages.js';
+import {
+  adoptLocalAgentTurnId,
+  buildLiveFailedTurnDisplay,
+  mapHistoryMessage,
+  mergeLocalAgentMessages,
+} from './messages.js';
 import { ConnectedAgentsTab } from './ConnectedAgentsTab.js';
 import { NetworkTab } from './NetworkTab.js';
 import { SessionsTab } from './SessionsTab.js';
@@ -640,15 +645,14 @@ export function PanelRight() {
       const failureReason = isUserAbort ? 'Request cancelled.' : formatLocalAgentErrorMessage(integration, err);
       const failureContent = isUserAbort ? failureReason : `Error: ${failureReason}`;
       if (assistantId) {
+        const failedDisplay = buildLiveFailedTurnDisplay(assistantPartialText, failureContent);
         updateLocalMessages(conversationKey, (prev) =>
           prev.map((message) =>
             message.id === assistantId
               ? {
                   ...message,
-                  content: assistantPartialText,
-                  failureNotice: failureContent,
+                  ...failedDisplay,
                   streaming: false,
-                  synthesized: !assistantPartialText,
                 }
               : message,
           ),

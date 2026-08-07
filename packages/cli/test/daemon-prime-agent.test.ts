@@ -652,6 +652,77 @@ describe('connect from the Node UI', () => {
   });
 });
 
+describe('refresh from the Node UI', () => {
+  it('promotes a previously idle Prime integration when a live session appears', async () => {
+    const bridge = await startStubBridge({ sessionId: 's1' });
+    writeDescriptor('s1', bridge.url);
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: { kind: 'prime-agent-channel' },
+          runtime: {
+            status: 'degraded',
+            ready: false,
+            lastError: 'no live Prime Agent session',
+          },
+          metadata: { sessionCount: 0 },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+
+    expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
+    expect(result.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
+    expect(result.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's1' });
+  });
+
+  it('refreshes transport through a survivor without moving the UI conversation pin', async () => {
+    const head = await startStubBridge({ sessionId: 'head', healthSessionId: 'recycled-port' });
+    const survivor = await startStubBridge({ sessionId: 'survivor' });
+    writeDescriptor('head', head.url, process.pid, '2026-08-07T12:00:00.000Z');
+    writeDescriptor('survivor', survivor.url, process.pid, '2026-08-07T11:00:00.000Z');
+    const config = enabledConfig();
+
+    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+
+    expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
+    expect(result.transport).toMatchObject({
+      kind: 'prime-agent-channel',
+      bridgeUrl: survivor.url,
+    });
+    expect(result.metadata).toMatchObject({ sessionCount: 2, activeSessionId: 'head' });
+  });
+
+  it('returns Prime to idle and clears a stale elected session when none is live', async () => {
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: {
+            kind: 'prime-agent-channel',
+            bridgeUrl: 'http://127.0.0.1:4321',
+          },
+          runtime: { status: 'ready', ready: true, lastError: null },
+          metadata: { sessionCount: 1, activeSessionId: 'old-session' },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+
+    expect(result.runtime).toMatchObject({
+      status: 'degraded',
+      ready: false,
+      lastError: 'no live Prime Agent session',
+    });
+    expect(result.metadata).toMatchObject({ sessionCount: 0, activeSessionId: null });
+  });
+});
+
 describe('local-agent integrations listing', () => {
   it('reports live Prime Agent session counts so the UI can tell idle from absent', async () => {
     const bridge = await startStubBridge({ sessionId: 's1' });
