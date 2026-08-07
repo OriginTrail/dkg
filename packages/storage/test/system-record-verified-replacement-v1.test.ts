@@ -22,8 +22,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { describe, expect, it } from 'vitest';
 
+import { createManagedOxigraphOwnershipControllerV1 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import {
   createSystemRecordVerifiedReplacementRegistryV1,
+  resolveOwnedSystemRecordVerifiedReplacementRuntimeV1,
   type SystemRecordActiveReplacementIssueV1,
   type SystemRecordVerifiedReplacementLaneBindingV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
@@ -299,6 +301,120 @@ describe('system-record verified replacement V1', () => {
     registry.consumer.release(facts);
     expect(() => registry.consumer.release(facts)).toThrow(/already released/);
     expect(registry.issuer.issueActive(input)).toBeDefined();
+  });
+
+  it('resolves one runtime per authentic lease under one process-wide reservation', () => {
+    const firstOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7878/query',
+      'http://127.0.0.1:7878/update',
+    );
+    const secondOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7879/query',
+      'http://127.0.0.1:7879/update',
+    );
+    firstOwnership.bindReadyGeneration();
+    secondOwnership.bindReadyGeneration();
+
+    const first = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(firstOwnership.lease);
+    const firstAgain = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(firstOwnership.lease);
+    const second = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(secondOwnership.lease);
+    expect(firstAgain).toBe(first);
+    expect(second).not.toBe(first);
+    expect(() => resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
+      Object.freeze(Object.create(null) as object) as typeof firstOwnership.lease,
+    )).toThrow(/authentic managed Oxigraph ownership lease/);
+
+    const activation = first.activationIssuer.issue({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
+    expect(Object.isFrozen(activation)).toBe(true);
+    expect(Object.getPrototypeOf(activation)).toBeNull();
+    expect(Reflect.ownKeys(activation)).toEqual([]);
+    expect(first.activationReader.read(activation)).toEqual({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
+    expect(() => second.activationReader.read(activation)).toThrow(/another runtime/);
+    expect(() => first.activationReader.read({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    })).toThrow(/activation capability/);
+
+    const { input } = fixture();
+    const firstHandle = first.issuer.issueActive(input);
+    expect(() => second.issuer.issueActive(input)).toThrow(/reservation is already live/);
+    first.consumer.release(firstHandle);
+
+    const secondHandle = second.issuer.issueActive(input);
+    second.consumer.release(secondHandle);
+  });
+
+  it('keeps ownership liveness outside persisted runtime configuration', () => {
+    const ownership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7880/query',
+      'http://127.0.0.1:7880/update',
+    );
+    const runtime = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(ownership.lease);
+    const { input } = fixture();
+
+    expect(() => runtime.issuer.issueActive(input)).toThrow(/ownership lease is not ready/);
+    expect(() => runtime.activationIssuer.issue({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    })).toThrow(/ownership lease is not ready/);
+    ownership.bindReadyGeneration();
+    const handle = runtime.issuer.issueActive(input);
+    runtime.consumer.release(handle);
+    ownership.invalidate('shutdown');
+    expect(() => runtime.issuer.issueActive(input)).toThrow(/ownership lease is not ready/);
+    expect(() => runtime.activationIssuer.issue({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    })).toThrow(/ownership lease is not ready/);
+  });
+
+  it('refuses diagnostic leases that do not prove the managed listener endpoints', () => {
+    const diagnostic = createManagedOxigraphOwnershipControllerV1();
+    diagnostic.bindReadyGeneration();
+    expect(() => resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
+      diagnostic.lease,
+    )).toThrow(/endpoint-bound managed Oxigraph ownership lease/);
+  });
+
+  it('holds the process reservation across recovery ownership until settlement', async () => {
+    const firstOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7881/query',
+      'http://127.0.0.1:7881/update',
+    );
+    const secondOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7882/query',
+      'http://127.0.0.1:7882/update',
+    );
+    firstOwnership.bindReadyGeneration();
+    secondOwnership.bindReadyGeneration();
+    const first = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(firstOwnership.lease);
+    const second = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(secondOwnership.lease);
+    const { input, bindings } = fixture();
+    const facts = first.consumer.consume(first.issuer.issueActive(input), bindings);
+    const ownership = Object.freeze(Object.create(null) as object);
+    let settle!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+
+    first.consumer.transferToRecovery(facts, ownership, completion);
+    expect(() => second.issuer.issueActive(input)).toThrow(/reservation is already live/);
+    settle();
+    await completion;
+    await Promise.resolve();
+    const next = second.issuer.issueActive(input);
+    second.consumer.release(next);
   });
 
   it('discards only a live unconsumed proof and refuses aliases after consumption', () => {
@@ -636,5 +752,6 @@ describe('system-record verified replacement V1', () => {
   it('is not exported from the storage package barrel', async () => {
     const storage = await import('../src/index.js');
     expect('createSystemRecordVerifiedReplacementRegistryV1' in storage).toBe(false);
+    expect('resolveOwnedSystemRecordVerifiedReplacementRuntimeV1' in storage).toBe(false);
   });
 });

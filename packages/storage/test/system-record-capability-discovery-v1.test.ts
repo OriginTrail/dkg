@@ -12,6 +12,7 @@ import {
   type ManagedOxigraphSupervisorHandoffV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
+import { resolveOwnedSystemRecordVerifiedReplacementRuntimeV1 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
 const QUERY_ENDPOINT = 'http://127.0.0.1:1/query';
@@ -95,6 +96,18 @@ describe('system-record V1 capability discovery', () => {
       await store.close().catch(() => undefined);
     });
 
+    it('refuses a caller-authored activation descriptor on the production controller', async () => {
+      const store = await build(managedOptions());
+      const controller = store.getSystemRecordLaneControllerV1?.();
+      expect(controller).toBeDefined();
+      await expect(controller!.open({
+        networkId: 'testnet',
+        kinds: ['agents'],
+        mode: 'shadow',
+      })).rejects.toThrow(/activation capability/);
+      await store.close();
+    });
+
     it.each([
       ['wrong query path', UPDATE_ENDPOINT, UPDATE_ENDPOINT, undefined],
       ['wrong update path', QUERY_ENDPOINT, QUERY_ENDPOINT, undefined],
@@ -149,6 +162,13 @@ describe('system-record V1 capability discovery', () => {
       const firstStore = await build(managedOptions());
       const retired = firstStore.getSystemRecordLaneControllerV1?.();
       expect(retired).toBeDefined();
+      const activation = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
+        ownership.lease,
+      ).activationIssuer.issue({
+        networkId: 'testnet',
+        kinds: ['agents'],
+        mode: 'shadow',
+      });
       await firstStore.close();
 
       // SparqlHttpStore.close rotates a reusable lifecycle generation. The
@@ -161,11 +181,7 @@ describe('system-record V1 capability discovery', () => {
 
       const replacementStore = await build(managedOptions());
       expect(replacementStore.getSystemRecordLaneControllerV1?.()).toBeDefined();
-      await expect(retired!.open({
-        networkId: 'testnet',
-        kinds: ['agents'],
-        mode: 'shadow',
-      })).rejects.toThrow(/terminal/);
+      await expect(retired!.open(activation)).rejects.toThrow(/terminal/);
       await replacementStore.close();
     });
 

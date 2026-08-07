@@ -15,6 +15,7 @@ import {
   __resetSystemRecordControllerRegistrationForTests,
   type SystemRecordLaneActivationV1,
 } from '../src/system-record-materializer-v1.js';
+import { resolveOwnedSystemRecordVerifiedReplacementRuntimeV1 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
 let QUERY_ENDPOINT: string;
@@ -102,6 +103,7 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
   let supervisor: RecordingSupervisor;
   let gated: GatedFetch;
   let store: TripleStore;
+  let activation: unknown;
 
   beforeAll(async () => {
     managedServer = createServer((req, res) => {
@@ -139,6 +141,9 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
     __resetSystemRecordControllerRegistrationForTests();
     ownership = createManagedOxigraphOwnershipControllerV1(QUERY_ENDPOINT, UPDATE_ENDPOINT);
     ownership.bindReadyGeneration();
+    activation = resolveOwnedSystemRecordVerifiedReplacementRuntimeV1(
+      ownership.lease,
+    ).activationIssuer.issue(ACTIVATION);
     supervisor = new RecordingSupervisor();
     gated = new GatedFetch();
     epoch = null;
@@ -178,7 +183,7 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
     await gated.firstEntry;
     expect(gated.entered).toBe(1);
 
-    const opening = controller!.open(ACTIVATION);
+    const opening = controller!.open(activation);
     await drainTurns();
 
     // THE assertion. Without the barrier this reads ['stop', 'start'] here: the
@@ -201,7 +206,7 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
     // Positive control for the timing claim: the wait above is caused by the
     // in-flight request, not by the barrier being slow or the open being async.
     const controller = store.getSystemRecordLaneControllerV1?.();
-    const session = await controller!.open(ACTIVATION);
+    const session = await controller!.open(activation);
     expect(supervisor.calls).toEqual(['stop', 'start']);
     expect(session.state).toBe('enabled');
   });
@@ -216,7 +221,7 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
     const held = store.query('SELECT ?s WHERE { ?s ?p ?o }');
     await gated.firstEntry;
 
-    const opening = controller!.open(ACTIVATION);
+    const opening = controller!.open(activation);
     await drainTurns(10);
     const queuedDuringSection = store.query('ASK { ?s ?p ?o }');
 
@@ -232,7 +237,7 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
     const controller = store.getSystemRecordLaneControllerV1?.();
     supervisor.failAt = 'start';
 
-    await expect(controller!.open(ACTIVATION)).rejects.toThrow(/supervisor start failed/);
+    await expect(controller!.open(activation)).rejects.toThrow(/supervisor start failed/);
     await expect(store.insert([{
       subject: 'urn:test:s',
       predicate: 'urn:test:p',
@@ -245,7 +250,7 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
 
   it('disposes an opened controller on store close and releases registration once', async () => {
     const controller = store.getSystemRecordLaneControllerV1?.();
-    await controller!.open(ACTIVATION);
+    await controller!.open(activation);
     supervisor.calls.length = 0;
 
     await store.close();

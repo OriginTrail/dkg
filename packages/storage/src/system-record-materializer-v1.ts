@@ -9,6 +9,11 @@ import type {
   SystemRecordAtomicRecoveryResolutionV1,
   SystemRecordAtomicRecoveryRuntimeV1,
 } from './system-record-atomic-apply-executor-v1-internal.js';
+import {
+  snapshotSystemRecordLaneActivationDescriptorV1,
+  type OwnedSystemRecordLaneActivationV1,
+  type SystemRecordLaneActivationReaderV1,
+} from './system-record-lane-activation-v1-internal.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).
@@ -30,21 +35,8 @@ import type {
  * Public contract
  * ------------------------------------------------------------------ */
 
-/**
- * Activation descriptor. Carries no authority of its own: it names WHICH
- * `(network, kind)` set to enable, while the right to enable anything at all
- * comes from the ownership lease captured at controller construction.
- */
-export interface SystemRecordLaneActivationV1 {
-  readonly networkId: string;
-  /** V1 accepts only the fixed `agents` kind; `ontology` is Stack E. */
-  readonly kinds: readonly ['agents'];
-  /**
-   * Pre-activation shadow mode keeps the legacy lane authoritative: V1 rows are
-   * materialized and charged, but legacy RDF is never deleted.
-   */
-  readonly mode: 'shadow' | 'authoritative';
-}
+/** Lifecycle-issued process-local authority; no public descriptor can mint it. */
+export type SystemRecordLaneActivationV1 = OwnedSystemRecordLaneActivationV1;
 
 export type SystemRecordApplyOutcomeV1 =
   | { readonly outcome: 'applied'; readonly stateRevision: string; readonly appliedStateDigest: string }
@@ -205,6 +197,8 @@ export interface SystemRecordLaneControllerDepsV1 {
   readonly lease: ManagedOxigraphOwnershipLeaseV1;
   readonly handoff: SystemRecordChildHandoffV1;
   readonly executor: SystemRecordTransactionExecutorV1;
+  /** Production reader for the opaque lifecycle-issued activation capability. */
+  readonly activationReader?: SystemRecordLaneActivationReaderV1;
   /**
    * Required, not optional. An optional barrier is one that gets forgotten:
    * this capability shipped once with a barrier implemented, exported and
@@ -252,77 +246,6 @@ interface SystemRecordLaneActivationSnapshotV1 {
   readonly kind: 'agents';
   readonly mode: 'shadow' | 'authoritative';
 }
-
-const NETWORK_ID_PATTERN_V1 = /^[A-Za-z0-9._:-]+$/;
-const MAX_NETWORK_ID_BYTES_V1 = 128;
-const UTF8 = new TextEncoder();
-
-/** Snapshot the closed activation record without invoking caller accessors or iterators. */
-const snapshotActivation = (activation: unknown): SystemRecordLaneActivationSnapshotV1 => {
-  if (
-    activation === null ||
-    typeof activation !== 'object' ||
-    Array.isArray(activation) ||
-    ![Object.prototype, null].includes(Object.getPrototypeOf(activation))
-  ) {
-    throw new Error('system-record lane activation must be a plain data object');
-  }
-
-  const expected = ['kinds', 'mode', 'networkId'];
-  const ownKeys = Reflect.ownKeys(activation);
-  if (
-    ownKeys.length !== expected.length ||
-    ownKeys.some((key) => typeof key !== 'string') ||
-    [...(ownKeys as string[])].sort().some((key, index) => key !== expected[index])
-  ) {
-    throw new Error('system-record lane activation has unknown or missing fields');
-  }
-
-  const readDataField = (key: string): unknown => {
-    const field = Object.getOwnPropertyDescriptor(activation, key);
-    if (!field?.enumerable || !Object.prototype.hasOwnProperty.call(field, 'value')) {
-      throw new Error('system-record lane activation fields must be enumerable data properties');
-    }
-    return field.value;
-  };
-
-  const networkId = readDataField('networkId');
-  if (
-    typeof networkId !== 'string' ||
-    networkId.length === 0 ||
-    UTF8.encode(networkId).byteLength > MAX_NETWORK_ID_BYTES_V1 ||
-    !NETWORK_ID_PATTERN_V1.test(networkId)
-  ) {
-    throw new Error('system-record lane activation networkId is not canonical');
-  }
-
-  const kinds = readDataField('kinds');
-  if (!Array.isArray(kinds)) {
-    throw new Error('system-record lane activation kinds must be the closed [agents] tuple');
-  }
-  const kindKeys = Reflect.ownKeys(kinds);
-  const length = Object.getOwnPropertyDescriptor(kinds, 'length');
-  const first = Object.getOwnPropertyDescriptor(kinds, '0');
-  if (
-    kindKeys.length !== 2 ||
-    !kindKeys.includes('length') ||
-    !kindKeys.includes('0') ||
-    length?.value !== 1 ||
-    length.enumerable ||
-    !first?.enumerable ||
-    !Object.prototype.hasOwnProperty.call(first, 'value') ||
-    first.value !== 'agents'
-  ) {
-    throw new Error('system-record lane activation kinds must be the closed [agents] tuple');
-  }
-
-  const mode = readDataField('mode');
-  if (mode !== 'shadow' && mode !== 'authoritative') {
-    throw new Error('system-record lane activation mode is invalid');
-  }
-
-  return Object.freeze({ networkId, kind: 'agents', mode });
-};
 
 const descriptorOf = (activation: SystemRecordLaneActivationSnapshotV1): string =>
   `${activation.networkId}|${activation.kind}|${activation.mode}`;
@@ -562,8 +485,16 @@ class SystemRecordLaneSession {
 
   /* -------------------------------------------------------------- */
 
-  async open(activation: SystemRecordLaneActivationV1): Promise<SystemRecordLaneSessionV1> {
-    const activationSnapshot = snapshotActivation(activation);
+  async open(activation: unknown): Promise<SystemRecordLaneSessionV1> {
+    const descriptor = this.deps.activationReader
+      ? this.deps.activationReader.read(activation)
+      : activation;
+    const parsed = snapshotSystemRecordLaneActivationDescriptorV1(descriptor);
+    const activationSnapshot: SystemRecordLaneActivationSnapshotV1 = Object.freeze({
+      networkId: parsed.networkId,
+      kind: 'agents',
+      mode: parsed.mode,
+    });
     const wanted = descriptorOf(activationSnapshot);
 
     this.assertNotTerminal();
