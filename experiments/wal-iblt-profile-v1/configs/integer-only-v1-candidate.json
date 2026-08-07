@@ -1,0 +1,14 @@
+{
+  "candidateName": "integer-only-v1-candidate",
+  "status": "experimental-not-wire-stable",
+  "extends": "paper-baseline-v0",
+  "algorithm": {
+    "mapping": {
+      "arithmetic": "integer-v1",
+      "multiplierHex": "0xda942042e4dd58b5",
+      "scale": 4294967296,
+      "squareRoot": "exact-floor-isqrt",
+      "division": "exact-floor-with-integer-ceiling"
+    }
+  }
+}

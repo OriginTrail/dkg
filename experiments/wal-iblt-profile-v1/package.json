@@ -1,0 +1,20 @@
+{
+  "name": "@origintrail-experiments/wal-iblt-profile-v1",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compare:mappings": "node --import tsx scripts/compare-mappings.ts",
+    "compare:schedules": "node --import tsx scripts/compare-schedules.ts",
+    "sweep": "node --import tsx scripts/sweep.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-wal": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^22",
+    "tsx": "^4.21.0",
+    "typescript": "^5.7"
+  }
+}
