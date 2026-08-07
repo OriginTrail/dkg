@@ -9,7 +9,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { createServer, Server as HttpServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionBridge, tokenMatches } from '../extension/src/extension.js';
 
 const TOKEN = 'test-bridge-token-value';
@@ -772,6 +772,117 @@ describe('/send', () => {
 });
 
 describe('/stream', () => {
+  it('keeps a non-text turn alive without exposing thinking or tool-call content', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(
+      stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never,
+      'sess-keepalive',
+      { sseKeepaliveIntervalMs: 20 },
+    );
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const res = await fetch(`${base}/stream`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'work silently', correlationId: 'c-keepalive' }),
+    });
+    expect(res.headers.get('x-accel-buffering')).toBe('no');
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    const first = await reader.read();
+    expect(decoder.decode(first.value)).toContain(': open');
+    await until(() => sent.length === 1);
+    startBridgeRun();
+
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'thinking_delta', delta: 'hidden reasoning' } });
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'toolcall_delta', delta: 'secret tool args' } });
+
+    const heartbeat = await Promise.race([
+      reader.read(),
+      new Promise<undefined>((resolve) => setTimeout(() => resolve(undefined), 150)),
+    ]);
+    expect(heartbeat).toBeDefined();
+    const heartbeatText = decoder.decode(heartbeat?.value);
+    expect(heartbeatText).toContain(': keepalive');
+    expect(heartbeatText).not.toContain('hidden reasoning');
+    expect(heartbeatText).not.toContain('secret tool args');
+
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'visible' } });
+    bridge.onAgentEnd();
+    const remainder: string[] = [];
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      remainder.push(decoder.decode(chunk.value));
+    }
+    expect(remainder.join('')).toContain('"type":"final"');
+    expect(remainder.join('')).toContain('visible');
+  });
+
+  it('stops the keepalive interval when the downstream stream disconnects', async () => {
+    await bridge.stop();
+    bridge = new SessionBridge(
+      stubPi((t, options) => { sent.push(t); sendOptions.push(options); }) as never,
+      'sess-keepalive-disconnect',
+      { sseKeepaliveIntervalMs: 20 },
+    );
+    await bridge.start();
+    base = await bridgeBaseUrl(bridge);
+
+    const setIntervalSpy = vi.spyOn(globalThis, 'setInterval');
+    const clearIntervalSpy = vi.spyOn(globalThis, 'clearInterval');
+    try {
+      const controller = new AbortController();
+      const res = await fetch(`${base}/stream`, {
+        method: 'POST',
+        headers: authed(),
+        body: JSON.stringify({ text: 'disconnect me', correlationId: 'c-disconnect' }),
+        signal: controller.signal,
+      });
+      const reader = res.body!.getReader();
+      await reader.read(); // consume `: open` so the body is actively observed
+      const keepaliveTimer = setIntervalSpy.mock.results.at(-1)?.value;
+      expect(keepaliveTimer).toBeDefined();
+
+      controller.abort();
+      await reader.read().catch(() => undefined);
+      await until(() => clearIntervalSpy.mock.calls.some(([timer]) => timer === keepaliveTimer));
+      const health = await fetch(`${base}/health`, { headers: authed() }).then((response) => response.json());
+      expect(health).toMatchObject({
+        ok: true,
+        busy: true,
+        turnState: 'queued',
+        clientConnected: false,
+      });
+      expect(health.clientDisconnectedAt).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+
+      // Several keepalive intervals with the subscriber gone must not write to
+      // the dead response or keep an interval alive. The Prime turn itself is
+      // not cancelled and still settles at its real lifecycle boundary.
+      await new Promise((r) => setTimeout(r, 70));
+      startBridgeRun();
+      bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'unseen tail' } });
+      bridge.onAgentEnd();
+
+      const next = fetch(`${base}/send`, {
+        method: 'POST',
+        headers: authed(),
+        body: JSON.stringify({ text: 'after abort', correlationId: 'c-after-abort' }),
+      });
+      await until(() => sent.length === 2);
+      startBridgeRun();
+      bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'accepted' } });
+      bridge.onAgentEnd();
+      const recovered = await next;
+      expect(recovered.status).toBe(200);
+      expect(await recovered.json()).toMatchObject({ text: 'accepted', correlationId: 'c-after-abort' });
+    } finally {
+      setIntervalSpy.mockRestore();
+      clearIntervalSpy.mockRestore();
+    }
+  });
+
   it('emits data: <json> frames of delta then final', async () => {
     const res = await fetch(`${base}/stream`, {
       method: 'POST',

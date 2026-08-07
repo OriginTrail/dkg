@@ -16,7 +16,10 @@ import {
 } from '../src/daemon/prime-agent.js';
 import { handlePrimeAgentRoutes } from '../src/daemon/routes/prime-agent.js';
 import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
-import { connectLocalAgentIntegrationFromUi } from '../src/daemon/local-agents.js';
+import {
+  connectLocalAgentIntegrationFromUi,
+  refreshLocalAgentIntegrationFromUi,
+} from '../src/daemon/local-agents.js';
 
 // The setup entry pulls in the adapter's runtime; the daemon only ever calls it
 // on disconnect, and none of these tests exercise that path.
@@ -111,6 +114,7 @@ async function startStubBridge(opts: {
   sendStatus?: number;
   sendBody?: unknown;
   healthSessionId?: string;
+  healthState?: Record<string, unknown>;
   /** SSE frames served from `/stream`, verbatim. */
   streamFrames?: string[];
 } ): Promise<{ url: string; seen: { headers: Record<string, string | undefined>; body: any } | null }> {
@@ -126,6 +130,7 @@ async function startStubBridge(opts: {
           ok: true,
           sessionId: opts.healthSessionId ?? opts.sessionId,
           pid: process.pid,
+          ...(opts.healthState ?? {}),
         }));
         return;
       }
@@ -151,10 +156,15 @@ async function startStubBridge(opts: {
   return { url: `http://127.0.0.1:${port}`, get seen() { return state.value; } } as any;
 }
 
-function writeDescriptor(sessionId: string, bridgeUrl: string, pid = process.pid): void {
+function writeDescriptor(
+  sessionId: string,
+  bridgeUrl: string,
+  pid = process.pid,
+  activeAt = new Date().toISOString(),
+): void {
   writeFileSync(
     join(sessionsDir, `${sessionId}.json`),
-    JSON.stringify({ sessionId, bridgeUrl, pid, startedAt: new Date().toISOString() }),
+    JSON.stringify({ sessionId, bridgeUrl, pid, startedAt: activeAt, lastActiveAt: activeAt }),
   );
 }
 
@@ -225,6 +235,37 @@ describe('/api/prime-agent-channel/health', () => {
 
     const report = await probePrimeAgentChannelHealth('bridge-token');
     expect(report).toMatchObject({ ok: true, sessionCount: 1, target: 's1' });
+  });
+
+  it('surfaces a recoverable disconnected-client turn state from the selected session', async () => {
+    const bridge = await startStubBridge({
+      sessionId: 's-working',
+      healthState: {
+        busy: true,
+        turnState: 'running',
+        clientConnected: false,
+        clientDisconnectedAt: '2026-08-07T12:34:56.000Z',
+      },
+    });
+    writeDescriptor('s-working', bridge.url);
+    const res = makeJsonResponse();
+
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('GET', '/api/prime-agent-channel/health'),
+      res,
+      config: makeConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/health',
+    } as any);
+
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      target: 's-working',
+      busy: true,
+      turnState: 'running',
+      clientConnected: false,
+      clientDisconnectedAt: '2026-08-07T12:34:56.000Z',
+    });
   });
 
   it('rejects a bridge whose session id does not match the descriptor', async () => {
@@ -501,7 +542,11 @@ describe('/api/prime-agent-channel/stream', () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['Content-Type']).toBe('text/event-stream; charset=utf-8');
     expect(res.headers['Cache-Control']).toBe('no-cache, no-transform');
+    expect(res.headers['X-Accel-Buffering']).toBe('no');
     expect(res.headers.Connection).toBe('keep-alive');
+    // Keepalive comments only defeat proxy idle timeouts if fronting proxies
+    // flush them; nginx-family buffering is disabled per response.
+    expect(res.headers['X-Accel-Buffering']).toBe('no');
     expect(res.writableEnded).toBe(true);
     expect(res.body).toContain('"type":"final"');
     expect(res.body).toContain('Hello!');
@@ -545,6 +590,43 @@ describe('connect from the Node UI', () => {
     expect(result.integration.transport).toMatchObject({ kind: 'prime-agent-channel', bridgeUrl: bridge.url });
   });
 
+  it('pins the routing head even when the health probe falls through to an older survivor', async () => {
+    const head = await startStubBridge({ sessionId: 'head', healthSessionId: 'recycled-port' });
+    const survivor = await startStubBridge({ sessionId: 'survivor' });
+    writeDescriptor('head', head.url, process.pid, '2026-08-07T12:00:00.000Z');
+    writeDescriptor('survivor', survivor.url, process.pid, '2026-08-07T11:00:00.000Z');
+
+    const result = await connectLocalAgentIntegrationFromUi(
+      makeConfig(),
+      { id: 'prime-agent' } as any,
+      'bridge-token',
+      { runPrimeAgentSetup: vi.fn(async () => ({ ok: true, errors: [], warnings: [] })) } as any,
+    );
+
+    expect(result.integration.metadata).toMatchObject({
+      sessionCount: 2,
+      activeSessionId: 'head',
+    });
+    expect(result.integration.transport?.bridgeUrl).toBe(survivor.url);
+  });
+
+  it('refreshes the Prime session pin and clears it after the last session exits', async () => {
+    const bridge = await startStubBridge({ sessionId: 'current' });
+    writeDescriptor('current', bridge.url);
+    const config = enabledConfig();
+    config.localAgentIntegrations!['prime-agent'].metadata = {
+      sessionCount: 1,
+      activeSessionId: 'stale',
+    };
+
+    const live = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    expect(live.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 'current' });
+
+    rmSync(join(sessionsDir, 'current.json'));
+    const idle = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+    expect(idle.metadata).toMatchObject({ sessionCount: 0, activeSessionId: null });
+  });
+
   it('does not claim to be connected when setup itself failed', async () => {
     const runPrimeAgentSetup = vi.fn(async () => ({
       ok: false,
@@ -585,5 +667,66 @@ describe('local-agent integrations listing', () => {
 
     // Single-session agents must not grow a phantom counter.
     expect(integrations.find((entry) => entry.id === 'hermes')?.metadata?.sessionCount).toBeUndefined();
+  });
+
+  it('drops a stale persisted activeSessionId when no session is live', async () => {
+    // node-ui pins chat to activeSessionId. A zero-session listing that keeps
+    // advertising the connect-time id routes every send into a guaranteed 409.
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: { kind: 'prime-agent-channel' },
+          metadata: { sessionCount: 1, activeSessionId: 'stale-connect-time-uuid' },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const res = makeJsonResponse();
+    await handleLocalAgentsRoutes({
+      req: makeJsonRequest('GET', '/api/local-agent-integrations'),
+      res,
+      config,
+      path: '/api/local-agent-integrations',
+      url: new URL('http://127.0.0.1:9200/api/local-agent-integrations'),
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    const integrations = JSON.parse(res.body).integrations as Array<{ id: string; metadata?: any }>;
+    const primeAgent = integrations.find((entry) => entry.id === 'prime-agent');
+    expect(primeAgent?.metadata?.sessionCount).toBe(0);
+    expect(primeAgent?.metadata?.activeSessionId).toBeUndefined();
+    expect(res.body).not.toContain('stale-connect-time-uuid');
+  });
+
+  it('applies the session overlay to the single-integration GET as well as the listing', async () => {
+    const bridge = await startStubBridge({ sessionId: 's-live' });
+    writeDescriptor('s-live', bridge.url);
+    // Both persisted fields are deliberately wrong so each overlay half fails
+    // independently if the single-integration path bypasses it.
+    const config = makeConfig({
+      localAgentIntegrations: {
+        'prime-agent': {
+          enabled: true,
+          capabilities: { localChat: true },
+          transport: { kind: 'prime-agent-channel' },
+          metadata: { sessionCount: 5, activeSessionId: 'stale-connect-time-uuid' },
+        },
+      },
+    } as Partial<DkgConfig>);
+
+    const res = makeJsonResponse();
+    await handleLocalAgentsRoutes({
+      req: makeJsonRequest('GET', '/api/local-agent-integrations/prime-agent'),
+      res,
+      config,
+      path: '/api/local-agent-integrations/prime-agent',
+      url: new URL('http://127.0.0.1:9200/api/local-agent-integrations/prime-agent'),
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    const integration = JSON.parse(res.body).integration as { metadata?: any };
+    expect(integration.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's-live' });
   });
 });

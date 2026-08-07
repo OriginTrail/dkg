@@ -98,6 +98,11 @@ interface ExtensionApiLike {
 
 const ADAPTER_STATE_DIRNAME = '.dkg-adapter-prime-agent';
 const TURN_IDLE_TIMEOUT_MS = 15 * 60_000; // matches the daemon's channel timeout
+// Keep every HTTP hop alive while Prime is doing non-text work. Thinking and
+// tool-call deltas reset the agent idle timer below, but they are intentionally
+// not exposed as transcript bytes; without an independent transport heartbeat,
+// a browser/proxy can abandon an otherwise healthy turn as an idle response.
+const SSE_KEEPALIVE_INTERVAL_MS = 15_000;
 // Deliberately below the daemon's 60-minute transport backstop so the bridge
 // emits a terminal verdict and releases its one-turn guard before the daemon
 // has to abort the HTTP connection.
@@ -173,10 +178,13 @@ interface PendingTurn {
   inputObserved: boolean;
   chunks: string[];
   subscribers: Set<ServerResponse>;
+  streamRequested: boolean;
+  clientDisconnectedAt?: string;
   responseSettled: boolean;
   resolve: (outcome: TurnOutcome) => void;
   idleTimer?: NodeJS.Timeout;
   hardTimer?: NodeJS.Timeout;
+  keepaliveTimer?: NodeJS.Timeout;
 }
 
 interface TurnOutcome {
@@ -270,16 +278,22 @@ class SessionBridge {
   #closed = false;
   readonly #turnIdleTimeoutMs: number;
   readonly #turnHardTimeoutMs: number;
+  readonly #sseKeepaliveIntervalMs: number;
 
   constructor(
     pi: ExtensionApiLike,
     sessionId: string,
-    options: { turnIdleTimeoutMs?: number; turnHardTimeoutMs?: number } = {},
+    options: {
+      turnIdleTimeoutMs?: number;
+      turnHardTimeoutMs?: number;
+      sseKeepaliveIntervalMs?: number;
+    } = {},
   ) {
     this.#pi = pi;
     this.#sessionId = sessionId;
     this.#turnIdleTimeoutMs = options.turnIdleTimeoutMs ?? TURN_IDLE_TIMEOUT_MS;
     this.#turnHardTimeoutMs = options.turnHardTimeoutMs ?? TURN_HARD_TIMEOUT_MS;
+    this.#sseKeepaliveIntervalMs = options.sseKeepaliveIntervalMs ?? SSE_KEEPALIVE_INTERVAL_MS;
   }
 
   get sessionId(): string {
@@ -458,7 +472,26 @@ class SessionBridge {
     if (req.method === 'GET' && path === '/health') {
       // Echo the session id: this is how the daemon detects a descriptor that
       // points at a recycled port now owned by a different session.
-      this.#json(res, 200, { ok: true, sessionId: this.#sessionId, pid: process.pid });
+      const turn = this.#turn;
+      this.#json(res, 200, {
+        ok: true,
+        sessionId: this.#sessionId,
+        pid: process.pid,
+        busy: Boolean(turn || this.#agentActive),
+        ...(turn
+          ? {
+              turnState: this.#activeRunTurn === turn ? 'running' : 'queued',
+              ...(turn.streamRequested
+                ? {
+                    clientConnected: turn.subscribers.size > 0,
+                    ...(turn.clientDisconnectedAt
+                      ? { clientDisconnectedAt: turn.clientDisconnectedAt }
+                      : {}),
+                  }
+                : {}),
+            }
+          : {}),
+      });
       return;
     }
     if (req.method === 'POST' && path === '/send') {
@@ -503,8 +536,10 @@ class SessionBridge {
         inputObserved: false,
         chunks: [],
         subscribers: new Set(),
+        streamRequested: stream,
         responseSettled: false,
         resolve,
+        keepaliveTimer: undefined,
       };
       this.#turn = turn;
     });
@@ -514,6 +549,7 @@ class SessionBridge {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream; charset=utf-8',
         'Cache-Control': 'no-cache',
+        'X-Accel-Buffering': 'no',
         Connection: 'keep-alive',
       });
       // Flush headers immediately with an SSE comment. Without a first write,
@@ -522,7 +558,21 @@ class SessionBridge {
       // for a turn that produces no tokens at all never resolves.
       res.write(': open\n\n');
       admittedTurn.subscribers.add(res);
-      req.on('close', () => admittedTurn.subscribers.delete(res));
+      this.#startSseKeepalive(admittedTurn);
+      const detach = () => {
+        admittedTurn.subscribers.delete(res);
+        if (
+          this.#turn === admittedTurn
+          && admittedTurn.subscribers.size === 0
+          && !admittedTurn.clientDisconnectedAt
+        ) {
+          admittedTurn.clientDisconnectedAt = new Date().toISOString();
+        }
+        if (admittedTurn.subscribers.size === 0) this.#stopSseKeepalive(admittedTurn);
+      };
+      req.on('aborted', detach);
+      res.on('close', detach);
+      res.on('error', detach);
     }
 
     // Inject as a real user message so the turn is indistinguishable from one
@@ -751,17 +801,51 @@ class SessionBridge {
     }, this.#turnIdleTimeoutMs);
   }
 
+  #startSseKeepalive(turn: PendingTurn): void {
+    if (turn.keepaliveTimer || this.#sseKeepaliveIntervalMs <= 0) return;
+    turn.keepaliveTimer = setInterval(() => {
+      if (this.#turn !== turn || turn.responseSettled) {
+        this.#stopSseKeepalive(turn);
+        return;
+      }
+      for (const res of turn.subscribers) {
+        if (res.destroyed || res.writableEnded) {
+          turn.subscribers.delete(res);
+          continue;
+        }
+        try {
+          // SSE comments are valid heartbeat frames. Every daemon/UI reader
+          // already forwards or ignores comments, so this carries liveness
+          // without inventing a transcript event or exposing hidden work.
+          res.write(': keepalive\n\n');
+        } catch {
+          turn.subscribers.delete(res);
+        }
+      }
+      if (turn.subscribers.size === 0) this.#stopSseKeepalive(turn);
+    }, this.#sseKeepaliveIntervalMs);
+    turn.keepaliveTimer.unref?.();
+  }
+
+  #stopSseKeepalive(turn: PendingTurn): void {
+    if (!turn.keepaliveTimer) return;
+    clearInterval(turn.keepaliveTimer);
+    turn.keepaliveTimer = undefined;
+  }
+
   #settleResponse(outcome: TurnOutcome): void {
     const turn = this.#turn;
     if (!turn || turn.responseSettled) return;
     turn.responseSettled = true;
     if (turn.idleTimer) clearTimeout(turn.idleTimer);
+    this.#stopSseKeepalive(turn);
     turn.resolve(outcome);
   }
 
   #clearTurn(turn: PendingTurn): void {
     if (turn.idleTimer) clearTimeout(turn.idleTimer);
     if (turn.hardTimer) clearTimeout(turn.hardTimer);
+    this.#stopSseKeepalive(turn);
     if (this.#turn === turn) this.#turn = undefined;
   }
 

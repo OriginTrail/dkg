@@ -234,6 +234,10 @@ export interface PrimeAgentChannelHealthResponse {
   /** Which session answered; lets the daemon detect a recycled port. */
   sessionId?: string;
   sessions?: PrimeAgentSessionDescriptor[];
+  busy?: boolean;
+  turnState?: 'queued' | 'running';
+  clientConnected?: boolean;
+  clientDisconnectedAt?: string;
   error?: string;
 }
 
