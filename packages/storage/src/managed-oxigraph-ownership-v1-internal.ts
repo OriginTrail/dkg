@@ -267,6 +267,29 @@ export function isManagedOxigraphOwnershipLiveV1(lease: unknown): boolean {
 }
 
 /**
+ * Allocation-free terminality read.
+ *
+ * Distinct from `isManagedOxigraphOwnershipLiveV1` on purpose, and the gap
+ * between them is the whole read/write policy:
+ *
+ * - **not live** covers a child being replaced. A write there has nowhere
+ *   correct to go, so writes refuse; a read fails at the transport anyway and
+ *   the supervisor is about to revive, so reads continue.
+ * - **terminal** means the supervisor could not prove our child released the
+ *   bind and will never bind another. Whatever answers now may not be ours, so
+ *   a read can return another store's data as this node's state — and that data
+ *   feeds assertion authorship, whose root goes on-chain, and the sync
+ *   responder, which serves it to peers. Reads refuse too.
+ */
+export function isManagedOxigraphOwnershipTerminalV1(lease: unknown): boolean {
+  if (!isManagedOxigraphOwnershipLeaseV1(lease)) return false;
+  const current = LEASE_STATE.get(lease);
+  /* c8 ignore next -- guarded by isManagedOxigraphOwnershipLeaseV1 above */
+  if (!current) return false;
+  return current.terminal;
+}
+
+/**
  * Thrown when a managed store is asked to mutate a backend it cannot prove it
  * owns.
  *

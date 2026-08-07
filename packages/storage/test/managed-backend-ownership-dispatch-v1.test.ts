@@ -175,6 +175,80 @@ describe('managed backend ownership at mutation dispatch', () => {
     await store.close().catch(() => undefined);
   });
 
+  it('refuses a READ with ZERO I/O once ownership is terminal', async () => {
+    // The foreign-listener case. `port-release-unproven` means the supervisor
+    // could not prove our child released the bind and will never bind another,
+    // so whatever answers may not be ours — and a foreign answer does not stay
+    // local: assertion authorship puts a merkle root ON-CHAIN and the sync
+    // responder serves store reads TO PEERS.
+    const store = await managedStore();
+    ownership.invalidate('port-release-unproven');
+
+    await expect(store.query('ASK { ?s ?p ?o }')).rejects.toThrow(/not the proven ready listener/);
+    expect(requests).toEqual([]);
+
+    await store.close().catch(() => undefined);
+  });
+
+  it('still serves reads during a recoverable NOT-READY window', async () => {
+    // The deliberate asymmetry, and the reason this guard is keyed on TERMINAL
+    // rather than on liveness. A child being replaced is not-ready but not
+    // terminal: the supervisor is about to revive it, a read fails at the
+    // transport anyway, and refusing here would turn every respawn into a total
+    // store outage on every managed node.
+    const store = await managedStore();
+    ownership.invalidate('child-exit');
+
+    await expect(store.query('ASK { ?s ?p ?o }')).resolves.toBeDefined();
+    expect(requests).toHaveLength(1);
+
+    await store.close().catch(() => undefined);
+  });
+
+  it('refuses deleteByPattern with ZERO I/O on a merely NOT-READY lease', async () => {
+    // This is what makes the pre-count guard load-bearing, and it took a
+    // surviving mutant to find: on a TERMINAL lease the read guard already
+    // refuses the count, so removing the pre-count guard changed nothing there.
+    // Not-ready is the case only it covers — the write will be refused anyway,
+    // so counting first is a socket opened to a child that is being replaced.
+    const store = await managedStore();
+    ownership.invalidate('child-exit');
+
+    await expect(store.deleteByPattern({ subject: 'urn:dkg:test:s' })).rejects.toThrow(
+      /not the proven ready listener/,
+    );
+    expect(requests).toEqual([]);
+
+    await expect(store.deleteBySubjectPrefix('urn:dkg:test:g', 'urn:dkg:test:')).rejects.toThrow(
+      /not the proven ready listener/,
+    );
+    expect(requests).toEqual([]);
+
+    await store.close().catch(() => undefined);
+  });
+
+  it('refuses the read that deleteByPattern issues BEFORE its update', async () => {
+    // `deleteByPattern` and `deleteBySubjectPrefix` count first. That count
+    // reached the wire ahead of the mutation guard, so the write was refused
+    // while a socket had already been opened and a foreign count consumed —
+    // making the "zero I/O" property claimed for mutations false for exactly
+    // these two methods.
+    const store = await managedStore();
+    ownership.invalidate('port-release-unproven');
+
+    await expect(store.deleteByPattern({ subject: 'urn:dkg:test:s' })).rejects.toThrow(
+      /not the proven ready listener/,
+    );
+    expect(requests).toEqual([]);
+
+    await expect(store.deleteBySubjectPrefix('urn:dkg:test:g', 'urn:dkg:test:')).rejects.toThrow(
+      /not the proven ready listener/,
+    );
+    expect(requests).toEqual([]);
+
+    await store.close().catch(() => undefined);
+  });
+
   it('refuses a mutation the BARRIER queued, once the handoff that queued it fails', async () => {
     // THE reported shape, through the real mechanism rather than a stand-in: a
     // real `SparqlHttpStore`, the real process-global scheduler, and a real

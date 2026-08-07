@@ -17,6 +17,7 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
 import type {
   SystemRecordApplyOutcomeV1,
   SystemRecordLaneActivationV1,
@@ -612,6 +613,21 @@ export class GraphSetIndexStore implements TripleStore {
       try {
         return await this.refreshIndexLoop(source, options, flight);
       } catch (error: unknown) {
+        // NEVER swallow a proven-unowned backend.
+        //
+        // The tolerance below exists for TRANSIENT store failures: serving the
+        // last known graph set beats making every reader repeat an expensive
+        // scan. `ManagedOxigraphBackendUnownedError` is the opposite kind of
+        // failure — the adapter has PROVEN it cannot account for whatever is
+        // answering, and that condition never clears on its own.
+        //
+        // Measured before this line existed: with a WARM index, a terminal lease
+        // made the adapter refuse correctly and this handler returned the stale
+        // set as a SUCCESS, so `listGraphs()` and `listGraphsByPrefix()` kept
+        // answering forever. A fail-closed guard one layer down became silently
+        // fail-open here — and a regression test written against the adapter
+        // alone would have passed while the guarantee was absent.
+        if (error instanceof ManagedOxigraphBackendUnownedError) throw error;
         if (source !== 'revalidate') throw error;
         // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
         // correctness paths even if another refresh published in parallel.
