@@ -16,13 +16,36 @@
 // against a key anchored to that address, never the caller's transport identity.
 import { createHash } from "node:crypto";
 import { computeUnits, costMicroTrac, isExempt, SCHEDULE_VERSION, type MeterConfig } from "./read-meter.js";
-import { balance, recordReadLeg, recordShadowObservation } from "./ledger.js";
+import { balance, recordReadLeg, recordShadowObservation, readJournal, appendJournal } from "./ledger.js";
 import { verifyCapability, admissibleForSettlement, type SignedDelegation, type CapabilityState } from "./capability.js";
 import { anchorWalletKey } from "./buyer-registry.js";
 import { activeOpening } from "./deposit-rail.js";
 import type { BindingProof } from "./evm-binding.js";
 
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
+
+/**
+ * Gradual release (Q3, buyer-corrected). The fair-exchange problem: the provider
+ * delivers a result, THEN the buyer countersigns. Whoever moves second can
+ * cheat — and since the read is already delivered, disputing every leg would be
+ * free for the buyer, while billing an unsigned leg would be theft by the
+ * provider. Bo's answer, adopted: withhold the NEXT valuable result until the
+ * prior leg is countersigned. That bounds the provider's exposure to exactly one
+ * provisional leg, and makes disputing cost the buyer their service continuity.
+ *
+ * "Outstanding" is derived from the journal, never held in memory — a debit leg
+ * with no matching countersign record. In-memory-only state has cost this
+ * prototype a full evening; the obligation must survive a restart.
+ */
+export function outstandingLegs(home: string, principal: string): number {
+  const p = principal.toLowerCase();
+  let debits = 0, signed = 0;
+  for (const rec of readJournal(home)) {
+    if (rec.kind === "debit" && String((rec.leg as any)?.requester?.principal ?? "").toLowerCase() === p) debits++;
+    if (rec.kind === "leg-countersigned" && String(rec.principal ?? "").toLowerCase() === p) signed++;
+  }
+  return Math.max(0, debits - signed);
+}
 
 export interface MeteredReadRequest {
   delegation: SignedDelegation;
@@ -108,6 +131,16 @@ export function authoriseMeteredRead(args: {
   const willBill = !isExempt(principal, cfg);
   if (willBill && !activeOpening(home, principal)) {
     return { ok: false, status: 402, code: "E_NO_OPEN_TAB", detail: "This principal has no open tab to bill against." };
+  }
+
+  // Gradual release: at most ONE un-countersigned billable leg may be
+  // outstanding. A prior leg awaiting the buyer's countersignature blocks the
+  // next billable read until it is signed — never billed, never forced.
+  if (willBill && outstandingLegs(home, principal) >= 1) {
+    return {
+      ok: false, status: 409, code: "E_AWAITING_COUNTERSIGNATURE",
+      detail: "Countersign your previous leg before requesting another. The provider serves at most one provisional leg.",
+    };
   }
 
   return { ok: true, principal, label: anchor.label };
@@ -217,6 +250,7 @@ export function settleMeteredRead(args: {
 
 /** Verify a buyer's countersignature over a leg and mark it settleable. */
 export function countersignLeg(args: {
+  home?: string;
   leg: Record<string, unknown>;
   countersignature: string;
   sessionPublicKeyPem: string;
@@ -228,5 +262,21 @@ export function countersignLeg(args: {
     countersignature: args.countersignature,
     now: args.now ?? Date.now(),
   });
+  // On success, durably record that THIS leg is countersigned, so gradual
+  // release lets the next read through and a restart does not resurrect the
+  // outstanding obligation. Idempotent: a leg already recorded is not doubled.
+  if (r.ok && args.home) {
+    const principal = String((args.leg as any)?.requester?.principal ?? "");
+    const legId = String((args.leg as any)?.legId ?? "");
+    const already = readJournal(args.home).some(
+      (rec) => rec.kind === "leg-countersigned" && rec.legId === legId,
+    );
+    if (principal && legId && !already) {
+      appendJournal(args.home, {
+        kind: "leg-countersigned", principal, legId,
+        countersignature: args.countersignature, at: new Date().toISOString(),
+      });
+    }
+  }
   return { ok: r.ok, code: r.code };
 }

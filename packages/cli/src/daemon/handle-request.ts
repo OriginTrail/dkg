@@ -314,6 +314,7 @@ import type { MemoryGraphChangedEvent, NotificationSseEvent, RequestContext } fr
 import { handleStatusRoutes } from './routes/status.js';
 import { handleMeteringRoutes } from './routes/metering.js';
 import { handleMeteredQueryRoutes } from './routes/metered-query.js';
+import { handleSettlementRoutes } from './routes/settlement-routes.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
 import { handleOpenclawRoutes } from './routes/openclaw.js';
@@ -369,6 +370,10 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   // Capability-authenticated metered read. BEFORE handleMeteringRoutes so its
   // /api/metering/* default-deny cannot swallow these two paths.
   await handleMeteredQueryRoutes(ctx);
+  if (res.writableEnded) return;
+
+  // Settlement: buyer-facing close (read-only) + operator-only withdrawal.
+  await handleSettlementRoutes(ctx);
   if (res.writableEnded) return;
 
   await handleMeteringRoutes(ctx);

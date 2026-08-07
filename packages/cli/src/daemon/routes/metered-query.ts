@@ -55,7 +55,7 @@ export async function handleMeteredQueryRoutes(ctx: RequestContext): Promise<voi
       return jsonResponse(res, 400, { error: "E_MISSING_FIELD", required: ["leg", "countersignature", "sessionPublicKeyPem"] });
     }
     const r = countersignLeg({
-      leg: body.leg, countersignature: body.countersignature, sessionPublicKeyPem: body.sessionPublicKeyPem,
+      home, leg: body.leg, countersignature: body.countersignature, sessionPublicKeyPem: body.sessionPublicKeyPem,
     });
     return jsonResponse(res, r.ok ? 200 : 403, {
       settleable: r.ok, code: r.code,

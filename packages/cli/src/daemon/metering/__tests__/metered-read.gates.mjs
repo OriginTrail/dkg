@@ -181,5 +181,67 @@ console.log("\nfunds run out honestly:");
     L.balance(home, BUYER).balance === before && before >= 0, String(L.balance(home, BUYER).balance));
 }
 
+console.log("\ngradual release — at most one un-countersigned billable leg (Q3):");
+{
+  const { createHash } = await import("node:crypto");
+  const sha = (b) => createHash("sha256").update(b).digest("hex");
+  // Fresh principal + tab so prior debits in this file do not pollute the count.
+  const GR = "0x9999999999999999999999999999999999999999";
+  const grWallet = generateKeyPairSync("ed25519");
+  writeFileSync(join(process.env.DKG_HOME, "metering", "buyer-registry.json"), JSON.stringify({
+    principals: {
+      [BUYER.toLowerCase()]: { label: "buyer", walletPublicKeyPem: pem(wallet.publicKey, "pub") },
+      [OTHER.toLowerCase()]: { label: "other", walletPublicKeyPem: pem(otherWallet.publicKey, "pub") },
+      [GR.toLowerCase()]: { label: "gr", walletPublicKeyPem: pem(grWallet.publicKey, "pub") },
+    },
+  }));
+  const grTerms = S.stage3Terms(PROVIDER, GR, 100, RM.SCHEDULE_VERSION, CHAIN);
+  const grArt = D.buildOpeningArtifact(GR, grTerms);
+  D.registerOpening(home, grArt);
+  const grTransfer = { txHash: "0xgr", from: GR, to: PROVIDER, token: grTerms.tracContract, amountTrac: "1", blockNumber: 100, safeHeadBlock: 111 };
+  D.creditDeposit(home, grTransfer, grArt, D.evaluateDeposit(grTransfer, grArt));
+
+  ok("no outstanding leg before the first read", M.outstandingLegs(home, GR) === 0);
+
+  const leg1 = M.settleMeteredRead({ home, cfg: { ...enforceCfg, enforcedPrincipals: new Set([GR]) }, principal: GR, sparql: SPARQL, responseBody: BODY, scopeQuads: 26200 });
+  ok("first billable read succeeds and creates ONE outstanding leg",
+    leg1.ok && leg1.billed && M.outstandingLegs(home, GR) === 1);
+
+  const grDeleg = (() => {
+    const d = {
+      domain: "odysseus-dkg:delegation:v1", capabilityId: "cap-gr", tabPrincipal: GR,
+      sessionPublicKeyPem: pem(session.publicKey, "pub"), agentUrn: "urn:gr",
+      audience: { settlement: "settle-main", nodeClasses: ["dkg-edge-mainnet"] },
+      routes: ["POST /api/metering/read"], bindings: { scheduleDigest: sched, priceVectorDigest: sched },
+      caps: { absoluteMicroTrac: 1_000_000, windowMicroTrac: 500_000, windowMs: 3_600_000 },
+      notBefore: new Date(Date.now() - 3600e3).toISOString(),
+      expiresAt: new Date(Date.now() + 3600e3).toISOString(), tier: "session-key",
+    };
+    return { ...d, walletSignature: edSign(null, C.delegationPreimage(d), createPrivateKey(pem(grWallet.privateKey, "priv"))).toString("base64") };
+  })();
+  const blocked = M.authoriseMeteredRead({
+    home, chainId: CHAIN, cfg: { ...enforceCfg, enforcedPrincipals: new Set([GR]) },
+    request: { delegation: grDeleg, sparql: SPARQL, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+    state: freshState(), route: "POST /api/metering/read", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main", scheduleDigest: sched, priceVectorDigest: sched,
+  });
+  ok("the NEXT billable read is refused 409 while a leg is un-countersigned",
+    blocked.ok === false && blocked.status === 409 && blocked.code === "E_AWAITING_COUNTERSIGNATURE", JSON.stringify(blocked));
+
+  // Countersign leg1, which clears the outstanding obligation durably.
+  const digest1 = "sha256:" + sha(L.canonicalize(leg1.leg));
+  const sig1 = edSign(null, Buffer.concat([Buffer.from(C.CAPABILITY_DOMAIN + "\n"), Buffer.from(digest1)]), createPrivateKey(pem(session.privateKey, "priv"))).toString("base64");
+  const cs = M.countersignLeg({ home, leg: leg1.leg, countersignature: sig1, sessionPublicKeyPem: pem(session.publicKey, "pub") });
+  ok("countersigning the leg records it and clears the obligation",
+    cs.ok && M.outstandingLegs(home, GR) === 0, JSON.stringify(cs));
+
+  // And the obligation is journal-derived, so it survives a "restart" (re-read).
+  ok("the cleared obligation is durable (journal-derived, not in-memory)",
+    M.outstandingLegs(home, GR) === 0);
+
+  const cs2 = M.countersignLeg({ home, leg: leg1.leg, countersignature: sig1, sessionPublicKeyPem: pem(session.publicKey, "pub") });
+  const signedRecords = readFileSync(join(process.env.DKG_HOME, "metering", "read-journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((r) => r.kind === "leg-countersigned" && r.principal === GR);
+  ok("re-countersigning the same leg is idempotent — exactly one record", cs2.ok && signedRecords.length === 1, `${signedRecords.length} records`);
+}
+
 console.log(`\n${pass}/${pass + fail} metered-read gates pass\n`);
 process.exit(fail === 0 ? 0 : 1);
