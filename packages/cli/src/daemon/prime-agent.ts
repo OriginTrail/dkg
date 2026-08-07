@@ -35,6 +35,7 @@ export const PRIME_AGENT_CHANNEL_HARD_TIMEOUT_MS = 60 * 60_000;
 export const PRIME_AGENT_HEALTH_TIMEOUT_MS = 5_000;
 export const PRIME_AGENT_PRE_SEND_TIMEOUT_MS = 3_000;
 export const PRIME_AGENT_TRANSPORT_KIND = 'prime-agent-channel';
+export const PRIME_AGENT_DKG_SESSION_PREFIX = 'prime-agent:dkg-ui:';
 
 export type PrimeAgentSessionDescriptor = AdapterPrimeAgentSessionDescriptor;
 
@@ -237,6 +238,34 @@ export interface PrimeAgentChatPayload {
   metadata?: Record<string, unknown>;
 }
 
+export type PrimeAgentTurnPersistenceState = 'stored' | 'failed' | 'pending';
+
+export interface PrimeAgentPersistTurnPayload {
+  sessionId: string;
+  userMessage: string;
+  assistantReply: string;
+  correlationId?: string;
+  turnId?: string;
+  persistenceState: PrimeAgentTurnPersistenceState;
+  failureReason?: string;
+  toolCalls?: Array<{ name: string; args: Record<string, unknown>; result: unknown }>;
+  metadata?: Record<string, unknown>;
+}
+
+export function primeAgentDkgSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
+    ? trimmed
+    : `${PRIME_AGENT_DKG_SESSION_PREFIX}${trimmed}`;
+}
+
+export function primeAgentRawSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
+    ? trimmed.slice(PRIME_AGENT_DKG_SESSION_PREFIX.length)
+    : trimmed;
+}
+
 export function normalizePrimeAgentChatPayload(raw: unknown): PrimeAgentChatPayload | { error: string } {
   if (!raw || typeof raw !== 'object') return { error: 'Invalid payload' };
   const r = raw as Record<string, unknown>;
@@ -258,6 +287,45 @@ export function normalizePrimeAgentChatPayload(raw: unknown): PrimeAgentChatPayl
     ...(typeof r.identity === 'string' ? { identity: r.identity } : {}),
     ...(typeof r.persistUserMessage === 'boolean' ? { persistUserMessage: r.persistUserMessage } : {}),
     ...(r.metadata && typeof r.metadata === 'object'
+      ? { metadata: r.metadata as Record<string, unknown> }
+      : {}),
+  };
+}
+
+export function normalizePrimeAgentPersistTurnPayload(raw: unknown): PrimeAgentPersistTurnPayload | { error: string } {
+  if (!raw || typeof raw !== 'object') return { error: 'Invalid payload' };
+  const r = raw as Record<string, unknown>;
+  const sessionId = typeof r.sessionId === 'string' ? r.sessionId.trim() : '';
+  if (!sessionId) return { error: 'Missing "sessionId"' };
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) return { error: 'Invalid "sessionId"' };
+  const userMessage = typeof r.userMessage === 'string' ? r.userMessage : '';
+  if (!userMessage.trim()) return { error: 'Missing "userMessage"' };
+  const assistantReply = typeof r.assistantReply === 'string' ? r.assistantReply : '';
+  const correlationId = typeof r.correlationId === 'string' ? r.correlationId.trim() : '';
+  const turnId = typeof r.turnId === 'string' ? r.turnId.trim() : '';
+  const persistenceState =
+    r.persistenceState === 'failed' || r.persistenceState === 'pending'
+      ? r.persistenceState
+      : 'stored';
+  const failureReason = typeof r.failureReason === 'string' ? r.failureReason.trim() : '';
+  const toolCalls = Array.isArray(r.toolCalls)
+    ? r.toolCalls.filter((entry): entry is { name: string; args: Record<string, unknown>; result: unknown } =>
+        !!entry
+        && typeof entry === 'object'
+        && typeof (entry as { name?: unknown }).name === 'string'
+        && (entry as { name: string }).name.trim().length > 0,
+      )
+    : undefined;
+  return {
+    sessionId,
+    userMessage,
+    assistantReply,
+    ...(correlationId ? { correlationId } : {}),
+    ...(turnId ? { turnId } : {}),
+    persistenceState,
+    ...(failureReason ? { failureReason } : {}),
+    ...(toolCalls && toolCalls.length > 0 ? { toolCalls } : {}),
+    ...(r.metadata && typeof r.metadata === 'object' && !Array.isArray(r.metadata)
       ? { metadata: r.metadata as Record<string, unknown> }
       : {}),
   };

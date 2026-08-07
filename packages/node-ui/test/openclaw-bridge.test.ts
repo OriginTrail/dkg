@@ -761,6 +761,62 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(getDefaultLocalAgentSessionId('hermes')).toBe('hermes:dkg-ui');
   });
 
+  it('Prime Agent forwards raw live session ids but reads history from the prefixed DKG session id', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [{
+            id: 'prime-agent',
+            name: 'Prime Agent',
+            description: 'Prime Agent adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            metadata: { activeSessionId: 'prime-session-1', sessionCount: 1 },
+            runtime: { status: 'ready', ready: true },
+          }],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({ ok: true, target: 'prime-session-1', sessionCount: 1 }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          session: 'prime-agent:dkg-ui:prime-session-1',
+          messages: [],
+        }),
+      },
+      {
+        ok: true,
+        headers: { get: () => 'application/json' },
+        body: null,
+        json: async () => ({ text: 'reply', sessionId: 'prime-agent:dkg-ui:prime-session-1', correlationId: 'corr-1' }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations, fetchLocalAgentHistory, streamLocalAgentChat } = await import('../src/ui/api.js');
+      const integrations = await fetchLocalAgentIntegrations();
+      const primeAgent = integrations.integrations.find((item: any) => item.id === 'prime-agent');
+      expect(primeAgent?.defaultSessionId).toBe('prime-agent:dkg-ui:prime-session-1');
+
+      await fetchLocalAgentHistory('prime-agent', 10, {
+        sessionId: primeAgent?.defaultSessionId,
+      });
+      expect(calls[2].url).toContain('/api/memory/sessions/prime-agent%3Adkg-ui%3Aprime-session-1');
+
+      await streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: primeAgent?.defaultSessionId,
+      });
+      expect(JSON.parse(calls[3].opts?.body as string).sessionId).toBe('prime-session-1');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('streamLocalAgentChat forwards injected context entries', async () => {
     const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {

@@ -17,6 +17,7 @@ export * from './pca-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
+const PRIME_AGENT_DKG_SESSION_PREFIX = 'prime-agent:dkg-ui:';
 
 function normalizeContextGraphId(contextGraphIdOrUri: string): string {
   const trimmed = contextGraphIdOrUri.trim();
@@ -2387,11 +2388,11 @@ const LOCAL_AGENT_SURFACES: Record<string, LocalAgentSurface> = {
   'prime-agent': {
     connectSupported: true,
     chatSupported: true,
-    // No synthesised default. A Prime Agent session id is a uuidv7 minted by the
-    // agent itself, so the node cannot invent one — leaving it undefined makes
-    // the daemon route to the most recently active live session, which is what
-    // the operator means by "the session I'm in" until they pick another.
-    resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId } : {}),
+    // Prime Agent session ids are minted by Prime itself. The UI uses a
+    // prefixed DKG memory id for shared session history, then strips it back to
+    // the raw Prime session id when targeting the bridge.
+    defaultSessionId: ({ record, health }) => buildPrimeAgentDefaultSessionId(record, health),
+    resolveChatContext: ({ sessionId }) => (sessionId ? { sessionId: primeAgentRawSessionId(sessionId) } : {}),
     fetchHealth: fetchPrimeAgentLocalHealth,
     streamChat: streamPrimeAgentLocalChat,
   },
@@ -2526,6 +2527,33 @@ function buildHermesTransportSessionSegment(record?: LocalAgentIntegrationRecord
     transport.healthUrl,
   ].filter((value): value is string => typeof value === 'string' && value.trim().length > 0);
   return parts.length ? `transport-${stableSessionHash(parts.join('|'))}` : null;
+}
+
+function buildPrimeAgentDkgSessionId(rawSessionId: string): string {
+  const trimmed = rawSessionId.trim();
+  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
+    ? trimmed
+    : `${PRIME_AGENT_DKG_SESSION_PREFIX}${trimmed}`;
+}
+
+function primeAgentRawSessionId(sessionId: string): string {
+  const trimmed = sessionId.trim();
+  return trimmed.startsWith(PRIME_AGENT_DKG_SESSION_PREFIX)
+    ? trimmed.slice(PRIME_AGENT_DKG_SESSION_PREFIX.length)
+    : trimmed;
+}
+
+function buildPrimeAgentDefaultSessionId(
+  record?: LocalAgentIntegrationRecord,
+  health?: LocalAgentHealthResponse | null,
+): string | undefined {
+  const activeSessionId = firstTrimmedString(
+    health && typeof (health as { target?: unknown }).target === 'string'
+      ? (health as { target: string }).target
+      : undefined,
+    record?.metadata?.activeSessionId,
+  );
+  return activeSessionId ? buildPrimeAgentDkgSessionId(activeSessionId) : undefined;
 }
 
 function localAgentMemoryLabel(memory: LocalAgentHealthResponse['memory']): string | null {

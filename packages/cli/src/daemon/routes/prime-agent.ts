@@ -2,9 +2,9 @@
  * `/api/prime-agent-channel/*` — the daemon half of the Prime Agent chat surface.
  *
  * Structurally this is `routes/hermes.ts` minus everything Hermes needs and
- * Prime Agent does not: no OpenAI-compatible second protocol, no attachment
+ * Prime Agent does not: no OpenAI-compatible second protocol and no attachment
  * provenance verification (the Node UI does not offer attachments for this
- * integration yet), and no persist-turn route (Stage 4 owns memory election).
+ * integration yet).
  * What remains is the part that has to be right — target selection, the auth
  * header, and the SSE pump.
  *
@@ -14,6 +14,7 @@
  * silently routed to an arbitrary session — see `resolveTargets` below.
  */
 
+import { randomUUID } from 'node:crypto';
 import type { RequestContext } from './context.js';
 import {
   corsHeaders,
@@ -30,12 +31,21 @@ import {
   buildPrimeAgentChannelHeaders,
   ensurePrimeAgentBridgeAvailable,
   getPrimeAgentChannelTargets,
+  normalizePrimeAgentPersistTurnPayload,
+  primeAgentDkgSessionId,
+  primeAgentRawSessionId,
   normalizePrimeAgentChatPayload,
   probePrimeAgentChannelHealth,
   type PrimeAgentChannelTarget,
   type PrimeAgentChatPayload,
+  type PrimeAgentPersistTurnPayload,
 } from '../prime-agent.js';
-import { pipeOpenClawStream } from '../openclaw.js';
+import { writeOpenClawStreamChunk } from '../openclaw.js';
+
+type PrimeAgentPersistRouteResult = {
+  statusCode: number;
+  body: Record<string, unknown>;
+};
 
 function ensurePrimeAgentIntegrationEnabled(
   config: RequestContext['config'],
@@ -60,7 +70,9 @@ function resolveTargets(
   payload: PrimeAgentChatPayload,
   res: RequestContext['res'],
 ): PrimeAgentChannelTarget[] | null {
-  const targets = getPrimeAgentChannelTargets({ sessionId: payload.sessionId });
+  const targets = getPrimeAgentChannelTargets({
+    sessionId: payload.sessionId ? primeAgentRawSessionId(payload.sessionId) : undefined,
+  });
   if (targets.length === 0) {
     jsonResponse(res, 409, {
       error: payload.sessionId
@@ -146,6 +158,171 @@ function timeoutBody(
     correlationId,
     timeoutMs,
   };
+}
+
+function buildPrimeAgentPersistPayload(
+  payload: PrimeAgentChatPayload,
+  target: PrimeAgentChannelTarget,
+  assistantReply: string,
+  state: 'stored' | 'failed' = 'stored',
+  failureReason?: string,
+): PrimeAgentPersistTurnPayload {
+  return {
+    sessionId: primeAgentDkgSessionId(target.sessionId),
+    userMessage: payload.text,
+    assistantReply,
+    correlationId: payload.correlationId,
+    turnId: payload.correlationId,
+    persistenceState: state,
+    ...(failureReason ? { failureReason } : {}),
+    metadata: { source: 'prime-agent-channel' },
+  };
+}
+
+function persistenceStateRank(state: PrimeAgentPersistTurnPayload['persistenceState']): number {
+  if (state === 'stored') return 3;
+  if (state === 'failed') return 2;
+  return 1;
+}
+
+async function persistPrimeAgentTurn(
+  ctx: RequestContext,
+  payload: PrimeAgentPersistTurnPayload,
+): Promise<PrimeAgentPersistRouteResult> {
+  const { memoryManager } = ctx;
+  const sessionId = primeAgentDkgSessionId(payload.sessionId);
+  const turnId = payload.turnId || payload.correlationId || randomUUID();
+  try {
+    let existingState: PrimeAgentPersistTurnPayload['persistenceState'] | null = null;
+    try {
+      existingState = await memoryManager.getChatTurnPersistenceState(sessionId, turnId);
+    } catch {
+      existingState = null;
+    }
+    if (existingState === 'stored') {
+      return { statusCode: 200, body: { ok: true, duplicate: true, turnId, sessionId } };
+    }
+    if (existingState) {
+      if (
+        existingState === payload.persistenceState
+        || persistenceStateRank(payload.persistenceState) < persistenceStateRank(existingState)
+      ) {
+        return { statusCode: 200, body: { ok: true, duplicate: true, turnId, sessionId } };
+      }
+      await memoryManager.recordChatTurnPersistenceTransition(
+        sessionId,
+        turnId,
+        payload.persistenceState,
+        {
+          failureReason: payload.failureReason ?? null,
+          assistantReply: payload.assistantReply,
+          toolCalls: payload.toolCalls,
+        },
+      );
+      return { statusCode: 200, body: { ok: true, transitioned: true, turnId, sessionId } };
+    }
+    await memoryManager.storeChatExchange(
+      sessionId,
+      payload.userMessage,
+      payload.assistantReply,
+      payload.toolCalls,
+      {
+        turnId,
+        persistenceState: payload.persistenceState,
+        failureReason: payload.failureReason,
+      },
+    );
+    return { statusCode: 200, body: { ok: true, turnId, sessionId } };
+  } catch (err: any) {
+    return { statusCode: 500, body: { error: err.message } };
+  }
+}
+
+function parsePrimeAgentSseEvent(frame: string): Record<string, unknown> | null {
+  for (const line of frame.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('data:')) continue;
+    const data = trimmed.slice(5).trim();
+    if (!data) continue;
+    try {
+      const parsed = JSON.parse(data);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+        ? parsed as Record<string, unknown>
+        : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+async function pipePrimeAgentStreamAndCollect(
+  ctx: RequestContext,
+  reader: { read: () => Promise<{ done: boolean; value?: Uint8Array }>; cancel: () => Promise<unknown>; releaseLock: () => void },
+): Promise<{ text: string; terminal: boolean }> {
+  const { req, res } = ctx;
+  let clientGone = false;
+  const cancelUpstream = () => {
+    if (clientGone) return;
+    clientGone = true;
+    void reader.cancel().catch(() => {});
+  };
+
+  req.on('aborted', cancelUpstream);
+  res.on('close', () => {
+    if (!res.writableEnded) cancelUpstream();
+  });
+  res.on('error', cancelUpstream);
+
+  const decoder = new TextDecoder();
+  let frameBuffer = '';
+  let text = '';
+  let terminal = false;
+
+  const inspectChunk = (chunk: Uint8Array): boolean => {
+    frameBuffer += decoder.decode(chunk, { stream: true });
+    const separator = /\r?\n\r?\n/;
+    let consumed = 0;
+    let match = separator.exec(frameBuffer.slice(consumed));
+    while (match) {
+      const separatorStart = consumed + match.index;
+      const frame = frameBuffer.slice(consumed, separatorStart);
+      const frameEnd = separatorStart + match[0].length;
+      const event = parsePrimeAgentSseEvent(frame);
+      if (event?.type === 'delta' && typeof event.text === 'string') {
+        text += event.text;
+      } else if (event?.type === 'final') {
+        if (typeof event.text === 'string') text = event.text;
+        terminal = true;
+        return true;
+      }
+      consumed = frameEnd;
+      match = separator.exec(frameBuffer.slice(consumed));
+    }
+    frameBuffer = frameBuffer.slice(consumed);
+    if (frameBuffer.length > 1_000_000) frameBuffer = '';
+    return false;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done || clientGone) break;
+      if (value !== undefined) {
+        const sawTerminal = inspectChunk(value);
+        await writeOpenClawStreamChunk(res, value);
+        if (clientGone) break;
+        if (sawTerminal) {
+          if (!res.writableEnded) res.end();
+          cancelUpstream();
+          break;
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  return { text, terminal };
 }
 
 async function readPayload(
@@ -259,10 +436,16 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
       } catch {
         parsed = { text };
       }
+      const assistantReply = parsed && typeof parsed === 'object' && typeof (parsed as { text?: unknown }).text === 'string'
+        ? (parsed as { text: string }).text
+        : text;
+      const persisted = await persistPrimeAgentTurn(ctx, buildPrimeAgentPersistPayload(payload, target, assistantReply));
+      if (persisted.statusCode >= 400) return jsonResponse(res, persisted.statusCode, persisted.body);
       return jsonResponse(res, 200, {
         ...(parsed && typeof parsed === 'object' ? parsed as Record<string, unknown> : { text }),
-        sessionId: target.sessionId,
+        sessionId: primeAgentDkgSessionId(target.sessionId),
         correlationId: payload.correlationId,
+        turnId: String(persisted.body.turnId ?? payload.correlationId),
       });
     } catch (err) {
       if (isPrimeAgentTimeoutError(err)) {
@@ -341,9 +524,10 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
         ...corsHeaders(resolveCorsOrigin(req, daemonState.moduleCorsAllowed)),
       });
 
-      // Same pump Hermes and OpenClaw use — backpressure handling and
-      // terminal-frame detection live in one place on purpose.
-      await pipeOpenClawStream(req, res, (transportRes.body as any).getReader());
+      const streamed = await pipePrimeAgentStreamAndCollect(ctx, (transportRes.body as any).getReader());
+      if (streamed.terminal) {
+        await persistPrimeAgentTurn(ctx, buildPrimeAgentPersistPayload(payload, target, streamed.text)).catch(() => undefined);
+      }
       if (!res.writableEnded) res.end();
       return;
     } catch (err) {
@@ -380,5 +564,22 @@ export async function handlePrimeAgentRoutes(ctx: RequestContext): Promise<void>
     // Always 200. `ok: false` with `sessionCount: 0` is the idle state, not a
     // server fault, and the UI needs the counts either way.
     return jsonResponse(res, 200, health);
+  }
+
+  if (req.method === 'POST' && path === '/api/prime-agent-channel/persist-turn') {
+    const body = await readBody(req, SMALL_BODY_BYTES);
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      return jsonResponse(res, 400, { error: 'Invalid JSON' });
+    }
+    const payload = normalizePrimeAgentPersistTurnPayload(parsed);
+    if ('error' in payload) return jsonResponse(res, 400, { error: payload.error });
+    const result = await persistPrimeAgentTurn(ctx, {
+      ...payload,
+      sessionId: primeAgentDkgSessionId(payload.sessionId),
+    });
+    return jsonResponse(res, result.statusCode, result.body);
   }
 }

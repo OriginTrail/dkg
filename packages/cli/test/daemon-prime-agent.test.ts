@@ -101,6 +101,22 @@ function makeJsonResponse() {
   return res;
 }
 
+function makeMemoryManager() {
+  const stored: any[] = [];
+  const transitions: any[] = [];
+  return {
+    stored,
+    transitions,
+    getChatTurnPersistenceState: vi.fn(async () => null),
+    storeChatExchange: vi.fn(async (...args: any[]) => {
+      stored.push(args);
+    }),
+    recordChatTurnPersistenceTransition: vi.fn(async (...args: any[]) => {
+      transitions.push(args);
+    }),
+  };
+}
+
 /**
  * A stand-in for the extension-hosted bridge. Real one, on a real ephemeral
  * loopback port, so the descriptor -> target -> fetch path is exercised end to
@@ -270,6 +286,7 @@ describe('/api/prime-agent-channel/send', () => {
   it('forwards to the live session with the bridge token', async () => {
     const bridge = await startStubBridge({ sessionId: 's1', sendBody: { text: 'pong', correlationId: 'c1' } });
     writeDescriptor('s1', bridge.url);
+    const memoryManager = makeMemoryManager();
 
     const res = makeJsonResponse();
     await handlePrimeAgentRoutes({
@@ -279,12 +296,25 @@ describe('/api/prime-agent-channel/send', () => {
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/send',
       requestAgentAddress: '0x0000000000000000000000000000000000000001',
+      memoryManager,
     } as any);
 
     expect(res.statusCode).toBe(200);
-    expect(JSON.parse(res.body)).toMatchObject({ text: 'pong', sessionId: 's1', correlationId: 'c1' });
+    expect(JSON.parse(res.body)).toMatchObject({
+      text: 'pong',
+      sessionId: 'prime-agent:dkg-ui:s1',
+      correlationId: 'c1',
+      turnId: 'c1',
+    });
     expect(bridge.seen?.headers['x-dkg-bridge-token']).toBe('bridge-token');
     expect(bridge.seen?.body).toMatchObject({ text: 'hi', sessionId: 's1' });
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledWith(
+      'prime-agent:dkg-ui:s1',
+      'hi',
+      'pong',
+      undefined,
+      expect.objectContaining({ turnId: 'c1', persistenceState: 'stored' }),
+    );
   });
 
   it('does not silently reroute when the addressed session is gone', async () => {
@@ -488,6 +518,7 @@ describe('/api/prime-agent-channel/stream', () => {
       ],
     });
     writeDescriptor('s1', bridge.url);
+    const memoryManager = makeMemoryManager();
 
     const res = makeJsonResponse();
     await handlePrimeAgentRoutes({
@@ -496,6 +527,7 @@ describe('/api/prime-agent-channel/stream', () => {
       config: enabledConfig(),
       bridgeAuthToken: 'bridge-token',
       path: '/api/prime-agent-channel/stream',
+      memoryManager,
     } as any);
 
     expect(res.statusCode).toBe(200);
@@ -506,6 +538,45 @@ describe('/api/prime-agent-channel/stream', () => {
     expect(res.body).toContain('"type":"final"');
     expect(res.body).toContain('Hello!');
     expect(res.body).not.toContain('must-be-dropped');
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledWith(
+      'prime-agent:dkg-ui:s1',
+      'hi',
+      'Hello!',
+      undefined,
+      expect.objectContaining({ turnId: 'c1', persistenceState: 'stored' }),
+    );
+  });
+
+  it('persists an adapter-reported turn through the shared chat memory manager', async () => {
+    const memoryManager = makeMemoryManager();
+    const res = makeJsonResponse();
+    await handlePrimeAgentRoutes({
+      req: makeJsonRequest('POST', '/api/prime-agent-channel/persist-turn', {
+        sessionId: 's1',
+        userMessage: 'hello',
+        assistantReply: 'hi there',
+        turnId: 'turn-1',
+      }),
+      res,
+      config: enabledConfig(),
+      bridgeAuthToken: 'bridge-token',
+      path: '/api/prime-agent-channel/persist-turn',
+      memoryManager,
+    } as any);
+
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      sessionId: 'prime-agent:dkg-ui:s1',
+      turnId: 'turn-1',
+    });
+    expect(memoryManager.storeChatExchange).toHaveBeenCalledWith(
+      'prime-agent:dkg-ui:s1',
+      'hello',
+      'hi there',
+      undefined,
+      expect.objectContaining({ turnId: 'turn-1', persistenceState: 'stored' }),
+    );
   });
 });
 
