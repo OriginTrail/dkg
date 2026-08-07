@@ -20,11 +20,27 @@ export type SyncRow = Readonly<{ s: string; p: string; o: string; g: string }>;
  * They bound temporary materialization even when an operator configures a very
  * large cache. Larger phases use direct store paging instead of being cached.
  */
-// Keep the ordinary 50 x 1,000-triple release gate on the snapshot path. The
-// byte ceiling remains the primary heap bound, so raising the row ceiling does
-// not permit a large-literal snapshot to exceed 32 MiB of estimated row data.
-export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 64_000;
-export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 32 * 1024 * 1024;
+// Sized against measured mainnet `_meta` density (fifa-world-cup-2026,
+// 2026-08-05: 76,265 rows / 34.5 MiB => 474.5 B/row via
+// estimateStringRowHeapBytes). The two caps are CO-TUNED: 200,000 x 474.5 B
+// ~= 90.5 MiB, just under the 96 MiB ceiling, so neither cap is dead code —
+// ordinary rows bind on ROWS and large-literal rows bind on BYTES.
+//
+// Both stay strictly below the retained per-snapshot caps
+// (SYNC_RESPONDER_PER_SNAPSHOT_ROW_LIMIT = 250_000,
+// SYNC_RESPONDER_PER_SNAPSHOT_BYTES_ESTIMATE_LIMIT = 128 MiB), preserving the
+// "hard build caps < retained-cache defaults" ordering documented above: a
+// snapshot that passes the build check is always admissible, never built and
+// then rejected.
+//
+// Why raised from 64,000 / 32 MiB: a CG whose `_meta` crossed the old ceiling
+// fell off the in-memory predicate (filterDurableMetaSnapshotRows) onto the
+// SPARQL fallback (buildDurableMetaRowsQuery), whose assertion-name branch is
+// O(candidates x assertionName-lifecycles) and is re-paid per page. Measured on
+// mainnet that fallback exceeded a 120s server-side query deadline; fifa was
+// only 1.19x over the row cap and 1.08x over the byte cap when it fell off.
+export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS = 200_000;
+export const SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_BYTES_ESTIMATE = 96 * 1024 * 1024;
 export const SYNC_RESPONDER_SNAPSHOT_BUILD_PAGE_ROWS = 500;
 
 export interface SyncRowSnapshotLoadLimits {

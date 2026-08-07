@@ -8,14 +8,8 @@
 
 ## Active Now
 
-* [OriginTrail DKG V10 Pre-Mainnet Bug Bounty](active-now/dkg-v10-premainnet-bounty.md)
 * [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
 * [Staking & Migration (V8 → V10)](active-now/staking-migration.md)
-
-## OriginTrail V9/V10
-
-* [Roadmap](origintrail-v9-v10/roadmap.md)
-* [V10 Mainnet Release Timeline](origintrail-v9-v10/v10-mainnet-release-timeline.md)
 
 ## How DKG Works
 
@@ -76,4 +70,7 @@
 
 ## Archive
 
+* [Pre-Mainnet Bug Bounty (closed)](active-now/dkg-v10-premainnet-bounty.md)
+* [Historical V9/V10 Roadmap](origintrail-v9-v10/roadmap.md)
+* [Historical V10 Mainnet Release Plan](origintrail-v9-v10/v10-mainnet-release-timeline.md)
 * [V9 Archive](archive/v9/README.md)
