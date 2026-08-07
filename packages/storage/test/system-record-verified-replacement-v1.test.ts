@@ -9,7 +9,6 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
-  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -32,6 +31,7 @@ import {
   type SystemRecordVerifiedReplacementLaneBindingV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
+import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
 
 interface Vectors {
   readonly variants: {
@@ -47,23 +47,6 @@ const vectors = JSON.parse(readFileSync(new URL(
   import.meta.url,
 ), 'utf8')) as Vectors;
 
-function identityProjectionFor(
-  head: Pick<AgentProfileActiveHeadObjectV1,
-    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
-) {
-  const identity = agentProfileIdentityFactsV1({
-    rootSubject: head.rootSubject,
-    peerId: head.peerId,
-    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
-    agentAddress: head.evmIssuer,
-  });
-  return [identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
-    subject: head.rootSubject,
-    ...fact,
-    graph: '',
-  }));
-}
-
 function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
   'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return [
@@ -73,7 +56,7 @@ function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
       object: 'https://dkg.network/ontology#Agent',
       graph: '',
     },
-    ...identityProjectionFor(head),
+    ...agentProfileIdentityProjectionV1(head),
     { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
     { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
   ].sort(compareProjectionQuads);
@@ -645,7 +628,7 @@ describe('system-record verified replacement V1', () => {
         object: '"Meow"@en',
         graph: '',
       },
-      ...identityProjectionFor(base.input.head),
+      ...agentProfileIdentityProjectionV1(base.input.head),
     ].sort(compareProjectionQuads);
     const canonicalProjectionBytes = canonicalBytesFor(projectionQuads);
     const contentDigest = contentDigestFor(projectionQuads);

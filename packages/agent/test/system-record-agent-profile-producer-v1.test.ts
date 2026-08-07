@@ -811,6 +811,26 @@ describe('agent-profile system-record producer V1', () => {
       }),
     ],
     [
+      'a foreign UAL account',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: {
+          ...publication.seal,
+          kaUal: publication.seal.kaUal.replace(
+            /\/0x[0-9a-f]{40}\//,
+            `/0x${'22'.repeat(20)}/`,
+          ),
+        },
+      }),
+    ],
+    [
+      'a foreign asserted chain',
+      (publication: AgentProfilePublicationBindingV1) => ({
+        ...publication,
+        seal: { ...publication.seal, assertedAtChainId: '1' },
+      }),
+    ],
+    [
       'a foreign KAv10 deployment',
       (publication: AgentProfilePublicationBindingV1) => ({
         ...publication,
@@ -864,6 +884,41 @@ describe('agent-profile system-record producer V1', () => {
     })).rejects.toThrow(/validUntil must be later than issuedAt/);
     expect(peerSign).not.toHaveBeenCalled();
     expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
+  it('rejects an already-expired validity window before signing, install, or commit', async () => {
+    const fixture = await producerFixture();
+    const peerSign = vi.fn(fixture.peerSigner.sign);
+    const evmSignMessage = vi.fn(fixture.evmSigner.signMessage);
+    const prepareCommit = vi.fn(fixture.store.prepareCommit.bind(fixture.store));
+    const store: AgentProfileProducerPublicationStoreV1 = {
+      snapshot: () => fixture.store.snapshot(),
+      resolveArtifact: (reference) => fixture.store.resolveArtifact(reference),
+      prepareCommit,
+    };
+    const install = vi.fn();
+    const nowMs = Date.parse('2026-08-07T12:00:00Z');
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: { ...fixture.peerSigner, sign: peerSign },
+      evmSigner: { ...fixture.evmSigner, signMessage: evmSignMessage },
+      store,
+      nowMs: () => nowMs,
+      fence: () => {},
+      install,
+    });
+
+    await expect(produce(producer, fixture.prepared, {
+      ...fixture.publication,
+      issuedAt: '2026-08-06T00:00:00Z',
+      validUntil: '2026-08-06T01:00:00Z',
+    })).rejects.toThrow(/already expired/);
+    expect(peerSign).not.toHaveBeenCalled();
+    expect(evmSignMessage).not.toHaveBeenCalled();
+    expect(install).not.toHaveBeenCalled();
+    expect(prepareCommit).not.toHaveBeenCalled();
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 

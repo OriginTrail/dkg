@@ -8,7 +8,6 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
-  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -48,6 +47,7 @@ import { SYSTEM_RECORD_V1_PREDICATES, systemRecordEpochSubjectV1 } from '../src/
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../src/system-record-materializer-v1.js';
 import type { Quad } from '../src/triple-store.js';
+import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
 
 interface Vectors {
   readonly variants: { readonly active: { readonly object: AgentProfileActiveHeadObjectV1 } };
@@ -85,7 +85,7 @@ const VERIFIED_WITH_DERIVED_SUBJECT = await verifiedFixture([
     object: '"Meow"@en',
     graph: '',
   },
-  ...identityProjectionFor(vectors.variants.active.object),
+  ...agentProfileIdentityProjectionV1(vectors.variants.active.object),
 ].sort(compareProjectionQuads), [vectors.variants.active.object.rootSubject, DERIVED_CAPABILITY]);
 
 async function verifiedFixture(
@@ -888,28 +888,11 @@ class FakeClient implements SystemRecordAtomicApplyHttpClientV1 {
   }
 }
 
-function identityProjectionFor(
-  head: Pick<AgentProfileActiveHeadObjectV1,
-    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
-) {
-  const identity = agentProfileIdentityFactsV1({
-    rootSubject: head.rootSubject,
-    peerId: head.peerId,
-    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
-    agentAddress: head.evmIssuer,
-  });
-  return [identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
-    subject: head.rootSubject,
-    ...fact,
-    graph: '',
-  }));
-}
-
 function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
   'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return [
     { subject: head.rootSubject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'https://dkg.network/ontology#Agent', graph: '' },
-    ...identityProjectionFor(head),
+    ...agentProfileIdentityProjectionV1(head),
     { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
     { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
   ].sort(compareProjectionQuads);

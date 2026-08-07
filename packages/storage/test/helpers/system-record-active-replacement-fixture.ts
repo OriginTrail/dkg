@@ -7,7 +7,6 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
-  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileHeadObjectDigestV1,
@@ -36,6 +35,7 @@ import {
 } from '../../src/system-record-verified-replacement-v1-internal.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../../src/system-record-materializer-v1.js';
 import type { Quad } from '../../src/triple-store.js';
+import { agentProfileIdentityProjectionV1 } from './agent-profile-identity-projection-v1.js';
 
 interface Vectors {
   readonly variants: { readonly active: { readonly object: AgentProfileActiveHeadObjectV1 } };
@@ -143,12 +143,6 @@ function issue(binding: SystemRecordLaneExecutionBindingV1): SystemRecordActiveR
 
 function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
   'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
-  const identity = agentProfileIdentityFactsV1({
-    rootSubject: head.rootSubject,
-    peerId: head.peerId,
-    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
-    agentAddress: head.evmIssuer,
-  });
   return [
     {
       subject: head.rootSubject,
@@ -156,11 +150,7 @@ function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
       object: 'https://dkg.network/ontology#Agent',
       graph: '',
     },
-    ...[identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
-      subject: head.rootSubject,
-      ...fact,
-      graph: '',
-    })),
+    ...agentProfileIdentityProjectionV1(head),
     { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
     { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
   ].sort((left, right) => Buffer.compare(

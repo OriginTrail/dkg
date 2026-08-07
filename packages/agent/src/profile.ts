@@ -245,14 +245,13 @@ interface AgentProfileFactV1 {
 }
 
 interface AgentProfileModelV1 {
-  readonly projectionFacts: readonly AgentProfileFactV1[];
-  readonly publicationOnlyFacts: readonly AgentProfileFactV1[];
+  readonly facts: readonly AgentProfileFactV1[];
   readonly rootEntity: string;
 }
 
 /**
- * Canonical profile model. Projection facts are governed by schema V1, while the
- * separate publication-only lane makes future legacy extensions an explicit choice.
+ * Canonical signed-profile facts governed by schema V1. Future legacy-only
+ * output belongs explicitly in the publication renderer, not in this model.
  */
 function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModelV1 {
   // A-12: normalise the DID subject so profile + endorsement subjects
@@ -260,13 +259,12 @@ function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModel
   // `canonicalAgentDidSubject` for rationale.
   const identity = agentProfileAdvertisedIdentityV1(config);
   const entity = identity.rootEntity;
-  const projectionFacts: AgentProfileFactV1[] = [];
-  const publicationOnlyFacts: AgentProfileFactV1[] = [];
+  const facts: AgentProfileFactV1[] = [];
   const role = config.nodeRole ?? 'edge';
   const profileTimestamp = config.lastSeen ?? new Date().toISOString();
 
   const q = (s: string, p: string, o: string) =>
-    projectionFacts.push({ subject: s, predicate: p, object: o });
+    facts.push({ subject: s, predicate: p, object: o });
 
   // Type: dkg:Agent + role-specific subclass
   q(entity, RDF_TYPE, `${DKG}Agent`);
@@ -379,18 +377,17 @@ function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModel
     }
   }
 
-  return { projectionFacts, publicationOnlyFacts, rootEntity: entity };
+  return { facts, rootEntity: entity };
 }
 
 function renderAgentProfilePublicationV1(
   model: AgentProfileModelV1,
 ): Quad[] {
-  return [...model.projectionFacts, ...model.publicationOnlyFacts]
-    .map((fact) => ({ ...fact, graph: AGENT_REGISTRY_GRAPH }));
+  return model.facts.map((fact) => ({ ...fact, graph: AGENT_REGISTRY_GRAPH }));
 }
 
 function renderAgentProfileProjectionV1(
   model: AgentProfileModelV1,
 ): AgentProfileProjectionQuadV1[] {
-  return model.projectionFacts.map((fact) => ({ ...fact, graph: '' }));
+  return model.facts.map((fact) => ({ ...fact, graph: '' }));
 }

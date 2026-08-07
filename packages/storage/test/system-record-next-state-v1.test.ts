@@ -7,7 +7,6 @@ import {
   V10MerkleTree,
 } from '@origintrail-official/dkg-core';
 import {
-  agentProfileIdentityFactsV1,
   buildAgentProfileVerificationClosureV1,
   canonicalizeOwnedSubjectTableObjectV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
@@ -59,6 +58,7 @@ import {
   type SystemRecordVerifiedReplacementFactsV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
+import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
 
 interface Vectors {
   readonly variants: {
@@ -839,28 +839,11 @@ function prepareHead(
   } as AgentProfileActiveHeadObjectV1;
 }
 
-function identityProjection(
-  head: Pick<AgentProfileActiveHeadObjectV1,
-    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
-) {
-  const identity = agentProfileIdentityFactsV1({
-    rootSubject: head.rootSubject,
-    peerId: head.peerId,
-    publicKey: Buffer.from(head.peerPublicKey, 'base64url').toString('base64'),
-    agentAddress: head.evmIssuer,
-  });
-  return [identity.peerId, identity.publicKey!, identity.agentAddress!].map((fact) => ({
-    subject: head.rootSubject,
-    ...fact,
-    graph: '',
-  }));
-}
-
 function smallProjection(head: Pick<AgentProfileActiveHeadObjectV1,
   'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return sortProjection([
     { subject: head.rootSubject, predicate: RDF_TYPE, object: 'https://dkg.network/ontology#Agent', graph: '' },
-    ...identityProjection(head),
+    ...agentProfileIdentityProjectionV1(head),
     { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
     { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
   ]);
@@ -871,7 +854,7 @@ function maximumProjection(head: Pick<AgentProfileActiveHeadObjectV1,
   const root = head.rootSubject;
   const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
     { subject: root, predicate: RDF_TYPE, object: 'https://dkg.network/ontology#Agent', graph: '' },
-    ...identityProjection(head),
+    ...agentProfileIdentityProjectionV1(head),
   ];
   for (let index = 0; index < 9_996; index += 1) {
     quads.push({
@@ -894,7 +877,7 @@ function largeProjection(
   const subjects = [root];
   const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
     { subject: root, predicate: 'https://schema.org/name', object: '"large"', graph: '' },
-    ...identityProjection(head),
+    ...agentProfileIdentityProjectionV1(head),
   ];
   for (let index = 1; index <= count; index += 1) {
     const subject = `${root}/.well-known/genid/${kind === 'capability' ? 'cap' : 'offering'}${index}`;

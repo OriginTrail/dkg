@@ -211,6 +211,9 @@ export function createAgentProfileProducerV1(
     if (Date.parse(validUntil) <= Date.parse(issuedAt)) {
       throw new Error('agent-profile validUntil must be later than issuedAt');
     }
+    if (Date.parse(validUntil) <= verifierNowMs) {
+      throw new Error('agent-profile validUntil is already expired');
+    }
     const evmIssuer = options.evmSigner.address;
     assertCanonicalEvmAddress(evmIssuer, 'profile EVM issuer');
     const snapshot = options.store.snapshot();
