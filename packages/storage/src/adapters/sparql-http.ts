@@ -69,7 +69,6 @@ import {
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerV1,
 } from '../system-record-materializer-v1.js';
-import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
@@ -203,10 +202,6 @@ export class SparqlHttpStore implements TripleStore {
   private readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 | null;
   /** Lazily built so a store that is never asked for the lane allocates nothing. */
   private systemRecordLane: SystemRecordLaneControllerV1 | null | undefined;
-  /** The owned pool for the CURRENT child generation. */
-  private managedClient: OwnedManagedHttpClient | null = null;
-  /** A pool retired by `destroyClient`, still awaiting drain by `awaitRetiredWork`. */
-  private retiredClient: OwnedManagedHttpClient | null = null;
 
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
@@ -379,69 +374,41 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   /**
-   * Refuse a managed-store mutation whose backend we cannot prove we own.
+   * Refuse a managed-store MUTATION whose backend we cannot prove we own.
    *
-   * Scoped to MUTATIONS on stores that actually hold an ownership lease:
+   * INVARIANT: same live-ownership predicate as the read guard, but checked
+   * INSIDE `postUpdate`’s scheduled work callback rather than at call time —
+   * the scheduler releases work queued before a failed generation handoff, so
+   * a write must be re-checked when it resumes, not when it was issued.
    *
-   * - An operator-configured store has no lease, returns on the first line, and
-   *   pays one already-loaded field read. Nothing about the default path moves.
-   * - Reads are deliberately NOT refused. A lane failure must not take the
-   *   daemon's whole triple store down — the same reasoning that made a failed
-   *   shutdown leave the child alive rather than kill it. A read against a dead
-   *   port fails at the transport anyway, and refusing reads would turn every
-   *   child respawn into a total store outage.
+   * A store with no lease returns immediately and pays one field read, so the
+   * default path is unchanged.
    *
-   * It is a live READ of the lease, not a latch armed by the lane, and that is a
-   * deliberate departure from the fix the review proposed. Three measured
-   * reasons:
-   *
-   * 1. An armed latch's safety margin is ZERO microtasks. The scheduler rejects
-   *    the barrier one reaction before it releases queued work, so a latch
-   *    written synchronously in the lane's `catch` wins by exactly one tick —
-   *    and one added `await` anywhere between them silently disarms it with
-   *    every test still green. A dispatch-time read has no ordering requirement
-   *    to get wrong.
-   * 2. An armed latch is blanket. Of the five handoff steps, two
-   *    (`destroyClient`, `rotateMaterializationEpoch`) leave the child proven
-   *    and healthy; latching on "the barrier threw" refuses every managed write
-   *    for the process lifetime on a node where nothing was wrong.
-   * 3. A lane-armed latch fixes the RAREST instance of this class. The same
-   *    exposure exists with no lane involved: on an ordinary child exit the
-   *    supervisor invalidates ownership and revives, and for the whole backoff
-   *    the adapter keeps POSTing to a port it does not own. That path ships
-   *    today; the lane path has no production caller at all.
-   *
-   * Self-clearing follows from being a read: when the supervisor binds a proven
-   * replacement generation the lease reads live again and writes resume, with no
-   * clear path to forget and no sticky field to leave set. A latch would have
-   * needed one, and the version this was modelled on does not have it — which
-   * would have converted a self-healing respawn into a mandatory node restart.
+   * This is a live READ of the lease, deliberately not a latch armed by the
+   * lane: a read has no arming order to get wrong, refuses nothing while the
+   * child is provably healthy, is self-clearing when a replacement generation
+   * binds, and also covers the ordinary child-exit window that has no lane
+   * involvement at all. Rationale and the measurements behind it are in the PR
+   * discussion and in ADR 0002; the regressions are named on the read guard.
    */
   /**
    * Refuse a managed-store READ whose backend we cannot prove is ours.
    *
-   * SAME predicate as the mutation guard: live, i.e. the supervisor-owned
-   * child is the proven ready listener. An earlier revision refused only on
-   * TERMINAL, arguing that a not-ready read "fails at the transport anyway" so
-   * refusing would convert every respawn into a store outage. That argument is
-   * wrong, and the counter-example is the whole reason the lease exists:
+   * INVARIANT: a managed store issues no endpoint request — read or write —
+   * unless the supervisor-owned child is the proven ready listener. Same
+   * predicate as the mutation guard, checked at dispatch, zero I/O on refusal.
    *
-   *   an unexpected child exit records `child-exit`, which is NON-terminal. If
-   *   another process binds the port during the backoff/revive window the read
-   *   does not fail at the transport — it SUCCEEDS, against a foreign server,
-   *   and that answer is accepted as this node’s state.
+   * Reads matter because a foreign answer does not stay local: assertion
+   * authorship puts a merkle root ON-CHAIN and the sync responder serves store
+   * reads TO PEERS. A non-terminal `child-exit` window is exactly when another
+   * process can take the bind, so "not ready" is not safe to serve through.
    *
-   * Port takeover is precisely the case ownership exists to make untrustworthy,
-   * and a foreign answer does not stay local: `finalized-assertion-author` reads
-   * the store to build the assertion whose merkle root goes ON-CHAIN, and the
-   * sync responder serves store reads TO PEERS.
+   * Refusal here is bounded and self-clearing: it lasts until
+   * `bindReadyGeneration()` proves a replacement.
    *
-   * The outage objection does not survive once the two windows are told apart.
-   * A not-ready refusal is BOUNDED and self-clearing — it lasts until
-   * `bindReadyGeneration()` proves the replacement — which is exactly the
-   * transient condition every consumer’s retry-with-backoff branch is built
-   * for. The retry-storm hazard belongs to the TERMINAL case, which is
-   * permanent, and which has no production trigger today.
+   * Regressions: `managed-backend-ownership-dispatch-v1.test.ts` (per-reason
+   * refusal, recovery, zero-I/O) and `managed-terminal-read-through-index-v1
+   * .test.ts` (the decorator must not swallow the refusal).
    */
   /**
    * Production disposal for the memoized lane controller.
@@ -642,28 +609,23 @@ export class SparqlHttpStore implements TripleStore {
     supervisor: ManagedOxigraphSupervisorHandoffV1,
   ): SystemRecordChildHandoffV1 {
     return {
-      // `destroyClient` moves the live client to `retiredClient` rather than
-      // dropping it, so `awaitRetiredWork` still has something to drain. The
-      // previous shape nulled the field and then re-read that same null, which
-      // made step 3 of the sequence a structural no-op — harmless only because
-      // step 1 happened to await settlement, and actively wrong in `disable`,
-      // which calls `awaitRetiredWork` with no preceding `destroyClient` and so
-      // would have destroyed the CURRENT client and left the field pointing at
-      // a dead pool bound to the live generation.
-      destroyClient: async () => {
-        const retired = this.managedClient;
-        this.managedClient = null;
-        if (retired) {
-          this.retiredClient = retired;
-          await retired.destroyAndSettle();
-        }
-      },
+      // B2 owns no connection pool, so both pool steps are genuinely empty here
+      // — and saying so is the point. What B2 does own and pin is the ORDER:
+      // destroy the pool, THEN prove the child dead, THEN drain what the retired
+      // pool still had inflight, THEN prove a clean replacement. The materializer
+      // is what imposes that order, and it is asserted there
+      // (`system-record-materializer-lifecycle-v1.test.ts`, "Order is the
+      // invariant, not merely the set"), so the sequence is protected before
+      // anything fills these steps in.
+      //
+      // Stack B3 supplies the pool half, because B3 is where the first byte is
+      // actually dispatched. Carrying an owned HTTP client here would be 260
+      // lines that no production path can reach — and it already caused one real
+      // defect: a pool built solely to be discarded turned an ordinary child
+      // recovery into a permanent `capability-lost`.
+      destroyClient: async () => {},
       stopAndProveOwnedChildDead: () => supervisor.stopAndProveOwnedChildDead(),
-      awaitRetiredWork: async () => {
-        const retired = this.retiredClient;
-        this.retiredClient = null;
-        if (retired) await retired.destroyAndSettle();
-      },
+      awaitRetiredWork: async () => {},
       startAndProveCleanGeneration: () => supervisor.startAndProveCleanGeneration(),
       rotateMaterializationEpoch: async () => {
         this.invalidateListGraphsCache();

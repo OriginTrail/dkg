@@ -762,8 +762,15 @@ interface SystemRecordLaneSessionV1 {
   readonly activationGeneration: string;
   // B2: fail-closed, dispatches nothing. B3: the full-state CAS, which
   // revalidates internally before it commits.
-  applyVerified(proof: VerifiedAgentProfileReplacementV1, options?: QueryOptions):
-    Promise<SystemRecordApplyOutcomeV1>;
+  //
+  // Deliberately no `options?: QueryOptions`. An earlier draft of this ADR
+  // carried one, but neither implementation takes it: the lane owns its own
+  // sequencing through the control barrier, so a per-call timeout or priority
+  // from a caller would either be ignored or race the barrier. Shipping the
+  // parameter unused would be dead public surface that reviewers must keep
+  // re-deciding about, so the contract drops it rather than both stacks
+  // silently disagreeing with the document.
+  applyVerified(proof: VerifiedAgentProfileReplacementV1): Promise<SystemRecordApplyOutcomeV1>;
   close(mode: 'disable' | 'shutdown'): Promise<void>;
 }
 

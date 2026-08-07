@@ -63,7 +63,6 @@ export {
   type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from './managed-oxigraph-ownership-v1-internal.js';
-export { OwnedManagedHttpClient } from './adapters/managed-http-client.js';
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,

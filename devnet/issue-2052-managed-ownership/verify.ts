@@ -82,7 +82,7 @@ async function main(): Promise<void> {
     scope: 'issue #2052 Stack B2 live managed-Oxigraph ownership conformance',
     sourceCommit,
     rawArtifactSha256,
-    predecessors: raw.predecessors.map((entry) => ({ id: entry.id, pass: entry.pass })),
+    pinnedPredecessors: raw.pinnedPredecessors,
     checks: checks.map((check) => ({ name: check.name, pass: true as const })),
   };
 
@@ -93,7 +93,7 @@ async function main(): Promise<void> {
   console.log(`[managed-ownership-verifier] verdict artifact: ${VERDICT_ARTIFACT}`);
   console.log(
     `[managed-ownership-verifier] PASS: ${checks.length} checks, ` +
-      `${raw.predecessors.length} predecessor entries`,
+      `${raw.pinnedPredecessors.length} pinned predecessor commits (inventory, not verdicts)`,
   );
 }
 

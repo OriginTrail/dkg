@@ -20,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 import {
-  OwnedManagedHttpClient,
   SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
   SYSTEM_RECORD_V1_STATE_GRAPH,
   attachManagedOxigraphLeaseV1,
@@ -44,7 +43,7 @@ import {
   MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION,
   type LiveHandoffMeasurementV1,
   type ManagedOwnershipRawResultV1,
-  type PredecessorEntryResultV1,
+  type CurrentBinaryConformanceV1,
 } from './model.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -583,9 +582,7 @@ async function main(): Promise<void> {
     }
   });
 
-  const predecessors: PredecessorEntryResultV1[] = [];
-  let ownedSocketsBeforeDestroy = 0;
-  let leakedOwnedSockets = 0;
+  let currentBinaryConformance: CurrentBinaryConformanceV1 | null = null;
   const capability = {
     withoutLease: false,
     withLeaseWithoutHandoff: false,
@@ -687,21 +684,9 @@ async function main(): Promise<void> {
     capability.withLiveLeaseAndHandoff =
       full.getSystemRecordLaneControllerV1?.() !== undefined;
 
-    // ---- Owned-client socket ownership: destroy must leave nothing behind.
-    const owned = new OwnedManagedHttpClient('1');
-    await owned.post(
-      server.updateEndpoint,
-      'application/sparql-update; charset=utf-8',
-      'INSERT DATA { GRAPH <urn:dkg:gate:probe> { <urn:s> <urn:p> "o" . } }',
-      5_000,
-    );
-    // Captured BEFORE destroy. `destroyAndSettle` loops until the count is zero
-    // and throws otherwise, so reading it afterwards alone can only ever be 0 —
-    // an assertion that cannot fail. The pair proves the probe is live.
-    ownedSocketsBeforeDestroy = owned.openSocketCount;
-    await owned.destroyAndSettle();
-    leakedOwnedSockets = owned.openSocketCount;
-
+    // No owned-client socket probe. The pool moved to Stack B3 with the class
+    // that owns it; measuring it here would exercise a capability that no B2
+    // production path can reach.
     // ---- Predecessor matrix: every manifest entry, against the live store.
     //
     // HONEST FRAMING, because the artifact previously overstated this. No
@@ -710,7 +695,19 @@ async function main(): Promise<void> {
     // role is to pin WHICH commits must keep the property. `executedAgainst`
     // says so in the artifact itself rather than only in prose that the uploaded
     // evidence does not carry.
-    for (const entry of manifest.entries) {
+    // ONCE, against the current binary — not once per manifest entry.
+    //
+    // This used to iterate the manifest and emit a `pass` per pinned commit,
+    // which published green PREDECESSOR verdicts that were never measured: no
+    // predecessor is checked out or built, so every row ran this same binary
+    // and the rows were identical by construction. `executedAgainst` made the
+    // caveat visible but did not make the verdicts evidence.
+    //
+    // The manifest keeps its real job — a reviewed, pinned inventory of the
+    // commits that must retain the property, with every commit proven to
+    // resolve — and the behavioural probe is reported once, honestly, as
+    // current-binary conformance.
+    {
       const failures: string[] = [];
 
       // The deletion probe below is destructive, so re-seed before EACH entry.
@@ -833,19 +830,14 @@ async function main(): Promise<void> {
         );
       }
 
-      predecessors.push({
-        id: entry.id,
-        commit: entry.commit,
-        nodeVersion: entry.nodeVersion,
-        executedAgainst: 'current-binary',
+      currentBinaryConformance = {
         enumeratedReservedGraphs: [...enumerated, ...enumeratedDirect],
         servedReservedGraphs: served,
         deletedReservedGraphsOnCleanup: deleted,
         seededQuadCount,
         expectedQuadCount: fixture.expectedQuadCount,
-        pass: failures.length === 0,
         failures,
-      });
+      };
     }
 
     for (const store of [plain, leaseOnly, full, withChangelog, terminal]) {
@@ -866,12 +858,15 @@ async function main(): Promise<void> {
     oxigraphBinarySha256: `0x${binarySha256}`,
     platform: process.platform,
     nodeVersion: process.versions.node,
-    predecessors,
+    pinnedPredecessors: manifest.entries.map((entry) => ({
+      id: entry.id,
+      commit: entry.commit,
+      nodeVersion: entry.nodeVersion,
+    })),
+    currentBinaryConformance,
     manifestEntryCount: manifest.entries.length,
     manifestCommitsResolved,
     liveHandoff,
-    ownedSocketsBeforeDestroy,
-    leakedOwnedSockets,
     capability,
   };
 

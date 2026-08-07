@@ -170,6 +170,44 @@ describe('managed backend ownership at mutation dispatch', () => {
     await plain.close().catch(() => undefined);
   });
 
+  it('keeps deferring across a proven generation change, never capability-lost', async () => {
+    // The regression for a fix that had none. B2's placeholder apply used to
+    // construct a generation-bound `OwnedManagedHttpClient` and then return
+    // `deferred` without sending a byte; after an ordinary child recovery
+    // advanced the generation, the next apply found that stale pool and returned
+    // `capability-lost` — a RECOVERABLE generation change made permanent by a
+    // client that never carried a request.
+    //
+    // Without this test a future eager-client refactor restores the sticky
+    // failure with CI still green.
+    const store = await managedStore();
+    const lane = store.getSystemRecordLaneControllerV1?.();
+    expect(lane).toBeDefined();
+    const session = await lane!.open({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
+
+    expect(await session.applyVerified({})).toEqual({
+      outcome: 'deferred',
+      reason: 'validation-mismatch',
+    });
+
+    // An ordinary recovery: the child exits and a replacement is proven.
+    ownership.invalidate('child-exit');
+    ownership.bindReadyGeneration();
+
+    // Still the ordinary fail-closed deferral, NOT a lost capability. Same
+    // reason as before the recovery: the lane re-reads the lease per call, so
+    // once the replacement is proven the generations agree again.
+    const after = await session.applyVerified({});
+    expect(after.outcome).not.toBe('capability-lost');
+    expect(after).toEqual({ outcome: 'deferred', reason: 'validation-mismatch' });
+
+    await store.close().catch(() => undefined);
+  });
+
   it('hides reserved internal graphs from adapter-level hasGraph', async () => {
     // The policy module claims reserved state never enumerates and that "no
     // legitimate iterate-and-drop loop can reach one". That held only for the

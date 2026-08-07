@@ -12,26 +12,36 @@ export const MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION =
 export const MANAGED_OWNERSHIP_VERDICT_SCHEMA_VERSION =
   'dkg-system-record-managed-ownership-verdict-v1' as const;
 
-export interface PredecessorEntryResultV1 {
+/**
+ * A pinned manifest entry: an inventory row, NOT a result.
+ *
+ * It deliberately carries no pass/fail. The gate does not check out or build
+ * any predecessor, so a per-commit verdict would be a green claim nobody
+ * measured — every row ran the current binary and the rows were identical by
+ * construction. What the manifest genuinely provides is a reviewed list of the
+ * commits that must retain the property, and each one is proven to resolve to
+ * a real object in this repository.
+ */
+export interface PinnedPredecessorV1 {
   readonly id: string;
   readonly commit: string;
   readonly nodeVersion: string;
-  /**
-   * What the row was actually measured against.
-   *
-   * Always `current-binary`: no predecessor is checked out, built or executed.
-   * The field exists because the ARTIFACT is what gets uploaded as evidence, and
-   * it previously recorded `<commit>: pass` for a binary that never ran — the
-   * caveat lived only in prose the evidence does not carry. The manifest's role
-   * is to pin WHICH commits must keep the property, not to claim they were run.
-   */
-  readonly executedAgainst: 'current-binary';
+}
+
+/**
+ * The behavioural probe, run ONCE against the current binary.
+ *
+ * This is the measured half: reserved state must be invisible to enumeration
+ * (through both the indexed and index-free compositions), unserved by
+ * `hasGraph`, undeletable by generic mutation including an unscoped
+ * `deleteByPattern`, and the seed must be intact afterwards.
+ */
+export interface CurrentBinaryConformanceV1 {
   readonly enumeratedReservedGraphs: readonly string[];
   readonly servedReservedGraphs: readonly string[];
   readonly deletedReservedGraphsOnCleanup: readonly string[];
   readonly seededQuadCount: number;
   readonly expectedQuadCount: number;
-  readonly pass: boolean;
   readonly failures: readonly string[];
 }
 
@@ -137,15 +147,10 @@ export interface ManagedOwnershipRawResultV1 {
   readonly platform: string;
   readonly nodeVersion: string;
 
-  /**
-   * Every manifest entry, checked against a live pinned Oxigraph.
-   *
-   * NOTE: these run against the CURRENT binary, not against each entry's
-   * commit — no predecessor is checked out or built. The manifest's role today
-   * is to pin WHICH commits must keep the property and to require that each one
-   * resolves; executing them per-commit is not implemented.
-   */
-  readonly predecessors: readonly PredecessorEntryResultV1[];
+  /** Reviewed inventory of commits that must retain the property. Not results. */
+  readonly pinnedPredecessors: readonly PinnedPredecessorV1[];
+  /** The measured probe. `null` means it never ran, which the verdict rejects. */
+  readonly currentBinaryConformance: CurrentBinaryConformanceV1 | null;
   readonly manifestEntryCount: number;
   /** Every manifest commit resolved to a real object in this repository. */
   readonly manifestCommitsResolved: boolean;
@@ -153,10 +158,10 @@ export interface ManagedOwnershipRawResultV1 {
   /** One real supervisor-driven generation handoff under the control barrier. */
   readonly liveHandoff: LiveHandoffMeasurementV1;
 
-  /** Sockets still held by the owned pool BEFORE it was destroyed. */
-  readonly ownedSocketsBeforeDestroy: number;
-  /** Sockets still held AFTER destroy settled. Must be zero. */
-  readonly leakedOwnedSockets: number;
+  // No owned-socket measurement here. B2 owns no connection pool — the class
+  // that carried one moved to Stack B3, which is where the first byte is
+  // actually dispatched — so a socket-drain probe in this gate would measure a
+  // capability that no B2 production path can reach. B3's gate carries it.
 
   /** Capability fail-closed matrix. */
   readonly capability: {
@@ -174,7 +179,8 @@ export interface ManagedOwnershipVerdictV1 {
   readonly scope: string;
   readonly sourceCommit: string;
   readonly rawArtifactSha256: string;
-  readonly predecessors: readonly { readonly id: string; readonly pass: boolean }[];
+  /** Echoed inventory. No per-commit verdict is published, because none is measured. */
+  readonly pinnedPredecessors: readonly PinnedPredecessorV1[];
   readonly checks: readonly { readonly name: string; readonly pass: true }[];
 }
 
@@ -288,19 +294,6 @@ export function evaluateManagedOwnership(
       pass: live.childrenSpawnedAfterShutdown === 0,
       detail: `${live.childrenSpawnedAfterShutdown} child process(es) spawned after shutdown`,
     },
-
-
-    // The socket check is a PAIR on purpose. Asserting only the post-destroy
-    // zero was unfalsifiable: `destroyAndSettle` loops until the count reaches
-    // zero and throws otherwise, so the value it returns is necessarily 0 and
-    // the check could never report a failure. Requiring a socket to have
-    // existed first makes the probe demonstrably live.
-    {
-      name: 'ownedSocketExistedBeforeDestroy',
-      pass: raw.ownedSocketsBeforeDestroy > 0,
-      detail: `${raw.ownedSocketsBeforeDestroy} socket(s)`,
-    },
-    zero('leakedOwnedSockets', raw.leakedOwnedSockets),
     {
       name: 'everyManifestCommitResolves',
       pass: raw.manifestCommitsResolved,
@@ -314,22 +307,26 @@ export function evaluateManagedOwnership(
     { name: 'capabilityAbsentOnTerminalOwnership', pass: raw.capability.withTerminalOwnership === false },
     { name: 'capabilityDeniedByEnabledChangelog', pass: raw.capability.throughEnabledChangelog === false },
     { name: 'capabilityPresentWhenFullyProven', pass: raw.capability.withLiveLeaseAndHandoff === true },
-    // Kept, but honestly: `predecessors` is built one push per manifest entry
-    // in the same loop, so the equality is structural. Its real content is the
-    // `> 0` term — a manifest emptied by accident still fails.
+    // The manifest is an inventory, so the only thing to assert about it is
+    // that it exists and was fully echoed. There is deliberately NO
+    // `everyPredecessorEntryPassed`: it aggregated per-commit verdicts that
+    // nothing measured.
     {
-      name: 'manifestIsNonEmptyAndFullyIterated',
+      name: 'manifestIsNonEmptyAndFullyEchoed',
       pass:
-        raw.manifestEntryCount > 0 && raw.predecessors.length === raw.manifestEntryCount,
-      detail: `${raw.predecessors.length}/${raw.manifestEntryCount} iterated`,
+        raw.manifestEntryCount > 0 &&
+        raw.pinnedPredecessors.length === raw.manifestEntryCount,
+      detail: `${raw.pinnedPredecessors.length}/${raw.manifestEntryCount} echoed`,
     },
     {
-      name: 'everyPredecessorEntryPassed',
-      pass: raw.predecessors.every((entry) => entry.pass),
-      detail: raw.predecessors
-        .filter((entry) => !entry.pass)
-        .map((entry) => `${entry.id}: ${entry.failures.join('; ')}`)
-        .join(' | '),
+      name: 'currentBinaryConformanceRan',
+      pass: raw.currentBinaryConformance !== null,
+      detail: raw.currentBinaryConformance === null ? 'the probe did not run' : undefined,
+    },
+    {
+      name: 'currentBinaryConformsToReservedStatePolicy',
+      pass: (raw.currentBinaryConformance?.failures.length ?? 1) === 0,
+      detail: raw.currentBinaryConformance?.failures.join('; ') || undefined,
     },
   ];
 
