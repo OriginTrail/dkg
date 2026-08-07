@@ -393,7 +393,7 @@ describe('/send', () => {
     bridge.onAgentEnd();
   });
 
-  it('sanitizes a terminal provider failure before Prime can auto-retry it', async () => {
+  it('sanitizes a terminal provider failure and releases admission without agent_end', async () => {
     const firstResponse = await fetch(`${base}/stream`, {
       method: 'POST',
       headers: authed(),
@@ -427,15 +427,16 @@ describe('/send', () => {
     // makes the finalized error non-retryable.
     expect(failedRunAbortCount).toBe(0);
 
-    // The failed run is still active until its real agent_end, so a successor
-    // cannot be injected into an ambiguous lifecycle window.
-    const tooSoon = await fetch(`${base}/send`, {
+    // Some provider failures never produce agent_end. Once message_end has the
+    // terminal lifecycle marker, the bridge must admit a successor instead of
+    // remaining 429-busy forever.
+    const second = fetch(`${base}/send`, {
       method: 'POST',
       headers: authed(),
-      body: JSON.stringify({ text: 'too soon', correlationId: 'c-too-soon' }),
+      body: JSON.stringify({ text: 'retry after credentials are fixed', correlationId: 'c-retry' }),
     });
-    expect(tooSoon.status).toBe(429);
-    expect(sent.map(visiblePrompt)).toEqual(['use the provider']);
+    await until(() => sent.length === 2);
+    expect(sent.map(visiblePrompt)).toEqual(['use the provider', 'retry after credentials are fixed']);
     expect(replacement?.message).toMatchObject({
       role: 'assistant',
       stopReason: 'error',
@@ -451,18 +452,9 @@ describe('/send', () => {
         },
       ],
     });
-    bridge.onAgentEnd();
     // The finalized message marker makes Prime's retry decision deterministic,
-    // so no abort or deferred retry can race a successor turn.
+    // so no immediate abort races message_end even though admission reopened.
     expect(failedRunAbortCount).toBe(0);
-
-    const second = fetch(`${base}/send`, {
-      method: 'POST',
-      headers: authed(),
-      body: JSON.stringify({ text: 'retry after credentials are fixed', correlationId: 'c-retry' }),
-    });
-    await until(() => sent.length === 2);
-    expect(sent.map(visiblePrompt)).toEqual(['use the provider', 'retry after credentials are fixed']);
 
     // Prime may prepare the queued action before its retry wins the handoff.
     // Its hidden ownership marker is cached on that action and excluded from
@@ -504,6 +496,75 @@ describe('/send', () => {
     const secondResponse = await second;
     expect(secondResponse.status).toBe(200);
     expect(await secondResponse.json()).toMatchObject({ text: 'recovered', correlationId: 'c-retry' });
+  });
+
+  it('carries a message_update provider failure into the terminal message_end marker', async () => {
+    const failedResponse = await fetch(`${base}/stream`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'stream through the provider', correlationId: 'c-update-error' }),
+    });
+    await until(() => sent.length === 1);
+    let abortCount = 0;
+    startBridgeRun({
+      sessionManager: { getSessionId: () => 'sess-test' },
+      abort: () => { abortCount += 1; },
+    });
+
+    bridge.onMessageUpdate({
+      assistantMessageEvent: {
+        type: 'error',
+        error: { errorMessage: 'provider key sk-update-secret was Unauthorized' },
+      },
+    });
+    const replacement = bridge.onMessageEnd({
+      message: {
+        role: 'assistant',
+        stopReason: 'error',
+        errorMessage: 'provider key sk-update-secret was Unauthorized',
+        diagnostics: [{ type: 'provider_stream_failure', timestamp: 1 }],
+      },
+    });
+
+    const failedText = await failedResponse.text();
+    expect(failedText).toContain('"type":"error"');
+    expect(failedText).toContain('"code":"PRIME_AGENT_PROVIDER_UNAUTHORIZED"');
+    expect(failedText).not.toContain('update-secret');
+    expect(failedText).not.toContain('sk-');
+    expect(abortCount).toBe(0);
+    expect(replacement?.message).toMatchObject({
+      role: 'assistant',
+      stopReason: 'error',
+      errorMessage: 'Prime Agent provider authentication failed. Check the configured provider credentials.',
+      diagnostics: [
+        {
+          type: 'agent_lifecycle_failure',
+          details: {
+            source: 'dkg-bridge',
+            reason: 'terminal_bridge_response_settled',
+            code: 'PRIME_AGENT_PROVIDER_UNAUTHORIZED',
+          },
+        },
+      ],
+    });
+    expect(replacement?.message.diagnostics).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: 'provider_stream_failure' })]),
+    );
+
+    bridge.onAgentEnd();
+    const recovered = fetch(`${base}/send`, {
+      method: 'POST',
+      headers: authed(),
+      body: JSON.stringify({ text: 'next real turn', correlationId: 'c-after-update-error' }),
+    });
+    await until(() => sent.length === 2);
+    startBridgeRun();
+    bridge.onMessageUpdate({ assistantMessageEvent: { type: 'text_delta', delta: 'healthy' } });
+    bridge.onAgentEnd();
+    expect(await recovered.then((response) => response.json())).toMatchObject({
+      text: 'healthy',
+      correlationId: 'c-after-update-error',
+    });
   });
 
   it('uses a separate hard limit to abort and release a turn that never emits agent_end', async () => {

@@ -673,6 +673,23 @@ describe('refresh from the Node UI', () => {
     expect(result.metadata).toMatchObject({ sessionCount: 1, activeSessionId: 's1' });
   });
 
+  it('refreshes transport through a survivor without moving the UI conversation pin', async () => {
+    const head = await startStubBridge({ sessionId: 'head', healthSessionId: 'recycled-port' });
+    const survivor = await startStubBridge({ sessionId: 'survivor' });
+    writeDescriptor('head', head.url, process.pid, '2026-08-07T12:00:00.000Z');
+    writeDescriptor('survivor', survivor.url, process.pid, '2026-08-07T11:00:00.000Z');
+    const config = enabledConfig();
+
+    const result = await refreshLocalAgentIntegrationFromUi(config, 'prime-agent', 'bridge-token');
+
+    expect(result.runtime).toMatchObject({ status: 'ready', ready: true, lastError: null });
+    expect(result.transport).toMatchObject({
+      kind: 'prime-agent-channel',
+      bridgeUrl: survivor.url,
+    });
+    expect(result.metadata).toMatchObject({ sessionCount: 2, activeSessionId: 'head' });
+  });
+
   it('returns Prime to idle and clears a stale elected session when none is live', async () => {
     const config = makeConfig({
       localAgentIntegrations: {
