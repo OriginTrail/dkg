@@ -7,6 +7,7 @@ import {
   type Quad,
   type QueryOptions,
   type StorePressureSnapshot,
+  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import type {
   EventBus,
@@ -924,6 +925,15 @@ export class StorageACKHandler {
             { code: 'SWM_ATOMIC_REPLACE_UNSUPPORTED' },
           );
         }
+        // #2079: a REPLACE, not a drop — invisible to the catch-up lane's count
+        // gate, so the witness must be dropped explicitly. The head write and
+        // two other store calls follow, any of which can throw and leave content
+        // ahead of the head.
+        await invalidateSwmMaterializationWitness(
+          this.store,
+          swmGraphUri,
+          ackStoreOptions('storage-ack.persistGraphScoped.witnessInvalidate', signal),
+        ).catch(() => {});
       }
       await this.store.deleteByPattern(
         { graph: metaGraph, subject: operationSubject },

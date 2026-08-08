@@ -18,6 +18,10 @@ export type StrictJsonParseOptions = CanonicalJsonOptions;
 export const MAX_CANONICAL_JSON_BYTES = 8 * 1024 * 1024;
 export const MAX_CANONICAL_JSON_DEPTH = 64;
 const UTF8 = new TextEncoder();
+const TYPED_ARRAY_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
+  Object.getPrototypeOf(Uint8Array.prototype) as object,
+  'byteLength',
+)?.get;
 // Preserve a leading BOM so the explicit wire-level rejection below can see it.
 const UTF8_FATAL = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
@@ -142,7 +146,22 @@ export function parseJsonStrict(
 ): CanonicalJsonValue {
   const { maxBytes, maxDepth } = resolveLimits(options);
 
-  const byteLength = typeof input === 'string' ? UTF8.encode(input).byteLength : input.byteLength;
+  let byteLength: number;
+  if (typeof input === 'string') {
+    if (input.length > maxBytes) {
+      throw new CanonicalJsonError(`JSON input exceeds ${maxBytes} bytes`);
+    }
+    byteLength = UTF8.encode(input).byteLength;
+  } else {
+    if (!(input instanceof Uint8Array) || TYPED_ARRAY_BYTE_LENGTH === undefined) {
+      throw new CanonicalJsonError('JSON byte input must be a Uint8Array');
+    }
+    try {
+      byteLength = Reflect.apply(TYPED_ARRAY_BYTE_LENGTH, input, []) as number;
+    } catch {
+      throw new CanonicalJsonError('JSON byte input must be a valid Uint8Array');
+    }
+  }
   if (byteLength > maxBytes) {
     throw new CanonicalJsonError(`JSON input exceeds ${maxBytes} bytes`);
   }

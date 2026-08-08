@@ -7,6 +7,7 @@ import {
   createGraphKnowledgeAssetScope,
   isSafeIri,
   knowledgeAssetLayerGraphUri,
+  type TimestampMsV1,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import type { LiftPublishSnapshotRequest } from './lift-job.js';
@@ -84,10 +85,24 @@ export interface KnowledgeAssetWorkspaceHead {
   readonly privateMerkleRoot?: string;
   readonly privateTripleCount: number;
   readonly shareOperationId: string;
+  /** Canonical durable operation timestamp, normalized to decimal milliseconds. */
+  readonly publishedAt?: TimestampMsV1;
   /** Transport owner retained at KA granularity; replaces per-subject ownership rows. */
   readonly publisherPeerId: string;
   readonly accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
   readonly allowedPeers: string[];
+}
+
+export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWorkspaceHead {
+  readonly publishedAt: TimestampMsV1;
+}
+
+export interface ResolveKnowledgeAssetWorkspaceHeadParams {
+  readonly store: TripleStore;
+  readonly graphManager: GraphManager;
+  readonly contextGraphId: string;
+  readonly kaUal: string;
+  readonly subGraphName?: string;
 }
 
 /**
@@ -95,13 +110,9 @@ export interface KnowledgeAssetWorkspaceHead {
  * Missing means this node has not accepted this KA yet; malformed rows fail
  * closed so a corrupt head cannot allow an older assertion to overwrite data.
  */
-export async function resolveKnowledgeAssetWorkspaceHead(params: {
-  store: TripleStore;
-  graphManager: GraphManager;
-  contextGraphId: string;
-  kaUal: string;
-  subGraphName?: string;
-}): Promise<KnowledgeAssetWorkspaceHead | undefined> {
+export async function resolveKnowledgeAssetWorkspaceHead(
+  params: ResolveKnowledgeAssetWorkspaceHeadParams,
+): Promise<KnowledgeAssetWorkspaceHead | undefined> {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, 1);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
   const metaGraph = params.graphManager.sharedMemoryMetaUri(
@@ -110,7 +121,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   );
   const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
   const result = await params.store.query(
-    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?accessPolicy WHERE {
+    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?publishedAt ?accessPolicy WHERE {
       GRAPH <${assertSafeIri(metaGraph)}> {
         <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
           <${DKG}kaUal> ?kaUal ;
@@ -125,6 +136,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
           <${DKG}privateTripleCount> ?privateCount ;
           <${DKG}publisherPeerId> ?publisherPeerId .
         OPTIONAL { ?operation <${DKG}privateMerkleRoot> ?privateRoot }
+        OPTIONAL { ?operation <${DKG}publishedAt> ?publishedAt }
         OPTIONAL { ?operation <${DKG}accessPolicy> ?accessPolicy }
       }
     } LIMIT 1`,
@@ -193,6 +205,10 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
   const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
   const shareOperationId = stripLiteral(row?.['shareOperationId'])?.trim() ?? '';
   const publisherPeerId = stripLiteral(row?.['publisherPeerId'])?.trim() ?? '';
+  const publishedAtLexical = stripLiteral(row?.['publishedAt'])?.trim();
+  const publishedAtMs = publishedAtLexical === undefined
+    ? undefined
+    : Date.parse(publishedAtLexical);
   const rawAccessPolicy = stripLiteral(row?.['accessPolicy'])?.trim();
   const accessPolicy = rawAccessPolicy === 'public'
     || rawAccessPolicy === 'ownerOnly'
@@ -226,6 +242,10 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
     !shareOperationId ||
     !publisherPeerId ||
+    (publishedAtLexical !== undefined && (
+      !Number.isSafeInteger(publishedAtMs)
+      || publishedAtMs! < 0
+    )) ||
     row?.['operation'] !== expectedOperationSubject ||
     operationUal !== actualScope.ual ||
     operationVersion.toString() !== actualScope.assertionVersion ||
@@ -266,10 +286,27 @@ export async function resolveKnowledgeAssetWorkspaceHead(params: {
     privateMerkleRoot,
     privateTripleCount,
     shareOperationId,
+    ...(publishedAtMs === undefined
+      ? {}
+      : { publishedAt: publishedAtMs.toString() as TimestampMsV1 }),
     publisherPeerId,
     ...(accessPolicy ? { accessPolicy } : {}),
     allowedPeers,
   };
+}
+
+/** Resolve an inventory-ready SWM head with its canonical operation timestamp. */
+export async function resolvePublishedKnowledgeAssetWorkspaceHead(
+  params: ResolveKnowledgeAssetWorkspaceHeadParams,
+): Promise<PublishedKnowledgeAssetWorkspaceHead | undefined> {
+  const head = await resolveKnowledgeAssetWorkspaceHead(params);
+  if (head === undefined) return undefined;
+  if (head.publishedAt === undefined) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${head.kaUal}: missing canonical publishedAt`,
+    );
+  }
+  return Object.freeze({ ...head, publishedAt: head.publishedAt });
 }
 
 /** Replace the durable current-assertion pointer after data and snapshot land. */

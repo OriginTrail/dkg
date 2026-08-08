@@ -36,6 +36,27 @@ export interface FinalizationRecoveryLiveInput {
   candidate: ParsedGraphScopedFinalization;
 }
 
+export type FinalizationRecoveryLiveProcessResult =
+  | { status: 'fallback' }
+  | { status: 'handled' }
+  | { status: 'retryable-capacity'; ual: string };
+
+export class FinalizationRecoveryCapacityError extends Error {
+  readonly code = 'FINALIZATION_RECOVERY_CAPACITY';
+  readonly retryable = true;
+
+  constructor(readonly ual: string) {
+    super(`Finalization recovery durable capacity exhausted for ${ual}`);
+    this.name = 'FinalizationRecoveryCapacityError';
+  }
+}
+
+type FinalizationRecoveryReceiveOutcome =
+  | { status: 'entry'; entry: FinalizationRecoveryEntry }
+  | { status: 'pending' }
+  | { status: 'capacity' }
+  | { status: 'rejected' };
+
 export type FinalizationRecoveryLiveAdmission =
   | {
     status: 'admitted';
@@ -275,12 +296,31 @@ export class FinalizationRecovery<
 
   /**
    * Applies a live graph-scoped finalization behind the durable write-ahead
-   * boundary. Returns false when durable recovery is unavailable so the caller
-   * can preserve the legacy live-verification path.
+   * boundary. Preserves the original boolean contract for external callers:
+   * false means the caller must run the unjournaled compatibility path.
    */
   async processLive(
     input: FinalizationRecoveryLiveInput,
   ): Promise<boolean> {
+    const result = await this.processLiveOutcome(input);
+    switch (result.status) {
+      case 'fallback':
+        return false;
+      case 'handled':
+        return true;
+      case 'retryable-capacity':
+        throw new FinalizationRecoveryCapacityError(result.ual);
+      default: {
+        const exhaustive: never = result;
+        throw new Error(`Unhandled finalization recovery result: ${JSON.stringify(exhaustive)}`);
+      }
+    }
+  }
+
+  /** Structured result used by internal callers that must distinguish capacity. */
+  async processLiveOutcome(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<FinalizationRecoveryLiveProcessResult> {
     const store = this.getStore();
     // The receipt API is intentionally optional on ChainAdapter. Preserve the
     // legacy live path when it is absent instead of admitting an envelope that
@@ -290,7 +330,7 @@ export class FinalizationRecovery<
       || !this.chain
       || this.chain.chainId === 'none'
       || !this.chain.resolveCanonicalFinalizationReceipt
-    ) return false;
+    ) return { status: 'fallback' };
     const key = finalizationRecoveryEntryKey({
       chainId: this.chain.chainId,
       contextGraphId: input.contextGraphId,
@@ -298,18 +338,31 @@ export class FinalizationRecovery<
       txHash: input.candidate.msg.txHash,
     });
     return this.withEntryLock(key, async () => {
-      let entry = await this.receive(input);
-      // A configured inbox fails closed: capacity, conflict, corruption, and
-      // write failures leave Oxigraph untouched.
-      if (!entry) return true;
+      const received = await this.receiveOutcome(input);
+      if (received.status === 'pending') {
+        await this.recordPendingPublisherAuthority(store, key, input);
+        return { status: 'handled' };
+      }
+      if (received.status === 'capacity') {
+        return {
+          status: 'retryable-capacity',
+          ual: input.candidate.scope.ual,
+        };
+      }
+      // Conflicts, corruption, and write failures fail closed and leave
+      // Oxigraph untouched. Capacity is handled separately above because it is
+      // retryable and must never look successfully consumed.
+      if (received.status === 'rejected') return { status: 'handled' };
+      let { entry } = received;
       if (entry.state === 'SETTLED') {
-        entry = await this.revalidateSettled(input, entry);
-        if (!entry) return true;
+        const revalidated = await this.revalidateSettled(input, entry);
+        if (!revalidated) return { status: 'handled' };
+        entry = revalidated;
       }
       // Terminal rows remain audited and inert until retention removes them.
       // In particular, duplicate gossip must not revive an entry that exhausted
       // the autonomous retry budget.
-      if (!this.isLiveEntry(entry)) return true;
+      if (!this.isLiveEntry(entry)) return { status: 'handled' };
 
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
@@ -322,7 +375,7 @@ export class FinalizationRecovery<
           } else {
             await this.settleEntry(entry, outcome);
           }
-          return true;
+          return { status: 'handled' };
         } catch (error) {
           if (!this.materializer.isRetryableError(error)) throw error;
           if (attempt === 0) {
@@ -337,11 +390,57 @@ export class FinalizationRecovery<
             entry,
             'store scheduler remained busy',
           );
-          return true;
+          return { status: 'handled' };
         }
       }
-      return true;
+      return { status: 'handled' };
     });
+  }
+
+  private async recordPendingPublisherAuthority(
+    store: FinalizationRecoveryStore,
+    key: string,
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<void> {
+    if (!input.sourcePeerId) return;
+    let prepared: Prepared | undefined;
+    try {
+      prepared = await this.materializer.prepare(input);
+    } catch (error) {
+      this.log.info(
+        `Finalization recovery deferred publisher authority check for `
+          + `${input.candidate.scope.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (!prepared || input.sourcePeerId !== prepared.publisherPeerId) return;
+    try {
+      if (await store.recordPendingTrustedPublisher(key, prepared.publisherPeerId)) return;
+      // Promotion is serialized by the store but is intentionally independent
+      // of the per-entry recovery lock. If it moved this row between admission
+      // and the authority CAS, preserve the same monotonic evidence on the live row.
+      const promoted = await store.get(key);
+      if (
+        promoted
+        && this.isLiveEntry(promoted)
+        && await store.recordTrustedPublisher(
+          key,
+          promoted.generation,
+          prepared.publisherPeerId,
+        )
+      ) return;
+      this.log.warn(
+        `Finalization recovery inbox refused publisher authority for `
+          + `${input.candidate.scope.ual}`,
+      );
+    } catch (error) {
+      this.log.warn(
+        `Finalization recovery pending publisher authority commit failed for `
+          + `${input.candidate.scope.ual}: `
+          + `${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**
@@ -354,6 +453,15 @@ export class FinalizationRecovery<
     if (!store) return 0;
     try {
       if (!this.chain || this.chain.chainId === 'none') return 0;
+      let promoted = 0;
+      try {
+        promoted = await store.promotePending(limit);
+      } catch (error) {
+        this.log.warn(
+          `Finalization recovery deferred-inbox promotion failed: `
+            + `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       let entries: FinalizationRecoveryEntry[];
       try {
         entries = await store.listDue(limit);
@@ -382,7 +490,7 @@ export class FinalizationRecovery<
         }
         getMetrics().finalizationRecoveryAttemptsTotal?.add(1, { outcome });
       }
-      return entries.length;
+      return Math.max(entries.length, promoted);
     } finally {
       await this.recordDueMetrics(store);
     }
@@ -394,6 +502,7 @@ export class FinalizationRecovery<
       const metrics = getMetrics();
       metrics.finalizationRecoveryDueEntries?.record(health.dueEntries);
       metrics.finalizationRecoveryOldestDueAgeMs?.record(health.oldestDueAgeMs ?? 0);
+      metrics.finalizationRecoveryDeferredEntries?.record(health.deferredEntries ?? 0);
     } catch (error) {
       this.log.warn(
         `Finalization recovery metrics snapshot failed: `
@@ -540,8 +649,15 @@ export class FinalizationRecovery<
   async receive(
     input: FinalizationRecoveryLiveInput,
   ): Promise<FinalizationRecoveryEntry | undefined> {
+    const outcome = await this.receiveOutcome(input);
+    return outcome.status === 'entry' ? outcome.entry : undefined;
+  }
+
+  private async receiveOutcome(
+    input: FinalizationRecoveryLiveInput,
+  ): Promise<FinalizationRecoveryReceiveOutcome> {
     const store = this.getStore();
-    if (!store) return undefined;
+    if (!store) return { status: 'rejected' };
     const { candidate } = input;
     const key = finalizationRecoveryEntryKey({
       chainId: this.chain?.chainId ?? 'none',
@@ -578,7 +694,8 @@ export class FinalizationRecovery<
             `Finalization recovery inbox rejected changed immutable envelope for `
               + `${candidate.scope.ual}`,
           );
-          return undefined;
+          getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'conflict' });
+          return { status: 'rejected' };
         }
         if (
           result.entry.state === 'RECEIVED'
@@ -586,20 +703,37 @@ export class FinalizationRecovery<
           || result.entry.state === 'REORGED'
           || result.entry.state === 'SETTLED'
         ) {
-          return result.entry;
+          getMetrics().finalizationRecoveryAdmissionTotal?.add(1, {
+            outcome: result.status,
+          });
+          return { status: 'entry', entry: result.entry };
         }
-        return undefined;
+        getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'conflict' });
+        return { status: 'rejected' };
+      }
+      if (result.status === 'pending') {
+        getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'deferred' });
+        this.log.info(
+          `Finalization recovery deferred ${candidate.scope.ual} until live inbox capacity is available`,
+        );
+        return { status: 'pending' };
       }
       this.log.warn(
         `Finalization recovery inbox rejected ${candidate.scope.ual}: ${result.status}`,
       );
-      return undefined;
+      getMetrics().finalizationRecoveryAdmissionTotal?.add(1, {
+        outcome: result.status,
+      });
+      return result.status === 'capacity'
+        ? { status: 'capacity' }
+        : { status: 'rejected' };
     } catch (error) {
       this.log.warn(
         `Finalization recovery inbox write failed for ${candidate.scope.ual}: `
           + `${error instanceof Error ? error.message : String(error)}`,
       );
-      return undefined;
+      getMetrics().finalizationRecoveryAdmissionTotal?.add(1, { outcome: 'write-failure' });
+      return { status: 'rejected' };
     }
   }
 

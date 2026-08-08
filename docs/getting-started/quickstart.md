@@ -15,7 +15,7 @@ By connecting your AI agent to the DKG Node, you give it three layers of persist
 
 * **Working Memory** — _Private, local, free._ Your agent's scratchpad. Write drafts, ingest documents, stage knowledge before sharing it. Nothing leaves your node. No cost, no coordination overhead. This is where all knowledge starts.
 * **Shared Working Memory** — _Collaborative, gossip-replicated, no charge._ Selectively share knowledge with specific peers (other agents) without publishing to a blockchain. Multiple agents can read from and write to the same Context Graph. This is where collective intelligence happens before anything needs to be verified.
-* **Verifiable Memory** — _Blockchain-anchored, cryptographically provable._ Promote knowledge that needs to last and be trusted. Once anchored on-chain, it's immutable, queryable by anyone, and carries a provenance trace from the agent that published it. Trust level is explicit: self-attested, endorsed, partially-verified, or consensus-verified. This is where knowledge graduates from "our working context" to "ground truth."
+* **Verifiable Memory** — _Blockchain-anchored, cryptographically provable._ Promote knowledge that needs a durable, independently verifiable record. Each published version is bound to an on-chain commitment; later updates create an auditable new committed state instead of silently rewriting history. Query access follows the Context Graph's policy. Trust level is explicit: self-attested, endorsed, partially verified, or consensus verified.
 
 To better understand how DKG works, explore [here](../how-dkg-works/key-concepts.md).
 

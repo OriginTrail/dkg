@@ -27,9 +27,10 @@ import {
 } from './finalization-recovery-sqlite-codec.js';
 
 const APPLICATION_ID = 0x444b4649; // DKFI
-const USER_VERSION = 1;
+const LEGACY_USER_VERSION = 1;
+const USER_VERSION = 2;
 
-const DDL = `
+const DDL_V1 = `
 CREATE TABLE finalization_inbox_v1 (
   key TEXT PRIMARY KEY NOT NULL,
   state TEXT NOT NULL CHECK (
@@ -98,6 +99,41 @@ CREATE INDEX finalization_inbox_state_time_v1
   ON finalization_inbox_v1(state, updated_at);
 `;
 
+const PENDING_DDL_V2 = `
+-- This is a bounded admission spool, not a second recovery state machine.
+-- Canonical recovery states, verification evidence, attempts, and transitions
+-- remain exclusively in finalization_inbox_v1. Keeping the spool separate
+-- avoids rebuilding/copying accepted v1 rows merely to widen that table's
+-- state CHECK during an upgrade; promotion atomically moves immutable envelope
+-- identity into the canonical inbox.
+CREATE TABLE finalization_pending_v2 (
+  key TEXT PRIMARY KEY NOT NULL,
+  chain_id TEXT NOT NULL,
+  context_graph_id TEXT NOT NULL,
+  source_peer_id TEXT,
+  trusted_publisher_peer_id TEXT,
+  ual TEXT NOT NULL,
+  tx_hash TEXT NOT NULL,
+  assertion_version TEXT NOT NULL,
+  merkle_root TEXT NOT NULL,
+  ka_id TEXT NOT NULL,
+  batch_id TEXT NOT NULL,
+  target_context_graph_id TEXT,
+  envelope_sha256 TEXT NOT NULL,
+  raw_envelope BLOB NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+) STRICT;
+CREATE INDEX finalization_pending_time_v2
+  ON finalization_pending_v2(created_at, key);
+CREATE INDEX finalization_pending_graph_v2
+  ON finalization_pending_v2(context_graph_id, created_at);
+CREATE INDEX finalization_pending_peer_v2
+  ON finalization_pending_v2(source_peer_id, created_at);
+`;
+
+const DDL_V2 = `${DDL_V1}\n${PENDING_DDL_V2}`;
+
 export interface OpenedFinalizationRecoveryDatabase {
   databasePath: string;
   database: DatabaseSync;
@@ -150,20 +186,27 @@ function schemaObjects(database: DatabaseSync): Map<string, string> {
   return new Map(rows.map((row) => [String(row.name), normalizeSql(String(row.sql))]));
 }
 
-function expectedSchema(Database: OwnedSqliteModuleV1['DatabaseSync']): Map<string, string> {
+function expectedSchema(
+  Database: OwnedSqliteModuleV1['DatabaseSync'],
+  ddl: string,
+): Map<string, string> {
   const memory = new Database(':memory:');
   try {
-    memory.exec(DDL);
+    memory.exec(ddl);
     return schemaObjects(memory);
   } finally {
     memory.close();
   }
 }
 
-function verifySchema(database: DatabaseSync, expected: Map<string, string>): void {
+function verifySchema(
+  database: DatabaseSync,
+  expected: Map<string, string>,
+  userVersion = USER_VERSION,
+): void {
   if (
     readPragmaInteger(database, 'application_id') !== APPLICATION_ID
-    || readPragmaInteger(database, 'user_version') !== USER_VERSION
+    || readPragmaInteger(database, 'user_version') !== userVersion
   ) {
     throw new Error('Finalization inbox has a foreign or unsupported database identity');
   }
@@ -231,7 +274,7 @@ function initializeFresh(database: DatabaseSync, path: string): void {
     ) {
       throw new Error('Finalization inbox lost its pristine identity before initialization');
     }
-    database.exec(DDL);
+    database.exec(DDL_V2);
     database.exec(`PRAGMA application_id = ${APPLICATION_ID}`);
     database.exec(`PRAGMA user_version = ${USER_VERSION}`);
     database.exec('COMMIT');
@@ -250,6 +293,31 @@ function initializeFresh(database: DatabaseSync, path: string): void {
   fsyncOwnedSqliteFileAndDirectoryV1(path);
 }
 
+function migrateLegacyV1(database: DatabaseSync, databasePath: string): void {
+  let transactionOpen = false;
+  try {
+    database.exec('BEGIN IMMEDIATE');
+    transactionOpen = true;
+    database.exec(PENDING_DDL_V2);
+    database.exec(`PRAGMA user_version = ${USER_VERSION}`);
+    database.exec('COMMIT');
+    transactionOpen = false;
+  } catch (error) {
+    if (transactionOpen) {
+      try { database.exec('ROLLBACK'); } catch { /* retain migration failure */ }
+    }
+    throw error;
+  }
+  const journalMode = database.prepare('PRAGMA journal_mode').get();
+  if (String(journalMode?.journal_mode).toLowerCase() === 'wal') {
+    const checkpoint = database.prepare('PRAGMA wal_checkpoint(TRUNCATE)').get();
+    if (Number(checkpoint?.busy ?? 1) !== 0) {
+      throw new Error('Finalization inbox v1 migration WAL checkpoint remained busy');
+    }
+  }
+  fsyncOwnedSqliteFileAndDirectoryV1(databasePath);
+}
+
 export async function openFinalizationRecoveryDatabase(
   dataDir: string,
 ): Promise<OpenedFinalizationRecoveryDatabase> {
@@ -257,18 +325,40 @@ export async function openFinalizationRecoveryDatabase(
   const fresh = !existsSync(databasePath);
   const sqlite = await loadOwnedSqliteModuleV1('Durable finalization recovery');
   if (!fresh) {
-    assertOwnedSqliteHeaderIdentityV1(
-      databasePath,
-      APPLICATION_ID,
-      USER_VERSION,
-      'Finalization inbox',
-    );
+    try {
+      assertOwnedSqliteHeaderIdentityV1(
+        databasePath,
+        APPLICATION_ID,
+        USER_VERSION,
+        'Finalization inbox',
+      );
+    } catch {
+      // The main-file header can legitimately lag a committed WAL. Accept
+      // exactly the owned v1 header here, then classify from SQLite's recovered
+      // PRAGMA below after the WAL has been replayed.
+      assertOwnedSqliteHeaderIdentityV1(
+        databasePath,
+        APPLICATION_ID,
+        LEGACY_USER_VERSION,
+        'Finalization inbox',
+      );
+    }
   }
   const database = new sqlite.DatabaseSync(databasePath);
   try {
-    const expected = expectedSchema(sqlite.DatabaseSync);
     if (fresh) initializeFresh(database, databasePath);
-    verifySchema(database, expected);
+    const recoveredVersion = readPragmaInteger(database, 'user_version');
+    if (recoveredVersion === LEGACY_USER_VERSION) {
+      verifySchema(
+        database,
+        expectedSchema(sqlite.DatabaseSync, DDL_V1),
+        LEGACY_USER_VERSION,
+      );
+      migrateLegacyV1(database, databasePath);
+    } else if (recoveredVersion !== USER_VERSION) {
+      throw new Error('Finalization inbox has a foreign or unsupported recovered version');
+    }
+    verifySchema(database, expectedSchema(sqlite.DatabaseSync, DDL_V2));
     applyRuntimePragmas(database);
     secureOwnedSqliteFileSetV1(databasePath, 'Finalization inbox');
     return { databasePath, database };

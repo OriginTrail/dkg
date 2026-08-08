@@ -4,6 +4,7 @@ import {
   MAX_KA_BUNDLE_BYTES_V1,
   assertOpaqueKaBundleByteLengthV1,
   calculateOpaqueKaBundleByteLengthV1,
+  computeKaProjectionDigestV1,
   decodeOpaqueKaBundleV1,
   encodeOpaqueKaBundleV1,
   type KaBundleV1ErrorCode,
@@ -39,6 +40,7 @@ describe('RFC-64 dormant opaque KA bundle framing', () => {
     const encoded = encodeOpaqueKaBundleV1(fromHex('61'), fromHex('6263'));
     expect(lowerHex(encoded.bundleBytes)).toBe(A_BC_BUNDLE);
     expect(encoded.projectionDigest).toBe(A_PROJECTION_DIGEST);
+    expect(computeKaProjectionDigestV1(fromHex('61'))).toBe(A_PROJECTION_DIGEST);
     expect(encoded.blobDigest).toBe(A_BC_BLOB_DIGEST);
 
     const decoded = decodeOpaqueKaBundleV1(fromHex(A_BC_BUNDLE));

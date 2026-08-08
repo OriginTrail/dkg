@@ -1,0 +1,378 @@
+import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+
+import {
+  SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+  computeSwmAuthorInventoryHeadObjectDigestV1,
+  computeSwmAuthorInventoryRowsDigestV1,
+  computeSwmAuthorInventoryScopeDigestV1,
+  type EvmAddressV1,
+  type SignedSwmAuthorInventoryHeadEnvelopeV1,
+  type SwmAuthorInventoryHeadV1,
+  type SwmAuthorInventoryRowV1,
+  type SwmAuthorInventoryScopeV1,
+  type SwmAuthorInventorySnapshotV1,
+  type TimestampMsV1,
+  type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
+} from '@origintrail-official/dkg-core';
+import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
+
+import {
+  InventoryV1CandidateError,
+  openInventoryV1,
+  type Rfc64InventoryV1Foundation,
+  type Rfc64InventoryV1OperationsV1,
+} from '../src/rfc64/inventory-v1/index.js';
+import {
+  maintainRfc64SwmAuthorInventoryV1,
+  removeRfc64SwmAuthorInventoryRowV1,
+  type MaintainRfc64SwmAuthorInventoryInputV1,
+} from '../src/rfc64/swm-author-inventory-producer-v1.js';
+
+const PRIVATE_KEY = `0x${'31'.repeat(32)}`;
+const OTHER_PRIVATE_KEY = `0x${'42'.repeat(32)}`;
+const wallet = new ethers.Wallet(PRIVATE_KEY);
+const otherWallet = new ethers.Wallet(OTHER_PRIVATE_KEY);
+const AUTHOR = wallet.address.toLowerCase() as EvmAddressV1;
+const SCOPE = Object.freeze({
+  networkId: 'otp:20430',
+  contextGraphId: 'public-swm-producer-fixture',
+  governanceChainId: '20430',
+  governanceContractAddress: '0x2222222222222222222222222222222222222222',
+  ownershipTransitionDigest: null,
+  subGraphName: null,
+  authorAddress: AUTHOR,
+  era: '0',
+}) as SwmAuthorInventoryScopeV1;
+const SCOPE_DIGEST = computeSwmAuthorInventoryScopeDigestV1(SCOPE);
+const ROW_A = row('7', 'draft-a', 'share-a', '11', '22');
+const ROW_B = row('8', 'draft-b', 'share-b', '33', '44');
+const ROW_C = row('9', 'draft-c', 'share-c', '55', '66');
+const ROW_FUTURE = Object.freeze({
+  ...row('10', 'draft-future', 'share-future', '12', '23'),
+  sharedAt: '1700000000500',
+}) as SwmAuthorInventoryRowV1;
+const ROW_A_V2 = Object.freeze({
+  ...ROW_A,
+  assertionCoordinate: 'draft-a-v2',
+  assertionVersion: '2',
+  shareOperationId: 'share-a-v2',
+  projectionDigest: `0x${'77'.repeat(32)}`,
+  sealDigest: `0x${'88'.repeat(32)}`,
+}) as SwmAuthorInventoryRowV1;
+const directories: string[] = [];
+const foundations: Rfc64InventoryV1Foundation[] = [];
+
+afterEach(() => {
+  for (const foundation of foundations.splice(0)) foundation.close();
+  for (const directory of directories.splice(0)) {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+describe('RFC-64 SWM author inventory producer', () => {
+  it('signs genesis and successor heads, preserves both rows, and makes replay a no-op', async () => {
+    const inventory = await createInventory();
+    const first = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    expect(first.status).toBe('applied');
+    expect(first.snapshot.head.payload).toMatchObject({ version: '0', totalRows: '1' });
+    await expect(verifyControlEnvelopeIssuerSignatureV1(first.snapshot.head)).resolves.toBeDefined();
+
+    const second = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_B));
+    expect(second.snapshot.head.payload).toMatchObject({
+      version: '1',
+      previousHeadDigest: first.snapshot.head.objectDigest,
+      totalRows: '2',
+    });
+    expect(second.snapshot.rows.map(({ kaUal }) => kaUal)).toEqual([
+      ROW_A.kaUal,
+      ROW_B.kaUal,
+    ]);
+
+    const replay = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_B));
+    expect(replay).toMatchObject({
+      status: 'existing',
+      attempts: 1,
+      snapshot: { head: { objectDigest: second.snapshot.head.objectDigest } },
+    });
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)?.head.payload.version)
+      .toBe('1');
+  });
+
+  it('clamps successor timestamps across older upserts and removals', async () => {
+    const inventory = await createInventory();
+    const future = await maintainRfc64SwmAuthorInventoryV1(inventory, {
+      ...input(ROW_FUTURE),
+      issuedAt: '1700000000500' as TimestampMsV1,
+    });
+    const olderUpsert = await maintainRfc64SwmAuthorInventoryV1(
+      inventory,
+      input(ROW_B),
+    );
+    expect(olderUpsert.snapshot.head.payload.issuedAt).toBe('1700000000500');
+    expect(olderUpsert.snapshot.head.payload.previousHeadDigest)
+      .toBe(future.snapshot.head.objectDigest);
+
+    const olderRemoval = await removeRfc64SwmAuthorInventoryRowV1(inventory, {
+      scope: SCOPE,
+      expectedRow: exactRemovalIdentity(ROW_B),
+      issuedAt: '1700000000100' as TimestampMsV1,
+      signer: input(ROW_B).signer,
+    });
+    expect(olderRemoval.snapshot?.head.payload.issuedAt).toBe('1700000000500');
+    expect(olderRemoval.snapshot?.rows).toEqual([ROW_FUTURE]);
+  });
+
+  it('re-reads a real winning writer before rebuilding an upsert retry', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    const predecessor = inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+    const winningSnapshot = await signedSuccessor(predecessor, [ROW_A, ROW_C]);
+    let conflicts = 1;
+    const conflictOnce: Pick<
+      Rfc64InventoryV1OperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
+    > = {
+      readSwmAuthorInventorySnapshotV1:
+        inventory.readSwmAuthorInventorySnapshotV1.bind(inventory),
+      compareAndSwapSwmAuthorInventoryV1: (candidate) => {
+        if (conflicts-- > 0) {
+          inventory.compareAndSwapSwmAuthorInventoryV1({
+            snapshot: winningSnapshot,
+            mutation: { kind: 'upsert', row: ROW_C },
+            expectedCurrentHeadDigest: predecessor.head.objectDigest as `0x${string}`,
+          });
+          throw new InventoryV1CandidateError(
+            'swm-inventory-cas-conflict',
+            'injected concurrent writer',
+          );
+        }
+        return inventory.compareAndSwapSwmAuthorInventoryV1(candidate);
+      },
+    };
+
+    const result = await maintainRfc64SwmAuthorInventoryV1(
+      conflictOnce,
+      input(ROW_B),
+    );
+    expect(result.attempts).toBe(2);
+    expect(result.snapshot.rows).toEqual([ROW_A, ROW_B, ROW_C]);
+    expect(result.snapshot.head.payload.previousHeadDigest)
+      .toBe(winningSnapshot.head.objectDigest);
+  });
+
+  it('removes a VM-confirmed row and makes duplicate confirmation idempotent', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_B));
+    const removal = await removeRfc64SwmAuthorInventoryRowV1(inventory, {
+      scope: SCOPE,
+      expectedRow: exactRemovalIdentity(ROW_A),
+      issuedAt: '1700000000300' as TimestampMsV1,
+      signer: input(ROW_A).signer,
+    });
+    expect(removal.status).toBe('applied');
+    expect(removal.snapshot?.rows).toEqual([ROW_B]);
+    expect(removal.snapshot?.head.payload.version).toBe('2');
+
+    const replay = await removeRfc64SwmAuthorInventoryRowV1(inventory, {
+      scope: SCOPE,
+      expectedRow: exactRemovalIdentity(ROW_A),
+      issuedAt: '1700000000300' as TimestampMsV1,
+      signer: input(ROW_A).signer,
+    });
+    expect(replay).toMatchObject({ status: 'absent', attempts: 1 });
+    expect(replay.snapshot?.head.objectDigest).toBe(removal.snapshot?.head.objectDigest);
+  });
+
+  it('preserves a newer SWM version when an older VM confirmation arrives', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    const newer = await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A_V2));
+
+    const staleConfirmation = await removeRfc64SwmAuthorInventoryRowV1(inventory, {
+      scope: SCOPE,
+      expectedRow: exactRemovalIdentity(ROW_A),
+      issuedAt: '1700000000300' as TimestampMsV1,
+      signer: input(ROW_A).signer,
+    });
+
+    expect(staleConfirmation).toMatchObject({ status: 'absent', attempts: 1 });
+    expect(staleConfirmation.snapshot?.head.objectDigest).toBe(newer.snapshot.head.objectDigest);
+    expect(staleConfirmation.snapshot?.rows).toEqual([ROW_A_V2]);
+  });
+
+  it('re-reads a real winning writer before rebuilding a removal retry', async () => {
+    const inventory = await createInventory();
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_A));
+    await maintainRfc64SwmAuthorInventoryV1(inventory, input(ROW_B));
+    const predecessor = inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)!;
+    const winningSnapshot = await signedSuccessor(predecessor, [ROW_A, ROW_B, ROW_C]);
+    let conflicts = 1;
+    const conflictOnce: Pick<
+      Rfc64InventoryV1OperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
+    > = {
+      readSwmAuthorInventorySnapshotV1:
+        inventory.readSwmAuthorInventorySnapshotV1.bind(inventory),
+      compareAndSwapSwmAuthorInventoryV1: (candidate) => {
+        if (conflicts-- > 0) {
+          inventory.compareAndSwapSwmAuthorInventoryV1({
+            snapshot: winningSnapshot,
+            mutation: { kind: 'upsert', row: ROW_C },
+            expectedCurrentHeadDigest: predecessor.head.objectDigest as `0x${string}`,
+          });
+          throw new InventoryV1CandidateError(
+            'swm-inventory-cas-conflict',
+            'injected concurrent writer',
+          );
+        }
+        return inventory.compareAndSwapSwmAuthorInventoryV1(candidate);
+      },
+    };
+
+    const result = await removeRfc64SwmAuthorInventoryRowV1(conflictOnce, {
+      scope: SCOPE,
+      expectedRow: exactRemovalIdentity(ROW_A),
+      issuedAt: '1700000000300' as TimestampMsV1,
+      signer: input(ROW_A).signer,
+    });
+    expect(result.attempts).toBe(2);
+    expect(result.snapshot?.rows).toEqual([ROW_B, ROW_C]);
+    expect(result.snapshot?.head.payload.previousHeadDigest)
+      .toBe(winningSnapshot.head.objectDigest);
+  });
+
+  it('rejects a signer that cannot recover to the scoped author before persistence', async () => {
+    const inventory = await createInventory();
+    await expect(maintainRfc64SwmAuthorInventoryV1(inventory, {
+      ...input(ROW_A),
+      signer: {
+        issuer: AUTHOR,
+        signDigest: (digest) => otherWallet.signMessage(digest),
+      },
+    })).rejects.toMatchObject({ code: 'swm-inventory-producer-signer' });
+    expect(inventory.readSwmAuthorInventorySnapshotV1(SCOPE_DIGEST, AUTHOR)).toBeNull();
+  });
+
+  it('refuses to extend supplied history whose signature does not recover to the author', async () => {
+    const payload = Object.freeze({
+      ...SCOPE,
+      version: '0',
+      previousHeadDigest: null,
+      totalRows: '1',
+      rowsDigest: computeSwmAuthorInventoryRowsDigestV1([ROW_A]),
+      issuedAt: '1700000000200',
+    }) as SwmAuthorInventoryHeadV1;
+    const unsigned = Object.freeze({
+      issuer: AUTHOR,
+      objectType: SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+      payload,
+      signatureEvidence: Object.freeze({ kind: 'none' }),
+      signatureSuite: 'eip191-personal-sign-digest-v1',
+    }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
+    const invalidHead = Object.freeze({
+      ...unsigned,
+      objectDigest: computeSwmAuthorInventoryHeadObjectDigestV1(unsigned),
+      signature: await otherWallet.signMessage(
+        ethers.getBytes(computeSwmAuthorInventoryHeadObjectDigestV1(unsigned)),
+      ),
+    }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
+    const compare = vi.fn();
+    const suppliedHistory: Pick<
+      Rfc64InventoryV1OperationsV1,
+      'readSwmAuthorInventorySnapshotV1' | 'compareAndSwapSwmAuthorInventoryV1'
+    > = {
+      readSwmAuthorInventorySnapshotV1: () => Object.freeze({
+        head: invalidHead,
+        rows: Object.freeze([ROW_A]),
+      }),
+      compareAndSwapSwmAuthorInventoryV1: compare,
+    };
+
+    await expect(maintainRfc64SwmAuthorInventoryV1(suppliedHistory, input(ROW_B)))
+      .rejects.toMatchObject({ code: 'swm-inventory-producer-history' });
+    expect(compare).not.toHaveBeenCalled();
+  });
+});
+
+function input(rowValue: SwmAuthorInventoryRowV1): MaintainRfc64SwmAuthorInventoryInputV1 {
+  return {
+    scope: SCOPE,
+    row: rowValue,
+    issuedAt: '1700000000200' as TimestampMsV1,
+    signer: {
+      issuer: AUTHOR,
+      signDigest: (digest) => wallet.signMessage(digest),
+    },
+  };
+}
+
+function row(
+  kaNumber: string,
+  assertionCoordinate: string,
+  shareOperationId: string,
+  projectionByte: string,
+  sealByte: string,
+): SwmAuthorInventoryRowV1 {
+  return Object.freeze({
+    assertionCoordinate,
+    assertionVersion: '1',
+    kaUal: `did:dkg:otp:20430/${AUTHOR}/${kaNumber}`,
+    shareOperationId,
+    projectionDigest: `0x${projectionByte.repeat(32)}`,
+    publicTripleCount: '17',
+    privateTripleCount: '0',
+    sealDigest: `0x${sealByte.repeat(32)}`,
+    sharedAt: '1700000000000',
+    expiresAt: null,
+  }) as SwmAuthorInventoryRowV1;
+}
+
+async function createInventory(): Promise<Rfc64InventoryV1Foundation> {
+  const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-swm-producer-')));
+  directories.push(directory);
+  const inventory = await openInventoryV1(directory);
+  foundations.push(inventory);
+  return inventory;
+}
+
+function exactRemovalIdentity(rowValue: SwmAuthorInventoryRowV1) {
+  return Object.freeze({
+    kaUal: rowValue.kaUal,
+    assertionVersion: rowValue.assertionVersion,
+    sealDigest: rowValue.sealDigest,
+  });
+}
+
+async function signedSuccessor(
+  predecessor: SwmAuthorInventorySnapshotV1,
+  rows: readonly SwmAuthorInventoryRowV1[],
+): Promise<SwmAuthorInventorySnapshotV1> {
+  const payload = Object.freeze({
+    ...SCOPE,
+    version: (BigInt(predecessor.head.payload.version) + 1n).toString(),
+    previousHeadDigest: predecessor.head.objectDigest,
+    totalRows: rows.length.toString(),
+    rowsDigest: computeSwmAuthorInventoryRowsDigestV1(rows),
+    issuedAt: '1700000000250',
+  }) as SwmAuthorInventoryHeadV1;
+  const unsigned = Object.freeze({
+    issuer: AUTHOR,
+    objectType: SWM_AUTHOR_INVENTORY_HEAD_OBJECT_TYPE_V1,
+    payload,
+    signatureEvidence: Object.freeze({ kind: 'none' }),
+    signatureSuite: 'eip191-personal-sign-digest-v1',
+  }) as UnsignedSwmAuthorInventoryHeadEnvelopeV1;
+  const objectDigest = computeSwmAuthorInventoryHeadObjectDigestV1(unsigned);
+  const head = Object.freeze({
+    ...unsigned,
+    objectDigest,
+    signature: await wallet.signMessage(ethers.getBytes(objectDigest)),
+  }) as SignedSwmAuthorInventoryHeadEnvelopeV1;
+  return Object.freeze({ head, rows: Object.freeze([...rows]) });
+}

@@ -18,7 +18,10 @@ import {
   type SystemRecordAppliedStatePresentV1,
 } from '../src/system-record-applied-state-v1.js';
 import { computeSystemRecordStableKeyHashV1 } from '../src/system-record-inventory-v1.js';
-import { SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES } from '../src/system-record-limits-v1.js';
+import {
+  SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES,
+  SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES,
+} from '../src/system-record-limits-v1.js';
 import { EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1 } from '../src/system-record-objects-v1.js';
 
 const HASH_A = `0x${'aa'.repeat(32)}` as const;
@@ -63,12 +66,42 @@ describe('system-record applied-state codecs', () => {
     } as SystemRecordAppliedStatePresentV1)).toThrow(/slots/);
   });
 
+  it('requires closed persisted arrays and returns owned frozen snapshots', () => {
+    const lineage = Object.assign([], { map: () => [{ unexpected: true }] });
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), transitionLineage: lineage,
+    } as unknown as SystemRecordAppliedStatePresentV1)).toThrow(/closed|non-index/);
+
+    const rootAccessor = Object.defineProperty([ROOT_B], '0', {
+      enumerable: true,
+      get: () => ROOT_B,
+    });
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), historicalRoots: rootAccessor,
+    } as unknown as SystemRecordAppliedStatePresentV1)).toThrow(/data elements/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), conflictDigestSlots: new Array(1),
+    } as unknown as SystemRecordAppliedStatePresentV1)).toThrow(/dense/);
+
+    const parsed = parseCanonicalSystemRecordAppliedStateV1(
+      canonicalizeSystemRecordAppliedStateV1(activeState()),
+    );
+    if (parsed.state !== 'present') throw new Error('expected present state');
+    expect(Object.isFrozen(parsed.transitionLineage)).toBe(true);
+    expect(Object.isFrozen(parsed.historicalRoots)).toBe(true);
+    expect(Object.isFrozen(parsed.conflictDigestSlots)).toBe(true);
+  });
+
   it('enforces tombstone zero accounting and capacity aggregate arithmetic', () => {
     expect(() => canonicalizeSystemRecordAppliedStateV1({
       ...activeState(), status: 'tombstone', projectionBytes: '1', projectionQuads: '0',
       ownedSubjectCount: '0',
       accountedBytes: computeSystemRecordAccountedBytesV1(80, 1).toString(),
     })).toThrow(/canonical empty/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), ownedSubjectTableBytes: '0',
+      accountedBytes: computeSystemRecordAccountedBytesV1(0, 4096).toString(),
+    })).toThrow(/nonempty projection\/table/);
 
     const capacity = {
       objectType: 'system-record-capacity-state', kind: 'agents', networkId: 'otp:20430',
@@ -78,6 +111,12 @@ describe('system-record applied-state codecs', () => {
     expect(parseCanonicalSystemRecordCapacityStateV1(
       canonicalizeSystemRecordCapacityStateV1(capacity),
     )).toEqual(capacity);
+    expect(() => canonicalizeSystemRecordCapacityStateV1({
+      ...capacity,
+      stateBytes: SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES.toString(),
+      tableBytes: '1',
+      projectionBytes: '0',
+    })).toThrow(/combined bytes exceed the aggregate bound/);
     expect(computeSystemRecordAccountedBytesV1(2048, 4096)).toBe(
       SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES + 2048 + 4096,
     );
@@ -166,6 +205,9 @@ describe('system-record applied-state codecs', () => {
     expect(() => canonicalizeSystemRecordAppliedStateV1({
       ...activeState(), historicalRoots: [ROOT_B],
     })).toThrow(/lineage/);
+    expect(() => canonicalizeSystemRecordAppliedStateV1({
+      ...activeState(), status: 'quarantined',
+    })).toThrow(/installed conflict evidence|resumable sidecar intent/);
 
     const publish = {
       ...activeState(), status: 'quarantined' as const,

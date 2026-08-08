@@ -98,7 +98,8 @@ interface AgentInternals {
     watermarkAfter: number;
   }>;
   runVmReconcileSweep(): Promise<void>;
-  subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
+  subscribedContextGraphs: Map<string, { subscribed: boolean; syncMode?: 'on-demand' | 'always-on'; coreHosted?: boolean; onChainId?: string; lastReconciledOrdinal?: number }>;
+  gossipRegistered: Set<string>;
   vmReconcileDispatcher: {
     triggerLive: (cg: string) => void;
     triggerPeriodic: (cg: string) => void;
@@ -694,7 +695,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     ).toBe(false);
   });
 
-  it('clears VM reconcile state when stale inactive on-chain ids are re-registered', async () => {
+  it('clears VM reconcile state and promotes durable mode when stale inactive on-chain ids are re-registered', async () => {
     const internals = await boot();
     const localCgId = 'stale-register';
     const ownerAddr = (internals.chain as unknown as { signerAddress: string }).signerAddress;
@@ -711,9 +712,13 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       object: '"5"',
       graph: contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY),
     }]);
+    // This low-level fixture intentionally has no gossip runtime. Model a
+    // valid already-live on-demand member, including the handler-registration
+    // invariant that makes subscribeToContextGraph's promotion path idempotent.
     internals.subscribedContextGraphs.set(localCgId, {
-      subscribed: true, onChainId: '5', lastReconciledOrdinal: 4,
+      syncMode: 'on-demand', subscribed: true, onChainId: '5', lastReconciledOrdinal: 4,
     });
+    internals.gossipRegistered.add(localCgId);
     internals.chain.isContextGraphActiveOnChain = async (id) => id !== 5n;
 
     const storageAddr = await internals.chain.getDKGKnowledgeAssetsAddress();
@@ -748,6 +753,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
     const sub = internals.subscribedContextGraphs.get(localCgId);
     expect(sub?.onChainId).not.toBe('5');
+    expect(sub?.syncMode).toBe('always-on');
     expect(sub?.lastReconciledOrdinal).toBe(0);
     expect(recent.has(recentKey)).toBe(false);
     expect(negativeCache.has(recentKey)).toBe(false);

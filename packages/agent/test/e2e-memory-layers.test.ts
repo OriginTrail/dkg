@@ -165,6 +165,61 @@ describe('Memory layer isolation (single agent)', () => {
     expect(data.bindings.length).toBe(0);
   }, 15_000);
 
+  it('returns a named WM to SWM promote before the RFC-64 inventory shadow settles', async () => {
+    const contextGraphId = 'shadow-promote-nonblocking';
+    const name = 'shadow-nonblocking';
+    const agent = await createAgent('ShadowPromoteNonblockingBot');
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Shadow Promote Nonblocking',
+    });
+    await agent.registerContextGraph(contextGraphId);
+    await agent.assertion.create(contextGraphId, name);
+    await agent.assertion.write(contextGraphId, name, [{
+      subject: `${ENTITY_BASE}:shadow`,
+      predicate: 'http://schema.org/name',
+      object: '"Shadow remains observational"',
+    }]);
+    let releaseShadow!: () => void;
+    const deferredShadow = new Promise<void>((resolve) => { releaseShadow = resolve; });
+    const shadow = vi
+      .spyOn(agent, 'recordRfc64SwmAuthorInventoryShadowV1')
+      .mockImplementation(async () => {
+        await deferredShadow;
+        return {
+          status: 'dormant',
+          action: 'upsert',
+          attempts: 0,
+          headObjectDigest: null,
+          error: null,
+        };
+      });
+
+    const result = await Promise.race([
+      agent.assertion.promote(contextGraphId, name),
+      sleep(2_000).then(() => { throw new Error('promote waited for shadow observer'); }),
+    ]);
+
+    expect(result.sealed).toBe(true);
+    expect(result.publishReady).toBe(true);
+    expect(result.shareOperationId).toEqual(expect.any(String));
+    expect(shadow).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      assertionCoordinate: name,
+      shareOperationId: result.shareOperationId,
+    }));
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(1);
+    releaseShadow();
+    await agent.awaitInFlightRfc64SwmInventoryObserversV1();
+    expect(agent.inFlightRfc64SwmInventoryObserverCountV1()).toBe(0);
+    const swm = await agent.query(
+      `SELECT ?name WHERE { <${ENTITY_BASE}:shadow> <http://schema.org/name> ?name }`,
+      { contextGraphId, graphSuffix: '_shared_memory' },
+    );
+    expect(swm.bindings).toHaveLength(1);
+    shadow.mockRestore();
+  }, 30_000);
+
   it('published data is in data graph but not SWM', async () => {
     const agent = await createAgent('PublishedBot');
     await agent.createContextGraph({ id: CG_ID, name: 'Memory Layers E2E' });

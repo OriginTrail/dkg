@@ -98,9 +98,6 @@ import {
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
   type SubscriptionSource,
-  assertAssertionCoordinateV1,
-  assertContextGraphIdV1,
-  assertSubGraphNameV1,
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
   withSpan,
@@ -124,6 +121,7 @@ import {
   type TripleStoreConfig,
   type Quad,
   type LargeLiteralStorageConfig,
+  invalidateSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
@@ -468,6 +466,18 @@ import type { DKGAgent } from './dkg-agent.js';
  */
 export const SEAL_CAPABILITY_GAP_CODE = 'SEAL_CAPABILITY_GAP';
 
+/**
+ * GH#1759 — stable code tagged on the `assertionFinalize` throws that mean the
+ * DRAFT HAS NO SEALABLE CONTENT: either it holds no quads at all, or every
+ * quad it holds has a reserved-namespace subject that is filtered out before
+ * the assertion crosses the SWM boundary. Both are client preconditions the
+ * caller can fix (write a quad on a non-reserved subject), not server faults,
+ * but the daemon's `respondAssertionError` had no mapping for them and fell
+ * through to a generic 500. Keyed on a code rather than the message text so
+ * the mapping cannot drift when the wording changes.
+ */
+export const ASSERTION_EMPTY_CODE = 'ASSERTION_EMPTY';
+
 const ROOTLESS_UPDATE_DKG_NS = 'http://dkg.io/ontology/';
 const ROOTLESS_UPDATE_XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
@@ -669,6 +679,37 @@ export function buildPrivateCatalogDefaultGraphQuads(cgDid: string, assertionUri
     .map((quad) => ({ ...quad, graph: '' }));
 }
 
+/**
+ * Resolve the detached public-catalog capability for an on-chain V2 publish.
+ *
+ * The encryption callback is produced by the chain-aware curated-policy
+ * resolver. It is therefore the authoritative decision for the same publish
+ * operation. Re-reading only local `_meta` here can disagree on an edge whose
+ * catalog metadata has not converged yet: the payload is encrypted as curated,
+ * while the catalog capability is omitted and cores (which intentionally do
+ * not custody curated ciphertext) can only decline the StorageACK with
+ * `MERKLE_MISMATCH_IN_SWM`.
+ */
+export function resolveCuratedV2CatalogCapability(input: {
+  contextGraphId: string;
+  graphScoped: boolean;
+  onChainContextGraphId?: string | bigint;
+  encryptInlinePayload: PublishOptions['encryptInlinePayload'];
+}): PublishOptions['trustedNonManifestCatalogTriples'] {
+  const hasOnChainContextGraphId = typeof input.onChainContextGraphId === 'bigint'
+    ? input.onChainContextGraphId > 0n
+    : typeof input.onChainContextGraphId === 'string'
+      && input.onChainContextGraphId.trim().length > 0;
+  if (
+    !input.graphScoped
+    || !hasOnChainContextGraphId
+    || typeof input.encryptInlinePayload !== 'function'
+  ) {
+    return undefined;
+  }
+  return generatedPrivateCatalogTripleKeys(input.contextGraphId);
+}
+
 export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
   contextGraphId: string;
   snapshotQuads: readonly Quad[];
@@ -694,7 +735,13 @@ export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
         ? input.resolvedEncryptInlineChunked
         : input.queuedEncryptInlineChunked,
   };
-  if (!input.onChainContextGraphId || !input.resolvedEncryptInlinePayload) {
+  const trustedNonManifestCatalogTriples = resolveCuratedV2CatalogCapability({
+    contextGraphId: input.contextGraphId,
+    graphScoped: true,
+    onChainContextGraphId: input.onChainContextGraphId,
+    encryptInlinePayload: input.resolvedEncryptInlinePayload,
+  });
+  if (!trustedNonManifestCatalogTriples) {
     return { quads: [...input.snapshotQuads], ...encryptionOptions };
   }
 
@@ -704,8 +751,7 @@ export function prepareQueuedKnowledgeAssetVmPublishOptions(input: {
     // the publisher; never append it to a queued snapshot.
     quads: [...input.snapshotQuads],
     ...encryptionOptions,
-    trustedNonManifestCatalogTriples:
-      generatedPrivateCatalogTripleKeys(input.contextGraphId),
+    trustedNonManifestCatalogTriples,
   };
 }
 
@@ -1513,12 +1559,14 @@ export class PublishMethods extends DKGAgentBase {
         promoted.shareOperationId,
       );
     }
-    await this._stampSwmPointer(
+    await this.afterDurableSwmPromotionV1({
       contextGraphId,
-      assertionName,
+      subGraphName: opts?.subGraphName,
+      assertionCoordinate: assertionName,
       lifecycleAgentAddress,
-      opts?.subGraphName,
-    );
+      shareOperationId: promoted.shareOperationId,
+      ctx,
+    });
 
     const intent = await this.resolveFinalizedAssertionVmPublishIntent(
       contextGraphId,
@@ -1615,10 +1663,6 @@ export class PublishMethods extends DKGAgentBase {
       // WM/SWM/VM graph, so reject it instead of signing ambiguous content.
       assertNoKnowledgeAssetPayloadNamedGraphs(quads, privateQuads ?? []);
     }
-    const trustedNonManifestCatalogTriples = graphScopedDirectPublish
-      && await this.isPrivateContextGraph(contextGraphId)
-      ? generatedPrivateCatalogTripleKeys(contextGraphId)
-      : undefined;
     const publishQuads = quads;
 
     // RFC-001 §9.x — sign-at-creation. The publisher refuses on-chain
@@ -1731,6 +1775,17 @@ export class PublishMethods extends DKGAgentBase {
       explicitPublishPolicyTarget,
       publishBindingOptions,
     );
+    // Use the same chain-aware curated decision that selected encryption.
+    // Local `_meta` can legitimately lag chain registration; consulting it a
+    // second time here used to omit the detached catalog from an otherwise
+    // curated V2 publish, leaving every strip-ciphertext core with zero bytes
+    // to verify for StorageACK.
+    const trustedNonManifestCatalogTriples = resolveCuratedV2CatalogCapability({
+      contextGraphId,
+      graphScoped: graphScopedDirectPublish,
+      onChainContextGraphId: onChainId,
+      encryptInlinePayload,
+    });
 
     const result = await this.publisher.publish({
       contextGraphId,
@@ -2040,6 +2095,15 @@ export class PublishMethods extends DKGAgentBase {
       canonicalSwmGraph,
       canonicalParts.publicQuads.map((quad) => ({ ...quad, graph: canonicalSwmGraph })),
     );
+    // #2079: a REPLACE, not a drop — the catch-up lane's count gate cannot see
+    // it, so the witness must be dropped explicitly. The head is persisted only
+    // after this point, so a tear in between leaves content ahead of the head;
+    // without this, a witness for the OLD digest would still certify it.
+    // Best-effort, like every other invalidate: never fail a write that has
+    // already committed in order to drop a memo.
+    await invalidateSwmMaterializationWitness(this.store, canonicalSwmGraph, {
+      source: 'agent.publish.graphScopedUpdate.witnessInvalidate',
+    }).catch(() => {});
     if (!replacedSwm) {
       throw Object.assign(
         new Error(
@@ -2495,9 +2559,9 @@ export class PublishMethods extends DKGAgentBase {
     this.contextGraphMetaProjection.markDirtyFromQuads(quads);
     await gm.ensureContextGraph(contextGraphId);
     await this.store.flush?.();
-    this.subscribeToContextGraph(contextGraphId);
+    const promotedSub = this.subscribeToContextGraph(contextGraphId, { syncMode: 'always-on' });
     this.setContextGraphSubscription(contextGraphId, {
-      ...existingSub,
+      ...promotedSub,
       name,
       subscribed: true,
       synced: true,
@@ -2720,9 +2784,12 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
     if (rawQuads.length === 0 && rawPrivateQuads.length === 0) {
-      throw new Error(
-        `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
-          `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
+      throw Object.assign(
+        new Error(
+          `Cannot finalize assertion <${assertionUri}>: it has no quads. ` +
+            `Write at least one quad with /api/knowledge-assets/${name}/wm/write before finalizing.`,
+        ),
+        { code: ASSERTION_EMPTY_CODE },
       );
     }
 
@@ -2740,11 +2807,14 @@ export class PublishMethods extends DKGAgentBase {
       (q) => !isReservedSubject(q.subject) && !isTrustLevelQuad(q),
     );
     if (userQuads.length === 0 && userPrivateQuads.length === 0) {
-      throw new Error(
-        `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
-          `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
-          `which is filtered out before SWM. Add at least one user-authored ` +
-          `public or private quad on a non-reserved subject before finalizing.`,
+      throw Object.assign(
+        new Error(
+          `Cannot finalize assertion <${assertionUri}>: every quad has a ` +
+            `reserved-namespace subject (urn:dkg:file:* / urn:dkg:extraction:*) ` +
+            `which is filtered out before SWM. Add at least one user-authored ` +
+            `public or private quad on a non-reserved subject before finalizing.`,
+        ),
+        { code: ASSERTION_EMPTY_CODE },
       );
     }
 
@@ -6156,33 +6226,7 @@ export class PublishMethods extends DKGAgentBase {
     }>,
   ): Promise<void> {
     if (input.status !== 'confirmed') return;
-    try {
-      const contextGraphId = input.contextGraphId;
-      const assertionCoordinate = input.assertionCoordinate;
-      const subGraphName = input.subGraphName ?? null;
-      assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
-      assertAssertionCoordinateV1(
-        assertionCoordinate,
-        'confirmed publish assertionCoordinate',
-      );
-      if (subGraphName !== null) {
-        assertSubGraphNameV1(subGraphName, 'confirmed publish subGraphName');
-      }
-      await this.recordConfirmedRfc64PublicCatalogAssetV1({
-        contextGraphId,
-        subGraphName,
-        assertionCoordinate,
-        publicQuads: input.publicQuads,
-        seal: input.seal,
-      });
-    } catch (err) {
-      this.log.warn(
-        input.ctx,
-        `Confirmed ${input.publicationLabel} for <${input.assertionUri}> but `
-          + `RFC-64 catalog advancement failed: `
-          + (err instanceof Error ? err.message : String(err)),
-      );
-    }
+    await this.observeRfc64ConfirmedVmV1(input);
   }
 
   /**
@@ -6533,11 +6577,9 @@ export class PublishMethods extends DKGAgentBase {
     // derives a detached catalog commitment without altering the exact KA
     // graph or its author seal.
     const graphScopedPublish = options?.contentScopeVersion === GRAPH_KA_CONTENT_SCOPE_VERSION;
-    const hasGeneratedPrivateCatalog = onChainId != null && (await this.isPrivateContextGraph(contextGraphId));
-    const trustedNonManifestCatalogTriples = hasGeneratedPrivateCatalog
-      ? generatedPrivateCatalogTripleKeys(contextGraphId)
-      : undefined;
-    if (hasGeneratedPrivateCatalog && !graphScopedPublish) {
+    let localTrustedNonManifestCatalogTriples: PublishOptions['trustedNonManifestCatalogTriples'];
+    if (!graphScopedPublish && onChainId != null && (await this.isPrivateContextGraph(contextGraphId))) {
+      localTrustedNonManifestCatalogTriples = generatedPrivateCatalogTripleKeys(contextGraphId);
       selection = await this._ensureCuratedCatalogInSwm(
         contextGraphId,
         selection,
@@ -6628,6 +6670,19 @@ export class PublishMethods extends DKGAgentBase {
     if (encryptInlineChunked) {
       this.log.info(ctx, `LU-11: curated CG ${contextGraphId} — chunked path active (per-chunk SWM gossip + V2 ACK)`);
     }
+
+    // V2 curation is decided by the live chain-aware encryption resolver, not
+    // by a second local `_meta` read. Keep the legacy combined-model behavior
+    // unchanged, but make graph-scoped publishes carry the detached catalog
+    // whenever the exact same operation was resolved as curated.
+    const trustedNonManifestCatalogTriples = graphScopedPublish
+      ? resolveCuratedV2CatalogCapability({
+          contextGraphId,
+          graphScoped: true,
+          onChainContextGraphId: onChainId,
+          encryptInlinePayload,
+        })
+      : localTrustedNonManifestCatalogTriples;
 
     const publisher = options?.publisherOverride ?? this.publisher;
     const result = await publisher.publishFromSharedMemory(contextGraphId, selection, {

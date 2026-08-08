@@ -40,7 +40,12 @@ import {
   type DecimalU64V1,
   type Digest32V1,
 } from './sync-wire-scalars.js';
-import { snapshotExactDataRecord } from './sync-wire-objects.js';
+import {
+  hasOwnDataProperty,
+  snapshotDataArray,
+  snapshotDataRecord,
+  snapshotExactDataRecord,
+} from './sync-wire-objects.js';
 
 export interface SystemRecordAppliedStateAbsentV1 {
   readonly objectType: 'system-record-applied-state';
@@ -166,9 +171,11 @@ export function computeSystemRecordAppliedStateDigestV1(
 }
 
 function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
-  const probe = plainRecord(value, 'system-record applied state');
+  const probe = snapshotDataRecord(value, 'system-record applied state', {
+    rejectNullValues: true,
+  });
   if (probe.state === 'absent') {
-    const absent = snapshotExactDataRecord(value, ['objectType', 'state'], 'absent applied state');
+    const absent = snapshotExactDataRecord(probe, ['objectType', 'state'], 'absent applied state');
     if (absent.objectType !== 'system-record-applied-state') throw new Error('absent applied-state tag is invalid');
     return ABSENT;
   }
@@ -177,9 +184,9 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     'conflictSidecarIntentOperation', 'conflictSidecarIntentEvidenceDigest',
     'conflictSidecarIntentStateRevision',
     'pendingDeletionTableDigest', 'pendingDeletionSubjectCount', 'pendingDeletionTableBytes',
-  ].filter((key) => Object.prototype.hasOwnProperty.call(probe, key));
+  ].filter((key) => hasOwnDataProperty(probe, key));
   const state = snapshotExactDataRecord(
-    value,
+    probe,
     [
       'objectType', 'state', 'kind', 'networkId', 'stableKeyHash', 'peerId',
       'stateRevision', 'status', 'headDigest', ...optional,
@@ -210,7 +217,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
   }
   assertCanonicalDigest(state.headDigest);
   const transitionLineage = validateTransitionLineage(state.transitionLineage);
-  if (Object.prototype.hasOwnProperty.call(state, 'conflictEvidenceDigest')) {
+  if (hasOwnDataProperty(state, 'conflictEvidenceDigest')) {
     assertCanonicalDigest(state.conflictEvidenceDigest);
   }
   assertCanonicalDigest(state.projectionDigest);
@@ -218,7 +225,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
   const projectionQuads = boundedU64(state.projectionQuads, SYSTEM_RECORD_MAX_PROJECTION_QUADS, 'projectionQuads');
   assertCanonicalDigest(state.ownedSubjectTableDigest);
   const ownedCount = boundedU64(state.ownedSubjectCount, SYSTEM_RECORD_MAX_OWNED_SUBJECTS, 'ownedSubjectCount');
-  boundedU64(
+  const ownedSubjectTableBytes = boundedU64(
     state.ownedSubjectTableBytes,
     SYSTEM_RECORD_OBJECT_CAPS_V1['owned-subject-table'],
     'ownedSubjectTableBytes',
@@ -228,7 +235,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     'conflictSidecarIntentEvidenceDigest',
     'conflictSidecarIntentStateRevision',
   ], 'conflict sidecar intent');
-  if (Object.prototype.hasOwnProperty.call(state, 'conflictSidecarIntentOperation')) {
+  if (hasOwnDataProperty(state, 'conflictSidecarIntentOperation')) {
     if (!['publish', 'remove', 'deferred'].includes(state.conflictSidecarIntentOperation as string)) {
       throw new Error('conflict sidecar intent operation is invalid');
     }
@@ -244,17 +251,22 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
         throw new Error('remove intent requires discoverable state retaining the installed evidence digest');
       }
     } else if (state.status !== 'quarantined'
-      || Object.prototype.hasOwnProperty.call(state, 'conflictEvidenceDigest')) {
+      || hasOwnDataProperty(state, 'conflictEvidenceDigest')) {
       throw new Error('publish/deferred intent requires quarantine without installed evidence');
     }
-  } else if (Object.prototype.hasOwnProperty.call(state, 'conflictEvidenceDigest')
+  } else if (hasOwnDataProperty(state, 'conflictEvidenceDigest')
     && state.status !== 'quarantined') {
     throw new Error('installed conflict evidence requires quarantine or an active remove intent');
+  }
+  if (state.status === 'quarantined'
+    && !hasOwnDataProperty(state, 'conflictEvidenceDigest')
+    && !hasOwnDataProperty(state, 'conflictSidecarIntentOperation')) {
+    throw new Error('quarantine requires installed conflict evidence or a resumable sidecar intent');
   }
   validateAllOrNoneGroup(state, [
     'pendingDeletionTableDigest', 'pendingDeletionSubjectCount', 'pendingDeletionTableBytes',
   ], 'pending deletion');
-  if (Object.prototype.hasOwnProperty.call(state, 'pendingDeletionTableDigest')) {
+  if (hasOwnDataProperty(state, 'pendingDeletionTableDigest')) {
     if (state.status !== 'dirty') throw new Error('pending deletion is valid only on dirty shadow state');
     assertCanonicalDigest(state.pendingDeletionTableDigest);
     boundedU64(state.pendingDeletionSubjectCount, SYSTEM_RECORD_MAX_OWNED_SUBJECTS, 'pendingDeletionSubjectCount');
@@ -289,7 +301,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES,
     'accountedBytes',
   );
-  const pendingBytes = Object.prototype.hasOwnProperty.call(state, 'pendingDeletionTableBytes')
+  const pendingBytes = hasOwnDataProperty(state, 'pendingDeletionTableBytes')
     ? parseCanonicalDecimalU64(state.pendingDeletionTableBytes)
     : 0n;
   const normalizedState = {
@@ -302,7 +314,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     maxBytes: SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES,
   });
   const expectedAccounted = BigInt(computeSystemRecordAccountedBytesV1(
-    Number(parseCanonicalDecimalU64(state.ownedSubjectTableBytes)),
+    Number(ownedSubjectTableBytes),
     Number(projectionBytes),
     Number(pendingBytes),
   ));
@@ -316,6 +328,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     throw new Error('tombstone applied state must commit the canonical empty projection/table');
   }
   if (state.status === 'active' && (projectionBytes === 0n || projectionQuads === 0n || ownedCount === 0n
+    || ownedSubjectTableBytes === 0n
     || state.projectionDigest === SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1
     || state.ownedSubjectTableDigest === EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1)) {
     throw new Error('active applied state must commit a nonempty projection/table');
@@ -505,11 +518,11 @@ export function computeSystemRecordAccountedBytesV1(
 }
 
 function validateTransitionLineage(value: unknown): readonly AgentProfileAppliedTransitionV1[] {
-  if (!Array.isArray(value) || value.length > Number(SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX)) {
-    throw new Error('transition lineage exceeds the V1 authority bound');
-  }
+  const lineage = snapshotDataArray(value, 'transition lineage', {
+    maxLength: Number(SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX),
+  });
   let expectedPrior = 0n;
-  return Object.freeze(value.map((candidate) => {
+  return Object.freeze(lineage.map((candidate) => {
     const entry = snapshotExactDataRecord(
       candidate,
       ['priorAuthoritySequence', 'nextAuthoritySequence', 'transitionDigest'],
@@ -527,11 +540,11 @@ function validateTransitionLineage(value: unknown): readonly AgentProfileApplied
 }
 
 function validateRootArray(value: unknown, currentRoot: string): readonly string[] {
-  if (!Array.isArray(value) || value.length > SYSTEM_RECORD_MAX_ROOT_CLAIMS - 1) {
-    throw new Error('historical roots exceed the V1 authority bound');
-  }
+  const values = snapshotDataArray(value, 'historical roots', {
+    maxLength: SYSTEM_RECORD_MAX_ROOT_CLAIMS - 1,
+  });
   const seen = new Set([currentRoot]);
-  const roots = value.map((candidate) => {
+  const roots = values.map((candidate) => {
     assertAgentRootV1(candidate as string);
     if (seen.has(candidate as string)) throw new Error('root claims must be duplicate-free');
     seen.add(candidate as string);
@@ -541,12 +554,12 @@ function validateRootArray(value: unknown, currentRoot: string): readonly string
 }
 
 function validateDigestSlots(value: unknown): readonly Digest32V1[] {
-  if (!Array.isArray(value) || value.length > SYSTEM_RECORD_MAX_CONFLICT_DIGESTS) {
-    throw new Error('conflict digest slots exceed the V1 bound');
-  }
-  const slots = value.map((candidate, index) => {
+  const values = snapshotDataArray(value, 'conflict digest slots', {
+    maxLength: SYSTEM_RECORD_MAX_CONFLICT_DIGESTS,
+  });
+  const slots = values.map((candidate, index) => {
     assertCanonicalDigest(candidate);
-    if (index > 0 && value[index - 1] >= candidate) {
+    if (index > 0 && (values[index - 1] as string) >= candidate) {
       throw new Error('conflict digest slots must be sorted and duplicate-free');
     }
     return candidate;
@@ -559,7 +572,7 @@ function validateAllOrNoneGroup(
   keys: readonly string[],
   label: string,
 ): void {
-  const present = keys.filter((key) => Object.prototype.hasOwnProperty.call(record, key)).length;
+  const present = keys.filter((key) => hasOwnDataProperty(record, key)).length;
   if (present !== 0 && present !== keys.length) throw new Error(`${label} fields must be all present or all omitted`);
 }
 
@@ -567,21 +580,4 @@ function boundedU64(value: unknown, maximum: number, label: string): bigint {
   const parsed = parseCanonicalDecimalU64(value, label);
   if (parsed > BigInt(maximum)) throw new Error(`${label} exceeds its V1 bound`);
   return parsed;
-}
-
-function plainRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be a plain object`);
-  }
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) throw new Error(`${label} must be a plain object`);
-  for (const key of Reflect.ownKeys(value)) {
-    if (typeof key !== 'string') throw new Error(`${label} must not contain symbols`);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} must contain only enumerable data properties`);
-    }
-    if (descriptor.value === null) throw new Error(`${label} must omit optional fields, not use null`);
-  }
-  return value as Record<string, unknown>;
 }

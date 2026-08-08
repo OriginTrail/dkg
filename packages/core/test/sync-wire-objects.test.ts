@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { assertExactKeys, isPlainRecord } from '../src/sync-wire-objects.js';
+import {
+  assertExactKeys,
+  hasOwnDataProperty,
+  isPlainRecord,
+  snapshotDataRecord,
+} from '../src/sync-wire-objects.js';
 
 describe('RFC-64 sync wire object helpers', () => {
   it('accepts ordinary and null-prototype records', () => {
@@ -55,5 +60,18 @@ describe('RFC-64 sync wire object helpers', () => {
     expect(() => assertExactKeys(accessor, ['value'], 'fixture')).toThrow(
       /enumerable data properties/,
     );
+  });
+
+  it('snapshots optional data properties once and rejects null optionals centrally', () => {
+    const source = Object.create(null) as Record<string, unknown>;
+    source.required = 'ok';
+    source.optional = 1;
+    const snapshot = snapshotDataRecord(source, 'fixture', { rejectNullValues: true });
+    expect(snapshot).toEqual({ required: 'ok', optional: 1 });
+    expect(hasOwnDataProperty(snapshot, 'optional')).toBe(true);
+    expect(hasOwnDataProperty(snapshot, 'missing')).toBe(false);
+    expect(() => snapshotDataRecord({ required: 'ok', optional: null }, 'fixture', {
+      rejectNullValues: true,
+    })).toThrow(/omit optional fields/);
   });
 });

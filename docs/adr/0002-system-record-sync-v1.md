@@ -126,6 +126,11 @@ An authenticated tombstone is signed and terminal for its authority sequence; re
 needs a valid authority transition. Active/tombstone conflicts resolve to the tombstone and
 cannot enter the ordinary fork-resolution path. If multiple valid tombstones are learned for
 one sequence, the lowest version wins and equal versions select the lowest semantic digest.
+When a tombstone is learned below the current applied sequence, the receiver verifies its exact
+active predecessor and the exact retained transition out of that sequence. The descendant is
+valid only when that transition names the tombstone as its predecessor; otherwise the tombstone
+takes precedence. Missing retained-transition evidence rejects for retry rather than treating the
+tombstone as stale.
 Inventory omission has no deletion authority.
 
 ## AgentProfileHeadV1
@@ -719,6 +724,8 @@ For every present record, `accountedBytes` is canonical and exact:
 `64 KiB fixed state/security precharge + ownedSubjectTableBytes + projectionBytes +
 pendingDeletionTableBytes`. The pending term is zero when omitted; current JSON size is
 validated against the 64-KiB envelope but never reduces the precharge.
+Tombstones commit the canonical SHA-256 digest of an empty projection under
+`dkg-ka-projection-v1\n`; active state rejects that empty-projection digest.
 Capacity accounting separates state/table bytes, persistent V1 projection bytes, and
 projection quads.
 `conflictEvidenceDigest` is present only for a fully cached unresolved availability

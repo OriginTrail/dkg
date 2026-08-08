@@ -1528,6 +1528,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
     const agent = await DKGAgent.create({
       name: 'ReconcilerLocalBackpressureRetry',
       listenHost: '127.0.0.1',
+      nodeRole: 'core',
       chainAdapter: new MockChainAdapter(),
       syncGlobalMaxInflight: 1,
       syncGlobalQueueLimit: 0,
@@ -1899,6 +1900,7 @@ describe('DKGAgent sync state lifecycle', () => {
     const agent = await DKGAgent.create({
       name: 'DenialOnlyNoProgressCooldown',
       listenHost: '127.0.0.1',
+      nodeRole: 'core',
       chainAdapter: new MockChainAdapter(),
     });
     try {

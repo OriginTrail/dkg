@@ -156,6 +156,10 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/adapter-prime-agent': {
+    lanes: ['bura_cli', 'kosava_node_ui_e2e', 'kosava_supporting', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
   'packages/adapter-elizaos': {
     lanes: ['kosava_supporting'],
     evmScopes: [],
@@ -200,6 +204,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/okf': ['kosava_supporting'],
   'packages/adapter-hermes': ['kosava_supporting'],
   'packages/adapter-openclaw': ['kosava_supporting'],
+  'packages/adapter-prime-agent': ['kosava_supporting'],
   'packages/adapter-elizaos': ['kosava_supporting'],
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],

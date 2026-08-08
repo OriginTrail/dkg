@@ -331,4 +331,20 @@ describe('WorkerCatchupRunner agent bridge', () => {
       source: 'catchup-foreground',
     });
   });
+
+  it('emits worker pass diagnostics through the parent logger bridge', async () => {
+    const info = vi.fn();
+    const { agent } = bridgeAgent({ log: { info } });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'logCatchupPass',
+      ['Catch-up SWM pass 2: 2 -> 3'],
+    );
+
+    expect(posted.error).toBeUndefined();
+    expect(posted.result).toBeNull();
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(info.mock.calls[0]?.[1]).toBe('Catch-up SWM pass 2: 2 -> 3');
+  });
 });

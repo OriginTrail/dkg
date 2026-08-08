@@ -29,9 +29,11 @@ import {
   INVENTORY_V1_APPLICATION_ID,
   INVENTORY_V1_DDL,
   INVENTORY_V1_LEGACY_DDL,
+  INVENTORY_V1_LEGACY_USER_VERSION,
   INVENTORY_V1_RELATIVE_PATH,
   INVENTORY_V1_USER_OBJECTS,
   INVENTORY_V1_USER_VERSION,
+  INVENTORY_V1_V2_USER_VERSION,
   INVENTORY_V1_POSIX_QUARANTINE_CAPABILITY,
   InventoryV1OpenError,
   normalizeInventoryV1SchemaSql,
@@ -1459,6 +1461,64 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     expect(readFileSync(path)).toEqual(before);
     expectNoQuarantine(path);
   });
+
+  it.each([
+    INVENTORY_V1_LEGACY_USER_VERSION,
+    INVENTORY_V1_V2_USER_VERSION,
+  ])(
+    'classifies corrupt owned migratable user_version=%i but refuses mutation without quiescence proof',
+    async (userVersion) => {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      mkdirSync(dirname(path), { recursive: true });
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`
+        CREATE TABLE legacy_corrupt_data (value TEXT);
+        INSERT INTO legacy_corrupt_data VALUES ('version-${userVersion}');
+        PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
+        PRAGMA user_version = ${userVersion};
+      `);
+      legacy.close();
+      truncateSync(path, 100);
+      const before = readFileSync(path);
+
+      await expect(openInventoryV1(dataDirectory)).rejects.toSatisfy(
+        (error: unknown) => expectOpenErrorCode(error, 'database-io'),
+      );
+      expect(readFileSync(path)).toEqual(before);
+      expectNoQuarantine(path);
+    },
+  );
+
+  it.each([
+    INVENTORY_V1_LEGACY_USER_VERSION,
+    INVENTORY_V1_V2_USER_VERSION,
+  ])(
+    'leaves corrupt owned migratable user_version=%i untouched without quarantine capability',
+    async (userVersion) => {
+      const dataDirectory = temporaryDataDirectory();
+      const path = databasePath(dataDirectory);
+      mkdirSync(dirname(path), { recursive: true });
+      const legacy = new DatabaseSync(path);
+      legacy.exec(`
+        CREATE TABLE legacy_corrupt_data (value TEXT);
+        PRAGMA application_id = ${INVENTORY_V1_APPLICATION_ID};
+        PRAGMA user_version = ${userVersion};
+      `);
+      legacy.close();
+      truncateSync(path, 100);
+      const before = readFileSync(path);
+      const openWithoutDurability = createInventoryV1TestOpener({
+        quarantineCapability: null,
+      });
+
+      await expect(openWithoutDurability(dataDirectory)).rejects.toSatisfy(
+        (error: unknown) => expectOpenErrorCode(error, 'durability-unavailable'),
+      );
+      expect(readFileSync(path)).toEqual(before);
+      expectNoQuarantine(path);
+    },
+  );
 
   it('refuses a corrupt uncommitted DK64 user_version=0 database as ambiguous', async () => {
     const dataDirectory = temporaryDataDirectory();

@@ -43,13 +43,10 @@ export function finalizationEnvelopeSha256(value: Uint8Array): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-export function finalizationRecoveryRowToEntry(
+/** Validates the durable envelope bytes shared by live and deferred rows. */
+export function finalizationEnvelopeFromRow(
   row: Record<string, unknown>,
-): FinalizationRecoveryEntry {
-  const state = String(row.state) as FinalizationRecoveryState;
-  if (!LIVE_STATES.has(state) && !TERMINAL_STATES.has(state)) {
-    throw new Error('Finalization inbox row has invalid state');
-  }
+): { raw: Uint8Array; envelopeSha256: string } {
   const raw = row.raw_envelope;
   if (!(raw instanceof Uint8Array)) {
     throw new Error('Finalization inbox row has invalid envelope');
@@ -61,6 +58,17 @@ export function finalizationRecoveryRowToEntry(
   ) {
     throw new Error('Finalization inbox row has invalid envelope integrity');
   }
+  return { raw, envelopeSha256 };
+}
+
+export function finalizationRecoveryRowToEntry(
+  row: Record<string, unknown>,
+): FinalizationRecoveryEntry {
+  const state = String(row.state) as FinalizationRecoveryState;
+  if (!LIVE_STATES.has(state) && !TERMINAL_STATES.has(state)) {
+    throw new Error('Finalization inbox row has invalid state');
+  }
+  const { raw, envelopeSha256 } = finalizationEnvelopeFromRow(row);
   const verifiedEvidence = row.verified_evidence_json === null
     ? undefined
     : VerifiedGraphScopedFinalizationEvidenceCodec.parse(

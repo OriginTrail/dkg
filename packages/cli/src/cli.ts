@@ -16,6 +16,7 @@ import { registerAssertionCommand } from './commands/assertion.js';
 import { registerOpenclawCommand } from './commands/openclaw.js';
 import { registerMcpCommand } from './commands/mcp.js';
 import { registerHermesCommand } from './commands/hermes.js';
+import { registerPrimeAgentCommand } from './commands/prime-agent.js';
 import { registerCclCommand } from './commands/ccl.js';
 import { registerIndexCommand } from './commands/index-command.js';
 import { registerSourceWorkerCommand } from './commands/source-worker.js';
@@ -31,7 +32,7 @@ import { registerOkfCommand } from './commands/okf.js';
 const program = new Command();
 program
   .name('dkg')
-  .description('DKG V10 testnet node CLI')
+  .description('DKG V10 node CLI')
   .version(getCliVersion());
 
 registerInitCommand(program);
@@ -47,6 +48,7 @@ registerAssertionCommand(program);
 registerOpenclawCommand(program);
 registerMcpCommand(program);
 registerHermesCommand(program);
+registerPrimeAgentCommand(program);
 registerCclCommand(program);
 registerIndexCommand(program);
 registerSourceWorkerCommand(program);

@@ -761,6 +761,77 @@ describe('OpenClaw bridge behavioral tests', () => {
     expect(getDefaultLocalAgentSessionId('hermes')).toBe('hermes:dkg-ui');
   });
 
+  it('Prime Agent forwards raw live session ids but reads history from the prefixed DKG session id', async () => {
+    const { fetch, calls } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [{
+            id: 'prime-agent',
+            name: 'Prime Agent',
+            description: 'Prime Agent adapter',
+            enabled: true,
+            capabilities: { localChat: true, connectFromUi: true },
+            metadata: {
+              activeSessionId: 'prime-session-1',
+              activeMemorySessionId: 'prime-agent:dkg-ui:prime-session-1',
+              sessionCount: 1,
+            },
+            runtime: { status: 'ready', ready: true },
+          }],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          target: 'prime-session-1',
+          targetMemorySessionId: 'prime-agent:dkg-ui:prime-session-1',
+          sessionCount: 1,
+          sessions: [{
+            sessionId: 'prime-session-1',
+            rawSessionId: 'prime-session-1',
+            memorySessionId: 'prime-agent:dkg-ui:prime-session-1',
+          }],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          session: 'prime-agent:dkg-ui:prime-session-1',
+          messages: [],
+        }),
+      },
+      {
+        ok: true,
+        headers: { get: () => 'application/json' },
+        body: null,
+        json: async () => ({ text: 'reply', sessionId: 'prime-agent:dkg-ui:prime-session-1', correlationId: 'corr-1' }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations, fetchLocalAgentHistory, streamLocalAgentChat } = await import('../src/ui/api.js');
+      const integrations = await fetchLocalAgentIntegrations();
+      const primeAgent = integrations.integrations.find((item: any) => item.id === 'prime-agent');
+      expect(primeAgent?.defaultSessionId).toBe('prime-agent:dkg-ui:prime-session-1');
+
+      await fetchLocalAgentHistory('prime-agent', 10, {
+        sessionId: primeAgent?.defaultSessionId,
+      });
+      expect(calls[2].url).toContain('/api/memory/sessions/prime-agent%3Adkg-ui%3Aprime-session-1');
+
+      await streamLocalAgentChat('prime-agent', 'hello', {
+        sessionId: primeAgent?.defaultSessionId,
+        liveSession: primeAgent?.liveSessions?.[0],
+      });
+      expect(JSON.parse(calls[3].opts?.body as string).sessionId).toBe('prime-session-1');
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it('streamLocalAgentChat forwards injected context entries', async () => {
     const fetchCalls: [string | URL | Request, RequestInit | undefined][] = [];
     const fakeFetch = (async (url: string | URL | Request, init?: RequestInit) => {
@@ -831,6 +902,75 @@ describe('OpenClaw bridge behavioral tests', () => {
       expect(openclaw?.target).toBe('gateway');
       expect(hermes?.status).toBe('available');
       expect(hermes?.connectSupported).toBe(true);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it('pins Prime Agent chat to the elected live session', async () => {
+    const { fetch } = createTrackingFetch([
+      {
+        ok: true,
+        json: async () => ({
+          integrations: [
+            {
+              id: 'prime-agent',
+              name: 'Prime Agent',
+              description: 'Prime Agent framework adapter',
+              enabled: true,
+              capabilities: { localChat: true, connectFromUi: true },
+              runtime: { status: 'ready', ready: true },
+              metadata: {
+                sessionCount: 2,
+                activeSessionId: '019f-session-a',
+                activeMemorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+              },
+            },
+          ],
+        }),
+      },
+      {
+        ok: true,
+        json: async () => ({
+          ok: true,
+          sessionCount: 2,
+          target: '019f-session-a',
+          busy: true,
+          turnState: 'running',
+          clientConnected: false,
+          clientDisconnectedAt: '2026-08-07T12:34:56.000Z',
+          sessions: [
+            {
+              sessionId: '019f-session-a',
+              rawSessionId: '019f-session-a',
+              memorySessionId: 'prime-agent:dkg-ui:019f-session-a',
+              sessionName: 'Research',
+            },
+            {
+              sessionId: '019f-session-b',
+              rawSessionId: '019f-session-b',
+              memorySessionId: 'prime-agent:dkg-ui:019f-session-b',
+              sessionName: 'Publishing',
+            },
+          ],
+        }),
+      },
+    ]);
+    const original = globalThis.fetch;
+    globalThis.fetch = fetch;
+    try {
+      const { fetchLocalAgentIntegrations } = await import('../src/ui/api.js');
+      const result = await fetchLocalAgentIntegrations();
+      const prime = result.integrations.find((item) => item.id === 'prime-agent');
+      expect(prime?.activeSessionId).toBe('019f-session-a');
+      expect(prime?.defaultSessionId).toBe('prime-agent:dkg-ui:019f-session-a');
+      expect(prime?.busy).toBe(true);
+      expect(prime?.liveSessions?.map((session) => session.sessionId)).toEqual([
+        'prime-agent:dkg-ui:019f-session-a',
+        'prime-agent:dkg-ui:019f-session-b',
+      ]);
+      expect(prime?.statusLabel).toBe('Still working');
+      expect(prime?.detail).toContain('browser stream disconnected');
     } finally {
       globalThis.fetch = original;
     }
