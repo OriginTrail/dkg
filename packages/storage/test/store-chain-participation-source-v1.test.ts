@@ -20,8 +20,22 @@ const EXPECTED_STORAGE_DECORATORS = Object.freeze([
   'shared-memory-literal-blob-store.ts#SharedMemoryLiteralBlobStore',
 ]);
 
-function typeNamesTripleStore(type: ts.TypeNode | undefined, sourceFile: ts.SourceFile): boolean {
-  return type !== undefined && /(?:^|\W)TripleStore(?:\W|$)/.test(type.getText(sourceFile));
+function entityNamesTripleStore(name: ts.EntityName): boolean {
+  return ts.isIdentifier(name)
+    ? name.text === 'TripleStore'
+    : name.right.text === 'TripleStore';
+}
+
+function expressionNamesTripleStore(expression: ts.Expression): boolean {
+  return ts.isIdentifier(expression)
+    ? expression.text === 'TripleStore'
+    : ts.isPropertyAccessExpression(expression) && expression.name.text === 'TripleStore';
+}
+
+function typeNamesTripleStore(type: ts.TypeNode | undefined): boolean {
+  return type !== undefined
+    && ts.isTypeReferenceNode(type)
+    && entityNamesTripleStore(type.typeName);
 }
 
 function directlyRegisters(
@@ -55,12 +69,12 @@ function discoverDecorators(sourceText: string, fileName: string): DecoratorSour
     if (ts.isClassDeclaration(node) && node.name !== undefined
       && node.heritageClauses?.some(
         (clause) => clause.token === ts.SyntaxKind.ImplementsKeyword
-          && clause.types.some((type) => typeNamesTripleStore(type, sourceFile)),
+          && clause.types.some((type) => expressionNamesTripleStore(type.expression)),
       )) {
       const constructor = node.members.find(ts.isConstructorDeclaration);
       const inner = constructor?.parameters.find(
         (parameter) => ts.isIdentifier(parameter.name)
-          && typeNamesTripleStore(parameter.type, sourceFile),
+          && typeNamesTripleStore(parameter.type),
       );
       if (constructor !== undefined && inner !== undefined && ts.isIdentifier(inner.name)) {
         const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
@@ -129,5 +143,20 @@ describe('first-party store-chain participation source contract', () => {
     expect(registrationViolation(decorator!)).toBe(
       'fixture.ts:2 ForgetfulDecoratorStore: missing linkStoreChainV1(this, inner)',
     );
+  });
+
+  it('accepts namespace-qualified TripleStore references', () => {
+    const [decorator] = discoverDecorators(`
+      class QualifiedDecoratorStore implements storage.TripleStore {
+        constructor(private readonly inner: storage.TripleStore) {
+          linkStoreChainV1(this, inner);
+        }
+      }
+    `, 'qualified-fixture.ts');
+
+    expect(decorator).toMatchObject({
+      key: 'qualified-fixture.ts#QualifiedDecoratorStore',
+      directlyRegistered: true,
+    });
   });
 });
