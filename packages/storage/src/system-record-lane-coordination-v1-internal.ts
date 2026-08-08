@@ -121,6 +121,12 @@ export class SystemRecordTransitionCoordinatorV1<Transition extends object> {
     if (this.ownedSettlements.has(entry)) {
       throw new Error('system-record transition settlement is already owned');
     }
+    // The state machine permits only the current transition plus one
+    // shutdown-superseded predecessor. Enforce that physical bound rather than
+    // turning the settlement registry into a general-purpose queue.
+    if (this.ownedSettlements.size >= 2) {
+      throw new Error('system-record transition settlement ownership exceeded its bound');
+    }
     this.ownedSettlements.set(entry, Object.freeze({ settlement, assertSettled }));
     this.settlementVersion += 1;
     void settlement.catch(() => undefined);
