@@ -245,9 +245,12 @@ describe('system-record controller disposal', () => {
     const opening = lane!.open(ACTIVATION).then(() => 'resolved', () => 'rejected');
     await started;
 
-    await a.close();
-
+    let closed = false;
+    const closing = a.close().then(() => { closed = true; });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(closed).toBe(false);
     release();
+    await closing;
     expect(await opening).toBe('rejected');
 
     // The replacement can register, and the superseded lane never reopened.

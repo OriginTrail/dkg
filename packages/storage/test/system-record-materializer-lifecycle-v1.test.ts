@@ -268,6 +268,78 @@ class AtomicRecoveryExecutor extends StubExecutor {
   }
 }
 
+class CapturingSettlementExecutor extends StubExecutor {
+  registrar: SystemRecordAtomicRecoveryRegistrarV1 | null = null;
+  binding: SystemRecordLaneExecutionBindingV1 | null = null;
+
+  async applyVerifiedSettlementBound(
+    _proof: unknown,
+    binding: SystemRecordLaneExecutionBindingV1,
+    registerRecovery: SystemRecordAtomicRecoveryRegistrarV1,
+  ): Promise<SystemRecordAtomicApplySettlementV1> {
+    this.calls.push(binding);
+    this.binding = binding;
+    this.registrar = registerRecovery;
+    return Object.freeze({
+      settlement: 'no-mutation',
+      outcome: Object.freeze({ outcome: 'stale' }),
+    });
+  }
+}
+
+class MismatchedBindingExecutor extends StubExecutor {
+  registrationError: unknown = null;
+
+  async applyVerifiedSettlementBound(
+    _proof: unknown,
+    binding: SystemRecordLaneExecutionBindingV1,
+    registerRecovery: SystemRecordAtomicRecoveryRegistrarV1,
+  ): Promise<SystemRecordAtomicApplySettlementV1> {
+    this.calls.push(binding);
+    try {
+      registerRecovery(Object.freeze({
+        ownership: Object.freeze(Object.create(null) as object),
+        binding: Object.freeze({ ...binding }),
+        reconcile: async () => Object.freeze({ resolution: 'unavailable' as const }),
+      }));
+    } catch (error) {
+      this.registrationError = error;
+    }
+    return Object.freeze({
+      settlement: 'no-mutation',
+      outcome: Object.freeze({ outcome: 'stale' }),
+    });
+  }
+}
+
+class RejectingSettlementExecutor extends StubExecutor {
+  registration: SystemRecordAtomicRecoveryRegistrationV1 | null = null;
+
+  constructor(private readonly registerBeforeReject: boolean) {
+    super();
+  }
+
+  async applyVerifiedSettlementBound(
+    _proof: unknown,
+    binding: SystemRecordLaneExecutionBindingV1,
+    registerRecovery: SystemRecordAtomicRecoveryRegistrarV1,
+  ): Promise<SystemRecordAtomicApplySettlementV1> {
+    this.calls.push(binding);
+    if (this.registerBeforeReject) {
+      this.registration = registerRecovery(Object.freeze({
+        ownership: Object.freeze(Object.create(null) as object),
+        binding,
+        reconcile: async () => Object.freeze({
+          resolution: 'applied' as const,
+          stateRevision: '2',
+          appliedStateDigest: `0x${'2'.repeat(64)}`,
+        }),
+      }));
+    }
+    throw new Error('settlement executor rejected');
+  }
+}
+
 class RecoveryHandoff extends RecordingHandoff {
   private epoch = 0;
   readonly recoveryDeadlines: Array<{ phase: string; value: number | undefined }> = [];
@@ -376,6 +448,31 @@ class GateBarrier extends RecordingBarrier {
 
 }
 
+/** Parks after a transition callback settles but before its barrier releases. */
+class SettlementTailGateBarrier extends RecordingBarrier {
+  private releaseTail!: () => void;
+  private readonly tail = new Promise<void>((resolve) => { this.releaseTail = resolve; });
+  private reachedTail!: () => void;
+  readonly tailReached = new Promise<void>((resolve) => { this.reachedTail = resolve; });
+
+  constructor(private readonly gatedPurpose: string) {
+    super();
+    const recordAndRun = this.run;
+    this.run = async <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+      const result = await recordAndRun(purpose, transition);
+      if (purpose === this.gatedPurpose) {
+        this.reachedTail();
+        await this.tail;
+      }
+      return result;
+    };
+  }
+
+  release(): void {
+    this.releaseTail();
+  }
+}
+
 /**
  * Scheduler-faithful transition-timeout model.
  *
@@ -415,17 +512,38 @@ class TransitionTimeoutBarrier extends RecordingBarrier {
   }
 }
 
-/** Models the scheduler rejecting before the shutdown callback is admitted. */
+/** Models the scheduler rejecting before a selected callback is admitted. */
 class WaitPhaseTimeoutBarrier extends RecordingBarrier {
-  constructor() {
+  constructor(private readonly rejectedPurpose = 'system-record.shutdown') {
     super();
     const recordAndRun = this.run;
     this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
-      if (purpose === 'system-record.shutdown') {
+      if (purpose === this.rejectedPurpose) {
         return Promise.reject(new Error('STORE_CONTROL_BARRIER_WAIT_TIMEOUT'));
       }
       return recordAndRun(purpose, transition);
     };
+  }
+}
+
+/** Holds the wait phase so recovery can attach before the timeout is reported. */
+class ControlledWaitPhaseTimeoutBarrier extends RecordingBarrier {
+  private rejectWait!: (reason: unknown) => void;
+  private reachedWait!: () => void;
+  readonly waitReached = new Promise<void>((resolve) => { this.reachedWait = resolve; });
+
+  constructor(private readonly rejectedPurpose: string) {
+    super();
+    const recordAndRun = this.run;
+    this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+      if (purpose !== this.rejectedPurpose) return recordAndRun(purpose, transition);
+      this.reachedWait();
+      return new Promise<T>((_resolve, reject) => { this.rejectWait = reject; });
+    };
+  }
+
+  timeout(): void {
+    this.rejectWait(new Error('STORE_CONTROL_BARRIER_WAIT_TIMEOUT'));
   }
 }
 
@@ -1938,6 +2056,372 @@ describe('system-record lane session lifecycle V1', () => {
         executor: new StubExecutor(),
         barrier: barrier.run,
       });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('retains the single-writer registration when release wins before recovery registration', async () => {
+      const gatedBarrier = new GateBarrier();
+      gatedBarrier.gate('system-record.recovery');
+      const { controller, recoveryExecutor } = buildRecovery(gatedBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+
+      let released = false;
+      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        released = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      const releasedBeforeRegistration = released;
+
+      recoveryExecutor.releaseRegistration();
+      const applyResult = await apply.then(
+        (value) => ({ status: 'fulfilled' as const, value }),
+        (reason: unknown) => ({ status: 'rejected' as const, reason }),
+      );
+      let releasedBeforePhysicalSettlement = released;
+      if (applyResult.status === 'fulfilled') {
+        await gatedBarrier.reached('system-record.recovery');
+        await new Promise((resolve) => setImmediate(resolve));
+        releasedBeforePhysicalSettlement = released;
+      }
+
+      gatedBarrier.release('system-record.recovery');
+      await release;
+
+      expect(releasedBeforeRegistration).toBe(false);
+      expect(releasedBeforePhysicalSettlement).toBe(false);
+      expect(applyResult).toEqual({
+        status: 'fulfilled',
+        value: { outcome: 'indeterminate', recoveryGeneration: '1' },
+      });
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('waits for every admitted compatibility call and coalesces concurrent release', async () => {
+      const controller = build();
+      const session = await controller.open(ACTIVATION);
+      executor.park();
+
+      const first = session.applyVerified({ call: 1 });
+      const second = session.applyVerified({ call: 2 });
+      await executor.dispatched;
+      expect(executor.calls).toHaveLength(2);
+
+      let releases = 0;
+      const releaseA = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        releases += 1;
+      });
+      const releaseB = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        releases += 1;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(releases).toBe(0);
+      await expect(session.applyVerified({ call: 3 })).resolves.toEqual({
+        outcome: 'capability-lost',
+      });
+      expect(executor.calls).toHaveLength(2);
+      expect(() => build()).toThrow(SystemRecordControllerRegistrationError);
+
+      executor.release();
+      await Promise.all([first, second, releaseA, releaseB]);
+      expect(releases).toBe(2);
+
+      const replacement = build();
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('rejects a recovery registrar retained after its apply invocation settled', async () => {
+      const recoveryHandoff = new RecoveryHandoff(ownership);
+      const capturingExecutor = new CapturingSettlementExecutor();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: recoveryHandoff,
+        executor: capturingExecutor,
+        barrier: barrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+
+      await expect(session.applyVerified({})).resolves.toEqual({ outcome: 'stale' });
+      const binding = capturingExecutor.binding;
+      const registrar = capturingExecutor.registrar;
+      expect(binding).not.toBeNull();
+      expect(registrar).not.toBeNull();
+      expect(() => registrar?.(Object.freeze({
+        ownership: Object.freeze(Object.create(null) as object),
+        binding: binding!,
+        reconcile: async () => Object.freeze({ resolution: 'unavailable' as const }),
+      }))).toThrow(/no longer live for this apply invocation/);
+
+      await releaseSystemRecordLaneControllerV1(controller);
+    });
+
+    it('rejects a copied binding from the live invocation registrar', async () => {
+      const recoveryHandoff = new RecoveryHandoff(ownership);
+      const mismatchedExecutor = new MismatchedBindingExecutor();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: recoveryHandoff,
+        executor: mismatchedExecutor,
+        barrier: barrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+
+      await expect(session.applyVerified({})).resolves.toEqual({ outcome: 'stale' });
+      expect(mismatchedExecutor.registrationError).toEqual(expect.objectContaining({
+        message: expect.stringMatching(/not bound to the admitted apply invocation/),
+      }));
+      await releaseSystemRecordLaneControllerV1(controller);
+    });
+
+    it.each([
+      ['before recovery registration', false],
+      ['after recovery registration', true],
+    ] as const)('drains an executor rejection %s', async (_label, registerBeforeReject) => {
+      const recoveryHandoff = new RecoveryHandoff(ownership);
+      const rejectingExecutor = new RejectingSettlementExecutor(registerBeforeReject);
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: recoveryHandoff,
+        executor: rejectingExecutor,
+        barrier: barrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+
+      await expect(session.applyVerified({})).rejects.toThrow(/settlement executor rejected/);
+      if (registerBeforeReject) {
+        await expect(rejectingExecutor.registration?.completion).resolves.toEqual({
+          resolution: 'applied',
+          stateRevision: '2',
+          appliedStateDigest: `0x${'2'.repeat(64)}`,
+        });
+      }
+      await expect(releaseSystemRecordLaneControllerV1(controller)).resolves.toBeUndefined();
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('waits for the recovery barrier tail after the recovery token settles', async () => {
+      const tailBarrier = new SettlementTailGateBarrier('system-record.recovery');
+      const { controller, recoveryExecutor } = buildRecovery(tailBarrier);
+      const session = await controller.open(ACTIVATION);
+
+      await expect(session.applyVerified({})).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'applied',
+        stateRevision: '2',
+        appliedStateDigest: `0x${'2'.repeat(64)}`,
+      });
+      await tailBarrier.tailReached;
+
+      let released = false;
+      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        released = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(released).toBe(false);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+
+      tailBarrier.release();
+      await release;
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('accepts late bound recovery after a disable wait timeout clears the active binding', async () => {
+      const waitTimeout = new WaitPhaseTimeoutBarrier('system-record.disable');
+      const { controller, recoveryExecutor } = buildRecovery(waitTimeout);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const disable = session.close('disable');
+      let released = false;
+      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        released = true;
+      });
+      await expect(disable).rejects.toThrow(/WAIT_TIMEOUT/);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(released).toBe(false);
+
+      recoveryExecutor.releaseRegistration();
+      await expect(apply).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await release;
+      expect(released).toBe(true);
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('keeps unavailable terminal when recovery registers after a disable wait timeout', async () => {
+      const waitTimeout = new WaitPhaseTimeoutBarrier('system-record.disable');
+      const { controller, recoveryExecutor } = buildRecovery(waitTimeout);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      await expect(session.close('disable')).rejects.toThrow(/WAIT_TIMEOUT/);
+      expect(session.state).toBe('unavailable');
+
+      recoveryExecutor.releaseRegistration();
+      await expect(apply).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'applied',
+        stateRevision: '2',
+        appliedStateDigest: `0x${'2'.repeat(64)}`,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(session.state).toBe('unavailable');
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal \(unavailable\)/);
+    });
+
+    it('retains recovery attached before a disable wait timeout reports', async () => {
+      const waitTimeout = new ControlledWaitPhaseTimeoutBarrier('system-record.disable');
+      const { controller, recoveryExecutor } = buildRecovery(waitTimeout);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const disable = session.close('disable');
+      await waitTimeout.waitReached;
+
+      recoveryExecutor.releaseRegistration();
+      await expect(apply).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      const release = releaseSystemRecordLaneControllerV1(controller);
+      waitTimeout.timeout();
+
+      await expect(disable).rejects.toThrow(/WAIT_TIMEOUT/);
+      await expect(release).rejects.toThrow(/WAIT_TIMEOUT/);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+      let recoverySettled = false;
+      void recoveryExecutor.registration?.completion.then(() => { recoverySettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(recoverySettled).toBe(false);
+    });
+
+    it('blocks a disable successor that was waiting behind recovery when detach latches', async () => {
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryExecutor.parkReconcile();
+
+      await expect(session.applyVerified({})).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await recoveryExecutor.reconcileReached;
+      const disable = session.close('disable');
+      const release = releaseSystemRecordLaneControllerV1(controller);
+
+      recoveryExecutor.releaseReconcile();
+      await Promise.all([disable, release]);
+      expect(recoveryHandoff.calls).not.toContain('rotateMaterializationEpoch');
+      expect(session.state).toBe('detached');
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('keeps a failed shutdown and late recovery globally claimed', async () => {
+      const waitTimeout = new WaitPhaseTimeoutBarrier();
+      const { controller, recoveryExecutor } = buildRecovery(waitTimeout);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const shutdown = session.close('shutdown');
+      const release = releaseSystemRecordLaneControllerV1(controller);
+      await expect(shutdown).rejects.toThrow(/WAIT_TIMEOUT/);
+
+      recoveryExecutor.releaseRegistration();
+      await expect(apply).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await expect(release).rejects.toThrow(/WAIT_TIMEOUT/);
+      expect(session.state).toBe('shutdown');
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+    });
+
+    it('retries owner quiescence without rerunning the detach decision', async () => {
+      const controller = build();
+      await controller.open(ACTIVATION);
+
+      await expect(releaseSystemRecordLaneControllerV1(
+        controller,
+        () => Promise.reject(new Error('owner quiescence failed')),
+      )).rejects.toThrow(/owner quiescence failed/);
+      expect(() => build()).toThrow(SystemRecordControllerRegistrationError);
+
+      await releaseSystemRecordLaneControllerV1(controller);
+      const replacement = build();
       await releaseSystemRecordLaneControllerV1(replacement);
     });
 
