@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   AGENT_PROFILE_LINK_PREDICATES_V1,
   assertAgentProfileProjectionSchemaV1,
+  classifyAgentProfileOwnedSubjectV1,
   deriveAgentProfileOwnedSubjectV1,
   evaluateAuthorityTransitionConflictV1,
   isAllowedAgentProfilePredicateV1,
@@ -228,8 +229,14 @@ describe('system-record V1 public policy helpers', () => {
     const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
     expect(deriveAgentProfileOwnedSubjectV1(root, 'capability', 2))
       .toBe(`${root}/.well-known/genid/cap2`);
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'offering', 3))
+      .toBe(`${root}/.well-known/genid/offering3`);
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'registration'))
+      .toBe(`${root}/.well-known/genid/registration`);
     expect(deriveAgentProfileOwnedSubjectV1(root, 'hosting'))
       .toBe(`${root}/.well-known/genid/hosting`);
+    const x25519 = `${root}#x25519-${'a'.repeat(32)}`;
+    expect(classifyAgentProfileOwnedSubjectV1(root, x25519)).toBe('x25519');
     const uncheckedDerive = deriveAgentProfileOwnedSubjectV1 as unknown as (
       rootSubject: string,
       kind: 'capability' | 'offering' | 'registration' | 'hosting',

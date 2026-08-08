@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { PreparedAgentProfileV1 } from '../profile.js';
-import { commitAgentProfileProductionV1 } from './agent-profile-producer-commit-v1.js';
+import {
+  commitAgentProfileProductionV1,
+  type AgentProfileProducerCommitDependenciesV1,
+} from './agent-profile-producer-commit-v1.js';
 import type {
   AgentProfileProducerLeaseV1,
   AgentProfileProducerPublicationV1,
@@ -9,19 +12,20 @@ import type {
   AgentProfilePublicationBindingV1,
   CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-contract-v1.js';
-import type {
-  AgentProfileProducerCommitDependenciesV1,
-  AgentProfileProducerInventoryDependenciesV1,
-  AgentProfileProducerPreparationDependenciesV1,
-  AgentProfileProducerSigningDependenciesV1,
-} from './agent-profile-producer-phase-contracts-v1.js';
-import { prepareAgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
+import {
+  prepareAgentProfileProductionInventoryV1,
+  type AgentProfileProducerInventoryDependenciesV1,
+} from './agent-profile-producer-inventory-v1.js';
 import {
   prepareAgentProfileProductionV1,
   validateAgentProfileProductionInputV1,
+  type AgentProfileProducerPreparationDependenciesV1,
   type ValidatedAgentProfileProductionInputV1,
 } from './agent-profile-producer-preparation-v1.js';
-import { signAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
+import {
+  signAgentProfileProductionV1,
+  type AgentProfileProducerSigningDependenciesV1,
+} from './agent-profile-producer-signing-v1.js';
 
 export * from './agent-profile-producer-contract-v1.js';
 
@@ -38,27 +42,21 @@ export function createAgentProfileProducerV1(
     peerId: options.peerSigner.peerId,
     peerPublicKey: options.peerSigner.publicKey,
     evmIssuer: options.evmSigner.address,
-    ...(options.nowMs === undefined ? {} : { nowMs: () => options.nowMs?.() ?? Date.now() }),
-    snapshot: () => options.store.snapshot(),
+    clock: options,
+    store: options.store,
   });
   const signingDependencies: AgentProfileProducerSigningDependenciesV1 = Object.freeze({
     peerSigner: options.peerSigner,
     evmSigner: options.evmSigner,
   });
-  const resolveArtifact: AgentProfileProducerInventoryDependenciesV1['resolveArtifact'] =
-    (reference) => options.store.resolveArtifact(reference);
   const inventoryDependencies: AgentProfileProducerInventoryDependenciesV1 = Object.freeze({
     networkId: options.networkId,
     peerSigner: options.peerSigner,
-    resolveArtifact,
+    store: options.store,
   });
-  const prepareCommit: AgentProfileProducerCommitDependenciesV1['prepareCommit'] =
-    (input) => options.store.prepareCommit(input);
-  const install: AgentProfileProducerCommitDependenciesV1['install'] =
-    (input) => options.install(input);
   const commitDependencies: AgentProfileProducerCommitDependenciesV1 = Object.freeze({
-    prepareCommit,
-    install,
+    store: options.store,
+    producer: options,
   });
   let active = false;
   const completePrepared = async (

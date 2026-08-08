@@ -1,12 +1,16 @@
 import type {
+  AgentProfileProducerPublicationStoreV1,
   AgentProfileProducerPublicationV1,
+  CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-contract-v1.js';
-import type {
-  AgentProfileProducerCommitDependenciesV1,
-} from './agent-profile-producer-phase-contracts-v1.js';
 import type { AgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
+
+export interface AgentProfileProducerCommitDependenciesV1 {
+  readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'prepareCommit'>;
+  readonly producer: Pick<CreateAgentProfileProducerOptionsV1, 'install'>;
+}
 
 export async function commitAgentProfileProductionV1(
   dependencies: AgentProfileProducerCommitDependenciesV1,
@@ -15,7 +19,7 @@ export async function commitAgentProfileProductionV1(
   inventoryPlan: AgentProfileProductionInventoryV1,
   signal: AbortSignal,
 ): Promise<AgentProfileProducerPublicationV1> {
-  const commitLease = await dependencies.prepareCommit({
+  const commitLease = await dependencies.store.prepareCommit({
     expectedHeadDigest: preparation.snapshot.currentHead?.objectDigest ?? null,
     expectedRootDescriptorDigest: preparation.snapshot.inventory?.descriptorDigest ?? null,
     publicationArtifacts: inventoryPlan.publicationArtifacts,
@@ -25,7 +29,7 @@ export async function commitAgentProfileProductionV1(
   let committed = false;
   try {
     signal.throwIfAborted();
-    await dependencies.install({
+    await dependencies.producer.install({
       head: preparation.head,
       envelope: signed.envelope,
       canonicalProjectionBytes: preparation.projectionBytes,

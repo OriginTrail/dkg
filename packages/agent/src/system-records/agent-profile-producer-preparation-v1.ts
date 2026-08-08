@@ -36,17 +36,26 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import type {
+  AgentProfileProducerPublicationStoreV1,
   AgentProfilePublicationBindingV1,
+  CreateAgentProfileProducerOptionsV1,
   SystemRecordPeerSignerV1,
 } from './agent-profile-producer-contract-v1.js';
-import type {
-  AgentProfileProducerPreparationDependenciesV1,
-} from './agent-profile-producer-phase-contracts-v1.js';
 
 const UTF8 = new TextEncoder();
 const VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1: unique symbol = Symbol(
   'validated-agent-profile-production-input-v1',
 );
+
+export interface AgentProfileProducerPreparationDependenciesV1 {
+  readonly networkId: NetworkIdV1;
+  readonly publicationDeployment: Readonly<CatalogSealDeploymentProfileV1>;
+  readonly peerId: string;
+  readonly peerPublicKey: SystemRecordPeerSignerV1['publicKey'];
+  readonly evmIssuer: string;
+  readonly clock: Pick<CreateAgentProfileProducerOptionsV1, 'nowMs'>;
+  readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'snapshot'>;
+}
 
 export interface ValidatedAgentProfileProductionInputV1 {
   readonly [VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1]: true;
@@ -56,7 +65,7 @@ export interface ValidatedAgentProfileProductionInputV1 {
 }
 
 export interface AgentProfileProductionPreparationV1 {
-  readonly snapshot: ReturnType<AgentProfileProducerPreparationDependenciesV1['snapshot']>;
+  readonly snapshot: ReturnType<AgentProfileProducerPreparationDependenciesV1['store']['snapshot']>;
   readonly verifierNowMs: number;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly projectionBytes: Uint8Array;
@@ -83,7 +92,7 @@ export async function prepareAgentProfileProductionV1(
     'assertionFinalizedAt',
   );
   const assertionFinalizedAtMs = Date.parse(publication.seal.assertionFinalizedAt);
-  const verifierNowMs = producerNowMs(dependencies.nowMs?.() ?? Date.now());
+  const verifierNowMs = producerNowMs(dependencies.clock.nowMs?.() ?? Date.now());
   if (Date.parse(issuedAt) > verifierNowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS) {
     throw new Error('agent-profile issuedAt exceeds the future clock-skew bound');
   }
@@ -98,7 +107,7 @@ export async function prepareAgentProfileProductionV1(
   }
   const evmIssuer = dependencies.evmIssuer;
   assertCanonicalEvmAddress(evmIssuer, 'profile EVM issuer');
-  const snapshot = dependencies.snapshot();
+  const snapshot = dependencies.store.snapshot();
   const previous = snapshot.currentHead;
   if (previous !== null
     && (previous.object.networkId !== dependencies.networkId

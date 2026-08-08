@@ -5,10 +5,14 @@ import {
   type SignedAgentProfileHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type {
-  AgentProfileProducerSigningDependenciesV1,
-} from './agent-profile-producer-phase-contracts-v1.js';
+import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
+import type { SystemRecordPeerSignerV1 } from './agent-profile-producer-contract-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
+
+export interface AgentProfileProducerSigningDependenciesV1 {
+  readonly peerSigner: SystemRecordPeerSignerV1;
+  readonly evmSigner: EvmPersonalMessageSignerV1;
+}
 
 export interface SignedAgentProfileProductionV1 {
   readonly envelope: SignedAgentProfileHeadEnvelopeV1;

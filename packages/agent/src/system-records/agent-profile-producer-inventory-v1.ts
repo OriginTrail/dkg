@@ -12,6 +12,7 @@ import {
   type AgentProfileHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type Digest32V1,
+  type NetworkIdV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryRowV1,
   type SystemRecordInventoryTreeSnapshotV1,
@@ -21,14 +22,19 @@ import {
 import {
   flattenAgentProfileProducerPublicationArtifactsV1,
   type AgentProfileProducerArtifactV1,
+  type AgentProfileProducerPublicationStoreV1,
   type AgentProfileProducerPublicationArtifactsV1,
+  type SystemRecordPeerSignerV1,
 } from './agent-profile-producer-contract-v1.js';
-import type {
-  AgentProfileProducerInventoryDependenciesV1,
-} from './agent-profile-producer-phase-contracts-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
 import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
+
+export interface AgentProfileProducerInventoryDependenciesV1 {
+  readonly networkId: NetworkIdV1;
+  readonly peerSigner: SystemRecordPeerSignerV1;
+  readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'resolveArtifact'>;
+}
 
 export interface AgentProfileProductionInventoryV1 {
   readonly inventory: SystemRecordInventoryTreeSnapshotV1;
@@ -114,7 +120,7 @@ export async function prepareAgentProfileProductionInventoryV1(
           objectDigest: digest,
         } as const;
         const artifact = artifactsByKey.get(systemRecordArtifactKeyV1(reference))
-          ?? await dependencies.resolveArtifact(reference);
+          ?? await dependencies.store.resolveArtifact(reference);
         return artifact === undefined
           || artifact === null
           ? undefined

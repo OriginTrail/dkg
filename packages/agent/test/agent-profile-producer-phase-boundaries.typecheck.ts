@@ -1,15 +1,12 @@
 import type { PreparedAgentProfileV1 } from '../src/profile.js';
 import {
+  type AgentProfileProducerPreparationDependenciesV1,
   prepareAgentProfileProductionV1,
   type ValidatedAgentProfileProductionInputV1,
 } from '../src/system-records/agent-profile-producer-preparation-v1.js';
 import type {
   AgentProfilePublicationBindingV1,
 } from '../src/system-records/agent-profile-producer-contract-v1.js';
-import type {
-  AgentProfileProducerPreparationDependenciesV1,
-} from '../src/system-records/agent-profile-producer-phase-contracts-v1.js';
-
 // @ts-expect-error phase dependency DTOs are not exported by the producer entrypoint.
 import type { AgentProfileProducerPreparationDependenciesV1 as LeakedPreparationDeps } from '../src/system-records/agent-profile-producer-v1.js';
 
