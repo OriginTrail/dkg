@@ -80,6 +80,11 @@ import {
   type StoreControlBarrierKeyV1,
 } from '../store-control-barrier-key-v1.js';
 import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
+import {
+  createSystemRecordAtomicApplyExecutorV1,
+  type SystemRecordAtomicApplyExecutorDepsV1,
+  type SystemRecordAtomicApplyExecutorV1,
+} from '../system-record-atomic-apply-executor-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -239,6 +244,13 @@ export class SparqlHttpStore implements TripleStore {
   // invalidate the listGraphs cache (every local mutation). Feeds the chain-
   // reconcile negative memo via `asGraphWriteGenSource` / `getWriteGen`.
   private readonly writeGen = new GraphWriteGenTracker();
+
+  /** Narrow composition seam for adapter subclasses and production-style tests. */
+  protected buildSystemRecordAtomicApplyExecutorV1(
+    deps: SystemRecordAtomicApplyExecutorDepsV1,
+  ): SystemRecordAtomicApplyExecutorV1 {
+    return createSystemRecordAtomicApplyExecutorV1(deps);
+  }
 
   /**
    * Supervisor-issued ownership lease (#2052 B2), or null on every store that
@@ -760,6 +772,7 @@ export class SparqlHttpStore implements TripleStore {
         const owner = createManagedSystemRecordCoordinatorV1({
           lease: this.ownershipLease,
           handoff: this.buildChildHandoff(this.supervisorHandoff),
+          createAtomicExecutor: (deps) => this.buildSystemRecordAtomicApplyExecutorV1(deps),
           storeId: this,
           queryEndpoint: this.systemRecordQueryEndpoint,
           updateEndpoint: this.systemRecordUpdateEndpoint,

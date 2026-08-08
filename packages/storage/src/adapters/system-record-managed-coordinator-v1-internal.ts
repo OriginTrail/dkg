@@ -1,6 +1,8 @@
 import type { ManagedOxigraphOwnershipLeaseV1 } from '../managed-oxigraph-ownership-v1-internal.js';
 import {
   createSystemRecordAtomicApplyExecutorV1,
+  type SystemRecordAtomicApplyExecutorDepsV1,
+  type SystemRecordAtomicApplyExecutorV1,
   type SystemRecordAtomicApplyHttpClientV1,
 } from '../system-record-atomic-apply-executor-v1-internal.js';
 import {
@@ -30,6 +32,9 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
   readonly barrier: SystemRecordLaneBarrierV1;
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;
+  readonly createAtomicExecutor?: (
+    deps: SystemRecordAtomicApplyExecutorDepsV1,
+  ) => SystemRecordAtomicApplyExecutorV1;
 }
 
 /** Compose the one managed-store lane from adapter-owned endpoints and ownership. */
@@ -37,7 +42,7 @@ export function createManagedSystemRecordCoordinatorV1(
   options: ManagedSystemRecordCoordinatorOptionsV1,
 ): SystemRecordLaneControllerV1 {
   const { consumer } = resolveOwnedSystemRecordRuntimeV1(options.lease);
-  const atomicExecutor = createSystemRecordAtomicApplyExecutorV1({
+  const atomicExecutor = (options.createAtomicExecutor ?? createSystemRecordAtomicApplyExecutorV1)({
     consumer,
     storeId: options.storeId,
     queryEndpoint: options.queryEndpoint,
