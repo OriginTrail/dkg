@@ -63,6 +63,11 @@ beforeAll(async () => {
       res.end('abc');
       return;
     }
+    if (req.url === '/declared-overflow') {
+      res.writeHead(200, { 'Content-Length': '6' });
+      res.end('123456');
+      return;
+    }
     if (req.url === '/legacy-large') {
       res.writeHead(200);
       res.end('x'.repeat(4 * 1024 * 1024 + 1));
@@ -192,6 +197,24 @@ describe('OwnedManagedHttpClient', () => {
     } finally {
       await client.destroyAndSettle().catch(() => undefined);
     }
+  });
+
+  it('rejects an oversized declared response before reserving response capacity', async () => {
+    const client = new OwnedManagedHttpClient('declared-response-overflow');
+    const reserveResponseCapacity = vi.fn();
+    try {
+      await expect(
+        client.post(`${base}/declared-overflow`, UPDATE, 'x', 5_000, undefined, {
+          maxRequestBytes: 1,
+          maxResponseBytes: 5,
+          reserveResponseCapacity,
+        }),
+      ).rejects.toThrow(/response body declares 6 bytes; maximum is 5 bytes/);
+      expect(reserveResponseCapacity).not.toHaveBeenCalled();
+    } finally {
+      await client.destroyAndSettle().catch(() => undefined);
+    }
+    expect(client.openSocketCount).toBe(0);
   });
 
   it('clears its deadline and abort listener after bounded success', async () => {

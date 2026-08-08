@@ -5,6 +5,7 @@ import {
   mergeSystemRecordOwnedSubjectsV1,
 } from '../src/system-record-apply-command-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
+import { SYSTEM_RECORD_V1_PREDICATES } from '../src/system-record-rdf-schema-v1-internal.js';
 import {
   makeAuthenticActiveReplacementFixtureV1,
 } from './helpers/system-record-active-replacement-fixture.js';
@@ -100,7 +101,61 @@ describe('system-record conditional apply command V1', () => {
     expect(ask(`GRAPH <${ready.plan.projectionGraph}> { <${guardedSubject}> ` +
       '<urn:test:late> "must-survive-stale-cas" }')).toBe(true);
   });
+
+  it('performs zero writes when a foreign root claim races the inspected transition', async () => {
+    endpoint = await startOxigraphSparqlEndpoint();
+    const { ready } = makeAuthenticActiveReplacementFixtureV1('authoritative');
+    const legacySubject = ready.nextSubjects[0];
+    endpoint.store.update(`INSERT DATA {
+      ${ready.previousReservedQuads.map(renderQuad).join('\n')}
+      GRAPH <${ready.projectionGraph}> {
+        <${legacySubject}> <urn:test:legacy> "must-survive-root-race" .
+      }
+    }`);
+
+    // Build from the authentic collision-free derivation first. The foreign
+    // ownership row appears only after that pre-read-derived command exists.
+    const update = buildSystemRecordConditionalApplyUpdateV1(ready);
+    const guard = ready.rootClaimGuards[0];
+    if (guard === undefined) throw new Error('fixture emitted no root-claim guard');
+    endpoint.store.update(`INSERT DATA { GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}> {
+      <${guard.claimSubject}> <${SYSTEM_RECORD_V1_PREDICATES.claimedBy}>
+        <urn:test:foreign-record> .
+    } }`);
+    const before = snapshotStore(endpoint);
+
+    const response = await fetch(endpoint.updateEndpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/sparql-update; charset=utf-8' },
+      body: update.sparql,
+    });
+    expect(response.status).toBe(204);
+
+    expect(snapshotStore(endpoint)).toEqual(before);
+    const ask = (pattern: string): boolean => endpoint!.store.query(`ASK { ${pattern} }`) as boolean;
+    expect(ask(`GRAPH <${ready.projectionGraph}> { <${legacySubject}> ` +
+      '<urn:test:legacy> "must-survive-root-race" }')).toBe(true);
+    const projection = ready.nextProjectionQuads[0];
+    expect(ask(`GRAPH <${ready.projectionGraph}> { <${projection.subject}> ` +
+      `<${projection.predicate}> ${renderObject(projection.object)} }`)).toBe(false);
+    expect(ask(`GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}> { <${guard.claimSubject}> ` +
+      `<${SYSTEM_RECORD_V1_PREDICATES.claimedBy}> <${guard.recordSubject}> }`)).toBe(false);
+  });
 });
+
+function snapshotStore(endpoint: OxigraphSparqlEndpoint): string[] {
+  return [...endpoint.store.match(null, null, null, null)].map((quad) => [
+    quad.subject.termType,
+    quad.subject.value,
+    quad.predicate.value,
+    quad.object.termType,
+    quad.object.value,
+    quad.object.termType === 'Literal' ? quad.object.language : '',
+    quad.object.termType === 'Literal' ? quad.object.datatype.value : '',
+    quad.graph.termType,
+    quad.graph.value,
+  ].join('\u0000')).sort();
+}
 
 function renderQuad(quad: Readonly<{ subject: string; predicate: string; object: string; graph: string }>): string {
   return `GRAPH <${quad.graph}> { <${quad.subject}> <${quad.predicate}> ${renderObject(quad.object)} . }`;

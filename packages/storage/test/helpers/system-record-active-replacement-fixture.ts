@@ -84,6 +84,13 @@ export interface AuthenticActiveReplacementFixtureV1 {
   readonly ready: SystemRecordActiveReplacementReadyV1;
 }
 
+export function makeAuthenticActiveReplacementIssueV1(
+  binding: SystemRecordLaneExecutionBindingV1,
+  admittedDeadlineMs: number,
+): SystemRecordActiveReplacementIssueV1 {
+  return issue(binding, admittedDeadlineMs);
+}
+
 /** Exercise the real verifier registry, snapshot decoder and transition factory. */
 export function makeAuthenticActiveReplacementFixtureV1(
   mode: 'shadow' | 'authoritative' = 'shadow',
@@ -128,11 +135,14 @@ export function makeAuthenticActiveReplacementFixtureV1(
   return Object.freeze({ binding, epochQuad, ready: derivation });
 }
 
-function issue(binding: SystemRecordLaneExecutionBindingV1): SystemRecordActiveReplacementIssueV1 {
+function issue(
+  binding: SystemRecordLaneExecutionBindingV1,
+  admittedDeadlineMs = 10_000,
+): SystemRecordActiveReplacementIssueV1 {
   return {
     ...binding,
     networkId: SYSTEM_RECORD_FIXTURE_NETWORK,
-    admittedDeadlineMs: 10_000,
+    admittedDeadlineMs,
     head: structuredClone(verified.head),
     verifiedAuthoritySummary: verified.authority,
     canonicalProjectionBytes: new Uint8Array(verified.canonicalProjectionBytes),

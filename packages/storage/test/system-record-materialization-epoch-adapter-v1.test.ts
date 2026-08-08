@@ -6,8 +6,16 @@ import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
-import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
+import {
+  __resetSystemRecordControllerRegistrationForTests,
+  type SystemRecordLaneExecutionBindingV1,
+} from '../src/system-record-materializer-v1.js';
+import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import {
+  makeAuthenticActiveReplacementIssueV1,
+  SYSTEM_RECORD_FIXTURE_NETWORK,
+} from './helpers/system-record-active-replacement-fixture.js';
 
 let server: Server;
 let queryEndpoint: string;
@@ -87,12 +95,20 @@ describe('sparql-http managed epoch handoff', () => {
     const controller = store.getSystemRecordLaneControllerV1();
     expect(controller).toBeDefined();
 
-    const first = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    const first = await controller!.open({
+      networkId: SYSTEM_RECORD_FIXTURE_NETWORK,
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
     expect(resultBarrier).toHaveBeenCalled();
     expect(epoch).toBe('1');
     await first.close('disable');
     expect(epoch).toBe('2');
-    const second = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    const second = await controller!.open({
+      networkId: SYSTEM_RECORD_FIXTURE_NETWORK,
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
     expect(epoch).toBe('3');
     expect(requests.map((request) => request.path)).toEqual([
       '/query', '/update', '/query',
@@ -114,6 +130,19 @@ describe('sparql-http managed epoch handoff', () => {
     });
     expect(requests).toHaveLength(beforeForgedApply);
 
+    const binding = executionBindingOf(second);
+    const runtime = resolveOwnedSystemRecordRuntimeV1(ownership.lease);
+    const proof = runtime.issuer.issueActive(makeAuthenticActiveReplacementIssueV1(
+      binding,
+      Math.ceil(performance.now() + 10_000),
+    ));
+    const beforeAuthenticApply = requests.length;
+    await expect(second.applyVerified(proof)).resolves.toEqual({
+      outcome: 'deferred',
+      reason: 'validation-mismatch',
+    });
+    expect(requests.slice(beforeAuthenticApply).map((request) => request.path)).toEqual(['/query']);
+
     await second.close('shutdown');
     const barrierKeys = resultBarrier.mock.calls.map((call) => call[1]);
     expect(barrierKeys.map((key) => key.purpose)).toEqual([
@@ -129,3 +158,21 @@ describe('sparql-http managed epoch handoff', () => {
     await store.close();
   });
 });
+
+function executionBindingOf(session: unknown): SystemRecordLaneExecutionBindingV1 {
+  // The binding is deliberately not public authority. This test reads the
+  // runtime field only to mint the exact process-local handle that production's
+  // future verifier will issue; the adapter must consume it from the same lease.
+  const facade = session as Readonly<{
+    binding: SystemRecordLaneExecutionBindingV1 & { readonly descriptor: string };
+  }>;
+  return Object.freeze({
+    activationGeneration: facade.binding.activationGeneration,
+    networkId: facade.binding.networkId,
+    kind: facade.binding.kind,
+    mode: facade.binding.mode,
+    sessionIdentity: facade.binding.sessionIdentity,
+    childGeneration: facade.binding.childGeneration,
+    materializationEpoch: facade.binding.materializationEpoch,
+  });
+}
