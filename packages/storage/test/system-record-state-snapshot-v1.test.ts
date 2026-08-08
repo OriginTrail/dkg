@@ -220,6 +220,19 @@ describe('system-record reserved-state snapshot decoder', () => {
       predicate: SYSTEM_RECORD_V1_PREDICATES.root,
       object: ROOT,
     }])).toThrow(/fixed canonical RDF schema/);
+    const escapedEpoch = {
+      ...canonical.epoch[0],
+      object: '"\\u0032"',
+    };
+    expect(() => decode(all.map((quad) => (
+      quad === canonical.epoch[0] ? escapedEpoch : quad
+    )))).toThrow(/fixed canonical RDF schema/);
+    expect(() => decodeSystemRecordAppliedSnapshotV1({
+      networkId: NETWORK,
+      stableKeyHash: STABLE_KEY,
+      materializationEpoch: '2',
+      quads: [escapedEpoch],
+    })).toThrow(/fixed canonical RDF schema/);
     expect(() => decode(all.map((quad) => quad === canonical.record[0]
       ? { ...quad, object: '"not-json"^^<urn:dkg:system-record-v1:canonical-json>' }
       : quad))).toThrow();
