@@ -35,6 +35,8 @@
  * obtains the lease still cannot extend or revive it, failing (3).
  */
 
+import { resolveStoreChainCapabilityV1 } from './store-chain-capability.js';
+
 /** Opaque, non-inspectable lease handle. Compare by identity only. */
 declare const MANAGED_OXIGRAPH_LEASE_BRAND: unique symbol;
 export type ManagedOxigraphOwnershipLeaseV1 = {
@@ -436,24 +438,19 @@ export interface ManagedReadGateHostV1 {
  * decorator turned a fail-closed read into a fail-open one, and keeping that
  * safe meant every wrapper in every package had to opt in forever.
  *
- * Mirrors `asGraphWriteGenSource` / `asChangelogReader` exactly, including the
- * `.innerStore ?? .inner` walk — `inner` is TypeScript-private on the storage
- * decorators but present at runtime — and the depth bound against a cyclic
- * chain. Reusing that convention is the point: wrappers already have to expose
- * their inner store for the changelog and write-gen capabilities to resolve, so
- * this adds no new obligation.
+ * Traversal itself lives in `resolveStoreChainCapabilityV1`, shared with
+ * `asGraphWriteGenSource` and `asChangelogReader`. Reusing that convention is
+ * the point: wrappers already have to expose their inner store for those two to
+ * resolve, so this adds no new obligation on any wrapper.
  *
  * `null` means no managed backend anywhere in the chain, which is the ordinary
  * case for an operator-configured store: such a store is always readable.
  */
 export function asManagedReadGateV1(store: unknown): ManagedReadGateHostV1 | null {
-  let s = store as
-    | { assertManagedBackendReadableV1?: unknown; innerStore?: unknown; inner?: unknown }
-    | null
-    | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (typeof s.assertManagedBackendReadableV1 === 'function') return s as ManagedReadGateHostV1;
-    s = (s.innerStore ?? s.inner) as typeof s;
-  }
-  return null;
+  return resolveStoreChainCapabilityV1<ManagedReadGateHostV1>(
+    store,
+    (candidate) =>
+      typeof (candidate as Partial<ManagedReadGateHostV1>).assertManagedBackendReadableV1 ===
+      'function',
+  );
 }

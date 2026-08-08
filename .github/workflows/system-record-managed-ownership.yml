@@ -158,7 +158,8 @@ jobs:
             test/system-record-verified-replacement-v1.test.ts \
             test/managed-backend-ownership-dispatch-v1.test.ts \
             test/managed-terminal-read-through-index-v1.test.ts \
-            test/managed-warm-read-composition-v1.test.ts \n            test/managed-read-gate-decorator-coverage-v1.test.ts \
+            test/managed-warm-read-composition-v1.test.ts \
+            test/managed-read-gate-decorator-coverage-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \
             test/system-record-capability-probe-errors-v1.test.ts \
             test/graph-set-index-store.test.ts \
@@ -177,7 +178,8 @@ jobs:
       - name: Agent facade conformance
         run: |
           pnpm --filter @origintrail-official/dkg-agent exec vitest run \
-            test/system-record-agent-facade-outcomes-v1.test.ts \n            test/managed-read-gate-through-agent-wrapper-v1.test.ts
+            test/system-record-agent-facade-outcomes-v1.test.ts \
+            test/managed-read-gate-through-agent-wrapper-v1.test.ts
 
       - name: CLI supervisor conformance
         run: |

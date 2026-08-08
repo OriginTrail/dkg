@@ -302,6 +302,14 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   private readonly inner: TripleStore;
+  /**
+   * Public alias of {@link inner}, the decorator-chain convention.
+   *
+   * Capability resolution (`asChangelogReader`, `asGraphWriteGenSource`,
+   * `asManagedReadGateV1`) walks `innerStore`. Exposing it here means that walk
+   * no longer has to reach a TypeScript-private field to traverse this class.
+   */
+  readonly innerStore: TripleStore;
   private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
   /** The inner controller the memo wraps, so a replacement is not masked. */
   private systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
@@ -340,6 +348,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
+    this.innerStore = inner;
     this.managedReadGate = asManagedReadGateV1(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);

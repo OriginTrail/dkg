@@ -2,8 +2,9 @@ import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import { ChangelogStore } from '../src/changelog-store.js';
+import { ChangelogStore, asChangelogReader } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
+import { asGraphWriteGenSource } from '../src/graph-write-gen.js';
 import {
   asManagedReadGateV1,
   ManagedOxigraphBackendUnownedError,
@@ -97,6 +98,43 @@ describe('managed read gate resolves through any wrapper chain', () => {
     expect(
       asManagedReadGateV1(opaqueForwarder(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS))),
     ).toBe(adapter);
+  });
+
+  it('all THREE capabilities resolve through the same wrapper chain', () => {
+    // The consolidation check. These walkers used to be three separate copies
+    // and had already diverged — `asChangelogReader` followed only
+    // `.innerStore` while the other two also followed `.inner`. A traversal gap
+    // surfaces as `null`, which every caller reads as "this store does not have
+    // the capability", so divergence is silent by construction. Asserting all
+    // three against ONE composition is what makes a future drift visible.
+    const adapter = managedAdapter();
+    const chain = new ChangelogStore(
+      new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS)),
+      { enabled: true },
+    );
+    const wrapped = opaqueForwarder(chain);
+
+    // Read gate lives on the innermost adapter.
+    expect(asManagedReadGateV1(wrapped)).toBe(adapter);
+    // Changelog reader lives on the OUTERMOST decorator — opposite direction,
+    // so this also proves the walk starts where it should.
+    expect(asChangelogReader(wrapped)).toBe(chain);
+    // Write-gen source is absent here; `null` must mean absent, not "gave up".
+    expect(asGraphWriteGenSource(wrapped)).toBeNull();
+  });
+
+  it('finds a write-gen source through the same chain when one exists', () => {
+    // The positive half of the assertion above: prove `null` was a real absence
+    // rather than a traversal that stops early.
+    const adapter = managedAdapter() as unknown as Record<string, unknown>;
+    adapter.getWriteGen = () => 1;
+    const chain = opaqueForwarder(
+      new GraphSetIndexStore(
+        new SharedMemoryLiteralBlobStore(adapter as unknown as TripleStore, BLOB_OPTIONS),
+      ),
+    );
+
+    expect(asGraphWriteGenSource(chain)).toBe(adapter);
   });
 
   it('terminates on a cyclic chain instead of hanging', () => {
