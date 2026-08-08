@@ -6,7 +6,7 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
-import type { SystemRecordPeerSignerV1 } from './agent-profile-producer-contract-v1.js';
+import type { SystemRecordPeerSignerV1 } from './agent-profile-producer-api-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 
 export interface AgentProfileProducerSigningDependenciesV1 {

@@ -12,7 +12,6 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import {
-  flattenAgentProfileProducerPublicationArtifactsV1,
   type AgentProfileProducerPublicationCommitLeaseV1,
   type AgentProfileProducerPublicationCommitV1,
   type AgentProfileProducerPublicationStoreV1,
@@ -77,9 +76,12 @@ export function createInMemoryAgentProfilePublicationStoreV1(
       // cannot obtain a second lease and make the installed projection stale.
       prepared = true;
       try {
-        const publicationArtifacts = flattenAgentProfileProducerPublicationArtifactsV1(
-          input.publicationArtifacts,
-        );
+        const publicationArtifacts: readonly SystemRecordArtifactV1[] = Object.freeze([
+          input.publicationArtifacts.head,
+          input.publicationArtifacts.bundle,
+          input.publicationArtifacts.ownedSubjectTable,
+          ...input.publicationArtifacts.inventoryObjects,
+        ]);
         let addedObjects = 0;
         let addedBytes = 0;
         for (const artifact of publicationArtifacts) {

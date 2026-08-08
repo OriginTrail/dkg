@@ -11,7 +11,7 @@ import type {
   AgentProfileProducerV1,
   AgentProfilePublicationBindingV1,
   CreateAgentProfileProducerOptionsV1,
-} from './agent-profile-producer-contract-v1.js';
+} from './agent-profile-producer-api-v1.js';
 import {
   prepareAgentProfileProductionInventoryV1,
   type AgentProfileProducerInventoryDependenciesV1,
@@ -27,7 +27,7 @@ import {
   type AgentProfileProducerSigningDependenciesV1,
 } from './agent-profile-producer-signing-v1.js';
 
-export * from './agent-profile-producer-contract-v1.js';
+export * from './agent-profile-producer-api-v1.js';
 
 /**
  * Author one local profile record. No protocol, timer, queue, or independent

@@ -40,7 +40,7 @@ import type {
   AgentProfilePublicationBindingV1,
   CreateAgentProfileProducerOptionsV1,
   SystemRecordPeerSignerV1,
-} from './agent-profile-producer-contract-v1.js';
+} from './agent-profile-producer-api-v1.js';
 
 const UTF8 = new TextEncoder();
 const VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1: unique symbol = Symbol(

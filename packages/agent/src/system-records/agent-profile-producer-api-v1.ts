@@ -21,6 +21,7 @@ import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import type { SystemRecordArtifactV1 } from './artifact-v1.js';
 
+/** Stable producer boundary; implementation-phase capabilities stay in their owning modules. */
 export interface SystemRecordPeerSignerV1 {
   readonly peerId: string;
   readonly publicKey: SystemRecordPeerPublicKeyV1;
@@ -78,17 +79,6 @@ export interface AgentProfileProducerPublicationArtifactsV1 {
   readonly inventoryObjects: readonly AgentProfileProducerArtifactV1<
     'inventory-internal' | 'inventory-leaf'
   >[];
-}
-
-export function flattenAgentProfileProducerPublicationArtifactsV1(
-  artifacts: AgentProfileProducerPublicationArtifactsV1,
-): readonly SystemRecordArtifactV1[] {
-  return Object.freeze([
-    artifacts.head,
-    artifacts.bundle,
-    artifacts.ownedSubjectTable,
-    ...artifacts.inventoryObjects,
-  ]);
 }
 
 export interface AgentProfileProducerPublicationCommitLeaseV1 {
