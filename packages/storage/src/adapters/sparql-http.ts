@@ -68,15 +68,13 @@ import {
 } from '../managed-oxigraph-ownership-v1-internal.js';
 import {
   SystemRecordControllerRegistrationError,
-  createSystemRecordLaneControllerV1,
   releaseSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
-import { createSystemRecordAtomicApplyExecutorV1 } from '../system-record-atomic-apply-executor-v1-internal.js';
-import { resolveOwnedSystemRecordRuntimeV1 } from '../system-record-runtime-v1-internal.js';
+import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -730,31 +728,15 @@ export class SparqlHttpStore implements TripleStore {
     // already carries the property.
     if (this.systemRecordLane === undefined) {
       try {
-        // Resolve the ownership-lease runtime and retain only its consumer at
-        // the storage boundary. Every adapter for this lease receives the same
-        // registry, and all authentic leases share one process-wide accountant.
-        // The issuer remains outside the store and has no production caller in
-        // this default-unused stack; the later lifecycle verifier captures it.
-        const { consumer } = resolveOwnedSystemRecordRuntimeV1(
-          this.ownershipLease,
-        );
-        const atomicExecutor = createSystemRecordAtomicApplyExecutorV1({
-          consumer,
+        const owner = createManagedSystemRecordCoordinatorV1({
+          lease: this.ownershipLease,
+          handoff: this.buildChildHandoff(this.supervisorHandoff),
           storeId: this,
           queryEndpoint: this.systemRecordQueryEndpoint,
           updateEndpoint: this.systemRecordUpdateEndpoint,
           resolveClient: (binding) => this.resolveSystemRecordManagedClient(binding),
-        });
-        const owner = createSystemRecordLaneControllerV1({
-          lease: this.ownershipLease,
-          handoff: this.buildChildHandoff(this.supervisorHandoff),
-          executor: {
-            applyVerified: (proof, childGeneration) =>
-              this.executeSystemRecordApplyLegacy(proof, childGeneration),
-            discardVerified: (proof) => atomicExecutor.discard(proof),
-            applyVerifiedSettlementBound: (proof, binding, registerRecovery) =>
-              atomicExecutor.execute(proof, binding, registerRecovery),
-          },
+          applyLegacy: (proof, childGeneration) =>
+            this.executeSystemRecordApplyLegacy(proof, childGeneration),
           // Every lifecycle transition runs under the scheduler's control
           // barrier, which is what actually makes "the child is stopped only
           // when nothing is talking to it" true. The barrier existed, was
@@ -780,9 +762,7 @@ export class SparqlHttpStore implements TripleStore {
                 ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
                 : undefined,
             ),
-          setAdmissionActive: (active) => {
-            this.systemRecordAdmissionActive = active;
-          },
+          setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
         });
         this.systemRecordLane = owner;
       } catch (error) {
