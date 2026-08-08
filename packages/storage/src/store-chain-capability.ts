@@ -1,56 +1,52 @@
 /**
- * One canonical walk over a `TripleStore` decorator chain.
+ * One walk over a `TripleStore` decorator chain, shared by every capability
+ * that must find the store actually implementing it.
  *
- * Three capabilities need to find the store that actually implements them —
- * the changelog reader, the write-generation source, and the managed read gate
- * — and each had grown its own copy of the traversal. The copies had already
- * DIVERGED: `asChangelogReader` followed only `.innerStore`, while the other
- * two also followed `.inner`. A capability that cannot be found through a given
- * wrapper resolves to `null`, and every caller reads `null` as "this store does
- * not have it" — so a traversal gap is silent by construction.
+ * ## Traversal
  *
- * ## How a decorator becomes traversable
+ * From the outermost store inward, taking the first node that satisfies the
+ * caller's guard. A node's inner store is found by, in order:
  *
- * It REGISTERS, via {@link linkStoreChainV1}. The link lives in a module-private
- * `WeakMap` keyed by wrapper identity, mirroring how the ownership lease in
- * `managed-oxigraph-ownership-v1-internal.ts` keeps its authority table: the
- * registration function grants the caller nothing: it writes a link, it does not
- * read one, and nothing exported from this module can retrieve the wrapped store.
+ * 1. a link recorded via {@link linkStoreChainV1} — how this package's own
+ *    decorators opt in, without exposing the store they wrap;
+ * 2. a public `innerStore` property — the convention wrappers outside this
+ *    package use;
+ * 3. a `inner` property — {@link resolveStoreChainCapabilityLegacyV1} only.
  *
- * That is the whole reason it is not a symbol-keyed getter. An earlier revision
- * used one and exported the symbol so first-party wrappers in other packages
- * could declare it — which made the getter public API and handed every consumer
- * an invariant bypass: `store[STORE_CHAIN_INNER].insert(...)` skips changelog
- * markers and graph-set index maintenance exactly as `store.innerStore.insert(...)`
- * would. Publishing a hidden handle is still publishing the handle.
+ * ## What the result means
  *
- * `.innerStore` remains honoured because it is a genuine pre-existing PUBLIC
- * property on `SharedMemoryLiteralBlobStore` and the agent's forwarder, and
- * removing it from the walk would silently break capability discovery for any
- * out-of-repo wrapper built on it. First-party wrappers no longer depend on it —
- * a test resolves the whole storage chain through the registry alone.
+ * `null` means the chain ended with no node holding the capability. It never
+ * means traversal gave up: there is no depth limit, and the one shape that
+ * cannot terminate — a cycle — throws {@link StoreChainCycleError}.
  *
- * `.inner` is NOT walked here. Reaching a TypeScript-private field made any
- * wrapper with an incidentally-named property an accidental opt-in to capability
- * discovery. It survives only in {@link resolveStoreChainCapabilityLegacyV1},
- * used by the single capability whose checked-in contract asserts it.
+ * That distinction is load-bearing. Callers treat `null` as "no such
+ * capability", and for a safety capability such as the cached-read gate that
+ * reads as "unconstrained" — so a traversal failure reported as `null` would
+ * fail OPEN.
+ *
+ * ## Adding a capability
+ *
+ * Use {@link resolveStoreChainCapabilityV1} with a type predicate. Prefer a
+ * symbol-keyed member so discovery is an identity check rather than a
+ * structural match on a method name.
  */
 
-/** wrapper -> wrapped store. Module-private: registration is write-only to callers. */
+/** wrapper -> wrapped store. Module-private, so registration cannot be read back. */
 const CHAIN_LINKS = new WeakMap<object, unknown>();
 
 /**
- * Declare that capability discovery may pass through `wrapper` to `inner`.
+ * Record that capability discovery may pass through `wrapper` to `inner`.
  *
- * Call once, from a decorator's constructor. Grants the caller no ability to
- * read any wrapped store, including its own — this is the whole point.
+ * Call once from a decorator's constructor. Deliberately write-only: it exposes
+ * no way to read a wrapped store, so it cannot become a route around the
+ * decorator's own invariants the way a public `innerStore` can.
  */
 export function linkStoreChainV1(wrapper: object, inner: unknown): void {
   CHAIN_LINKS.set(wrapper, inner);
 }
 
 export interface StoreChainNodeV1 {
-  /** Pre-existing public convention. Prefer {@link linkStoreChainV1}. */
+  /** Public convention for wrappers outside this package. */
   readonly innerStore?: unknown;
 }
 
@@ -69,7 +65,6 @@ type NextInChain = (node: object) => unknown;
 const registeredOrPublic: NextInChain = (node) =>
   CHAIN_LINKS.get(node) ?? (node as StoreChainNodeV1).innerStore;
 
-/** Adds the TS-private `.inner` reach. Quarantined — see the module doc. */
 const registeredOrPublicOrLegacyInner: NextInChain = (node) =>
   registeredOrPublic(node) ?? (node as { inner?: unknown }).inner;
 
@@ -90,20 +85,10 @@ function walk<T>(
 }
 
 /**
- * Walk `store` and its inner stores, returning the first node for which
- * `isCapable` holds, or `null` when the chain ends without one.
+ * Find the first store in `store`'s chain satisfying `isCapable`, or `null`.
  *
- * `isCapable` is a TYPE PREDICATE, not a boolean: the helper returns the node
- * as-is with no cast, so the narrowing a caller gets is exactly the one its own
- * guard proved.
- *
- * `null` means ONE thing: the chain ended and no node had the capability. It
- * does not also mean "traversal gave up". An earlier draft used a depth cap of
- * 8, which silently returned `null` for a legitimately deeper chain — and for
- * the managed read gate that reads as "unleased store", i.e. fail-OPEN, which is
- * the exact failure this change exists to prevent. Termination is by object
- * identity, so depth is unbounded and the only non-terminating shape — a genuine
- * cycle — THROWS rather than being reported as absence.
+ * `isCapable` is a type predicate and the node is returned unchanged, so the
+ * narrowing a caller gets is exactly the one its own guard proved.
  */
 export function resolveStoreChainCapabilityV1<T>(
   store: unknown,
@@ -113,16 +98,12 @@ export function resolveStoreChainCapabilityV1<T>(
 }
 
 /**
- * As {@link resolveStoreChainCapabilityV1}, but also follows a TS-private
- * `.inner`.
+ * As {@link resolveStoreChainCapabilityV1}, but also follows a `inner` property.
  *
- * COMPATIBILITY ONLY, for `asGraphWriteGenSource`, whose checked-in contract
- * asserts `asGraphWriteGenSource({ innerStore: { inner: store } })` resolves
- * (`graph-write-gen.test.ts`). Removing that reach once already regressed it
- * silently: its callers fail open on `null` and fall back to expensive full
- * scans, so nothing announces the loss.
- *
- * Do not use for new capabilities. Register with {@link linkStoreChainV1}.
+ * Compatibility only, for `asGraphWriteGenSource`, whose published contract
+ * covers wrappers exposing `inner` alone. Not for new capabilities: reaching an
+ * arbitrarily-named property makes any object with that field an accidental
+ * participant in discovery.
  */
 export function resolveStoreChainCapabilityLegacyV1<T>(
   store: unknown,
