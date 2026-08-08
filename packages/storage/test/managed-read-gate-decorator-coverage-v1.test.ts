@@ -11,10 +11,7 @@ import {
   ManagedOxigraphBackendUnownedError,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
-import {
-  STORE_CHAIN_INNER,
-  StoreChainCycleError,
-} from '../src/store-chain-capability.js';
+import { StoreChainCycleError } from '../src/store-chain-capability.js';
 import type { TripleStore } from '../src/triple-store.js';
 
 /**
@@ -144,31 +141,34 @@ describe('managed read gate resolves through any wrapper chain', () => {
     expect(asGraphWriteGenSource(chain)).toBe(adapter);
   });
 
-  it('every first-party storage wrapper is traversable by the SYMBOL alone', () => {
-    // This is the claim that makes STORE_CHAIN_INNER "the" contract rather than
-    // one of three. `innerStore` and `.inner` remain honoured as legacy shapes,
-    // so a wrapper that only had those would still resolve and the ordinary
-    // tests could not tell the difference. Resolving against a walker that
-    // follows ONLY the symbol is what proves first-party code no longer depends
-    // on the legacy paths.
-    const symbolOnly = (store: unknown): unknown => {
-      let node = store as { [STORE_CHAIN_INNER]?: unknown } | null | undefined;
-      for (let depth = 0; node && depth < 32; depth++) {
-        if (typeof (node as Record<symbol, unknown>)[MANAGED_READ_GATE_V1] === 'function') {
-          return node;
-        }
-        node = node[STORE_CHAIN_INNER] as typeof node;
-      }
-      return null;
-    };
-
+  it('every first-party storage wrapper is traversable by REGISTRATION alone', () => {
+    // The claim that makes registration "the" contract rather than one of
+    // several. `.innerStore` is still honoured as a pre-existing public
+    // convention, so a wrapper relying only on that would still resolve and the
+    // ordinary tests could not tell the difference. Resolving with a walker that
+    // consults ONLY the registry is what proves first-party code no longer
+    // depends on any public handle.
+    //
+    // Note there is deliberately no way to READ the registry from outside the
+    // module — so this walks by asking each wrapper to resolve a capability
+    // through the real resolver on a chain whose public handles are stripped.
     const adapter = managedAdapter();
     const chain = new ChangelogStore(
       new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS)),
       { enabled: true },
     );
 
-    expect(symbolOnly(chain)).toBe(adapter);
+    // Strip every public traversal handle the chain exposes. Only the
+    // module-private registration links survive.
+    for (let node: unknown = chain; node; ) {
+      const current = node as { innerStore?: unknown; inner?: unknown };
+      const next = current.innerStore ?? current.inner;
+      Object.defineProperty(current, 'innerStore', { value: undefined, configurable: true });
+      Object.defineProperty(current, 'inner', { value: undefined, configurable: true });
+      node = next;
+    }
+
+    expect(asManagedReadGateV1(chain)).toBe(adapter);
   });
 
   it('THROWS on a cyclic chain rather than reporting absence', () => {

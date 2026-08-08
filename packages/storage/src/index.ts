@@ -206,8 +206,10 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+// Registration only — grants no ability to READ any wrapped store, so it
+// cannot become an invariant bypass the way a public handle would.
 export {
-  STORE_CHAIN_INNER,
   StoreChainCycleError,
+  linkStoreChainV1,
   type StoreChainNodeV1,
 } from './store-chain-capability.js';
