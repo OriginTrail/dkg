@@ -116,7 +116,7 @@ export class SystemRecordTransitionCoordinatorV1<Transition extends object> {
   ): void {
     if (this.active !== entry) {
       void settlement.catch(() => undefined);
-      return;
+      throw new Error('system-record transition settlement owner is not the active transition');
     }
     if (this.ownedSettlements.has(entry)) {
       throw new Error('system-record transition settlement is already owned');
