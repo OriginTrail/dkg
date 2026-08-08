@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { linkStoreChainV1 } from './store-chain-capability.js';
 import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 import type {
   ConstructResult,
@@ -62,7 +63,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
+  /**
+   * Pre-existing public handle, kept because callers already use it. New
+   * wrappers should register with {@link linkStoreChainV1} instead — that is how
+   * a decorator opts into capability discovery without publishing its inner store.
+   */
   readonly innerStore: TripleStore;
+
+
   private readonly inner: TripleStore;
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
@@ -77,6 +85,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     }
     this.inner = inner;
     this.innerStore = inner;
+    linkStoreChainV1(this, inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
   }

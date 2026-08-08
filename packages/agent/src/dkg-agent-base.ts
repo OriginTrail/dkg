@@ -637,6 +637,10 @@ export function createListContextGraphsCacheInvalidatingStore(
       return innerStore.close();
     },
   };
+  // Traversable via the public `innerStore` above — no registration needed.
+  // EVERY capability a caller resolves through this forwarder depends on that,
+  // since it declares neither the changelog API nor the cached-read gate:
+  // the sync-changelog responder lane and the write-generation source both.
   return wrapper;
 }
 

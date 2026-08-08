@@ -202,6 +202,29 @@ describe('managed backend ownership at mutation dispatch', () => {
     await store.close().catch(() => undefined);
   });
 
+  it('refuses listGraphs from the adapter cache after ownership is lost', async () => {
+    // The adapter keeps its OWN warm list for MANAGED_LIST_GRAPHS_CACHE_MS
+    // (30 s), served without touching the endpoint — so it never reached the
+    // read check on `query`, and a lost lease kept answering enumeration from
+    // it for the whole window. Same defect the graph-set decorator had; found
+    // by sweeping the class rather than only the reported instance.
+    const store = await managedStore();
+
+    await store.listGraphs(); // warm it
+    const afterWarm = requests.length;
+    expect(afterWarm).toBeGreaterThan(0);
+
+    ownership.invalidate('port-release-unproven');
+
+    await expect(store.listGraphs()).rejects.toThrow(/not the proven ready listener/);
+    // A cached read would have produced no I/O either, so the refusal is the
+    // load-bearing assertion here; the request count guards against the fix
+    // "working" by accidentally forcing a refresh.
+    expect(requests.length).toBe(afterWarm);
+
+    await store.close().catch(() => undefined);
+  });
+
   it('hides reserved internal graphs from adapter-level hasGraph', async () => {
     // The policy module claims reserved state never enumerates and that "no
     // legitimate iterate-and-drop loop can reach one". That held only for the

@@ -206,3 +206,9 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+// `linkStoreChainV1` is deliberately NOT exported: it is an internal
+// composition detail of this package's own decorators. A wrapper outside
+// storage is traversable through its public `innerStore`, so publishing the
+// registry would add a second traversal source for the same object without
+// changing discovery.
+export { StoreChainCycleError, type StoreChainNodeV1 } from './store-chain-capability.js';

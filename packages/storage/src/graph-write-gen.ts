@@ -21,6 +21,8 @@
  * shared oxigraph-server) are invisible here; the memo's TTL bounds that
  * hole, and a restart clears the memo entirely (the counter is in-memory).
  */
+import { resolveStoreChainCapabilityLegacyV1 } from './store-chain-capability.js';
+
 export interface GraphWriteGenSource {
   /**
    * Monotonic generation for "any local write that may have touched a graph
@@ -81,18 +83,13 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
  * MUST fail open (always scan) on `null`.
  */
 export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | null {
-  // Follow `.innerStore` (hand-rolled forwarders like the daemon's
-  // listContextGraphs-cache invalidator) and `.inner` (ChangelogStore,
-  // GraphSetIndexStore, SharedMemoryLiteralBlobStore) so the capability
-  // resolves through any decorator order — mirrors `asChangelogReader`.
-  // The depth bound guards a pathological/cyclic chain.
-  let s = store as
-    | { getWriteGen?: unknown; innerStore?: unknown; inner?: unknown }
-    | null
-    | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (typeof s.getWriteGen === 'function') return s as GraphWriteGenSource;
-    s = (s.innerStore ?? s.inner) as typeof s;
-  }
-  return null;
+  // Traversal is shared — see `resolveStoreChainCapabilityV1`. This carried its
+  // own copy of the walk, which had already drifted from `asChangelogReader`'s.
+  // The LEGACY resolver: this is the one capability whose checked-in contract
+  // asserts a TS-private `.inner` reach. New capabilities must not use it.
+  return resolveStoreChainCapabilityLegacyV1(store, isGraphWriteGenSource);
+}
+
+function isGraphWriteGenSource(candidate: unknown): candidate is GraphWriteGenSource {
+  return typeof (candidate as Partial<GraphWriteGenSource>)?.getWriteGen === 'function';
 }

@@ -413,3 +413,5 @@ export function readManagedOxigraphOwnershipSnapshotV1(
   if (!current) return null;
   return snapshotLeaseState(current);
 }
+
+

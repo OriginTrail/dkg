@@ -16,6 +16,10 @@ import {
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
+import {
+  linkStoreChainV1,
+  resolveStoreChainCapabilityV1,
+} from './store-chain-capability.js';
 import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 
 /**
@@ -205,6 +209,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   }
 
   private readonly inner: TripleStore;
+
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
@@ -229,6 +234,9 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
+    // Registration, not a public handle: reaching past this decorator would
+    // skip the change-marker recording that makes the log complete.
+    linkStoreChainV1(this, inner);
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);
@@ -993,24 +1001,26 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
  * no `instanceof`/cast/decorator-order assumption at the call site.
  */
 export function asChangelogReader(store: unknown): ChangelogReader | null {
-  // Follow `.innerStore` so a wrapper AROUND the ChangelogStore still resolves.
-  // The daemon's store is `createListContextGraphsCacheInvalidatingStore(...)`
-  // (dkg-agent-base.ts), a hand-rolled forwarder that exposes `.innerStore` but
-  // does NOT forward the changelog API — so a direct check misses it even when
-  // the changelog is enabled. The depth bound guards a pathological/cyclic chain.
-  let s = store as (Partial<ChangelogReader> & { innerStore?: unknown }) | null | undefined;
-  for (let depth = 0; s && depth < 8; depth++) {
-    if (s instanceof ChangelogStore) return s;
-    if (
-      typeof s.changelogHead === 'function' &&
-      typeof s.readChanges === 'function' &&
-      typeof s.headSeq === 'function' &&
-      typeof s.clearReconcileFlag === 'function' &&
-      typeof s.needsReconcile === 'boolean'
-    ) {
-      return s as ChangelogReader;
-    }
-    s = s.innerStore as typeof s;
-  }
-  return null;
+  // The walk itself is shared — see `resolveStoreChainCapabilityV1`. This copy
+  // followed ONLY `.innerStore`, while the write-gen and read-gate walkers also
+  // followed `.inner`; consolidating removes that divergence, which could only
+  // ever surface as a silent `null` ("no changelog") rather than an error.
+  //
+  // Resolution matters here because the daemon's store is
+  // `createListContextGraphsCacheInvalidatingStore(...)` (dkg-agent-base.ts), a
+  // hand-rolled forwarder that exposes `.innerStore` but does NOT forward the
+  // changelog API — so a direct check misses it even when the changelog is on.
+  return resolveStoreChainCapabilityV1(store, isChangelogReader);
+}
+
+function isChangelogReader(candidate: unknown): candidate is ChangelogReader {
+  if (candidate instanceof ChangelogStore) return true;
+  const c = candidate as Partial<ChangelogReader> | null | undefined;
+  return (
+    typeof c?.changelogHead === 'function' &&
+    typeof c.readChanges === 'function' &&
+    typeof c.headSeq === 'function' &&
+    typeof c.clearReconcileFlag === 'function' &&
+    typeof c.needsReconcile === 'boolean'
+  );
 }

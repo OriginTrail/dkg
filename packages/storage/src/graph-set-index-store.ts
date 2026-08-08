@@ -10,6 +10,7 @@ import type {
   UpdateOptions,
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
+import { linkStoreChainV1 } from './store-chain-capability.js';
 import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
@@ -18,6 +19,11 @@ import {
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
+import {
+  CACHED_READ_GATE_V1,
+  asCachedReadGateV1,
+  type CachedReadGateHostV1,
+} from './cached-read-gate-v1.js';
 import type {
   SystemRecordApplyOutcomeV1,
   SystemRecordLaneActivationV1,
@@ -298,6 +304,7 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   private readonly inner: TripleStore;
+
   private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
   /** The inner controller the memo wraps, so a replacement is not masked. */
   private systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
@@ -321,8 +328,26 @@ export class GraphSetIndexStore implements TripleStore {
    */
   private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
+  /**
+   * The managed read gate, resolved ONCE through the whole inner chain.
+   *
+   * Resolved rather than probed per call: `this.inner.assert…?.()` asked only
+   * the immediate wrapper, and optional chaining treats an absent method as
+   * PERMISSION — so a single intervening decorator turned this fail-closed read
+   * into a fail-open one. `asCachedReadGateV1` walks to the store that
+   * actually holds the lease, so no wrapper can erase it by omission.
+   *
+   * `null` for every store with no managed backend: those are always readable.
+   */
+  private readonly cachedReadGate: CachedReadGateHostV1 | null;
+
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
+    // Traversable for capability discovery WITHOUT publishing the wrapped store.
+    // A public handle — named or symbol-keyed — would let a caller reach past
+    // this decorator and skip the index maintenance it exists to enforce.
+    linkStoreChainV1(this, inner);
+    this.cachedReadGate = asCachedReadGateV1(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -618,6 +643,13 @@ export class GraphSetIndexStore implements TripleStore {
       this.revalidateMs > 0 &&
       this.now() < this.nextRevalidateAt
     ) {
+      // The warm path returns WITHOUT touching the inner store, so the
+      // ownership refusal that `refreshIndex` rethrows is unreachable here.
+      // Serving this set after the lease is lost attributes stale enumeration
+      // to a backend the node may no longer own — for up to `revalidateMs`
+      // (30 s in production), which is the window a foreign listener needs.
+      // Cheap: a lease-snapshot read, no I/O.
+      this.cachedReadGate?.[CACHED_READ_GATE_V1]('graph-set-index.warm');
       return this.graphs;
     }
     return raceAgainstAbort(
