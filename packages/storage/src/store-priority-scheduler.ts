@@ -239,22 +239,6 @@ interface HeldRun {
   release: () => void;
 }
 
-interface BarrierEntry {
-  storeId: object;
-  purpose: string;
-  transition: () => Promise<unknown>;
-  promise: Promise<unknown>;
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  waitStartedAt: number;
-  coalesced: number;
-  running: boolean;
-  /** Guards the caller promise so a timeout and a late settle cannot both fire. */
-  settled: boolean;
-  timer?: ReturnType<typeof setTimeout>;
-  seal: StoreGenerationSeal;
-}
-
 interface NonAckLanePolicy {
   /** Shared normal/background capacity after the ACK and health reservations. */
   totalLimit: number;
@@ -317,7 +301,6 @@ export const STORE_ADMISSION_SHARED_BYPASS_LIMIT = 8;
 export const STORE_ADMISSION_EXCLUSIVE_WAIT_BOUND_MS = 250;
 
 /** Seal generation recorded for a barrier that drains ALL tagged work. */
-const BARRIER_ANY_GENERATION = '*';
 
 /**
  * Default bound on a whole control transition, wait plus execution.
@@ -688,12 +671,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // Routed FIRST: a control transition must not be rejectable by an
     // already-aborted caller signal any more than by queue capacity.
     if (admission !== undefined && admission.mode === 'control-barrier') {
-      return await (this.barrierCoordinator.enqueue(
+      return await this.barrierCoordinator.enqueue(
         admission.storeId,
         operation,
         work,
         admission.generation,
-      ) as Promise<T>);
+      );
     }
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -802,7 +785,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // allocation. The barrier term is what lets a transition stop untagged
     // traffic, which carries no store identity to gate on.
     const admissionActive =
-      this.taggedQueuedCount > 0 || this.barrierCoordinator.metrics.pending > 0;
+      this.taggedQueuedCount > 0 || this.barrierCoordinator.hasPendingBarriers();
     for (const priority of priorities) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
@@ -1076,7 +1059,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       transition,
       generation,
       timeoutMs,
-    ) as Promise<T>;
+    );
   }
 
   private isSealed(storeId: object): boolean {
@@ -1273,7 +1256,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       // unrelated lane. Holding them in the queue instead converts that into
       // ordinary backpressure — and the existing wait timer still bounds it,
       // with a typed retryable rejection rather than a transport failure.
-      return this.barrierCoordinator.metrics.pending === 0;
+      return !this.barrierCoordinator.hasPendingBarriers();
     }
     const state = this.storeStates.get(admission.storeId);
     if (state === undefined) return true;

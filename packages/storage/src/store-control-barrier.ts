@@ -83,6 +83,18 @@ export class StoreControlBarrierCoordinator {
     private readonly defaultTimeoutMs: number,
   ) {}
 
+  /**
+   * Is any barrier pending or running for ANY store?
+   *
+   * Separate from {@link metrics} on purpose: admission consults this on the
+   * hot path, and reading a diagnostics object to answer one scheduling
+   * question both allocates and makes a reporting shape part of the control
+   * contract — a metrics rename would then change admission behaviour.
+   */
+  hasPendingBarriers(): boolean {
+    return this.barriers.length > 0;
+  }
+
   get metrics(): StoreBarrierMetricsV1 {
     return {
       inflight: this.running ? 1 : 0,
@@ -103,13 +115,13 @@ export class StoreControlBarrierCoordinator {
    * idempotent control transition; do not use one purpose for two different
    * transitions.
    */
-  enqueue(
+  enqueue<T>(
     storeId: object,
     purpose: string,
-    transition: () => Promise<unknown>,
+    transition: () => Promise<T>,
     generation?: string,
     timeoutMs?: number,
-  ): Promise<unknown> {
+  ): Promise<T> {
     const existing = this.barriers.find(
       (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
     );
@@ -117,7 +129,10 @@ export class StoreControlBarrierCoordinator {
       existing.coalesced += 1;
       this.coalescedTotal += 1;
       this.host.observeDepths();
-      return existing.promise;
+      // The one cast, and it lives here because the coalescing invariant does:
+      // callers of the same (storeId, purpose) share a transition by design, so
+      // the coordinator is what knows the shared promise carries T.
+      return existing.promise as Promise<T>;
     }
     let resolve!: (value: unknown) => void;
     let reject!: (reason?: unknown) => void;
@@ -156,7 +171,7 @@ export class StoreControlBarrierCoordinator {
     this.barriers.push(barrier);
     this.host.observeDepths();
     this.pump();
-    return promise;
+    return promise as Promise<T>;
   }
 
   /**
