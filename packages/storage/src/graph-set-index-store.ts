@@ -26,10 +26,7 @@ import {
   type CachedReadGateHostV1,
 } from './cached-read-gate-v1.js';
 import type {
-  SystemRecordApplyOutcomeV1,
-  SystemRecordLaneActivationV1,
   SystemRecordLaneControllerV1,
-  SystemRecordLaneSessionV1,
 } from './system-record-materializer-v1.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
