@@ -100,6 +100,25 @@ export function systemRecordEpochSubjectV1(networkId: string): string {
   return fixedSubject(networkId, 'epoch');
 }
 
+export function buildSystemRecordMaterializationEpochQuadsV1(
+  networkId: string,
+  materializationEpoch: string,
+): readonly Quad[] {
+  assertNetworkIdV1(networkId);
+  const canonicalEpoch = parseCanonicalDecimalU64(materializationEpoch).toString();
+  if (canonicalEpoch !== materializationEpoch) {
+    throw new Error('system-record materialization epoch must be canonical');
+  }
+  return freezeQuads([
+    quad(
+      systemRecordEpochSubjectV1(networkId),
+      SYSTEM_RECORD_V1_PREDICATES.materializationEpoch,
+      stringLiteral(canonicalEpoch),
+      SYSTEM_RECORD_V1_STATE_GRAPH,
+    ),
+  ]);
+}
+
 export function systemRecordReceiptSubjectV1(networkId: string, stableKeyHash: string): string {
   return fixedSubject(networkId, `receipt:${digestToken(stableKeyHash)}`);
 }
@@ -171,7 +190,6 @@ export function buildSystemRecordReservedStateQuadsV1(input: {
     appliedState.stableKeyHash,
   );
   const capacity = systemRecordCapacitySubjectV1(appliedState.networkId);
-  const epoch = systemRecordEpochSubjectV1(appliedState.networkId);
   const receipt = systemRecordReceiptSubjectV1(
     appliedState.networkId,
     appliedState.stableKeyHash,
@@ -212,14 +230,10 @@ export function buildSystemRecordReservedStateQuadsV1(input: {
         graph,
       ),
     ]),
-    epoch: freezeQuads([
-      quad(
-        epoch,
-        SYSTEM_RECORD_V1_PREDICATES.materializationEpoch,
-        stringLiteral(appliedState.materializationEpoch),
-        graph,
-      ),
-    ]),
+    epoch: buildSystemRecordMaterializationEpochQuadsV1(
+      appliedState.networkId,
+      appliedState.materializationEpoch,
+    ),
     receipt: freezeQuads([
       quad(receipt, SYSTEM_RECORD_V1_PREDICATES.receipt, jsonLiteral(receiptBytes), graph),
       quad(

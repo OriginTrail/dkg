@@ -33,6 +33,7 @@ import {
 
 import type { Quad } from './triple-store.js';
 import {
+  buildSystemRecordMaterializationEpochQuadsV1,
   buildSystemRecordReservedStateQuadsV1,
   systemRecordCapacitySubjectV1,
   systemRecordEpochSubjectV1,
@@ -113,9 +114,7 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   if (epoch !== owned.materializationEpoch) {
     throw new Error('system-record materialization epoch changed during inspection');
   }
-  const canonicalEpochRows = epochRows.filter((quad) => (
-    quad.predicate === SYSTEM_RECORD_V1_PREDICATES.materializationEpoch
-  ));
+  const canonicalEpochRows = buildSystemRecordMaterializationEpochQuadsV1(networkId, epoch);
 
   const decodedCapacity = decodeCapacityState(networkId, capacityRows);
 
