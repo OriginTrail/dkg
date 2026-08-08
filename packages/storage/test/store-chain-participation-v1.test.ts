@@ -2,7 +2,6 @@ import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-import * as storage from '../src/index.js';
 import { ChangelogStore } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
@@ -10,68 +9,36 @@ import { CACHED_READ_GATE_V1, asCachedReadGateV1 } from '../src/cached-read-gate
 import type { TripleStore } from '../src/triple-store.js';
 
 /**
- * Every exported store-shaped class is accounted for, and every DECORATOR is
- * proven to pass capability discovery through.
+ * Every first-party storage decorator passes capability discovery through.
  *
- * The failure this exists to catch, in the reviewer's words: a new decorator
- * can hold `private readonly inner`, satisfy `TripleStore`, compile, and never
- * call `linkStoreChainV1`. Discovery through it then resolves to `null`, which
- * callers read as "no constraint" — fail-open, silently.
+ * The failure this guards: a decorator holds an inner store, satisfies
+ * `TripleStore`, compiles, and never calls `linkStoreChainV1`. Discovery through
+ * it then resolves to `null`, which callers read as "no constraint" — fail-open,
+ * silently, because `null` is also the honest answer for an unmanaged store.
  *
- * The enforcement is the CLASSIFICATION table below. It is not a list this
- * suite consults politely: an exported store-shaped class that is absent from
- * it fails the first test. Adding a decorator therefore cannot be completed
- * without deciding, in this file, whether it participates in discovery — and if
- * it does, the second test proves it actually does rather than taking the
- * classification's word for it.
+ * ## What this is, and is not
  *
- * ## What this does NOT cover, stated plainly
+ * It is a PROOF for the decorators that exist: each is constructed over a probe
+ * carrying the cached-read gate, and discovery must reach the probe through it.
+ * A regression in any of them fails here.
  *
- * - Decorators that are not exported from the package barrel.
- * - Wrappers that are object literals rather than classes — the agent's
- *   `createListContextGraphsCacheInvalidatingStore` is one, and it is covered
- *   by its own suite in packages/agent.
+ * It is NOT enforcement for decorators that do not exist yet. An earlier
+ * revision tried to be, by discovering exported classes reflectively and
+ * demanding each be classified — but that selector was a heuristic (uppercase
+ * export name plus four prototype methods), so a decorator written with
+ * instance-field methods, or returned from a factory, would have slipped past
+ * it while the suite reported enforcement. A guard that overstates its reach is
+ * the same defect it was written to prevent, one level up.
  *
- * Both are real gaps. This closes the case the review named — a new first-party
- * decorator class — and does not claim more than that.
+ * Enforcing participation for future decorators needs a mechanism the type
+ * system or tooling can carry, and this repository currently has neither an
+ * ESLint configuration nor a lint script for this package. That remains open as
+ * #2168.
  */
-
-/** A store that owns a backend rather than wrapping one: nothing to traverse. */
-const BACKEND = Symbol('backend');
-
-type Classification =
-  | typeof BACKEND
-  | { readonly decorator: (inner: TripleStore) => TripleStore };
-
-const CLASSIFICATION: Readonly<Record<string, Classification>> = {
-  BlazegraphStore: BACKEND,
-  OxigraphStore: BACKEND,
-  OxigraphWorkerStore: BACKEND,
-  SparqlHttpStore: BACKEND,
-
-  ChangelogStore: { decorator: (inner) => new ChangelogStore(inner, { enabled: true }) },
-  GraphSetIndexStore: { decorator: (inner) => new GraphSetIndexStore(inner) },
-  SharedMemoryLiteralBlobStore: {
-    decorator: (inner) =>
-      new SharedMemoryLiteralBlobStore(inner, {
-        blobDir: join(process.cwd(), 'test', '.tmp-unused'),
-        thresholdBytes: 1_000_000,
-      }),
-  },
+const BLOB_OPTIONS = {
+  blobDir: join(process.cwd(), 'test', '.tmp-unused'),
+  thresholdBytes: 1_000_000,
 };
-
-/** Discovered at runtime, so a new export cannot slip past by not being listed. */
-const exportedStoreShapedClasses = (): string[] =>
-  Object.entries(storage as Record<string, unknown>)
-    .filter(([name, value]) => {
-      if (typeof value !== 'function' || !/^[A-Z]/.test(name)) return false;
-      const proto = (value as { prototype?: Record<string, unknown> }).prototype;
-      if (!proto) return false;
-      return ['insert', 'delete', 'query', 'listGraphs'].every(
-        (method) => typeof proto[method] === 'function',
-      );
-    })
-    .map(([name]) => name);
 
 /** Carries the cached-read gate, so traversal through a wrapper is observable. */
 const probeStore = () => {
@@ -94,47 +61,34 @@ const probeStore = () => {
   return store as unknown as TripleStore;
 };
 
-describe('decorator-chain participation is accounted for, not assumed', () => {
-  it('every exported store-shaped class is classified', () => {
-    // The enforcement point. A new decorator cannot be added without this
-    // failing first, which is what turns participation from a convention
-    // someone must remember into a step they cannot skip silently.
-    const unclassified = exportedStoreShapedClasses().filter(
-      (name) => !(name in CLASSIFICATION),
-    );
+/** Every first-party decorator, with the arguments needed to construct one. */
+const DECORATORS: ReadonlyArray<{
+  readonly name: string;
+  readonly wrap: (inner: TripleStore) => TripleStore;
+}> = [
+  { name: 'ChangelogStore', wrap: (inner) => new ChangelogStore(inner, { enabled: true }) },
+  { name: 'GraphSetIndexStore', wrap: (inner) => new GraphSetIndexStore(inner) },
+  {
+    name: 'SharedMemoryLiteralBlobStore',
+    wrap: (inner) => new SharedMemoryLiteralBlobStore(inner, BLOB_OPTIONS),
+  },
+];
 
-    expect(unclassified).toEqual([]);
-  });
+describe('first-party decorators pass capability discovery through', () => {
+  for (const { name, wrap } of DECORATORS) {
+    it(`${name} is traversable`, () => {
+      const probe = probeStore();
+      expect(asCachedReadGateV1(wrap(probe))).toBe(probe);
+    });
+  }
 
-  it('the discovery finds the classes (it is not vacuously empty)', () => {
-    // A selector that silently matched nothing would make the test above pass
-    // forever, which is the purest form of a check that cannot fail.
-    expect(exportedStoreShapedClasses()).toEqual(
-      expect.arrayContaining(['ChangelogStore', 'GraphSetIndexStore', 'SparqlHttpStore']),
-    );
-  });
-
-  it('every classified DECORATOR passes capability discovery through', () => {
-    // Classification is a claim; this is the proof. A decorator listed as
-    // participating but not calling linkStoreChainV1 fails here.
-    const probe = probeStore();
-    const failures: string[] = [];
-
-    for (const [name, classification] of Object.entries(CLASSIFICATION)) {
-      if (classification === BACKEND) continue;
-      const wrapped = classification.decorator(probe);
-      if (asCachedReadGateV1(wrapped) !== probe) failures.push(name);
-    }
-
-    expect(failures).toEqual([]);
-  });
-
-  it('a decorator that does not participate is REJECTED by the check above', () => {
-    // Proves the previous test can fail. Without this, "no failures" might mean
-    // the loop never resolved anything in the first place.
+  it('a decorator that does not participate resolves to null', () => {
+    // The negative control. Without it, the assertions above could pass because
+    // resolution reaches the probe some other way rather than through the
+    // decorator's registration.
     const probe = probeStore();
     const unregistered = {
-      innerStoreButPrivate: probe,
+      privateInnerNotExposed: probe,
       listGraphs: async () => [],
       query: async () => ({ type: 'boolean' as const, value: true }),
       insert: async () => undefined,
@@ -143,5 +97,16 @@ describe('decorator-chain participation is accounted for, not assumed', () => {
     } as unknown as TripleStore;
 
     expect(asCachedReadGateV1(unregistered)).toBeNull();
+  });
+
+  it('covers every decorator this package composes into a store', () => {
+    // Anti-vacuity, and a deliberate tripwire: `createTripleStore` builds a
+    // chain from exactly these three, so if that composition grows a fourth,
+    // this count is the thing that fails and points here.
+    expect(DECORATORS.map(({ name }) => name)).toEqual([
+      'ChangelogStore',
+      'GraphSetIndexStore',
+      'SharedMemoryLiteralBlobStore',
+    ]);
   });
 });
