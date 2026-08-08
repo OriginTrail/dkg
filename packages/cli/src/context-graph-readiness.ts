@@ -1,4 +1,8 @@
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type {
+  CatchupPassDecisionReason,
+  DKGAgent,
+  SwmSnapshotCoverage,
+} from '@origintrail-official/dkg-agent';
 import { DKGEvent, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type {
   ContextGraphReadinessProvenance,
@@ -17,6 +21,179 @@ import {
 export { catchupPlaneCompletedWithoutFailure } from './catchup-runner.js';
 
 export const CONTEXT_GRAPH_READINESS_VERSION = 1;
+
+/**
+ * Identifiers named in the terminal shortfall clause. The producer already caps
+ * the sample; this bounds the SENTENCE independently, so a future producer
+ * change cannot silently grow an operator-facing error string.
+ */
+const SWM_SHORTFALL_SAMPLE_LIMIT = 10;
+
+/**
+ * Rendered length of ONE identifier in that clause.
+ *
+ * Bounding the count is not enough: each identifier is a literal a public peer
+ * put in its own SWM metadata, and the producer only trims it. Ten refs are ten
+ * peer-chosen strings of any length.
+ */
+const SWM_SHORTFALL_REF_MAX_CHARS = 96;
+
+/**
+ * Make one peer-supplied snapshot ref safe to put in an operator-facing string.
+ *
+ * These identifiers are UNTRUSTED. They arrive as `dkg:publicSnapshotRef`
+ * literals in a remote peer's shared-memory metadata, and the producer applies
+ * only `.trim()`. Rendered verbatim into the terminal error — which surfaces
+ * through the API and the node UI — a peer could:
+ *
+ *   - forge structure, e.g. a ref containing "\nSync denied by 3 remote peers",
+ *     which reads as an additional line of our own diagnostics;
+ *   - inflate the message without bound, which matters here specifically because
+ *     oversized peer literals are a phenomenon this codebase has already met on
+ *     the sync path, not a hypothetical.
+ *
+ * So: fold every C0/C1 control character (newlines and tabs included) to U+FFFD
+ * rather than dropping it — dropping would let "a\nb" masquerade as the real ref
+ * "ab" — then bound the length with a visible marker so a truncated identifier
+ * cannot be mistaken for a complete one.
+ *
+ * Sanitising at the RENDERER is deliberate: it is the last point before the
+ * string reaches an operator, so it holds regardless of which producer path
+ * filled the sample or what a future one does.
+ */
+function sanitizeSnapshotRef(ref: string): string {
+  const flattened = ref.replace(/[\u0000-\u001F\u007F-\u009F]/gu, '\uFFFD');
+  return flattened.length > SWM_SHORTFALL_REF_MAX_CHARS
+    ? `${flattened.slice(0, SWM_SHORTFALL_REF_MAX_CHARS)}\u2026(truncated)`
+    : flattened;
+}
+
+/**
+ * Why the continuation loop stopped, in operator-facing words.
+ *
+ * An exhaustive `Record` rather than a `switch` with a default: the vocabulary
+ * is closed precisely so this message stays testable, and a new reason should
+ * fail the build here rather than silently render nothing.
+ *
+ * `coverage-stalled` deliberately outranks `budget-exhausted` in the policy, so
+ * a run that stalled AND ran out of time reports the stall. Its wording must
+ * therefore never mention time: "ran out of time" would send an operator to
+ * raise a budget that buys nothing, which is the precise misdirection that
+ * precedence exists to prevent.
+ */
+const SWM_STOP_REASON_TEXT: Record<CatchupPassDecisionReason, string> = {
+  // Not a stop at all — the loop was still willing to continue.
+  continue: '',
+  'plane-proven': 'the plane was proven by another peer',
+  'coverage-stalled': 'a further pass stopped making progress, so more passes would not help',
+  'no-capable-peers': 'no remaining peer reported holding the missing snapshots',
+  'max-passes-reached': 'the pass limit was reached',
+  'budget-exhausted': 'the time budget was exhausted',
+};
+
+/**
+ * The shared-memory shortfall clause appended to the incomplete-progress
+ * terminal message.
+ *
+ * Every figure comes from ONE {@link SwmSnapshotCoverage} record — the counts,
+ * the peer they are attributed to, and the sample — so the sentence can never
+ * describe a graph state no peer reported, and the named Knowledge Assets
+ * always belong to the manifest the counts came from.
+ *
+ * Returns `''` whenever there is nothing to add, which is what keeps the base
+ * sentence byte-identical on every other path: no snapshot inventory was
+ * observed, or the selected manifest was fully retrieved AND fully written — in
+ * which case the shortfall lies on another plane, and reporting "0 outstanding"
+ * beside an `unreachable` verdict would misdirect the reader.
+ */
+export function swmShortfallClause(
+  coverage: SwmSnapshotCoverage | undefined,
+  continuationPasses: number | undefined,
+  stopReason?: CatchupPassDecisionReason,
+): string {
+  if (!coverage) return '';
+  // `missingCount` is MATERIALIZATION completeness, not fetch completeness: the
+  // producer derives it as `snapshotsTotal - min(materializedRefCount, total)`,
+  // so a ref that was fetched and digest-verified but failed to write to the
+  // store raises it exactly like a ref that never arrived. The two are NOT
+  // independent axes and must never be added together — `missingCount` already
+  // includes every unwritten ref.
+  //
+  // `materializationFailures` is kept as the CAUSE indicator: it says the
+  // shortfall is a store problem rather than a network one, which is the whole
+  // reason the distinction is worth printing. It counts failing DESCRIPTORS
+  // while `missingCount` counts REFS, so the two are not in the same unit and
+  // neither is a subset count of the other — phrase them as separate facts, and
+  // never as "N of which".
+  // Defaulted, not trusted: this record crosses a worker RPC boundary, and an
+  // absent counter must read as "none known" rather than making `<= 0` false
+  // and forcing a clause onto a round with nothing to report.
+  const failedToWrite = coverage.materializationFailures ?? 0;
+  if (coverage.missingCount <= 0 && failedToWrite <= 0) return '';
+
+  // `continuationPasses` counts the REPEATS, so the walk itself is one more.
+  const passes = (continuationPasses ?? 0) + 1;
+  // Sanitized per identifier, not merely capped in count. See
+  // `sanitizeSnapshotRef`: these are untrusted peer literals. Mapping after the
+  // slice keeps `unnamed` arithmetic on the SAMPLE COUNT, which sanitizing
+  // cannot change — so the "(+N more)" accounting is unaffected by construction.
+  const sample = coverage.missingSample
+    .slice(0, SWM_SHORTFALL_SAMPLE_LIMIT)
+    .map(sanitizeSnapshotRef);
+  const unnamed = coverage.missingCount - sample.length;
+  const named = sample.length > 0
+    ? `, including ${sample.join(', ')}${unnamed > 0 ? ` (+${unnamed} more)` : ''}`
+    : '';
+  // Reported as separate clauses because they send an operator to different
+  // places: the outstanding count is what is still missing locally, the write
+  // failures say the store is why. Conflating them wastes the hour the
+  // stop-reason wording exists to save.
+  //
+  // "not materialized", NOT "not retrieved": these refs are the ones absent from
+  // the local store, and under a store fault they were fetched and digest-valid
+  // before they failed. Naming a ref that arrived intact as "not retrieved"
+  // sends the reader to the network and the peer set when the fault is entirely
+  // local — the one misdirection this clause exists to prevent.
+  const outstanding = coverage.missingCount > 0
+    ? ` ${coverage.missingCount} not materialized${named}`
+    : '';
+  const writes = failedToWrite > 0
+    ? `${outstanding ? ';' : ''} ${failedToWrite} store write failure(s)`
+    : '';
+  // An incomplete manifest means the denominator is only what this peer managed
+  // to advertise before its metadata phase ran out, not what the graph holds —
+  // presenting it as the total would understate the shortfall. It is also why
+  // this peer got no further passes: the capability gate requires a complete
+  // manifest, because a truncated round advances `snapshotsResolved` against a
+  // truncated denominator while materializing nothing. Both facts belong here;
+  // "the count is a lower bound" and "we stopped asking" are different things
+  // for the person reading it.
+  const lowerBound = coverage.manifestComplete
+    ? ''
+    : ` The peer's snapshot manifest was itself incomplete, so ${coverage.snapshotsTotal}`
+      + ' is a lower bound and that peer was not retried.';
+  // Absent whenever the continuation loop did not run — shared memory was not
+  // requested, or no decision was reached.
+  const stopped = stopReason && SWM_STOP_REASON_TEXT[stopReason]
+    ? ` Continuation stopped because ${SWM_STOP_REASON_TEXT[stopReason]}.`
+    : '';
+
+  // Scoped to "Shared memory" throughout: continuation passes repeat the
+  // shared-memory peer walk only, and the wording must not suggest the durable
+  // plane was retried.
+  // "materialized", NOT "fetched": `snapshotsResolved` counts refs whose
+  // Knowledge Assets are WRITTEN and locally visible, not refs sitting valid in
+  // the blob cache. Rendering it as "fetched" reported "250/250 snapshots
+  // fetched" on a graph where every write failed and nothing landed — the
+  // flattering direction, and undetectable by the reader. The word has to track
+  // the producer: `snapshotsResolved` was redefined to mean materialized so the
+  // capability gate could not be fooled by a cached-but-unwritten round, and
+  // this sentence is the same number's operator-facing face.
+  return ` (Shared memory: ${coverage.snapshotsResolved}/${coverage.snapshotsTotal}`
+    + ` snapshots materialized from peer …${coverage.peerIdSuffix}`
+    + ` after ${passes} ${passes === 1 ? 'pass' : 'passes'};`
+    + `${outstanding}${writes}.)${lowerBound}${stopped}`;
+}
 
 export type ContextGraphReadinessStore = Pick<
   DashboardDB,
@@ -373,7 +550,17 @@ export function classifyContextGraphCatchupReadiness(input: {
     if (missingGraphProof || missingRequestedSharedMemory) {
       jobStatus = 'unreachable';
       if (madeIncompleteProgress) {
-        error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.';
+        // The base sentence is byte-identical to what it has always been; the
+        // shortfall is APPENDED. This is the r26 terminal — "some verified data
+        // landed, the plane is still unready" — and it was the one message that
+        // could not say WHAT was missing even though the answer was computable
+        // in memory at the moment the round gave up.
+        error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.'
+          + swmShortfallClause(
+            result.diagnostics?.sharedMemory?.swmCoverage,
+            result.diagnostics?.sharedMemory?.continuationPasses,
+            result.diagnostics?.sharedMemory?.continuationStopReason,
+          );
       } else if (input.isPrivate && missingGraphProof) {
         error = 'No authorized context-graph peer delivered verified durable or shared-memory data — empty or metadata-only responses cannot prove a private graph is fully synchronized, and the curator may be offline.';
       } else if (input.isPrivate) {

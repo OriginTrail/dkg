@@ -83,7 +83,13 @@ export type SystemRecordLaneStateV1 =
   | 'reconciling'
   | 'disabling'
   | 'shutdown'
-  | 'unavailable';
+  | 'unavailable'
+  /**
+   * The owning store closed. Terminal, and distinct from `shutdown`: only
+   * `shutdown` claims the child was proven dead, and a detach proves nothing
+   * about the child because the adapter never owned it.
+   */
+  | 'detached';
 
 export interface SystemRecordLaneSessionV1 {
   readonly state: SystemRecordLaneStateV1;
@@ -348,7 +354,19 @@ const descriptorOf = (activation: SystemRecordLaneActivationSnapshotV1): string 
  * into the scheduler would create a second one to drift out of sync.
  */
 let registeredController: SystemRecordLaneControllerV1 | null = null;
-const controllerSessions = new WeakMap<SystemRecordLaneControllerV1, SystemRecordLaneSession>();
+
+/**
+ * Controller -> session, module-private and keyed by identity.
+ *
+ * Same construction as the ownership lease's own table, and for the same
+ * reason: `releaseSystemRecordLaneControllerV1` must be able to reach the
+ * session behind a controller without putting a mutable back-reference on the
+ * frozen public object, where any holder could reach it.
+ */
+const CONTROLLER_SESSIONS = new WeakMap<
+  SystemRecordLaneControllerV1,
+  SystemRecordLaneSession
+>();
 
 /** Test-only reset. Never called from production code. */
 export function __resetSystemRecordControllerRegistrationForTests(): void {
@@ -356,40 +374,38 @@ export function __resetSystemRecordControllerRegistrationForTests(): void {
 }
 
 /**
- * Release a controller that was only discovered and never opened.
+ * Production disposal, called by the store that obtained the controller.
  *
- * Store capability probes are intentionally lazy, but a successful probe still
- * reserves the process-global controller slot. Closing that store before an
- * activation must release the reservation without performing a child restart.
- * The session is terminally latched first so a retained controller reference
- * cannot be opened after a replacement store has claimed the slot.
+ * Two separately-scoped effects, and keeping them separate is the whole
+ * correctness argument:
+ *
+ * 1. The SESSION is detached unconditionally. Its owner is disposing of it, so
+ *    it must stop being usable whether or not it still holds the global.
+ * 2. The GLOBAL registration is released only if this controller still holds
+ *    it. That identity check is the "exactly its own" guarantee. An
+ *    unconditional clear was measured to hand a THIRD store a second live
+ *    controller over the same child: store B probes, is refused, and its
+ *    `close()` then releases store A's registration although B never held it.
+ *
+ * Detach, not shutdown: a shutdown runs `stopAndProveOwnedChildDead` on a child
+ * the daemon supervisor owns and is about to stop itself, and runs it under a
+ * control barrier whose failure would make `store.close()` reject. The adapter
+ * never owned the child, so it makes no claim about it.
  */
-export function releasePassiveSystemRecordLaneControllerV1(
+export async function releaseSystemRecordLaneControllerV1(
   controller: SystemRecordLaneControllerV1,
-): boolean {
-  if (registeredController !== controller) return false;
-  const session = controllerSessions.get(controller);
-  if (!session?.releasePassive()) return false;
-  registeredController = null;
-  controllerSessions.delete(controller);
-  return true;
-}
-
-/**
- * Store-owner disposal. Passive probes release without touching the child;
- * activated controllers run the one coalesced shutdown transition so no live
- * session can retain the process-global slot after its adapter is gone.
- */
-export async function disposeSystemRecordLaneControllerV1(
-  controller: SystemRecordLaneControllerV1,
-): Promise<boolean> {
-  if (registeredController !== controller) return false;
-  if (releasePassiveSystemRecordLaneControllerV1(controller)) return true;
-  const session = controllerSessions.get(controller);
-  if (!session) return false;
-  await session.close('shutdown');
-  controllerSessions.delete(controller);
-  return true;
+  quiesceOwner: () => Promise<void> = () => Promise.resolve(),
+): Promise<void> {
+  const session = CONTROLLER_SESSIONS.get(controller);
+  const recoverySettlement = session?.detach() ?? Promise.resolve();
+  // Detach is synchronous up to its first return: new lane work is refused
+  // before owner quiescence starts. The global slot remains claimed until BOTH
+  // the store is drained and any already-owned uncertain-write recovery has
+  // physically settled. Promise.all also observes the recovery if quiescence
+  // fails, while deliberately retaining the registration on either failure.
+  await Promise.all([quiesceOwner(), recoverySettlement]);
+  if (registeredController === controller) registeredController = null;
+  CONTROLLER_SESSIONS.delete(controller);
 }
 
 export function createSystemRecordLaneControllerV1(
@@ -402,8 +418,8 @@ export function createSystemRecordLaneControllerV1(
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
   });
   session.owner = controller;
+  CONTROLLER_SESSIONS.set(controller, session);
   registeredController = controller;
-  controllerSessions.set(controller, session);
   return controller;
 }
 
@@ -549,21 +565,6 @@ class SystemRecordLaneSession {
   get activationGeneration(): string {
     return this.activation.toString(10);
   }
-
-  /** Called only by the owning store during close, before any activation. */
-  releasePassive(): boolean {
-    if (
-      this.current !== 'disabled' ||
-      this.activation !== 0n ||
-      this.descriptor !== null ||
-      this.transition !== null
-    ) return false;
-    this.current = 'shutdown';
-    this.owner = null;
-    return true;
-  }
-
-  /* -------------------------------------------------------------- */
 
   async open(activation: SystemRecordLaneActivationV1): Promise<SystemRecordLaneSessionV1> {
     const activationSnapshot = snapshotActivation(activation);
@@ -731,7 +732,7 @@ class SystemRecordLaneSession {
   async close(mode: 'disable' | 'shutdown'): Promise<void> {
     if (mode === 'shutdown') return this.runShutdown();
 
-    if (this.current === 'shutdown') return; // shutdown supersedes disable
+    if (this.current === 'shutdown' || this.current === 'detached') return;
     if (this.current === 'disabled' || this.current === 'unavailable') return;
 
     if (this.transition) {
@@ -913,6 +914,10 @@ class SystemRecordLaneSession {
         : this.transition.work;
     }
     if (this.readState() === 'shutdown') return Promise.resolve();
+    // A DETACHED lane has no store behind it and no claim on the child: its
+    // adapter closed, and the supervisor stops the child itself. Running the
+    // teardown here would signal a process the daemon is already stopping.
+    if (this.readState() === 'detached') return Promise.resolve();
 
     // THE LATCH. Shutdown intent becomes the committed state SYNCHRONOUSLY —
     // before this method can suspend, and therefore before any other caller can
@@ -970,7 +975,7 @@ class SystemRecordLaneSession {
       // callback has settled. A scheduler transition timeout rejects its
       // public promise early but deliberately retains the seal and callback.
       if (registeredController === this.owner) registeredController = null;
-      if (this.owner) controllerSessions.delete(this.owner);
+      if (this.owner) CONTROLLER_SESSIONS.delete(this.owner);
     };
 
     const work = (async () => {
@@ -1105,7 +1110,11 @@ class SystemRecordLaneSession {
     proof: unknown,
     facade: SystemRecordLaneFacadeBindingV1,
   ): Promise<SystemRecordApplyOutcomeV1> {
-    if (this.current === 'shutdown' || this.current === 'unavailable') {
+    if (
+      this.current === 'shutdown' ||
+      this.current === 'unavailable' ||
+      this.current === 'detached'
+    ) {
       return this.refuseVerifiedBeforeDispatch(proof, { outcome: 'capability-lost' });
     }
     if (this.current !== 'enabled') {
@@ -1624,6 +1633,47 @@ class SystemRecordLaneSession {
   }
 
   /**
+   * The owning store closed. Latch terminal WITHOUT touching the child.
+   *
+   * Synchronous, for the same reason `runShutdown` is not `async`: an intent
+   * that only becomes visible after an await is an intent every concurrent
+   * caller gets to race. A store can close at ANY point of ANY transition, so
+   * `commitState` refuses every continuation that resumes afterwards — a
+   * `runEnable` about to publish `enabled`, a `runDisable` about to publish
+   * `disabled`, an `applyVerified` about to seal `reconciling`.
+   *
+   * It asserts nothing physical. It does not destroy the client, stop the child
+   * or prove a port released: the adapter never owned the child, and the daemon
+   * supervisor that does stops it itself. A second stop-and-prove from here is
+   * the double process signal `runShutdown` documents as unsafe — which is why
+   * the committed state is `detached` and not `shutdown`. Only `shutdown`
+   * claims the child was proven dead, and a detach cannot make that claim.
+   *
+   * It does not join an ordinary open. It does join a transition that already
+   * owns uncertain-write recovery, because releasing the process-global writer
+   * slot before that recovery physically settles would admit a second writer
+   * over the same managed child.
+   */
+  detach(): Promise<void> {
+    // A completed or in-flight shutdown made the STRONGER claim; overwriting it
+    // with `detached` would downgrade the record of what was established.
+    if (this.readState() !== 'shutdown') this.current = 'detached';
+    this.descriptor = null;
+    const transition = this.transition;
+    const recovery = this.recoveryOf(transition);
+    if (transition === null || recovery === null || recovery.settled) {
+      return Promise.resolve();
+    }
+    return this.transitionSettlement(transition).then(() => {
+      if (!recovery.settled) {
+        throw new Error(
+          'system-record controller detach could not prove uncertain-write recovery settled',
+        );
+      }
+    });
+  }
+
+  /**
    * Clear the in-flight pointer ONLY if it is still ours.
    *
    * `runShutdown` deliberately REPLACES the pointer so that later callers join
@@ -1662,7 +1712,7 @@ class SystemRecordLaneSession {
    * reintroduces exactly the await-placement audit that has been wrong twice.
    */
   private commitState(next: SystemRecordLaneStateV1): boolean {
-    if (this.readState() === 'shutdown') return false;
+    if (this.readState() === 'shutdown' || this.readState() === 'detached') return false;
     this.current = next;
     if (next === 'enabling') this.deps.setAdmissionActive?.(true);
     if (next === 'disabled' || next === 'unavailable') {
@@ -1680,7 +1730,7 @@ class SystemRecordLaneSession {
    */
   private assertNotTerminal(): void {
     const state = this.readState();
-    if (state === 'shutdown' || state === 'unavailable') {
+    if (state === 'shutdown' || state === 'unavailable' || state === 'detached') {
       throw new Error(`system-record lane is terminal (${state}) and cannot be reopened`);
     }
   }

@@ -99,6 +99,12 @@ export function sqlBlobsEqualV1(left: unknown, right: unknown): boolean {
   return true;
 }
 
+export function nullableSqlBlobsEqualV1(left: unknown, right: unknown): boolean {
+  return left === null || right === null
+    ? left === right
+    : sqlBlobsEqualV1(left, right);
+}
+
 function unsignedBigIntToFixedWidth(
   value: bigint,
   width: number,

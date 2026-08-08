@@ -40,8 +40,8 @@ dkg context-graph approve-join <id>      # approve a pending join request
 dkg ka create <name> -c <cg> --input-file <rdf-file> --share  # one-shot create/write/finalize/share; no VM publish
 dkg ka import-file <name> -c <cg> --input-file <file>         # import a document into WM
 dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF payload quads to WM
-dkg ka finalize <name> -c <cg> [--layer wm|swm]               # seal WM, or seal SWM content
-dkg ka share <name> -c <cg> [--entity <uri...>]               # WM -> SWM
+dkg ka finalize <name> -c <cg>                                # seal the WM draft
+dkg ka share <name> -c <cg>                                   # WM -> SWM
 dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
 dkg ka share-jobs [--context-graph-id <cg>]                   # list async share jobs
 dkg ka publish <name> -c <cg>                                 # sync SWM -> VM publish

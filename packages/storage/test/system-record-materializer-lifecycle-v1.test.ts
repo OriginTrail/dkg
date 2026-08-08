@@ -10,6 +10,7 @@ import {
   SystemRecordLaneActivationConflictError,
   __resetSystemRecordControllerRegistrationForTests,
   createSystemRecordLaneControllerV1,
+  releaseSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneActivationV1,
@@ -1899,6 +1900,45 @@ describe('system-record lane session lifecycle V1', () => {
         childGeneration: '2',
         materializationEpoch: '1',
       }));
+    });
+
+    it('retains the single-writer registration until detached recovery settles', async () => {
+      const { controller, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkReconcile();
+
+      await expect(session.applyVerified({})).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await recoveryExecutor.reconcileReached;
+
+      let released = false;
+      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        released = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(released).toBe(false);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+
+      recoveryExecutor.releaseReconcile();
+      await release;
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
     });
 
     it('accepts an attributable exact result that returns after its dispatch deadline', async () => {

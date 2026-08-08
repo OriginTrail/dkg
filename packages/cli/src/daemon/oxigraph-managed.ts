@@ -325,8 +325,9 @@ export async function startManagedOxigraph(
   // The lease ALONE is valid but deliberately does not advertise the lane:
   // without a handoff nothing could prove the retired child dead before a
   // replacement binds. Passing the supervisor handoff is what makes the
-  // composition live — the adapter owns the connection pool, but only the
-  // supervisor holds the `ChildProcess` and can assert process facts.
+  // composition live — only the supervisor holds the `ChildProcess` and can
+  // assert process facts, so the adapter composes the ordered handoff around
+  // steps it cannot perform itself.
   const storeConfig: ManagedOxigraphResult['storeConfig'] = {
     backend: 'sparql-http',
     options: attachManagedOxigraphLeaseV1(

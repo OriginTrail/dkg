@@ -18,6 +18,33 @@ export function formatLocalAgentErrorMessage(
     if (err.code === 'OPENCLAW_GATEWAY_RESPONSE_TIMEOUT') {
       return `${integration.name} gateway response timed out.`;
     }
+    if (err.code === 'PRIME_AGENT_SESSION_BUSY') {
+      return `${integration.name} session is busy — try again in a moment.`;
+    }
+    if (err.code === 'PRIME_AGENT_NO_SESSION') {
+      return `No live ${integration.name} session is available. Start or resume a session, then send again.`;
+    }
+    // The PRIME_AGENT_* terminal codes below must stay in lock-step with
+    // PrimeAgentTurnErrorCode in
+    // packages/adapter-prime-agent/extension/src/extension.ts and
+    // SANITIZED_PRIME_AGENT_BRIDGE_FAILURES in
+    // packages/cli/src/daemon/routes/prime-agent.ts; an unmatched code falls
+    // through to the raw daemon message at the bottom of this function.
+    if (err.code === 'PRIME_AGENT_PROVIDER_UNAUTHORIZED') {
+      return `${integration.name} provider authentication failed. Check its provider credentials and try again.`;
+    }
+    if (err.code === 'PRIME_AGENT_PROVIDER_ERROR') {
+      return `${integration.name} provider request failed. Check its provider configuration and try again.`;
+    }
+    if (err.code === 'PRIME_AGENT_TURN_ABORTED') {
+      return `${integration.name} turn was aborted.`;
+    }
+    if (err.code === 'PRIME_AGENT_TURN_TIMEOUT') {
+      return `${integration.name} turn exceeded its maximum run time.`;
+    }
+    if (err.code === 'PRIME_AGENT_DELIVERY_FAILED') {
+      return `${integration.name} rejected the message before starting the turn.`;
+    }
     if (err.code === 'SWM_SYNC_TIMEOUT' || err.source === 'background-sync') {
       return 'Background sync timed out. The chat request was not marked as failed by the local-agent bridge.';
     }
@@ -42,4 +69,3 @@ export function formatLocalAgentErrorMessage(
   }
   return message;
 }
-

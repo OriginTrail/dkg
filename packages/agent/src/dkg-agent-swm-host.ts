@@ -1236,6 +1236,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // translate either direction without an extra RPC.
     if (storageCgId !== contextGraphId) {
       const storageSubscription = this.subscribedContextGraphs.get(storageCgId) ?? {
+        syncMode: 'always-on' as const,
         subscribed: false,
         synced: false,
         pendingMeta: true,
@@ -2578,7 +2579,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       existing.coreHosted = true;
       next = existing;
     } else {
-      next = { subscribed: false, synced: false, onChainId: numericStr, coreHosted: true };
+      next = {
+        syncMode: 'always-on',
+        subscribed: false,
+        synced: false,
+        onChainId: numericStr,
+        coreHosted: true,
+      };
     }
     this.setContextGraphSubscription(localCgId, next);
     this.log.info(

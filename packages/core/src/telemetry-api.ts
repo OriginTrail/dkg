@@ -205,10 +205,23 @@ export interface DkgMetrics {
   storeSchedulerActive: UpDownCounter;
   /** current queued work; scheduler and lane are bounded static labels */
   backpressureQueueDepth: Gauge;
+  /**
+   * depth the lane's pressure state was classified against — the numerator that
+   * pairs with `backpressureQueueLimit`. Equals queue depth on a lane holding a
+   * private allocation, and the pool's depth on a lane drawing from a shared
+   * one; scheduler and lane are bounded static labels
+   */
+  backpressurePressureDepth: Gauge;
   /** configured queue capacity; scheduler and lane are bounded static labels */
   backpressureQueueLimit: Gauge;
   /** current admitted work; scheduler and lane are bounded static labels */
   backpressureInflight: Gauge;
+  /**
+   * admitted count the lane's `backpressureInflightLimit` bounds — this lane's
+   * own under a private allocation, the pool's under a shared one; scheduler
+   * and lane are bounded static labels
+   */
+  backpressurePressureInflight: Gauge;
   /** configured concurrent-work capacity; scheduler and lane are bounded static labels */
   backpressureInflightLimit: Gauge;
   /** age of the oldest queued item; scheduler and lane are bounded static labels */
@@ -239,6 +252,10 @@ export interface DkgMetrics {
   finalizationRecoveryOldestDueAgeMs: Gauge;
   /** outcome={recovered|invalidated|retry-pending|none} */
   finalizationRecoveryAttemptsTotal: Counter;
+  /** outcome={inserted|existing|deferred|capacity|conflict|closed|write-failure} */
+  finalizationRecoveryAdmissionTotal: Counter;
+  /** durable finalization envelopes waiting for live-inbox capacity */
+  finalizationRecoveryDeferredEntries: Gauge;
   /** process-local sync inflight sample */
   syncGlobalInflight: Histogram;
   /** ms; lane and priority_class are bounded sync scheduler enums */
@@ -394,11 +411,19 @@ function buildMetrics(): DkgMetrics {
     backpressureQueueDepth: meter.createGauge('dkg.backpressure.queue_depth', {
       description: 'Current scheduler queue depth by bounded scheduler and lane',
     }),
+    backpressurePressureDepth: meter.createGauge('dkg.backpressure.pressure_depth', {
+      description:
+        'Queue depth a lane\'s pressure state was classified against, by bounded scheduler and lane',
+    }),
     backpressureQueueLimit: meter.createGauge('dkg.backpressure.queue_limit', {
       description: 'Configured scheduler queue capacity by bounded scheduler and lane',
     }),
     backpressureInflight: meter.createGauge('dkg.backpressure.inflight', {
       description: 'Current admitted scheduler work by bounded scheduler and lane',
+    }),
+    backpressurePressureInflight: meter.createGauge('dkg.backpressure.pressure_inflight', {
+      description:
+        'Admitted work the lane inflight limit bounds, by bounded scheduler and lane',
     }),
     backpressureInflightLimit: meter.createGauge('dkg.backpressure.inflight_limit', {
       description: 'Configured scheduler concurrent-work capacity by bounded scheduler and lane',
@@ -459,6 +484,14 @@ function buildMetrics(): DkgMetrics {
     finalizationRecoveryAttemptsTotal: meter.createCounter(
       'dkg.finalization_recovery.attempts_total',
       { description: 'Autonomous finalization replay attempts by bounded outcome' },
+    ),
+    finalizationRecoveryAdmissionTotal: meter.createCounter(
+      'dkg.finalization_recovery.admission_total',
+      { description: 'Durable finalization admission outcomes by bounded result' },
+    ),
+    finalizationRecoveryDeferredEntries: meter.createGauge(
+      'dkg.finalization_recovery.deferred_entries',
+      { description: 'Durable finalization envelopes waiting for live-inbox capacity' },
     ),
     syncGlobalInflight: meter.createHistogram('dkg.sync.global_inflight', {
       description: 'Sampled process-local sync inflight count',

@@ -42,7 +42,7 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
   }
 
   /**
-   * Memoized no-rewrite facade for the system-record V1 lane (#2052 B2).
+   * No-rewrite, no-memo facade for the system-record V1 lane (#2052 B2).
    *
    * This decorator externalises oversized SWM literal object terms into blob
    * files, but the lane never routes through `insert()` — it builds one
@@ -52,20 +52,14 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
    * A rewriting facade would have to re-externalise terms the materializer has
    * already committed to a digest, which would break the projection digest that
    * applied state pins and make every restart revalidation fail.
-   *
-   * Memoized so repeated capability probes allocate nothing.
    */
   getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
-    // Memoize only a PRESENT controller. Absence must be re-probed, because the
-    // adapter returns undefined for a merely transient condition — any window
-    // in which the managed child is not the proven-ready listener, i.e. every
-    // ordinary revive. Latching that would let one probe landing inside a
-    // one-second Oxigraph restart disable the lane for the entire process
-    // lifetime, silently, recoverable only by a daemon restart.
-    if (this.systemRecordLaneMemo) return this.systemRecordLaneMemo;
-    const inner = this.inner.getSystemRecordLaneControllerV1?.();
-    this.systemRecordLaneMemo = inner ?? null;
-    return inner;
+    // Straight through, no memo. Because this forwards the inner controller
+    // UNCHANGED, caching bought no identity stability — it could only go stale
+    // and keep advertising a lane the adapter would now deny. Capability
+    // discovery is the safety gate callers use, so a stale "yes" is the
+    // dangerous direction.
+    return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
   readonly innerStore: TripleStore;
@@ -73,7 +67,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
   private readonly blobDir: string;
   private readonly thresholdBytes: number;
   private readonly pendingBlobWrites = new Map<string, Promise<void>>();
-  private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
 
   constructor(inner: TripleStore, options: SharedMemoryLiteralBlobStoreOptions) {
     if (!options.blobDir?.trim()) {

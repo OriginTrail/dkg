@@ -14,14 +14,17 @@ import {
   assertAgentProfileForkResolutionEvidenceV1,
   assertOwnedSubjectTableObjectV1,
   assertDerivedAgentEncryptionSubjectV1,
+  assertSystemRecordPeerBindingV1,
   assertSystemRecordClosureAlgebraV1,
   buildAgentProfileVerificationClosureV1,
   buildSystemRecordSignatureMessageV1,
+  classifyAgentProfileOwnedSubjectV1,
   canonicalizeAgentProfileAuthorityTransitionV1,
   canonicalizeAgentProfileConflictEvidenceV1,
   canonicalizeAgentProfileForkResolutionV1,
   canonicalizeAgentProfileHeadObjectV1,
   canonicalizeOwnedSubjectTableObjectV1,
+  canonicalizeSystemRecordRootCollisionEvidenceV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileForkResolutionDigestV1,
@@ -36,6 +39,7 @@ import {
   evaluateAuthorityTransitionAgainstAcceptedStateV1,
   evaluateAgentProfileHeadAdvanceV1,
   preflightSystemRecordCacheAccountingV1,
+  recoverEip191SignerV1,
   parseCanonicalAgentProfileAuthorityTransitionV1,
   parseCanonicalAgentProfileConflictEvidenceV1,
   parseCanonicalAgentProfileForkResolutionV1,
@@ -47,13 +51,16 @@ import {
   type AgentProfileForkResolutionV1,
   type AgentProfileHeadObjectV1,
   type SignedAgentProfileHeadEnvelopeV1,
+  type SystemRecordCacheRowAccountingV1,
   type SystemRecordSignatureEntryV1,
   type SignedSystemRecordEnvelopeV1,
 } from '../src/system-record-objects-v1.js';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_ACTIVATION_BUNDLE_BYTES,
+  SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_REFERENCES,
   SYSTEM_RECORD_MAX_ATOMIC_BUNDLE_BYTES,
+  SYSTEM_RECORD_MAX_CONFLICT_SIDECARS,
 } from '../src/system-record-limits-v1.js';
 import {
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
@@ -84,8 +91,11 @@ describe('system-record V1 object codecs', () => {
   it('round-trips exact active/tombstone, transition, fork, and conflict variants', async () => {
     const fixture = await authorityFixture();
     const active = activeHead(fixture);
-    expect(parseCanonicalAgentProfileHeadObjectV1(canonicalizeAgentProfileHeadObjectV1(active)))
-      .toEqual(active);
+    const parsedActive = parseCanonicalAgentProfileHeadObjectV1(
+      canonicalizeAgentProfileHeadObjectV1(active),
+    );
+    expect(parsedActive).toEqual(active);
+    expect(Object.isFrozen(parsedActive.graphScopedAuthorSeal)).toBe(true);
 
     const tombstone: AgentProfileHeadObjectV1 = {
       objectType: 'agent-profile-head', kind: 'agents', state: 'tombstone',
@@ -106,9 +116,11 @@ describe('system-record V1 object codecs', () => {
     )).toEqual(transition);
 
     const fork = forkResolution(fixture, active);
-    expect(parseCanonicalAgentProfileForkResolutionV1(
+    const parsedFork = parseCanonicalAgentProfileForkResolutionV1(
       canonicalizeAgentProfileForkResolutionV1(fork),
-    )).toEqual(fork);
+    );
+    expect(parsedFork).toEqual(fork);
+    expect(Object.isFrozen(parsedFork.evidenceHeadDigests)).toBe(true);
 
     const evidence = {
       objectType: 'conflict-evidence', kind: 'agents', networkId: NETWORK,
@@ -118,9 +130,41 @@ describe('system-record V1 object codecs', () => {
         { type: 'transition', priorAuthoritySequence: '0', nextAuthoritySequence: '1', objectDigests: [DIGEST_B, DIGEST_C] },
       ],
     } as const;
-    expect(parseCanonicalAgentProfileConflictEvidenceV1(
+    const parsedEvidence = parseCanonicalAgentProfileConflictEvidenceV1(
       canonicalizeAgentProfileConflictEvidenceV1(evidence),
-    )).toEqual(evidence);
+    );
+    expect(parsedEvidence).toEqual(evidence);
+    expect(parsedEvidence.entries.every((entry) => Object.isFrozen(entry.objectDigests))).toBe(true);
+    const misleadingEntries = Object.assign([...evidence.entries], { map: () => [] });
+    expect(() => canonicalizeAgentProfileConflictEvidenceV1({
+      ...evidence,
+      entries: misleadingEntries,
+    } as unknown as typeof evidence)).toThrow(/closed|non-index/);
+    const digestIterator = [...evidence.entries[0].objectDigests] as string[];
+    Object.defineProperty(digestIterator, Symbol.iterator, {
+      value: function* () { yield DIGEST_A; },
+    });
+    expect(() => canonicalizeAgentProfileConflictEvidenceV1({
+      ...evidence,
+      entries: [{ ...evidence.entries[0], objectDigests: digestIterator }, evidence.entries[1]],
+    } as unknown as typeof evidence)).toThrow(/closed digests/);
+
+    for (const entry of [
+      { type: 'fork', authoritySequence: '15', version: '0', objectDigests: [DIGEST_A, DIGEST_B] },
+      {
+        type: 'transition', priorAuthoritySequence: '14', nextAuthoritySequence: '15',
+        objectDigests: [DIGEST_A, DIGEST_B],
+      },
+      {
+        type: 'transition', priorAuthoritySequence: '15', nextAuthoritySequence: '16',
+        objectDigests: [DIGEST_A, DIGEST_B],
+      },
+    ] as const) {
+      expect(() => canonicalizeAgentProfileConflictEvidenceV1({
+        ...evidence,
+        entries: [entry],
+      } as never)).toThrow(/V1.*limit/i);
+    }
   });
 
   it('rejects null optionals, wrong peer-key binding, unsafe timestamps, and high-s signatures', async () => {
@@ -138,6 +182,44 @@ describe('system-record V1 object codecs', () => {
     expect(() => assertAgentRootV1(`did:dkg:agent:0x${'0'.repeat(40)}`)).toThrow(/address/);
     const highS = `0x${'01'.repeat(32)}${'ff'.repeat(32)}1b`;
     expect(() => assertCanonicalEip191SignatureV1(highS)).toThrow(/low-s/);
+    expect(() => assertSystemRecordPeerBindingV1(
+      'x'.repeat(257),
+      fixture.peerPublicKey,
+    )).toThrow(/byte bound/);
+    expect(classifyAgentProfileOwnedSubjectV1(
+      fixture.root,
+      `${fixture.root}/.well-known/genid/cap${'9'.repeat(256 * 1024)}`,
+    )).toBeNull();
+    expect(() => assertOwnedSubjectTableObjectV1(fixture.root, [
+      `${fixture.root}/.well-known/genid/cap1${'1'.repeat(140_000)}`,
+      `${fixture.root}/.well-known/genid/cap2${'2'.repeat(140_000)}`,
+    ])).toThrow(/byte cap/);
+  });
+
+  it('snapshots exact root-collision evidence and its incumbent tuple', async () => {
+    const fixture = await authorityFixture();
+    const evidence = {
+      networkId: NETWORK,
+      root: fixture.root,
+      incumbentRecordKey: [NETWORK, fixture.peerId] as const,
+      contenderStableKey: DIGEST_A,
+      contenderHeadDigest: DIGEST_B,
+    };
+    expect(canonicalizeSystemRecordRootCollisionEvidenceV1(evidence).byteLength).toBeGreaterThan(0);
+    const accessor = Object.defineProperty({ ...evidence }, 'networkId', {
+      enumerable: true,
+      get: () => NETWORK,
+    });
+    expect(() => canonicalizeSystemRecordRootCollisionEvidenceV1(accessor as typeof evidence))
+      .toThrow(/data properties/);
+    const tupleAccessor = Object.defineProperty([NETWORK, fixture.peerId], '0', {
+      enumerable: true,
+      get: () => NETWORK,
+    });
+    expect(() => canonicalizeSystemRecordRootCollisionEvidenceV1({
+      ...evidence,
+      incumbentRecordKey: tupleAccessor as unknown as typeof evidence.incumbentRecordKey,
+    })).toThrow(/closed two-item tuple/);
   });
 
   it('binds active head content/count/table fields to its public graph-scoped seal', async () => {
@@ -157,6 +239,20 @@ describe('system-record V1 object codecs', () => {
     })).toThrow(/public-only/);
     expect(() => canonicalizeAgentProfileHeadObjectV1({
       ...active,
+      graphScopedAuthorSeal: {
+        ...active.graphScopedAuthorSeal,
+        kaUal: `did:dkg:base:8453/${fixture.evmIssuer}/7`,
+      },
+    })).toThrow(/UAL network/);
+    expect(() => canonicalizeAgentProfileHeadObjectV1({
+      ...active,
+      graphScopedAuthorSeal: {
+        ...active.graphScopedAuthorSeal,
+        assertedAtChainId: '8453',
+      },
+    })).toThrow(/asserted chain/);
+    expect(() => canonicalizeAgentProfileHeadObjectV1({
+      ...active,
       ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
     })).toThrow(/nonempty/);
   });
@@ -167,6 +263,20 @@ describe('system-record V1 object codecs', () => {
     const objectDigest = computeAgentProfileHeadObjectDigestV1(object);
     const peerMessage = buildSystemRecordSignatureMessageV1(object, objectDigest, 'peer');
     const evmMessage = buildSystemRecordSignatureMessageV1(object, objectDigest, 'current-evm');
+    const hostileObject = new Proxy(object, {
+      get(target, property, receiver) {
+        if (property === 'networkId') return 'otp:9999';
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(buildSystemRecordSignatureMessageV1(hostileObject, objectDigest, 'peer'))
+      .toEqual(peerMessage);
+    class MisleadingMessage extends Uint8Array {
+      override get byteLength(): number { return 1; }
+      override subarray(): Uint8Array { return new Uint8Array(); }
+    }
+    expect(eip191PersonalMessageHashV1(new MisleadingMessage(evmMessage)))
+      .toEqual(eip191PersonalMessageHashV1(evmMessage));
     const peerSignature = Buffer.from(
       await signEd25519(peerMessage, fixture.peerSecretSeed),
     ).toString('base64url');
@@ -180,11 +290,89 @@ describe('system-record V1 object codecs', () => {
       ],
     };
     expect(await verifySignedSystemRecordEnvelopeV1(envelope)).toBe(true);
+    const personalHash = eip191PersonalMessageHashV1(evmMessage);
+    expect(recoverEip191SignerV1(evmSignature, new MisleadingMessage(personalHash)))
+      .toBe(fixture.evmIssuer);
+    const misleadingSignatures = Object.assign([...envelope.signatures], { map: () => [] });
+    expect(() => canonicalizeSignedSystemRecordEnvelopeV1({
+      ...envelope,
+      signatures: misleadingSignatures,
+    } as unknown as SignedAgentProfileHeadEnvelopeV1)).toThrow(/closed|non-index/);
+    let objectAccessorCalls = 0;
+    const accessorEnvelope = Object.defineProperty({
+      objectDigest,
+      signatures: envelope.signatures,
+    }, 'object', {
+      enumerable: true,
+      get: () => {
+        objectAccessorCalls += 1;
+        return object;
+      },
+    });
+    expect(() => canonicalizeSignedSystemRecordEnvelopeV1(
+      accessorEnvelope as unknown as SignedAgentProfileHeadEnvelopeV1,
+    )).toThrow(/data properties/);
+    expect(objectAccessorCalls).toBe(0);
     const tampered = {
       ...envelope,
       signatures: [envelope.signatures[0], { ...envelope.signatures[1], signature: signEip191(peerMessage, fixture.evmPrivateKey) }],
     } as SignedAgentProfileHeadEnvelopeV1;
     expect(await verifySignedSystemRecordEnvelopeV1(tampered)).toBe(false);
+  });
+
+  it('snapshots EIP-1271 evidence before awaited authority verification', async () => {
+    const fixture = await authorityFixture();
+    const object = activeHead(fixture);
+    const objectDigest = computeAgentProfileHeadObjectDigestV1(object);
+    const evidence = {
+      kind: 'eip1271-current-finalized' as const,
+      chainId: '20430' as const,
+      contractAddress: fixture.evmIssuer,
+      finalizedBlockNumber: '1' as const,
+      finalizedBlockHash: DIGEST_A,
+    };
+    const envelope: SignedAgentProfileHeadEnvelopeV1 = {
+      object,
+      objectDigest,
+      signatures: [
+        {
+          role: 'peer', suite: 'ed25519-v1', signer: fixture.peerId,
+          evidence: { kind: 'none' },
+          signature: Buffer.from(await signEd25519(
+            buildSystemRecordSignatureMessageV1(object, objectDigest, 'peer'),
+            fixture.peerSecretSeed,
+          )).toString('base64url'),
+        },
+        {
+          role: 'current-evm', suite: 'eip1271-current-finalized-v1',
+          signer: fixture.evmIssuer, evidence, signature: '0x01',
+        },
+      ],
+    };
+    const mutatedAddress = '0x5555555555555555555555555555555555555555';
+    let observedAddress: string | undefined;
+    const verification = verifySignedSystemRecordEnvelopeV1(envelope, {
+      verifyEip1271: (entry) => {
+        if (entry.evidence.kind !== 'eip1271-current-finalized') return false;
+        observedAddress = entry.evidence.contractAddress;
+        return entry.evidence.contractAddress === mutatedAddress;
+      },
+    });
+    (evidence as { contractAddress: string }).contractAddress = mutatedAddress;
+
+    expect(await verification).toBe(false);
+    expect(observedAddress).toBe(fixture.evmIssuer);
+    (evidence as { contractAddress: string }).contractAddress = fixture.evmIssuer;
+
+    const mutableOptions = {
+      verifyEip1271: () => false,
+    };
+    const pinnedVerification = verifySignedSystemRecordEnvelopeV1(envelope, mutableOptions);
+    mutableOptions.verifyEip1271 = () => true;
+    expect(await pinnedVerification).toBe(false);
+    expect(await verifySignedSystemRecordEnvelopeV1(envelope, {
+      verifyEip1271: (() => ({ valid: false })) as never,
+    })).toBe(false);
   });
 
   it('enforces transition expiry and direct successor fork decisions', async () => {
@@ -249,6 +437,11 @@ describe('system-record V1 object codecs', () => {
       issuedAt: '2026-08-05T12:05:00Z',
     };
     expect(() => assertAgentProfileForkResolutionEvidenceV1(resolution, [right, left])).not.toThrow();
+    const misleadingHeads = Object.assign([right, left], { map: () => [] });
+    expect(() => assertAgentProfileForkResolutionEvidenceV1(
+      resolution,
+      misleadingHeads,
+    )).toThrow(/closed|non-index/);
     const altered = { ...left, acceptedTransitionDigest: DIGEST_C };
     expect(() => assertAgentProfileForkResolutionEvidenceV1(
       {
@@ -310,12 +503,56 @@ describe('system-record V1 object codecs', () => {
       { acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition) },
     );
     const state = { current, disposition: 'discoverable' as const, transitionLineage: [], historicalRoots: [] };
+    expect(() => evaluateAgentProfileHeadAdvanceV1(
+      { ...state, disposition: 'unknown' } as never,
+      current,
+      { nowMs: Date.parse('2026-08-08T00:00:00Z') },
+    )).toThrow(/disposition/);
+    expect(() => evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      { ...state, disposition: 'unknown' } as never,
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toThrow(/disposition/);
     expect(evaluateAgentProfileHeadAdvanceV1(state, next, {
       nowMs: Date.parse('2026-08-08T00:00:00Z'),
     })).toMatchObject({ decision: 'reject', reason: expect.stringMatching(/verified active predecessor|exact accepted/) });
     expect(evaluateAgentProfileHeadAdvanceV1(state, next, {
       nowMs: Date.parse('2026-08-08T00:00:00Z'), acceptedTransition: transition,
     })).toEqual({ decision: 'accept' });
+
+    const absent = {
+      disposition: 'discoverable' as const,
+      transitionLineage: [],
+      historicalRoots: [],
+    };
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      absent,
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({ decision: 'reject', reason: 'transition has no accepted predecessor' });
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      { ...absent, disposition: 'transition-equivocation-quarantined' },
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({
+      decision: 'reject',
+      reason: 'absent state cannot retain authority history or quarantine',
+    });
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      {
+        ...absent,
+        transitionLineage: [{
+          priorAuthoritySequence: '0',
+          nextAuthoritySequence: '1',
+          transitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+        }],
+      },
+      transition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({
+      decision: 'reject',
+      reason: 'absent state cannot retain authority history or quarantine',
+    });
 
     const tombstone: AgentProfileHeadObjectV1 = {
       objectType: 'agent-profile-head', kind: 'agents', state: 'tombstone',
@@ -355,6 +592,31 @@ describe('system-record V1 object codecs', () => {
       historicalRoots: [current.rootSubject],
     }, alternate, Date.parse('2026-08-08T00:00:00Z')))
       .toEqual({ decision: 'quarantine', reason: 'transition-equivocation' });
+  });
+
+  it('rejects foreign records before honoring a retained transition quarantine', async () => {
+    const fixture = await authorityFixture();
+    const other = await authorityFixture(17);
+    const current = activeHead(fixture);
+    const foreignHead = activeHead(other);
+    const foreignTransition = authorityTransition(other, foreignHead);
+    const quarantined = {
+      current,
+      disposition: 'transition-equivocation-quarantined' as const,
+      transitionLineage: [],
+      historicalRoots: [],
+    };
+
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      quarantined,
+      foreignHead,
+      { nowMs: Date.parse('2026-08-05T12:10:00Z') },
+    )).toEqual({ decision: 'reject', reason: 'stable record key changed' });
+    expect(evaluateAuthorityTransitionAgainstAcceptedStateV1(
+      quarantined,
+      foreignTransition,
+      Date.parse('2026-08-08T00:00:00Z'),
+    )).toEqual({ decision: 'reject', reason: 'stable record key changed' });
   });
 
   it('makes a verified tombstone dominant regardless of active-head delivery order', async () => {
@@ -416,6 +678,110 @@ describe('system-record V1 object codecs', () => {
       higherVersionTombstone,
       { nowMs, tombstonePredecessor: initial },
     )).toEqual({ decision: 'stale' });
+
+    const equalVersionTombstone = {
+      ...tombstone,
+      issuedAt: '2026-08-07T11:55:00Z' as const,
+    };
+    const sameVersionByDigest = [tombstone, equalVersionTombstone].sort((left, right) =>
+      computeAgentProfileHeadObjectDigestV1(left)
+        .localeCompare(computeAgentProfileHeadObjectDigestV1(right)));
+    const [lowerDigestTombstone, higherDigestTombstone] = sameVersionByDigest;
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        current: higherDigestTombstone,
+        disposition: 'discoverable',
+        transitionLineage: [],
+        historicalRoots: [],
+      },
+      lowerDigestTombstone,
+      { nowMs, tombstonePredecessor: initial },
+    )).toEqual({ decision: 'accept' });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        current: lowerDigestTombstone,
+        disposition: 'discoverable',
+        transitionLineage: [],
+        historicalRoots: [],
+      },
+      higherDigestTombstone,
+      { nowMs, tombstonePredecessor: initial },
+    )).toEqual({ decision: 'stale' });
+  });
+
+  it('requires exact resurrection lineage before dismissing a late lower-sequence tombstone', async () => {
+    const fixture = await authorityFixture();
+    const nextAuthority = await authorityFixture(23);
+    const initial = activeHead(fixture);
+    const tombstone = tombstoneHead(initial);
+    const ordinaryTransition = transitionFrom(fixture, initial, '1', nextAuthority.evmIssuer);
+    const ordinaryTransitionDigest = computeAgentProfileAuthorityTransitionDigestV1(ordinaryTransition);
+    const ordinaryDescendant = activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+      acceptedTransitionDigest: ordinaryTransitionDigest,
+    });
+    const nowMs = Date.parse('2026-08-08T00:00:00Z');
+    const ordinaryState = {
+      current: ordinaryDescendant,
+      disposition: 'discoverable' as const,
+      transitionLineage: [{
+        priorAuthoritySequence: '0' as const,
+        nextAuthoritySequence: '1' as const,
+        transitionDigest: ordinaryTransitionDigest,
+      }],
+      historicalRoots: [initial.rootSubject],
+    };
+
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      ordinaryState,
+      tombstone,
+      { nowMs, tombstonePredecessor: initial },
+    )).toEqual({
+      decision: 'reject',
+      reason: 'late tombstone requires the exact retained resurrection transition',
+    });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      ordinaryState,
+      tombstone,
+      { nowMs, tombstonePredecessor: initial, acceptedTransition: ordinaryTransition },
+    )).toEqual({ decision: 'accept' });
+
+    const resurrectionTransition = transitionFrom(
+      fixture,
+      tombstone,
+      '1',
+      nextAuthority.evmIssuer,
+    );
+    const resurrectionTransitionDigest = computeAgentProfileAuthorityTransitionDigestV1(
+      resurrectionTransition,
+    );
+    const resurrectedDescendant = activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+      acceptedTransitionDigest: resurrectionTransitionDigest,
+    });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        ...ordinaryState,
+        current: resurrectedDescendant,
+        transitionLineage: [{
+          priorAuthoritySequence: '0',
+          nextAuthoritySequence: '1',
+          transitionDigest: resurrectionTransitionDigest,
+        }],
+      },
+      tombstone,
+      { nowMs, tombstonePredecessor: initial, acceptedTransition: resurrectionTransition },
+    )).toEqual({ decision: 'stale' });
+
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      { ...ordinaryState, transitionLineage: ordinaryState.transitionLineage.map((entry) => ({
+        ...entry,
+        transitionDigest: resurrectionTransitionDigest,
+      })) },
+      tombstone,
+      { nowMs, tombstonePredecessor: initial, acceptedTransition: resurrectionTransition },
+    )).toEqual({
+      decision: 'reject',
+      reason: 'accepted head does not bind its retained transition lineage',
+    });
   });
 
   it('rejects tombstone fork evidence and reused or incomplete authority roots', async () => {
@@ -549,9 +915,24 @@ describe('system-record owned subjects and verification closure', () => {
       `${fixture.root}#x25519-${'0'.repeat(32)}`,
       publicKey,
     )).toThrow(/not derived/);
+    class MisleadingPublicKey extends Uint8Array {
+      override get byteLength(): number { return 32; }
+    }
+    const shortKey = new MisleadingPublicKey([9]);
+    const shortKeyId = `${fixture.root}#x25519-${createHash('sha256')
+      .update(Uint8Array.of(9)).digest('hex').slice(0, 32)}`;
+    expect(() => assertDerivedAgentEncryptionSubjectV1(
+      fixture.root,
+      shortKeyId,
+      shortKey,
+    )).toThrow(/exactly 32 bytes/);
   });
 
   it('preflights exact closure/sidecar references without trusting caller counters', async () => {
+    class MisleadingAccountingBytes extends Uint8Array {
+      override get byteLength(): number { return 0; }
+      override slice(): Uint8Array { return new Uint8Array(); }
+    }
     const metadata = (byteLength = 0) => createSystemRecordCacheMetadataV1(new Uint8Array(byteLength));
     const emptyMetadata = metadata();
     const references = Array.from({ length: 32 }, (_, index) => {
@@ -562,13 +943,44 @@ describe('system-record owned subjects and verification closure', () => {
         canonicalBytes,
       );
     });
+    const accountedBytes = new Uint8Array(64).fill(42);
+    const accountedDigest = digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+      accountedBytes,
+    );
+    const accountedReference = createSystemRecordCacheReferenceV1(
+      'profile-bundle',
+      accountedDigest,
+      new MisleadingAccountingBytes(accountedBytes),
+    );
+    const accountedMetadata = createSystemRecordCacheMetadataV1(
+      new MisleadingAccountingBytes(accountedBytes),
+    );
+    expect(preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
+      closure: [accountedReference],
+      metadata: accountedMetadata,
+    }] })).toMatchObject({ cohortPhysicalBytes: 64, metadataBytes: 64 });
     expect(preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [
       { closure: references, metadata: metadata(512) },
       { closure: references, metadata: metadata(512) },
     ] })).toMatchObject({ cohortPhysicalObjects: 32, closureReferences: 64, cohortPhysicalBytes: 2048 });
+    const misleadingRows = Object.assign([
+      { closure: references, metadata: emptyMetadata },
+    ], { map: () => [] });
+    expect(() => preflightSystemRecordCacheAccountingV1({
+      mode: 'live',
+      rows: misleadingRows,
+    })).toThrow(/closed bounds/);
+    const misleadingClosure = [...references];
+    Object.defineProperty(misleadingClosure, Symbol.iterator, {
+      value: function* () { yield references[0]; },
+    });
+    expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [
+      { closure: misleadingClosure, metadata: emptyMetadata },
+    ] })).toThrow(/closed bounds/);
     expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [
       { closure: [...references, references[0]], metadata: metadata(1) },
-    ] })).toThrow(/row closure/);
+    ] })).toThrow(/cache row arrays|closed bounds/);
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'live',
       rows: [{
@@ -580,6 +992,53 @@ describe('system-record owned subjects and verification closure', () => {
         metadata: emptyMetadata,
       }],
     })).toThrow(/not derived from canonical bytes/);
+    const ReferenceConstructor = Object.getPrototypeOf(references[0]).constructor as new (
+      ...args: unknown[]
+    ) => typeof references[0];
+    expect(() => new ReferenceConstructor(
+      references[0].digest,
+      references[0].cacheDigest,
+      references[0].objectKind,
+      { byteLength: 0, fingerprint: '0'.repeat(64) },
+    )).toThrow(/factory-only/);
+    const forgedReference = Object.assign(Object.create(Object.getPrototypeOf(references[0])), {
+      digest: references[0].digest,
+      cacheDigest: references[0].cacheDigest,
+      objectKind: references[0].objectKind,
+    }) as typeof references[0];
+    expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
+      closure: [forgedReference], metadata: emptyMetadata,
+    }] })).toThrow(/not derived from canonical bytes/);
+    let forgedReferenceReads = 0;
+    const proxiedReference = new Proxy(references[0], {
+      get(target, property, receiver) {
+        forgedReferenceReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
+      closure: [proxiedReference], metadata: emptyMetadata,
+    }] })).toThrow(/not derived from canonical bytes/);
+    expect(forgedReferenceReads).toBe(0);
+    const MetadataConstructor = Object.getPrototypeOf(emptyMetadata).constructor as new (
+      ...args: unknown[]
+    ) => typeof emptyMetadata;
+    expect(() => new MetadataConstructor(0)).toThrow(/factory-only/);
+    const forgedMetadata = Object.create(Object.getPrototypeOf(emptyMetadata)) as typeof emptyMetadata;
+    expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
+      closure: [], metadata: forgedMetadata,
+    }] })).toThrow(/not derived from encoded bytes/);
+    let forgedMetadataReads = 0;
+    const proxiedMetadata = new Proxy(emptyMetadata, {
+      get(target, property, receiver) {
+        forgedMetadataReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    expect(() => preflightSystemRecordCacheAccountingV1({ mode: 'live', rows: [{
+      closure: [], metadata: proxiedMetadata,
+    }] })).toThrow(/not derived from encoded bytes/);
+    expect(forgedMetadataReads).toBe(0);
     const fixture = await authorityFixture();
     const evidenceBytes = canonicalizeAgentProfileConflictEvidenceV1({
       objectType: 'conflict-evidence', kind: 'agents', networkId: NETWORK,
@@ -603,7 +1062,7 @@ describe('system-record owned subjects and verification closure', () => {
       mode: 'activation',
       rows: Array.from({ length: 513 }, () => ({ closure: [], metadata: emptyMetadata })),
       inventoryLeaves: [],
-    })).toThrow(/record bound/);
+    })).toThrow(/record bound|closed bounds/);
     const leaf = (index: number) => {
       const bytes = new TextEncoder().encode(`leaf-${index}`);
       return createSystemRecordCacheReferenceV1(
@@ -622,7 +1081,7 @@ describe('system-record owned subjects and verification closure', () => {
     });
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'activation', rows: [], inventoryLeaves: Array.from({ length: 5 }, (_, index) => leaf(index)),
-    })).toThrow(/leaf bound/);
+    })).toThrow(/leaf bound|closed bounds/);
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'live',
       rows: [{
@@ -636,7 +1095,7 @@ describe('system-record owned subjects and verification closure', () => {
         closure: [], metadata: emptyMetadata,
         sidecar: undefined, sidecarMetadata: emptyMetadata,
       }],
-    })).toThrow(/sidecar must be an array/);
+    })).toThrow(/sidecar must be an array|cache row arrays/);
     expect(() => preflightSystemRecordCacheAccountingV1({
       mode: 'live',
       rows: [{ closure: [], metadata: emptyMetadata, sidecar: sharedSidecar }],
@@ -649,6 +1108,34 @@ describe('system-record owned subjects and verification closure', () => {
       mode: 'live',
       rows: [{ closure: [], metadata: emptyMetadata, unknown: 1 }],
     } as never)).toThrow(/unknown or missing fields/);
+
+    const fullClosureRow = { closure: references, metadata: emptyMetadata };
+    const overReferenceCap = Array.from({
+      length: Math.floor(SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_REFERENCES / references.length) + 1,
+    }, () => fullClosureRow);
+    const trailingRow = Object.defineProperty(
+      { metadata: emptyMetadata },
+      'closure',
+      {
+        enumerable: true,
+        get: () => { throw new Error('preflight scanned past the aggregate reference cap'); },
+      },
+    ) as unknown as SystemRecordCacheRowAccountingV1;
+    expect(() => preflightSystemRecordCacheAccountingV1({
+      mode: 'live',
+      rows: [...overReferenceCap, trailingRow],
+    })).toThrow(/aggregate cache accounting exceeds/);
+    const fullSidecarRow = {
+      closure: [], sidecar: sharedSidecar,
+      metadata: emptyMetadata, sidecarMetadata: emptyMetadata,
+    };
+    const overSidecarCap = Array.from({
+      length: SYSTEM_RECORD_MAX_CONFLICT_SIDECARS + 1,
+    }, () => fullSidecarRow);
+    expect(() => preflightSystemRecordCacheAccountingV1({
+      mode: 'live',
+      rows: [...overSidecarCap, trailingRow],
+    })).toThrow(/aggregate cache accounting exceeds/);
   });
 
   it.runIf(process.env.DKG_SYSTEM_RECORD_EXHAUSTIVE === '1')(
@@ -779,6 +1266,281 @@ describe('system-record owned subjects and verification closure', () => {
     })).rejects.toThrow(/missing/);
   });
 
+  it('keeps historical fork resolutions audit-only in a rotated closure', async () => {
+    const fixture = await authorityFixture();
+    const nextAuthority = await authorityFixture(29);
+    const initial = activeHead(fixture);
+    const conflicting = { ...initial, bundleDigest: DIGEST_C };
+    const historicalResolution = forkResolution(fixture, initial, [initial, conflicting]);
+    const resolvedPrior = {
+      ...initial,
+      version: '3' as const,
+      forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(historicalResolution),
+    };
+    const transition = transitionFrom(fixture, resolvedPrior, '1', nextAuthority.evmIssuer);
+    const current = {
+      ...activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+        acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+      }),
+      bundleDigest: CLOSURE_BUNDLE_DIGEST,
+    };
+    const artifacts = closureArtifacts(current, [resolvedPrior], [transition]);
+    const requestedKinds: string[] = [];
+
+    const closure = await buildAgentProfileVerificationClosureV1(
+      computeAgentProfileHeadObjectDigestV1(current),
+      {
+        nowMs: Date.parse('2026-08-08T00:00:00Z'),
+        resolve: async (reference) => {
+          requestedKinds.push(reference.objectKind);
+          return artifacts.get(`${reference.objectKind}:${reference.digest}`);
+        },
+        verifyAuthorityEnvelope: () => true,
+        verifyCurrentBundle: (_head, bytes) => Buffer.from(bytes).equals(Buffer.from(CLOSURE_BUNDLE)),
+      },
+    );
+
+    expect(closure.objects).toHaveLength(4);
+    expect(closure.resolvedForkTuples).toBe(0);
+    expect(requestedKinds).not.toContain('fork-resolution');
+    const historicalArtifact = closure.objects.find(
+      (candidate) => candidate.digest === computeAgentProfileHeadObjectDigestV1(resolvedPrior),
+    );
+    expect(historicalArtifact?.references).toEqual([]);
+  });
+
+  it('snapshots resolver-owned artifact bytes before awaited closure verification', async () => {
+    class MisleadingSliceBytes extends Uint8Array {
+      override slice(): Uint8Array { return new Uint8Array(); }
+    }
+    const fixture = await authorityFixture();
+    const bundle = new TextEncoder().encode('resolver-owned-profile-bundle');
+    const expectedBundleBytes = bundle.slice();
+    const object = {
+      ...activeHead(fixture),
+      bundleDigest: digestSystemRecordBytesV1(
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+        bundle,
+      ),
+    };
+    const envelope = await signedHeadEnvelope(fixture, object);
+    const headBytes = canonicalizeSignedSystemRecordEnvelopeV1(envelope);
+    const expectedHeadBytes = headBytes.slice();
+    const resolverHeadBytes = new MisleadingSliceBytes(headBytes);
+    const resolverBundleBytes = new MisleadingSliceBytes(bundle);
+    const artifacts = new Map([
+      [`agent-profile-head:${envelope.objectDigest}`, {
+        objectKind: 'agent-profile-head' as const,
+        digest: envelope.objectDigest,
+        canonicalBytes: resolverHeadBytes,
+      }],
+      [`profile-bundle:${object.bundleDigest}`, {
+        objectKind: 'profile-bundle' as const,
+        digest: object.bundleDigest,
+        canonicalBytes: resolverBundleBytes,
+      }],
+    ]);
+    let verificationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { verificationStarted = resolve; });
+    let releaseVerification!: () => void;
+    const release = new Promise<void>((resolve) => { releaseVerification = resolve; });
+    const closurePromise = buildAgentProfileVerificationClosureV1(envelope.objectDigest, {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference) => artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: async (candidate) => {
+        const valid = await verifySignedSystemRecordEnvelopeV1(candidate);
+        if (candidate.object.objectType === 'agent-profile-head'
+          && candidate.object.state === 'active') {
+          expect(Object.isFrozen(candidate.object.graphScopedAuthorSeal)).toBe(true);
+        }
+        verificationStarted();
+        await release;
+        return valid;
+      },
+      verifyCurrentBundle: (_head, bytes) => {
+        bytes.fill(0);
+        return true;
+      },
+    });
+
+    await started;
+    resolverHeadBytes.fill(0);
+    releaseVerification();
+    const closure = await closurePromise;
+    const retainedHead = closure.objects.find((entry) => entry.objectKind === 'agent-profile-head');
+    expect(retainedHead?.canonicalBytes).toEqual(expectedHeadBytes);
+    const retainedBundle = closure.objects.find((entry) => entry.objectKind === 'profile-bundle');
+    expect(retainedBundle?.canonicalBytes).toEqual(expectedBundleBytes);
+  });
+
+  it('pins closure capabilities, hides traversal context, and requires exact booleans', async () => {
+    const fixture = await authorityFixture();
+    const bundle = new TextEncoder().encode('pinned-closure-bundle');
+    const object = {
+      ...activeHead(fixture),
+      bundleDigest: digestSystemRecordBytesV1(
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+        bundle,
+      ),
+    };
+    const envelope = await signedHeadEnvelope(fixture, object);
+    const headBytes = canonicalizeSignedSystemRecordEnvelopeV1(envelope);
+    const artifacts = new Map([
+      [`agent-profile-head:${envelope.objectDigest}`, {
+        objectKind: 'agent-profile-head' as const,
+        digest: envelope.objectDigest,
+        canonicalBytes: headBytes,
+      }],
+      [`profile-bundle:${object.bundleDigest}`, {
+        objectKind: 'profile-bundle' as const,
+        digest: object.bundleDigest,
+        canonicalBytes: bundle,
+      }],
+    ]);
+    const verifier = {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference: Readonly<{ objectKind: string; digest: string }>) => {
+        verifier.nowMs = Date.parse('2036-08-05T12:10:00Z');
+        verifier.verifyAuthorityEnvelope = () => true;
+        verifier.verifyCurrentBundle = () => true;
+        return artifacts.get(`${reference.objectKind}:${reference.digest}`);
+      },
+      verifyAuthorityEnvelope: () => false,
+      verifyCurrentBundle: () => false,
+    };
+    await expect(buildAgentProfileVerificationClosureV1(envelope.objectDigest, verifier as never))
+      .rejects.toThrow(/authority verification failed/);
+    const bundleVerifier = {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference: Readonly<{ objectKind: string; digest: string }>) => {
+        bundleVerifier.verifyCurrentBundle = () => true;
+        return artifacts.get(`${reference.objectKind}:${reference.digest}`);
+      },
+      verifyAuthorityEnvelope: () => true,
+      verifyCurrentBundle: () => false,
+    };
+    await expect(buildAgentProfileVerificationClosureV1(
+      envelope.objectDigest,
+      bundleVerifier as never,
+    )).rejects.toThrow(/bundle verification failed/);
+
+    const closure = await buildAgentProfileVerificationClosureV1(envelope.objectDigest, {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference) => {
+        expect(Object.keys(reference).sort()).toEqual(['digest', 'objectKind']);
+        expect(Object.isFrozen(reference)).toBe(true);
+        try {
+          (reference as unknown as { purpose: string }).purpose = 'history';
+        } catch {
+          // Frozen resolver DTOs intentionally reject mutation in strict ESM.
+        }
+        return artifacts.get(`${reference.objectKind}:${reference.digest}`);
+      },
+      verifyAuthorityEnvelope: () => true,
+      verifyCurrentBundle: () => true,
+    });
+    expect(closure.objects.some((candidate) => candidate.objectKind === 'profile-bundle')).toBe(true);
+    expect(closure.objects.every((candidate) => (
+      candidate.references.every((reference) => Object.isFrozen(reference))
+    ))).toBe(true);
+
+    await expect(buildAgentProfileVerificationClosureV1(envelope.objectDigest, {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference) => artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: (() => ({ valid: false })) as never,
+      verifyCurrentBundle: () => true,
+    })).rejects.toThrow(/authority verification failed/);
+    await expect(buildAgentProfileVerificationClosureV1(envelope.objectDigest, {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference) => artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: () => true,
+      verifyCurrentBundle: (() => 'yes') as never,
+    })).rejects.toThrow(/bundle verification failed/);
+  });
+
+  it('cryptographically verifies a cold rotated tombstone closure and rejects tampered history', async () => {
+    const fixture = await authorityFixture();
+    const nextAuthority = await authorityFixture(31);
+    const initial = activeHead(fixture);
+    const transition = transitionFrom(fixture, initial, '1', nextAuthority.evmIssuer);
+    const transitionDigest = computeAgentProfileAuthorityTransitionDigestV1(transition);
+    const rotated = activeForIssuer(initial, nextAuthority.evmIssuer, '1', '0', {
+      acceptedTransitionDigest: transitionDigest,
+    });
+    const tombstone = tombstoneHead(rotated);
+    const initialEnvelope = await signedHeadEnvelope(fixture, initial);
+    const rotatedEnvelope = await signedHeadEnvelope(
+      fixture,
+      rotated,
+      nextAuthority.evmPrivateKey,
+    );
+    const tombstoneEnvelope = await signedHeadEnvelope(
+      fixture,
+      tombstone,
+      nextAuthority.evmPrivateKey,
+    );
+    const transitionEnvelope = await signedTransitionEnvelope(
+      fixture,
+      transition,
+      fixture.evmPrivateKey,
+      nextAuthority.evmPrivateKey,
+    );
+    const artifacts = closureArtifacts(tombstone, [rotated, initial], [transition]);
+    for (const envelope of [initialEnvelope, rotatedEnvelope, tombstoneEnvelope]) {
+      artifacts.set(`agent-profile-head:${envelope.objectDigest}`, {
+        objectKind: 'agent-profile-head',
+        digest: envelope.objectDigest,
+        canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(envelope),
+      });
+    }
+    artifacts.set(`authority-transition:${transitionEnvelope.objectDigest}`, {
+      objectKind: 'authority-transition',
+      digest: transitionEnvelope.objectDigest,
+      canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(transitionEnvelope),
+    });
+    const verifier = {
+      nowMs: Date.parse('2026-08-08T00:00:00Z'),
+      resolve: async (reference: { objectKind: string; digest: string }) =>
+        artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: (envelope: SignedSystemRecordEnvelopeV1<
+      AgentProfileHeadObjectV1 | AgentProfileAuthorityTransitionV1 | AgentProfileForkResolutionV1
+      >) => verifySignedSystemRecordEnvelopeV1(envelope),
+      verifyCurrentBundle: () => true,
+    };
+
+    const closure = await buildAgentProfileVerificationClosureV1(
+      tombstoneEnvelope.objectDigest,
+      verifier,
+    );
+    expect(closure.authoritySummary).toMatchObject({
+      candidateHeadDigest: tombstoneEnvelope.objectDigest,
+      deletionTableDigest: rotated.ownedSubjectTableDigest,
+      historicalRoots: [initial.rootSubject],
+    });
+
+    const tamperedTransitionEnvelope = {
+      ...transitionEnvelope,
+      signatures: transitionEnvelope.signatures.map((signature) => signature.role === 'prior-evm'
+        ? {
+            ...signature,
+            signature: signEip191(new Uint8Array([1]), fixture.evmPrivateKey),
+          }
+        : signature),
+    } as SignedSystemRecordEnvelopeV1<AgentProfileAuthorityTransitionV1>;
+    const tamperedArtifacts = new Map(artifacts);
+    tamperedArtifacts.set(`authority-transition:${transitionEnvelope.objectDigest}`, {
+      objectKind: 'authority-transition',
+      digest: transitionEnvelope.objectDigest,
+      canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1(tamperedTransitionEnvelope),
+    });
+    await expect(buildAgentProfileVerificationClosureV1(tombstoneEnvelope.objectDigest, {
+      ...verifier,
+      resolve: async (reference) => tamperedArtifacts.get(
+        `${reference.objectKind}:${reference.digest}`,
+      ),
+    })).rejects.toThrow(/authority-transition verification failed/);
+  });
+
   it('fails closed when authority verification rejects each closure control kind', async () => {
     const fixture = await authorityFixture();
     const initial = { ...activeHead(fixture), bundleDigest: CLOSURE_BUNDLE_DIGEST };
@@ -823,7 +1585,15 @@ describe('system-record owned subjects and verification closure', () => {
     const other = await authorityFixture(17);
     for (const mismatch of ['network', 'peer'] as const) {
       const prior = mismatch === 'network'
-        ? { ...activeHead(fixture), networkId: 'otp:9999' as const }
+        ? {
+            ...activeHead(fixture),
+            networkId: 'otp:9999' as const,
+            graphScopedAuthorSeal: {
+              ...activeHead(fixture).graphScopedAuthorSeal,
+              assertedAtChainId: '9999',
+              kaUal: `did:dkg:otp:9999/${fixture.evmIssuer}/7`,
+            },
+          }
         : activeHead(other);
       const transition = {
         ...authorityTransition(mismatch === 'network' ? fixture : other, prior),
@@ -873,6 +1643,25 @@ describe('system-record owned subjects and verification closure', () => {
           ...closure.authoritySummary,
         } as unknown as typeof closure.authoritySummary },
     )).toMatchObject({ decision: 'reject', reason: expect.stringMatching(/verified authority closure/) });
+    const summaryPrototype = Object.getPrototypeOf(closure.authoritySummary);
+    const forgedSummary = Object.assign(Object.create(summaryPrototype), {
+      candidateHeadDigest: closure.authoritySummary.candidateHeadDigest,
+      transitionLineage: closure.authoritySummary.transitionLineage,
+      historicalRoots: closure.authoritySummary.historicalRoots,
+    }) as typeof closure.authoritySummary;
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      { disposition: 'discoverable', transitionLineage: [], historicalRoots: [] },
+      current,
+      { nowMs: Date.parse('2026-08-08T00:00:00Z'), verifiedAuthoritySummary: forgedSummary },
+    )).toMatchObject({ decision: 'reject', reason: expect.stringMatching(/verified authority closure/) });
+    const SummaryConstructor = summaryPrototype.constructor as new (
+      ...args: unknown[]
+    ) => typeof closure.authoritySummary;
+    expect(() => new SummaryConstructor(
+      closure.authoritySummary.candidateHeadDigest,
+      closure.authoritySummary.transitionLineage,
+      closure.authoritySummary.historicalRoots,
+    )).toThrow(/factory-only/);
   });
 
   it('accepts a cold rotated tombstone only with its closure-minted deletion proof', async () => {
@@ -989,7 +1778,10 @@ async function authorityFixture(offset = 0) {
   const peerKey = await generateKeyPairFromSeed('Ed25519', peerSecretSeed);
   const peerId = peerIdFromPublicKey(peerKey.publicKey).toString();
   const peerPublicKey = Buffer.from(peerKey.publicKey.raw).toString('base64url');
-  const evmPrivateKey = Uint8Array.from({ length: 32 }, (_, index) => index + 33);
+  const evmPrivateKey = Uint8Array.from(
+    { length: 32 },
+    (_, index) => (index + 33 + offset) & 0xff,
+  );
   const publicKey = secp256k1.getPublicKey(evmPrivateKey, false);
   const evmIssuer = `0x${Buffer.from(keccak256(publicKey.subarray(1)).subarray(12)).toString('hex')}`;
   return {
@@ -1243,7 +2035,8 @@ function signEip191(message: Uint8Array, privateKey: Uint8Array): string {
 
 async function signedHeadEnvelope(
   fixture: Awaited<ReturnType<typeof authorityFixture>>,
-  object: AgentProfileActiveHeadObjectV1,
+  object: AgentProfileHeadObjectV1,
+  evmPrivateKey = fixture.evmPrivateKey,
 ): Promise<SignedAgentProfileHeadEnvelopeV1> {
   const objectDigest = computeAgentProfileHeadObjectDigestV1(object);
   return {
@@ -1258,11 +2051,49 @@ async function signedHeadEnvelope(
         )).toString('base64url'),
       },
       {
-        role: 'current-evm', suite: 'eip191-personal-sign-digest-v1', signer: fixture.evmIssuer,
+        role: 'current-evm', suite: 'eip191-personal-sign-digest-v1', signer: object.evmIssuer,
         evidence: { kind: 'none' },
         signature: signEip191(
           buildSystemRecordSignatureMessageV1(object, objectDigest, 'current-evm'),
-          fixture.evmPrivateKey,
+          evmPrivateKey,
+        ),
+      },
+    ],
+  };
+}
+
+async function signedTransitionEnvelope(
+  fixture: Awaited<ReturnType<typeof authorityFixture>>,
+  object: AgentProfileAuthorityTransitionV1,
+  priorEvmPrivateKey: Uint8Array,
+  nextEvmPrivateKey: Uint8Array,
+): Promise<SignedSystemRecordEnvelopeV1<AgentProfileAuthorityTransitionV1>> {
+  const objectDigest = computeAgentProfileAuthorityTransitionDigestV1(object);
+  return {
+    object,
+    objectDigest,
+    signatures: [
+      {
+        role: 'peer', suite: 'ed25519-v1', signer: object.peerId, evidence: { kind: 'none' },
+        signature: Buffer.from(await signEd25519(
+          buildSystemRecordSignatureMessageV1(object, objectDigest, 'peer'),
+          fixture.peerSecretSeed,
+        )).toString('base64url'),
+      },
+      {
+        role: 'prior-evm', suite: 'eip191-personal-sign-digest-v1',
+        signer: object.priorEvmIssuer, evidence: { kind: 'none' },
+        signature: signEip191(
+          buildSystemRecordSignatureMessageV1(object, objectDigest, 'prior-evm'),
+          priorEvmPrivateKey,
+        ),
+      },
+      {
+        role: 'next-evm', suite: 'eip191-personal-sign-digest-v1',
+        signer: object.nextEvmIssuer, evidence: { kind: 'none' },
+        signature: signEip191(
+          buildSystemRecordSignatureMessageV1(object, objectDigest, 'next-evm'),
+          nextEvmPrivateKey,
         ),
       },
     ],

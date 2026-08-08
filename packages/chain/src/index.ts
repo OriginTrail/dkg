@@ -18,6 +18,7 @@ export {
   assertVerifiedControlEnvelopeIssuerSignatureV1,
   readVerifiedControlEnvelopeIssuerSignatureV1,
   verifyControlEnvelopeIssuerSignatureV1,
+  verifyEip191ControlEnvelopeIssuerSignatureV1,
   type ControlSignatureVerificationDispositionV1,
   type ControlSignatureVerificationErrorCodeV1,
   type ControlSignatureVerificationReasonV1,

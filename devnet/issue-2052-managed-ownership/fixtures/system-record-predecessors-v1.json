@@ -1,6 +1,6 @@
 {
   "schemaVersion": "dkg-system-record-predecessors-v1",
-  "purpose": "Every binary revision whose enumeration, responder, restart and failed-atomic-replace cleanup paths must be proven unable to enumerate, serve or delete system-record V1 reserved state. CI executes every entry and reports a per-entry result in managed-ownership-verdict.json. Changing supported predecessors requires reviewing a diff of this file; a moving branch head or a new-binary-only filter is explicitly insufficient.",
+  "purpose": "Every binary revision whose enumeration, responder, restart and failed-atomic-replace cleanup paths must be proven unable to enumerate, serve or delete system-record V1 reserved state. CI does NOT execute these revisions: no predecessor is checked out or built, so this list is a reviewed compatibility INVENTORY plus a commit-resolution check, and the behavioural probe is reported once as current-binary conformance. Changing supported predecessors requires reviewing a diff of this file; a moving branch head or a new-binary-only filter is explicitly insufficient.",
   "reservedGraphs": [
     "urn:dkg:internal:atomic-graph-replace:system-record-v1:state",
     "urn:dkg:internal:atomic-graph-replace:system-record-v1:shadow:agents"

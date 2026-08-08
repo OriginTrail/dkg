@@ -349,6 +349,7 @@ import {
   type DKGAgentConfig,
   type ReplicationEvent,
 } from './dkg-agent-types.js';
+import { resolveContextGraphSyncMode } from './context-graph-subscription-policy.js';
 import {
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
@@ -384,10 +385,28 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
-  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: { trackSyncScope?: boolean; persist?: boolean; deferSharedMemoryGossipSubscribe?: boolean }): void {
+  subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: {
+    trackSyncScope?: boolean;
+    persist?: boolean;
+    deferSharedMemoryGossipSubscribe?: boolean;
+    syncMode?: 'on-demand' | 'always-on';
+  }): ContextGraphSub {
     if (options?.trackSyncScope !== false) {
       this.trackSyncContextGraph(contextGraphId);
     }
+
+    const existing = this.subscribedContextGraphs.get(contextGraphId);
+    // Opening an already durable graph must never silently downgrade it to a
+    // process-local subscription. An explicit always-on request may promote an
+    // existing on-demand subscription, while an omitted mode preserves the
+    // current lifetime (or the legacy always-on default for a new graph).
+    const syncMode = resolveContextGraphSyncMode({
+      existing,
+      requested: options?.syncMode,
+      hasDormantDurableIntent:
+        this.contextGraphSubscriptionRehydrationStatus?.dormantIds.includes(contextGraphId) === true,
+    });
+    const persist = syncMode === 'on-demand' ? false : options?.persist;
 
     // SWM gossip subscribe runs `canReadContextGraph` against the local
     // `_meta` graph. On a fresh `join-approved` notification the curator
@@ -407,15 +426,19 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!deferSwmGossip) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
       }
-      const existing = this.subscribedContextGraphs.get(contextGraphId);
-      if (!existing?.subscribed) {
-        this.setContextGraphSubscription(
+      if (!existing?.subscribed || existing.syncMode !== syncMode) {
+        return this.setContextGraphSubscription(
           contextGraphId,
-          { ...existing, subscribed: true, synced: existing?.synced ?? false },
-          { persist: options?.persist },
+          {
+            ...existing,
+            subscribed: true,
+            synced: existing?.synced ?? false,
+            syncMode,
+          },
+          { persist },
         );
       }
-      return;
+      return existing;
     }
     this.gossipRegistered.add(contextGraphId);
 
@@ -425,11 +448,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.gossip.subscribe(publishTopic);
     this.gossip.subscribe(appTopic);
 
-    const existing = this.subscribedContextGraphs.get(contextGraphId);
-    this.setContextGraphSubscription(
+    const subscription = this.setContextGraphSubscription(
       contextGraphId,
-      { ...existing, subscribed: true, synced: existing?.synced ?? false },
-      { persist: options?.persist },
+      {
+        ...existing,
+        subscribed: true,
+        synced: existing?.synced ?? false,
+        syncMode,
+      },
+      { persist },
     );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
@@ -454,6 +481,8 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const fh = this.getOrCreateFinalizationHandler();
       await fh.handleFinalizationMessage(data, contextGraphId, from);
     });
+
+    return subscription;
   }
 
   /**

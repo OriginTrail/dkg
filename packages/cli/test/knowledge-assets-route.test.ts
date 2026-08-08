@@ -386,6 +386,29 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       expect(res.body.assertionUri).toMatch(/^did:dkg:/);
     });
 
+    // GH#1759 — finalizing a draft with no quads is a client precondition
+    // failure, not a server fault. It used to fall through
+    // `respondAssertionError` to a generic 500 because the engine threw an
+    // untagged Error and the message matched none of the 400 substrings.
+    it('returns 409 ASSERTION_EMPTY when finalizing a draft with no quads', async () => {
+      await createKa(REG, 'fin-empty');
+      const res = await postJson(daemon, '/api/knowledge-assets/fin-empty/wm/finalize', { contextGraphId: REG });
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('ASSERTION_EMPTY');
+      expect(String(res.body.error)).toContain('it has no quads');
+    });
+
+    it('still seals normally after the empty draft is given a quad', async () => {
+      await createKa(REG, 'fin-empty-then-filled');
+      const empty = await postJson(daemon, '/api/knowledge-assets/fin-empty-then-filled/wm/finalize', { contextGraphId: REG });
+      expect(empty.status).toBe(409);
+
+      await write(REG, 'fin-empty-then-filled', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);
+      const sealed = await postJson(daemon, '/api/knowledge-assets/fin-empty-then-filled/wm/finalize', { contextGraphId: REG });
+      expect(sealed.status).toBe(200);
+      expect(String(sealed.body.merkleRoot)).toMatch(/^0x[0-9a-f]{8,}$/);
+    });
+
     it('rejects a malformed pre-signed attestation (bad signature.r) before finalize', async () => {
       await createKa(REG, 'att-r');
       await write(REG, 'att-r', [{ subject: 'ex:A', predicate: 'ex:p', object: '"x"' }]);

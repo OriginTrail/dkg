@@ -446,6 +446,7 @@ export function createListContextGraphsCacheInvalidatingStore(
     return result;
   };
   let systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
+  let systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
   const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
@@ -470,16 +471,24 @@ export function createListContextGraphsCacheInvalidatingStore(
      * silent wrong answer.
      */
     getSystemRecordLaneControllerV1() {
-      // Memoize only a PRESENT controller — absence is re-probed. The adapter
-      // reports undefined during any window in which the managed child is not
-      // the proven-ready listener, so latching that would disable the lane for
-      // the whole process on one probe landing inside an ordinary revive.
-      if (systemRecordLaneMemo) return systemRecordLaneMemo;
+      // PROBE THE INNER STORE EVERY TIME. The memo preserves wrapper identity;
+      // it must never answer the capability question itself.
+      //
+      // Absence was already re-probed — the adapter reports undefined during any
+      // window in which the managed child is not the proven-ready listener, and
+      // latching that would disable the lane for the whole process on one probe
+      // landing inside an ordinary revive. But PRESENCE was latched, so once a
+      // wrapper had been cached this kept advertising a lane after the lease
+      // went terminal, while the adapter would have denied it. Discovery is the
+      // safety gate callers use, so a stale "yes" is the dangerous direction.
       const inner = innerStore.getSystemRecordLaneControllerV1?.();
       if (!inner) {
         systemRecordLaneMemo = null;
+        systemRecordLaneInner = null;
         return undefined;
       }
+      if (systemRecordLaneMemo && systemRecordLaneInner === inner) return systemRecordLaneMemo;
+      systemRecordLaneInner = inner;
       systemRecordLaneMemo = Object.freeze({
         open: async (activation: SystemRecordLaneActivationV1) => {
           const session = await inner.open(activation);

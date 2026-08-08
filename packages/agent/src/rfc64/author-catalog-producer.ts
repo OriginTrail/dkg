@@ -48,7 +48,12 @@ import {
   type UnsignedControlEnvelopeV1,
 } from '@origintrail-official/dkg-core';
 import { verifyControlEnvelopeIssuerSignatureV1 } from '@origintrail-official/dkg-chain';
-import { ethers } from 'ethers';
+
+import {
+  Rfc64ControlEnvelopeSigningErrorV1,
+  signAndVerifyRfc64ControlEnvelopeV1,
+  type Rfc64ControlEnvelopeEip191SignerV1,
+} from './control-envelope-signer-v1.js';
 
 export const RFC64_AUTHOR_CATALOG_PRODUCTION_ERROR_CODES_V1 = Object.freeze([
   'catalog-production-input',
@@ -80,10 +85,7 @@ export class Rfc64AuthorCatalogProductionErrorV1 extends Error {
  * Local EOA signer used for catalog production. The callback signs the raw
  * 32-byte control-object digest with EIP-191 personal-sign framing.
  */
-export interface Rfc64AuthorCatalogEip191SignerV1 {
-  readonly issuer: EvmAddressV1;
-  readonly signDigest: (objectDigest: Uint8Array) => Promise<string>;
-}
+export type Rfc64AuthorCatalogEip191SignerV1 = Rfc64ControlEnvelopeEip191SignerV1;
 
 export interface ProduceEmptyAuthorCatalogGenesisInputV1 {
   readonly scope: AuthorCatalogScopeV1;
@@ -115,10 +117,7 @@ export interface ProducedAuthorCatalogPublicationV1 {
   readonly stagedObjects: readonly SignedControlEnvelopeV1[];
 }
 
-interface SnapshotEip191SignerV1 {
-  readonly issuer: EvmAddressV1;
-  readonly signDigest: (objectDigest: Uint8Array) => Promise<string>;
-}
+type SnapshotEip191SignerV1 = Rfc64ControlEnvelopeEip191SignerV1;
 
 /** Produce the canonical scoped empty catalog used to bootstrap later sparse writes. */
 export async function produceEmptyAuthorCatalogGenesisV1(
@@ -607,28 +606,27 @@ async function signEnvelope(
   signer: SnapshotEip191SignerV1,
   assertSpecific: (value: SignedControlEnvelopeV1) => void,
 ): Promise<SignedControlEnvelopeV1> {
-  let signature: string;
   try {
-    signature = await signer.signDigest(ethers.getBytes(objectDigest));
+    const signed = await signAndVerifyRfc64ControlEnvelopeV1(
+      unsigned,
+      objectDigest,
+      signer,
+    );
+    assertSpecific(signed.envelope);
+    return signed.envelope;
   } catch (cause) {
-    fail('catalog-production-signer', `signer failed for ${unsigned.objectType}`, cause);
-  }
-  const signed = {
-    ...unsigned,
-    objectDigest,
-    signature,
-  } as SignedControlEnvelopeV1;
-  try {
-    assertSpecific(signed);
-    await verifyControlEnvelopeIssuerSignatureV1(signed);
-  } catch (cause) {
+    if (
+      cause instanceof Rfc64ControlEnvelopeSigningErrorV1
+      && cause.phase === 'callback'
+    ) {
+      fail('catalog-production-signer', `signer failed for ${unsigned.objectType}`, cause);
+    }
     fail(
       'catalog-production-signer',
       `signer did not produce a canonical ${unsigned.objectType} signature for ${signer.issuer}`,
       cause,
     );
   }
-  return signed;
 }
 
 function snapshotHead(

@@ -20,7 +20,6 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 
 import {
-  OwnedManagedHttpClient,
   SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
   SYSTEM_RECORD_V1_STATE_GRAPH,
   attachManagedOxigraphLeaseV1,
@@ -44,7 +43,7 @@ import {
   MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION,
   type LiveHandoffMeasurementV1,
   type ManagedOwnershipRawResultV1,
-  type PredecessorEntryResultV1,
+  type CurrentBinaryConformanceV1,
 } from './model.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -484,6 +483,32 @@ async function runLiveHandoff(
   };
 }
 
+/**
+ * Exact-quad existence probe.
+ *
+ * Deliberately not a graph total: a canary asserted by count can be masked by
+ * any unrelated insertion into the same graph, which is how a check quietly
+ * stops testing what it names.
+ */
+async function askExactQuad(
+  endpoint: string,
+  graph: string,
+  subject: string,
+  predicate: string,
+): Promise<boolean> {
+  const res = await fetch(endpoint, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/sparql-query',
+      Accept: 'application/sparql-results+json',
+    },
+    body: `ASK { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+    signal: AbortSignal.timeout(10_000),
+  });
+  const json = (await res.json()) as { boolean?: boolean };
+  return json.boolean === true;
+}
+
 interface Manifest {
   reservedGraphs: string[];
   entries: {
@@ -557,9 +582,7 @@ async function main(): Promise<void> {
     }
   });
 
-  const predecessors: PredecessorEntryResultV1[] = [];
-  let ownedSocketsBeforeDestroy = 0;
-  let leakedOwnedSockets = 0;
+  let currentBinaryConformance: CurrentBinaryConformanceV1 | null = null;
   const capability = {
     withoutLease: false,
     withLeaseWithoutHandoff: false,
@@ -667,37 +690,26 @@ async function main(): Promise<void> {
     capability.withLiveLeaseAndHandoff =
       full.getSystemRecordLaneControllerV1?.() !== undefined;
 
-    // ---- Owned-client socket ownership: destroy must leave nothing behind.
-    const owned = new OwnedManagedHttpClient('1');
-    await owned.post(
-      server.updateEndpoint,
-      'application/sparql-update; charset=utf-8',
-      'INSERT DATA { GRAPH <urn:dkg:gate:probe> { <urn:s> <urn:p> "o" . } }',
-      5_000,
-    );
-    // Captured BEFORE destroy. `destroyAndSettle` loops until the count is zero
-    // and throws otherwise, so reading it afterwards alone can only ever be 0 —
-    // an assertion that cannot fail. The pair proves the probe is live.
-    ownedSocketsBeforeDestroy = owned.openSocketCount;
-    await owned.destroyAndSettle();
-    leakedOwnedSockets = owned.openSocketCount;
-
-    // ---- Predecessor matrix: every manifest entry, against the live store.
+    // No owned-client socket probe. The pool moved to Stack B3 with the class
+    // that owns it; measuring it here would exercise a capability that no B2
+    // production path can reach.
+    // ---- Reserved-state conformance: ONE probe, against the current binary.
     //
-    // HONEST FRAMING, because the artifact previously overstated this. No
-    // predecessor is checked out, built or executed: every row runs the CURRENT
-    // binary, so the rows are identical by construction and the manifest's real
-    // role is to pin WHICH commits must keep the property. `executedAgainst`
-    // says so in the artifact itself rather than only in prose that the uploaded
-    // evidence does not carry.
-    for (const entry of manifest.entries) {
+    // Reported once and honestly. An earlier revision iterated the manifest and
+    // emitted a `pass` per pinned commit, which published green PREDECESSOR
+    // verdicts that nothing measured — no predecessor is checked out or built,
+    // so every row ran this same binary and the rows were identical by
+    // construction. The manifest keeps its real job, a reviewed inventory of the
+    // commits that must retain the property with each proven to resolve, and
+    // carries no pass/fail field to be misread.
+    {
       const failures: string[] = [];
 
-      // The deletion probe below is destructive, so re-seed before EACH entry.
-      // Without this it was one-shot: entry 1's `dropGraph` either failed (as it
-      // must) or emptied the graph, after which entries 2 and 3 read
-      // before=0/after=0, `after < before` was false, and they PASSED. Only the
-      // first row could ever detect a deletion.
+      // The deletion probe below is destructive, so seed immediately before it.
+      // This is also why the old per-entry loop could not work: the first row's
+      // `dropGraph` either failed (as it must) or emptied the graph, after which
+      // later rows read before=0/after=0, `after < before` was false, and they
+      // PASSED. Only the first row could ever detect a deletion.
       await sparqlUpdate(server.updateEndpoint, `INSERT DATA {\n${triples}\n}`);
 
       const listed = await full.listGraphs();
@@ -720,8 +732,71 @@ async function main(): Promise<void> {
       const served: string[] = [];
       for (const graph of manifest.reservedGraphs) {
         if (await full.hasGraph(graph)) served.push(graph);
+        // Adapter-only too, for the same reason as the enumeration pair above:
+        // `hasGraph` asked the backend directly and answered `true` for reserved
+        // state whenever the graph-set index was disabled, so measuring only the
+        // indexed composition left the always-on layer unfalsifiable.
+        if (await plain.hasGraph(graph)) served.push(`adapter:${graph}`);
       }
       if (served.length > 0) failures.push(`served reserved graphs: ${served.join(', ')}`);
+
+      // An unscoped `deleteByPattern` binds `?g_ctx` across EVERY named graph,
+      // so it reaches reserved state while sailing past the scope guard, whose
+      // body is `if (graph)`. A reserved-prefix FILTER closes that — and this
+      // proves the BEHAVIOUR against real Oxigraph rather than string-matching
+      // the generated update: an ordinary row that matches the same pattern
+      // must be deleted while the reserved rows survive.
+      const decoyGraph = 'urn:dkg:gate:unscoped-delete-decoy';
+      const decoySubject = 'urn:dkg:gate:decoy-subject';
+      const decoyPredicate = 'urn:dkg:gate:decoy-predicate';
+      const canarySubject = 'urn:dkg:gate:reserved-canary';
+
+      // A CANARY inside each reserved graph, matching the SAME predicate the
+      // deletion targets. Without it this check does not test what it claims:
+      // the first version seeded only the ordinary row, so removing the
+      // reserved-prefix FILTER still deleted just that row, reserved counts did
+      // not move, and the gate passed with the guard gone. Measured as a solo
+      // mutant — `PASS: 27 checks` with the FILTER removed.
+      //
+      // The canaries are asserted by EXACT ASK rather than by graph totals, so
+      // an unrelated insertion cannot mask a deletion, and they are removed
+      // again below so the seed-count check further down still sees exactly the
+      // fixture.
+      await sparqlUpdate(
+        server.updateEndpoint,
+        `INSERT DATA {\n${[
+          `GRAPH <${decoyGraph}> { <${decoySubject}> <${decoyPredicate}> "decoy" . }`,
+          ...manifest.reservedGraphs.map(
+            (g) => `GRAPH <${g}> { <${canarySubject}> <${decoyPredicate}> "canary" . }`,
+          ),
+        ].join('\n')}\n}`,
+      );
+
+      // Deliberately UNSCOPED (no `graph`) and matching only by predicate, so
+      // the pattern is exactly one a reserved row DOES match.
+      await full.deleteByPattern({ predicate: decoyPredicate }).catch(() => undefined);
+
+      const decoyAfter = await countQuadsInGraph(server.queryEndpoint, decoyGraph);
+      if (decoyAfter !== 0) {
+        failures.push(`unscoped deleteByPattern did not delete the ordinary row (${decoyAfter} left)`);
+      }
+      for (const graph of manifest.reservedGraphs) {
+        const survived = await askExactQuad(
+          server.queryEndpoint,
+          graph,
+          canarySubject,
+          decoyPredicate,
+        );
+        if (!survived) {
+          failures.push(`unscoped deleteByPattern deleted the reserved canary in ${graph}`);
+        }
+      }
+
+      // Restore the seeded state: the canaries are scaffolding, not fixture.
+      await sparqlUpdate(
+        server.updateEndpoint,
+        `DELETE WHERE { GRAPH ?g { <${canarySubject}> <${decoyPredicate}> ?o } }`,
+      );
 
       // Failed atomic-replace cleanup must not delete persistent reserved state.
       const deleted: string[] = [];
@@ -750,19 +825,14 @@ async function main(): Promise<void> {
         );
       }
 
-      predecessors.push({
-        id: entry.id,
-        commit: entry.commit,
-        nodeVersion: entry.nodeVersion,
-        executedAgainst: 'current-binary',
+      currentBinaryConformance = {
         enumeratedReservedGraphs: [...enumerated, ...enumeratedDirect],
         servedReservedGraphs: served,
         deletedReservedGraphsOnCleanup: deleted,
         seededQuadCount,
         expectedQuadCount: fixture.expectedQuadCount,
-        pass: failures.length === 0,
         failures,
-      });
+      };
     }
 
     for (const store of [plain, leaseOnly, full, withChangelog, terminal]) {
@@ -783,12 +853,15 @@ async function main(): Promise<void> {
     oxigraphBinarySha256: `0x${binarySha256}`,
     platform: process.platform,
     nodeVersion: process.versions.node,
-    predecessors,
+    pinnedPredecessors: manifest.entries.map((entry) => ({
+      id: entry.id,
+      commit: entry.commit,
+      nodeVersion: entry.nodeVersion,
+    })),
+    currentBinaryConformance,
     manifestEntryCount: manifest.entries.length,
     manifestCommitsResolved,
     liveHandoff,
-    ownedSocketsBeforeDestroy,
-    leakedOwnedSockets,
     capability,
   };
 

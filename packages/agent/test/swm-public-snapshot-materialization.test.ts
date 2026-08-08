@@ -179,10 +179,18 @@ function harness(overrides: HarnessOverrides = {}) {
         inserted.push(quads);
       },
       snapshotMaterializer: {
-        withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) => {
+        withKaWriteLock: async (contextGraphId, subGraphName, kaUal, fn) => {
           events.push('lock-requested');
           overrides.onLockRequested?.();
-          return withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
+          try {
+            return await withKeyedLocks(lockMap, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn);
+          } finally {
+            // Records the CLOSE of the window, not just its open. Without it the
+            // tape cannot tell a write made UNDER the lock from one made after it
+            // released — which is the entire claim of the per-KA meta insert.
+            // `finally`, so a KA that threw still closes its own window.
+            events.push('lock-released');
+          }
         },
         isGraphAssetMaterialized: async () => {
           events.push('content-checked');
@@ -318,6 +326,34 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events).toContain('head-swapped');
     expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
     expect(summary.failedPhases).toBe(0);
+  });
+
+  it('writes the KA\'s verified metadata INSIDE the write lock, right after the head swap', async () => {
+    // #2050 G7. `replaceHeadMetadata` is delete-only, and the compensating
+    // `storeInsert(processed.verifiedMeta)` sits below the `continue` on the
+    // incomplete branch — so a round that ran out of clock mid-list deleted the
+    // head rows of the KAs it had just materialized and never rewrote them.
+    // Content present, heads absent, invisible to every head reader.
+    //
+    // The existing ordering assertions ("...BEFORE the meta append") do NOT pin
+    // this. They use `indexOf`, and pre-fix the first `meta-inserted` was the
+    // bulk append, which already landed after the swap — so they stayed green
+    // whether or not the per-KA write existed. This case is separate rather than
+    // an edit to them for exactly that reason.
+    //
+    // Pre-fix this failed with `expected 6 to be less than 5`: the meta write
+    // landed AFTER the lock released. What must hold is that the KA's own
+    // verified metadata is rewritten before its lock releases, so the
+    // head-absent window is one operation wide instead of one round wide.
+    const h = harness();
+    await h.run();
+    const headSwapped = h.events.indexOf('head-swapped');
+    const metaInserted = h.events.indexOf('meta-inserted');
+    const lockReleased = h.events.indexOf('lock-released');
+    expect(headSwapped).toBeGreaterThan(-1);
+    expect(lockReleased).toBeGreaterThan(-1);
+    expect(metaInserted).toBeGreaterThan(headSwapped);
+    expect(metaInserted).toBeLessThan(lockReleased);
   });
 
   it('withholds the meta insert when a replace fails, and marks the phase failed', async () => {

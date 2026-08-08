@@ -83,15 +83,49 @@ describe('system-record wire request framing', () => {
     expect(() => decodeSystemRecordRequestFrameV1(withPayload)).toThrow(/payload-free/);
   });
 
+  it('snapshots request paths without trusting caller-owned array behavior', () => {
+    class MisleadingPath extends Array<number> {
+      override some(): boolean { return true; }
+    }
+    const source = new MisleadingPath(0, 255);
+    const request = {
+      ...COMMON,
+      operation: 'get-inventory-object' as const,
+      rootDescriptorDigest: DIGEST,
+      path: source,
+      objectKind: 'inventory-leaf' as const,
+      objectDigest: DIGEST,
+    };
+    const decoded = decodeSystemRecordRequestFrameV1(encodeSystemRecordRequestFrameV1(request));
+    expect(decoded.operation).toBe('get-inventory-object');
+    if (decoded.operation !== 'get-inventory-object') throw new Error('expected inventory request');
+    expect(decoded.path).toEqual([0, 255]);
+    expect(decoded.path).not.toBe(source);
+    expect(Object.isFrozen(decoded.path)).toBe(true);
+
+    const extra = Object.assign([0], { unexpected: true });
+    expect(() => encodeSystemRecordRequestFrameV1({ ...request, path: extra })).toThrow(/closed|non-index/);
+    const accessor = Object.defineProperty([0], '0', { enumerable: true, get: () => 0 });
+    expect(() => encodeSystemRecordRequestFrameV1({ ...request, path: accessor })).toThrow(/data elements/);
+  });
+
   it('checks the four-byte header cap before body allocation', () => {
     const prefix = new Uint8Array(4);
     new DataView(prefix.buffer).setUint32(0, SYSTEM_RECORD_MAX_HEADER_BYTES + 1, false);
     expect(() => readSystemRecordHeaderLengthV1(prefix)).toThrow(/preallocation/);
+    class MisleadingPrefix extends Uint8Array {
+      override get byteLength(): number { return 4; }
+    }
+    expect(() => readSystemRecordHeaderLengthV1(new MisleadingPrefix([0]))).toThrow(/four bytes/);
   });
 });
 
 describe('system-record wire response framing', () => {
   it('round-trips and digest-verifies an exact bundle response', () => {
+    class MisleadingPayload extends Uint8Array {
+      override get byteLength(): number { return 999; }
+      override slice(): Uint8Array { return new Uint8Array(); }
+    }
     const payload = new TextEncoder().encode('canonical bundle bytes');
     const objectDigest = digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, payload);
     const request = {
@@ -109,6 +143,20 @@ describe('system-record wire response framing', () => {
       .not.toThrow();
     expect(frame.byteLength).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_FRAME_BYTES);
     expect(decoded.payload.buffer).toBe(frame.buffer);
+    const hostilePayload = new MisleadingPayload(payload);
+    expect(digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+      hostilePayload,
+    )).toBe(objectDigest);
+    expect(decodeSystemRecordResponseFrameV1(
+      encodeSystemRecordResponseFrameV1(header, hostilePayload),
+    ).payload).toEqual(payload);
+    expect(() => verifySystemRecordResponsePayloadV1(request, header, hostilePayload)).not.toThrow();
+    class MisleadingFrame extends Uint8Array {
+      override get byteLength(): number { return 1; }
+      override subarray(): Uint8Array { return new Uint8Array(); }
+    }
+    expect(decodeSystemRecordResponseFrameV1(new MisleadingFrame(frame)).payload).toEqual(payload);
   });
 
   it('accepts the exact payload ceiling, rejects +1, and rejects hostile JSON encodings', () => {
@@ -138,6 +186,16 @@ describe('system-record wire response framing', () => {
       wireVersion: '1', requestId: REQUEST_ID, status: 'busy', payloadBytes: '0',
       errorCode: 'internal',
     }, new Uint8Array())).toThrow(/tuple/);
+    for (const inheritedStatus of ['toString', 'constructor']) {
+      expect(() => verifySystemRecordResponsePayloadV1(
+        { ...COMMON, operation: 'get-root' },
+        {
+          wireVersion: '1', requestId: REQUEST_ID, status: inheritedStatus,
+          payloadBytes: '0', errorCode: Object.prototype[inheritedStatus as 'toString'],
+        } as never,
+        new Uint8Array(),
+      )).toThrow(/status/);
+    }
 
     const oversizedHeader = new TextEncoder().encode(JSON.stringify({
       objectDigest: DIGEST, objectKind: 'conflict-evidence', payloadBytes: '16385',

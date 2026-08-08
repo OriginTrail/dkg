@@ -44,11 +44,13 @@ import {
   type SignedAuthorCatalogBucketEnvelopeV1,
   type SignedAuthorCatalogHeadEnvelopeV1,
   type SubGraphNameV1,
+  type SwmAuthorInventorySnapshotV1,
   type VerifiedAuthorCatalogDirectoryPathV1,
   type VerifiedCgSharedProjectionV1,
   type VerifiedTransferredCatalogBundleV1,
 } from '@origintrail-official/dkg-core';
 
+import { snapshotExactPlainDataRecordV1 } from './exact-record.js';
 import {
   assertSqlBlobWidthV1,
   decimalU64ToSqlBlobV1,
@@ -62,6 +64,22 @@ import {
   sqlBlobsEqualV1,
 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
+import { prepareVerifiedSwmAuthorInventoryCommitInputV1 } from './swm-author-inventory-auth-v1.js';
+import {
+  encodeSwmAuthorInventoryKeyV1,
+  prepareSwmAuthorInventoryCommitV1,
+} from './swm-author-inventory-commit-plan.js';
+import { SwmAuthorInventoryPersistenceV1 } from './swm-author-inventory-persistence.js';
+import type {
+  CompareAndSwapSwmAuthorInventoryInputV1,
+  SwmAuthorInventoryCasResultV1,
+  SwmAuthorInventoryErrorCodeV1,
+} from './swm-author-inventory-contracts.js';
+export type {
+  CompareAndSwapSwmAuthorInventoryInputV1,
+  SwmAuthorInventoryCasResultV1,
+  SwmAuthorInventoryMutationV1,
+} from './swm-author-inventory-contracts.js';
 
 const MAX_PAGE_SIZE = 256;
 const STATEMENT_LATENCY_BUDGET_MS = 10_000;
@@ -206,6 +224,7 @@ export type InventoryV1CandidateErrorCode =
   | 'applied-head-input'
   | 'applied-head-cas-conflict'
   | 'applied-head-database-corrupt'
+  | SwmAuthorInventoryErrorCodeV1
   | 'candidate-database-corrupt'
   | 'latency-budget-exceeded'
   | 'candidate-database-error';
@@ -221,7 +240,18 @@ export class InventoryV1CandidateError extends Error {
   }
 }
 
-export interface Rfc64InventoryV1CandidateApi {
+export interface Rfc64SwmAuthorInventoryOperationsV1 {
+  readSwmAuthorInventorySnapshotV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): SwmAuthorInventorySnapshotV1 | null;
+  compareAndSwapSwmAuthorInventoryV1(
+    input: CompareAndSwapSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1;
+}
+
+export interface Rfc64InventoryV1CandidateApi
+  extends Rfc64SwmAuthorInventoryOperationsV1 {
   purgeNextStartupStaleCandidateBatch(): CandidateSessionGcBatchResultV1;
   createCandidateSession(): CandidateSessionV1;
   putVerifiedCandidateBucket(load: VerifiedCandidateBucketLoadV1): CandidateBucketPutResultV1;
@@ -306,13 +336,7 @@ export function createRfc64InventoryOperationsViewV1(
   inventory: Rfc64InventoryV1CandidateApi,
   requireOwnerOpen: () => void,
 ): Rfc64InventoryV1OperationsV1 {
-  const fence = <TArguments extends unknown[], TResult>(
-    operation: (...arguments_: TArguments) => TResult,
-  ): ((...arguments_: TArguments) => TResult) =>
-    (...arguments_: TArguments): TResult => {
-      requireOwnerOpen();
-      return operation(...arguments_);
-    };
+  const fence = createInventoryOperationFenceV1(requireOwnerOpen);
   return Object.freeze({
     createCandidateSession: fence(inventory.createCandidateSession.bind(inventory)),
     putVerifiedCandidateBucket: fence(inventory.putVerifiedCandidateBucket.bind(inventory)),
@@ -342,6 +366,45 @@ export function createRfc64InventoryOperationsViewV1(
       inventory.compareAndSwapAppliedCatalogHeadV1.bind(inventory),
     ),
   });
+}
+
+/** Build the feature-owned non-owning SWM author-inventory capability. */
+export function createRfc64SwmAuthorInventoryOperationsViewV1(
+  inventory: Rfc64SwmAuthorInventoryOperationsV1,
+  requireOwnerOpen: () => void,
+): Rfc64SwmAuthorInventoryOperationsV1 {
+  return Object.freeze({
+    readSwmAuthorInventorySnapshotV1: (
+      inventoryScopeDigest: Digest32V1,
+      authorAddress: EvmAddressV1,
+    ): SwmAuthorInventorySnapshotV1 | null => {
+      requireOwnerOpen();
+      return inventory.readSwmAuthorInventorySnapshotV1(
+        inventoryScopeDigest,
+        authorAddress,
+      );
+    },
+    compareAndSwapSwmAuthorInventoryV1: (
+      input: CompareAndSwapSwmAuthorInventoryInputV1,
+    ): SwmAuthorInventoryCasResultV1 => {
+      requireOwnerOpen();
+      return inventory.compareAndSwapSwmAuthorInventoryV1(input);
+    },
+  });
+}
+
+function createInventoryOperationFenceV1(
+  requireOwnerOpen: () => void,
+): <TArguments extends unknown[], TResult>(
+  operation: (...arguments_: TArguments) => TResult,
+) => (...arguments_: TArguments) => TResult {
+  return <TArguments extends unknown[], TResult>(
+    operation: (...arguments_: TArguments) => TResult,
+  ): ((...arguments_: TArguments) => TResult) =>
+    (...arguments_: TArguments): TResult => {
+      requireOwnerOpen();
+      return operation(...arguments_);
+    };
 }
 
 interface EncodedAppliedCatalogHeadV1 {
@@ -599,6 +662,52 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
     } catch (cause) {
       if (cause instanceof InventoryV1CandidateError) throw cause;
       throw databaseError('failed to compare-and-swap applied catalog head', cause);
+    }
+  }
+
+  readSwmAuthorInventorySnapshotV1(
+    inventoryScopeDigest: Digest32V1,
+    authorAddress: EvmAddressV1,
+  ): SwmAuthorInventorySnapshotV1 | null {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const key = encodeSwmAuthorInventoryKeyV1(
+      inventoryScopeDigest,
+      authorAddress,
+      swmAuthorInventoryErrorV1,
+    );
+    return this.readTransaction(() => persistence.read(key));
+  }
+
+  compareAndSwapSwmAuthorInventoryV1(
+    input: CompareAndSwapSwmAuthorInventoryInputV1,
+  ): SwmAuthorInventoryCasResultV1 {
+    this.assertOpen();
+    const persistence = this.swmAuthorInventoryPersistenceV1();
+    const verified = prepareVerifiedSwmAuthorInventoryCommitInputV1(
+      input,
+      swmAuthorInventoryErrorV1,
+    );
+    const prepared = prepareSwmAuthorInventoryCommitV1(
+      verified,
+      swmAuthorInventoryErrorV1,
+    );
+    try {
+      return this.writeTransaction(
+        'compare-and-swap SWM author inventory',
+        () => persistence.apply(prepared),
+        {
+          resolve: () => persistence.resolve(prepared),
+          retry: () => persistence.apply(prepared),
+          resolvedCommittedResult: () => Object.freeze({
+            status: 'applied' as const,
+            snapshot: prepared.snapshot,
+          }),
+        },
+      );
+    } catch (cause) {
+      if (cause instanceof InventoryV1CandidateError) throw cause;
+      throw databaseError('failed to compare-and-swap SWM author inventory', cause);
     }
   }
 
@@ -1220,17 +1329,15 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
   private encodeAndVerifyLoadUnchecked(
     load: VerifiedCandidateBucketLoadV1,
   ): EncodedCandidateLoadV1 {
-    const loadRecord = exactPlainRecord(
+    const loadRecord = snapshotExactPlainDataRecordV1(
       load,
       ['bucket', 'directoryPath', 'head', 'session'],
       'load',
     );
-    const sessionHandle = loadRecord.session as CandidateSessionV1;
+    const sessionHandle = loadRecord.session;
     const session = this.requireSession(sessionHandle);
-    assertSignedAuthorCatalogHeadEnvelopeV1(
-      loadRecord.head as SignedAuthorCatalogHeadEnvelopeV1,
-    );
-    const head = loadRecord.head as SignedAuthorCatalogHeadEnvelopeV1;
+    assertSignedAuthorCatalogHeadEnvelopeV1(loadRecord.head);
+    const head = loadRecord.head;
     const scope = deriveAuthorCatalogScopeFromHeadV1(head.payload);
     const headDigest = head.objectDigest as Digest32V1;
     const scopeDigest = computeAuthorCatalogScopeDigestV1(scope);
@@ -1555,6 +1662,14 @@ export class CandidateInventoryV1 implements Rfc64InventoryV1CandidateApi {
       current?.currentCatalogHeadDigest ?? null,
       expected === null ? null : inputDigest(expected),
     );
+  }
+
+  private swmAuthorInventoryPersistenceV1(): SwmAuthorInventoryPersistenceV1 {
+    return new SwmAuthorInventoryPersistenceV1({
+      prepare: (sql) => this.prepare(sql),
+      statement: <T>(operation: () => T): T => this.statement(operation),
+      error: swmAuthorInventoryErrorV1,
+    });
   }
 
   private captureDeleteTarget(row: SqlRowV1): DeleteTargetV1 {
@@ -2207,28 +2322,17 @@ function appliedHeadCasConflict(
   );
 }
 
-function exactPlainRecord(
-  value: unknown,
-  expectedKeys: readonly string[],
-  label: string,
-): Record<string, unknown> {
-  if (typeof value !== 'object' || value === null || Object.getPrototypeOf(value) !== Object.prototype) {
-    invalidLoad(`${label} must be a plain object`);
-  }
-  const keys = Reflect.ownKeys(value);
-  if (
-    keys.length !== expectedKeys.length
-    || keys.some((key) => typeof key !== 'string' || !expectedKeys.includes(key))
-  ) {
-    invalidLoad(`${label} has an invalid field set`);
-  }
-  for (const key of expectedKeys) {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      invalidLoad(`${label}.${key} must be an enumerable data property`);
-    }
-  }
-  return value as Record<string, unknown>;
+function swmAuthorInventoryErrorV1(
+  code: Extract<
+    InventoryV1CandidateErrorCode,
+    | 'swm-inventory-input'
+    | 'swm-inventory-cas-conflict'
+    | 'swm-inventory-database-corrupt'
+  >,
+  message: string,
+  options: ErrorOptions = {},
+): InventoryV1CandidateError {
+  return new InventoryV1CandidateError(code, message, options);
 }
 
 function cloneKey(key: EncodedLoadKeyV1): EncodedLoadKeyV1 {

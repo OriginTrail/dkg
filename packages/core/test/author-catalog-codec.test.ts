@@ -10,6 +10,7 @@ import {
   assertAuthorCatalogRowScopeBindingV1,
   assertAuthorCatalogRowV1,
   assertAuthorCatalogScopeV1,
+  assertAuthorLaneScopeV1,
   assertContextGraphIdV1,
   assertNetworkIdV1,
   assertPackedKaIdAuthorBindingV1,
@@ -27,6 +28,7 @@ import {
   iriComponentV1,
   parseCanonicalAuthorCatalogRowV1,
   parseCanonicalAuthorCatalogScopeV1,
+  snapshotAuthorLaneScopeV1,
   type AssertionCoordinateV1,
   type AuthorCatalogRowV1,
   type AuthorCatalogScopeV1,
@@ -111,6 +113,14 @@ describe('RFC-64 author catalog identifiers and graph names', () => {
 });
 
 describe('AuthorCatalogScopeV1', () => {
+  it('shares one exact author-lane boundary with non-catalog commitments', () => {
+    const { bucketCount: _bucketCount, ...lane } = VALID_SCOPE;
+    expect(() => assertAuthorLaneScopeV1(lane)).not.toThrow();
+    expect(snapshotAuthorLaneScopeV1(VALID_SCOPE)).toEqual(lane);
+    expect(Object.isFrozen(snapshotAuthorLaneScopeV1(VALID_SCOPE))).toBe(true);
+    expect(() => assertAuthorLaneScopeV1(VALID_SCOPE)).toThrow(/catalog-schema/);
+  });
+
   it('pins the exact 346-byte canonical fixture and scope digest', () => {
     expect(canonicalizeAuthorCatalogScopeV1(VALID_SCOPE)).toBe(SCOPE_CANONICAL);
     expect(new TextEncoder().encode(SCOPE_CANONICAL).byteLength).toBe(346);

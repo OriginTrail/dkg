@@ -28,12 +28,18 @@ import { buildChatContextEntries } from './chat-context.js';
 import { ADD_AGENT_TAB_ID, STATIC_DEFAULT_LOCAL_AGENT_HISTORY_INTEGRATIONS } from './constants.js';
 import { formatLocalTimestamp, toIsoTimestamp } from './format.js';
 import { formatLocalAgentErrorMessage } from './local-agent-errors.js';
-import { adoptLocalAgentTurnId, mapHistoryMessage, mergeLocalAgentMessages } from './messages.js';
+import {
+  adoptLocalAgentTurnId,
+  buildLiveFailedTurnDisplay,
+  mapHistoryMessage,
+  mergeLocalAgentMessages,
+} from './messages.js';
 import { ConnectedAgentsTab } from './ConnectedAgentsTab.js';
 import { NetworkTab } from './NetworkTab.js';
 import { SessionsTab } from './SessionsTab.js';
 import {
   compareLocalAgentIntegrations,
+  getLocalAgentConversationStateKey,
   markLocalAgentIntegrationDisconnected,
   resolveLocalAgentConversation,
   resolveLocalAgentSelectionState,
@@ -548,11 +554,17 @@ export function PanelRight() {
       const contextEntries = [
         ...buildChatContextEntries(availableProjects, activeProjectId, currentAgent),
       ];
+      const liveSession = integration.id === 'prime-agent'
+        ? integration.liveSessions?.find(
+            (session) => session.sessionId === conversation.sessionId,
+          )
+        : undefined;
 
       const result = await streamLocalAgentChat(integrationId, outboundText, {
         correlationId,
         signal: controller?.signal,
         sessionId: conversation.sessionId ?? undefined,
+        liveSession,
         profile: integration.profile,
         persistUserMessage: outboundText ? undefined : messageText,
         attachments,
@@ -595,6 +607,37 @@ export function PanelRight() {
             : message,
         ),
       );
+      const resolvedPrimeSessionId = integrationId === 'prime-agent'
+        ? result.sessionId?.trim()
+        : undefined;
+      if (
+        resolvedPrimeSessionId
+        && resolvedPrimeSessionId !== conversation.sessionId
+        && selectedIntegrationIdRef.current === integrationId
+        && selectedSessionIdRef.current === conversation.sessionId
+      ) {
+        const nextConversationKey = getLocalAgentConversationStateKey(
+          integrationId,
+          resolvedPrimeSessionId,
+        );
+        // Preserve the just-finished transcript while moving the routing pin
+        // to the replacement Prime session. The API retries only the explicit
+        // PRIME_AGENT_NO_SESSION miss, which is a pre-delivery failure, so this
+        // migration cannot duplicate an executed turn.
+        setLocalMessagesByConversation((prev) => ({
+          ...prev,
+          [nextConversationKey]: mergeLocalAgentMessages(
+            prev[nextConversationKey] ?? [],
+            prev[conversationKey] ?? [],
+          ),
+        }));
+        setLocalHistoryLoadedByConversation((prev) => ({
+          ...prev,
+          [nextConversationKey]: prev[conversationKey] ?? true,
+        }));
+        setSelectedIntegration(integrationId, { sessionId: resolvedPrimeSessionId });
+        setConnectNotice(`${integration.name} restarted; switched chat to the live session.`);
+      }
       loadSessions();
       if (stage === 0) advance();
     } catch (err: any) {
@@ -602,15 +645,14 @@ export function PanelRight() {
       const failureReason = isUserAbort ? 'Request cancelled.' : formatLocalAgentErrorMessage(integration, err);
       const failureContent = isUserAbort ? failureReason : `Error: ${failureReason}`;
       if (assistantId) {
+        const failedDisplay = buildLiveFailedTurnDisplay(assistantPartialText, failureContent);
         updateLocalMessages(conversationKey, (prev) =>
           prev.map((message) =>
             message.id === assistantId
               ? {
                   ...message,
-                  content: assistantPartialText,
-                  failureNotice: failureContent,
+                  ...failedDisplay,
                   streaming: false,
-                  synthesized: !assistantPartialText,
                 }
               : message,
           ),
@@ -681,6 +723,7 @@ export function PanelRight() {
     clearCompletedAttachmentsForConversation,
     setLocalInputForConversation,
     setLocalSendingForConversation,
+    setSelectedIntegration,
     stage,
     updateLocalMessages,
   ]);

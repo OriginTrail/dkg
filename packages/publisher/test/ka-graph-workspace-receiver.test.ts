@@ -8,7 +8,12 @@ import {
   knowledgeAssetLayerGraphUri,
   type WorkspacePublishRequestMsg,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  readSwmMaterializationWitness,
+  writeSwmMaterializationWitness,
+} from '@origintrail-official/dkg-storage';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -90,6 +95,42 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     // The current-head fence points at the immutable operation, so the digest
     // and private commitment are stored only once.
     expect(meta.quads.filter((quad) => quad.predicate.endsWith('publicQuadsDigest'))).toHaveLength(1);
+  });
+
+  it('drops the catch-up materialization witness when it replaces the graph (#2079)', async () => {
+    // A gossip apply REPLACES this graph under the same `swmKaWriteLockKey` the
+    // catch-up materializer uses. Catch-up's count gate cannot see a replace
+    // (the count can be unchanged), so this path must drop the memo itself —
+    // otherwise a TORN apply (graph replaced, head write throws) leaves
+    // catch-up certifying the OLD digest against NEW content.
+    //
+    // Its own test rather than an assertion bolted onto another: the second
+    // apply below adds metadata, which would break sibling assertions about
+    // final meta state.
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
+
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    await writeSwmMaterializationWitness(store, swmGraph, 'sha256:stale-witness');
+    expect(await readSwmMaterializationWitness(store, swmGraph, 'sha256:stale-witness')).toBe(true);
+
+    // A genuinely NEW version, not a replay: an identical request is fenced by
+    // durable metadata and never reaches the replace, so it would prove nothing.
+    // All versions of a graph-scoped KA share one assertion graph, so this
+    // replaces exactly the graph the witness was seeded against.
+    const replacement = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-witness',
+      assertionVersion: '2',
+    }), PEER_ID);
+    expect(replacement.applied).toBe(true);
+
+    expect(await readSwmMaterializationWitness(store, swmGraph, 'sha256:stale-witness')).toBe(false);
   });
 
   it('stores canonical Markdown section entities received over SWM', async () => {

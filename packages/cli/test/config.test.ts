@@ -35,8 +35,195 @@ import {
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
+  resolveRfc64PublicCatalogActivation,
+  resolveRfc64PublicCatalogActivationChainIdentityV1,
   resolveStorageAckTiming,
 } from '../src/config.js';
+import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('resolveRfc64PublicCatalogActivation', () => {
+  const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430');
+
+  it('is fail-closed when omitted or explicitly disabled', () => {
+    expect(resolveRfc64PublicCatalogActivation({}, chainIdentity)).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: { enabled: false },
+    }, chainIdentity)).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+    expect(resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: false,
+        deploymentProfile: {
+          networkId: 'otp:20430',
+          assertedAtChainId: '20430',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        autoPublish: {
+          peers: ['12D3KooIgnored'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('ignored-disabled-selection')],
+        },
+      },
+    }, chainIdentity)).toEqual({
+      enabled: false,
+      selectedContextGraphs: [],
+    });
+  });
+
+  it('derives the exact durable and auto-publish allowlist from the pinned manifest', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a'), policy('selected-b')],
+          retryIntervalMs: 30_000,
+        },
+      } as any,
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-a', 'selected-b'],
+      autoPublish: {
+        peers: ['12D3KooReceiver'],
+      },
+    });
+  });
+
+  it('keeps receiver-only activation selected while leaving auto-publish absent', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-receiver')],
+        },
+      },
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-receiver'],
+      autoPublish: undefined,
+    });
+    expect(resolved.bootstrap?.acceptedPublicPolicies[0]?.policyEnvelope.payload.contextGraphId)
+      .toBe('selected-receiver');
+  });
+
+  it('rejects activation without a selected policy and rejects a second allowlist', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: { enabled: true },
+    }, chainIdentity)).toThrow(/non-empty bootstrap/u);
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublish: {
+          contextGraphIds: ['different-selection'],
+          peers: [],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: { acceptedPublicPolicies: [policy('selected-a')] },
+      } as any,
+    }, chainIdentity)).toThrow(/derived from the bootstrap manifest/u);
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a'), policy('selected-a')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/policies must be unique by graph/u);
+  });
+
+  it('rejects unknown root activation fields instead of silently changing mode', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        autoPublsih: {
+          peers: ['12D3KooReceiver'],
+          catalogIssuerDelegationExpiresAt: '1893456000000',
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/unknown fields/u);
+  });
+
+  it('rejects manifests and deployment overrides for another network', () => {
+    const activation = {
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    };
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      resolveRfc64PublicCatalogActivationChainIdentityV1(undefined),
+    )).toThrow(/requires an effective network id/u);
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      resolveRfc64PublicCatalogActivationChainIdentityV1('none'),
+    )).toThrow(/requires a numeric EVM chain id/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation(
+      activation,
+      {
+        networkId: chainIdentity.networkId,
+        evmChainId: '20431' as typeof chainIdentity.evmChainId,
+      },
+    )).toThrow(/network and EVM chain ids differ/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a', 'base:84532')],
+        },
+      },
+    }, chainIdentity)).toThrow(/policy network differs/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile: {
+          networkId: 'base:84532',
+          assertedAtChainId: '84532',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    }, chainIdentity)).toThrow(/deployment network differs/u);
+
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: true,
+        deploymentProfile: {
+          networkId: 'otp:20430',
+          assertedAtChainId: '20431',
+          assertedAtKav10Address: `0x${'22'.repeat(20)}`,
+        },
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-a')],
+        },
+      },
+    }, chainIdentity)).toThrow(/deployment EVM chain id differs/u);
+  });
+});
 
 describe('classifyMonorepoInit (dkg init monorepo home guard — issue #960)', () => {
   const npmHome = '/home/u/.dkg';
@@ -671,6 +858,19 @@ describe('localAgentIntegrations config round-trip', () => {
     const loaded = await loadConfig();
     expect(loaded.nodeRole).toBe('edge');
     expect(loaded.syncAgentsMeta).toBe(false);
+  });
+
+  it('round-trips the automatic system Context Graph sync override', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      syncSystemContextGraphsOnConnect: true,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
   });
 
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
