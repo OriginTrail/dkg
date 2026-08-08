@@ -197,7 +197,7 @@ export interface LegacyWmMigrationHost {
  * - `resume-copy`     — prepared, draft already minted: copy, complete.
  */
 export type LegacyWmMigrationPlan =
-  | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' }
+  | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' | 'target-not-writable' }
   | { phase: 'migrate-fresh' }
   | { phase: 'resume-create' }
   | { phase: 'resume-copy' };
@@ -251,6 +251,14 @@ export interface LifecycleSummary {
   layers: Set<string>;
   /** Any SWM/VM pointer, share operation, or promote intent on the draft. */
   hasDurableOrInFlightState: boolean;
+}
+
+/** Is this lifecycle an open `created`/`WM` draft the publisher will write? */
+function isOpenWorkingMemoryDraft(summary: LifecycleSummary): boolean {
+  return summary.states.size === 1
+    && summary.states.has('created')
+    && summary.layers.size === 1
+    && summary.layers.has(MemoryLayer.WorkingMemory);
 }
 
 function migrationRefused(message: string): Error {
@@ -371,9 +379,12 @@ export function summarizeLifecycle(
 
 /**
  * The single classifier for the migration state machine: marker × lifecycle
- * in, an exhaustive plan out, refusals thrown. Every mutating variant means
- * the draft is already known eligible — nothing downstream re-decides
- * whether a draft may migrate.
+ * in, an exhaustive plan out, refusals thrown. Nothing downstream re-decides
+ * whether a draft may migrate: `migrate-fresh` has passed the full legacy
+ * eligibility gate, and `resume-copy` has confirmed its target is still an
+ * open `created`/`WM` draft (a discard/share/seal inside the prepared window
+ * makes the outstanding copy impossible, and declining beats throwing on a
+ * path that runs ahead of `createAssertion`).
  *
  * Ordering is part of the durable contract:
  * 1. an already graph-scoped draft is done, even under a stale marker;
@@ -413,19 +424,32 @@ export async function classifyLegacyWmMigration(
   if (markerState === 'prepared') {
     // Preparation already happened; what remains depends on how far the
     // interrupted run got, which the lifecycle shape reports.
-    return summary.isGraphScoped
-      ? { phase: 'resume-copy' }
-      : { phase: 'resume-create' };
+    if (!summary.isGraphScoped) {
+      // The draft was never minted. `resume-create` clears the legacy
+      // lifecycle and creates fresh, so a since-discarded draft self-heals.
+      return { phase: 'resume-create' };
+    }
+    // The draft exists and only the copy is outstanding — but the copy is a
+    // WRITE, and the publisher refuses to write a lifecycle that is no
+    // longer an open `created`/`WM` draft. If the assertion was discarded,
+    // shared, or sealed inside the prepared window, attempting it would
+    // throw, and this migration runs ahead of `createAssertion` outside its
+    // idempotent catch: the throw would permanently break chat memory with
+    // no way back, since `resume-copy` never re-mints and only
+    // `completeMarker` clears the marker. Decline instead. The marker stays
+    // `prepared`, so if the draft returns to a writable state the copy still
+    // completes, and the source content is retained meanwhile.
+    if (!isOpenWorkingMemoryDraft(summary)) {
+      return { phase: 'not-needed', reason: 'target-not-writable' };
+    }
+    return { phase: 'resume-copy' };
   }
   if (summary.activeRows.length === 0) {
     return { phase: 'not-needed', reason: 'no-legacy-draft' };
   }
   if (
     summary.scopeVersions.size > 1
-    || summary.states.size !== 1
-    || !summary.states.has('created')
-    || summary.layers.size !== 1
-    || !summary.layers.has(MemoryLayer.WorkingMemory)
+    || !isOpenWorkingMemoryDraft(summary)
     || summary.hasDurableOrInFlightState
     || await loadSeal()
   ) {
@@ -627,6 +651,14 @@ export async function runLegacyWorkingMemoryMigration(
     // data is retained (the source graph is never deleted), so surface it
     // rather than abandoning it silently. Probed ONLY in this anomalous
     // case, so the healthy no-draft path costs no extra query.
+    if (plan.reason === 'target-not-writable') {
+      host.logInfo(
+        `Legacy WM ${request.contextGraphId}/${request.name}: an interrupted migration still `
+        + `owes a content copy, but the assertion is no longer an open created/WM draft, so `
+        + `the copy is declined rather than failing the create that follows. The legacy `
+        + `content remains in ${uris.sourceGraph} and the copy resumes if the draft reopens.`,
+      );
+    }
     if (plan.reason === 'no-legacy-draft' && lifecycleRows.length > 0) {
       const stranded = await host.store.query(
         `ASK { GRAPH <${uris.sourceGraph}> { ?s ?p ?o } }`,

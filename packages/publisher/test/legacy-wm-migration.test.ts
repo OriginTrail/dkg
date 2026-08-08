@@ -601,6 +601,53 @@ describe('Legacy root-scoped WM migration', () => {
     expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
   });
 
+  it(
+    'a prepared migration whose draft was discarded mid-window declines the copy '
+    + 'instead of throwing — the create that follows must not be blocked',
+    async () => {
+      // The terminal trap this guard exists to prevent. Crash inside the
+      // prepared window leaves marker='prepared' + a graph-scoped draft.
+      // `assertionDiscard` then removes the created/WM state but LEAVES
+      // contentScopeVersion, so the draft still looks graph-scoped and the
+      // run classifies as resume-copy — while the publisher will refuse the
+      // outstanding write. Throwing here is unrecoverable: migration runs
+      // ahead of createAssertion outside its idempotent catch, resume-copy
+      // never re-mints, and only completeMarker clears the marker.
+      const name = 'legacy-resume-discarded-target';
+      const { sourceGraph } = legacyMigrationUris(name);
+      await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+        allocateKaNumber: recordingAllocator(55n).allocateKaNumber,
+      });
+      // Legacy content still uncopied, so the copy branch is genuinely live.
+      await store.insert([{
+        subject: 'urn:test:uncopied-then-discarded',
+        predicate: 'http://schema.org/text',
+        object: '"still here"',
+        graph: sourceGraph,
+      }]);
+      await stampMigrationMarker(name, 'prepared');
+      await publisher.assertionDiscard(CG_ID, name, AGENT);
+
+      const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+      expect(result.status).toBe('not-needed');
+
+      // The daemon's create-after-migrate is not blocked.
+      await publisher.assertionCreate(CG_ID, name, AGENT);
+      await publisher.assertionWrite(CG_ID, name, AGENT, [
+        { subject: 'urn:test:after-discard', predicate: 'http://schema.org/text', object: '"ok"' },
+      ]);
+      expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+        expect.objectContaining({ subject: 'urn:test:after-discard' }),
+      ]);
+
+      // The uncopied legacy content is retained, not destroyed.
+      const retained = await store.query(
+        `ASK { GRAPH <${sourceGraph}> { <urn:test:uncopied-then-discarded> <http://schema.org/text> "still here" } }`,
+      );
+      expect(retained.type === 'boolean' && retained.value).toBe(true);
+    },
+  );
+
   it('a prepared marker resumes the CONTENT COPY when the draft exists but data was not copied', async () => {
     // The riskiest crash window: `prepareBackup` ran, `createGraphScopedDraft`
     // minted graph-scoped metadata, and the process died BEFORE
