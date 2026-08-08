@@ -18,9 +18,9 @@ import {
 } from './agent-profile-producer-inventory-v1.js';
 import {
   prepareAgentProfileProductionV1,
-  validateAgentProfileProductionInputV1,
+  snapshotAgentProfileProductionInputV1,
   type AgentProfileProducerPreparationDependenciesV1,
-  type ValidatedAgentProfileProductionInputV1,
+  type PreparedProfileProjectionSnapshotV1,
 } from './agent-profile-producer-preparation-v1.js';
 import {
   signAgentProfileProductionV1,
@@ -60,7 +60,7 @@ export function createAgentProfileProducerV1(
   });
   let active = false;
   const completePrepared = async (
-    input: ValidatedAgentProfileProductionInputV1,
+    input: PreparedProfileProjectionSnapshotV1,
     publication: AgentProfilePublicationBindingV1,
     signal: AbortSignal,
   ): Promise<AgentProfileProducerPublicationV1> => {
@@ -93,14 +93,14 @@ export function createAgentProfileProducerV1(
   return Object.freeze({
     async prepare(prepared: PreparedAgentProfileV1): Promise<AgentProfileProducerLeaseV1> {
       if (active) throw new Error('agent-profile producer is busy');
-      const validatedInput = validateAgentProfileProductionInputV1(
+      const projectionSnapshot = snapshotAgentProfileProductionInputV1(
         preparationDependencies,
         prepared,
       );
       active = true;
       const controller = new AbortController();
       try {
-        await options.fence(validatedInput.preparedSnapshot, controller.signal);
+        await options.fence(projectionSnapshot.preparedSnapshot, controller.signal);
       } catch (error) {
         active = false;
         throw error;
@@ -114,7 +114,7 @@ export function createAgentProfileProducerV1(
           state = 'completing';
           try {
             return await completePrepared(
-              validatedInput,
+              projectionSnapshot,
               publication,
               controller.signal,
             );

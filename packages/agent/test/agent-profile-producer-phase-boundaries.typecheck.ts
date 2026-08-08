@@ -1,8 +1,8 @@
 import type { PreparedAgentProfileV1 } from '../src/profile.js';
 import {
   type AgentProfileProducerPreparationDependenciesV1,
+  type PreparedProfileProjectionSnapshotV1,
   prepareAgentProfileProductionV1,
-  type ValidatedAgentProfileProductionInputV1,
 } from '../src/system-records/agent-profile-producer-preparation-v1.js';
 import type {
   AgentProfilePublicationBindingV1,
@@ -14,20 +14,12 @@ import { flattenAgentProfileProducerPublicationArtifactsV1 as leakedFlattenArtif
 
 declare const dependencies: AgentProfileProducerPreparationDependenciesV1;
 declare const prepared: PreparedAgentProfileV1;
-declare const validated: ValidatedAgentProfileProductionInputV1;
+declare const validated: PreparedProfileProjectionSnapshotV1;
 declare const publication: AgentProfilePublicationBindingV1;
 
 void prepareAgentProfileProductionV1(dependencies, validated, publication);
 
-// @ts-expect-error callers cannot fabricate the module-private validated-input brand.
-const fabricated: ValidatedAgentProfileProductionInputV1 = {
-  preparedSnapshot: prepared,
-  projectionQuads: prepared.projectionQuads,
-  ownedSubjectTable: [],
-};
-void fabricated;
-
-// @ts-expect-error preparation accepts only the bound validated snapshot/projection input.
+// @ts-expect-error preparation accepts a snapshotted projection plan, not a raw profile.
 void prepareAgentProfileProductionV1(dependencies, prepared, publication);
 
 declare const leaked: LeakedPreparationDeps;

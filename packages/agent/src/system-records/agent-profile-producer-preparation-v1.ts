@@ -43,10 +43,6 @@ import type {
 } from './agent-profile-producer-api-v1.js';
 
 const UTF8 = new TextEncoder();
-const VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1: unique symbol = Symbol(
-  'validated-agent-profile-production-input-v1',
-);
-
 export interface AgentProfileProducerPreparationDependenciesV1 {
   readonly networkId: NetworkIdV1;
   readonly publicationDeployment: Readonly<CatalogSealDeploymentProfileV1>;
@@ -57,8 +53,7 @@ export interface AgentProfileProducerPreparationDependenciesV1 {
   readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'snapshot'>;
 }
 
-export interface ValidatedAgentProfileProductionInputV1 {
-  readonly [VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1]: true;
+export interface PreparedProfileProjectionSnapshotV1 {
   readonly preparedSnapshot: PreparedAgentProfileV1;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
@@ -80,10 +75,9 @@ export interface AgentProfileProductionPreparationV1 {
 
 export async function prepareAgentProfileProductionV1(
   dependencies: AgentProfileProducerPreparationDependenciesV1,
-  input: ValidatedAgentProfileProductionInputV1,
+  input: PreparedProfileProjectionSnapshotV1,
   inputPublication: AgentProfilePublicationBindingV1,
 ): Promise<AgentProfileProductionPreparationV1> {
-  assertValidatedAgentProfileProductionInputV1(input);
   const { preparedSnapshot: prepared, projectionQuads, ownedSubjectTable } = input;
   const publication = snapshotConfirmedPublicationBindingV1(inputPublication);
   const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
@@ -217,29 +211,13 @@ export async function prepareAgentProfileProductionV1(
   });
 }
 
-function assertValidatedAgentProfileProductionInputV1(
-  input: unknown,
-): asserts input is ValidatedAgentProfileProductionInputV1 {
-  if (typeof input !== 'object'
-    || input === null
-    || !Object.prototype.hasOwnProperty.call(
-      input,
-      VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1,
-    )
-    || (input as Record<PropertyKey, unknown>)[
-      VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1
-    ] !== true) {
-    throw new TypeError('agent-profile preparation requires a validated production input');
-  }
-}
-
-export function validateAgentProfileProductionInputV1(
+export function snapshotAgentProfileProductionInputV1(
   dependencies: Pick<
     AgentProfileProducerPreparationDependenciesV1,
     'peerId' | 'peerPublicKey' | 'evmIssuer'
   >,
   prepared: PreparedAgentProfileV1,
-): ValidatedAgentProfileProductionInputV1 {
+): PreparedProfileProjectionSnapshotV1 {
   const preparedSnapshot = snapshotPreparedProfileV1(prepared);
   const projected = preparedSnapshot.projectionQuads
     .map((quad) => Object.freeze({ ...quad }));
@@ -263,7 +241,6 @@ export function validateAgentProfileProductionInputV1(
     dependencies.evmIssuer,
   );
   return Object.freeze({
-    [VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1]: true as const,
     preparedSnapshot,
     projectionQuads: Object.freeze(projected),
     ownedSubjectTable,
