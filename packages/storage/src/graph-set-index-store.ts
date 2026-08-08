@@ -216,6 +216,24 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   /**
+   * Pass-through for the managed read gate (#2052).
+   *
+   * This class is the main CONSUMER of the gate — see the warm branch in
+   * `ensureGraphSet` — but it must also RE-EXPOSE it, which is easy to miss.
+   * `createTripleStore` can put a `ChangelogStore` outside this one, so a
+   * cache-owning wrapper above would call this method on the index; without a
+   * declaration here the optional call evaporates and reads go fail-open again,
+   * one layer higher than the bug this was written to fix.
+   *
+   * Consuming a capability is not the same as forwarding it. Grepping for the
+   * NAME is what hides this: the call site above matches, the declaration does
+   * not exist.
+   */
+  assertManagedBackendReadableV1(operation: string): void {
+    this.inner.assertManagedBackendReadableV1?.(operation);
+  }
+
+  /**
    * Memoized outcome-mapping facade for the system-record V1 lane (#2052 B2).
    *
    * The lane writes reserved graphs that this index deliberately never lists,

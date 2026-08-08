@@ -62,6 +62,20 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
+  /**
+   * Pass-through for the managed read gate (#2052).
+   *
+   * This decorator owns no cached read state, so it has nothing of its own to
+   * refuse — but it MUST forward, because the caller above it uses optional
+   * chaining and optional chaining treats an absent method as PERMISSION. With
+   * this missing, `GraphSetIndexStore(SharedMemoryLiteralBlobStore(adapter))`
+   * served its warm graph set for the whole revalidation window after the lease
+   * was lost: the guard evaporated here, one layer short of the snapshot.
+   */
+  assertManagedBackendReadableV1(operation: string): void {
+    this.inner.assertManagedBackendReadableV1?.(operation);
+  }
+
   readonly innerStore: TripleStore;
   private readonly inner: TripleStore;
   private readonly blobDir: string;
