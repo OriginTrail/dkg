@@ -20,7 +20,7 @@ import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 /**
  * The warm-read ownership guard must survive REAL decorator compositions.
  *
- * `GraphSetIndexStore` calls `this.inner.assertManagedBackendReadableV1?.(…)`,
+ * `GraphSetIndexStore` used to call `this.inner.assertManagedBackendReadableV1?.(…)`,
  * and optional chaining treats an absent method as PERMISSION. Production
  * composes `GraphSetIndexStore(ChangelogStore(SharedMemoryLiteralBlobStore(
  * SparqlHttpStore)))`, so with either middle wrapper present the call lands on

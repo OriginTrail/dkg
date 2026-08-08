@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
-import { ManagedOxigraphBackendUnownedError } from '../src/managed-oxigraph-ownership-v1-internal.js';
+import {
+  MANAGED_READ_GATE_V1,
+  ManagedOxigraphBackendUnownedError,
+} from '../src/managed-oxigraph-ownership-v1-internal.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore } from '../src/triple-store.js';
 
 /**
@@ -30,7 +33,7 @@ class FakeInnerStore implements Partial<TripleStore> {
   unowned: ManagedOxigraphBackendUnownedError | null = null;
   readableChecks = 0;
 
-  assertManagedBackendReadableV1(_operation: string): void {
+  [MANAGED_READ_GATE_V1](_operation: string): void {
     this.readableChecks += 1;
     if (this.unowned) throw this.unowned;
   }

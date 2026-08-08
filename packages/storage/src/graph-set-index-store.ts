@@ -19,6 +19,7 @@ import {
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import {
+  MANAGED_READ_GATE_V1,
   ManagedOxigraphBackendUnownedError,
   asManagedReadGateV1,
   type ManagedReadGateHostV1,
@@ -655,7 +656,7 @@ export class GraphSetIndexStore implements TripleStore {
       // to a backend the node may no longer own — for up to `revalidateMs`
       // (30 s in production), which is the window a foreign listener needs.
       // Cheap: a lease-snapshot read, no I/O.
-      this.managedReadGate?.assertManagedBackendReadableV1('graph-set-index.warm');
+      this.managedReadGate?.[MANAGED_READ_GATE_V1]('graph-set-index.warm');
       return this.graphs;
     }
     return raceAgainstAbort(

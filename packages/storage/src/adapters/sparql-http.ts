@@ -56,6 +56,7 @@ import {
   isInternalGraphUriV1,
 } from '../internal-graph-policy.js';
 import {
+  MANAGED_READ_GATE_V1,
   ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
@@ -570,21 +571,25 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   /**
-   * Public so a caching decorator can fail closed WITHOUT a round trip.
+   * The managed read gate, so a caching decorator can fail closed WITHOUT a
+   * round trip.
    *
    * `GraphSetIndexStore` answers `listGraphs()` from a warm set for up to its
    * revalidation interval, and this adapter answers from `listGraphsCache` for
    * up to 30 s. Neither path touches the endpoint, so neither reaches the
    * ownership checks on `query`/`update` — a lost lease kept serving
-   * enumeration for a whole cache window. A decorator that holds cached state
+   * enumeration for a whole cache window. A decorator holding cached state
    * derived from this store needs to ask, cheaply, whether that state is still
    * attributable to a backend we own. This is a lease-snapshot read: no I/O.
    *
-   * Named `…V1` and optional on `TripleStore` because only the managed adapter
-   * can answer it; stores without a lease are always readable and simply do not
-   * implement it.
+   * SYMBOL-keyed, not a named method. This class is a general SPARQL-over-HTTP
+   * adapter, and a string-named `assertManagedBackendReadableV1` on it both
+   * advertised a managed-Oxigraph lease concern to every consumer of the
+   * exported class and made discovery a structural match on a magic name — so
+   * any unrelated store declaring the same name would have been treated as a
+   * managed backend.
    */
-  assertManagedBackendReadableV1(operation: string): void {
+  [MANAGED_READ_GATE_V1](operation: string): void {
     this.assertManagedBackendReadable(operation);
   }
 

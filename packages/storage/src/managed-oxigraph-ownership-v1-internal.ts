@@ -417,15 +417,23 @@ export function readManagedOxigraphOwnershipSnapshotV1(
 }
 
 /**
- * A store that can answer "is my backend still proven owned?" without I/O.
+ * The managed read gate, keyed by symbol rather than by method name.
  *
- * Declared by the managed adapter only. This is deliberately NOT a member of
- * `TripleStore`: the read gate is a managed-Oxigraph concern, and putting it on
- * the vendor-neutral interface made it a cross-cutting obligation every present
+ * Symbol-keyed for two reasons the review drew out. It keeps a managed-Oxigraph
+ * lease concern OFF the public surface of `SparqlHttpStore`, which is a general
+ * SPARQL-over-HTTP adapter and has no business advertising one; and it makes
+ * discovery an identity check rather than a structural match on a magic string,
+ * so an unrelated store that happens to declare a same-named method is not
+ * mistaken for a managed backend.
+ *
+ * Deliberately NOT a member of `TripleStore` either: putting it on the
+ * vendor-neutral interface made it a cross-cutting obligation that every present
  * and future wrapper had to remember, policed by nothing.
  */
+export const MANAGED_READ_GATE_V1: unique symbol = Symbol('dkg.managedReadGate.v1');
+
 export interface ManagedReadGateHostV1 {
-  assertManagedBackendReadableV1(operation: string): void;
+  [MANAGED_READ_GATE_V1](operation: string): void;
 }
 
 /**
@@ -452,7 +460,6 @@ export function asManagedReadGateV1(store: unknown): ManagedReadGateHostV1 | nul
 
 function isManagedReadGateHostV1(candidate: unknown): candidate is ManagedReadGateHostV1 {
   return (
-    typeof (candidate as Partial<ManagedReadGateHostV1>)?.assertManagedBackendReadableV1 ===
-    'function'
+    typeof (candidate as Partial<ManagedReadGateHostV1>)?.[MANAGED_READ_GATE_V1] === 'function'
   );
 }

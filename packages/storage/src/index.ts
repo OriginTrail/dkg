@@ -206,3 +206,8 @@ import './adapters/oxigraph.js';
 import './adapters/oxigraph-worker.js';
 import './adapters/blazegraph.js';
 import './adapters/sparql-http.js';
+export {
+  STORE_CHAIN_INNER,
+  StoreChainCycleError,
+  type StoreChainNodeV1,
+} from './store-chain-capability.js';

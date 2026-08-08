@@ -6,11 +6,15 @@ import { ChangelogStore, asChangelogReader } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { asGraphWriteGenSource } from '../src/graph-write-gen.js';
 import {
+  MANAGED_READ_GATE_V1,
   asManagedReadGateV1,
   ManagedOxigraphBackendUnownedError,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
-import { StoreChainCycleError } from '../src/store-chain-capability.js';
+import {
+  STORE_CHAIN_INNER,
+  StoreChainCycleError,
+} from '../src/store-chain-capability.js';
 import type { TripleStore } from '../src/triple-store.js';
 
 /**
@@ -36,7 +40,7 @@ const BLOB_OPTIONS = {
 /** Stands in for the managed adapter: the only thing that declares the gate. */
 const managedAdapter = () => {
   const store = {
-    assertManagedBackendReadableV1: vi.fn(),
+    [MANAGED_READ_GATE_V1]: vi.fn(),
     listGraphs: async () => [],
     query: async () => ({ type: 'boolean' as const, value: true }),
     insert: async () => undefined,
@@ -44,7 +48,7 @@ const managedAdapter = () => {
     close: async () => undefined,
   };
   return store as unknown as TripleStore & {
-    assertManagedBackendReadableV1: ReturnType<typeof vi.fn>;
+    [MANAGED_READ_GATE_V1]: ReturnType<typeof vi.fn>;
   };
 };
 
@@ -140,6 +144,33 @@ describe('managed read gate resolves through any wrapper chain', () => {
     expect(asGraphWriteGenSource(chain)).toBe(adapter);
   });
 
+  it('every first-party storage wrapper is traversable by the SYMBOL alone', () => {
+    // This is the claim that makes STORE_CHAIN_INNER "the" contract rather than
+    // one of three. `innerStore` and `.inner` remain honoured as legacy shapes,
+    // so a wrapper that only had those would still resolve and the ordinary
+    // tests could not tell the difference. Resolving against a walker that
+    // follows ONLY the symbol is what proves first-party code no longer depends
+    // on the legacy paths.
+    const symbolOnly = (store: unknown): unknown => {
+      let node = store as { [STORE_CHAIN_INNER]?: unknown } | null | undefined;
+      for (let depth = 0; node && depth < 32; depth++) {
+        if (typeof (node as Record<symbol, unknown>)[MANAGED_READ_GATE_V1] === 'function') {
+          return node;
+        }
+        node = node[STORE_CHAIN_INNER] as typeof node;
+      }
+      return null;
+    };
+
+    const adapter = managedAdapter();
+    const chain = new ChangelogStore(
+      new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS)),
+      { enabled: true },
+    );
+
+    expect(symbolOnly(chain)).toBe(adapter);
+  });
+
   it('THROWS on a cyclic chain rather than reporting absence', () => {
     // A cycle is a broken object graph, not "this store has no gate". Reporting
     // it as `null` would read as an unleased store — fail-OPEN, the exact
@@ -173,7 +204,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
     // already fail-closed. The warm branch is the one under test.
     await index.listGraphs();
 
-    adapter.assertManagedBackendReadableV1.mockImplementation(() => {
+    adapter[MANAGED_READ_GATE_V1].mockImplementation(() => {
       throw new ManagedOxigraphBackendUnownedError('probe', true, 'port-release-unproven');
     });
 
