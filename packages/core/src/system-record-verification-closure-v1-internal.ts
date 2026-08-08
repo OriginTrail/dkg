@@ -20,17 +20,21 @@ import {
 import {
   computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileForkResolutionDigestV1,
-  computeOwnedSubjectTableDigestV1,
-  digest,
-  parseCanonicalOwnedSubjectTableObjectV1,
-  type AgentProfileActiveHeadObjectV1,
   type AgentProfileAuthorityTransitionV1,
   type AgentProfileForkResolutionV1,
-  type AgentProfileHeadObjectV1,
   type SignedAgentProfileAuthorityTransitionEnvelopeV1,
   type SignedAgentProfileForkResolutionEnvelopeV1,
   type SignedAgentProfileHeadEnvelopeV1,
-} from './system-record-agent-profile-codecs-v1-internal.js';
+} from './system-record-agent-profile-control-codecs-v1-internal.js';
+import type {
+  AgentProfileActiveHeadObjectV1,
+  AgentProfileHeadObjectV1,
+} from './system-record-agent-profile-head-codec-v1-internal.js';
+import { digest } from './system-record-agent-profile-primitives-v1-internal.js';
+import {
+  computeOwnedSubjectTableDigestV1,
+  parseCanonicalOwnedSubjectTableObjectV1,
+} from './system-record-owned-subject-codecs-v1-internal.js';
 import {
   mintAgentProfileVerifiedAuthoritySummaryV1,
   type AgentProfileVerifiedAuthoritySummaryV1,

@@ -12,23 +12,27 @@ import {
 } from './system-record-limits-v1.js';
 
 import {
-  assertAgentRootV1,
   computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileForkResolutionDigestV1,
+  validateAuthorityTransition,
+  validateForkResolution,
+  type AgentProfileAuthorityTransitionV1,
+  type AgentProfileForkResolutionV1,
+} from './system-record-agent-profile-control-codecs-v1-internal.js';
+import {
   computeAgentProfileHeadObjectDigestV1,
+  validateAgentProfileHeadObjectV1,
+  type AgentProfileActiveHeadObjectV1,
+  type AgentProfileHeadObjectV1,
+  type AgentProfileTombstoneHeadObjectV1,
+} from './system-record-agent-profile-head-codec-v1-internal.js';
+import {
+  assertAgentRootV1,
   digest,
   snapshotSystemRecordDataRecord,
   u64,
-  validateAgentProfileHeadObjectV1,
-  validateAuthorityTransition,
-  validateForkResolution,
-  type AgentProfileActiveHeadObjectV1,
-  type AgentProfileAuthorityTransitionV1,
-  type AgentProfileForkResolutionV1,
-  type AgentProfileHeadObjectV1,
-  type AgentProfileTombstoneHeadObjectV1,
   type CanonicalRfc3339SecondsV1,
-} from './system-record-agent-profile-codecs-v1-internal.js';
+} from './system-record-agent-profile-primitives-v1-internal.js';
 import {
   isAgentProfileVerifiedAuthoritySummaryV1,
   type AgentProfileVerifiedAuthoritySummaryV1,

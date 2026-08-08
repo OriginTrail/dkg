@@ -5,11 +5,13 @@ import {
 } from './canonical-json.js';
 import {
   computeAgentProfileAuthorityTransitionDigestV1,
-  computeAgentProfileConflictEvidenceDigestV1,
   computeAgentProfileForkResolutionDigestV1,
-  computeAgentProfileHeadObjectDigestV1,
+} from './system-record-agent-profile-control-codecs-v1-internal.js';
+import { computeAgentProfileHeadObjectDigestV1 } from './system-record-agent-profile-head-codec-v1-internal.js';
+import {
+  computeAgentProfileConflictEvidenceDigestV1,
   parseCanonicalAgentProfileConflictEvidenceV1,
-} from './system-record-agent-profile-codecs-v1-internal.js';
+} from './system-record-agent-profile-evidence-codecs-v1-internal.js';
 import {
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,

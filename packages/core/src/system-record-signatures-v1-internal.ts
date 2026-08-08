@@ -20,16 +20,10 @@ import {
 import {
   computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileForkResolutionDigestV1,
-  computeAgentProfileHeadObjectDigestV1,
-  digest,
-  numericChainIdForNetworkV1,
-  snapshotSystemRecordDataRecord,
-  validateAgentProfileHeadObjectV1,
   validateAuthorityTransition,
   validateForkResolution,
   type AgentProfileAuthorityTransitionV1,
   type AgentProfileForkResolutionV1,
-  type AgentProfileHeadObjectV1,
   type SignedAgentProfileAuthorityTransitionEnvelopeV1,
   type SignedAgentProfileForkResolutionEnvelopeV1,
   type SignedAgentProfileHeadEnvelopeV1,
@@ -38,7 +32,17 @@ import {
   type SystemRecordNoSignatureEvidenceV1,
   type SystemRecordSignatureEntryV1,
   type SystemRecordSignatureRoleV1,
-} from './system-record-agent-profile-codecs-v1-internal.js';
+} from './system-record-agent-profile-control-codecs-v1-internal.js';
+import {
+  computeAgentProfileHeadObjectDigestV1,
+  validateAgentProfileHeadObjectV1,
+  type AgentProfileHeadObjectV1,
+} from './system-record-agent-profile-head-codec-v1-internal.js';
+import {
+  digest,
+  numericChainIdForNetworkV1,
+  snapshotSystemRecordDataRecord,
+} from './system-record-agent-profile-primitives-v1-internal.js';
 import {
   copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,

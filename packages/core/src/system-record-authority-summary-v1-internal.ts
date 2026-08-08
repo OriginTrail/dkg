@@ -1,5 +1,5 @@
 import { failSystemRecordObjectV1 as fail } from './system-record-codec-primitives-v1.js';
-import type { AgentProfileActiveHeadObjectV1 } from './system-record-agent-profile-codecs-v1-internal.js';
+import type { AgentProfileActiveHeadObjectV1 } from './system-record-agent-profile-head-codec-v1-internal.js';
 import type { AgentProfileAppliedTransitionV1 } from './system-record-authority-types-v1-internal.js';
 import type { Digest32V1 } from './sync-wire-scalars.js';
 

@@ -3,10 +3,8 @@ import {
   parseCanonicalJson,
   type CanonicalJsonValue,
 } from './canonical-json.js';
-import {
-  assertAgentRootV1,
-  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
-} from './system-record-agent-profile-codecs-v1-internal.js';
+import { assertAgentRootV1 } from './system-record-agent-profile-primitives-v1-internal.js';
+import { EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1 } from './system-record-owned-subject-codecs-v1-internal.js';
 import type { AgentProfileAppliedTransitionV1 } from './system-record-authority-types-v1-internal.js';
 import { KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1 } from './ka-bundle-v1.js';
 import {

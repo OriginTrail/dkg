@@ -37,7 +37,7 @@ import {
   type SystemRecordObjectKindV1,
 } from './system-record-limits-v1.js';
 
-import { digest } from './system-record-agent-profile-codecs-v1-internal.js';
+import { digest } from './system-record-agent-profile-primitives-v1-internal.js';
 import {
   computeSignedSystemRecordEnvelopeDigestV1,
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,

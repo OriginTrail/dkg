@@ -113,7 +113,6 @@ export function chooseSystemRecordByteAwareSplitIndexV1(
   }
   return best;
 }
-
 export type SystemRecordRebalanceChoiceV1 =
   | 'borrow-left'
   | 'borrow-right'
@@ -345,15 +344,71 @@ interface CowLeafMutationResultV1 {
   readonly totalRowsDelta: -1 | 0 | 1;
 }
 
+
+
+interface CowPreparedMutationV1 {
+  readonly networkId: NetworkIdV1;
+  readonly descriptor: SystemRecordRootDescriptorObjectV1;
+  readonly pinnedDescriptorDigest: Digest32V1;
+  readonly objects: ReadonlyMap<Digest32V1, SystemRecordInventoryStoredObjectV1>;
+  readonly mutation: SystemRecordInventoryMutationV1;
+  readonly targetKey: Digest32V1;
+  readonly targetPeer: string;
+}
+
+interface CowLocatedLeafV1 {
+  readonly path: CowPathFrame[];
+  readonly leafMutation: CowLeafMutationResultV1;
+}
+
+interface CowMutationContextV1 extends CowPreparedMutationV1 {
+  loadObject(
+    digest: Digest32V1,
+    root: boolean,
+  ): Pick<SystemRecordInventoryStoredObjectV1, 'objectKind' | 'object'>;
+  persistLeaf(
+    rows: readonly SystemRecordInventoryRowV1[],
+    root: boolean,
+    role: SystemRecordInventoryCowWriteV1['role'],
+  ): CowChildRef;
+  persistInternal(
+    children: readonly CowChildRef[],
+    root: boolean,
+    role: SystemRecordInventoryCowWriteV1['role'],
+  ): CowChildRef;
+  persistInternalEntries(
+    entries: readonly SystemRecordInventoryInternalEntryV1[],
+    root: boolean,
+    role: SystemRecordInventoryCowWriteV1['role'],
+  ): CowChildRef;
+  childRef(entry: SystemRecordInventoryInternalEntryV1): CowChildRef;
+  finishRootEntries(
+    entries: readonly SystemRecordInventoryInternalEntryV1[],
+    totalRows: number,
+  ): SystemRecordInventoryCowUpdateV1;
+  finish(rootDigest: Digest32V1, totalRows: number): SystemRecordInventoryCowUpdateV1;
+  unchanged(): SystemRecordInventoryCowUpdateV1;
+  totalRows(delta: -1 | 0 | 1): number;
+}
+
 /**
- * Apply one localized immutable mutation. Only the search path and the adjacent siblings
- * needed by the deterministic lend-before-merge rule are loaded; every returned write is
- * derived from canonical bytes, never reported by the caller.
+ * Apply one localized immutable mutation through explicit validation, lookup,
+ * leaf-rewrite, parent-propagation, and descriptor-finalization phases.
  */
 export function updateSystemRecordInventoryTreeV1(
   snapshot: SystemRecordInventoryTreeSnapshotV1,
   mutation: SystemRecordInventoryMutationV1,
 ): SystemRecordInventoryCowUpdateV1 {
+  const context = createCowMutationContextV1(prepareCowMutationV1(snapshot, mutation));
+  const located = locateCowMutationLeafV1(context);
+  if (!located.leafMutation.changed) return context.unchanged();
+  return rewriteCowLeafAndPropagateV1(context, located);
+}
+
+function prepareCowMutationV1(
+  snapshot: SystemRecordInventoryTreeSnapshotV1,
+  mutation: SystemRecordInventoryMutationV1,
+): CowPreparedMutationV1 {
   const pinnedSnapshot = snapshotExactDataRecord(
     snapshot,
     ['networkId', 'descriptor', 'descriptorDigest', 'objects'],
@@ -377,6 +432,7 @@ export function updateSystemRecordInventoryTreeV1(
   ) {
     throw new Error('inventory snapshot descriptor binding is invalid');
   }
+
   const mutationProbe = snapshotDataRecord(mutation, 'inventory mutation', {
     rejectNullValues: true,
   });
@@ -418,24 +474,30 @@ export function updateSystemRecordInventoryTreeV1(
   if (targetKey !== computeSystemRecordStableKeyHashV1(networkId, targetPeer)) {
     throw new Error('inventory mutation key does not bind networkId/peerId');
   }
+  return {
+    networkId,
+    descriptor,
+    pinnedDescriptorDigest,
+    objects: objects as ReadonlyMap<Digest32V1, SystemRecordInventoryStoredObjectV1>,
+    mutation: normalizedMutation,
+    targetKey,
+    targetPeer,
+  };
+}
 
-  const loaded = new Set<Digest32V1>();
-  const validatedStoredObjects = new Map<
-    string,
-    Pick<SystemRecordInventoryStoredObjectV1, 'objectKind' | 'object'>
-  >();
+function locateCowMutationLeafV1(context: CowMutationContextV1): CowLocatedLeafV1 {
   const path: CowPathFrame[] = [];
-  let currentDigest = descriptor.treeRootDigest;
+  let currentDigest = context.descriptor.treeRootDigest;
   let depth = 1;
   let leaf: SystemRecordInventoryLeafObjectV1;
   while (true) {
-    const stored = loadObject(currentDigest, depth === 1);
+    const stored = context.loadObject(currentDigest, depth === 1);
     if (stored.objectKind === 'inventory-leaf') {
       leaf = stored.object as SystemRecordInventoryLeafObjectV1;
       break;
     }
     const internal = stored.object as SystemRecordInventoryInternalObjectV1;
-    const childIndex = findChildIndex(internal.entries, targetKey);
+    const childIndex = findChildIndex(internal.entries, context.targetKey);
     path.push({
       digest: currentDigest,
       object: internal,
@@ -444,115 +506,133 @@ export function updateSystemRecordInventoryTreeV1(
     });
     currentDigest = internal.entries[childIndex].childDigest;
     depth += 1;
-    if (depth > SYSTEM_RECORD_MAX_TREE_HEIGHT)
+    if (depth > SYSTEM_RECORD_MAX_TREE_HEIGHT) {
       throw new Error('inventory mutation path exceeds height bound');
+    }
   }
-  const leafMutation = applyCowLeafMutationV1(
-    networkId,
-    leaf.rows.map((encoded) => decodeInventoryRowBase64UrlV1(networkId, encoded)),
-    normalizedMutation,
-    targetKey,
-    targetPeer,
-  );
-  if (!leafMutation.changed) return unchanged();
-  const rows = [...leafMutation.rows];
+  return {
+    path,
+    leafMutation: applyCowLeafMutationV1(
+      context.networkId,
+      leaf.rows.map((encoded) => decodeInventoryRowBase64UrlV1(context.networkId, encoded)),
+      context.mutation,
+      context.targetKey,
+      context.targetPeer,
+    ),
+  };
+}
 
-  const writes: SystemRecordInventoryCowWriteV1[] = [];
-  // Bounded write overlay only. The caller persists these objects before publishing the
-  // returned descriptor; copying the complete provider cache would defeat COW locality.
-  const nextObjects = new Map<Digest32V1, SystemRecordInventoryStoredObjectV1>();
-  let childReplacement: CowChildReplacementV1;
-  const leafParentIndex = path.at(-1)?.childIndex ?? 0;
-  const leafIsRoot = path.length === 0;
-  if (leafIsRoot) {
+function rewriteCowLeafAndPropagateV1(
+  context: CowMutationContextV1,
+  located: CowLocatedLeafV1,
+): SystemRecordInventoryCowUpdateV1 {
+  const rows = [...located.leafMutation.rows];
+  const path = located.path;
+  if (path.length === 0) {
     if (rows.length <= SYSTEM_RECORD_LEAF_MAX_ROWS) {
-      const root = persistLeaf(rows, true, 'root');
-      return finish(root.digest, rows.length);
+      return context.finish(context.persistLeaf(rows, true, 'root').digest, rows.length);
     }
     const split = chooseSystemRecordByteAwareSplitIndexV1(
-      rows.map((row) => encodeSystemRecordInventoryRowV1(networkId, row).byteLength),
+      rows.map((row) => encodeSystemRecordInventoryRowV1(context.networkId, row).byteLength),
       SYSTEM_RECORD_LEAF_MIN_ROWS,
       SYSTEM_RECORD_LEAF_MIN_ROWS,
     );
     const children = [
-      persistLeaf(rows.slice(0, split), false, 'leaf'),
-      persistLeaf(rows.slice(split), false, 'leaf'),
+      context.persistLeaf(rows.slice(0, split), false, 'leaf'),
+      context.persistLeaf(rows.slice(split), false, 'leaf'),
     ];
-    const root = persistInternal(children, true, 'root');
-    return finish(root.digest, rows.length);
+    return context.finish(context.persistInternal(children, true, 'root').digest, rows.length);
   }
+  return propagateCowChildReplacementV1(
+    context,
+    path,
+    planCowLeafReplacementV1(context, path.at(-1)!, rows),
+    context.totalRows(located.leafMutation.totalRowsDelta),
+  );
+}
 
+function planCowLeafReplacementV1(
+  context: CowMutationContextV1,
+  parent: CowPathFrame,
+  rows: readonly SystemRecordInventoryRowV1[],
+): CowChildReplacementV1 {
   if (rows.length > SYSTEM_RECORD_LEAF_MAX_ROWS) {
     const split = chooseSystemRecordByteAwareSplitIndexV1(
-      rows.map((row) => encodeSystemRecordInventoryRowV1(networkId, row).byteLength),
+      rows.map((row) => encodeSystemRecordInventoryRowV1(context.networkId, row).byteLength),
       SYSTEM_RECORD_LEAF_MIN_ROWS,
       SYSTEM_RECORD_LEAF_MIN_ROWS,
     );
-    childReplacement = {
+    return {
       refs: [
-        persistLeaf(rows.slice(0, split), false, 'leaf'),
-        persistLeaf(rows.slice(split), false, 'leaf'),
+        context.persistLeaf(rows.slice(0, split), false, 'leaf'),
+        context.persistLeaf(rows.slice(split), false, 'leaf'),
       ],
-      parentIndex: leafParentIndex,
+      parentIndex: parent.childIndex,
       replacedCount: 1,
     };
-  } else if (rows.length >= SYSTEM_RECORD_LEAF_MIN_ROWS) {
-    childReplacement = {
-      refs: [persistLeaf(rows, false, 'leaf')],
-      parentIndex: leafParentIndex,
+  }
+  if (rows.length >= SYSTEM_RECORD_LEAF_MIN_ROWS) {
+    return {
+      refs: [context.persistLeaf(rows, false, 'leaf')],
+      parentIndex: parent.childIndex,
       replacedCount: 1,
     };
-  } else {
-    const parent = path.at(-1)!;
-    const leftIndex = parent.childIndex > 0 ? parent.childIndex - 1 : undefined;
-    const rightIndex =
-      parent.childIndex + 1 < parent.object.entries.length ? parent.childIndex + 1 : undefined;
-    const leftRows = leftIndex === undefined ? undefined : loadLeafRows(leftIndex);
-    const rightRows =
-      leftRows !== undefined && leftRows.length > SYSTEM_RECORD_LEAF_MIN_ROWS
-        ? undefined
-        : rightIndex === undefined
-          ? undefined
-          : loadLeafRows(rightIndex);
-    const rebalance = chooseSystemRecordRebalanceV1(
-      leftRows?.length,
-      rightRows?.length,
-      SYSTEM_RECORD_LEAF_MIN_ROWS,
+  }
+  const leftIndex = parent.childIndex > 0 ? parent.childIndex - 1 : undefined;
+  const rightIndex =
+    parent.childIndex + 1 < parent.object.entries.length ? parent.childIndex + 1 : undefined;
+  const loadLeafRows = (index: number): SystemRecordInventoryRowV1[] => {
+    const siblingEntry = parent.object.entries[index];
+    if (siblingEntry?.childKind !== 'inventory-leaf') {
+      throw new Error('leaf rebalance sibling is unavailable');
+    }
+    const sibling = context.loadObject(siblingEntry.childDigest, false)
+      .object as SystemRecordInventoryLeafObjectV1;
+    return sibling.rows.map((encoded) =>
+      decodeInventoryRowBase64UrlV1(context.networkId, encoded),
     );
-    const siblingIsLeft = rebalance.endsWith('left');
-    const siblingIndex = siblingIsLeft ? leftIndex! : rightIndex!;
-    const siblingRows = siblingIsLeft ? leftRows! : rightRows!;
-    const rowGroups = rebalanceOrderedCowGroupsV1(
+  };
+  const leftRows = leftIndex === undefined ? undefined : loadLeafRows(leftIndex);
+  const rightRows =
+    leftRows !== undefined && leftRows.length > SYSTEM_RECORD_LEAF_MIN_ROWS
+      ? undefined
+      : rightIndex === undefined
+        ? undefined
+        : loadLeafRows(rightIndex);
+  const rebalance = chooseSystemRecordRebalanceV1(
+    leftRows?.length,
+    rightRows?.length,
+    SYSTEM_RECORD_LEAF_MIN_ROWS,
+  );
+  const siblingIsLeft = rebalance.endsWith('left');
+  const siblingIndex = siblingIsLeft ? leftIndex! : rightIndex!;
+  const siblingRows = siblingIsLeft ? leftRows! : rightRows!;
+  return {
+    refs: rebalanceOrderedCowGroupsV1(
       rows,
       siblingRows,
       siblingIsLeft,
       rebalance.startsWith('borrow'),
-    );
-    childReplacement = {
-      refs: rowGroups.map((group) => persistLeaf(group, false, 'leaf')),
-      parentIndex: Math.min(parent.childIndex, siblingIndex),
-      replacedCount: 2,
-    };
+    ).map((group) => context.persistLeaf(group, false, 'leaf')),
+    parentIndex: Math.min(parent.childIndex, siblingIndex),
+    replacedCount: 2,
+  };
+}
 
-    function loadLeafRows(index: number): SystemRecordInventoryRowV1[] {
-      const siblingEntry = parent.object.entries[index];
-      if (siblingEntry?.childKind !== 'inventory-leaf')
-        throw new Error('leaf rebalance sibling is unavailable');
-      const sibling = loadObject(siblingEntry.childDigest, false)
-        .object as SystemRecordInventoryLeafObjectV1;
-      return sibling.rows.map((encoded) => decodeInventoryRowBase64UrlV1(networkId, encoded));
-    }
-  }
-
-  let frame = path.pop()!;
-  let parentEntries = replaceChildEntries(
+function propagateCowChildReplacementV1(
+  context: CowMutationContextV1,
+  path: CowPathFrame[],
+  childReplacement: CowChildReplacementV1,
+  totalRows: number,
+): SystemRecordInventoryCowUpdateV1 {
+  const frame = path.pop()!;
+  const parentEntries = replaceChildEntries(
     frame.object.entries,
     childReplacement.parentIndex,
     childReplacement.replacedCount,
     childReplacement.refs,
   );
-  if (frame.root) return finishRootEntries(parentEntries, rowsDelta());
-
+  if (frame.root) return context.finishRootEntries(parentEntries, totalRows);
   let nextParentRefs: CowChildRef[];
   if (parentEntries.length > SYSTEM_RECORD_INTERNAL_MAX_ENTRIES) {
     const split = chooseSystemRecordByteAwareSplitIndexV1(
@@ -563,97 +643,101 @@ export function updateSystemRecordInventoryTreeV1(
       SYSTEM_RECORD_INTERNAL_MIN_ENTRIES,
     );
     nextParentRefs = [
-      persistInternalEntries(parentEntries.slice(0, split), false, 'internal'),
-      persistInternalEntries(parentEntries.slice(split), false, 'internal'),
+      context.persistInternalEntries(parentEntries.slice(0, split), false, 'internal'),
+      context.persistInternalEntries(parentEntries.slice(split), false, 'internal'),
     ];
   } else if (parentEntries.length >= SYSTEM_RECORD_INTERNAL_MIN_ENTRIES) {
-    nextParentRefs = [persistInternalEntries(parentEntries, false, 'internal')];
+    nextParentRefs = [context.persistInternalEntries(parentEntries, false, 'internal')];
   } else {
-    const rootFrame = path.pop();
-    if (rootFrame === undefined || !rootFrame.root)
-      throw new Error('non-root internal node lacks root parent');
-    const rootParent = rootFrame;
-    const leftIndex = rootParent.childIndex > 0 ? rootParent.childIndex - 1 : undefined;
-    const rightIndex =
-      rootParent.childIndex + 1 < rootParent.object.entries.length
-        ? rootParent.childIndex + 1
-        : undefined;
-    const left = leftIndex === undefined ? undefined : loadInternalSibling(leftIndex);
-    const right =
-      left !== undefined && left.entries.length > SYSTEM_RECORD_INTERNAL_MIN_ENTRIES
-        ? undefined
-        : rightIndex === undefined
-          ? undefined
-          : loadInternalSibling(rightIndex);
-    const rebalance = chooseSystemRecordRebalanceV1(
-      left?.entries.length,
-      right?.entries.length,
-      SYSTEM_RECORD_INTERNAL_MIN_ENTRIES,
-    );
-    const siblingIsLeft = rebalance.endsWith('left');
-    const siblingIndex = siblingIsLeft ? leftIndex! : rightIndex!;
-    const sibling = siblingIsLeft ? left! : right!;
-    const rootReplaceIndex = Math.min(rootParent.childIndex, siblingIndex);
-    const entryGroups = rebalanceOrderedCowGroupsV1(
-      parentEntries,
-      sibling.entries,
-      siblingIsLeft,
-      rebalance.startsWith('borrow'),
-    );
-    const collapsesRoot = entryGroups.length === 1 && rootParent.object.entries.length === 2;
-    nextParentRefs = entryGroups.map((group) =>
-      persistInternalEntries(
-        group,
-        collapsesRoot,
-        collapsesRoot ? 'root' : 'internal',
-      ),
-    );
-    const rootEntries = replaceChildEntries(
-      rootParent.object.entries,
-      rootReplaceIndex,
-      2,
-      nextParentRefs,
-    );
-    if (rootEntries.length === 1) return finish(rootEntries[0].childDigest, rowsDelta());
-    return finishRootEntries(rootEntries, rowsDelta());
-
-    function loadInternalSibling(index: number): SystemRecordInventoryInternalObjectV1 {
-      const siblingEntry = rootParent.object.entries[index];
-      if (siblingEntry?.childKind !== 'inventory-internal') {
-        throw new Error('internal rebalance sibling is unavailable');
-      }
-      return loadObject(siblingEntry.childDigest, false)
-        .object as SystemRecordInventoryInternalObjectV1;
-    }
+    return rebalanceCowInternalUnderflowV1(context, path, parentEntries, totalRows);
   }
-
   const rootFrame = path.pop();
-  if (rootFrame === undefined || !rootFrame.root)
+  if (rootFrame === undefined || !rootFrame.root) {
     throw new Error('inventory height exceeds the V1 update model');
+  }
+  return context.finishRootEntries(
+    replaceChildEntries(rootFrame.object.entries, rootFrame.childIndex, 1, nextParentRefs),
+    totalRows,
+  );
+}
+
+function rebalanceCowInternalUnderflowV1(
+  context: CowMutationContextV1,
+  path: CowPathFrame[],
+  parentEntries: readonly SystemRecordInventoryInternalEntryV1[],
+  totalRows: number,
+): SystemRecordInventoryCowUpdateV1 {
+  const rootParent = path.pop();
+  if (rootParent === undefined || !rootParent.root) {
+    throw new Error('non-root internal node lacks root parent');
+  }
+  const leftIndex = rootParent.childIndex > 0 ? rootParent.childIndex - 1 : undefined;
+  const rightIndex =
+    rootParent.childIndex + 1 < rootParent.object.entries.length
+      ? rootParent.childIndex + 1
+      : undefined;
+  const loadInternalSibling = (index: number): SystemRecordInventoryInternalObjectV1 => {
+    const siblingEntry = rootParent.object.entries[index];
+    if (siblingEntry?.childKind !== 'inventory-internal') {
+      throw new Error('internal rebalance sibling is unavailable');
+    }
+    return context.loadObject(siblingEntry.childDigest, false)
+      .object as SystemRecordInventoryInternalObjectV1;
+  };
+  const left = leftIndex === undefined ? undefined : loadInternalSibling(leftIndex);
+  const right =
+    left !== undefined && left.entries.length > SYSTEM_RECORD_INTERNAL_MIN_ENTRIES
+      ? undefined
+      : rightIndex === undefined
+        ? undefined
+        : loadInternalSibling(rightIndex);
+  const rebalance = chooseSystemRecordRebalanceV1(
+    left?.entries.length,
+    right?.entries.length,
+    SYSTEM_RECORD_INTERNAL_MIN_ENTRIES,
+  );
+  const siblingIsLeft = rebalance.endsWith('left');
+  const siblingIndex = siblingIsLeft ? leftIndex! : rightIndex!;
+  const sibling = siblingIsLeft ? left! : right!;
+  const entryGroups = rebalanceOrderedCowGroupsV1(
+    parentEntries,
+    sibling.entries,
+    siblingIsLeft,
+    rebalance.startsWith('borrow'),
+  );
+  const collapsesRoot = entryGroups.length === 1 && rootParent.object.entries.length === 2;
+  const nextParentRefs = entryGroups.map((group) =>
+    context.persistInternalEntries(group, collapsesRoot, collapsesRoot ? 'root' : 'internal'),
+  );
   const rootEntries = replaceChildEntries(
-    rootFrame.object.entries,
-    rootFrame.childIndex,
-    1,
+    rootParent.object.entries,
+    Math.min(rootParent.childIndex, siblingIndex),
+    2,
     nextParentRefs,
   );
-  return finishRootEntries(rootEntries, rowsDelta());
+  if (rootEntries.length === 1) return context.finish(rootEntries[0].childDigest, totalRows);
+  return context.finishRootEntries(rootEntries, totalRows);
+}
 
-  function rowsDelta(): number {
-    return (
-      Number(parseCanonicalDecimalU64(descriptor.totalRows)) +
-      leafMutation.totalRowsDelta
-    );
-  }
+function createCowMutationContextV1(prepared: CowPreparedMutationV1): CowMutationContextV1 {
+  const { networkId, descriptor, pinnedDescriptorDigest, objects } = prepared;
+  const loaded = new Set<Digest32V1>();
+  const validatedStoredObjects = new Map<
+    string,
+    Pick<SystemRecordInventoryStoredObjectV1, 'objectKind' | 'object'>
+  >();
+  const writes: SystemRecordInventoryCowWriteV1[] = [];
+  const nextObjects = new Map<Digest32V1, SystemRecordInventoryStoredObjectV1>();
 
   function loadObject(
     digest: Digest32V1,
     root: boolean,
   ): Pick<SystemRecordInventoryStoredObjectV1, 'objectKind' | 'object'> {
-    const cacheKey = `${root ? 'root' : 'child'}:${digest}`;
+    const cacheKey = (root ? 'root' : 'child') + ':' + digest;
     const cached = validatedStoredObjects.get(cacheKey);
     if (cached !== undefined) return cached;
     const candidate = Reflect.apply(MAP_GET, objects, [digest]) as unknown;
-    if (candidate === undefined) throw new Error(`inventory snapshot is missing ${digest}`);
+    if (candidate === undefined) throw new Error('inventory snapshot is missing ' + digest);
     const stored = snapshotExactDataRecord(
       candidate,
       ['objectKind', 'object', 'canonicalBytes'],
@@ -691,11 +775,11 @@ export function updateSystemRecordInventoryTreeV1(
   }
 
   function persistLeaf(
-    nextRows: readonly SystemRecordInventoryRowV1[],
+    rows: readonly SystemRecordInventoryRowV1[],
     root: boolean,
     role: SystemRecordInventoryCowWriteV1['role'],
   ): CowChildRef {
-    const object = makeLeafObject(networkId, nextRows);
+    const object = makeLeafObject(networkId, rows);
     const bytes = canonicalizeSystemRecordInventoryLeafObjectV1(object, networkId, root);
     const digest = computeSystemRecordInventoryLeafDigestV1(object, networkId, root);
     persist(digest, 'inventory-leaf', object, bytes, role);
@@ -721,13 +805,16 @@ export function updateSystemRecordInventoryTreeV1(
     role: SystemRecordInventoryCowWriteV1['role'],
   ): CowChildRef {
     const lastChild = childRef(entries.at(-1)!);
-    const object: SystemRecordInventoryInternalObjectV1 = {
-      objectType: 'inventory-internal',
-      firstKeyHash: entries[0].separatorKeyHash,
-      lastKeyHash: lastChild.last!,
-      entries: Object.freeze([...entries]),
-    };
-    return persistInternalObject(object, root, role);
+    return persistInternalObject(
+      {
+        objectType: 'inventory-internal',
+        firstKeyHash: entries[0].separatorKeyHash,
+        lastKeyHash: lastChild.last!,
+        entries: Object.freeze([...entries]),
+      },
+      root,
+      role,
+    );
   }
 
   function persistInternalObject(
@@ -753,14 +840,10 @@ export function updateSystemRecordInventoryTreeV1(
     canonicalBytes: Uint8Array,
     role: SystemRecordInventoryCowWriteV1['role'],
   ): void {
-    const stored = Object.freeze({ objectKind, object, canonicalBytes });
-    nextObjects.set(digest, stored);
+    nextObjects.set(digest, Object.freeze({ objectKind, object, canonicalBytes }));
     const existsInSnapshot = Reflect.apply(MAP_HAS, objects, [digest]) as boolean;
-    if (existsInSnapshot) {
-      const existing = loadObject(digest, role === 'root');
-      if (existing.objectKind !== objectKind) {
-        throw new Error('inventory snapshot reuses a digest under a different object kind');
-      }
+    if (existsInSnapshot && loadObject(digest, role === 'root').objectKind !== objectKind) {
+      throw new Error('inventory snapshot reuses a digest under a different object kind');
     }
     if (!existsInSnapshot && !writes.some((write) => write.digest === digest)) {
       writes.push(Object.freeze({ digest, objectKind, object, canonicalBytes, role }));
@@ -768,17 +851,15 @@ export function updateSystemRecordInventoryTreeV1(
   }
 
   function childRef(entry: SystemRecordInventoryInternalEntryV1): CowChildRef {
-    const overlay = nextObjects.get(entry.childDigest);
-    const stored = overlay ?? loadObject(entry.childDigest, false);
+    const stored = nextObjects.get(entry.childDigest) ?? loadObject(entry.childDigest, false);
     if (stored.objectKind !== entry.childKind) {
       throw new Error('updated inventory child kind does not match its reference');
     }
-    const object = stored.object;
     return {
       digest: entry.childDigest,
       objectKind: entry.childKind,
-      first: object.firstKeyHash,
-      last: object.lastKeyHash,
+      first: stored.object.firstKeyHash,
+      last: stored.object.lastKeyHash,
     };
   }
 
@@ -788,8 +869,7 @@ export function updateSystemRecordInventoryTreeV1(
   ): SystemRecordInventoryCowUpdateV1 {
     if (entries.length === 1) return finish(entries[0].childDigest, totalRows);
     if (entries.length <= SYSTEM_RECORD_ROOT_MAX_ENTRIES) {
-      const root = persistInternalEntries(entries, true, 'root');
-      return finish(root.digest, totalRows);
+      return finish(persistInternalEntries(entries, true, 'root').digest, totalRows);
     }
     const split = chooseSystemRecordByteAwareSplitIndexV1(
       entries.map(
@@ -802,8 +882,7 @@ export function updateSystemRecordInventoryTreeV1(
       persistInternalEntries(entries.slice(0, split), false, 'internal'),
       persistInternalEntries(entries.slice(split), false, 'internal'),
     ];
-    const root = persistInternal(children, true, 'root');
-    return finish(root.digest, totalRows);
+    return finish(persistInternal(children, true, 'root').digest, totalRows);
   }
 
   function finish(rootDigest: Digest32V1, totalRows: number): SystemRecordInventoryCowUpdateV1 {
@@ -838,12 +917,10 @@ export function updateSystemRecordInventoryTreeV1(
         if (Reflect.apply(MAP_HAS, objects, [entry.childDigest])) reused.add(entry.childDigest);
       }
     }
-    const validatedDescriptor = validateRootDescriptor(nextDescriptor);
-    const nextDescriptorDigest = computeSystemRecordRootDescriptorDigestV1(nextDescriptor);
     return Object.freeze({
       changed: true,
-      descriptor: validatedDescriptor,
-      descriptorDigest: nextDescriptorDigest,
+      descriptor: validateRootDescriptor(nextDescriptor),
+      descriptorDigest: computeSystemRecordRootDescriptorDigestV1(nextDescriptor),
       writes: Object.freeze(writes),
       descriptorBytes,
       accounting: Object.freeze(accounting),
@@ -865,12 +942,23 @@ export function updateSystemRecordInventoryTreeV1(
         descriptorObjects: 0,
         encodedBytes: 0,
       }),
-      // A no-op publishes no descriptor, so it has no reuse closure to report. Enumerating the
-      // complete snapshot here would turn an otherwise path-bounded lookup into O(tree size).
       reusedObjectDigests: new Set<Digest32V1>(),
       loadedObjectDigests: loaded,
     });
   }
+
+  return {
+    ...prepared,
+    loadObject,
+    persistLeaf,
+    persistInternal,
+    persistInternalEntries,
+    childRef,
+    finishRootEntries,
+    finish,
+    unchanged,
+    totalRows: (delta) => Number(parseCanonicalDecimalU64(descriptor.totalRows)) + delta,
+  };
 }
 
 function applyCowLeafMutationV1(
