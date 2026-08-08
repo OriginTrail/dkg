@@ -265,75 +265,13 @@ async function executeAdmitted(
     discardUnconsumedProof(deps.consumer, proof);
     return noMutation({ outcome: 'capability-lost' });
   }
-  let recoveryOwnsReservation = false;
-  try {
-  const generationClient = deps.resolveClient(binding);
-  if (generationClient === null || generationClient.isDestroyed
-      || generationClient.childGeneration !== binding.childGeneration) {
-    return noMutation({ outcome: 'capability-lost' });
-  }
-  const client = accountedClient(generationClient, deps.consumer, facts);
-  const inspectionDeadlineMs = Math.min(
-    facts.admittedDeadlineMs,
-    now() + SYSTEM_RECORD_INSPECTION_TIMEOUT_MS,
-  );
-
-  let inspection: SystemRecordPriorInspectionPhaseV1;
-  try {
-    inspection = await inspectSystemRecordPriorStateV1({
-      client,
-      queryEndpoint: deps.queryEndpoint,
-      consumer: deps.consumer,
-      facts,
-      inspectionDeadlineMs,
-      now,
-    });
-  } catch (error) {
-    return noMutation({ outcome: 'deferred', reason: classifyInspectionFailure(error) });
-  }
-  const preparation = await prepareSystemRecordDispatchV1({
-    client,
-    queryEndpoint: deps.queryEndpoint,
-    consumer: deps.consumer,
-    facts,
-    binding,
-    inspectionDeadlineMs,
-    inspection,
-    now,
-  });
-  if (preparation.status === 'complete') return preparation.settlement;
-  const { prepared, update, exactNext, exactPrior } = preparation;
-
-  const dispatch = await dispatchSystemRecordConditionalApplyV1({
+  return new SystemRecordAtomicApplyAttemptV1(
     deps,
     binding,
-    generationClient,
-    client,
-    facts,
-    prepared,
-    update,
-    exactNext,
-    exactPrior,
-    now,
-  });
-  if (dispatch.status === 'complete') return dispatch.settlement;
-  const settlement = transferToRecovery(
-    binding,
-    dispatch.prepared,
-    exactPrior,
-    exactNext,
-    dispatch.retainedBeforePostRead,
-    dispatch.cause,
     registerRecovery,
-    deps.consumer,
     facts,
     now,
-  );
-  recoveryOwnsReservation = true;
-  return settlement;
-  } finally {
-    if (!recoveryOwnsReservation) deps.consumer.release(facts);
-  }
+  ).execute();
 }
 
 type SystemRecordDispatchPhaseV1 =
@@ -347,132 +285,6 @@ type SystemRecordDispatchPhaseV1 =
       retainedBeforePostRead: number;
       cause: unknown;
     }>;
-
-async function dispatchSystemRecordConditionalApplyV1(input: Readonly<{
-  deps: SystemRecordAtomicApplyExecutorDepsV1;
-  binding: SystemRecordLaneExecutionBindingV1;
-  generationClient: SystemRecordAtomicApplyHttpClientV1;
-  client: SystemRecordAtomicApplyHttpClientV1;
-  facts: SystemRecordVerifiedReplacementFactsV1;
-  prepared: SystemRecordActiveReplacementReadyV1;
-  update: ReturnType<typeof buildSystemRecordConditionalApplyUpdateV1>;
-  exactNext: ExactMaterializationV1;
-  exactPrior: ExactMaterializationV1;
-  now: () => number;
-}>): Promise<SystemRecordDispatchPhaseV1> {
-  const prepared = input.prepared;
-  if (
-    input.facts.admittedDeadlineMs - input.now() <
-    SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
-  ) {
-    return completeDispatch(
-      noMutation({ outcome: 'deferred', reason: 'insufficient-apply-budget' }),
-    );
-  }
-  if (
-    input.deps.resolveClient(input.binding) !== input.generationClient ||
-    input.client.isDestroyed ||
-    input.client.childGeneration !== input.binding.childGeneration
-  ) {
-    return completeDispatch(
-      noMutation({ outcome: 'deferred', reason: 'generation-changed' }),
-    );
-  }
-  const updateTimeout = boundedApplyTimeout(input.facts.admittedDeadlineMs, input.now);
-  if (updateTimeout === null) {
-    return completeDispatch(
-      noMutation({ outcome: 'deferred', reason: 'insufficient-apply-budget' }),
-    );
-  }
-
-  const retainedBeforePostRead = retainedPreparationBytes(
-    input.update.sparql,
-    input.exactNext,
-    input.exactPrior,
-  );
-  let updateFailure: unknown = null;
-  try {
-    const response = await input.client.post(
-      input.deps.updateEndpoint,
-      SPARQL_UPDATE_CONTENT_TYPE,
-      input.update.sparql,
-      updateTimeout,
-      undefined,
-      {
-        maxRequestBytes: SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
-        maxResponseBytes: UPDATE_RESPONSE_BYTES_V1,
-      },
-    );
-    if (response.status < 200 || response.status >= 300) {
-      updateFailure = new Error(`system-record apply failed with HTTP ${response.status}`);
-    }
-  } catch (error) {
-    updateFailure = error;
-  }
-
-  if (
-    input.deps.resolveClient(input.binding) !== input.generationClient ||
-    input.client.isDestroyed ||
-    input.client.childGeneration !== input.binding.childGeneration
-  ) {
-    updateFailure ??= new Error('managed child generation changed after apply dispatch');
-  } else {
-    try {
-      const observed = await readExactMaterialization(
-        input.client,
-        input.deps.queryEndpoint,
-        input.exactNext,
-        input.facts.admittedDeadlineMs,
-        input.now,
-        undefined,
-        (observedBytes) => replacePreparedCharge(
-          input.deps.consumer,
-          input.facts,
-          retainedBeforePostRead + observedBytes,
-        ),
-      );
-      if (
-        input.deps.resolveClient(input.binding) !== input.generationClient ||
-        input.client.isDestroyed ||
-        input.client.childGeneration !== input.binding.childGeneration
-      ) {
-        updateFailure ??= new Error(
-          'managed child generation changed during final post-read',
-        );
-      } else if (matchesExact(observed, input.exactNext)) {
-        return completeDispatch(Object.freeze({
-          settlement: 'settled',
-          outcome: Object.freeze({
-            outcome: 'applied',
-            stateRevision: prepared.plan.success.stateRevision,
-            appliedStateDigest: prepared.plan.success.appliedStateDigest,
-          }),
-        }));
-      } else if (updateFailure === null && matchesExact(observed, input.exactPrior)) {
-        return completeDispatch(noMutation({ outcome: 'deferred', reason: 'state-changed' }));
-      } else {
-        updateFailure ??= new Error(
-          'system-record post-read matched neither prior nor next state',
-        );
-      }
-    } catch (error) {
-      updateFailure ??= error;
-    }
-  }
-
-  return Object.freeze({
-    status: 'uncertain',
-    prepared,
-    retainedBeforePostRead,
-    cause: updateFailure,
-  });
-}
-
-function completeDispatch(
-  settlement: SystemRecordAtomicApplySettlementV1,
-): SystemRecordDispatchPhaseV1 {
-  return Object.freeze({ status: 'complete', settlement });
-}
 
 interface SystemRecordPriorInspectionPhaseV1 {
   readonly snapshot: SystemRecordAppliedSnapshotV1;
@@ -492,191 +304,348 @@ type SystemRecordDispatchPreparationPhaseV1 =
       exactPrior: ExactMaterializationV1;
     }>;
 
-async function prepareSystemRecordDispatchV1(input: Readonly<{
-  client: SystemRecordAtomicApplyHttpClientV1;
-  queryEndpoint: string;
-  consumer: SystemRecordVerifiedReplacementConsumerV1;
-  facts: SystemRecordVerifiedReplacementFactsV1;
-  binding: SystemRecordLaneExecutionBindingV1;
-  inspectionDeadlineMs: number;
-  inspection: SystemRecordPriorInspectionPhaseV1;
-  now: () => number;
-}>): Promise<SystemRecordDispatchPreparationPhaseV1> {
-  let derived: ReturnType<typeof deriveSystemRecordActiveReplacementV1>;
-  try {
-    derived = deriveSystemRecordActiveReplacementV1(Object.freeze({
-      facts: input.facts,
-      snapshot: input.inspection.snapshot,
-      observedRootClaimQuads: input.inspection.rootClaimQuads,
-    }));
-  } catch {
-    return completePreparation(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
-  }
-  if (derived.outcome !== 'ready' && derived.outcome !== 'already-applied') {
-    return completePreparation(noMutation(mapZeroWrite(derived)));
-  }
-  assertAuthenticSystemRecordActiveReplacementCompleteV1(derived);
+/** Owns one admitted attempt from reserved facts through release or recovery transfer. */
+class SystemRecordAtomicApplyAttemptV1 {
+  private recoveryOwnsReservation = false;
 
-  let update: ReturnType<typeof buildSystemRecordConditionalApplyUpdateV1>;
-  try {
-    update = buildSystemRecordConditionalApplyUpdateV1(
-      derived,
-      (bytes) => replacePreparedCharge(input.consumer, input.facts, bytes),
-    );
-    assertCompletePriorBinding(
-      derived,
-      input.inspection.snapshot,
-      input.inspection.rootClaimQuads,
-    );
-  } catch {
-    return completePreparation(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
-  }
-  const exactNext = exactMaterialization(derived, update.subjectUnion, input.binding.mode);
-  try {
-    replacePreparedCharge(
-      input.consumer,
-      input.facts,
-      retainedPreparationBytes(update.sparql, exactNext),
-    );
-  } catch {
-    return completePreparation(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
+  constructor(
+    private readonly deps: SystemRecordAtomicApplyExecutorDepsV1,
+    private readonly binding: SystemRecordLaneExecutionBindingV1,
+    private readonly registerRecovery: SystemRecordAtomicRecoveryRegistrarV1,
+    private readonly facts: SystemRecordVerifiedReplacementFactsV1,
+    private readonly now: () => number,
+  ) {}
+
+  async execute(): Promise<SystemRecordAtomicApplySettlementV1> {
+    try {
+      const generationClient = this.deps.resolveClient(this.binding);
+      if (generationClient === null || generationClient.isDestroyed
+          || generationClient.childGeneration !== this.binding.childGeneration) {
+        return noMutation({ outcome: 'capability-lost' });
+      }
+      const client = accountedClient(generationClient, this.deps.consumer, this.facts);
+      const inspectionDeadlineMs = Math.min(
+        this.facts.admittedDeadlineMs,
+        this.now() + SYSTEM_RECORD_INSPECTION_TIMEOUT_MS,
+      );
+
+      let inspection: SystemRecordPriorInspectionPhaseV1;
+      try {
+        inspection = await this.inspectPriorState(client, inspectionDeadlineMs);
+      } catch (error) {
+        return noMutation({ outcome: 'deferred', reason: classifyInspectionFailure(error) });
+      }
+      const preparation = await this.prepareDispatch(client, inspectionDeadlineMs, inspection);
+      if (preparation.status === 'complete') return preparation.settlement;
+
+      const dispatch = await this.dispatch(generationClient, client, preparation);
+      if (dispatch.status === 'complete') return dispatch.settlement;
+      const settlement = transferToRecovery(
+        this.binding,
+        dispatch.prepared,
+        preparation.exactPrior,
+        preparation.exactNext,
+        dispatch.retainedBeforePostRead,
+        dispatch.cause,
+        this.registerRecovery,
+        this.deps.consumer,
+        this.facts,
+        this.now,
+      );
+      this.recoveryOwnsReservation = true;
+      return settlement;
+    } finally {
+      if (!this.recoveryOwnsReservation) this.deps.consumer.release(this.facts);
+    }
   }
 
-  let exactPrior: ExactMaterializationV1;
-  try {
-    const priorReservedSubjects = relevantReservedSubjects(derived);
-    const priorReservedQuads = canonicalQuads([
-      ...input.inspection.snapshot.previousReservedQuads,
-      ...input.inspection.rootClaimQuads,
-    ]);
-    exactPrior = Object.freeze({
-      reservedSubjects: priorReservedSubjects,
-      reservedQuads: priorReservedQuads,
-      projectionSubjects: update.subjectUnion,
-      projectionQuads: await readProjection(
-        input.client,
-        input.queryEndpoint,
-        input.binding.mode,
-        update.subjectUnion,
-        boundedInspectionTimeout(input.inspectionDeadlineMs, input.now),
-        undefined,
-        (quads) => replacePreparedCharge(
-          input.consumer,
-          input.facts,
-          retainedPreparationBytes(update.sparql, exactNext, Object.freeze({
-            reservedSubjects: priorReservedSubjects,
-            reservedQuads: priorReservedQuads,
-            projectionSubjects: update.subjectUnion,
-            projectionQuads: quads,
-            mode: input.binding.mode,
-          })),
-        ),
-      ),
-      mode: input.binding.mode,
+  private async inspectPriorState(
+    client: SystemRecordAtomicApplyHttpClientV1,
+    inspectionDeadlineMs: number,
+  ): Promise<SystemRecordPriorInspectionPhaseV1> {
+    const stableKeyHash = computeSystemRecordStableKeyHashV1(
+      this.facts.networkId,
+      this.facts.head.peerId,
+    );
+    let retainedInitialBytes = 0;
+    const initialQuads = await readReserved(
+      client,
+      this.deps.queryEndpoint,
+      fixedInitialSubjects(this.facts.networkId, stableKeyHash),
+      boundedInspectionTimeout(inspectionDeadlineMs, this.now),
+      undefined,
+      (quads) => {
+        retainedInitialBytes = retainedSystemRecordInspectionQuadsBytesV1(quads);
+        replacePreparedCharge(this.deps.consumer, this.facts, retainedInitialBytes);
+      },
+    );
+    const snapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: this.facts.networkId,
+      stableKeyHash,
+      materializationEpoch: this.facts.materializationEpoch,
+      quads: initialQuads,
     });
-    replacePreparedCharge(
-      input.consumer,
-      input.facts,
-      retainedPreparationBytes(update.sparql, exactNext, exactPrior),
+    const rootClaimQuads = await readReserved(
+      client,
+      this.deps.queryEndpoint,
+      rootClaimSubjects(this.facts, snapshot),
+      boundedInspectionTimeout(inspectionDeadlineMs, this.now),
+      undefined,
+      (quads) => replacePreparedCharge(
+        this.deps.consumer,
+        this.facts,
+        retainedInitialBytes + retainedSystemRecordInspectionQuadsBytesV1(quads),
+      ),
     );
-  } catch (error) {
-    return completePreparation(noMutation({
-      outcome: 'deferred',
-      reason: classifyInspectionFailure(error),
-    }));
+    return Object.freeze({ snapshot, rootClaimQuads });
   }
 
-  try {
-    if (!matchesProjectionSnapshot(
-      input.inspection.snapshot,
-      exactPrior.projectionQuads,
-      input.binding.mode,
-    )) {
-      return completePreparation(
+  private async prepareDispatch(
+    client: SystemRecordAtomicApplyHttpClientV1,
+    inspectionDeadlineMs: number,
+    inspection: SystemRecordPriorInspectionPhaseV1,
+  ): Promise<SystemRecordDispatchPreparationPhaseV1> {
+    let derived: ReturnType<typeof deriveSystemRecordActiveReplacementV1>;
+    try {
+      derived = deriveSystemRecordActiveReplacementV1(Object.freeze({
+        facts: this.facts,
+        snapshot: inspection.snapshot,
+        observedRootClaimQuads: inspection.rootClaimQuads,
+      }));
+    } catch {
+      return this.completePreparation(
         noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
       );
     }
-  } catch {
-    return completePreparation(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
-  }
-  if (matchesExact(exactPrior, exactNext)) {
-    return completePreparation(noMutation({
-      outcome: 'already-applied',
-      stateRevision: derived.plan.success.stateRevision,
-      appliedStateDigest: derived.plan.success.appliedStateDigest,
-    }));
-  }
-  if (derived.outcome !== 'ready') {
-    return completePreparation(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
-  }
-  return Object.freeze({
-    status: 'ready',
-    prepared: derived,
-    update,
-    exactNext,
-    exactPrior,
-  });
-}
+    if (derived.outcome !== 'ready' && derived.outcome !== 'already-applied') {
+      return this.completePreparation(noMutation(mapZeroWrite(derived)));
+    }
+    assertAuthenticSystemRecordActiveReplacementCompleteV1(derived);
 
-function completePreparation(
-  settlement: SystemRecordAtomicApplySettlementV1,
-): SystemRecordDispatchPreparationPhaseV1 {
-  return Object.freeze({ status: 'complete', settlement });
-}
+    let update: ReturnType<typeof buildSystemRecordConditionalApplyUpdateV1>;
+    try {
+      update = buildSystemRecordConditionalApplyUpdateV1(
+        derived,
+        (bytes) => replacePreparedCharge(this.deps.consumer, this.facts, bytes),
+      );
+      assertCompletePriorBinding(derived, inspection.snapshot, inspection.rootClaimQuads);
+    } catch {
+      return this.completePreparation(
+        noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
+      );
+    }
+    const exactNext = exactMaterialization(derived, update.subjectUnion, this.binding.mode);
+    try {
+      replacePreparedCharge(
+        this.deps.consumer,
+        this.facts,
+        retainedPreparationBytes(update.sparql, exactNext),
+      );
+    } catch {
+      return this.completePreparation(
+        noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
+      );
+    }
 
-async function inspectSystemRecordPriorStateV1(input: Readonly<{
-  client: SystemRecordAtomicApplyHttpClientV1;
-  queryEndpoint: string;
-  consumer: SystemRecordVerifiedReplacementConsumerV1;
-  facts: SystemRecordVerifiedReplacementFactsV1;
-  inspectionDeadlineMs: number;
-  now: () => number;
-}>): Promise<SystemRecordPriorInspectionPhaseV1> {
-  const stableKeyHash = computeSystemRecordStableKeyHashV1(
-    input.facts.networkId,
-    input.facts.head.peerId,
-  );
-  let retainedInitialBytes = 0;
-  const initialQuads = await readReserved(
-    input.client,
-    input.queryEndpoint,
-    fixedInitialSubjects(input.facts.networkId, stableKeyHash),
-    boundedInspectionTimeout(input.inspectionDeadlineMs, input.now),
-    undefined,
-    (quads) => {
-      retainedInitialBytes = retainedSystemRecordInspectionQuadsBytesV1(quads);
-      replacePreparedCharge(input.consumer, input.facts, retainedInitialBytes);
-    },
-  );
-  const snapshot = decodeSystemRecordAppliedSnapshotV1({
-    networkId: input.facts.networkId,
-    stableKeyHash,
-    materializationEpoch: input.facts.materializationEpoch,
-    quads: initialQuads,
-  });
-  const rootClaimQuads = await readReserved(
-    input.client,
-    input.queryEndpoint,
-    rootClaimSubjects(input.facts, snapshot),
-    boundedInspectionTimeout(input.inspectionDeadlineMs, input.now),
-    undefined,
-    (quads) => replacePreparedCharge(
-      input.consumer,
-      input.facts,
-      retainedInitialBytes + retainedSystemRecordInspectionQuadsBytesV1(quads),
-    ),
-  );
-  return Object.freeze({ snapshot, rootClaimQuads });
+    let exactPrior: ExactMaterializationV1;
+    try {
+      const priorReservedSubjects = relevantReservedSubjects(derived);
+      const priorReservedQuads = canonicalQuads([
+        ...inspection.snapshot.previousReservedQuads,
+        ...inspection.rootClaimQuads,
+      ]);
+      exactPrior = Object.freeze({
+        reservedSubjects: priorReservedSubjects,
+        reservedQuads: priorReservedQuads,
+        projectionSubjects: update.subjectUnion,
+        projectionQuads: await readProjection(
+          client,
+          this.deps.queryEndpoint,
+          this.binding.mode,
+          update.subjectUnion,
+          boundedInspectionTimeout(inspectionDeadlineMs, this.now),
+          undefined,
+          (quads) => replacePreparedCharge(
+            this.deps.consumer,
+            this.facts,
+            retainedPreparationBytes(update.sparql, exactNext, Object.freeze({
+              reservedSubjects: priorReservedSubjects,
+              reservedQuads: priorReservedQuads,
+              projectionSubjects: update.subjectUnion,
+              projectionQuads: quads,
+              mode: this.binding.mode,
+            })),
+          ),
+        ),
+        mode: this.binding.mode,
+      });
+      replacePreparedCharge(
+        this.deps.consumer,
+        this.facts,
+        retainedPreparationBytes(update.sparql, exactNext, exactPrior),
+      );
+    } catch (error) {
+      return this.completePreparation(noMutation({
+        outcome: 'deferred',
+        reason: classifyInspectionFailure(error),
+      }));
+    }
+
+    try {
+      if (!matchesProjectionSnapshot(
+        inspection.snapshot,
+        exactPrior.projectionQuads,
+        this.binding.mode,
+      )) {
+        return this.completePreparation(
+          noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
+        );
+      }
+    } catch {
+      return this.completePreparation(
+        noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
+      );
+    }
+    if (matchesExact(exactPrior, exactNext)) {
+      return this.completePreparation(noMutation({
+        outcome: 'already-applied',
+        stateRevision: derived.plan.success.stateRevision,
+        appliedStateDigest: derived.plan.success.appliedStateDigest,
+      }));
+    }
+    if (derived.outcome !== 'ready') {
+      return this.completePreparation(
+        noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
+      );
+    }
+    return Object.freeze({
+      status: 'ready',
+      prepared: derived,
+      update,
+      exactNext,
+      exactPrior,
+    });
+  }
+
+  private async dispatch(
+    generationClient: SystemRecordAtomicApplyHttpClientV1,
+    client: SystemRecordAtomicApplyHttpClientV1,
+    preparation: Extract<SystemRecordDispatchPreparationPhaseV1, { status: 'ready' }>,
+  ): Promise<SystemRecordDispatchPhaseV1> {
+    const { prepared, update, exactNext, exactPrior } = preparation;
+    if (
+      this.facts.admittedDeadlineMs - this.now() < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
+    ) {
+      return this.completeDispatch(
+        noMutation({ outcome: 'deferred', reason: 'insufficient-apply-budget' }),
+      );
+    }
+    if (
+      this.deps.resolveClient(this.binding) !== generationClient ||
+      client.isDestroyed ||
+      client.childGeneration !== this.binding.childGeneration
+    ) {
+      return this.completeDispatch(
+        noMutation({ outcome: 'deferred', reason: 'generation-changed' }),
+      );
+    }
+    const updateTimeout = boundedApplyTimeout(this.facts.admittedDeadlineMs, this.now);
+    if (updateTimeout === null) {
+      return this.completeDispatch(
+        noMutation({ outcome: 'deferred', reason: 'insufficient-apply-budget' }),
+      );
+    }
+
+    const retainedBeforePostRead = retainedPreparationBytes(update.sparql, exactNext, exactPrior);
+    let updateFailure: unknown = null;
+    try {
+      const response = await client.post(
+        this.deps.updateEndpoint,
+        SPARQL_UPDATE_CONTENT_TYPE,
+        update.sparql,
+        updateTimeout,
+        undefined,
+        {
+          maxRequestBytes: SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
+          maxResponseBytes: UPDATE_RESPONSE_BYTES_V1,
+        },
+      );
+      if (response.status < 200 || response.status >= 300) {
+        updateFailure = new Error(`system-record apply failed with HTTP ${response.status}`);
+      }
+    } catch (error) {
+      updateFailure = error;
+    }
+
+    if (
+      this.deps.resolveClient(this.binding) !== generationClient ||
+      client.isDestroyed ||
+      client.childGeneration !== this.binding.childGeneration
+    ) {
+      updateFailure ??= new Error('managed child generation changed after apply dispatch');
+    } else {
+      try {
+        const observed = await readExactMaterialization(
+          client,
+          this.deps.queryEndpoint,
+          exactNext,
+          this.facts.admittedDeadlineMs,
+          this.now,
+          undefined,
+          (observedBytes) => replacePreparedCharge(
+            this.deps.consumer,
+            this.facts,
+            retainedBeforePostRead + observedBytes,
+          ),
+        );
+        if (
+          this.deps.resolveClient(this.binding) !== generationClient ||
+          client.isDestroyed ||
+          client.childGeneration !== this.binding.childGeneration
+        ) {
+          updateFailure ??= new Error('managed child generation changed during final post-read');
+        } else if (matchesExact(observed, exactNext)) {
+          return this.completeDispatch(Object.freeze({
+            settlement: 'settled',
+            outcome: Object.freeze({
+              outcome: 'applied',
+              stateRevision: prepared.plan.success.stateRevision,
+              appliedStateDigest: prepared.plan.success.appliedStateDigest,
+            }),
+          }));
+        } else if (updateFailure === null && matchesExact(observed, exactPrior)) {
+          return this.completeDispatch(
+            noMutation({ outcome: 'deferred', reason: 'state-changed' }),
+          );
+        } else {
+          updateFailure ??= new Error(
+            'system-record post-read matched neither prior nor next state',
+          );
+        }
+      } catch (error) {
+        updateFailure ??= error;
+      }
+    }
+
+    return Object.freeze({
+      status: 'uncertain',
+      prepared,
+      retainedBeforePostRead,
+      cause: updateFailure,
+    });
+  }
+
+  private completeDispatch(
+    settlement: SystemRecordAtomicApplySettlementV1,
+  ): SystemRecordDispatchPhaseV1 {
+    return Object.freeze({ status: 'complete', settlement });
+  }
+
+  private completePreparation(
+    settlement: SystemRecordAtomicApplySettlementV1,
+  ): SystemRecordDispatchPreparationPhaseV1 {
+    return Object.freeze({ status: 'complete', settlement });
+  }
 }
 
 function discardUnconsumedProof(
