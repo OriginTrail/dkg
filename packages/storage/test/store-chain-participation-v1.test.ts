@@ -2,14 +2,15 @@ import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
-// Adapter registration is a side effect of importing the adapter module.
-import '../src/adapters/oxigraph.js';
-
 import { ChangelogStore } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
 import { CACHED_READ_GATE_V1, asCachedReadGateV1 } from '../src/cached-read-gate-v1.js';
-import { createTripleStore, type TripleStore } from '../src/triple-store.js';
+import {
+  createTripleStore,
+  registerTripleStoreAdapter,
+  type TripleStore,
+} from '../src/triple-store.js';
 
 /**
  * Every first-party storage decorator passes capability discovery through.
@@ -38,6 +39,9 @@ import { createTripleStore, type TripleStore } from '../src/triple-store.js';
  * ESLint configuration nor a lint script for this package. That remains open as
  * #2168.
  */
+/** Registered per-run so the composed chain terminates in an observable probe. */
+const PROBE_BACKEND = 'store-chain-participation-probe';
+
 const BLOB_OPTIONS = {
   blobDir: join(process.cwd(), 'test', '.tmp-unused'),
   thresholdBytes: 1_000_000,
@@ -102,31 +106,29 @@ describe('first-party decorators pass capability discovery through', () => {
     expect(asCachedReadGateV1(unregistered)).toBeNull();
   });
 
-  it('covers exactly the decorators createTripleStore composes', async () => {
-    // Tied to the FACTORY, not to itself. The previous version asserted the
-    // inventory against a literal copy of its own contents, so it could only
-    // fail if someone edited both — it would not have noticed a fourth
-    // decorator entering the chain, which is the thing it claimed to catch.
+  it('the PRODUCTION resolver reaches the backend through the whole factory chain', async () => {
+    // End-to-end, and deliberately NOT a reimplementation of traversal.
     //
-    // This builds the real composition with every decorator enabled and walks
-    // it, so a new wrapper in `createTripleStore` fails here by name and points
-    // at the inventory above.
+    // An earlier version walked `.innerStore ?? .inner` itself to enumerate the
+    // chain — reaching through private field names, in a suite whose subject is
+    // the abstraction that exists so nobody has to do that. It also only worked
+    // because today's decorators happen to keep a runtime-visible `inner`.
+    //
+    // This instead registers a backend that IS the probe, builds the real
+    // composition with every decorator enabled, and asks the production
+    // resolver. Any wrapper anywhere in that chain that fails to participate
+    // breaks resolution, whatever it names its fields.
+    const probe = probeStore();
+    registerTripleStoreAdapter(PROBE_BACKEND, async () => probe);
+
     const store = await createTripleStore({
-      backend: 'oxigraph',
+      backend: PROBE_BACKEND,
       changelog: { enabled: true },
       graphSetIndex: true,
       largeLiteralStorage: { enabled: true, directory: BLOB_OPTIONS.blobDir },
     });
 
-    const composed: string[] = [];
-    for (let node: unknown = store; node; ) {
-      const current = node as { innerStore?: unknown; inner?: unknown };
-      const next = current.innerStore ?? current.inner;
-      if (next) composed.push(Object.getPrototypeOf(current).constructor.name);
-      node = next;
-    }
-
-    expect(composed.sort()).toEqual(DECORATORS.map(({ name }) => name).sort());
+    expect(asCachedReadGateV1(store)).toBe(probe);
 
     await store.close().catch(() => undefined);
   });
