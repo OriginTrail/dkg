@@ -1,10 +1,9 @@
 import type { ManagedOxigraphOwnershipLeaseV1 } from '../managed-oxigraph-ownership-v1-internal.js';
 import {
   createSystemRecordAtomicApplyExecutorV1,
-  type SystemRecordAtomicApplyExecutorDepsV1,
-  type SystemRecordAtomicApplyExecutorV1,
   type SystemRecordAtomicApplyHttpClientV1,
 } from '../system-record-atomic-apply-executor-v1-internal.js';
+import type { SystemRecordAtomicApplyProbeV1 } from '../system-record-atomic-apply-probe-v1-internal.js';
 import {
   createSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
@@ -19,6 +18,7 @@ import { resolveOwnedSystemRecordRuntimeV1 } from '../system-record-runtime-v1-i
 export interface ManagedSystemRecordCoordinatorOptionsV1 {
   readonly lease: ManagedOxigraphOwnershipLeaseV1;
   readonly handoff: SystemRecordChildHandoffV1;
+  readonly atomicApplyProbe: SystemRecordAtomicApplyProbeV1 | null;
   readonly storeId: object;
   readonly queryEndpoint: string;
   readonly updateEndpoint: string;
@@ -32,9 +32,6 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
   readonly barrier: SystemRecordLaneBarrierV1;
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;
-  readonly createAtomicExecutor?: (
-    deps: SystemRecordAtomicApplyExecutorDepsV1,
-  ) => SystemRecordAtomicApplyExecutorV1;
 }
 
 /** Compose the one managed-store lane from adapter-owned endpoints and ownership. */
@@ -42,21 +39,34 @@ export function createManagedSystemRecordCoordinatorV1(
   options: ManagedSystemRecordCoordinatorOptionsV1,
 ): SystemRecordLaneControllerV1 {
   const { consumer } = resolveOwnedSystemRecordRuntimeV1(options.lease);
-  const atomicExecutor = (options.createAtomicExecutor ?? createSystemRecordAtomicApplyExecutorV1)({
+  const atomicExecutor = createSystemRecordAtomicApplyExecutorV1({
     consumer,
     storeId: options.storeId,
     queryEndpoint: options.queryEndpoint,
     updateEndpoint: options.updateEndpoint,
     resolveClient: options.resolveClient,
   });
+  const settlementExecutor = options.atomicApplyProbe === null
+    ? atomicExecutor
+    : Object.freeze({
+        discard: atomicExecutor.discard,
+        execute: (
+          proof: unknown,
+          binding: SystemRecordLaneExecutionBindingV1,
+          registerRecovery: Parameters<typeof atomicExecutor.execute>[2],
+        ) => {
+          options.atomicApplyProbe!.observe(binding);
+          return atomicExecutor.execute(proof, binding, registerRecovery);
+        },
+      });
   return createSystemRecordLaneControllerV1({
     lease: options.lease,
     handoff: options.handoff,
     executor: {
       applyVerified: options.applyLegacy,
-      discardVerified: (proof) => atomicExecutor.discard(proof),
+      discardVerified: (proof) => settlementExecutor.discard(proof),
       applyVerifiedSettlementBound: (proof, binding, registerRecovery) =>
-        atomicExecutor.execute(proof, binding, registerRecovery),
+        settlementExecutor.execute(proof, binding, registerRecovery),
     },
     barrier: options.barrier,
     typedBarrier: options.typedBarrier,

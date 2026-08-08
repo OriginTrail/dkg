@@ -9,6 +9,10 @@ import {
   managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
+import {
+  attachSystemRecordAtomicApplyProbeForTestsV1,
+  extractSystemRecordAtomicApplyProbeV1,
+} from '../src/system-record-atomic-apply-probe-v1-internal.js';
 
 const QUERY_ENDPOINT = 'http://127.0.0.1:7878/query';
 const UPDATE_ENDPOINT = 'http://127.0.0.1:7878/update';
@@ -73,6 +77,31 @@ describe('managed Oxigraph ownership lease V1', () => {
       const persisted = JSON.parse(JSON.stringify(options)) as Record<string, unknown>;
       expect(Object.keys(persisted)).toEqual(['queryEndpoint', 'managedByDkg']);
       expect(extractManagedOxigraphLeaseV1(persisted)).toBeNull();
+    });
+
+    it('binds an atomic apply probe to one authentic, non-persistable lease', () => {
+      const first = createOwnership();
+      const second = createOwnership();
+      const probe = Object.freeze({ observe: () => undefined });
+      const options = attachSystemRecordAtomicApplyProbeForTestsV1(
+        attachManagedOxigraphLeaseV1({}, first.lease),
+        first.lease,
+        probe,
+      );
+
+      expect(extractSystemRecordAtomicApplyProbeV1(options, first.lease)).toBe(probe);
+      expect(extractSystemRecordAtomicApplyProbeV1(options, second.lease)).toBeNull();
+      expect(
+        extractSystemRecordAtomicApplyProbeV1(
+          JSON.parse(JSON.stringify(options)),
+          first.lease,
+        ),
+      ).toBeNull();
+      expect(() => attachSystemRecordAtomicApplyProbeForTestsV1(
+        {},
+        Object.freeze(Object.create(null)) as never,
+        probe,
+      )).toThrow(/authentic ownership lease/);
     });
 
     it('cannot be reconstructed by copying, freezing or cloning the handle', () => {

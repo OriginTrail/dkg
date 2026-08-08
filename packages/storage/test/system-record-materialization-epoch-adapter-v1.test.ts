@@ -1,57 +1,20 @@
 import { createServer, type Server } from 'node:http';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  SparqlHttpStore,
-  type SparqlHttpStoreOptions,
-} from '../src/adapters/sparql-http.js';
+import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../src/system-record-materializer-v1.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
-import type {
-  SystemRecordAtomicApplyExecutorDepsV1,
-  SystemRecordAtomicApplyExecutorV1,
-} from '../src/system-record-atomic-apply-executor-v1-internal.js';
+import { attachSystemRecordAtomicApplyProbeForTestsV1 } from '../src/system-record-atomic-apply-probe-v1-internal.js';
 import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import {
   makeAuthenticActiveReplacementIssueV1,
   SYSTEM_RECORD_FIXTURE_NETWORK,
 } from './helpers/system-record-active-replacement-fixture.js';
-
-class InstrumentedSparqlHttpStore extends SparqlHttpStore {
-  #observedBinding: SystemRecordLaneExecutionBindingV1 | undefined;
-
-  constructor(
-    options: SparqlHttpStoreOptions,
-    private readonly issueProof: (binding: SystemRecordLaneExecutionBindingV1) => unknown,
-  ) {
-    super(options);
-  }
-
-  protected override buildSystemRecordAtomicApplyExecutorV1(
-    deps: SystemRecordAtomicApplyExecutorDepsV1,
-  ): SystemRecordAtomicApplyExecutorV1 {
-    const executor = super.buildSystemRecordAtomicApplyExecutorV1(deps);
-    return Object.freeze({
-      discard: executor.discard,
-      execute: (proof, binding, registerRecovery) => {
-        this.#observedBinding = binding;
-        return executor.execute(proof, binding, registerRecovery);
-      },
-    });
-  }
-
-  issueProofForObservedBinding(): unknown {
-    if (this.#observedBinding === undefined) {
-      throw new Error('atomic executor has not observed a lane binding');
-    }
-    return this.issueProof(this.#observedBinding);
-  }
-}
 
 let server: Server;
 let queryEndpoint: string;
@@ -119,7 +82,8 @@ describe('sparql-http managed epoch handoff', () => {
     const resultBarrier = vi.spyOn(externalStorePriorityScheduler, 'runTypedControlBarrier');
     const ownership = createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint);
     ownership.bindReadyGeneration();
-    const options = attachManagedOxigraphLeaseV1(
+    let observedBinding: SystemRecordLaneExecutionBindingV1 | undefined;
+    const managedOptions = attachManagedOxigraphLeaseV1(
       { queryEndpoint, updateEndpoint },
       ownership.lease,
       {
@@ -127,12 +91,17 @@ describe('sparql-http managed epoch handoff', () => {
         startAndProveCleanGeneration: async () => undefined,
       },
     );
+    const options = attachSystemRecordAtomicApplyProbeForTestsV1(
+      managedOptions,
+      ownership.lease,
+      {
+        observe: (binding) => {
+          observedBinding = binding;
+        },
+      },
+    );
     const runtime = resolveOwnedSystemRecordRuntimeV1(ownership.lease);
-    const store = new InstrumentedSparqlHttpStore(options, (binding) =>
-      runtime.issuer.issueActive(makeAuthenticActiveReplacementIssueV1(
-        binding,
-        Math.ceil(performance.now() + 10_000),
-      )));
+    const store = new SparqlHttpStore(options);
     const controller = store.getSystemRecordLaneControllerV1();
     expect(controller).toBeDefined();
 
@@ -171,7 +140,11 @@ describe('sparql-http managed epoch handoff', () => {
     });
     expect(requests).toHaveLength(beforeForgedApply);
 
-    const proof = store.issueProofForObservedBinding();
+    if (observedBinding === undefined) throw new Error('atomic executor did not observe a binding');
+    const proof = runtime.issuer.issueActive(makeAuthenticActiveReplacementIssueV1(
+      observedBinding,
+      Math.ceil(performance.now() + 10_000),
+    ));
     const beforeAuthenticApply = requests.length;
     await expect(second.applyVerified(proof)).resolves.toEqual({
       outcome: 'deferred',
