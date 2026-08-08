@@ -418,7 +418,7 @@ import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
-import { buildMemoryToolContext } from './memory-tool-context.js';
+import { buildChatMemoryStack } from './memory-tool-context.js';
 import {
   createPromoteWorkerSupervisor,
   type PromoteWorkerConfig,
@@ -3207,34 +3207,16 @@ export async function runDaemonInner(
     }
   });
 
-  // The chat-memory identifiers are declared ONCE and drive both the manager
-  // and the legacy-migration policy, so the assertion allowed to storage-
-  // upgrade is always the assertion the manager actually writes to.
-  const chatMemoryIds = {
-    contextGraphId: AGENT_CONTEXT_GRAPH,
-    assertionName: CHAT_TURNS_ASSERTION,
-  };
-  // The chat-memory glue (query/create/write surface + the legacy chat-WM
-  // migration behind `createAssertion`) lives in `buildMemoryToolContext` so
-  // the daemon-wiring contract stays unit-testable without a real agent.
-  const agentToolsContext = buildMemoryToolContext(
+  // Chat-memory tool context + manager are built as one unit so the
+  // assertion the migration policy may upgrade is by construction the
+  // assertion the manager writes to. See `resolveMemoryAgentAddress` for the
+  // write/read-URI invariant the address encodes (issue #277).
+  const { toolContext: agentToolsContext, manager: memoryManager } = buildChatMemoryStack({
     agent,
     emitMemoryGraphChanged,
-    chatMemoryIds,
-  );
-  // See `resolveMemoryAgentAddress` for the write/read-URI invariant
-  // this encodes (issue #277). The helper is exported purely so the
-  // daemon-wiring contract stays unit-testable without a real agent.
-  const memoryAgentAddress = resolveMemoryAgentAddress(agent);
-  const memoryManager = new ChatMemoryManager(
-    agentToolsContext,
-    config.llm ?? { apiKey: '' },
-    {
-      agentAddress: memoryAgentAddress,
-      contextGraphId: chatMemoryIds.contextGraphId,
-      assertionName: chatMemoryIds.assertionName,
-    },
-  );
+    llmConfig: config.llm ?? { apiKey: '' },
+    agentAddress: resolveMemoryAgentAddress(agent),
+  });
   log('Memory manager ready');
   if (config.llm) log('Memory enrichment LLM ready');
   else log('Memory enrichment LLM not configured');

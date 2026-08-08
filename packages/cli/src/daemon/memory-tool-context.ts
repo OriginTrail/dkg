@@ -20,7 +20,13 @@
  * migrate its OWN assertion rather than silently migrating the package
  * defaults (or nothing at all).
  */
-import { type MemoryToolContext } from "@origintrail-official/dkg-node-ui";
+import {
+  AGENT_CONTEXT_GRAPH,
+  CHAT_TURNS_ASSERTION,
+  ChatMemoryManager,
+  type LlmConfig,
+  type MemoryToolContext,
+} from "@origintrail-official/dkg-node-ui";
 import type { MemoryGraphChangedEvent } from "./routes/context.js";
 
 /**
@@ -153,4 +159,46 @@ export function buildMemoryToolContext(
     }) => agent.createContextGraph(opts),
     listContextGraphs: () => agent.listContextGraphs(),
   };
+}
+
+/**
+ * Build the chat-memory stack as ONE unit.
+ *
+ * The safety property this exists to hold: the assertion the migration
+ * policy may storage-upgrade is by construction the assertion
+ * `ChatMemoryManager` writes to. Wiring them separately in `runDaemonInner`
+ * left a gap where a future edit could hand one pair to the manager and
+ * another to the policy — the manager would then write assertion A while
+ * migration was permitted for assertion B, silently reinstating the #2149
+ * failure with every test still green.
+ *
+ * Declaring the identifiers here and returning them alongside both objects
+ * makes that invariant testable without booting a daemon, in the same
+ * spirit as `resolveMemoryAgentAddress`.
+ */
+export function buildChatMemoryStack(input: {
+  agent: MemoryToolContextAgent;
+  emitMemoryGraphChanged: (event: MemoryGraphChangedEvent) => void;
+  llmConfig: LlmConfig;
+  agentAddress: string;
+}): {
+  chatMemoryIds: LegacyMigrationPolicy;
+  toolContext: MemoryToolContext;
+  manager: ChatMemoryManager;
+} {
+  const chatMemoryIds: LegacyMigrationPolicy = {
+    contextGraphId: AGENT_CONTEXT_GRAPH,
+    assertionName: CHAT_TURNS_ASSERTION,
+  };
+  const toolContext = buildMemoryToolContext(
+    input.agent,
+    input.emitMemoryGraphChanged,
+    chatMemoryIds,
+  );
+  const manager = new ChatMemoryManager(toolContext, input.llmConfig, {
+    agentAddress: input.agentAddress,
+    contextGraphId: chatMemoryIds.contextGraphId,
+    assertionName: chatMemoryIds.assertionName,
+  });
+  return { chatMemoryIds, toolContext, manager };
 }

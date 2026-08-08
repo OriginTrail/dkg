@@ -14,7 +14,7 @@
  * WHICH agentAddress the daemon drives this context with.
  */
 import { describe, it, expect } from 'vitest';
-import { buildMemoryToolContext, type MemoryToolContextAgent } from '../src/daemon.js';
+import { buildMemoryToolContext, buildChatMemoryStack, type MemoryToolContextAgent } from '../src/daemon.js';
 
 const CHAT_IDS = { contextGraphId: 'agent-context', assertionName: 'chat-turns' };
 
@@ -224,5 +224,46 @@ describe('buildMemoryToolContext — daemon chat-memory glue', () => {
         counts: { triples: 1 },
       }),
     ]);
+  });
+});
+
+describe('buildChatMemoryStack — the manager and the migration policy cannot diverge', () => {
+  // The #2149 failure returns silently if the manager writes assertion A
+  // while migration is permitted for assertion B. Building both from one
+  // identifier declaration is the production safety property; this locks it
+  // at the seam `runDaemonInner` actually calls.
+  it('migrates exactly the assertion the manager is configured to write to', async () => {
+    const agent = makeAgent();
+    const { chatMemoryIds, toolContext, manager } = buildChatMemoryStack({
+      agent,
+      emitMemoryGraphChanged: () => {},
+      llmConfig: { apiKey: '' },
+      agentAddress: AGENT_OPTS.agentAddress,
+    });
+
+    // The manager reads/writes the context graph the policy names...
+    expect(manager.contextGraphId).toBe(chatMemoryIds.contextGraphId);
+
+    // ...and driving createAssertion with the manager's OWN identifiers
+    // triggers the migration. If a future edit handed different pairs to the
+    // two halves, this call would not migrate.
+    await toolContext.createAssertion(
+      manager.contextGraphId,
+      chatMemoryIds.assertionName,
+      AGENT_OPTS,
+    );
+    expect(agent.order).toEqual(['migrate', 'create']);
+    expect(agent.migrateCalls[0]?.[0]).toBe(manager.contextGraphId);
+    expect(agent.migrateCalls[0]?.[1]).toBe(chatMemoryIds.assertionName);
+  });
+
+  it('forwards the resolved agentAddress into the manager', () => {
+    const { manager } = buildChatMemoryStack({
+      agent: makeAgent(),
+      emitMemoryGraphChanged: () => {},
+      llmConfig: { apiKey: '' },
+      agentAddress: AGENT_OPTS.agentAddress,
+    });
+    expect(manager.agentAddress).toBe(AGENT_OPTS.agentAddress);
   });
 });
