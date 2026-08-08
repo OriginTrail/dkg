@@ -736,9 +736,30 @@ local `+1` authority transition and requires it to equal the currently applied h
 ordinary same-sequence version advancement never derives predecessor authority from local
 state or from a caller-authored field.
 
-Stack B2 exposes a passive controller. Merely discovering it performs no work; an
+The storage B layer ships as TWO stacks, and this section states the B-layer target
+surface rather than any single PR's contents. **Stack B2** (#2110) delivers the
+ownership, capability and lifecycle boundary: the passive controller, the
+generation-bound session, the scheduler control barrier, and the reserved-graph policy.
+Its `applyVerified` is fail-closed and dispatches nothing. **Stack B3** (#2124) adds the
+verified-replacement command construction, the bounded revalidation read, the byte
+accountant, and the full-state CAS that makes `applyVerified` real.
+
+This paragraph originally read "Stack B2" throughout, because the whole storage B layer
+was one stack when this ADR was written. Where a statement below assigns a capability to
+"Stack B2", read it as the B LAYER unless B3 is named — and note that two of them
+(the activation issuer/validator, and the producer/receiver structured consume closures)
+are in neither stack yet and belong to a later one.
+
+The B layer exposes a passive controller. Merely discovering it performs no work; an
 explicit non-serializable activation lease opens a generation-bound session. Callers
-never supply graph URIs, reserved-state quads, or local CAS values:
+never supply graph URIs, reserved-state quads, or local CAS values.
+
+This is the SHIPPED public contract — identical in B2 and B3, and `inspectAppliedState`
+is deliberately not on it. An earlier revision of this ADR listed it here, which
+described neither stack: B3 performs the bounded revalidation read INTERNALLY, as a
+step of `applyVerified` (`system-record-inspection-v1-internal.ts`), and does not export
+it. Exposing it would hand callers a second, unsequenced route to reserved state, which
+is exactly what "callers never supply graph URIs or local CAS values" exists to prevent.
 
 ```ts
 interface SystemRecordLaneControllerV1 {
@@ -746,13 +767,19 @@ interface SystemRecordLaneControllerV1 {
 }
 
 interface SystemRecordLaneSessionV1 {
-  inspectAppliedState(
-    recordKey: string,
-    proof?: VerifiedAgentProfileReplacementV1,
-    options?: QueryOptions,
-  ): Promise<SystemRecordAppliedStateInspectionV1>;
-  applyVerified(proof: VerifiedAgentProfileReplacementV1, options?: QueryOptions):
-    Promise<SystemRecordApplyOutcomeV1>;
+  readonly state: SystemRecordLaneStateV1;
+  readonly activationGeneration: string;
+  // B2: fail-closed, dispatches nothing. B3: the full-state CAS, which
+  // revalidates internally before it commits.
+  //
+  // Deliberately no `options?: QueryOptions`. An earlier draft of this ADR
+  // carried one, but neither implementation takes it: the lane owns its own
+  // sequencing through the control barrier, so a per-call timeout or priority
+  // from a caller would either be ignored or race the barrier. Shipping the
+  // parameter unused would be dead public surface that reviewers must keep
+  // re-deciding about, so the contract drops it rather than both stacks
+  // silently disagreeing with the document.
+  applyVerified(proof: VerifiedAgentProfileReplacementV1): Promise<SystemRecordApplyOutcomeV1>;
   close(mode: 'disable' | 'shutdown'): Promise<void>;
 }
 
@@ -768,9 +795,11 @@ type SystemRecordApplyOutcomeV1 =
 ```
 
 Stack B1 owns canonical limits, state/object/inventory/wire codecs, and pure
-structural/cryptographic primitives only. Stack B2 introduces the one agent-runtime
+structural/cryptographic primitives only. Stack B3 introduces the agent-runtime
 foundation used by later local producer and receiver: private proof registry/reader,
-activation issuer, 64-MiB accountant, and one live 12-MiB lease per store. Producer and
+64-MiB accountant, and one live 12-MiB lease per store. (The activation ISSUER and
+validator are in neither B2 nor B3 — `SystemRecordLaneActivationV1` is a plain
+descriptor in both — and belong to the stack that first mints activations.) Producer and
 receiver receive distinct lifecycle-bound structured consume closures that reserve,
 decode, invoke their captured verifier, register a deep immutable proof, call
 `applyVerified`, and release in `finally` unless ownership transfers to recovery. No
@@ -1266,10 +1295,10 @@ independent marginal percentile or user-supplied aggregate mode label is accepte
 budget remains above the 24-MiB/minute closure-service floor; actual average closure size
 must satisfy both gates and is remeasured rather than inferred.
 All of these values come from one exported `system-record-limits-v1.ts` consumed by
-codecs, storage accounting, and tests. Stack B2 independently enforces a 4-MiB
+codecs, storage accounting, and tests. Stack B3 independently enforces a 4-MiB
 request-body limit and an 8-MiB materializer-local retained-byte limit. It preflights
 subjects/quads/state and uses an incrementally charged encoder before constructing the
-final SPARQL string; combined array-spread/map/join copies are forbidden. Stack B2's
+final SPARQL string; combined array-spread/map/join copies are forbidden. Stack B3's
 shared agent runtime owns one live 12-MiB end-to-end lease in the 64-MiB accountant.
 The structured consume callback reserves before bundle decode, keeps proof/lease private
 through `applyVerified`, transfers builder/fetch/response charges, and releases in

@@ -51,18 +51,24 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
-import { assertNotReservedInternalGraphV1 } from '../internal-graph-policy.js';
 import {
+  assertNotReservedInternalGraphV1,
+  isInternalGraphUriV1,
+} from '../internal-graph-policy.js';
+import {
+  ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
+  isManagedOxigraphOwnershipLiveV1,
   managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from '../managed-oxigraph-ownership-v1-internal.js';
 import {
+  SystemRecordControllerRegistrationError,
   createSystemRecordLaneControllerV1,
-  disposeSystemRecordLaneControllerV1,
+  releaseSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerV1,
@@ -228,8 +234,6 @@ export class SparqlHttpStore implements TripleStore {
   private readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 | null;
   /** Lazily built so a store that is never asked for the lane allocates nothing. */
   private systemRecordLane: SystemRecordLaneControllerV1 | null | undefined;
-  /** Registered controller behind the adapter facade; disposal must use this exact identity. */
-  private systemRecordLaneOwner: SystemRecordLaneControllerV1 | null = null;
   /**
    * Ordinary mutations stay on the existing untagged path until activation
    * intent synchronously claims admission. The control barrier already waits
@@ -427,6 +431,16 @@ export class SparqlHttpStore implements TripleStore {
     // Content-Type lacks a charset parameter as ISO-8859-1 (servlet default),
     // mojibake-ing any non-ASCII character in the query. UTF-8 is what the
     // SPARQL protocol prescribes.
+    //
+    // Reads refuse whenever ownership is not LIVE — the same predicate as
+    // mutations; see `assertManagedBackendReadable`. (An earlier revision
+    // refused only on terminal ownership, and this comment outlived it.)
+    //
+    // `postQuery` is one of exactly two `fetch` sites in this adapter, and every
+    // read form funnels through it
+    // (`query`/`queryConstruct`/`hasGraph`/`countQuads`/`listGraphsDirect`), so
+    // this one site is the whole endpoint-read surface.
+    this.assertManagedBackendReadable(options?.source ?? 'query');
     const timeoutSignal = AbortSignal.timeout(this.timeout);
     const signalScope = composeAbortSignals(options?.signal, timeoutSignal);
     const signal = signalScope.signal ?? timeoutSignal;
@@ -470,6 +484,21 @@ export class SparqlHttpStore implements TripleStore {
     const guardUnboundManagedMutation = this.ownershipLease !== null
       && mutationBinding === undefined;
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
+      // AT DISPATCH, and the placement is the entire guarantee.
+      //
+      // The scheduler holds ordinary work while a control barrier is pending and
+      // releases it when the barrier settles — identically whether the barrier
+      // RESOLVED or REJECTED. So a mutation queued before a generation handoff
+      // resumes after that handoff failed, and until now nothing on this path
+      // consulted ownership: reproduced, an `INSERT DATA` went on the wire while
+      // the store's own lease already read
+      // `terminal: true, port-release-unproven`. Every fact needed to refuse was
+      // available at the dispatch instant and simply never read.
+      //
+      // Checking in `insert()`/`update()` instead would be checking at CALL
+      // time, which is before the queue — precisely the calls the review names
+      // as "queued before activation/failure" would pass it and dispatch anyway.
+      this.assertManagedBackendOwned(operation);
       const timeoutSignal = AbortSignal.timeout(this.timeout);
       const signalScope = composeAbortSignals(lifecycleSignal, timeoutSignal);
       const signal = signalScope.signal ?? timeoutSignal;
@@ -504,6 +533,82 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   /**
+   * Refuse a managed-store MUTATION whose backend we cannot prove we own.
+   *
+   * INVARIANT: same live-ownership predicate as the read guard, but checked
+   * INSIDE `postUpdate`’s scheduled work callback rather than at call time —
+   * the scheduler releases work queued before a failed generation handoff, so
+   * a write must be re-checked when it resumes, not when it was issued.
+   *
+   * A store with no lease returns immediately and pays one field read, so the
+   * default path is unchanged.
+   *
+   * This is a live READ of the lease, deliberately not a latch armed by the
+   * lane: a read has no arming order to get wrong, refuses nothing while the
+   * child is provably healthy, is self-clearing when a replacement generation
+   * binds, and also covers the ordinary child-exit window that has no lane
+   * involvement at all. Rationale and the measurements behind it are in the PR
+   * discussion and in ADR 0002; the regressions are named on the read guard.
+   */
+  /**
+   * Refuse a managed-store READ whose backend we cannot prove is ours.
+   *
+   * INVARIANT: a managed store issues no endpoint request — read or write —
+   * unless the supervisor-owned child is the proven ready listener. Same
+   * predicate as the mutation guard, checked at dispatch, zero I/O on refusal.
+   *
+   * Reads matter because a foreign answer does not stay local: assertion
+   * authorship puts a merkle root ON-CHAIN and the sync responder serves store
+   * reads TO PEERS. A non-terminal `child-exit` window is exactly when another
+   * process can take the bind, so "not ready" is not safe to serve through.
+   *
+   * Refusal here is bounded and self-clearing: it lasts until
+   * `bindReadyGeneration()` proves a replacement.
+   *
+   * Regressions: `managed-backend-ownership-dispatch-v1.test.ts` (per-reason
+   * refusal, recovery, zero-I/O) and `managed-terminal-read-through-index-v1
+   * .test.ts` (the decorator must not swallow the refusal).
+   */
+  /**
+   * Production disposal for the memoized lane controller.
+   *
+   * Cannot throw, so a caller's `close().catch(...)` can never skip it, and is
+   * idempotent because `close()` may be called twice. The identity scoping that
+   * makes this safe — releasing the global ONLY if this controller still holds
+   * it — lives in `releaseSystemRecordLaneControllerV1`, where the registration
+   * does.
+   */
+  private releaseSystemRecordLane(): void {
+    const controller = this.systemRecordLane;
+    this.systemRecordLane = null;
+    if (controller) releaseSystemRecordLaneControllerV1(controller);
+  }
+
+  private assertManagedBackendReadable(operation: string): void {
+    if (!this.ownershipLease) return;
+    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    throw new ManagedOxigraphBackendUnownedError(
+      `sparql-http.${operation}`,
+      snapshot?.terminal ?? false,
+      snapshot?.lastInvalidation,
+    );
+  }
+
+  private assertManagedBackendOwned(operation: string): void {
+    if (!this.ownershipLease) return;
+    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
+    // Cold path only: the snapshot allocates, so it is taken to build the error
+    // and nowhere else.
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    throw new ManagedOxigraphBackendUnownedError(
+      `sparql-http.${operation}`,
+      snapshot?.terminal ?? false,
+      snapshot?.lastInvalidation,
+    );
+  }
+
+  /**
    * Refuse a caller-authored mutation aimed at persistent system-record V1
    * reserved state (#2052 B2).
    *
@@ -513,9 +618,8 @@ export class SparqlHttpStore implements TripleStore {
    * adapter is the only always-on choke point for the managed endpoint that
    * actually holds reserved state.
    *
-   * Reserved graphs are writable only through the materializer's structured,
-   * generation-bound command path, which derives its own scope and never calls
-   * these public methods. A hard throw is safe because reserved graphs never
+   * Reserved graphs are unreachable through every mutation that names its graph
+   * terms as arguments. A hard throw is safe because reserved graphs never
    * enumerate: no legitimate iterate-and-drop loop can reach one, only a
    * hardcoded IRI can.
    *
@@ -585,6 +689,20 @@ export class SparqlHttpStore implements TripleStore {
       )
     ) return undefined;
 
+    // `=== undefined`, NOT `!this.systemRecordLane`, and it is the whole
+    // never-advertise-after-close guarantee. One field, three meanings:
+    //
+    //   undefined  never built
+    //   null       CLOSED; never build again
+    //   controller live
+    //
+    // A managed store's lease still reads `ready` at `close()` — the supervisor
+    // stops the child afterwards — so a truthiness check here would let a first
+    // probe issued after close pass every precondition above, construct a
+    // controller over a closed store, and take the process registration from
+    // the replacement. A separate `systemRecordLaneClosed` boolean was written
+    // for this and deleted: its solo mutant SURVIVED, because this comparison
+    // already carries the property.
     if (this.systemRecordLane === undefined) {
       try {
         // Pair issuer and consumer in one private registry, but retain only the
@@ -641,17 +759,28 @@ export class SparqlHttpStore implements TripleStore {
             this.systemRecordAdmissionActive = active;
           },
         });
-        this.systemRecordLaneOwner = owner;
         this.systemRecordLane = owner;
-      } catch {
-        // A capability PROBE must never throw. The factory refuses a second
-        // owned-store registration, and that refusal used to propagate out of
-        // `getSystemRecordLaneControllerV1?.()` — through three decorators that
-        // call it inside an unguarded memo fill — so merely ASKING whether the
-        // capability existed could take down the caller. Absence is the correct
-        // answer to "can I have the lane?" when one is already registered.
-        this.systemRecordLaneOwner = null;
-        this.systemRecordLane = null;
+      } catch (error) {
+        // ONLY the registration refusal, and only because absence is the
+        // CORRECT answer to it: another managed store in this process holds the
+        // lane, so this store genuinely has none to offer. Every other
+        // construction failure is a wiring bug, and the previous catch-all
+        // converted such a bug into a capability that is silently and
+        // permanently missing with nothing logged.
+        //
+        // Stated honestly: nothing inside the `try` can throw anything else
+        // TODAY — `buildChildHandoff` returns closures, the executor is a
+        // literal, and the barrier closure is not invoked at construction. So
+        // this branch has no reachable trigger at present. Its value is not a
+        // failure it catches now but a failure it stops MASKING later, which is
+        // why the test for it injects the failure rather than pretending one
+        // exists.
+        if (!(error instanceof SystemRecordControllerRegistrationError)) throw error;
+        // NOT memoized as `null`. A refusal is transient now that the holder
+        // releases its registration on close, and latching it here would
+        // contradict the decorators above, which re-probe absence for exactly
+        // that reason.
+        return undefined;
       }
     }
     return this.systemRecordLane ?? undefined;
@@ -660,11 +789,10 @@ export class SparqlHttpStore implements TripleStore {
   /**
    * Compose the clean-generation handoff from its two owners.
    *
-   * The adapter owns exactly the connection pool: it is the only component that
-   * can destroy the retired generation's sockets and await the requests issued
-   * over them. Process facts — the child exited, the port was released, a
-   * replacement is the proven listener — belong to the supervisor, which holds
-   * the `ChildProcess`. Splitting them here keeps the ORDER in one place while
+   * Process facts — the child exited, the port was released, a replacement is
+   * the proven listener — belong to the supervisor, which holds the
+   * `ChildProcess`. The adapter owns the managed HTTP client and its pool.
+   * Composing those responsibilities here keeps the ORDER in one place while
    * letting each half assert only what it can actually observe.
    */
   private buildChildHandoff(
@@ -863,6 +991,13 @@ export class SparqlHttpStore implements TripleStore {
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
     const graphUri = pattern.graph;
     this.assertGenericMutationScope([graphUri], 'deleteByPattern');
+    // BEFORE the count. This method and `deleteBySubjectPrefix` are the only
+    // mutations that read first, and their `countBefore` reached the wire ahead
+    // of `postUpdate`'s ownership guard — so the mutation was correctly refused
+    // but a socket had already been opened and a foreign count consumed. That
+    // made the "zero I/O" property claimed for the mutation guard false for
+    // exactly these two methods.
+    this.assertManagedBackendOwned('deleteByPattern');
     const before = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern.countBefore',
@@ -904,6 +1039,9 @@ export class SparqlHttpStore implements TripleStore {
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     this.assertGenericMutationScope([graphUri], 'deleteBySubjectPrefix');
+    // See `deleteByPattern`: the `countBefore` below is a read that outran the
+    // mutation guard.
+    this.assertManagedBackendOwned('deleteBySubjectPrefix');
     const before = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix.countBefore',
@@ -1149,6 +1287,18 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
+    // Reserved and staging state is invisible here for the same reason it is
+    // invisible to `listGraphs`, and it has to be enforced at THIS layer:
+    // `graphSetIndex` is optional, so a store built without it — or an adapter
+    // used directly — otherwise asks the backend and answers `true`, revealing
+    // that reserved state exists. `internal-graph-policy.ts` already claimed
+    // this ("reserved graphs never enumerate: no legitimate iterate-and-drop
+    // loop can reach one"), and the claim held only for the indexed
+    // composition.
+    //
+    // Prefix-wide, matching `listGraphs`' own filter: an unrecognised internal
+    // name must be hidden too rather than leaked.
+    if (isInternalGraphUriV1(graphUri)) return false;
     const r = await this.query(
       `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
       { ...options, source: options?.source ?? 'sparql-http.hasGraph' },
@@ -1286,27 +1436,24 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async close(): Promise<void> {
+    // BEFORE the drain, and synchronously.
+    //
+    // The process-global lane registration was released ONLY by a session
+    // shutdown, which a store that merely probed for feature detection never
+    // performs. So a discovery-only store held the registration for the process
+    // lifetime and every replacement store's probe was refused — measured as
+    // `{first: true, second: false}`. Same for a failed `open()` and for an
+    // open-then-`disable`.
+    //
+    // Releasing here also latches this store's session terminal, so nothing can
+    // be admitted into a lane whose store is draining; doing it after the await
+    // would leave that window open.
+    this.releaseSystemRecordLane();
     // A managed endpoint is stopped immediately after store.close(). The
     // lifecycle owns one complete generation, aborting and draining every
     // operation admitted before close while rejecting work attempted during
     // close. A fresh generation is installed only after the drain completes.
-    try {
-      await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
-    } finally {
-      // A capability probe registers the controller process-wide even when no
-      // session is ever opened. Do not strand that passive reservation after
-      // this store is gone; the helper refuses active/transitioning sessions.
-      if (this.systemRecordLaneOwner) {
-        if (await disposeSystemRecordLaneControllerV1(this.systemRecordLaneOwner)) {
-          // Clear the disposed object. Passive probes touch no child; an active
-          // controller has completed its one coalesced shutdown and released
-          // the process-global slot before this assignment.
-          this.systemRecordLane = undefined;
-          this.systemRecordLaneOwner = null;
-          this.systemRecordAdmissionActive = false;
-        }
-      }
-    }
+    await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
   }
 }
 

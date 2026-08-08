@@ -51,11 +51,13 @@ export {
 } from './internal-graph-policy.js';
 export {
   MANAGED_OXIGRAPH_LEASE_OPTION_KEY,
+  ManagedOxigraphBackendUnownedError,
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLeaseV1,
+  isManagedOxigraphOwnershipLiveV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipInvalidationV1,
@@ -63,11 +65,11 @@ export {
   type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from './managed-oxigraph-ownership-v1-internal.js';
-export { OwnedManagedHttpClient } from './adapters/managed-http-client.js';
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,
   createSystemRecordLaneControllerV1,
+  releaseSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordDeferralReasonV1,
