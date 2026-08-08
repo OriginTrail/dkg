@@ -4,6 +4,7 @@ import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   buildSystemRecordInventoryTreeV1,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
+  computeSystemRecordStableKeyHashV1,
   decodeSystemRecordResponseFrameV1,
   digestSystemRecordBytesV1,
   encodeSystemRecordRequestFrameV1,
@@ -320,6 +321,46 @@ describe('system-record provider V1', () => {
     expect(response.payload).toHaveLength(0);
     expect(admission.active()).toBe(0);
     expect(provider.stats()).toMatchObject({ served: 1, active: 0, queued: 0 });
+  });
+
+  it('refuses root bytes that do not match the advertised descriptor digest', async () => {
+    const advertised = buildSystemRecordInventoryTreeV1(NETWORK, []);
+    const actual = buildSystemRecordInventoryTreeV1(NETWORK, [{
+      stableKeyHash: computeSystemRecordStableKeyHashV1(
+        NETWORK,
+        '12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf',
+      ),
+      peerId: '12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf',
+      authoritySequence: '0',
+      version: '0',
+      headDigest: DIGEST,
+      tombstone: false,
+      quarantined: false,
+    }]);
+    const corruptRootBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1({
+      object: actual.descriptor,
+      objectDigest: actual.descriptorDigest,
+      providerPeerId: '12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf',
+      signatureSuite: 'ed25519-v1',
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const admission = frameAdmission();
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: repository({
+        objectKind: 'root-descriptor',
+        objectDigest: advertised.descriptorDigest,
+        canonicalBytes: corruptRootBytes,
+      }),
+      frameAdmission: admission,
+    });
+    const exchange = fixtureExchange(rootRequest('c'.repeat(32)));
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('served');
+    const response = decodeSystemRecordResponseFrameV1(exchange.written[0]!);
+    expect(response.header).toMatchObject({ status: 'internal', payloadBytes: '0' });
+    expect(response.payload).toHaveLength(0);
+    expect(admission.active()).toBe(0);
   });
 
   it('serves the root descriptor and its requested inventory object', async () => {

@@ -71,9 +71,11 @@ export interface SystemRecordPeerSignerV1 {
   sign(message: Uint8Array): Promise<Uint8Array>;
 }
 
+export type AgentProfilePublicationStatusV1 = 'tentative' | 'confirmed' | 'failed';
+
+/** Untrusted legacy-publication result accepted at the producer boundary. */
 export interface AgentProfilePublicationBindingV1 {
-  /** Only a finalized VM publication may become signed-record authority. */
-  readonly publicationStatus: 'confirmed';
+  readonly publicationStatus: AgentProfilePublicationStatusV1;
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
   readonly issuedAt: string;
@@ -162,7 +164,7 @@ export interface CreateAgentProfileProducerOptionsV1 {
   readonly store: AgentProfileProducerPublicationStoreV1;
   /** Independent verifier clock; publication timestamps are untrusted input. */
   readonly nowMs?: () => number;
-  /** Storage-runtime bridge: fence before publish, install before advertisement. */
+  /** Storage-runtime bridge: fence before publish; successful install commits advertisement. */
   readonly fence: (
     prepared: PreparedAgentProfileV1,
     signal: AbortSignal,
@@ -199,10 +201,7 @@ export function createAgentProfileProducerV1(
     signal: AbortSignal,
   ): Promise<AgentProfileProducerPublicationV1> => {
     signal.throwIfAborted();
-    const publication = snapshotPublicationBindingV1(inputPublication);
-    if (publication.publicationStatus !== 'confirmed') {
-      throw new Error('agent-profile system record requires a confirmed publication');
-    }
+    const publication = snapshotConfirmedPublicationBindingV1(inputPublication);
     const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
     const validUntil = normalizePublicationTimestampV1(publication.validUntil, 'validUntil');
     normalizePublicationTimestampV1(
@@ -461,7 +460,8 @@ export function createAgentProfileProducerV1(
         verifiedAuthoritySummary: verifiedClosure.authoritySummary,
         signal,
       });
-      signal.throwIfAborted();
+      // Installation is the point of no return: a late abort cannot roll it back,
+      // so the already-reserved advertisement must commit to keep both views aligned.
       await commitLease.commit();
       committed = true;
     } finally {
@@ -635,11 +635,20 @@ function snapshotPreparedProfileV1(prepared: PreparedAgentProfileV1): PreparedAg
   });
 }
 
-function snapshotPublicationBindingV1(
+type ConfirmedAgentProfilePublicationBindingV1 = Readonly<
+  Omit<AgentProfilePublicationBindingV1, 'publicationStatus'> & {
+    readonly publicationStatus: 'confirmed';
+  }
+>;
+
+function snapshotConfirmedPublicationBindingV1(
   publication: AgentProfilePublicationBindingV1,
-): AgentProfilePublicationBindingV1 {
+): ConfirmedAgentProfilePublicationBindingV1 {
+  if (publication.publicationStatus !== 'confirmed') {
+    throw new Error('agent-profile system record requires a confirmed publication');
+  }
   return Object.freeze({
-    publicationStatus: publication.publicationStatus,
+    publicationStatus: 'confirmed',
     assertionCoordinate: publication.assertionCoordinate,
     seal: Object.freeze({ ...publication.seal }),
     issuedAt: publication.issuedAt,

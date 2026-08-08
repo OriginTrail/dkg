@@ -789,15 +789,30 @@ describe('agent-profile system-record producer V1', () => {
     expect(fixture.store.snapshot().currentHead).toBeNull();
   });
 
+  it('rejects a non-confirmed publication before installation', async () => {
+    const fixture = await producerFixture();
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install,
+    });
+    const publication: AgentProfilePublicationBindingV1 = {
+      ...fixture.publication,
+      publicationStatus: 'tentative',
+    };
+
+    await expect(produce(producer, fixture.prepared, publication))
+      .rejects.toThrow(/requires a confirmed publication/);
+    expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
   it.each([
-    [
-      'a non-confirmed publication',
-      (publication: AgentProfilePublicationBindingV1) => ({
-        ...publication,
-        publicationStatus: 'tentative',
-      }),
-      /requires a confirmed publication/,
-    ],
     [
       'a different author address',
       (publication: AgentProfilePublicationBindingV1) => ({
@@ -1310,6 +1325,25 @@ describe('agent-profile system-record producer V1', () => {
 
     const retry = await producer.prepare(fixture.prepared);
     await expect(retry.complete(fixture.publication)).resolves.toMatchObject({ version: '0' });
+  });
+
+  it('commits the advertisement when cancellation arrives after successful installation', async () => {
+    const fixture = await producerFixture();
+    let lease: Awaited<ReturnType<typeof producer.prepare>>;
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence: () => {},
+      install: () => { lease.abort(new Error('late cancellation')); },
+    });
+
+    lease = await producer.prepare(fixture.prepared);
+    await expect(lease.complete(fixture.publication)).resolves.toMatchObject({ version: '0' });
+    expect(fixture.store.snapshot().currentHead?.object.version).toBe('0');
+    expect(fixture.store.snapshot().inventory).not.toBeNull();
   });
 
   it('rejects duplicate canonical profile triples before fencing publication', async () => {
