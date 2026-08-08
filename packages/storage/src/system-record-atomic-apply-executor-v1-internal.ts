@@ -354,30 +354,13 @@ async function dispatchSystemRecordConditionalApplyV1(input: Readonly<{
   generationClient: SystemRecordAtomicApplyHttpClientV1;
   client: SystemRecordAtomicApplyHttpClientV1;
   facts: SystemRecordVerifiedReplacementFactsV1;
-  prepared: SystemRecordActiveReplacementCompleteV1;
+  prepared: SystemRecordActiveReplacementReadyV1;
   update: ReturnType<typeof buildSystemRecordConditionalApplyUpdateV1>;
   exactNext: ExactMaterializationV1;
   exactPrior: ExactMaterializationV1;
   now: () => number;
 }>): Promise<SystemRecordDispatchPhaseV1> {
   const prepared = input.prepared;
-  if (matchesExact(input.exactPrior, input.exactNext)) {
-    return completeDispatch(noMutation({
-      outcome: 'already-applied',
-      stateRevision: prepared.plan.success.stateRevision,
-      appliedStateDigest: prepared.plan.success.appliedStateDigest,
-    }));
-  }
-  if (prepared.outcome === 'already-applied') {
-    return completeDispatch(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
-  }
-  if (!isReadyReplacement(prepared)) {
-    return completeDispatch(
-      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
-    );
-  }
   if (
     input.facts.admittedDeadlineMs - input.now() <
     SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
@@ -491,12 +474,6 @@ function completeDispatch(
   return Object.freeze({ status: 'complete', settlement });
 }
 
-function isReadyReplacement(
-  value: SystemRecordActiveReplacementCompleteV1,
-): value is SystemRecordActiveReplacementReadyV1 {
-  return value.outcome === 'ready';
-}
-
 interface SystemRecordPriorInspectionPhaseV1 {
   readonly snapshot: SystemRecordAppliedSnapshotV1;
   readonly rootClaimQuads: readonly Readonly<Quad>[];
@@ -509,7 +486,7 @@ type SystemRecordDispatchPreparationPhaseV1 =
     }>
   | Readonly<{
       status: 'ready';
-      prepared: SystemRecordActiveReplacementCompleteV1;
+      prepared: SystemRecordActiveReplacementReadyV1;
       update: ReturnType<typeof buildSystemRecordConditionalApplyUpdateV1>;
       exactNext: ExactMaterializationV1;
       exactPrior: ExactMaterializationV1;
@@ -626,6 +603,18 @@ async function prepareSystemRecordDispatchV1(input: Readonly<{
       );
     }
   } catch {
+    return completePreparation(
+      noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
+    );
+  }
+  if (matchesExact(exactPrior, exactNext)) {
+    return completePreparation(noMutation({
+      outcome: 'already-applied',
+      stateRevision: derived.plan.success.stateRevision,
+      appliedStateDigest: derived.plan.success.appliedStateDigest,
+    }));
+  }
+  if (derived.outcome !== 'ready') {
     return completePreparation(
       noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
     );

@@ -82,4 +82,16 @@ describe('system-record storage trust-boundary primitives', () => {
       label: 'test payload',
     })).toThrow(/accounting mismatch/);
   });
+
+  it('fails the retained-byte bound before allocation or charging', () => {
+    const charges: number[] = [];
+    expect(() => buildBoundedSystemRecordUtf8V1({
+      emit: (writer) => writer.add('abcd'),
+      maxEncodedBytes: 4,
+      maxRetainedBytes: 11,
+      label: 'test payload',
+      replaceCharge: (bytes) => charges.push(bytes),
+    })).toThrow(/retained-byte bound/);
+    expect(charges).toEqual([]);
+  });
 });

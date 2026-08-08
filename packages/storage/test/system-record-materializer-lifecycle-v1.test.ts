@@ -1324,6 +1324,44 @@ describe('system-record lane session lifecycle V1', () => {
         .toHaveLength(2);
     });
 
+    it('keeps detach waiting for a timed-out disable physical settlement', async () => {
+      const timeoutBarrier = new TransitionTimeoutBarrier();
+      const gated = new GatedHandoff();
+      gated.barrier = timeoutBarrier;
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: gated,
+        executor,
+        barrier: timeoutBarrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+      gated.gate('awaitRetiredWork');
+
+      const disable = track(session.close('disable'));
+      await gated.reached('awaitRetiredWork');
+      timeoutBarrier.timeout('system-record.disable');
+      await disable.done;
+      expect(disable.state.rejected).toBe(true);
+
+      const detach = track(releaseSystemRecordLaneControllerV1(controller));
+      await drain();
+      expect(detach.state.settled).toBe(false);
+
+      gated.release('awaitRetiredWork');
+      await detach.done;
+      expect(detach.state.rejected).toBe(false);
+      expect(session.state).toBe('detached');
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
     it('runs ONE teardown when a superseded open settles under a stalled shutdown', async () => {
       const { gated, controller } = buildGated();
       const first = await controller.open(ACTIVATION);

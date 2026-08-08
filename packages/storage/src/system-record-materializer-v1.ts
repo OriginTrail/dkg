@@ -761,18 +761,29 @@ class SystemRecordLaneSession {
       }
     }
 
+    let resolvePublicWork!: () => void;
+    let rejectPublicWork!: (reason?: unknown) => void;
+    const publicWork = new Promise<void>((resolve, reject) => {
+      resolvePublicWork = resolve;
+      rejectPublicWork = reject;
+    });
+    let resolvePhysicalSettlement!: () => void;
+    let rejectPhysicalSettlement!: (reason?: unknown) => void;
+    const physicalSettlement = new Promise<void>((resolve, reject) => {
+      resolvePhysicalSettlement = resolve;
+      rejectPhysicalSettlement = reject;
+    });
     const entry: Extract<SystemRecordLaneTransitionV1, { kind: 'disable' }> = {
       kind: 'disable',
       descriptor: null,
       recovery: null,
-      work: Promise.resolve(),
-      settlement: Promise.resolve(),
+      work: publicWork,
+      settlement: physicalSettlement,
       physicalWork: null,
       physicalSettled: false,
       reportedSettled: false,
     };
     this.transitions.publish(entry);
-    entry.work = this.runDisable(entry);
     this.transitions.ownSettlement(entry, entry.settlement, () => {
       if (entry.recovery !== null && !entry.recovery.settlement.settled) {
         throw new Error(
@@ -780,6 +791,22 @@ class SystemRecordLaneSession {
         );
       }
     });
+    const operation = this.runDisable(entry);
+    void operation.then(resolvePublicWork, rejectPublicWork);
+    const settlement = (async () => {
+      try {
+        await operation;
+      } catch (reportedError) {
+        if (entry.physicalWork) await entry.physicalWork;
+        else throw reportedError;
+      }
+    })().finally(() => {
+      // Preserve an unresolved recovery token for a later shutdown attempt.
+      // Its executor reservation remains charged, and losing this pointer would
+      // make a subsequently successful physical teardown unable to settle it.
+      if (entry.recovery === null || entry.recovery.settlement.settled) this.release(entry);
+    });
+    void settlement.then(resolvePhysicalSettlement, rejectPhysicalSettlement);
     return entry.work;
   }
 
@@ -800,7 +827,6 @@ class SystemRecordLaneSession {
         new Error('system-record lane has no active network binding to disable'),
       );
       entry.reportedSettled = true;
-      entry.settlement = failure;
       void failure.catch(() => undefined);
       this.release(entry);
       return failure;
@@ -862,21 +888,6 @@ class SystemRecordLaneSession {
       }
     })();
 
-    entry.work = work;
-    entry.settlement = (async () => {
-      try {
-        await work;
-      } catch (reportedError) {
-        if (entry.physicalWork) await entry.physicalWork;
-        else throw reportedError;
-      }
-    })().finally(() => {
-      // Preserve an unresolved recovery token for a later shutdown attempt.
-      // Its executor reservation remains charged, and losing this pointer would
-      // make a subsequently successful physical teardown unable to settle it.
-      if (entry.recovery === null || entry.recovery.settlement.settled) this.release(entry);
-    });
-    void entry.settlement.catch(() => undefined);
     return work;
   }
 

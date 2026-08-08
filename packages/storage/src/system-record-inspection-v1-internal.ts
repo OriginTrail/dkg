@@ -8,9 +8,9 @@ import {
 import {
   SYSTEM_RECORD_MAX_ATOMIC_DECODED_TERM_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_INSPECTION_RESPONSE_BYTES,
-  SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
+  SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
   SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
   SYSTEM_RECORD_MAX_PROJECTION_QUADS,
   SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH,
@@ -203,7 +203,10 @@ function buildExactSubjectQuery(
   return buildBoundedSystemRecordUtf8V1({
     emit,
     maxEncodedBytes: SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
-    maxRetainedBytes: SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES,
+    // Inspection queries are transient request workspace, not retained
+    // materialization state. At the 4 MiB encoded boundary the Buffer and JS
+    // string coexist at a conservative 3x charge under the 12 MiB atomic lease.
+    maxRetainedBytes: SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
     label: 'system-record inspection query',
     replaceCharge: replaceBuilderCharge,
   }).value;
