@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AGENT_PROFILE_LINK_PREDICATES_V1,
+  AGENT_PROFILE_SCHEMA_V1,
+  agentProfilePredicatePolicyV1,
+  agentProfileSubjectPolicyV1,
+  deriveAgentProfileOwnedSubjectV1,
   evaluateAuthorityTransitionConflictV1,
   isAllowedAgentProfilePredicateV1,
   type AgentProfileAuthorityTransitionV1,
@@ -73,6 +77,20 @@ const UNLISTED_SAME_NAMESPACE_PREDICATES_V1 = [
 const PROFILE_SUBJECT_KINDS_V1 = Object.keys(
   EXPECTED_ALLOWED_PROFILE_PREDICATES_V1,
 ) as AgentProfileOwnedSubjectKindV1[];
+const EXPECTED_IRI_OBJECT_PREDICATES_V1 = new Set([
+  RDF_TYPE,
+  ...Object.values(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1),
+  `${SKILL}skill`,
+  `${SKILL}pricing`,
+  `${DKG}revokedBy`,
+]);
+const EXPECTED_ALLOWED_TYPE_OBJECTS_V1 = {
+  root: [`${DKG}Agent`, `${DKG}CoreNode`, `${DKG}EdgeNode`],
+  capability: [`${ERC8004}Capability`],
+  offering: [`${SKILL}SkillOffering`],
+  registration: [`${PROV}Activity`],
+  hosting: [`${SKILL}HostingProfile`],
+} as const;
 
 const FOREIGN_PEER = {
   peerId: '12D3KooWHwCJEQ7p5idnD7iQAWyCJHEW7rngKQiXCnEfGef69SV4',
@@ -153,5 +171,50 @@ describe('system-record V1 public policy helpers', () => {
   it('pins the exported profile link mapping independently', () => {
     expect(AGENT_PROFILE_LINK_PREDICATES_V1)
       .toEqual(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1);
+  });
+
+  it('exposes one immutable descriptor for subject, predicate, term, type, and link policy', () => {
+    expect(Object.isFrozen(AGENT_PROFILE_SCHEMA_V1)).toBe(true);
+    expect(Object.isFrozen(AGENT_PROFILE_SCHEMA_V1.terms)).toBe(true);
+    expect(Object.isFrozen(AGENT_PROFILE_SCHEMA_V1.subjectPolicies)).toBe(true);
+    expect(AGENT_PROFILE_SCHEMA_V1.subjectPolicies.map(({ kind }) => kind))
+      .toEqual(PROFILE_SUBJECT_KINDS_V1);
+
+    for (const kind of PROFILE_SUBJECT_KINDS_V1) {
+      const subjectPolicy = agentProfileSubjectPolicyV1(kind);
+      expect(Object.isFrozen(subjectPolicy), kind).toBe(true);
+      expect(Object.isFrozen(subjectPolicy.subjectShape), kind).toBe(true);
+      expect(Object.isFrozen(subjectPolicy.predicates), kind).toBe(true);
+      expect(subjectPolicy.predicates.map(({ predicate }) => predicate), kind)
+        .toEqual(EXPECTED_ALLOWED_PROFILE_PREDICATES_V1[kind]);
+      for (const predicate of subjectPolicy.predicates) {
+        expect(Object.isFrozen(predicate), `${kind}: ${predicate.predicate}`).toBe(true);
+        expect(predicate.objectTermKind, `${kind}: ${predicate.predicate}`)
+          .toBe(EXPECTED_IRI_OBJECT_PREDICATES_V1.has(predicate.predicate) ? 'iri' : 'literal');
+        expect(agentProfilePredicatePolicyV1(kind, predicate.predicate)).toBe(predicate);
+      }
+    }
+
+    for (const [kind, objects] of Object.entries(EXPECTED_ALLOWED_TYPE_OBJECTS_V1)) {
+      const typePolicy = agentProfilePredicatePolicyV1(
+        kind as AgentProfileOwnedSubjectKindV1,
+        RDF_TYPE,
+      );
+      expect(typePolicy?.allowedObjects, kind).toEqual(objects);
+      expect(Object.isFrozen(typePolicy?.allowedObjects), kind).toBe(true);
+    }
+    expect(agentProfilePredicatePolicyV1('root', `${ERC8004}capabilities`)?.linkTargetKind)
+      .toBe('capability');
+    expect(agentProfilePredicatePolicyV1('x25519', `${DKG}revokedBy`)?.objectBinding)
+      .toBe('profile-root');
+    expect(agentProfilePredicatePolicyV1('root', `${DKG}publicEncryptionKey`)?.capture)
+      .toBe('workspace-public-key');
+    const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'capability', 2))
+      .toBe(`${root}/.well-known/genid/cap2`);
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'hosting'))
+      .toBe(`${root}/.well-known/genid/hosting`);
+    expect(() => deriveAgentProfileOwnedSubjectV1(root, 'offering', 0)).toThrow(/positive/);
+    expect(() => deriveAgentProfileOwnedSubjectV1(root, 'registration', 1)).toThrow(/ordinal/);
   });
 });
