@@ -2,7 +2,7 @@ import type { Publisher, PublishOptions, PublishResult } from '@origintrail-offi
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { contextGraphDataGraphUri } from '@origintrail-official/dkg-core';
 import {
-  buildAgentProfile,
+  prepareAgentProfileV1,
   canonicalAgentDidSubject,
   AGENT_REGISTRY_CONTEXT_GRAPH,
   type AgentProfileConfig,
@@ -24,14 +24,17 @@ export class ProfileManager {
    */
   private lastRootEntity: string | null = null;
 
-  constructor(publisher: Publisher, store: TripleStore) {
+  constructor(
+    publisher: Publisher,
+    store: TripleStore,
+  ) {
     this.publisher = publisher;
     this.store = store;
   }
 
   async publishProfile(config: AgentProfileConfig): Promise<PublishResult> {
-    const { quads, rootEntity } = buildAgentProfile(config);
-
+    const prepared = prepareAgentProfileV1(config);
+    const { publicationQuads: quads, rootEntity } = prepared;
     // A-12 review: upgraded nodes that previously published
     // `did:dkg:agent:<peerId>` must drop the legacy subject alongside
     // the new EVM-form subject, otherwise discovery returns the same
@@ -98,17 +101,12 @@ export class ProfileManager {
 
     const options: PublishOptions = {
       contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
-      quads,
+      quads: quads.map((quad) => ({ ...quad })),
     };
 
-    if (this.currentKcId) {
-      const result = await this.publisher.update(this.currentKcId, options);
-      this.currentKcId = result.kaId;
-      this.lastRootEntity = rootEntity;
-      return result;
-    }
-
-    const result = await this.publisher.publish(options);
+    const result = this.currentKcId !== null
+      ? await this.publisher.update(this.currentKcId, options)
+      : await this.publisher.publish(options);
     this.currentKcId = result.kaId;
     this.lastRootEntity = rootEntity;
     return result;

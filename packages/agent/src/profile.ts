@@ -4,6 +4,11 @@ import {
   SYSTEM_CONTEXT_GRAPHS,
   isPublicLikeAddress,
 } from '@origintrail-official/dkg-core';
+import {
+  agentProfileIdentityFactsV1,
+  type AgentProfileIdentityFactsV1,
+  type AgentProfileProjectionQuadV1,
+} from '@origintrail-official/dkg-core/system-record-v1';
 
 /**
  * Canonicalise the DID subject for an agent.
@@ -149,6 +154,63 @@ export interface AgentProfileConfig {
   encryptionKeyProof?: string;
 }
 
+export type AgentProfileAdvertisedIdentityV1 = Omit<AgentProfileIdentityFactsV1, 'rootSubject'> & {
+  readonly rootEntity: string;
+};
+
+/** Canonical RDF identity terms shared by the profile builder and signed-record binder. */
+export function agentProfileAdvertisedIdentityV1(
+  config: Pick<AgentProfileConfig, 'peerId' | 'publicKey' | 'agentAddress'>,
+): AgentProfileAdvertisedIdentityV1 {
+  const rootEntity = `did:dkg:agent:${canonicalAgentDidSubject(config.agentAddress ?? config.peerId)}`;
+  const identity = agentProfileIdentityFactsV1({
+    rootSubject: rootEntity,
+    peerId: config.peerId,
+    publicKey: config.publicKey,
+    agentAddress: config.agentAddress === undefined
+      ? undefined
+      : canonicalAgentDidSubject(config.agentAddress),
+  });
+  return Object.freeze({
+    rootEntity,
+    peerId: identity.peerId,
+    ...(identity.publicKey === undefined ? {} : { publicKey: identity.publicKey }),
+    ...(identity.agentAddress === undefined ? {} : { agentAddress: identity.agentAddress }),
+  });
+}
+
+export interface PreparedAgentProfileV1 {
+  /** Graphful quads consumed by the legacy VM publisher. */
+  readonly publicationQuads: readonly Readonly<Quad>[];
+  /** Graphless facts consumed by signed profile projection. */
+  readonly projectionQuads: readonly Readonly<AgentProfileProjectionQuadV1>[];
+  readonly rootEntity: string;
+  /** Exact freshness value already embedded in both quad views. */
+  readonly lastSeen: string;
+}
+
+/**
+ * Snapshot all time-dependent profile input once, then expose distinct immutable
+ * graphful publication and graphless signed-projection views.
+ */
+export function prepareAgentProfileV1(
+  config: AgentProfileConfig,
+  now: () => Date = () => new Date(),
+): PreparedAgentProfileV1 {
+  const lastSeen = config.lastSeen ?? now().toISOString();
+  const built = buildAgentProfileModelV1({ ...config, lastSeen });
+  const publicationQuads = renderAgentProfilePublicationV1(built)
+    .map((quad) => Object.freeze(quad));
+  const projectionQuads = renderAgentProfileProjectionV1(built)
+    .map((quad) => Object.freeze(quad));
+  return Object.freeze({
+    publicationQuads: Object.freeze(publicationQuads),
+    projectionQuads: Object.freeze(projectionQuads),
+    rootEntity: built.rootEntity,
+    lastSeen,
+  });
+}
+
 /**
  * Builds RDF quads for an agent profile KA using the ERC-8004 aligned ontology.
  *
@@ -169,16 +231,40 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   quads: Quad[];
   rootEntity: string;
 } {
+  const built = buildAgentProfileModelV1(config);
+  return {
+    quads: renderAgentProfilePublicationV1(built),
+    rootEntity: built.rootEntity,
+  };
+}
+
+interface AgentProfileFactV1 {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+}
+
+interface AgentProfileModelV1 {
+  readonly facts: readonly AgentProfileFactV1[];
+  readonly rootEntity: string;
+}
+
+/**
+ * Canonical signed-profile facts governed by schema V1. Future legacy-only
+ * output belongs explicitly in the publication renderer, not in this model.
+ */
+function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModelV1 {
   // A-12: normalise the DID subject so profile + endorsement subjects
   // converge for the same wallet regardless of the source casing. See
   // `canonicalAgentDidSubject` for rationale.
-  const didSubject = canonicalAgentDidSubject(config.agentAddress ?? config.peerId);
-  const entity = `did:dkg:agent:${didSubject}`;
-  const quads: Quad[] = [];
+  const identity = agentProfileAdvertisedIdentityV1(config);
+  const entity = identity.rootEntity;
+  const facts: AgentProfileFactV1[] = [];
   const role = config.nodeRole ?? 'edge';
+  const profileTimestamp = config.lastSeen ?? new Date().toISOString();
 
   const q = (s: string, p: string, o: string) =>
-    quads.push({ subject: s, predicate: p, object: o, graph: AGENT_REGISTRY_GRAPH });
+    facts.push({ subject: s, predicate: p, object: o });
 
   // Type: dkg:Agent + role-specific subclass
   q(entity, RDF_TYPE, `${DKG}Agent`);
@@ -191,17 +277,17 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   }
 
   // DKG P2P properties
-  q(entity, `${DKG}peerId`, `"${config.peerId}"`);
+  q(entity, identity.peerId.predicate, identity.peerId.object);
   q(entity, `${DKG}nodeRole`, `"${role}"`);
 
-  if (config.publicKey) {
-    q(entity, `${DKG}publicKey`, `"${config.publicKey}"`);
+  if (identity.publicKey !== undefined) {
+    q(entity, identity.publicKey.predicate, identity.publicKey.object);
   }
   if (config.relayAddress) {
     q(entity, `${DKG}relayAddress`, `"${config.relayAddress}"`);
   }
-  if (config.agentAddress) {
-    q(entity, `${DKG}agentAddress`, `"${canonicalAgentDidSubject(config.agentAddress)}"`);
+  if (identity.agentAddress !== undefined) {
+    q(entity, identity.agentAddress.predicate, identity.agentAddress.object);
   }
   // Distributed phonebook (PR feat/chain-agents-cg-phonebook).
   // Note: properties `dkg:multiaddr` and `dkg:lastSeen` are emitted on
@@ -221,7 +307,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
       q(entity, `${DKG}multiaddr`, `"${ma}"`);
     }
   }
-  q(entity, `${DKG}lastSeen`, `"${config.lastSeen ?? new Date().toISOString()}"`);
+  q(entity, `${DKG}lastSeen`, `"${profileTimestamp}"`);
   // Encryption keys: prefer the multi-key array; fall back to the deprecated
   // singular fields only when the array isn't supplied (legacy callers /
   // test fixtures). Retired keys still get published so peers learn their
@@ -279,7 +365,7 @@ export function buildAgentProfile(config: AgentProfileConfig): {
   const activityUri = `${entity}/.well-known/genid/registration`;
   q(entity, `${PROV}wasGeneratedBy`, activityUri);
   q(activityUri, RDF_TYPE, `${PROV}Activity`);
-  q(activityUri, `${PROV}atTime`, `"${new Date().toISOString()}"`);
+  q(activityUri, `${PROV}atTime`, `"${profileTimestamp}"`);
 
   const served = config.contextGraphsServed;
   if (served?.length) {
@@ -291,5 +377,17 @@ export function buildAgentProfile(config: AgentProfileConfig): {
     }
   }
 
-  return { quads, rootEntity: entity };
+  return { facts, rootEntity: entity };
+}
+
+function renderAgentProfilePublicationV1(
+  model: AgentProfileModelV1,
+): Quad[] {
+  return model.facts.map((fact) => ({ ...fact, graph: AGENT_REGISTRY_GRAPH }));
+}
+
+function renderAgentProfileProjectionV1(
+  model: AgentProfileModelV1,
+): AgentProfileProjectionQuadV1[] {
+  return model.facts.map((fact) => ({ ...fact, graph: '' }));
 }

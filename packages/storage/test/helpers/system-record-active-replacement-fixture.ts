@@ -35,6 +35,7 @@ import {
 } from '../../src/system-record-verified-replacement-v1-internal.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../../src/system-record-materializer-v1.js';
 import type { Quad } from '../../src/triple-store.js';
+import { agentProfileIdentityProjectionV1 } from './agent-profile-identity-projection-v1.js';
 
 interface Vectors {
   readonly variants: { readonly active: { readonly object: AgentProfileActiveHeadObjectV1 } };
@@ -48,7 +49,7 @@ const vectors = JSON.parse(readFileSync(new URL(
 
 const verified = await (async () => {
   const source = structuredClone(vectors.variants.active.object);
-  const projectionQuads = projectionFor(source.rootSubject);
+  const projectionQuads = projectionFor(source);
   const canonicalProjectionBytes = canonicalBytesFor(projectionQuads);
   const contentDigest = contentDigestFor(projectionQuads);
   const bundle = new TextEncoder().encode('verified-profile-bundle');
@@ -140,17 +141,22 @@ function issue(binding: SystemRecordLaneExecutionBindingV1): SystemRecordActiveR
   };
 }
 
-function projectionFor(root: string) {
+function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return [
     {
-      subject: root,
+      subject: head.rootSubject,
       predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
       object: 'https://dkg.network/ontology#Agent',
       graph: '',
     },
-    { subject: root, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
-    { subject: root, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
-  ] as const;
+    ...agentProfileIdentityProjectionV1(head),
+    { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
+    { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
+  ].sort((left, right) => Buffer.compare(
+    tripleContentV10(left.subject, left.predicate, left.object),
+    tripleContentV10(right.subject, right.predicate, right.object),
+  ));
 }
 
 function canonicalBytesFor(

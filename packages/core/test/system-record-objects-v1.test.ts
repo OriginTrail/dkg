@@ -67,6 +67,7 @@ import {
   computeSystemRecordRootDescriptorDigestV1,
 } from '../src/system-record-inventory-v1.js';
 import { verifySystemRecordResponsePayloadV1 } from '../src/system-record-wire-v1.js';
+import { assertAgentProfileProjectionIdentityV1 } from '../src/agent-profile-projection-schema-v1.js';
 
 const DIGEST_A = `0x${'aa'.repeat(32)}` as const;
 const DIGEST_B = `0x${'bb'.repeat(32)}` as const;
@@ -79,6 +80,14 @@ const CLOSURE_BUNDLE_DIGEST = digestSystemRecordBytesV1(
 );
 
 describe('system-record V1 object codecs', () => {
+  it('rejects a signed root subject that differs from its EVM issuer', async () => {
+    const active = activeHead(await authorityFixture());
+    expect(() => assertAgentProfileProjectionIdentityV1({
+      ...active,
+      rootSubject: `did:dkg:agent:0x${'22'.repeat(20)}`,
+    }, [])).toThrow(/signed root identity/);
+  });
+
   it('round-trips exact active/tombstone, transition, fork, and conflict variants', async () => {
     const fixture = await authorityFixture();
     const active = activeHead(fixture);

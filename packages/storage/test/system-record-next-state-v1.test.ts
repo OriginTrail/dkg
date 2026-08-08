@@ -58,6 +58,7 @@ import {
   type SystemRecordVerifiedReplacementFactsV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
+import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
 
 interface Vectors {
   readonly variants: {
@@ -86,7 +87,7 @@ const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const CAPABILITY_LINK = 'https://eips.ethereum.org/erc-8004#capabilities';
 const OFFERING_LINK = 'https://dkg.origintrail.io/skill#offersSkill';
 
-const initialProjection = smallProjection(vectors.variants.active.object.rootSubject);
+const initialProjection = smallProjection(vectors.variants.active.object);
 const INITIAL = prepareHead(vectors.variants.active.object, initialProjection);
 const INITIAL_FACTS = await factsFor(INITIAL, initialProjection);
 
@@ -353,7 +354,7 @@ describe('system-record active next-state derivation', () => {
   });
 
   it('refuses a 2,049-subject replacement union before producing a command', async () => {
-    const priorData = largeProjection(INITIAL.rootSubject, 'capability', 1_024);
+    const priorData = largeProjection(INITIAL, 'capability', 1_024);
     const priorHead = prepareHead(INITIAL, priorData.quads, priorData.subjects);
     const priorFacts = await factsFor(priorHead, priorData.quads, [], [], priorData.subjects);
     const priorReady = expectReady(deriveSystemRecordActiveReplacementV1({
@@ -361,7 +362,7 @@ describe('system-record active next-state derivation', () => {
       snapshot: absentSnapshot(INITIAL.networkId),
       observedRootClaimQuads: [],
     }));
-    const nextData = largeProjection(INITIAL.rootSubject, 'offering', 1_024);
+    const nextData = largeProjection(INITIAL, 'offering', 1_024);
     const nextHead = prepareHead({
       ...priorHead,
       version: '1',
@@ -386,7 +387,7 @@ describe('system-record active next-state derivation', () => {
 
   it(
     'prepares the exact 10,000-quad protocol maximum within the 4 MiB request bound', async () => {
-    const projection = maximumProjection(INITIAL.rootSubject);
+    const projection = maximumProjection(INITIAL);
     const head = prepareHead(INITIAL, projection);
     const facts = await factsFor(head, projection);
     const ready = expectReady(deriveSystemRecordActiveReplacementV1({
@@ -630,8 +631,7 @@ async function rotatedFixture(
     issuedAt: '2026-08-07T12:00:00Z',
   } as AgentProfileAuthorityTransitionV1;
   const transitionDigest = computeAgentProfileAuthorityTransitionDigestV1(transition);
-  const projection = smallProjection(transition.nextRoot);
-  const head = prepareHead({
+  const nextSource = {
     ...prior,
     authoritySequence: transition.nextAuthoritySequence,
     version: '0',
@@ -641,7 +641,9 @@ async function rotatedFixture(
     issuedAt: '2026-08-07T12:01:00Z',
     validUntil: '2026-08-10T12:01:00Z',
     previousHeadDigest: undefined,
-  } as unknown as AgentProfileActiveHeadObjectV1, projection);
+  } as unknown as AgentProfileActiveHeadObjectV1;
+  const projection = smallProjection(nextSource);
+  const head = prepareHead(nextSource, projection);
   return {
     head,
     transition,
@@ -662,8 +664,7 @@ async function twiceRotatedFixture() {
     nextRoot: `did:dkg:agent:${nextIssuer}`,
     issuedAt: '2026-08-08T12:00:00Z',
   };
-  const projection = smallProjection(transition.nextRoot);
-  const head = prepareHead({
+  const nextSource = {
     ...first.head,
     authoritySequence: '2',
     version: '0',
@@ -673,7 +674,9 @@ async function twiceRotatedFixture() {
     issuedAt: '2026-08-08T12:01:00Z',
     validUntil: '2026-08-11T12:01:00Z',
     previousHeadDigest: undefined,
-  } as unknown as AgentProfileActiveHeadObjectV1, projection);
+  } as unknown as AgentProfileActiveHeadObjectV1;
+  const projection = smallProjection(nextSource);
+  const head = prepareHead(nextSource, projection);
   return {
     head,
     facts: await factsFor(
@@ -836,19 +839,24 @@ function prepareHead(
   } as AgentProfileActiveHeadObjectV1;
 }
 
-function smallProjection(root: string) {
+function smallProjection(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
   return sortProjection([
-    { subject: root, predicate: RDF_TYPE, object: 'https://dkg.network/ontology#Agent', graph: '' },
-    { subject: root, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
-    { subject: root, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
+    { subject: head.rootSubject, predicate: RDF_TYPE, object: 'https://dkg.network/ontology#Agent', graph: '' },
+    ...agentProfileIdentityProjectionV1(head),
+    { subject: head.rootSubject, predicate: 'https://schema.org/description', object: '"b"', graph: '' },
+    { subject: head.rootSubject, predicate: 'https://schema.org/name', object: '"a"', graph: '' },
   ]);
 }
 
-function maximumProjection(root: string) {
+function maximumProjection(head: Pick<AgentProfileActiveHeadObjectV1,
+  'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>) {
+  const root = head.rootSubject;
   const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
     { subject: root, predicate: RDF_TYPE, object: 'https://dkg.network/ontology#Agent', graph: '' },
+    ...agentProfileIdentityProjectionV1(head),
   ];
-  for (let index = 0; index < 9_999; index += 1) {
+  for (let index = 0; index < 9_996; index += 1) {
     quads.push({
       subject: root,
       predicate: 'https://schema.org/description',
@@ -859,10 +867,17 @@ function maximumProjection(root: string) {
   return sortProjection(quads);
 }
 
-function largeProjection(root: string, kind: 'capability' | 'offering', count: number) {
+function largeProjection(
+  head: Pick<AgentProfileActiveHeadObjectV1,
+    'rootSubject' | 'peerId' | 'peerPublicKey' | 'evmIssuer'>,
+  kind: 'capability' | 'offering',
+  count: number,
+) {
+  const root = head.rootSubject;
   const subjects = [root];
   const quads: Array<{ subject: string; predicate: string; object: string; graph: string }> = [
     { subject: root, predicate: 'https://schema.org/name', object: '"large"', graph: '' },
+    ...agentProfileIdentityProjectionV1(head),
   ];
   for (let index = 1; index <= count; index += 1) {
     const subject = `${root}/.well-known/genid/${kind === 'capability' ? 'cap' : 'offering'}${index}`;

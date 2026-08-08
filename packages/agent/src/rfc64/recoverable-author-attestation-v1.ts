@@ -1,6 +1,7 @@
 import {
   AUTHOR_SCHEME_VERSION_V1,
   buildAuthorAttestationTypedData,
+  type CanonicalGraphScopedAuthorSealV1,
   type VerifiedCatalogSealBindingSnapshotV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -16,7 +17,13 @@ export class RecoverableAuthorAttestationErrorV1 extends Error {
 export function assertRecoverableAuthorAttestationCapabilityV1(
   binding: VerifiedCatalogSealBindingSnapshotV1,
 ): void {
-  const { seal } = binding;
+  assertRecoverableGraphScopedAuthorAttestationV1(binding.seal);
+}
+
+/** Require one canonical graph-scoped seal's EOA attestation to recover its author. */
+export function assertRecoverableGraphScopedAuthorAttestationV1(
+  seal: Readonly<CanonicalGraphScopedAuthorSealV1>,
+): void {
   if (seal.authorSchemeVersion !== String(AUTHOR_SCHEME_VERSION_V1)) {
     throw new RecoverableAuthorAttestationErrorV1(
       'unsupported author attestation scheme',
