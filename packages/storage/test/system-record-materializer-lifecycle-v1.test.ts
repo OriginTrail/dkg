@@ -1362,6 +1362,30 @@ describe('system-record lane session lifecycle V1', () => {
       await releaseSystemRecordLaneControllerV1(replacement);
     });
 
+    it('retains the controller when a rejecting transition self-releases during detach', async () => {
+      const { gated, controller } = buildGated();
+      gated.gate('destroyClient');
+      const open = track(controller.open(ACTIVATION));
+      await gated.reached('destroyClient');
+      gated.failAt = 'stopAndProveOwnedChildDead';
+
+      const detach = track(releaseSystemRecordLaneControllerV1(controller));
+      gated.release('destroyClient');
+      await Promise.all([open.done, detach.done]);
+
+      expect(open.state.rejected).toBe(true);
+      expect(detach.state.rejected).toBe(true);
+      expect(String((detach.state.value as Error).message)).toMatch(/handoff failed/);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+    });
+
     it('runs ONE teardown when a superseded open settles under a stalled shutdown', async () => {
       const { gated, controller } = buildGated();
       const first = await controller.open(ACTIVATION);

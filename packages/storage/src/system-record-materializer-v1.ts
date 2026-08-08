@@ -549,13 +549,15 @@ class SystemRecordLaneTransitionsV1 {
       const version = this.settlementVersion;
       const owned = [...this.ownedSettlements.entries()];
       const results = await Promise.allSettled(owned.map(([, value]) => value.settlement));
-      if (version !== this.settlementVersion) continue;
-      for (const [index, [entry, value]] of owned.entries()) {
-        if (!this.ownedSettlements.has(entry)) continue;
+      // A settlement can release itself in `finally`, changing the version
+      // before this continuation runs. Validate the captured results first so
+      // a failed physical transition cannot disappear behind an empty retry.
+      for (const [index, [, value]] of owned.entries()) {
         const result = results[index];
         if (result?.status === 'rejected') throw result.reason;
         value.assertSettled?.();
       }
+      if (version !== this.settlementVersion) continue;
       return;
     }
   }
