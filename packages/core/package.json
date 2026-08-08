@@ -27,7 +27,7 @@
     "build": "tsc",
     "test": "pnpm run test:baseline && pnpm run test:system-record",
     "test:baseline": "vitest run --exclude 'test/system-record-*.test.ts' --maxWorkers=4",
-    "test:system-record": "vitest run --exclude 'test/**/!(system-record-*).test.ts' --maxWorkers=1 --no-file-parallelism",
+    "test:system-record": "vitest run --config vitest.system-record.config.ts --maxWorkers=1 --no-file-parallelism",
     "test:system-record-export": "node test/system-record-package-export-v1.mjs",
     "test:system-record-exhaustive": "DKG_SYSTEM_RECORD_EXHAUSTIVE=1 vitest run test/system-record-inventory-v1.test.ts test/system-record-objects-v1.test.ts -t \"complete height-three|exactly 128 MiB\" --maxWorkers=1 --no-file-parallelism",
     "test:coverage": "vitest run --coverage",

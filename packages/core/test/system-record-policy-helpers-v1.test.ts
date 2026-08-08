@@ -11,8 +11,59 @@ import {
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const SCHEMA = 'https://schema.org/';
 const DKG = 'https://dkg.network/ontology#';
+const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
 const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
+
+const EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1 = {
+  capability: `${ERC8004}capabilities`,
+  offering: `${SKILL}offersSkill`,
+  registration: `${PROV}wasGeneratedBy`,
+  hosting: `${SKILL}hostingProfile`,
+} as const;
+
+const EXPECTED_ALLOWED_PROFILE_PREDICATES_V1 = {
+  root: [
+    RDF_TYPE,
+    `${SCHEMA}name`,
+    `${SCHEMA}description`,
+    `${DKG}peerId`,
+    `${DKG}nodeRole`,
+    `${DKG}publicKey`,
+    `${DKG}relayAddress`,
+    `${DKG}agentAddress`,
+    `${DKG}multiaddr`,
+    `${DKG}lastSeen`,
+    `${DKG}publicEncryptionKey`,
+    `${DKG}encryptionKeyAlgorithm`,
+    `${DKG}encryptionKeyProof`,
+    `${SKILL}framework`,
+    ...Object.values(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1),
+  ],
+  capability: [RDF_TYPE, `${SCHEMA}name`],
+  offering: [
+    RDF_TYPE,
+    `${SKILL}skill`,
+    `${SKILL}pricePerCall`,
+    `${SKILL}currency`,
+    `${SKILL}successRate`,
+    `${SKILL}pricing`,
+  ],
+  registration: [RDF_TYPE, `${PROV}atTime`],
+  hosting: [RDF_TYPE, `${SKILL}contextGraphsServed`, `${SKILL}paranetsServed`],
+  x25519: [
+    `${DKG}revokedAt`,
+    `${DKG}revokedBy`,
+    `${DKG}encryptionKeyRevocationProof`,
+  ],
+} as const satisfies Readonly<Record<AgentProfileOwnedSubjectKindV1, readonly string[]>>;
+
+const PROFILE_PREDICATE_UNIVERSE_V1 = [
+  ...new Set(Object.values(EXPECTED_ALLOWED_PROFILE_PREDICATES_V1).flat()),
+];
+const PROFILE_SUBJECT_KINDS_V1 = Object.keys(
+  EXPECTED_ALLOWED_PROFILE_PREDICATES_V1,
+) as AgentProfileOwnedSubjectKindV1[];
 
 const FOREIGN_PEER = {
   peerId: '12D3KooWHwCJEQ7p5idnD7iQAWyCJHEW7rngKQiXCnEfGef69SV4',
@@ -76,95 +127,20 @@ describe('system-record V1 public policy helpers', () => {
     }
   });
 
-  it('pins the complete allowed predicate set for every owned-subject kind', () => {
-    const cases: readonly Readonly<{
-      kind: AgentProfileOwnedSubjectKindV1;
-      allowed: readonly string[];
-      forbidden: string;
-    }>[] = [
-      {
-        kind: 'root',
-        allowed: [
-          RDF_TYPE,
-          `${SCHEMA}name`,
-          `${SCHEMA}description`,
-          `${DKG}peerId`,
-          `${DKG}nodeRole`,
-          `${DKG}publicKey`,
-          `${DKG}relayAddress`,
-          `${DKG}agentAddress`,
-          `${DKG}multiaddr`,
-          `${DKG}lastSeen`,
-          `${DKG}publicEncryptionKey`,
-          `${DKG}encryptionKeyAlgorithm`,
-          `${DKG}encryptionKeyProof`,
-          `${SKILL}framework`,
-          ...Object.values(AGENT_PROFILE_LINK_PREDICATES_V1),
-        ],
-        forbidden: `${PROV}atTime`,
-      },
-      {
-        kind: 'capability',
-        allowed: [RDF_TYPE, `${SCHEMA}name`],
-        forbidden: `${SKILL}skill`,
-      },
-      {
-        kind: 'offering',
-        allowed: [
-          RDF_TYPE,
-          `${SKILL}skill`,
-          `${SKILL}pricePerCall`,
-          `${SKILL}currency`,
-          `${SKILL}successRate`,
-          `${SKILL}pricing`,
-        ],
-        forbidden: `${PROV}atTime`,
-      },
-      {
-        kind: 'registration',
-        allowed: [RDF_TYPE, `${PROV}atTime`],
-        forbidden: `${SCHEMA}name`,
-      },
-      {
-        kind: 'hosting',
-        allowed: [RDF_TYPE, `${SKILL}contextGraphsServed`, `${SKILL}paranetsServed`],
-        forbidden: `${SKILL}pricePerCall`,
-      },
-      {
-        kind: 'x25519',
-        allowed: [
-          `${DKG}revokedAt`,
-          `${DKG}revokedBy`,
-          `${DKG}encryptionKeyRevocationProof`,
-        ],
-        forbidden: RDF_TYPE,
-      },
-    ];
-
-    for (const { kind, allowed, forbidden } of cases) {
-      for (const predicate of allowed) {
+  it('pins the exact predicate matrix for every owned-subject kind', () => {
+    for (const kind of PROFILE_SUBJECT_KINDS_V1) {
+      const allowed = new Set(EXPECTED_ALLOWED_PROFILE_PREDICATES_V1[kind]);
+      for (const predicate of PROFILE_PREDICATE_UNIVERSE_V1) {
         expect(isAllowedAgentProfilePredicateV1(kind, predicate), `${kind}: ${predicate}`)
-          .toBe(true);
+          .toBe(allowed.has(predicate));
       }
-      expect(isAllowedAgentProfilePredicateV1(kind, forbidden), `${kind} forbidden predicate`)
+      expect(isAllowedAgentProfilePredicateV1(kind, 'https://example.org/not-in-v1'), kind)
         .toBe(false);
     }
   });
 
-  it('allows every exported profile link only on the root subject', () => {
-    const derivedKinds: readonly AgentProfileOwnedSubjectKindV1[] = [
-      'capability',
-      'offering',
-      'registration',
-      'hosting',
-      'x25519',
-    ];
-
-    for (const predicate of Object.values(AGENT_PROFILE_LINK_PREDICATES_V1)) {
-      expect(isAllowedAgentProfilePredicateV1('root', predicate), predicate).toBe(true);
-      for (const kind of derivedKinds) {
-        expect(isAllowedAgentProfilePredicateV1(kind, predicate), `${kind}: ${predicate}`).toBe(false);
-      }
-    }
+  it('pins the exported profile link mapping independently', () => {
+    expect(AGENT_PROFILE_LINK_PREDICATES_V1)
+      .toEqual(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1);
   });
 });
