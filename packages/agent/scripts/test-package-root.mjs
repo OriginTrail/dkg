@@ -8,6 +8,9 @@ const legacyAgent = await import('@origintrail-official/dkg-agent/dist/dkg-agent
 const publicCatalogActivation = await import(
   '@origintrail-official/dkg-agent/rfc64/public-catalog-activation-config-v1'
 );
+const agentProfileProducer = await import(
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-v1.js'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const expectedRfc64PolicyCells = [
@@ -17,11 +20,19 @@ const expectedRfc64PolicyCells = [
   'private-curated',
 ];
 const internalAgentProfilePhaseSpecifiers = [
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-api-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-artifacts-v1-internal.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-signing-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-inventory-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-commit-v1.js',
+];
+const publicSystemRecordSpecifiers = [
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/artifact-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/in-memory-agent-profile-publication-store-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/provider-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/transport-v1.js',
 ];
 
 for (const specifier of internalAgentProfilePhaseSpecifiers) {
@@ -33,6 +44,37 @@ for (const specifier of internalAgentProfilePhaseSpecifiers) {
     if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
   }
   if (resolved) throw new Error(`published package exposed internal phase ${specifier}`);
+}
+
+for (const specifier of publicSystemRecordSpecifiers) {
+  const subpath = `.${specifier.slice('@origintrail-official/dkg-agent'.length)}`;
+  if (packageManifest.exports[subpath] !== subpath) {
+    throw new Error(`historical System Record module is not explicitly public: ${specifier}`);
+  }
+  await import(specifier);
+}
+if (packageManifest.exports['./dist/system-records/*'] !== null) {
+  throw new Error('unclassified System Record deep imports are not blocked by default');
+}
+
+const profileArtifact = (objectKind, byte) => Object.freeze({
+  objectKind,
+  objectDigest: `0x${byte.toString(16).padStart(64, '0')}`,
+  canonicalBytes: Uint8Array.of(byte),
+});
+const flattenedProfileArtifacts = agentProfileProducer
+  .flattenAgentProfileProducerPublicationArtifactsV1({
+    head: profileArtifact('agent-profile-head', 1),
+    bundle: profileArtifact('profile-bundle', 2),
+    ownedSubjectTable: profileArtifact('owned-subject-table', 3),
+    inventoryObjects: Object.freeze([
+      profileArtifact('inventory-internal', 4),
+      profileArtifact('inventory-leaf', 5),
+    ]),
+  });
+if (flattenedProfileArtifacts.map((artifact) => artifact.objectKind).join(',')
+  !== 'agent-profile-head,profile-bundle,owned-subject-table,inventory-internal,inventory-leaf') {
+  throw new Error('historical producer artifact-flattening export changed behavior');
 }
 
 if (

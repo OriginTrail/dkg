@@ -9,8 +9,6 @@ import type {
 } from '../src/system-records/agent-profile-producer-api-v1.js';
 // @ts-expect-error phase dependency DTOs are not exported by the producer entrypoint.
 import type { AgentProfileProducerPreparationDependenciesV1 as LeakedPreparationDeps } from '../src/system-records/agent-profile-producer-v1.js';
-// @ts-expect-error artifact flattening is an inventory/store implementation detail.
-import { flattenAgentProfileProducerPublicationArtifactsV1 as leakedFlattenArtifacts } from '../src/system-records/agent-profile-producer-v1.js';
 
 declare const dependencies: AgentProfileProducerPreparationDependenciesV1;
 declare const prepared: PreparedAgentProfileV1;
@@ -24,7 +22,6 @@ void prepareAgentProfileProductionV1(dependencies, prepared, publication);
 
 declare const leaked: LeakedPreparationDeps;
 void leaked;
-void leakedFlattenArtifacts;
 
 // @ts-expect-error package exports block the preparation implementation phase.
 type PublishedPreparationPhase = typeof import('@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js');

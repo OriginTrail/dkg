@@ -28,6 +28,9 @@ import {
 } from './agent-profile-producer-signing-v1.js';
 
 export * from './agent-profile-producer-api-v1.js';
+export {
+  flattenAgentProfileProducerPublicationArtifactsV1,
+} from './agent-profile-producer-artifacts-v1-internal.js';
 
 /**
  * Author one local profile record. No protocol, timer, queue, or independent
