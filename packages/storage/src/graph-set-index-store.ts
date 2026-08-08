@@ -334,7 +334,7 @@ export class GraphSetIndexStore implements TripleStore {
    * Resolved rather than probed per call: `this.inner.assert…?.()` asked only
    * the immediate wrapper, and optional chaining treats an absent method as
    * PERMISSION — so a single intervening decorator turned this fail-closed read
-   * into a fail-open one. `asManagedReadGateV1` walks to the adapter that
+   * into a fail-open one. `asCachedReadGateV1` walks to the store that
    * actually holds the lease, so no wrapper can erase it by omission.
    *
    * `null` for every store with no managed backend: those are always readable.

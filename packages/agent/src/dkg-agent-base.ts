@@ -110,7 +110,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, linkStoreChainV1, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SystemRecordApplyOutcomeV1, type SystemRecordLaneActivationV1, type SystemRecordLaneControllerV1 } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SystemRecordApplyOutcomeV1, type SystemRecordLaneActivationV1, type SystemRecordLaneControllerV1 } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -637,11 +637,10 @@ export function createListContextGraphsCacheInvalidatingStore(
       return innerStore.close();
     },
   };
-  // Register for capability discovery. This forwarder declares neither the
-  // changelog API nor the managed read gate, so EVERY capability resolved
-  // through it depends on traversal working here — the sync-changelog
-  // responder lane and the write-generation source among them.
-  linkStoreChainV1(wrapper, innerStore);
+  // Traversable via the public `innerStore` above — no registration needed.
+  // EVERY capability a caller resolves through this forwarder depends on that,
+  // since it declares neither the changelog API nor the cached-read gate:
+  // the sync-changelog responder lane and the write-generation source both.
   return wrapper;
 }
 
