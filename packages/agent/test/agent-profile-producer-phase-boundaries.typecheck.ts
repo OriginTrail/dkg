@@ -30,3 +30,17 @@ void prepareAgentProfileProductionV1(dependencies, prepared, publication);
 
 declare const leaked: LeakedPreparationDeps;
 void leaked;
+
+// @ts-expect-error package exports block the preparation implementation phase.
+type PublishedPreparationPhase = typeof import('@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js');
+// @ts-expect-error package exports block the signing implementation phase.
+type PublishedSigningPhase = typeof import('@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-signing-v1.js');
+// @ts-expect-error package exports block the inventory implementation phase.
+type PublishedInventoryPhase = typeof import('@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-inventory-v1.js');
+// @ts-expect-error package exports block the commit implementation phase.
+type PublishedCommitPhase = typeof import('@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-commit-v1.js');
+
+void (undefined as PublishedPreparationPhase | undefined);
+void (undefined as PublishedSigningPhase | undefined);
+void (undefined as PublishedInventoryPhase | undefined);
+void (undefined as PublishedCommitPhase | undefined);

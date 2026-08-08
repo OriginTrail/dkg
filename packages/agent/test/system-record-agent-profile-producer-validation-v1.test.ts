@@ -11,6 +11,7 @@ import {
   type AgentProfileProducerPublicationStoreV1,
   type AgentProfilePublicationBindingV1,
 } from '../src/system-records/agent-profile-producer-v1.js';
+import { prepareAgentProfileProductionV1 } from '../src/system-records/agent-profile-producer-preparation-v1.js';
 import { createInMemoryAgentProfilePublicationStoreV1 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 import {
   DEPLOYMENT,
@@ -25,6 +26,26 @@ import {
 
 
 describe('agent-profile system-record producer V1 validation and binding', () => {
+  it('rejects a fabricated preparation input before reading dependencies or publication', async () => {
+    let reads = 0;
+    const unread = new Proxy({}, {
+      get() {
+        reads += 1;
+        throw new Error('fabricated input escaped the runtime boundary');
+      },
+    });
+    await expect(prepareAgentProfileProductionV1(
+      unread as never,
+      {
+        preparedSnapshot: null,
+        projectionQuads: [],
+        ownedSubjectTable: [],
+      } as never,
+      unread as never,
+    )).rejects.toThrow(/requires a validated production input/);
+    expect(reads).toBe(0);
+  });
+
   it('preflights provider capacity before materialization and releases a failed commit lease', async () => {
     const fixture = await producerFixture(createInMemoryAgentProfilePublicationStoreV1({
       maxObjects: 1,

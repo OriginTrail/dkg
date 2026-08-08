@@ -16,6 +16,23 @@ const expectedRfc64PolicyCells = [
   'private-open',
   'private-curated',
 ];
+const internalAgentProfilePhaseSpecifiers = [
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-signing-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-inventory-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-commit-v1.js',
+];
+
+for (const specifier of internalAgentProfilePhaseSpecifiers) {
+  let resolved = false;
+  try {
+    await import(specifier);
+    resolved = true;
+  } catch (error) {
+    if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
+  }
+  if (resolved) throw new Error(`published package exposed internal phase ${specifier}`);
+}
 
 if (
   typeof root.DKGAgent !== 'function'

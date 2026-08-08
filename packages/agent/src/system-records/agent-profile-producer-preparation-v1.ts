@@ -83,6 +83,7 @@ export async function prepareAgentProfileProductionV1(
   input: ValidatedAgentProfileProductionInputV1,
   inputPublication: AgentProfilePublicationBindingV1,
 ): Promise<AgentProfileProductionPreparationV1> {
+  assertValidatedAgentProfileProductionInputV1(input);
   const { preparedSnapshot: prepared, projectionQuads, ownedSubjectTable } = input;
   const publication = snapshotConfirmedPublicationBindingV1(inputPublication);
   const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
@@ -214,6 +215,22 @@ export async function prepareAgentProfileProductionV1(
     head,
     headDigest,
   });
+}
+
+function assertValidatedAgentProfileProductionInputV1(
+  input: unknown,
+): asserts input is ValidatedAgentProfileProductionInputV1 {
+  if (typeof input !== 'object'
+    || input === null
+    || !Object.prototype.hasOwnProperty.call(
+      input,
+      VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1,
+    )
+    || (input as Record<PropertyKey, unknown>)[
+      VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1
+    ] !== true) {
+    throw new TypeError('agent-profile preparation requires a validated production input');
+  }
 }
 
 export function validateAgentProfileProductionInputV1(
