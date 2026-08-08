@@ -27,10 +27,8 @@ import {
 } from './agent-profile-producer-api-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
-import {
-  systemRecordArtifactKeyV1,
-  type SystemRecordArtifactV1,
-} from './artifact-v1.js';
+import { flattenAgentProfileProducerPublicationArtifactsV1 } from './agent-profile-producer-artifacts-v1-internal.js';
+import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
 
 export interface AgentProfileProducerInventoryDependenciesV1 {
   readonly networkId: NetworkIdV1;
@@ -155,17 +153,6 @@ interface PublicationArtifactSetInputV1 {
   readonly preparation: AgentProfileProductionPreparationV1;
   readonly inventory: SystemRecordInventoryTreeSnapshotV1;
   readonly inventoryUpdate: ReturnType<typeof updateSystemRecordInventoryTreeV1> | null;
-}
-
-function flattenAgentProfileProducerPublicationArtifactsV1(
-  artifacts: AgentProfileProducerPublicationArtifactsV1,
-): readonly SystemRecordArtifactV1[] {
-  return Object.freeze([
-    artifacts.head,
-    artifacts.bundle,
-    artifacts.ownedSubjectTable,
-    ...artifacts.inventoryObjects,
-  ]);
 }
 
 function publicationArtifactSet(

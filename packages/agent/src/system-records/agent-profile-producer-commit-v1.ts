@@ -12,10 +12,25 @@ export interface AgentProfileProducerCommitDependenciesV1 {
   readonly producer: Pick<CreateAgentProfileProducerOptionsV1, 'install'>;
 }
 
+type AgentProfileProducerCommitPreparationV1 = Pick<
+  AgentProfileProductionPreparationV1,
+  | 'snapshot'
+  | 'head'
+  | 'headDigest'
+  | 'projectionBytes'
+  | 'projectionQuads'
+  | 'ownedSubjectTable'
+>;
+
+type AgentProfileProducerCommitSigningV1 = Pick<
+  SignedAgentProfileProductionV1,
+  'envelope'
+>;
+
 export async function commitAgentProfileProductionV1(
   dependencies: AgentProfileProducerCommitDependenciesV1,
-  preparation: AgentProfileProductionPreparationV1,
-  signed: SignedAgentProfileProductionV1,
+  preparation: AgentProfileProducerCommitPreparationV1,
+  signed: AgentProfileProducerCommitSigningV1,
   inventoryPlan: AgentProfileProductionInventoryV1,
   signal: AbortSignal,
 ): Promise<AgentProfileProducerPublicationV1> {

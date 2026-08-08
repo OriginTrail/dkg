@@ -17,6 +17,7 @@ const expectedRfc64PolicyCells = [
   'private-curated',
 ];
 const internalAgentProfilePhaseSpecifiers = [
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-artifacts-v1-internal.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-signing-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-inventory-v1.js',

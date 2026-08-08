@@ -1,5 +1,6 @@
 import {
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
+  type Digest32V1,
   type SignedAgentProfileHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import {
@@ -9,6 +10,8 @@ import {
   vi,
 } from 'vitest';
 import { prepareAgentProfileV1 } from '../src/profile.js';
+import type { AgentProfileProducerPublicationArtifactsV1 } from '../src/system-records/agent-profile-producer-api-v1.js';
+import { flattenAgentProfileProducerPublicationArtifactsV1 } from '../src/system-records/agent-profile-producer-artifacts-v1-internal.js';
 import { type AgentProfileProducerPublicationStoreV1 } from '../src/system-records/agent-profile-producer-v1.js';
 import {
   DEPLOYMENT,
@@ -25,6 +28,37 @@ import {
 
 
 describe('agent-profile system-record producer V1 publication and inventory', () => {
+  it('flattens every publication artifact group through one ordered path', () => {
+    const artifact = (
+      objectKind: 'agent-profile-head' | 'profile-bundle' | 'owned-subject-table'
+        | 'inventory-internal' | 'inventory-leaf',
+      byte: number,
+    ) => Object.freeze({
+      objectKind,
+      objectDigest: `0x${byte.toString(16).padStart(64, '0')}` as Digest32V1,
+      canonicalBytes: Uint8Array.of(byte),
+    });
+    const artifacts = {
+      head: artifact('agent-profile-head', 1),
+      bundle: artifact('profile-bundle', 2),
+      ownedSubjectTable: artifact('owned-subject-table', 3),
+      inventoryObjects: Object.freeze([
+        artifact('inventory-internal', 4),
+        artifact('inventory-leaf', 5),
+      ]),
+    } as AgentProfileProducerPublicationArtifactsV1;
+
+    expect(flattenAgentProfileProducerPublicationArtifactsV1(artifacts).map(
+      ({ objectKind, canonicalBytes }) => [objectKind, canonicalBytes[0]],
+    )).toEqual([
+      ['agent-profile-head', 1],
+      ['profile-bundle', 2],
+      ['owned-subject-table', 3],
+      ['inventory-internal', 4],
+      ['inventory-leaf', 5],
+    ]);
+  });
+
   it('stages one exact profile, installs it, then advertises the signed inventory root', async () => {
     const fixture = await producerFixture();
     const events: string[] = [];

@@ -16,6 +16,7 @@ import {
   type AgentProfileProducerPublicationCommitV1,
   type AgentProfileProducerPublicationStoreV1,
 } from './agent-profile-producer-v1.js';
+import { flattenAgentProfileProducerPublicationArtifactsV1 } from './agent-profile-producer-artifacts-v1-internal.js';
 import {
   cloneSystemRecordArtifactV1,
   systemRecordArtifactKeyV1,
@@ -76,12 +77,9 @@ export function createInMemoryAgentProfilePublicationStoreV1(
       // cannot obtain a second lease and make the installed projection stale.
       prepared = true;
       try {
-        const publicationArtifacts: readonly SystemRecordArtifactV1[] = Object.freeze([
-          input.publicationArtifacts.head,
-          input.publicationArtifacts.bundle,
-          input.publicationArtifacts.ownedSubjectTable,
-          ...input.publicationArtifacts.inventoryObjects,
-        ]);
+        const publicationArtifacts = flattenAgentProfileProducerPublicationArtifactsV1(
+          input.publicationArtifacts,
+        );
         let addedObjects = 0;
         let addedBytes = 0;
         for (const artifact of publicationArtifacts) {

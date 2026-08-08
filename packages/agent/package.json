@@ -34,6 +34,7 @@
     "./dist/system-records/agent-profile-producer-signing-v1.js": null,
     "./dist/system-records/agent-profile-producer-inventory-v1.js": null,
     "./dist/system-records/agent-profile-producer-commit-v1.js": null,
+    "./dist/system-records/agent-profile-producer-artifacts-v1-internal.js": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,

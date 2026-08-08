@@ -19,9 +19,14 @@ export interface SignedAgentProfileProductionV1 {
   readonly envelopeBytes: Uint8Array;
 }
 
+type AgentProfileProducerSigningInputV1 = Pick<
+  AgentProfileProductionPreparationV1,
+  'head' | 'headDigest'
+>;
+
 export async function signAgentProfileProductionV1(
   dependencies: AgentProfileProducerSigningDependenciesV1,
-  preparation: AgentProfileProductionPreparationV1,
+  preparation: AgentProfileProducerSigningInputV1,
   signal: AbortSignal,
 ): Promise<SignedAgentProfileProductionV1> {
   const [peerSignature, evmSignature] = await Promise.all([
