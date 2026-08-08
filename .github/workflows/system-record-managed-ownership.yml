@@ -160,6 +160,7 @@ jobs:
             test/managed-terminal-read-through-index-v1.test.ts \
             test/managed-warm-read-composition-v1.test.ts \
             test/managed-read-gate-decorator-coverage-v1.test.ts \
+            test/store-chain-participation-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \
             test/system-record-capability-probe-errors-v1.test.ts \
             test/graph-set-index-store.test.ts \
