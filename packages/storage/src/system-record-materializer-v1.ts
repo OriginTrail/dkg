@@ -168,7 +168,11 @@ export interface SystemRecordTransactionExecutorV1 {
   /**
    * B3 transaction boundary. Mutation settlement is explicit and an uncertain
    * write transfers ownership through `registerRecovery` while the executor's
-   * exclusive scheduler permit is still live.
+   * exclusive scheduler permit is still live. The executor must pass the exact
+   * binding object it received, invoke the registrar at most once before its
+   * returned promise settles, and must not retain that invocation-scoped
+   * capability afterward. The registrar call synchronously installs recovery
+   * ownership; the executor itself may have awaited inspection and dispatch.
    */
   applyVerifiedSettlementBound?(
     proof: unknown,
@@ -549,6 +553,13 @@ class SystemRecordLaneSession {
   /** In-flight transition, so same-intent callers coalesce instead of racing. */
   private transition: SystemRecordLaneTransitionV1 | null = null;
   private recoverySequence = 0n;
+  /** Already-admitted executor calls that may still transfer recovery ownership. */
+  private admittedApplyCount = 0;
+  /** Allocated only when detach actually has to wait for admitted work. */
+  private admittedApplyDrain: Promise<void> | null = null;
+  private resolveAdmittedApplyDrain: (() => void) | null = null;
+  /** Concurrent disposal callers join one ownership decision. */
+  private detachSettlement: Promise<void> | null = null;
 
   /**
    * The controller this session backs, so shutdown can release the
@@ -758,7 +769,12 @@ class SystemRecordLaneSession {
       // The joined open may have ended terminal, or a shutdown may have latched
       // while we waited. Re-read rather than acting on stale state.
       const after = this.readState();
-      if (after === 'shutdown' || after === 'disabled' || after === 'unavailable') return;
+      if (
+        after === 'shutdown' ||
+        after === 'detached' ||
+        after === 'disabled' ||
+        after === 'unavailable'
+      ) return;
       // Another disable that joined the SAME open may have resumed first and
       // already installed itself. `current` is then `disabling`, which none of
       // the three states above excludes, so installing anyway opened a SECOND
@@ -857,7 +873,10 @@ class SystemRecordLaneSession {
         throw error;
       } finally {
         entry.reportedSettled = true;
-        if (entry.physicalWork === null) this.release(entry);
+        if (
+          entry.physicalWork === null &&
+          (entry.recovery === null || entry.recovery.settled)
+        ) this.release(entry);
       }
     })();
 
@@ -1162,71 +1181,92 @@ class SystemRecordLaneSession {
       childGeneration: boundGeneration,
       materializationEpoch: facade.materializationEpoch,
     });
-    if (this.deps.executor.applyVerifiedSettlementBound) {
-      const settlement = await this.deps.executor.applyVerifiedSettlementBound(
-        proof,
-        executionBinding,
-        this.registerRecovery,
-      );
-      // The internal carrier is authoritative. In particular, a public
-      // `root-collision` may eventually include a settled quarantine mutation,
-      // while an `applied` result has already been exact-postread. Neither fact
-      // may be reconstructed from the public outcome spelling here.
-      return settlement.outcome;
-    }
-
-    const result = this.deps.executor.applyVerifiedBound
-      ? await this.deps.executor.applyVerifiedBound(proof, executionBinding)
-      : await this.deps.executor.applyVerified(proof, boundGeneration);
-
-    // Derive the FINAL outcome first, then seal on it.
-    //
-    // The previous order sealed only on the executor's own `indeterminate` and
-    // then synthesized a second one below without sealing — so a success whose
-    // generation changed under the dispatch returned `indeterminate` to the
-    // caller while leaving the lane `enabled`, and the very next apply was
-    // admitted. Reproduced: two dispatches, both returning `indeterminate`,
-    // state `enabled` throughout. The second must never have been admitted.
-    //
-    // Attribution is checked on the WHOLE ownership snapshot, not just the
-    // generation string: a lease that has gone not-ready or terminal under the
-    // dispatch is equally unable to attribute the response, and reading only
-    // `childGeneration` would miss both.
-    const after = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
-    const attributable =
-      after !== null &&
-      !after.terminal &&
-      after.ready &&
-      after.childGeneration === boundGeneration &&
-      this.current === 'enabled' &&
-      this.descriptor === facade.descriptor &&
-      this.activation.toString(10) === facade.activationGeneration &&
-      this.activeSessionIdentity === facade.sessionIdentity &&
-      this.activeChildGeneration === facade.childGeneration &&
-      this.activeMaterializationEpoch === facade.materializationEpoch;
-
-    // Compatibility-only B2 fallback. Production B3 composition uses the
-    // explicit settlement carrier above; an older injected executor can only
-    // mutate on these two success outcomes. Do not extend this inference to a
-    // future mutating outcome such as quarantine.
-    const final: SystemRecordApplyOutcomeV1 =
-      !attributable && (result.outcome === 'applied' || result.outcome === 'already-applied')
-        ? {
-            outcome: 'indeterminate',
-            recoveryGeneration: after?.childGeneration ?? boundGeneration,
+    this.admittedApplyCount += 1;
+    try {
+      if (this.deps.executor.applyVerifiedSettlementBound) {
+        let registrarOpen = true;
+        let registrationAttempted = false;
+        const registerForInvocation: SystemRecordAtomicRecoveryRegistrarV1 = (request) => {
+          if (!registrarOpen || registrationAttempted) {
+            throw new Error(
+              'system-record recovery registrar is no longer live for this apply invocation',
+            );
           }
-        : result;
+          registrationAttempted = true;
+          return this.registerRecoveryForInvocation(request, executionBinding);
+        };
+        try {
+          const settlement = await this.deps.executor.applyVerifiedSettlementBound(
+            proof,
+            executionBinding,
+            registerForInvocation,
+          );
+          // The internal carrier is authoritative. In particular, a public
+          // `root-collision` may eventually include a settled quarantine mutation,
+          // while an `applied` result has already been exact-postread. Neither fact
+          // may be reconstructed from the public outcome spelling here.
+          return settlement.outcome;
+        } finally {
+          // A retained callback cannot borrow a later invocation's detach window.
+          registrarOpen = false;
+        }
+      }
 
-    // One seal, on the final outcome, however it was reached. The lane must not
-    // accept further work against a generation whose last write may or may not
-    // have committed.
-    // `commitState`, not a raw write: this is the fourth writer of `current` and
-    // the only one that never touches `this.transition`, so no amount of
-    // pointer discipline can reach it. A dispatch parked in the executor across
-    // a COMPLETED shutdown resumed here and wrote `reconciling` over the
-    // terminal state, after which the lane reopened and dispatched again.
-    if (final.outcome === 'indeterminate') this.commitState('reconciling');
-    return final;
+      const result = this.deps.executor.applyVerifiedBound
+        ? await this.deps.executor.applyVerifiedBound(proof, executionBinding)
+        : await this.deps.executor.applyVerified(proof, boundGeneration);
+
+      // Derive the FINAL outcome first, then seal on it.
+      //
+      // The previous order sealed only on the executor's own `indeterminate` and
+      // then synthesized a second one below without sealing — so a success whose
+      // generation changed under the dispatch returned `indeterminate` to the
+      // caller while leaving the lane `enabled`, and the very next apply was
+      // admitted. Reproduced: two dispatches, both returning `indeterminate`,
+      // state `enabled` throughout. The second must never have been admitted.
+      //
+      // Attribution is checked on the WHOLE ownership snapshot, not just the
+      // generation string: a lease that has gone not-ready or terminal under the
+      // dispatch is equally unable to attribute the response, and reading only
+      // `childGeneration` would miss both.
+      const after = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
+      const attributable =
+        after !== null &&
+        !after.terminal &&
+        after.ready &&
+        after.childGeneration === boundGeneration &&
+        this.current === 'enabled' &&
+        this.descriptor === facade.descriptor &&
+        this.activation.toString(10) === facade.activationGeneration &&
+        this.activeSessionIdentity === facade.sessionIdentity &&
+        this.activeChildGeneration === facade.childGeneration &&
+        this.activeMaterializationEpoch === facade.materializationEpoch;
+
+      // Compatibility-only B2 fallback. Production B3 composition uses the
+      // explicit settlement carrier above; an older injected executor can only
+      // mutate on these two success outcomes. Do not extend this inference to a
+      // future mutating outcome such as quarantine.
+      const final: SystemRecordApplyOutcomeV1 =
+        !attributable && (result.outcome === 'applied' || result.outcome === 'already-applied')
+          ? {
+              outcome: 'indeterminate',
+              recoveryGeneration: after?.childGeneration ?? boundGeneration,
+            }
+          : result;
+
+      // One seal, on the final outcome, however it was reached. The lane must not
+      // accept further work against a generation whose last write may or may not
+      // have committed.
+      // `commitState`, not a raw write: this is the fourth writer of `current` and
+      // the only one that never touches `this.transition`, so no amount of
+      // pointer discipline can reach it. A dispatch parked in the executor across
+      // a COMPLETED shutdown resumed here and wrote `reconciling` over the
+      // terminal state, after which the lane reopened and dispatched again.
+      if (final.outcome === 'indeterminate') this.commitState('reconciling');
+      return final;
+    } finally {
+      this.releaseAdmittedApply();
+    }
   }
 
   private refuseVerifiedBeforeDispatch(
@@ -1246,14 +1286,16 @@ class SystemRecordLaneSession {
   /**
    * Transfer one ambiguous write to lifecycle recovery.
    *
-   * This is an arrow property deliberately: the executor receives it as a
-   * capability and invokes it synchronously from inside its exclusive permit.
-   * Calling `barrier` below synchronously installs the scheduler seal before
-   * this method returns, even though the transition itself cannot begin until
-   * that permit drains.
+   * The executor receives a separate wrapper for each invocation and calls it
+   * synchronously from inside its exclusive permit. Calling `barrier` below
+   * synchronously installs the scheduler seal before this method returns, even
+   * though the transition itself cannot begin until that permit drains.
    */
-  private readonly registerRecovery: SystemRecordAtomicRecoveryRegistrarV1 = (request) => {
-    this.assertRecoveryRequestBound(request);
+  private registerRecoveryForInvocation(
+    request: SystemRecordAtomicRecoveryRequestV1,
+    executionBinding: SystemRecordLaneExecutionBindingV1,
+  ): ReturnType<SystemRecordAtomicRecoveryRegistrarV1> {
+    this.assertRecoveryRequestBound(request, executionBinding);
     this.recoverySequence += 1n;
 
     let resolve!: (resolution: SystemRecordAtomicRecoveryResolutionV1) => void;
@@ -1281,7 +1323,12 @@ class SystemRecordLaneSession {
       if (active !== null) {
         throw new Error(`system-record ${active.kind} transition cannot accept recovery ownership`);
       }
-      if (!this.commitState('reconciling')) {
+      const state = this.readState();
+      if (
+        state !== 'detached' &&
+        state !== 'unavailable' &&
+        !this.commitState('reconciling')
+      ) {
         throw new Error('system-record terminal lane cannot enqueue recovery');
       }
       const entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }> = {
@@ -1307,7 +1354,7 @@ class SystemRecordLaneSession {
       recoveryGeneration: recovery.recoveryGeneration,
       completion,
     });
-  };
+  }
 
   private async runRecovery(
     entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }>,
@@ -1575,23 +1622,19 @@ class SystemRecordLaneSession {
     recovery.resolve(Object.freeze(resolution));
   }
 
-  private assertRecoveryRequestBound(request: SystemRecordAtomicRecoveryRequestV1): void {
-    const binding = request.binding;
+  private assertRecoveryRequestBound(
+    request: SystemRecordAtomicRecoveryRequestV1,
+    executionBinding: SystemRecordLaneExecutionBindingV1,
+  ): void {
     if (
       request === null ||
       typeof request !== 'object' ||
       request.ownership === null ||
       typeof request.ownership !== 'object' ||
       typeof request.reconcile !== 'function' ||
-      binding.activationGeneration !== this.activation.toString(10) ||
-      binding.networkId !== this.activeNetworkId ||
-      binding.kind !== 'agents' ||
-      this.descriptor !== `${binding.networkId}|${binding.kind}|${binding.mode}` ||
-      binding.sessionIdentity !== this.activeSessionIdentity ||
-      binding.childGeneration !== this.activeChildGeneration ||
-      binding.materializationEpoch !== this.activeMaterializationEpoch
+      request.binding !== executionBinding
     ) {
-      throw new Error('system-record recovery request is not bound to the active lane');
+      throw new Error('system-record recovery request is not bound to the admitted apply invocation');
     }
   }
 
@@ -1649,28 +1692,68 @@ class SystemRecordLaneSession {
    * the committed state is `detached` and not `shutdown`. Only `shutdown`
    * claims the child was proven dead, and a detach cannot make that claim.
    *
-   * It does not join an ordinary open. It does join a transition that already
-   * owns uncertain-write recovery, because releasing the process-global writer
-   * slot before that recovery physically settles would admit a second writer
-   * over the same managed child.
+   * It joins every transition that can still manipulate the managed child, and
+   * follows a successor installed by a continuation that was already suspended
+   * when detach latched. Releasing the process-global writer slot before those
+   * transitions physically settle would admit a second writer over that child.
    */
   detach(): Promise<void> {
     // A completed or in-flight shutdown made the STRONGER claim; overwriting it
     // with `detached` would downgrade the record of what was established.
     if (this.readState() !== 'shutdown') this.current = 'detached';
-    this.descriptor = null;
-    const transition = this.transition;
-    const recovery = this.recoveryOf(transition);
-    if (transition === null || recovery === null || recovery.settled) {
-      return Promise.resolve();
-    }
-    return this.transitionSettlement(transition).then(() => {
-      if (!recovery.settled) {
+    if (this.detachSettlement) return this.detachSettlement;
+    this.detachSettlement = this.finishDetach();
+    // A caller can abandon disposal after a sibling failure. Keep the shared
+    // settlement observed without changing what present or later callers join.
+    void this.detachSettlement.catch(() => undefined);
+    return this.detachSettlement;
+  }
+
+  private async finishDetach(): Promise<void> {
+    await this.waitForAdmittedApplies();
+
+    // Recovery registration is synchronous inside the executor permit, so the
+    // transition visible after the admitted cohort drains is the complete
+    // ownership handoff. Join every transition kind: an open/disable/shutdown
+    // can manipulate the same child even when it carries no recovery token.
+    let transition = this.transition;
+    while (transition !== null) {
+      await this.transitionSettlement(transition);
+      const recovery = this.recoveryOf(transition);
+      if (recovery !== null && !recovery.settled) {
         throw new Error(
           'system-record controller detach could not prove uncertain-write recovery settled',
         );
       }
-    });
+      const successor = this.transition;
+      if (successor === transition) break;
+      transition = successor;
+    }
+
+    this.descriptor = null;
+    this.clearActiveBinding();
+  }
+
+  private waitForAdmittedApplies(): Promise<void> {
+    if (this.admittedApplyCount === 0) return Promise.resolve();
+    if (this.admittedApplyDrain === null) {
+      this.admittedApplyDrain = new Promise<void>((resolve) => {
+        this.resolveAdmittedApplyDrain = resolve;
+      });
+    }
+    return this.admittedApplyDrain;
+  }
+
+  private releaseAdmittedApply(): void {
+    if (this.admittedApplyCount <= 0) {
+      throw new Error('system-record admitted apply count underflow');
+    }
+    this.admittedApplyCount -= 1;
+    if (this.admittedApplyCount !== 0) return;
+    const resolve = this.resolveAdmittedApplyDrain;
+    this.admittedApplyDrain = null;
+    this.resolveAdmittedApplyDrain = null;
+    resolve?.();
   }
 
   /**
@@ -1712,7 +1795,11 @@ class SystemRecordLaneSession {
    * reintroduces exactly the await-placement audit that has been wrong twice.
    */
   private commitState(next: SystemRecordLaneStateV1): boolean {
-    if (this.readState() === 'shutdown' || this.readState() === 'detached') return false;
+    if (
+      this.readState() === 'shutdown' ||
+      this.readState() === 'unavailable' ||
+      this.readState() === 'detached'
+    ) return false;
     this.current = next;
     if (next === 'enabling') this.deps.setAdmissionActive?.(true);
     if (next === 'disabled' || next === 'unavailable') {
