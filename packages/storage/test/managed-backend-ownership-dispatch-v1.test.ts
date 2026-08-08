@@ -178,6 +178,30 @@ describe('managed backend ownership at mutation dispatch', () => {
     await plain.close().catch(() => undefined);
   });
 
+  it('refuses a default-off managed store whose endpoints do not match its lease', async () => {
+    const store = await createTripleStore({
+      backend: 'sparql-http',
+      options: attachManagedOxigraphLeaseV1(
+        {
+          queryEndpoint: 'http://127.0.0.1:7904/query',
+          updateEndpoint: 'http://127.0.0.1:7904/update',
+          managedByDkg: true,
+        },
+        ownership.lease,
+        supervisor,
+      ) as unknown as Record<string, unknown>,
+      graphSetIndex: false,
+    });
+
+    await expect(store.insert([QUAD])).rejects.toThrow(/not the proven ready listener/);
+    await expect(store.query('ASK { ?s ?p ?o }')).rejects.toThrow(
+      /not the proven ready listener/,
+    );
+    expect(requests).toEqual([]);
+
+    await store.close().catch(() => undefined);
+  });
+
   it('hides reserved internal graphs from adapter-level hasGraph', async () => {
     // The policy module claims reserved state never enumerates and that "no
     // legitimate iterate-and-drop loop can reach one". That held only for the

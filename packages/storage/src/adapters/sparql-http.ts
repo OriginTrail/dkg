@@ -59,10 +59,10 @@ import {
   ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
-  isManagedOxigraphOwnershipLiveV1,
   managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
+  type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from '../managed-oxigraph-ownership-v1-internal.js';
 import {
@@ -321,26 +321,17 @@ export class SparqlHttpStore implements TripleStore {
     }
     if (!this.systemRecordAdmissionActive) return undefined;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
-    if (
-      !snapshot ||
-      snapshot.terminal ||
-      !snapshot.ready ||
-      this.systemRecordHasCredentials ||
-      !managedOxigraphOwnershipEndpointsMatchV1(
-        snapshot,
-        this.systemRecordQueryEndpoint,
-        this.systemRecordUpdateEndpoint,
-      )
-    ) {
+    const attributable = this.attributableManagedOwnership(snapshot);
+    if (!attributable) {
       throw new ManagedOxigraphMutationUnavailableError('ownership is not live and attributable');
     }
 
     const domain = this.managedMutationDomain(graphs);
     return Object.freeze({
-      generation: snapshot.childGeneration,
+      generation: attributable.childGeneration,
       admission: Object.freeze({
         storeId: this,
-        generation: snapshot.childGeneration,
+        generation: attributable.childGeneration,
         domain,
         mode: 'shared' as const,
       }),
@@ -356,17 +347,10 @@ export class SparqlHttpStore implements TripleStore {
       throw new ManagedOxigraphMutationUnavailableError('ownership lease was revoked');
     }
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    const attributable = this.attributableManagedOwnership(snapshot);
     if (
-      !snapshot ||
-      snapshot.terminal ||
-      !snapshot.ready ||
-      snapshot.childGeneration !== binding.generation ||
-      this.systemRecordHasCredentials ||
-      !managedOxigraphOwnershipEndpointsMatchV1(
-        snapshot,
-        this.systemRecordQueryEndpoint,
-        this.systemRecordUpdateEndpoint,
-      )
+      !attributable ||
+      attributable.childGeneration !== binding.generation
     ) {
       throw new ManagedOxigraphMutationUnavailableError('child generation changed before dispatch');
     }
@@ -578,16 +562,17 @@ export class SparqlHttpStore implements TripleStore {
    * it — lives in `releaseSystemRecordLaneControllerV1`, where the registration
    * does.
    */
-  private releaseSystemRecordLane(): void {
+  private releaseSystemRecordLane(quiesceOwner: () => Promise<void>): Promise<void> {
     const controller = this.systemRecordLane;
     this.systemRecordLane = null;
-    if (controller) releaseSystemRecordLaneControllerV1(controller);
+    if (!controller) return quiesceOwner();
+    return releaseSystemRecordLaneControllerV1(controller, quiesceOwner);
   }
 
   private assertManagedBackendReadable(operation: string): void {
     if (!this.ownershipLease) return;
-    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    if (this.attributableManagedOwnership(snapshot)) return;
     throw new ManagedOxigraphBackendUnownedError(
       `sparql-http.${operation}`,
       snapshot?.terminal ?? false,
@@ -597,14 +582,30 @@ export class SparqlHttpStore implements TripleStore {
 
   private assertManagedBackendOwned(operation: string): void {
     if (!this.ownershipLease) return;
-    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
-    // Cold path only: the snapshot allocates, so it is taken to build the error
-    // and nowhere else.
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    if (this.attributableManagedOwnership(snapshot)) return;
     throw new ManagedOxigraphBackendUnownedError(
       `sparql-http.${operation}`,
       snapshot?.terminal ?? false,
       snapshot?.lastInvalidation,
+    );
+  }
+
+  private attributableManagedOwnership(
+    snapshot: ManagedOxigraphOwnershipSnapshotV1 | null,
+  ): ManagedOxigraphOwnershipSnapshotV1 | null {
+    return (
+      snapshot &&
+      !snapshot.terminal &&
+      snapshot.ready &&
+      !this.systemRecordHasCredentials &&
+      managedOxigraphOwnershipEndpointsMatchV1(
+        snapshot,
+        this.systemRecordQueryEndpoint,
+        this.systemRecordUpdateEndpoint,
+      )
+        ? snapshot
+        : null
     );
   }
 
@@ -1448,12 +1449,14 @@ export class SparqlHttpStore implements TripleStore {
     // Releasing here also latches this store's session terminal, so nothing can
     // be admitted into a lane whose store is draining; doing it after the await
     // would leave that window open.
-    this.releaseSystemRecordLane();
-    // A managed endpoint is stopped immediately after store.close(). The
-    // lifecycle owns one complete generation, aborting and draining every
-    // operation admitted before close while rejecting work attempted during
-    // close. A fresh generation is installed only after the drain completes.
-    await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
+    await this.releaseSystemRecordLane(() =>
+      // A managed endpoint is stopped immediately after store.close(). The
+      // lifecycle owns one complete generation, aborting and draining every
+      // operation admitted before close while rejecting work attempted during
+      // close. A fresh controller is admitted only after this drain and any
+      // uncertain-write recovery both settle.
+      this.workLifecycle.close(new Error('SparqlHttpStore closed')),
+    );
   }
 }
 
