@@ -61,7 +61,10 @@ export interface SystemRecordPresentSnapshotV1 {
   readonly rootClaimSet: SystemRecordRootClaimSetV1;
   readonly capacityState: SystemRecordCapacityStateV1;
   readonly receipt: SystemRecordMaterializationReceiptV1;
+  /** Current durable epoch read from the global epoch row. */
   readonly materializationEpoch: string;
+  /** Epoch bound by the exact persisted applied-state/receipt tuple. */
+  readonly appliedTupleEpoch: string;
   readonly previousReservedQuads: readonly Readonly<Quad>[];
   readonly expectedRootClaimQuads: readonly Readonly<Quad>[];
   readonly requiredAbsentReservedSubjects: readonly string[];
@@ -110,6 +113,9 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   if (epoch !== owned.materializationEpoch) {
     throw new Error('system-record materialization epoch changed during inspection');
   }
+  const canonicalEpochRows = epochRows.filter((quad) => (
+    quad.predicate === SYSTEM_RECORD_V1_PREDICATES.materializationEpoch
+  ));
 
   const decodedCapacity = decodeCapacityState(networkId, capacityRows);
 
@@ -119,9 +125,7 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     }
     const expectedFirstRead = Object.freeze([
       ...capacityRows,
-      ...epochRows.filter((quad) => (
-        quad.predicate === SYSTEM_RECORD_V1_PREDICATES.materializationEpoch
-      )),
+      ...canonicalEpochRows,
     ]);
     assertExactQuadSet(quads, expectedFirstRead, 'absent reserved state');
     return markAuthenticSnapshot(Object.freeze({
@@ -171,9 +175,10 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     'materialization receipt',
   ));
 
+  const appliedStateDigest = computeSystemRecordAppliedStateDigestV1(appliedState);
   const digests = [
     [recordRows, SYSTEM_RECORD_V1_PREDICATES.appliedStateDigest,
-      computeSystemRecordAppliedStateDigestV1(appliedState), 'applied-state digest'],
+      appliedStateDigest, 'applied-state digest'],
     [recordRows, SYSTEM_RECORD_V1_PREDICATES.ownedSubjectTableDigest,
       appliedState.ownedSubjectTableDigest, 'owned-table digest'],
     [recordRows, SYSTEM_RECORD_V1_PREDICATES.rootClaimSetDigest,
@@ -191,8 +196,12 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   if (appliedState.networkId !== networkId || appliedState.stableKeyHash !== stableKeyHash
       || claims.networkId !== networkId || claims.stableKeyHash !== stableKeyHash
       || capacity.networkId !== networkId || receipt.networkId !== networkId
-      || receipt.stableKeyHash !== stableKeyHash || appliedState.materializationEpoch !== epoch
-      || receipt.materializationEpoch !== epoch) {
+      || receipt.stableKeyHash !== stableKeyHash
+      || receipt.materializationEpoch !== appliedState.materializationEpoch
+      || receipt.stateRevision !== appliedState.stateRevision
+      || receipt.appliedStateDigest !== appliedStateDigest
+      || receipt.headDigest !== appliedState.headDigest
+      || BigInt(appliedState.materializationEpoch) > BigInt(epoch)) {
     throw new Error('persisted system-record tuple crosses its network, key, or epoch binding');
   }
   const canonicalTableBytes = canonicalizeOwnedSubjectTableObjectV1(
@@ -228,7 +237,7 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   const expectedFirstRead = Object.freeze([
     ...canonical.record,
     ...canonical.capacity,
-    ...canonical.epoch,
+    ...canonicalEpochRows,
     ...canonical.receipt,
   ]);
   assertExactQuadSet(quads, expectedFirstRead, 'reserved state');
@@ -241,10 +250,17 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     capacityState: capacity,
     receipt,
     materializationEpoch: epoch,
+    appliedTupleEpoch: appliedState.materializationEpoch,
     previousReservedQuads: expectedFirstRead,
     expectedRootClaimQuads: canonical.rootClaims,
     requiredAbsentReservedSubjects: Object.freeze([]),
   }));
+}
+
+export function requiresSystemRecordSnapshotRematerializationV1(
+  snapshot: SystemRecordPresentSnapshotV1,
+): boolean {
+  return snapshot.appliedTupleEpoch !== snapshot.materializationEpoch;
 }
 
 export function assertAuthenticSystemRecordAppliedSnapshotV1(

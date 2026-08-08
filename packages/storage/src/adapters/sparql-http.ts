@@ -75,7 +75,7 @@ import {
   type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
 import { createSystemRecordAtomicApplyExecutorV1 } from '../system-record-atomic-apply-executor-v1-internal.js';
-import { createSystemRecordVerifiedReplacementRegistryV1 } from '../system-record-verified-replacement-v1-internal.js';
+import { resolveOwnedSystemRecordRuntimeV1 } from '../system-record-runtime-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -706,14 +706,14 @@ export class SparqlHttpStore implements TripleStore {
     // already carries the property.
     if (this.systemRecordLane === undefined) {
       try {
-        // Pair issuer and consumer in one private registry, but retain only the
-        // consumer at this storage boundary. The issuer is intentionally not a
-        // store property, option, facade member, or export. B3 deliberately
-        // discards it, leaving this production lane default-unused; the later
-        // structured-verifier stack must move registry creation to its private
-        // composition closure and hand this boundary the SAME consumer. Until
-        // then every caller-authored object fails before inspection/mutation.
-        const { consumer } = createSystemRecordVerifiedReplacementRegistryV1();
+        // Resolve the ownership-lease runtime and retain only its consumer at
+        // the storage boundary. Every adapter for this lease receives the same
+        // registry, and all authentic leases share one process-wide accountant.
+        // The issuer remains outside the store and has no production caller in
+        // this default-unused stack; the later lifecycle verifier captures it.
+        const { consumer } = resolveOwnedSystemRecordRuntimeV1(
+          this.ownershipLease,
+        );
         const atomicExecutor = createSystemRecordAtomicApplyExecutorV1({
           consumer,
           storeId: this,

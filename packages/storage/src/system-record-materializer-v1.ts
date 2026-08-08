@@ -1,3 +1,5 @@
+import { types as utilTypes } from 'node:util';
+
 import {
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
@@ -263,12 +265,13 @@ const NETWORK_ID_PATTERN_V1 = /^[A-Za-z0-9._:-]+$/;
 const MAX_NETWORK_ID_BYTES_V1 = 128;
 const UTF8 = new TextEncoder();
 
-/** Snapshot the closed activation record without invoking caller accessors or iterators. */
+/** Snapshot the closed activation record without invoking caller traps or accessors. */
 const snapshotActivation = (activation: unknown): SystemRecordLaneActivationSnapshotV1 => {
   if (
     activation === null ||
     typeof activation !== 'object' ||
     Array.isArray(activation) ||
+    utilTypes.isProxy(activation) ||
     ![Object.prototype, null].includes(Object.getPrototypeOf(activation))
   ) {
     throw new Error('system-record lane activation must be a plain data object');
@@ -303,7 +306,7 @@ const snapshotActivation = (activation: unknown): SystemRecordLaneActivationSnap
   }
 
   const kinds = readDataField('kinds');
-  if (!Array.isArray(kinds)) {
+  if (!Array.isArray(kinds) || utilTypes.isProxy(kinds)) {
     throw new Error('system-record lane activation kinds must be the closed [agents] tuple');
   }
   const kindKeys = Reflect.ownKeys(kinds);

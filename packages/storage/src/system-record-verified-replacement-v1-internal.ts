@@ -28,7 +28,6 @@ import {
   parseCanonicalOwnedSubjectTableObjectV1,
   SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
   SYSTEM_RECORD_MAX_PROJECTION_BYTES,
-  SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type NetworkIdV1,
@@ -36,6 +35,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { Quad } from './triple-store.js';
+import {
+  createSystemRecordNonQueuedReservationGateV1,
+  type SystemRecordRuntimeReservationGateV1,
+} from './system-record-reservation-gate-v1-internal.js';
 
 declare const VERIFIED_REPLACEMENT_HANDLE_BRAND: unique symbol;
 
@@ -159,6 +162,11 @@ interface RuntimeReservationV1 {
   readonly charges: Record<SystemRecordAtomicChargeCategoryV1, number>;
   phase: RuntimeReservationPhaseV1;
   recoveryOwnership?: object;
+}
+
+export interface SystemRecordVerifiedReplacementRegistryDepsV1 {
+  readonly reservationGate: SystemRecordRuntimeReservationGateV1;
+  readonly assertAvailable?: () => void;
 }
 
 /** Module-private and non-enumerable by construction. Handle identity is the only lookup key. */
@@ -563,20 +571,17 @@ function bindingsEqual(
  * Create one non-interchangeable issuer/consumer pair. Only the consumer half belongs
  * in the storage executor; only the issuer half belongs in the verifier closure.
  */
-export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordVerifiedReplacementRegistryV1 {
+export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
+  deps: SystemRecordVerifiedReplacementRegistryDepsV1,
+): SystemRecordVerifiedReplacementRegistryV1 {
   const registryIdentity = Object.freeze(Object.create(null) as object);
-  let accountedBytes = 0;
-  let liveAtomicReservation: RuntimeReservationV1 | null = null;
+  const { reservationGate } = deps;
 
   const reserveAtomic = (
     admittedDeadlineMs: number,
     decodedBytes: number,
   ): RuntimeReservationV1 => {
-    if (liveAtomicReservation !== null
-        || accountedBytes + SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES
-          > SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES) {
-      throw new Error('system-record atomic transient reservation is already live');
-    }
+    deps.assertAvailable?.();
     const reservation: RuntimeReservationV1 = {
       registryIdentity,
       identity: Object.freeze(Object.create(null) as object),
@@ -590,8 +595,7 @@ export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordV
       },
       phase: 'proof',
     };
-    accountedBytes += reservation.bytes;
-    liveAtomicReservation = reservation;
+    reservationGate.acquire(reservation.identity, reservation.bytes);
     return reservation;
   };
 
@@ -599,17 +603,13 @@ export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordV
     if (reservation.registryIdentity !== registryIdentity || reservation.phase === 'released') {
       throw new Error('system-record atomic transient reservation was already released');
     }
-    if (liveAtomicReservation !== reservation || accountedBytes !== reservation.bytes) {
-      throw new Error('system-record atomic transient accountant state is inconsistent');
-    }
+    reservationGate.release(reservation.identity, reservation.bytes);
     reservation.phase = 'released';
     reservation.charges.decoded = 0;
     reservation.charges.request = 0;
     reservation.charges.response = 0;
     reservation.charges.prepared = 0;
     reservation.recoveryOwnership = undefined;
-    accountedBytes -= reservation.bytes;
-    liveAtomicReservation = null;
   };
 
   const registeredHandle = (handle: unknown): RegisteredReplacementV1 => {
@@ -873,6 +873,17 @@ export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordV
   });
 
   return Object.freeze({ issuer, consumer });
+}
+
+/**
+ * Isolated registry for storage-internal tests and pure transaction composition.
+ * Production code must resolve the ownership-lease runtime below so every managed
+ * adapter and future lifecycle verifier shares one process-wide accountant.
+ */
+export function createSystemRecordVerifiedReplacementRegistryV1(): SystemRecordVerifiedReplacementRegistryV1 {
+  return createSystemRecordVerifiedReplacementRegistryForRuntimeV1({
+    reservationGate: createSystemRecordNonQueuedReservationGateV1(),
+  });
 }
 
 function retainedVerifiedFactsBytes(

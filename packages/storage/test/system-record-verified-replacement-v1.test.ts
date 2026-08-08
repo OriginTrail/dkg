@@ -15,6 +15,7 @@ import {
   computeOwnedSubjectTableDigestV1,
   digestSystemRecordBytesV1,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
+  SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type NetworkIdV1,
@@ -22,11 +23,14 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { describe, expect, it } from 'vitest';
 
+import { createManagedOxigraphOwnershipControllerV1 } from '../src/managed-oxigraph-ownership-v1-internal.js';
+import { createSystemRecordNonQueuedReservationGateV1 } from '../src/system-record-reservation-gate-v1-internal.js';
 import {
   createSystemRecordVerifiedReplacementRegistryV1,
   type SystemRecordActiveReplacementIssueV1,
   type SystemRecordVerifiedReplacementLaneBindingV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
+import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 
 interface Vectors {
   readonly variants: {
@@ -286,6 +290,22 @@ describe('system-record verified replacement V1', () => {
     expect(() => registry.consumer.consume(handle, bindings)).toThrow(/already consumed/);
   });
 
+  it('keeps one exact nonqueued reservation after wrong-owner or partial release attempts', () => {
+    const gate = createSystemRecordNonQueuedReservationGateV1();
+    const firstOwner = Object.freeze(Object.create(null) as object);
+    const secondOwner = Object.freeze(Object.create(null) as object);
+    const bytes = SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES;
+
+    gate.acquire(firstOwner, bytes);
+    expect(() => gate.acquire(secondOwner, 1)).toThrow(/reservation is already live/);
+    expect(() => gate.release(secondOwner, bytes)).toThrow(/accountant state is inconsistent/);
+    expect(() => gate.release(firstOwner, bytes - 1)).toThrow(/accountant state is inconsistent/);
+    expect(() => gate.acquire(secondOwner, 1)).toThrow(/reservation is already live/);
+    gate.release(firstOwner, bytes);
+    expect(() => gate.acquire(secondOwner, bytes)).not.toThrow();
+    gate.release(secondOwner, bytes);
+  });
+
   it('owns one nonqueued atomic reservation and releases handle or facts exactly once', () => {
     const registry = createSystemRecordVerifiedReplacementRegistryV1();
     const { input, bindings } = fixture();
@@ -299,6 +319,90 @@ describe('system-record verified replacement V1', () => {
     registry.consumer.release(facts);
     expect(() => registry.consumer.release(facts)).toThrow(/already released/);
     expect(registry.issuer.issueActive(input)).toBeDefined();
+  });
+
+  it('resolves one runtime per authentic lease under one process-wide reservation', () => {
+    const firstOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7878/query',
+      'http://127.0.0.1:7878/update',
+    );
+    const secondOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7879/query',
+      'http://127.0.0.1:7879/update',
+    );
+    firstOwnership.bindReadyGeneration();
+    secondOwnership.bindReadyGeneration();
+
+    const first = resolveOwnedSystemRecordRuntimeV1(firstOwnership.lease);
+    const firstAgain = resolveOwnedSystemRecordRuntimeV1(firstOwnership.lease);
+    const second = resolveOwnedSystemRecordRuntimeV1(secondOwnership.lease);
+    expect(firstAgain).toBe(first);
+    expect(second).not.toBe(first);
+    expect(() => resolveOwnedSystemRecordRuntimeV1(
+      Object.freeze(Object.create(null) as object) as typeof firstOwnership.lease,
+    )).toThrow(/authentic managed Oxigraph ownership lease/);
+
+    const { input } = fixture();
+    const firstHandle = first.issuer.issueActive(input);
+    expect(() => second.issuer.issueActive(input)).toThrow(/reservation is already live/);
+    first.consumer.release(firstHandle);
+
+    const secondHandle = second.issuer.issueActive(input);
+    second.consumer.release(secondHandle);
+  });
+
+  it('keeps ownership liveness outside persisted runtime configuration', () => {
+    const ownership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7880/query',
+      'http://127.0.0.1:7880/update',
+    );
+    const runtime = resolveOwnedSystemRecordRuntimeV1(ownership.lease);
+    const { input } = fixture();
+
+    expect(() => runtime.issuer.issueActive(input)).toThrow(/ownership lease is not ready/);
+    ownership.bindReadyGeneration();
+    const handle = runtime.issuer.issueActive(input);
+    runtime.consumer.release(handle);
+    ownership.invalidate('shutdown');
+    expect(() => runtime.issuer.issueActive(input)).toThrow(/ownership lease is not ready/);
+  });
+
+  it('refuses diagnostic leases that do not prove the managed listener endpoints', () => {
+    const diagnostic = createManagedOxigraphOwnershipControllerV1();
+    diagnostic.bindReadyGeneration();
+    expect(() => resolveOwnedSystemRecordRuntimeV1(
+      diagnostic.lease,
+    )).toThrow(/endpoint-bound managed Oxigraph ownership lease/);
+  });
+
+  it('holds the process reservation across recovery ownership until settlement', async () => {
+    const firstOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7881/query',
+      'http://127.0.0.1:7881/update',
+    );
+    const secondOwnership = createManagedOxigraphOwnershipControllerV1(
+      'http://127.0.0.1:7882/query',
+      'http://127.0.0.1:7882/update',
+    );
+    firstOwnership.bindReadyGeneration();
+    secondOwnership.bindReadyGeneration();
+    const first = resolveOwnedSystemRecordRuntimeV1(firstOwnership.lease);
+    const second = resolveOwnedSystemRecordRuntimeV1(secondOwnership.lease);
+    const { input, bindings } = fixture();
+    const facts = first.consumer.consume(first.issuer.issueActive(input), bindings);
+    const ownership = Object.freeze(Object.create(null) as object);
+    let settle!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      settle = resolve;
+    });
+
+    first.consumer.transferToRecovery(facts, ownership, completion);
+    expect(() => second.issuer.issueActive(input)).toThrow(/reservation is already live/);
+    settle();
+    await completion;
+    await Promise.resolve();
+    const next = second.issuer.issueActive(input);
+    second.consumer.release(next);
   });
 
   it('discards only a live unconsumed proof and refuses aliases after consumption', () => {
@@ -636,5 +740,6 @@ describe('system-record verified replacement V1', () => {
   it('is not exported from the storage package barrel', async () => {
     const storage = await import('../src/index.js');
     expect('createSystemRecordVerifiedReplacementRegistryV1' in storage).toBe(false);
+    expect('resolveOwnedSystemRecordRuntimeV1' in storage).toBe(false);
   });
 });
