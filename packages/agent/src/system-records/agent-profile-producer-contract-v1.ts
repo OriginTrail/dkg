@@ -67,7 +67,7 @@ export interface AgentProfileProducerPublicationCommitV1 {
   readonly rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1;
 }
 
-type AgentProfileProducerArtifactV1<Kind extends SystemRecordObjectKindV1> = Readonly<
+export type AgentProfileProducerArtifactV1<Kind extends SystemRecordObjectKindV1> = Readonly<
   Omit<SystemRecordArtifactV1, 'objectKind'> & { objectKind: Kind }
 >;
 

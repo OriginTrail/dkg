@@ -214,7 +214,12 @@ describe('system-record V1 public policy helpers', () => {
       .toBe(`${root}/.well-known/genid/cap2`);
     expect(deriveAgentProfileOwnedSubjectV1(root, 'hosting'))
       .toBe(`${root}/.well-known/genid/hosting`);
-    expect(() => deriveAgentProfileOwnedSubjectV1(root, 'offering', 0)).toThrow(/positive/);
-    expect(() => deriveAgentProfileOwnedSubjectV1(root, 'registration', 1)).toThrow(/ordinal/);
+    const uncheckedDerive = deriveAgentProfileOwnedSubjectV1 as unknown as (
+      rootSubject: string,
+      kind: 'capability' | 'offering' | 'registration' | 'hosting',
+      ordinal?: number,
+    ) => string;
+    expect(() => uncheckedDerive(root, 'offering', 0)).toThrow(/positive/);
+    expect(() => uncheckedDerive(root, 'registration', 1)).toThrow(/ordinal/);
   });
 });

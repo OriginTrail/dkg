@@ -20,19 +20,13 @@ import {
 
 import {
   flattenAgentProfileProducerPublicationArtifactsV1,
+  type AgentProfileProducerArtifactV1,
   type AgentProfileProducerPublicationArtifactsV1,
   type CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-contract-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
-import {
-  systemRecordArtifactKeyV1,
-  type SystemRecordArtifactV1,
-} from './artifact-v1.js';
-
-type AgentProfileProducerArtifactV1<Kind extends SystemRecordObjectKindV1> = Readonly<
-  Omit<SystemRecordArtifactV1, 'objectKind'> & { objectKind: Kind }
->;
+import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
 
 export interface AgentProfileProductionInventoryV1 {
   readonly inventory: SystemRecordInventoryTreeSnapshotV1;

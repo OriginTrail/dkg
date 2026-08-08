@@ -126,6 +126,8 @@ export {
   isAllowedAgentProfilePredicateV1,
 } from './agent-profile-schema-model-v1.js';
 export type {
+  AgentProfileExactLinkedSubjectKindV1,
+  AgentProfileIndexedSubjectKindV1,
   AgentProfileLinkedSubjectKindV1,
   AgentProfileObjectTermKindV1,
   AgentProfileOwnedSubjectKindV1,

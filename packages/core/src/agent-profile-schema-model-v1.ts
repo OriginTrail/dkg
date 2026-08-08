@@ -12,6 +12,8 @@ export type AgentProfileLinkedSubjectKindV1 = Exclude<
   AgentProfileOwnedSubjectKindV1,
   'root' | 'x25519'
 >;
+export type AgentProfileIndexedSubjectKindV1 = 'capability' | 'offering';
+export type AgentProfileExactLinkedSubjectKindV1 = 'registration' | 'hosting';
 
 export type AgentProfileObjectTermKindV1 = 'iri' | 'literal';
 
@@ -41,6 +43,14 @@ export interface AgentProfileSubjectPolicyV1 {
   readonly rootLinkPredicate?: string;
   readonly derivation?: 'workspace-public-key';
 }
+
+type AgentProfileSubjectPolicyForV1<Kind extends AgentProfileOwnedSubjectKindV1> = Readonly<
+  Omit<AgentProfileSubjectPolicyV1, 'kind'> & { readonly kind: Kind }
+>;
+
+type AgentProfileSubjectPolicyTableV1 = {
+  readonly [Kind in AgentProfileOwnedSubjectKindV1]: AgentProfileSubjectPolicyForV1<Kind>;
+};
 
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'https://schema.org/';
@@ -120,9 +130,9 @@ function iri(
   });
 }
 
-function subjectPolicy(
-  policy: AgentProfileSubjectPolicyV1,
-): Readonly<AgentProfileSubjectPolicyV1> {
+function subjectPolicy<const Kind extends AgentProfileOwnedSubjectKindV1>(
+  policy: AgentProfileSubjectPolicyForV1<Kind>,
+): AgentProfileSubjectPolicyForV1<Kind> {
   return Object.freeze({
     ...policy,
     subjectShape: Object.freeze({ ...policy.subjectShape }),
@@ -130,8 +140,8 @@ function subjectPolicy(
   });
 }
 
-const SUBJECT_POLICIES = Object.freeze([
-  subjectPolicy({
+const SUBJECT_POLICY_BY_KIND = Object.freeze({
+  root: subjectPolicy({
     kind: 'root',
     subjectShape: { type: 'root' },
     predicates: [
@@ -155,7 +165,7 @@ const SUBJECT_POLICIES = Object.freeze([
       iri(T.skillHostingProfile, { linkTargetKind: 'hosting' }),
     ],
   }),
-  subjectPolicy({
+  capability: subjectPolicy({
     kind: 'capability',
     subjectShape: { type: 'indexed-genid', prefix: 'cap' },
     rootLinkPredicate: T.erc8004Capabilities,
@@ -164,7 +174,7 @@ const SUBJECT_POLICIES = Object.freeze([
       literal(T.schemaName),
     ],
   }),
-  subjectPolicy({
+  offering: subjectPolicy({
     kind: 'offering',
     subjectShape: { type: 'indexed-genid', prefix: 'offering' },
     rootLinkPredicate: T.skillOffersSkill,
@@ -177,7 +187,7 @@ const SUBJECT_POLICIES = Object.freeze([
       iri(T.skillPricing),
     ],
   }),
-  subjectPolicy({
+  registration: subjectPolicy({
     kind: 'registration',
     subjectShape: { type: 'exact-genid', suffix: 'registration' },
     rootLinkPredicate: T.provWasGeneratedBy,
@@ -186,7 +196,7 @@ const SUBJECT_POLICIES = Object.freeze([
       literal(T.provAtTime),
     ],
   }),
-  subjectPolicy({
+  hosting: subjectPolicy({
     kind: 'hosting',
     subjectShape: { type: 'exact-genid', suffix: 'hosting' },
     rootLinkPredicate: T.skillHostingProfile,
@@ -196,7 +206,7 @@ const SUBJECT_POLICIES = Object.freeze([
       literal(T.skillParanetsServed),
     ],
   }),
-  subjectPolicy({
+  x25519: subjectPolicy({
     kind: 'x25519',
     subjectShape: { type: 'hex-fragment', prefix: 'x25519-', hexLength: 32 },
     derivation: 'workspace-public-key',
@@ -206,7 +216,9 @@ const SUBJECT_POLICIES = Object.freeze([
       literal(T.dkgEncryptionKeyRevocationProof),
     ],
   }),
-] as const);
+} satisfies AgentProfileSubjectPolicyTableV1);
+
+const SUBJECT_POLICIES = Object.freeze(Object.values(SUBJECT_POLICY_BY_KIND));
 
 export const AGENT_PROFILE_SCHEMA_V1 = Object.freeze({
   terms: AGENT_PROFILE_SCHEMA_TERMS_V1,
@@ -214,10 +226,6 @@ export const AGENT_PROFILE_SCHEMA_V1 = Object.freeze({
 });
 
 const ROOT_PATTERN = /^did:dkg:agent:(0x[0-9a-f]{40})$/;
-const SUBJECT_POLICY_BY_KIND = new Map<
-  AgentProfileOwnedSubjectKindV1,
-  Readonly<AgentProfileSubjectPolicyV1>
->(SUBJECT_POLICIES.map((policy) => [policy.kind, policy]));
 const PREDICATE_POLICY_BY_KIND = new Map(
   SUBJECT_POLICIES.map((policy) => [
     policy.kind,
@@ -232,7 +240,7 @@ export function matchAgentProfileRootAddressV1(value: string): string | null {
 export function agentProfileSubjectPolicyV1(
   kind: AgentProfileOwnedSubjectKindV1,
 ): Readonly<AgentProfileSubjectPolicyV1> {
-  return SUBJECT_POLICY_BY_KIND.get(kind)!;
+  return SUBJECT_POLICY_BY_KIND[kind];
 }
 
 export function agentProfilePredicatePolicyV1(
@@ -242,6 +250,15 @@ export function agentProfilePredicatePolicyV1(
   return PREDICATE_POLICY_BY_KIND.get(kind)?.get(predicate);
 }
 
+export function deriveAgentProfileOwnedSubjectV1(
+  rootSubject: string,
+  kind: AgentProfileIndexedSubjectKindV1,
+  ordinal: number,
+): string;
+export function deriveAgentProfileOwnedSubjectV1(
+  rootSubject: string,
+  kind: AgentProfileExactLinkedSubjectKindV1,
+): string;
 export function deriveAgentProfileOwnedSubjectV1(
   rootSubject: string,
   kind: AgentProfileLinkedSubjectKindV1,
