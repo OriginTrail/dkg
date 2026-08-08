@@ -717,13 +717,13 @@ function makeFixture(options: Readonly<{
   if (ready.outcome !== 'ready') throw new Error(`fixture derivation was ${ready.outcome}`);
 
   const localNext = options.localState === 'next';
-  const nextRootSubjects = new Set(ready.next.rootClaimQuads.map((quad) => quad.subject));
+  const nextRootSubjects = new Set(ready.plan.next.rootClaimQuads.map((quad) => quad.subject));
   const initialReserved = localNext
-    ? ready.nextReservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
+    ? ready.plan.next.reservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
     : [EPOCH];
-  const initialRoots = localNext ? ready.next.rootClaimQuads : [];
+  const initialRoots = localNext ? ready.plan.next.rootClaimQuads : [];
   const faithfulInitialProjection = localNext
-    ? ready.nextProjectionQuads.map((quad) => ({ ...quad, graph: ready.projectionGraph }))
+    ? ready.plan.next.projectionQuads.map((quad) => ({ ...quad, graph: ready.plan.projectionGraph }))
     : [];
   const initialProjection = options.priorProjection?.(faithfulInitialProjection)
     ?? faithfulInitialProjection;
@@ -743,10 +743,10 @@ function makeFixture(options: Readonly<{
       );
     } else {
       responses.push(
-        { status: 200, body: selectJson(ready.nextReservedQuads) },
-        { status: 200, body: selectJson(ready.nextProjectionQuads.map((quad) => ({
+        { status: 200, body: selectJson(ready.plan.next.reservedQuads) },
+        { status: 200, body: selectJson(ready.plan.next.projectionQuads.map((quad) => ({
           ...quad,
-          graph: ready.projectionGraph,
+          graph: ready.plan.projectionGraph,
         }))) },
       );
     }
@@ -815,10 +815,10 @@ function makeFixture(options: Readonly<{
     registerRecovery,
     registeredOwnership: () => registeredOwnership,
     registeredRequest: () => registeredRequest,
-    exactNextReserved: ready.nextReservedQuads,
-    exactNextProjection: ready.nextProjectionQuads.map((quad) => ({
+    exactNextReserved: ready.plan.next.reservedQuads,
+    exactNextProjection: ready.plan.next.projectionQuads.map((quad) => ({
       ...quad,
-      graph: ready.projectionGraph,
+      graph: ready.plan.projectionGraph,
     })),
     inspectProof: () => registry.consumer.inspectDeadline(proof, binding),
     consumeProof: () => registry.consumer.consume(proof, binding),

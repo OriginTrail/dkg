@@ -45,12 +45,12 @@ describe('system-record conditional apply command V1', () => {
     const { ready } = makeAuthenticActiveReplacementFixtureV1('shadow');
     const result = buildSystemRecordConditionalApplyUpdateV1(ready);
 
-    expect(result.subjectUnion).toEqual(ready.nextSubjects);
+    expect(result.subjectUnion).toEqual(ready.plan.next.ownedSubjectTable);
     expect(result.requestBytes).toBe(Buffer.byteLength(result.sparql, 'utf8'));
     expect(result.sparql.match(/\bDELETE\s*\{/g)).toHaveLength(1);
     expect(result.sparql.match(/\bINSERT\s*\{/g)).toHaveLength(1);
     expect(result.sparql.match(/\bWHERE\s*\{/g)).toHaveLength(1);
-    expect(result.sparql).toContain(`GRAPH <${ready.projectionGraph}>`);
+    expect(result.sparql).toContain(`GRAPH <${ready.plan.projectionGraph}>`);
     expect(result.sparql).toContain(`GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}>`);
     expect(result.sparql).not.toMatch(/;|STRSTARTS|COUNT\s*\(|ORDER\s+BY|GRAPH\s+\?g/i);
     expect(result.sparql).not.toContain('DROP');
@@ -64,10 +64,10 @@ describe('system-record conditional apply command V1', () => {
   it('atomically replaces authoritative legacy rows and a stale CAS becomes a zero-write miss', async () => {
     endpoint = await startOxigraphSparqlEndpoint();
     const { ready } = makeAuthenticActiveReplacementFixtureV1('authoritative');
-    const legacySubject = ready.nextSubjects[0];
+    const legacySubject = ready.plan.next.ownedSubjectTable[0];
     endpoint.store.update(`INSERT DATA {
-      ${ready.previousReservedQuads.map(renderQuad).join('\n')}
-      GRAPH <${ready.projectionGraph}> {
+      ${ready.plan.prior.reservedQuads.map(renderQuad).join('\n')}
+      GRAPH <${ready.plan.projectionGraph}> {
         <${legacySubject}> <urn:test:legacy> "must-be-replaced" .
       }
     }`);
@@ -83,21 +83,21 @@ describe('system-record conditional apply command V1', () => {
     const ask = (pattern: string): boolean => endpoint!.store.query(`ASK { ${pattern} }`) as boolean;
 
     await dispatch();
-    const projection = ready.nextProjectionQuads[0];
-    expect(ask(`GRAPH <${ready.projectionGraph}> { <${projection.subject}> ` +
+    const projection = ready.plan.next.projectionQuads[0];
+    expect(ask(`GRAPH <${ready.plan.projectionGraph}> { <${projection.subject}> ` +
       `<${projection.predicate}> ${renderObject(projection.object)} }`)).toBe(true);
-    const reserved = ready.nextReservedQuads[0];
+    const reserved = ready.plan.next.reservedQuads[0];
     expect(ask(`GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}> { <${reserved.subject}> ` +
       `<${reserved.predicate}> ${renderObject(reserved.object)} }`)).toBe(true);
-    expect(ask(`GRAPH <${ready.projectionGraph}> { <${legacySubject}> ` +
+    expect(ask(`GRAPH <${ready.plan.projectionGraph}> { <${legacySubject}> ` +
       '<urn:test:legacy> "must-be-replaced" }')).toBe(false);
 
-    const guardedSubject = ready.nextSubjects[0];
-    endpoint.store.update(`INSERT DATA { GRAPH <${ready.projectionGraph}> {
+    const guardedSubject = ready.plan.next.ownedSubjectTable[0];
+    endpoint.store.update(`INSERT DATA { GRAPH <${ready.plan.projectionGraph}> {
       <${guardedSubject}> <urn:test:late> "must-survive-stale-cas" .
     } }`);
     await dispatch();
-    expect(ask(`GRAPH <${ready.projectionGraph}> { <${guardedSubject}> ` +
+    expect(ask(`GRAPH <${ready.plan.projectionGraph}> { <${guardedSubject}> ` +
       '<urn:test:late> "must-survive-stale-cas" }')).toBe(true);
   });
 });

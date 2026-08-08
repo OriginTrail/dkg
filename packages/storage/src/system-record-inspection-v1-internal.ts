@@ -1,5 +1,3 @@
-import { types as utilTypes } from 'node:util';
-
 import {
   assertSafeIri,
   assertSafeRdfTerm,
@@ -10,12 +8,23 @@ import {
 import {
   SYSTEM_RECORD_MAX_ATOMIC_DECODED_TERM_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_INSPECTION_RESPONSE_BYTES,
+  SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
   SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
   SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
   SYSTEM_RECORD_MAX_PROJECTION_QUADS,
   SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  buildBoundedSystemRecordUtf8V1,
+  type SystemRecordUtf8WriterV1,
+} from './system-record-bounded-utf8-builder-v1-internal.js';
+import {
+  assertSystemRecordUnicodeScalarStringV1,
+  snapshotSystemRecordDataRecordV1,
+  snapshotSystemRecordDenseArrayV1,
+  snapshotSystemRecordExactDataRecordV1,
+} from './system-record-input-guards-v1-internal.js';
 import type { Quad } from './triple-store.js';
 import { compareSystemRecordUtf8V1 } from './system-record-utf8-order-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from './internal-graph-policy.js';
@@ -176,7 +185,7 @@ function buildExactSubjectQuery(
 ): string {
   assertSafeIri(graph);
   const closed = snapshotSubjects(subjects);
-  const emit = (writer: InspectionQueryWriterV1): void => {
+  const emit = (writer: SystemRecordUtf8WriterV1): void => {
     writer.add('SELECT ?s ?p ?o WHERE {\n');
     writer.add(`  GRAPH <${graph}> {\n`);
     writer.add('    VALUES ?s { ');
@@ -191,65 +200,13 @@ function buildExactSubjectQuery(
     writer.add('  }\n');
     writer.add(`}\nLIMIT ${limit}`);
   };
-  const counter = new CountingInspectionQueryWriterV1();
-  emit(counter);
-  const writer = new BoundedInspectionQueryWriterV1(counter.bytes, replaceBuilderCharge);
-  emit(writer);
-  return writer.finish();
-}
-
-interface InspectionQueryWriterV1 {
-  add(value: string): void;
-}
-
-class CountingInspectionQueryWriterV1 implements InspectionQueryWriterV1 {
-  private encodedBytes = 0;
-
-  get bytes(): number { return this.encodedBytes; }
-
-  add(value: string): void {
-    const bytes = Buffer.byteLength(value, 'utf8');
-    if (bytes > SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES - this.encodedBytes) {
-      throw new Error('system-record inspection query exceeds the 4 MiB request bound');
-    }
-    this.encodedBytes += bytes;
-  }
-}
-
-class BoundedInspectionQueryWriterV1 implements InspectionQueryWriterV1 {
-  private buffer: Buffer | null;
-  private offset = 0;
-
-  constructor(
-    private readonly encodedBytes: number,
-    private readonly replaceCharge?: SystemRecordInspectionQueryBuilderChargeV1,
-  ) {
-    replaceCharge?.(encodedBytes * 3);
-    this.buffer = Buffer.allocUnsafe(encodedBytes);
-  }
-
-  add(value: string): void {
-    const bytes = Buffer.byteLength(value, 'utf8');
-    if (this.buffer === null || bytes > this.encodedBytes - this.offset) {
-      throw new Error('system-record inspection query accounting mismatch');
-    }
-    const written = this.buffer.write(value, this.offset, bytes, 'utf8');
-    if (written !== bytes) throw new Error('system-record inspection query accounting mismatch');
-    this.offset += written;
-  }
-
-  finish(): string {
-    if (this.buffer === null || this.offset !== this.encodedBytes) {
-      throw new Error('system-record inspection query accounting mismatch');
-    }
-    const result = this.buffer.toString('utf8');
-    this.buffer = null;
-    this.replaceCharge?.(this.encodedBytes * 2);
-    if (Buffer.byteLength(result, 'utf8') !== this.encodedBytes) {
-      throw new Error('system-record inspection query accounting mismatch');
-    }
-    return result;
-  }
+  return buildBoundedSystemRecordUtf8V1({
+    emit,
+    maxEncodedBytes: SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
+    maxRetainedBytes: SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES,
+    label: 'system-record inspection query',
+    replaceCharge: replaceBuilderCharge,
+  }).value;
 }
 
 /** Strictly decode one bounded Oxigraph SPARQL JSON SELECT response. */
@@ -440,69 +397,19 @@ function exactRecord(
   expected: readonly string[],
   label: string,
 ): Record<string, unknown> {
-  const record = dataRecord(value, label);
-  const keys = Reflect.ownKeys(record);
-  if (keys.length !== expected.length
-      || keys.some((key) => typeof key !== 'string' || !expected.includes(key))) {
-    throw new Error(`${label} has unknown or missing fields`);
-  }
-  return record;
+  return snapshotSystemRecordExactDataRecordV1(value, expected, label) as Record<string, unknown>;
 }
 
 function dataRecord(value: unknown, label: string): Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)
-      || utilTypes.isProxy(value)
-      || ![Object.prototype, null].includes(Object.getPrototypeOf(value))) {
-    throw new Error(`${label} must be a plain data object`);
-  }
-  const record = value as Record<string, unknown>;
-  for (const key of Reflect.ownKeys(record)) {
-    const descriptor = Object.getOwnPropertyDescriptor(record, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} fields must be enumerable data properties`);
-    }
-  }
-  return record;
+  return snapshotSystemRecordDataRecordV1(value, label) as Record<string, unknown>;
 }
 
 function assertUnicodeScalarString(value: string, label: string): void {
-  for (let index = 0; index < value.length; index += 1) {
-    const code = value.charCodeAt(index);
-    if (code === 0 || (code >= 0xd800 && code <= 0xdbff
-      && (index + 1 >= value.length
-        || value.charCodeAt(index + 1) < 0xdc00
-        || value.charCodeAt(index + 1) > 0xdfff))
-      || (code >= 0xdc00 && code <= 0xdfff
-        && (index === 0
-          || value.charCodeAt(index - 1) < 0xd800
-          || value.charCodeAt(index - 1) > 0xdbff))) {
-      throw new Error(`${label} contains a non-scalar Unicode value`);
-    }
-    if (code >= 0xd800 && code <= 0xdbff) index += 1;
-  }
+  assertSystemRecordUnicodeScalarStringV1(value, label);
 }
 
-function closedArray(value: unknown, maxLength: number, label: string): unknown[] {
-  if (!Array.isArray(value) || !Number.isSafeInteger(value.length) || value.length > maxLength) {
-    throw new Error(`${label} must be a bounded array`);
-  }
-  const keys = Reflect.ownKeys(value);
-  if (keys.length !== value.length + 1) throw new Error(`${label} must be a closed dense array`);
-  const result = new Array<unknown>(value.length);
-  for (const key of keys) {
-    if (key === 'length') continue;
-    if (typeof key !== 'string' || !/^(0|[1-9][0-9]*)$/.test(key)) {
-      throw new Error(`${label} contains a non-index property`);
-    }
-    const index = Number(key);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!Number.isSafeInteger(index) || index >= value.length || !descriptor?.enumerable
-        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} must contain enumerable data elements`);
-    }
-    result[index] = descriptor.value;
-  }
-  return result;
+function closedArray(value: unknown, maxLength: number, label: string): readonly unknown[] {
+  return snapshotSystemRecordDenseArrayV1(value, { label, maxLength });
 }
 
 function compareTupleQuad(left: Readonly<Quad>, right: Readonly<Quad>): number {

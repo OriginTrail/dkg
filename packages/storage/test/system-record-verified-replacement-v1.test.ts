@@ -307,20 +307,16 @@ describe('system-record verified replacement V1', () => {
     expect(() => registry.consumer.consume(handle, bindings)).toThrow(/already consumed/);
   });
 
-  it('keeps one exact nonqueued reservation after wrong-owner or partial release attempts', () => {
+  it('keeps one exact nonqueued reservation behind an opaque exact-once lease', () => {
     const gate = createSystemRecordNonQueuedReservationGateV1();
-    const firstOwner = Object.freeze(Object.create(null) as object);
-    const secondOwner = Object.freeze(Object.create(null) as object);
     const bytes = SYSTEM_RECORD_MAX_RUNTIME_ACCOUNTED_BYTES;
 
-    gate.acquire(firstOwner, bytes);
-    expect(() => gate.acquire(secondOwner, 1)).toThrow(/reservation is already live/);
-    expect(() => gate.release(secondOwner, bytes)).toThrow(/accountant state is inconsistent/);
-    expect(() => gate.release(firstOwner, bytes - 1)).toThrow(/accountant state is inconsistent/);
-    expect(() => gate.acquire(secondOwner, 1)).toThrow(/reservation is already live/);
-    gate.release(firstOwner, bytes);
-    expect(() => gate.acquire(secondOwner, bytes)).not.toThrow();
-    gate.release(secondOwner, bytes);
+    const first = gate.acquire(bytes);
+    expect(() => gate.acquire(1)).toThrow(/reservation is already live/);
+    first.release();
+    expect(() => first.release()).toThrow(/already released/);
+    const second = gate.acquire(bytes);
+    second.release();
   });
 
   it('owns one nonqueued atomic reservation and releases handle or facts exactly once', () => {

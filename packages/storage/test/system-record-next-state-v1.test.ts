@@ -107,26 +107,25 @@ describe('system-record active next-state derivation', () => {
     const ready = expectReady(first);
     const repeated = expectReady(second);
 
-    expect(ready.nextAppliedState).toMatchObject({
+    expect(ready.plan.next.appliedState).toMatchObject({
       stateRevision: '1', status: 'active',
     });
-    expect(ready.nextAppliedState.transitionLineage).toHaveLength(0);
-    expect(ready.next.headVersion).toBe('0');
-    expect(ready.next.capacityState).toMatchObject({ revision: '1', liveRecordCount: '1' });
-    expect(ready.previousReservedQuads).toHaveLength(1);
-    expect(ready.nextReservedQuads).toHaveLength(15);
-    expect(ready.requiredAbsentReservedSubjects).toHaveLength(4);
-    expect(ready.conditionalApply.previousReservedQuads).toBe(ready.previousReservedQuads);
-    expect(ready.postReadExpectation.reservedQuads).toBe(ready.nextReservedQuads);
-    expect(ready.success).toEqual({
+    expect(ready.plan.next.appliedState.transitionLineage).toHaveLength(0);
+    expect(ready.plan.next.headVersion).toBe('0');
+    expect(ready.plan.next.capacityState).toMatchObject({ revision: '1', liveRecordCount: '1' });
+    expect(ready.plan.prior.reservedQuads).toHaveLength(1);
+    expect(ready.plan.next.reservedQuads).toHaveLength(15);
+    expect(ready.plan.prior.requiredAbsentReservedSubjects).toHaveLength(4);
+    expect(ready.plan.next.projectionQuads).toBe(INITIAL_FACTS.projectionQuads);
+    expect(ready.plan.success).toEqual({
       stateRevision: '1',
-      appliedStateDigest: computeSystemRecordAppliedStateDigestV1(ready.nextAppliedState),
+      appliedStateDigest: computeSystemRecordAppliedStateDigestV1(ready.plan.next.appliedState),
     });
-    expect(ready.next.receiptDigest).toBe(
-      computeSystemRecordMaterializationReceiptDigestV1(ready.next.receipt),
+    expect(ready.plan.next.receiptDigest).toBe(
+      computeSystemRecordMaterializationReceiptDigestV1(ready.plan.next.receipt),
     );
-    expect(repeated.next.receiptDigest).toBe(ready.next.receiptDigest);
-    expect(repeated.nextReservedQuads).toEqual(ready.nextReservedQuads);
+    expect(repeated.plan.next.receiptDigest).toBe(ready.plan.next.receiptDigest);
+    expect(repeated.plan.next.reservedQuads).toEqual(ready.plan.next.reservedQuads);
     expect(() => assertAuthenticSystemRecordActiveReplacementCompleteV1(ready)).not.toThrow();
     expect(() => assertAuthenticSystemRecordActiveReplacementCompleteV1({ ...ready }))
       .toThrow(/verified state derivation/);
@@ -144,14 +143,14 @@ describe('system-record active next-state derivation', () => {
       snapshot: absentSnapshot(INITIAL.networkId),
       observedRootClaimQuads: [],
     }));
-    expect(result.nextAppliedState).toMatchObject({
+    expect(result.plan.next.appliedState).toMatchObject({
       currentRoot: rotated.head.rootSubject,
       historicalRoots: [INITIAL.rootSubject],
     });
-    expect(result.nextAppliedState.transitionLineage).toHaveLength(1);
-    expect(result.next.headVersion).toBe('0');
-    expect(result.requiredAbsentReservedSubjects).toHaveLength(5);
-    expect(result.next.rootClaimQuads).toHaveLength(6);
+    expect(result.plan.next.appliedState.transitionLineage).toHaveLength(1);
+    expect(result.plan.next.headVersion).toBe('0');
+    expect(result.plan.prior.requiredAbsentReservedSubjects).toHaveLength(5);
+    expect(result.plan.next.rootClaimQuads).toHaveLength(6);
   });
 
   it('returns a complete authentic already-applied result for one equal head', () => {
@@ -160,13 +159,13 @@ describe('system-record active next-state derivation', () => {
     const result = deriveSystemRecordActiveReplacementV1({
       facts: INITIAL_FACTS,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     });
     expect(result.outcome).toBe('already-applied');
     if (result.outcome !== 'already-applied') throw new Error('expected already-applied');
-    expect(result.nextReservedQuads).toEqual(result.previousReservedQuads);
-    expect(result.success).toEqual(cold.success);
-    expect(result.conditionalApply.nextProjectionQuads).toBe(INITIAL_FACTS.projectionQuads);
+    expect(result.plan.next.reservedQuads).toEqual(result.plan.prior.reservedQuads);
+    expect(result.plan.success).toEqual(cold.plan.success);
+    expect(result.plan.next.projectionQuads).toBe(INITIAL_FACTS.projectionQuads);
     expect(() => assertAuthenticSystemRecordActiveReplacementCompleteV1(result)).not.toThrow();
   });
 
@@ -176,7 +175,7 @@ describe('system-record active next-state derivation', () => {
     const result = expectReady(deriveSystemRecordActiveReplacementV1({
       facts: INITIAL_FACTS,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     }));
 
     expect(snapshot).toMatchObject({
@@ -184,34 +183,34 @@ describe('system-record active next-state derivation', () => {
       appliedTupleEpoch: '12',
       appliedState: { materializationEpoch: '12', stateRevision: '1' },
     });
-    expect(result.nextAppliedState).toMatchObject({
+    expect(result.plan.next.appliedState).toMatchObject({
       materializationEpoch: EPOCH,
       stateRevision: '2',
-      headDigest: cold.next.appliedState.headDigest,
+      headDigest: cold.plan.next.appliedState.headDigest,
     });
-    expect(result.next.capacityState).toMatchObject({ revision: '2', liveRecordCount: '1' });
-    expect(result.previousReservedQuads).toHaveLength(
-      snapshot.previousReservedQuads.length + cold.next.rootClaimQuads.length,
+    expect(result.plan.next.capacityState).toMatchObject({ revision: '2', liveRecordCount: '1' });
+    expect(result.plan.prior.reservedQuads).toHaveLength(
+      snapshot.previousReservedQuads.length + cold.plan.next.rootClaimQuads.length,
     );
-    expect(result.previousReservedQuads).toEqual(expect.arrayContaining([
+    expect(result.plan.prior.reservedQuads).toEqual(expect.arrayContaining([
       ...snapshot.previousReservedQuads,
-      ...cold.next.rootClaimQuads,
+      ...cold.plan.next.rootClaimQuads,
     ]));
-    expect(result.nextReservedQuads).not.toEqual(result.previousReservedQuads);
-    expect(result.success.stateRevision).toBe('2');
+    expect(result.plan.next.reservedQuads).not.toEqual(result.plan.prior.reservedQuads);
+    expect(result.plan.success.stateRevision).toBe('2');
     expect(() => assertAuthenticSystemRecordActiveReplacementCompleteV1(result)).not.toThrow();
   });
 
   it('never acknowledges an equal digest whose canonical persisted tuple disagrees with the head', () => {
     const cold = coldReady();
     const inconsistent = snapshotWithAppliedState(cold, {
-      ...cold.next.appliedState,
+      ...cold.plan.next.appliedState,
       projectionDigest: `0x${'ab'.repeat(32)}`,
     });
     expect(deriveSystemRecordActiveReplacementV1({
       facts: INITIAL_FACTS,
       snapshot: inconsistent,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'deferred', reason: 'verified-state-mismatch' });
   });
 
@@ -229,15 +228,15 @@ describe('system-record active next-state derivation', () => {
     const fast = expectReady(deriveSystemRecordActiveReplacementV1({
       facts: fastFacts,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     }));
-    expect(fast.next.headVersion).toBe('2');
+    expect(fast.plan.next.headVersion).toBe('2');
 
     const fastSnapshot = snapshotFrom(fast);
     expect(deriveSystemRecordActiveReplacementV1({
       facts: INITIAL_FACTS,
       snapshot: fastSnapshot,
-      observedRootClaimQuads: fast.next.rootClaimQuads,
+      observedRootClaimQuads: fast.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'stale' });
 
     const forkHead = prepareHead({
@@ -249,7 +248,7 @@ describe('system-record active next-state derivation', () => {
     expect(deriveSystemRecordActiveReplacementV1({
       facts: forkFacts,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'deferred', reason: 'authority-fork' });
   });
 
@@ -260,10 +259,10 @@ describe('system-record active next-state derivation', () => {
     const accepted = expectReady(deriveSystemRecordActiveReplacementV1({
       facts: rotated.facts,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     }));
-    expect(accepted.nextAppliedState.historicalRoots).toEqual([INITIAL.rootSubject]);
-    expect(accepted.requiredAbsentReservedSubjects).toContain(
+    expect(accepted.plan.next.appliedState.historicalRoots).toEqual([INITIAL.rootSubject]);
+    expect(accepted.plan.prior.requiredAbsentReservedSubjects).toContain(
       systemRecordRootClaimSubjectV1(INITIAL.networkId, rotated.head.rootSubject),
     );
 
@@ -278,20 +277,20 @@ describe('system-record active next-state derivation', () => {
     expect(deriveSystemRecordActiveReplacementV1({
       facts: wrong.facts,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'deferred', reason: 'authority-history-mismatch' });
 
     const twice = await twiceRotatedFixture();
     expect(deriveSystemRecordActiveReplacementV1({
       facts: twice.facts,
       snapshot,
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'deferred', reason: 'authority-history-mismatch' });
   });
 
   it('classifies root collision and aggregate capacity refusal with zero prepared output', () => {
     const cold = coldReady();
-    const foreignClaim = cold.next.rootClaimQuads.map((quad) => (
+    const foreignClaim = cold.plan.next.rootClaimQuads.map((quad) => (
       quad.predicate === SYSTEM_RECORD_V1_PREDICATES.claimedBy
         ? Object.freeze({ ...quad, object: 'urn:test:foreign-record' })
         : quad
@@ -337,19 +336,19 @@ describe('system-record active next-state derivation', () => {
     expect(deriveSystemRecordActiveReplacementV1({
       facts: nextFacts,
       snapshot: snapshotWithAppliedState(cold, {
-        ...cold.next.appliedState,
+        ...cold.plan.next.appliedState,
         stateRevision: maxU64,
       }),
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'capacity-exhausted', reason: 'state-revision-overflow' });
 
     expect(deriveSystemRecordActiveReplacementV1({
       facts: nextFacts,
       snapshot: snapshotWithCapacityState(cold, {
-        ...cold.next.capacityState,
+        ...cold.plan.next.capacityState,
         revision: maxU64,
       }),
-      observedRootClaimQuads: cold.next.rootClaimQuads,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'capacity-exhausted', reason: 'capacity-revision-overflow' });
   });
 
@@ -381,7 +380,7 @@ describe('system-record active next-state derivation', () => {
     expect(deriveSystemRecordActiveReplacementV1({
       facts: nextFacts,
       snapshot: snapshotFrom(priorReady),
-      observedRootClaimQuads: priorReady.next.rootClaimQuads,
+      observedRootClaimQuads: priorReady.plan.next.rootClaimQuads,
     })).toEqual({ outcome: 'capacity-exhausted', reason: 'subject-union-cap' });
   }, 20_000);
 
@@ -397,7 +396,7 @@ describe('system-record active next-state derivation', () => {
     }));
     const update = buildSystemRecordConditionalApplyUpdateV1(ready);
 
-    expect(ready.nextProjectionQuads).toHaveLength(10_000);
+    expect(ready.plan.next.projectionQuads).toHaveLength(10_000);
     expect(update.requestBytes).toBe(Buffer.byteLength(update.sparql, 'utf8'));
     expect(update.requestBytes).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES);
     expect(update.requestBytes * 3).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES);
@@ -411,7 +410,7 @@ describe('system-record active next-state derivation', () => {
       expect(deriveSystemRecordActiveReplacementV1({
         facts: INITIAL_FACTS,
         snapshot,
-        observedRootClaimQuads: cold.next.rootClaimQuads,
+        observedRootClaimQuads: cold.plan.next.rootClaimQuads,
       })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
     }
   });
@@ -450,12 +449,12 @@ function absentSnapshotWithCapacity(
   capacityState: SystemRecordCapacityStateV1,
 ): SystemRecordAppliedSnapshotV1 {
   const quads = buildSystemRecordReservedStateQuadsV1({
-    appliedState: ready.next.appliedState,
-    headVersion: ready.next.headVersion,
-    ownedSubjectTable: ready.next.ownedSubjectTable,
-    rootClaimSet: ready.next.rootClaimSet,
+    appliedState: ready.plan.next.appliedState,
+    headVersion: ready.plan.next.headVersion,
+    ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+    rootClaimSet: ready.plan.next.rootClaimSet,
     capacityState,
-    receipt: ready.next.receipt,
+    receipt: ready.plan.next.receipt,
   });
   return decodeSystemRecordAppliedSnapshotV1({
     networkId: INITIAL.networkId,
@@ -466,12 +465,12 @@ function absentSnapshotWithCapacity(
 }
 
 function snapshotFrom(value: SystemRecordActiveReplacementCompleteV1): SystemRecordAppliedSnapshotV1 {
-  const rootKeys = new Set(value.next.rootClaimQuads.map(quadKey));
+  const rootKeys = new Set(value.plan.next.rootClaimQuads.map(quadKey));
   return decodeSystemRecordAppliedSnapshotV1({
-    networkId: value.next.appliedState.networkId,
-    stableKeyHash: value.next.appliedState.stableKeyHash,
-    materializationEpoch: value.next.materializationEpoch,
-    quads: value.nextReservedQuads.filter((quad) => !rootKeys.has(quadKey(quad))),
+    networkId: value.plan.next.appliedState.networkId,
+    stableKeyHash: value.plan.next.appliedState.stableKeyHash,
+    materializationEpoch: value.plan.next.materializationEpoch,
+    quads: value.plan.next.reservedQuads.filter((quad) => !rootKeys.has(quadKey(quad))),
   });
 }
 
@@ -480,29 +479,29 @@ function snapshotAtPriorEpoch(
   priorEpoch: string,
 ): SystemRecordAppliedSnapshotV1 {
   const appliedState: SystemRecordAppliedStatePresentV1 = {
-    ...ready.next.appliedState,
+    ...ready.plan.next.appliedState,
     materializationEpoch: priorEpoch,
   };
   const receipt: SystemRecordMaterializationReceiptV1 = {
-    ...ready.next.receipt,
+    ...ready.plan.next.receipt,
     materializationEpoch: priorEpoch,
     appliedStateDigest: computeSystemRecordAppliedStateDigestV1(appliedState),
   };
   const prior = buildSystemRecordReservedStateQuadsV1({
     appliedState,
-    headVersion: ready.next.headVersion,
-    ownedSubjectTable: ready.next.ownedSubjectTable,
-    rootClaimSet: ready.next.rootClaimSet,
-    capacityState: ready.next.capacityState,
+    headVersion: ready.plan.next.headVersion,
+    ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+    rootClaimSet: ready.plan.next.rootClaimSet,
+    capacityState: ready.plan.next.capacityState,
     receipt,
   });
   const currentEpoch = buildSystemRecordReservedStateQuadsV1({
-    appliedState: ready.next.appliedState,
-    headVersion: ready.next.headVersion,
-    ownedSubjectTable: ready.next.ownedSubjectTable,
-    rootClaimSet: ready.next.rootClaimSet,
-    capacityState: ready.next.capacityState,
-    receipt: ready.next.receipt,
+    appliedState: ready.plan.next.appliedState,
+    headVersion: ready.plan.next.headVersion,
+    ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+    rootClaimSet: ready.plan.next.rootClaimSet,
+    capacityState: ready.plan.next.capacityState,
+    receipt: ready.plan.next.receipt,
   }).epoch;
   return decodeSystemRecordAppliedSnapshotV1({
     networkId: INITIAL.networkId,
@@ -518,17 +517,17 @@ function snapshotWithAppliedState(
 ): SystemRecordAppliedSnapshotV1 {
   const appliedStateDigest = computeSystemRecordAppliedStateDigestV1(appliedState);
   const receipt: SystemRecordMaterializationReceiptV1 = {
-    ...ready.next.receipt,
+    ...ready.plan.next.receipt,
     appliedStateDigest,
     headDigest: appliedState.headDigest,
     stateRevision: appliedState.stateRevision,
   };
   const quads = buildSystemRecordReservedStateQuadsV1({
     appliedState,
-    headVersion: ready.next.headVersion,
-    ownedSubjectTable: ready.next.ownedSubjectTable,
-    rootClaimSet: ready.next.rootClaimSet,
-    capacityState: ready.next.capacityState,
+    headVersion: ready.plan.next.headVersion,
+    ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+    rootClaimSet: ready.plan.next.rootClaimSet,
+    capacityState: ready.plan.next.capacityState,
     receipt,
   });
   return decodeSystemRecordAppliedSnapshotV1({
@@ -544,12 +543,12 @@ function snapshotWithCapacityState(
   capacityState: SystemRecordCapacityStateV1,
 ): SystemRecordAppliedSnapshotV1 {
   const quads = buildSystemRecordReservedStateQuadsV1({
-    appliedState: ready.next.appliedState,
-    headVersion: ready.next.headVersion,
-    ownedSubjectTable: ready.next.ownedSubjectTable,
-    rootClaimSet: ready.next.rootClaimSet,
+    appliedState: ready.plan.next.appliedState,
+    headVersion: ready.plan.next.headVersion,
+    ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+    rootClaimSet: ready.plan.next.rootClaimSet,
     capacityState,
-    receipt: ready.next.receipt,
+    receipt: ready.plan.next.receipt,
   });
   return decodeSystemRecordAppliedSnapshotV1({
     networkId: INITIAL.networkId,
@@ -563,10 +562,10 @@ function nonActiveSnapshot(
   ready: SystemRecordActiveReplacementReadyV1,
   status: 'quarantined' | 'dirty' | 'tombstone',
 ): SystemRecordAppliedSnapshotV1 {
-  const base = ready.next.appliedState;
+  const base = ready.plan.next.appliedState;
   let appliedState: SystemRecordAppliedStatePresentV1;
-  let table = ready.next.ownedSubjectTable;
-  let capacityState = ready.next.capacityState;
+  let table = ready.plan.next.ownedSubjectTable;
+  let capacityState = ready.plan.next.capacityState;
   if (status === 'quarantined') {
     appliedState = {
       ...base,
@@ -597,15 +596,15 @@ function nonActiveSnapshot(
   }
   const appliedStateDigest = computeSystemRecordAppliedStateDigestV1(appliedState);
   const receipt: SystemRecordMaterializationReceiptV1 = {
-    ...ready.next.receipt,
+    ...ready.plan.next.receipt,
     appliedStateDigest,
     headDigest: appliedState.headDigest,
   };
   const quads = buildSystemRecordReservedStateQuadsV1({
     appliedState,
-    headVersion: ready.next.headVersion,
+    headVersion: ready.plan.next.headVersion,
     ownedSubjectTable: table,
-    rootClaimSet: ready.next.rootClaimSet,
+    rootClaimSet: ready.plan.next.rootClaimSet,
     capacityState,
     receipt,
   });

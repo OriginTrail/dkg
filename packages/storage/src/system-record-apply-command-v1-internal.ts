@@ -8,6 +8,11 @@ import {
   SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
   SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  buildBoundedSystemRecordUtf8V1,
+  type SystemRecordUtf8WriterV1,
+} from './system-record-bounded-utf8-builder-v1-internal.js';
+import { snapshotSystemRecordDenseArrayV1 } from './system-record-input-guards-v1-internal.js';
 import type { Quad } from './triple-store.js';
 import { compareSystemRecordUtf8V1 } from './system-record-utf8-order-v1-internal.js';
 import {
@@ -79,20 +84,21 @@ export function buildSystemRecordConditionalApplyUpdateV1(
   replaceBuilderCharge?: SystemRecordSparqlBuilderChargeV1,
 ): SystemRecordConditionalApplyUpdateV1 {
   assertAuthenticSystemRecordActiveReplacementCompleteV1(raw);
-  const projectionGraph = assertProjectionGraph(raw.projectionGraph);
+  const projectionGraph = assertProjectionGraph(raw.plan.projectionGraph);
   // The transition factory is the sole minter of this WeakSet-authentic,
   // deeply frozen derivation. Re-copying its maximum 10,000-row projection here
   // would create a second object graph inside the 12 MiB atomic lease without
   // adding a trust boundary.
-  const priorSubjects = raw.priorSubjects;
-  const nextSubjects = raw.nextSubjects;
+  const plan = raw.plan;
+  const priorSubjects = plan.prior.ownedSubjectTable;
+  const nextSubjects = plan.next.ownedSubjectTable;
   const subjectUnion = mergeSystemRecordOwnedSubjectsV1(priorSubjects, nextSubjects);
   if (subjectUnion.length < 1) throw new Error('active materialization requires an owned subject');
-  const oldReserved = raw.previousReservedQuads;
-  const nextReserved = raw.nextReservedQuads;
-  const absent = raw.requiredAbsentReservedSubjects;
-  const projection = raw.nextProjectionQuads;
-  const guards = raw.rootClaimGuards;
+  const oldReserved = plan.prior.reservedQuads;
+  const nextReserved = plan.next.reservedQuads;
+  const absent = plan.prior.requiredAbsentReservedSubjects;
+  const projection = plan.next.projectionQuads;
+  const guards = plan.rootClaimGuards;
 
   const oldBySubject = groupBySubject(oldReserved);
   for (const subject of absent) {
@@ -101,7 +107,7 @@ export function buildSystemRecordConditionalApplyUpdateV1(
     }
   }
 
-  const emit = (writer: SparqlWriterV1): void => {
+  const emit = (writer: SystemRecordUtf8WriterV1): void => {
     writer.add('DELETE {\n');
     writer.add('  GRAPH ');
     emitIri(writer, projectionGraph);
@@ -191,72 +197,14 @@ export function buildSystemRecordConditionalApplyUpdateV1(
     writer.add('}\n');
   };
 
-  const counter = new CountingSparqlWriter();
-  emit(counter);
-  const writer = new BoundedSparqlWriter(counter.bytes, replaceBuilderCharge);
-  emit(writer);
-  const sparql = writer.finish();
-  return Object.freeze({ sparql, requestBytes: counter.bytes, subjectUnion });
-}
-
-interface SparqlWriterV1 {
-  add(value: string): void;
-}
-
-class CountingSparqlWriter implements SparqlWriterV1 {
-  private encodedBytes = 0;
-
-  get bytes(): number { return this.encodedBytes; }
-
-  add(value: string): void {
-    const bytes = Buffer.byteLength(value, 'utf8');
-    if (bytes > SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES - this.encodedBytes) {
-      throw new Error('system-record SPARQL request exceeds the 4 MiB bound');
-    }
-    this.encodedBytes += bytes;
-  }
-}
-
-class BoundedSparqlWriter {
-  private buffer: Buffer | null;
-  private offset = 0;
-
-  constructor(
-    private readonly encodedBytes: number,
-    private readonly replaceCharge?: SystemRecordSparqlBuilderChargeV1,
-  ) {
-    // One exact encoded buffer and the final two-byte-weighted JS string coexist
-    // during conversion. There is no fragments array or join-time second string.
-    const peakBytes = encodedBytes * 3;
-    if (peakBytes > SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES) {
-      throw new Error('system-record SPARQL builder exceeds the retained-byte bound');
-    }
-    replaceCharge?.(peakBytes);
-    this.buffer = Buffer.allocUnsafe(encodedBytes);
-  }
-
-  add(value: string): void {
-    const bytes = Buffer.byteLength(value, 'utf8');
-    if (this.buffer === null || bytes > this.encodedBytes - this.offset) {
-      throw new Error('system-record SPARQL request accounting mismatch');
-    }
-    const written = this.buffer.write(value, this.offset, bytes, 'utf8');
-    if (written !== bytes) throw new Error('system-record SPARQL request accounting mismatch');
-    this.offset += written;
-  }
-
-  finish(): string {
-    if (this.buffer === null || this.offset !== this.encodedBytes) {
-      throw new Error('system-record SPARQL request accounting mismatch');
-    }
-    const result = this.buffer.toString('utf8');
-    this.buffer = null;
-    this.replaceCharge?.(this.encodedBytes * 2);
-    if (Buffer.byteLength(result, 'utf8') !== this.encodedBytes) {
-      throw new Error('system-record SPARQL request accounting mismatch');
-    }
-    return result;
-  }
+  const built = buildBoundedSystemRecordUtf8V1({
+    emit,
+    maxEncodedBytes: SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
+    maxRetainedBytes: SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES,
+    label: 'system-record SPARQL request',
+    replaceCharge: replaceBuilderCharge,
+  });
+  return Object.freeze({ sparql: built.value, requestBytes: built.encodedBytes, subjectUnion });
 }
 
 function snapshotCanonicalSubjects(value: unknown, label: string): readonly string[] {
@@ -293,14 +241,14 @@ function assertProjectionGraph(value: string): string {
   return value;
 }
 
-function emitIri(writer: SparqlWriterV1, value: string): void {
+function emitIri(writer: SystemRecordUtf8WriterV1, value: string): void {
   assertSafeIri(value);
   writer.add('<');
   writer.add(value);
   writer.add('>');
 }
 
-function emitObject(writer: SparqlWriterV1, value: string): void {
+function emitObject(writer: SystemRecordUtf8WriterV1, value: string): void {
   if (value.startsWith('"')) {
     assertSafeRdfTerm(value);
     writer.add(value);
@@ -309,7 +257,7 @@ function emitObject(writer: SparqlWriterV1, value: string): void {
   emitIri(writer, value);
 }
 
-function emitGraphQuad(writer: SparqlWriterV1, quad: Readonly<Quad>, indent: string): void {
+function emitGraphQuad(writer: SystemRecordUtf8WriterV1, quad: Readonly<Quad>, indent: string): void {
   writer.add(indent);
   writer.add('GRAPH ');
   emitIri(writer, quad.graph);
@@ -322,7 +270,7 @@ function emitGraphQuad(writer: SparqlWriterV1, quad: Readonly<Quad>, indent: str
   writer.add(' . }\n');
 }
 
-function emitQuadTuple(writer: SparqlWriterV1, quad: Readonly<Quad>, indent: string): void {
+function emitQuadTuple(writer: SystemRecordUtf8WriterV1, quad: Readonly<Quad>, indent: string): void {
   writer.add(indent);
   writer.add('(');
   emitIri(writer, quad.subject);
@@ -334,26 +282,7 @@ function emitQuadTuple(writer: SparqlWriterV1, quad: Readonly<Quad>, indent: str
 }
 
 function closedArray(value: unknown, maxLength: number, label: string): unknown[] {
-  if (!Array.isArray(value) || !Number.isSafeInteger(value.length) || value.length > maxLength) {
-    throw new Error(`${label} must be a bounded array`);
-  }
-  const keys = Reflect.ownKeys(value);
-  if (keys.length !== value.length + 1) throw new Error(`${label} must be a closed dense array`);
-  const result = new Array<unknown>(value.length);
-  for (const key of keys) {
-    if (key === 'length') continue;
-    if (typeof key !== 'string' || !/^(0|[1-9][0-9]*)$/.test(key)) {
-      throw new Error(`${label} contains a non-index property`);
-    }
-    const index = Number(key);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!Number.isSafeInteger(index) || index >= value.length || !descriptor?.enumerable
-        || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} must contain enumerable data elements`);
-    }
-    result[index] = descriptor.value;
-  }
-  return result;
+  return [...snapshotSystemRecordDenseArrayV1(value, { label, maxLength })];
 }
 
 function compareUtf8(left: string, right: string): number {
