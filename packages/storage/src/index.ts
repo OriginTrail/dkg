@@ -65,6 +65,12 @@ export {
   type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from './managed-oxigraph-ownership-v1-internal.js';
+// Exported for the agent's store forwarder, which is a first-party wrapper in
+// another package that holds cached state derived from the store.
+export {
+  SystemRecordLaneForwarderV1,
+  type SystemRecordLaneOutcomePolicyV1,
+} from './system-record-lane-forwarder-v1.js';
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,

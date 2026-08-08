@@ -110,7 +110,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SystemRecordApplyOutcomeV1, type SystemRecordLaneActivationV1, type SystemRecordLaneControllerV1 } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, SystemRecordLaneForwarderV1, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions, type SystemRecordApplyOutcomeV1, type SystemRecordLaneActivationV1, type SystemRecordLaneControllerV1 } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -445,8 +445,16 @@ export function createListContextGraphsCacheInvalidatingStore(
     }
     return result;
   };
-  let systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
-  let systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
+  const systemRecordLaneForwarder = new SystemRecordLaneForwarderV1({
+    onOutcome: (outcome) => {
+      if (outcome.outcome === 'applied' || outcome.outcome === 'root-collision') {
+        invalidate();
+        markProjectionDirty?.();
+      } else if (outcome.outcome === 'indeterminate') {
+        markProjectionDirty?.();
+      }
+    },
+  });
   const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
@@ -471,52 +479,17 @@ export function createListContextGraphsCacheInvalidatingStore(
      * silent wrong answer.
      */
     getSystemRecordLaneControllerV1() {
-      // PROBE THE INNER STORE EVERY TIME. The memo preserves wrapper identity;
-      // it must never answer the capability question itself.
-      //
-      // Absence was already re-probed — the adapter reports undefined during any
-      // window in which the managed child is not the proven-ready listener, and
-      // latching that would disable the lane for the whole process on one probe
-      // landing inside an ordinary revive. But PRESENCE was latched, so once a
-      // wrapper had been cached this kept advertising a lane after the lease
-      // went terminal, while the adapter would have denied it. Discovery is the
-      // safety gate callers use, so a stale "yes" is the dangerous direction.
-      const inner = innerStore.getSystemRecordLaneControllerV1?.();
-      if (!inner) {
-        systemRecordLaneMemo = null;
-        systemRecordLaneInner = null;
-        return undefined;
-      }
-      if (systemRecordLaneMemo && systemRecordLaneInner === inner) return systemRecordLaneMemo;
-      systemRecordLaneInner = inner;
-      systemRecordLaneMemo = Object.freeze({
-        open: async (activation: SystemRecordLaneActivationV1) => {
-          const session = await inner.open(activation);
-          return {
-            get state() {
-              return session.state;
-            },
-            get activationGeneration() {
-              return session.activationGeneration;
-            },
-            async applyVerified(proof: unknown): Promise<SystemRecordApplyOutcomeV1> {
-              const outcome = await session.applyVerified(proof);
-              if (outcome.outcome === 'applied' || outcome.outcome === 'root-collision') {
-                // root-collision durably quarantines and rewrites state, so it
-                // changes what a reader should observe just as an apply does.
-                invalidate();
-                markProjectionDirty?.();
-              } else if (outcome.outcome === 'indeterminate') {
-                markProjectionDirty?.();
-              }
-              return outcome;
-            },
-            close: (mode: 'disable' | 'shutdown') => session.close(mode),
-          };
-        },
-      });
-      return systemRecordLaneMemo;
+      // Probe the inner store on EVERY call; the shared forwarder owns the
+      // memo and identity keying. This wrapper supplies only the policy
+      // below, which deliberately differs from the graph-set index's:
+      // `root-collision` durably quarantines and rewrites state, so it
+      // changes what a reader should observe even though it adds and
+      // removes no named graph. This cache tracks readable CONTENT.
+      return systemRecordLaneForwarder.forward(
+        innerStore.getSystemRecordLaneControllerV1?.(),
+      );
     },
+
     insert(quads, options) {
       return invalidateAfterMutation(
         () => innerStore.insert(quads, options),
