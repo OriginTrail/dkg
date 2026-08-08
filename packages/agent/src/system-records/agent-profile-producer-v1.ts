@@ -3,16 +3,18 @@
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { commitAgentProfileProductionV1 } from './agent-profile-producer-commit-v1.js';
 import type {
-  AgentProfileProducerCommitDependenciesV1,
-  AgentProfileProducerInventoryDependenciesV1,
   AgentProfileProducerLeaseV1,
-  AgentProfileProducerPreparationDependenciesV1,
   AgentProfileProducerPublicationV1,
-  AgentProfileProducerSigningDependenciesV1,
   AgentProfileProducerV1,
   AgentProfilePublicationBindingV1,
   CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-contract-v1.js';
+import type {
+  AgentProfileProducerCommitDependenciesV1,
+  AgentProfileProducerInventoryDependenciesV1,
+  AgentProfileProducerPreparationDependenciesV1,
+  AgentProfileProducerSigningDependenciesV1,
+} from './agent-profile-producer-phase-contracts-v1.js';
 import { prepareAgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
 import {
   prepareAgentProfileProductionV1,

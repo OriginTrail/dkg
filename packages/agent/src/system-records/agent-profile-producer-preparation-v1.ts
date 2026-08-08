@@ -36,14 +36,20 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import type {
-  AgentProfileProducerPreparationDependenciesV1,
   AgentProfilePublicationBindingV1,
   SystemRecordPeerSignerV1,
 } from './agent-profile-producer-contract-v1.js';
+import type {
+  AgentProfileProducerPreparationDependenciesV1,
+} from './agent-profile-producer-phase-contracts-v1.js';
 
 const UTF8 = new TextEncoder();
+const VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1: unique symbol = Symbol(
+  'validated-agent-profile-production-input-v1',
+);
 
 export interface ValidatedAgentProfileProductionInputV1 {
+  readonly [VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1]: true;
   readonly preparedSnapshot: PreparedAgentProfileV1;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
@@ -231,6 +237,7 @@ export function validateAgentProfileProductionInputV1(
     dependencies.evmIssuer,
   );
   return Object.freeze({
+    [VALIDATED_AGENT_PROFILE_PRODUCTION_INPUT_V1]: true as const,
     preparedSnapshot,
     projectionQuads: Object.freeze(projected),
     ownedSubjectTable,

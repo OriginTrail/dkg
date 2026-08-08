@@ -268,4 +268,31 @@ describe('system-record V1 public policy helpers', () => {
       ],
     )).toThrow(/invalid object term kind/);
   });
+
+  it('enforces workspace-key and revocation-root object policies in the validator', () => {
+    const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
+    expect(() => assertAgentProfileProjectionSchemaV1(
+      root,
+      [root],
+      [{
+        subject: root,
+        predicate: `${DKG}publicEncryptionKey`,
+        object: '"not-a-canonical-workspace-key"',
+        graph: '',
+      }],
+    )).toThrow(/public encryption key is not canonical/);
+
+    const x25519 = `${root}#x25519-${'a'.repeat(32)}`;
+    const wrongRoot = `did:dkg:agent:0x${'22'.repeat(20)}`;
+    expect(() => assertAgentProfileProjectionSchemaV1(
+      root,
+      [root, x25519],
+      [{
+        subject: x25519,
+        predicate: `${DKG}revokedBy`,
+        object: wrongRoot,
+        graph: '',
+      }],
+    )).toThrow(/revocation does not bind the profile root/);
+  });
 });

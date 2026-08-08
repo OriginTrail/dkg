@@ -7,7 +7,7 @@ import {
 
 import type {
   AgentProfileProducerSigningDependenciesV1,
-} from './agent-profile-producer-contract-v1.js';
+} from './agent-profile-producer-phase-contracts-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 
 export interface SignedAgentProfileProductionV1 {

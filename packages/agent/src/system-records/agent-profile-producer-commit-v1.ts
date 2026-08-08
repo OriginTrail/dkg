@@ -1,7 +1,9 @@
 import type {
-  AgentProfileProducerCommitDependenciesV1,
   AgentProfileProducerPublicationV1,
 } from './agent-profile-producer-contract-v1.js';
+import type {
+  AgentProfileProducerCommitDependenciesV1,
+} from './agent-profile-producer-phase-contracts-v1.js';
 import type { AgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';

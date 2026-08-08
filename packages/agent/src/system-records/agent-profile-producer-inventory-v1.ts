@@ -21,9 +21,11 @@ import {
 import {
   flattenAgentProfileProducerPublicationArtifactsV1,
   type AgentProfileProducerArtifactV1,
-  type AgentProfileProducerInventoryDependenciesV1,
   type AgentProfileProducerPublicationArtifactsV1,
 } from './agent-profile-producer-contract-v1.js';
+import type {
+  AgentProfileProducerInventoryDependenciesV1,
+} from './agent-profile-producer-phase-contracts-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
 import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
