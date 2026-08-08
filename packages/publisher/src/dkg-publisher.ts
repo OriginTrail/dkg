@@ -7416,6 +7416,8 @@ export class DKGPublisher implements Publisher {
         rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
         rejectOversizedRdfLiterals(privateQuads, 'legacyWorkingMemoryMigration.privateQuads');
       },
+      hasRetainedSourceContent: async (sourceGraph) =>
+        (await this.assertionScopedQuads(sourceGraph)).length > 0,
       canSelfAllocateGraphIdentity: (agentAddress) =>
         this.kaAllocator !== undefined && isAllocatableKaAuthorV1(agentAddress),
       createGraphScopedDraft: (contextGraphId, name, agentAddress, subGraphName, opts) =>

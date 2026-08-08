@@ -159,6 +159,13 @@ export interface LegacyWmMigrationHost {
    * orchestration — see `validateMigratableContent`.
    */
   assertContentMigratable(publicQuads: Quad[], privateQuads: Quad[]): void;
+  /**
+   * Does the legacy draft still hold content anywhere in its assertion-scoped
+   * graph family? Diagnostic only — must cover the same graphs
+   * `loadMigratableContent` reads, or it will report "nothing stranded" for
+   * content sitting in a named child graph.
+   */
+  hasRetainedSourceContent(sourceGraph: string): Promise<boolean>;
   /** Whether the publisher can mint a KA number itself for this author. */
   canSelfAllocateGraphIdentity(agentAddress: string): boolean;
   createGraphScopedDraft(
@@ -657,10 +664,16 @@ export async function runLegacyWorkingMemoryMigration(
       );
     }
     if (plan.reason === 'no-legacy-draft' && lifecycleRows.length > 0) {
-      const stranded = await host.store.query(
-        `ASK { GRAPH <${uris.sourceGraph}> { ?s ?p ?o } }`,
-      );
-      if (stranded.type === 'boolean' && stranded.value) {
+      // Diagnostic only, and deliberately fail-soft: this branch exists so
+      // the daemon SURVIVES a corrupt-metadata draft. A probe that could
+      // throw would re-break exactly the path it reports on.
+      let stranded = false;
+      try {
+        stranded = await host.hasRetainedSourceContent(uris.sourceGraph);
+      } catch {
+        stranded = false;
+      }
+      if (stranded) {
         host.logInfo(
           `Legacy WM ${request.contextGraphId}/${request.name}: active lifecycle metadata is `
           + `missing but ${uris.sourceGraph} still holds content. Migration cannot verify `

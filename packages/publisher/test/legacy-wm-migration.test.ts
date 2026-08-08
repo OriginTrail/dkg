@@ -24,7 +24,7 @@ import {
   assertionLifecycleUri,
   LegacyKnowledgeAssetReadOnlyError,
 } from '@origintrail-official/dkg-core';
-import { DKGPublisher } from '../src/index.js';
+import { DKGPublisher, assertionScopedGraphUri } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
 
 const CG_ID = 'test-assertion-cg';
@@ -481,6 +481,46 @@ describe('Legacy root-scoped WM migration', () => {
     expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
   });
 
+  it('reports stranded legacy content held in an assertion-scoped CHILD graph', async () => {
+    // The probe must enumerate the same graph family the content loader
+    // reads. Probing only the root graph would report "nothing stranded"
+    // for content sitting in a named child graph — the diagnostic would be
+    // confidently wrong exactly when it matters.
+    const name = 'legacy-orphan-child-graph';
+    const { lifecycle, metaGraph, sourceGraph } = legacyMigrationUris(name);
+    const childGraph = assertionScopedGraphUri(sourceGraph, 'urn:test:named');
+    const logged: string[] = [];
+    const publisherLog = (publisher as any).log;
+    const originalInfo = publisherLog.info.bind(publisherLog);
+    publisherLog.info = (ctx: unknown, message: string) => {
+      logged.push(message);
+      return originalInfo(ctx, message);
+    };
+    try {
+      await store.insert([
+        {
+          subject: `${lifecycle}/event/orphaned`,
+          predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+          object: 'http://dkg.io/ontology/AssertionCreated',
+          graph: metaGraph,
+        },
+        // Content lives ONLY in the child graph — the root is empty.
+        {
+          subject: 'urn:test:child-stranded',
+          predicate: 'http://schema.org/text',
+          object: '"in a named graph"',
+          graph: childGraph,
+        },
+      ]);
+
+      const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+      expect(result.status).toBe('not-needed');
+      expect(logged.some((m) => m.includes('still holds content'))).toBe(true);
+    } finally {
+      publisherLog.info = originalInfo;
+    }
+  });
+
   it(
     'orphan lifecycle rows with surviving source content: create is unblocked AND the '
     + 'legacy data is retained, not destroyed',
@@ -724,18 +764,24 @@ describe('Legacy root-scoped WM migration', () => {
     // before `completeMarker`. The rerun must resume, not re-allocate a new
     // identity, and must not duplicate the copied content.
     const name = 'legacy-resume-post-apply';
+    const { sourceGraph } = legacyMigrationUris(name);
     const publicQuads = [
       { subject: 'urn:test:resume:1', predicate: 'http://schema.org/text', object: '"copied"' },
     ];
 
-    // Build a draft that is genuinely graph-scoped WITH a minted number, then
-    // rewind ONLY the marker to `prepared` — exactly the durable state a
-    // crash before completeMarker leaves behind (graph-scoped metadata
-    // present, content already copied into the target WM graph).
+    // Build a draft that is genuinely graph-scoped WITH a minted number and
+    // whose content was ALREADY copied, then rewind only the marker to
+    // `prepared` — the durable state a crash before completeMarker leaves.
+    //
+    // The legacy source graph must ALSO still hold that content: it is never
+    // deleted, so a real resume re-reads and re-copies it. Seeding only the
+    // target would leave `publicQuads` empty, `copyPublicContent` would
+    // early-return, and the non-duplication claim below would be vacuous.
     await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
       allocateKaNumber: recordingAllocator(77n).allocateKaNumber,
     });
     await publisher.assertionWrite(CG_ID, name, AGENT, publicQuads);
+    await store.insert(publicQuads.map((quad) => ({ ...quad, graph: sourceGraph })));
     await stampMigrationMarker(name, 'prepared');
 
     const resumeAllocator = recordingAllocator(77n);
@@ -750,7 +796,9 @@ describe('Legacy root-scoped WM migration', () => {
     expect(result.status).toBe('resumed');
     // Already graph-scoped, so no second identity may be minted.
     expect(resumeAllocator.calls).toHaveLength(0);
-    // Content survives exactly once — the resume must not duplicate it.
+    // The copy genuinely re-ran over the retained legacy content...
+    expect(result.copiedPublic).toBe(publicQuads.length);
+    // ...and the target still holds exactly one instance of it.
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual(
       publicQuads.map((quad) => expect.objectContaining(quad)),
     );
