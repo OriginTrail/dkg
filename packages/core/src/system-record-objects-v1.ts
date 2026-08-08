@@ -129,7 +129,6 @@ export type {
   AgentProfileExactLinkedSubjectKindV1,
   AgentProfileIndexedSubjectKindV1,
   AgentProfileLinkedSubjectKindV1,
-  AgentProfileObjectTermKindV1,
   AgentProfileOwnedSubjectKindV1,
   AgentProfilePredicatePolicyV1,
   AgentProfileSubjectPolicyV1,

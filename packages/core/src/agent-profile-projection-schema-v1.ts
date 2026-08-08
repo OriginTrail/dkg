@@ -125,32 +125,61 @@ export function assertAgentProfileProjectionSchemaV1(
     } else assertSafeIri(quad.object);
     if (quad.graph !== '') throw new Error('profile projections must be graphless');
     seenSubjects.add(quad.subject);
-    if ((predicatePolicy.objectTermKind === 'iri') === objectIsLiteral) {
-      throw new Error('profile projection predicate has an invalid object term kind');
-    }
-    if (predicatePolicy.allowedObjects !== undefined
-      && !predicatePolicy.allowedObjects.includes(quad.object)) {
-      throw new Error('profile projection rdf:type object is outside the frozen profile schema');
-    }
-    if (predicatePolicy.linkTargetKind !== undefined) {
-      if (objectIsLiteral || !ownedSubjects.has(quad.object)
-        || classifyAgentProfileOwnedSubjectV1(rootSubject, quad.object)
-          !== predicatePolicy.linkTargetKind) {
-        throw new Error('profile link does not target its exact derived-subject kind');
+    switch (predicatePolicy.objectPolicy) {
+      case 'literal':
+        if (!objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        break;
+      case 'iri':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        break;
+      case 'allowed-iri':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        if (!predicatePolicy.allowedObjects.includes(quad.object)) {
+          throw new Error('profile projection rdf:type object is outside the frozen profile schema');
+        }
+        break;
+      case 'owned-subject-link':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        if (!ownedSubjects.has(quad.object)
+          || classifyAgentProfileOwnedSubjectV1(rootSubject, quad.object)
+            !== predicatePolicy.linkTargetKind) {
+          throw new Error('profile link does not target its exact derived-subject kind');
+        }
+        linked.add(quad.object);
+        break;
+      case 'workspace-public-key': {
+        if (!objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        const match = /^"([A-Za-z0-9_-]{43})"$/.exec(quad.object);
+        if (match === null) throw new Error('profile public encryption key is not canonical');
+        try {
+          publicKeys.push(decodeWorkspaceEncryptionKey(match[1]));
+        } catch (cause) {
+          throw new Error('profile public encryption key is invalid', { cause });
+        }
+        break;
       }
-      linked.add(quad.object);
-    }
-    if (predicatePolicy.capture === 'workspace-public-key') {
-      const match = /^"([A-Za-z0-9_-]{43})"$/.exec(quad.object);
-      if (match === null) throw new Error('profile public encryption key is not canonical');
-      try {
-        publicKeys.push(decodeWorkspaceEncryptionKey(match[1]));
-      } catch (cause) {
-        throw new Error('profile public encryption key is invalid', { cause });
+      case 'profile-root-iri':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        if (quad.object !== rootSubject) {
+          throw new Error('x25519 revocation does not bind the profile root');
+        }
+        break;
+      default: {
+        const unsupported: never = predicatePolicy;
+        throw new TypeError(`unsupported profile predicate policy: ${String(unsupported)}`);
       }
-    }
-    if (predicatePolicy.objectBinding === 'profile-root' && quad.object !== rootSubject) {
-      throw new Error('x25519 revocation does not bind the profile root');
     }
   }
   for (const subject of ownedSubjectTable) {

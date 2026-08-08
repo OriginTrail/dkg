@@ -36,15 +36,15 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { assertRecoverableGraphScopedAuthorAttestationV1 } from '../rfc64/recoverable-author-attestation-v1.js';
 import type {
+  AgentProfileProducerPreparationDependenciesV1,
   AgentProfilePublicationBindingV1,
-  CreateAgentProfileProducerOptionsV1,
   SystemRecordPeerSignerV1,
 } from './agent-profile-producer-contract-v1.js';
 
 const UTF8 = new TextEncoder();
 
 export interface AgentProfileProductionPreparationV1 {
-  readonly snapshot: ReturnType<CreateAgentProfileProducerOptionsV1['store']['snapshot']>;
+  readonly snapshot: ReturnType<AgentProfileProducerPreparationDependenciesV1['snapshot']>;
   readonly verifierNowMs: number;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly projectionBytes: Uint8Array;
@@ -58,7 +58,7 @@ export interface AgentProfileProductionPreparationV1 {
 }
 
 export async function prepareAgentProfileProductionV1(
-  options: CreateAgentProfileProducerOptionsV1,
+  dependencies: AgentProfileProducerPreparationDependenciesV1,
   prepared: PreparedAgentProfileV1,
   projectionQuads: readonly Readonly<Quad>[],
   inputPublication: AgentProfilePublicationBindingV1,
@@ -71,7 +71,7 @@ export async function prepareAgentProfileProductionV1(
     'assertionFinalizedAt',
   );
   const assertionFinalizedAtMs = Date.parse(publication.seal.assertionFinalizedAt);
-  const verifierNowMs = producerNowMs(options.nowMs?.() ?? Date.now());
+  const verifierNowMs = producerNowMs(dependencies.nowMs?.() ?? Date.now());
   if (Date.parse(issuedAt) > verifierNowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS) {
     throw new Error('agent-profile issuedAt exceeds the future clock-skew bound');
   }
@@ -84,13 +84,13 @@ export async function prepareAgentProfileProductionV1(
   if (Date.parse(validUntil) <= verifierNowMs) {
     throw new Error('agent-profile validUntil is already expired');
   }
-  const evmIssuer = options.evmSigner.address;
+  const evmIssuer = dependencies.evmIssuer;
   assertCanonicalEvmAddress(evmIssuer, 'profile EVM issuer');
-  const snapshot = options.store.snapshot();
+  const snapshot = dependencies.snapshot();
   const previous = snapshot.currentHead;
   if (previous !== null
-    && (previous.object.networkId !== options.networkId
-      || previous.object.peerId !== options.peerSigner.peerId)) {
+    && (previous.object.networkId !== dependencies.networkId
+      || previous.object.peerId !== dependencies.peerId)) {
     throw new Error('stored profile head belongs to a different stable record');
   }
   if (previous !== null && !await verifySignedSystemRecordEnvelopeV1(previous)) {
@@ -113,8 +113,8 @@ export async function prepareAgentProfileProductionV1(
   }
   assertPublicationLaneV1(
     publication.seal,
-    options.networkId,
-    options.publicationDeployment,
+    dependencies.networkId,
+    dependencies.publicationDeployment,
     evmIssuer,
   );
   assertRecoverableGraphScopedAuthorAttestationV1(publication.seal);
@@ -157,9 +157,9 @@ export async function prepareAgentProfileProductionV1(
     objectType: 'agent-profile-head',
     kind: 'agents',
     state: 'active',
-    networkId: options.networkId,
-    peerId: options.peerSigner.peerId,
-    peerPublicKey: options.peerSigner.publicKey,
+    networkId: dependencies.networkId,
+    peerId: dependencies.peerId,
+    peerPublicKey: dependencies.peerPublicKey,
     authoritySequence,
     version,
     ...(previous === null ? {} : { previousHeadDigest: previous.objectDigest }),

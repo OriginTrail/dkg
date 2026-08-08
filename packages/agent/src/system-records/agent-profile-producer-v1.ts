@@ -5,8 +5,12 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { commitAgentProfileProductionV1 } from './agent-profile-producer-commit-v1.js';
 import type {
+  AgentProfileProducerCommitDependenciesV1,
+  AgentProfileProducerInventoryDependenciesV1,
   AgentProfileProducerLeaseV1,
+  AgentProfileProducerPreparationDependenciesV1,
   AgentProfileProducerPublicationV1,
+  AgentProfileProducerSigningDependenciesV1,
   AgentProfileProducerV1,
   AgentProfilePublicationBindingV1,
   CreateAgentProfileProducerOptionsV1,
@@ -29,6 +33,34 @@ export * from './agent-profile-producer-contract-v1.js';
 export function createAgentProfileProducerV1(
   options: CreateAgentProfileProducerOptionsV1,
 ): AgentProfileProducerV1 {
+  const preparationDependencies: AgentProfileProducerPreparationDependenciesV1 = Object.freeze({
+    networkId: options.networkId,
+    publicationDeployment: options.publicationDeployment,
+    peerId: options.peerSigner.peerId,
+    peerPublicKey: options.peerSigner.publicKey,
+    evmIssuer: options.evmSigner.address,
+    ...(options.nowMs === undefined ? {} : { nowMs: () => options.nowMs?.() ?? Date.now() }),
+    snapshot: () => options.store.snapshot(),
+  });
+  const signingDependencies: AgentProfileProducerSigningDependenciesV1 = Object.freeze({
+    peerSigner: options.peerSigner,
+    evmSigner: options.evmSigner,
+  });
+  const resolveArtifact: AgentProfileProducerInventoryDependenciesV1['resolveArtifact'] =
+    (reference) => options.store.resolveArtifact(reference);
+  const inventoryDependencies: AgentProfileProducerInventoryDependenciesV1 = Object.freeze({
+    networkId: options.networkId,
+    peerSigner: options.peerSigner,
+    resolveArtifact,
+  });
+  const prepareCommit: AgentProfileProducerCommitDependenciesV1['prepareCommit'] =
+    (input) => options.store.prepareCommit(input);
+  const install: AgentProfileProducerCommitDependenciesV1['install'] =
+    (input) => options.install(input);
+  const commitDependencies: AgentProfileProducerCommitDependenciesV1 = Object.freeze({
+    prepareCommit,
+    install,
+  });
   let active = false;
   const completePrepared = async (
     prepared: PreparedAgentProfileV1,
@@ -38,20 +70,24 @@ export function createAgentProfileProducerV1(
   ): Promise<AgentProfileProducerPublicationV1> => {
     signal.throwIfAborted();
     const preparation = await prepareAgentProfileProductionV1(
-      options,
+      preparationDependencies,
       prepared,
       projectionQuads,
       publication,
     );
-    const signed = await signAgentProfileProductionV1(options, preparation, signal);
+    const signed = await signAgentProfileProductionV1(
+      signingDependencies,
+      preparation,
+      signal,
+    );
     const inventoryPlan = await prepareAgentProfileProductionInventoryV1(
-      options,
+      inventoryDependencies,
       preparation,
       signed,
       signal,
     );
     return commitAgentProfileProductionV1(
-      options,
+      commitDependencies,
       preparation,
       signed,
       inventoryPlan,

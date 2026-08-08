@@ -128,6 +128,32 @@ export interface CreateAgentProfileProducerOptionsV1 {
   readonly install: (input: AgentProfileProducerInstallInputV1) => void | Promise<void>;
 }
 
+export interface AgentProfileProducerPreparationDependenciesV1 {
+  readonly networkId: NetworkIdV1;
+  readonly publicationDeployment: Readonly<CatalogSealDeploymentProfileV1>;
+  readonly peerId: string;
+  readonly peerPublicKey: SystemRecordPeerPublicKeyV1;
+  readonly evmIssuer: string;
+  readonly nowMs?: () => number;
+  readonly snapshot: AgentProfileProducerPublicationStoreV1['snapshot'];
+}
+
+export interface AgentProfileProducerSigningDependenciesV1 {
+  readonly peerSigner: SystemRecordPeerSignerV1;
+  readonly evmSigner: EvmPersonalMessageSignerV1;
+}
+
+export interface AgentProfileProducerInventoryDependenciesV1 {
+  readonly networkId: NetworkIdV1;
+  readonly peerSigner: SystemRecordPeerSignerV1;
+  readonly resolveArtifact: AgentProfileProducerPublicationStoreV1['resolveArtifact'];
+}
+
+export interface AgentProfileProducerCommitDependenciesV1 {
+  readonly prepareCommit: AgentProfileProducerPublicationStoreV1['prepareCommit'];
+  readonly install: CreateAgentProfileProducerOptionsV1['install'];
+}
+
 export interface AgentProfileProducerLeaseV1 {
   complete(
     publication: AgentProfilePublicationBindingV1,

@@ -5,7 +5,9 @@ import {
   type SignedAgentProfileHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type { CreateAgentProfileProducerOptionsV1 } from './agent-profile-producer-contract-v1.js';
+import type {
+  AgentProfileProducerSigningDependenciesV1,
+} from './agent-profile-producer-contract-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 
 export interface SignedAgentProfileProductionV1 {
@@ -14,19 +16,19 @@ export interface SignedAgentProfileProductionV1 {
 }
 
 export async function signAgentProfileProductionV1(
-  options: CreateAgentProfileProducerOptionsV1,
+  dependencies: AgentProfileProducerSigningDependenciesV1,
   preparation: AgentProfileProductionPreparationV1,
   signal: AbortSignal,
 ): Promise<SignedAgentProfileProductionV1> {
   const [peerSignature, evmSignature] = await Promise.all([
-    options.peerSigner.sign(
+    dependencies.peerSigner.sign(
       buildSystemRecordSignatureMessageV1(
         preparation.head,
         preparation.headDigest,
         'peer',
       ),
     ),
-    options.evmSigner.signMessage(
+    dependencies.evmSigner.signMessage(
       buildSystemRecordSignatureMessageV1(
         preparation.head,
         preparation.headDigest,
@@ -42,14 +44,14 @@ export async function signAgentProfileProductionV1(
       Object.freeze({
         role: 'peer',
         suite: 'ed25519-v1',
-        signer: options.peerSigner.peerId,
+        signer: dependencies.peerSigner.peerId,
         evidence: Object.freeze({ kind: 'none' }),
         signature: Buffer.from(peerSignature).toString('base64url'),
       }),
       Object.freeze({
         role: 'current-evm',
         suite: 'eip191-personal-sign-digest-v1',
-        signer: options.evmSigner.address,
+        signer: dependencies.evmSigner.address,
         evidence: Object.freeze({ kind: 'none' }),
         signature: evmSignature,
       }),

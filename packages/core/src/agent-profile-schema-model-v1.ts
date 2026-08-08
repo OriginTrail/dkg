@@ -15,16 +15,27 @@ export type AgentProfileLinkedSubjectKindV1 = Exclude<
 export type AgentProfileIndexedSubjectKindV1 = 'capability' | 'offering';
 export type AgentProfileExactLinkedSubjectKindV1 = 'registration' | 'hosting';
 
-export type AgentProfileObjectTermKindV1 = 'iri' | 'literal';
-
-export interface AgentProfilePredicatePolicyV1 {
-  readonly predicate: string;
-  readonly objectTermKind: AgentProfileObjectTermKindV1;
-  readonly allowedObjects?: readonly string[];
-  readonly linkTargetKind?: AgentProfileLinkedSubjectKindV1;
-  readonly objectBinding?: 'profile-root';
-  readonly capture?: 'workspace-public-key';
-}
+export type AgentProfilePredicatePolicyV1 =
+  | Readonly<{ readonly predicate: string; readonly objectPolicy: 'literal' }>
+  | Readonly<{ readonly predicate: string; readonly objectPolicy: 'iri' }>
+  | Readonly<{
+      readonly predicate: string;
+      readonly objectPolicy: 'allowed-iri';
+      readonly allowedObjects: readonly string[];
+    }>
+  | Readonly<{
+      readonly predicate: string;
+      readonly objectPolicy: 'owned-subject-link';
+      readonly linkTargetKind: AgentProfileLinkedSubjectKindV1;
+    }>
+  | Readonly<{
+      readonly predicate: string;
+      readonly objectPolicy: 'profile-root-iri';
+    }>
+  | Readonly<{
+      readonly predicate: string;
+      readonly objectPolicy: 'workspace-public-key';
+    }>;
 
 export type AgentProfileSubjectShapeV1 =
   | Readonly<{ readonly type: 'root' }>
@@ -109,25 +120,42 @@ export const AGENT_PROFILE_LINK_PREDICATES_V1 = Object.freeze({
   hosting: T.skillHostingProfile,
 } as const);
 
-function literal(
-  predicate: string,
-  extra: Omit<AgentProfilePredicatePolicyV1, 'predicate' | 'objectTermKind'> = {},
-): Readonly<AgentProfilePredicatePolicyV1> {
-  return Object.freeze({ predicate, objectTermKind: 'literal' as const, ...extra });
+function literal(predicate: string): Readonly<AgentProfilePredicatePolicyV1> {
+  return Object.freeze({ predicate, objectPolicy: 'literal' as const });
 }
 
-function iri(
+function iri(predicate: string): Readonly<AgentProfilePredicatePolicyV1> {
+  return Object.freeze({ predicate, objectPolicy: 'iri' as const });
+}
+
+function allowedIri(
   predicate: string,
-  extra: Omit<AgentProfilePredicatePolicyV1, 'predicate' | 'objectTermKind'> = {},
+  allowedObjects: readonly string[],
 ): Readonly<AgentProfilePredicatePolicyV1> {
   return Object.freeze({
     predicate,
-    objectTermKind: 'iri' as const,
-    ...extra,
-    ...(extra.allowedObjects === undefined
-      ? {}
-      : { allowedObjects: Object.freeze([...extra.allowedObjects]) }),
+    objectPolicy: 'allowed-iri' as const,
+    allowedObjects: Object.freeze([...allowedObjects]),
   });
+}
+
+function ownedSubjectLink(
+  predicate: string,
+  linkTargetKind: AgentProfileLinkedSubjectKindV1,
+): Readonly<AgentProfilePredicatePolicyV1> {
+  return Object.freeze({
+    predicate,
+    objectPolicy: 'owned-subject-link' as const,
+    linkTargetKind,
+  });
+}
+
+function profileRootIri(predicate: string): Readonly<AgentProfilePredicatePolicyV1> {
+  return Object.freeze({ predicate, objectPolicy: 'profile-root-iri' as const });
+}
+
+function workspacePublicKey(predicate: string): Readonly<AgentProfilePredicatePolicyV1> {
+  return Object.freeze({ predicate, objectPolicy: 'workspace-public-key' as const });
 }
 
 function subjectPolicy<const Kind extends AgentProfileOwnedSubjectKindV1>(
@@ -145,7 +173,7 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
     kind: 'root',
     subjectShape: { type: 'root' },
     predicates: [
-      iri(T.rdfType, { allowedObjects: [T.dkgAgent, T.dkgCoreNode, T.dkgEdgeNode] }),
+      allowedIri(T.rdfType, [T.dkgAgent, T.dkgCoreNode, T.dkgEdgeNode]),
       literal(T.schemaName),
       literal(T.schemaDescription),
       literal(T.dkgPeerId),
@@ -155,14 +183,14 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
       literal(T.dkgAgentAddress),
       literal(T.dkgMultiaddr),
       literal(T.dkgLastSeen),
-      literal(T.dkgPublicEncryptionKey, { capture: 'workspace-public-key' }),
+      workspacePublicKey(T.dkgPublicEncryptionKey),
       literal(T.dkgEncryptionKeyAlgorithm),
       literal(T.dkgEncryptionKeyProof),
       literal(T.skillFramework),
-      iri(T.erc8004Capabilities, { linkTargetKind: 'capability' }),
-      iri(T.skillOffersSkill, { linkTargetKind: 'offering' }),
-      iri(T.provWasGeneratedBy, { linkTargetKind: 'registration' }),
-      iri(T.skillHostingProfile, { linkTargetKind: 'hosting' }),
+      ownedSubjectLink(T.erc8004Capabilities, 'capability'),
+      ownedSubjectLink(T.skillOffersSkill, 'offering'),
+      ownedSubjectLink(T.provWasGeneratedBy, 'registration'),
+      ownedSubjectLink(T.skillHostingProfile, 'hosting'),
     ],
   }),
   capability: subjectPolicy({
@@ -170,7 +198,7 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
     subjectShape: { type: 'indexed-genid', prefix: 'cap' },
     rootLinkPredicate: T.erc8004Capabilities,
     predicates: [
-      iri(T.rdfType, { allowedObjects: [T.erc8004Capability] }),
+      allowedIri(T.rdfType, [T.erc8004Capability]),
       literal(T.schemaName),
     ],
   }),
@@ -179,7 +207,7 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
     subjectShape: { type: 'indexed-genid', prefix: 'offering' },
     rootLinkPredicate: T.skillOffersSkill,
     predicates: [
-      iri(T.rdfType, { allowedObjects: [T.skillSkillOffering] }),
+      allowedIri(T.rdfType, [T.skillSkillOffering]),
       iri(T.skillSkill),
       literal(T.skillPricePerCall),
       literal(T.skillCurrency),
@@ -192,7 +220,7 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
     subjectShape: { type: 'exact-genid', suffix: 'registration' },
     rootLinkPredicate: T.provWasGeneratedBy,
     predicates: [
-      iri(T.rdfType, { allowedObjects: [T.provActivity] }),
+      allowedIri(T.rdfType, [T.provActivity]),
       literal(T.provAtTime),
     ],
   }),
@@ -201,7 +229,7 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
     subjectShape: { type: 'exact-genid', suffix: 'hosting' },
     rootLinkPredicate: T.skillHostingProfile,
     predicates: [
-      iri(T.rdfType, { allowedObjects: [T.skillHostingProfileType] }),
+      allowedIri(T.rdfType, [T.skillHostingProfileType]),
       literal(T.skillContextGraphsServed),
       literal(T.skillParanetsServed),
     ],
@@ -212,7 +240,7 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
     derivation: 'workspace-public-key',
     predicates: [
       literal(T.dkgRevokedAt),
-      iri(T.dkgRevokedBy, { objectBinding: 'profile-root' }),
+      profileRootIri(T.dkgRevokedBy),
       literal(T.dkgEncryptionKeyRevocationProof),
     ],
   }),

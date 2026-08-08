@@ -21,8 +21,8 @@ import {
 import {
   flattenAgentProfileProducerPublicationArtifactsV1,
   type AgentProfileProducerArtifactV1,
+  type AgentProfileProducerInventoryDependenciesV1,
   type AgentProfileProducerPublicationArtifactsV1,
-  type CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-contract-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
@@ -38,17 +38,17 @@ export interface AgentProfileProductionInventoryV1 {
 }
 
 export async function prepareAgentProfileProductionInventoryV1(
-  options: CreateAgentProfileProducerOptionsV1,
+  dependencies: AgentProfileProducerInventoryDependenciesV1,
   preparation: AgentProfileProductionPreparationV1,
   signed: SignedAgentProfileProductionV1,
   signal: AbortSignal,
 ): Promise<AgentProfileProductionInventoryV1> {
   const row: SystemRecordInventoryRowV1 = {
     stableKeyHash: computeSystemRecordStableKeyHashV1(
-      options.networkId,
-      options.peerSigner.peerId,
+      dependencies.networkId,
+      dependencies.peerSigner.peerId,
     ),
-    peerId: options.peerSigner.peerId,
+    peerId: dependencies.peerSigner.peerId,
     authoritySequence: preparation.head.authoritySequence,
     version: preparation.head.version,
     headDigest: preparation.headDigest,
@@ -62,7 +62,7 @@ export async function prepareAgentProfileProductionInventoryV1(
         row,
       });
   const inventory = inventoryUpdate === null
-    ? buildSystemRecordInventoryTreeV1(options.networkId, [row])
+    ? buildSystemRecordInventoryTreeV1(dependencies.networkId, [row])
     : applyInventoryUpdate(preparation.snapshot.inventory!, inventoryUpdate);
   const inventoryWrites = inventoryUpdate?.writes.length
     ?? inventory.objects.size + 1;
@@ -71,24 +71,24 @@ export async function prepareAgentProfileProductionInventoryV1(
       (sum, object) => sum + object.canonicalBytes.byteLength,
       0,
     ) + canonicalizeSystemRecordRootDescriptorObjectV1(inventory.descriptor).byteLength;
-  const rootSignature = await options.peerSigner.sign(
+  const rootSignature = await dependencies.peerSigner.sign(
     buildSystemRecordProviderSignatureMessageV1(
       inventory.descriptor,
       inventory.descriptorDigest,
-      options.peerSigner.peerId,
+      dependencies.peerSigner.peerId,
     ),
   );
   signal.throwIfAborted();
   const rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1 = {
     object: inventory.descriptor,
     objectDigest: inventory.descriptorDigest,
-    providerPeerId: options.peerSigner.peerId,
+    providerPeerId: dependencies.peerSigner.peerId,
     signatureSuite: 'ed25519-v1',
     signature: Buffer.from(rootSignature).toString('base64url'),
   };
   if (!await verifySignedSystemRecordRootDescriptorEnvelopeV1(
     rootEnvelope,
-    options.peerSigner.publicKey,
+    dependencies.peerSigner.publicKey,
   )) {
     throw new Error('new profile inventory root signature verification failed');
   }
@@ -112,7 +112,7 @@ export async function prepareAgentProfileProductionInventoryV1(
           objectDigest: digest,
         } as const;
         const artifact = artifactsByKey.get(systemRecordArtifactKeyV1(reference))
-          ?? await options.store.resolveArtifact(reference);
+          ?? await dependencies.resolveArtifact(reference);
         return artifact === undefined
           || artifact === null
           ? undefined

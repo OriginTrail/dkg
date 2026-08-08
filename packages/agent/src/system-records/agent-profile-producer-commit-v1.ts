@@ -1,19 +1,19 @@
 import type {
+  AgentProfileProducerCommitDependenciesV1,
   AgentProfileProducerPublicationV1,
-  CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-contract-v1.js';
 import type { AgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
 
 export async function commitAgentProfileProductionV1(
-  options: CreateAgentProfileProducerOptionsV1,
+  dependencies: AgentProfileProducerCommitDependenciesV1,
   preparation: AgentProfileProductionPreparationV1,
   signed: SignedAgentProfileProductionV1,
   inventoryPlan: AgentProfileProductionInventoryV1,
   signal: AbortSignal,
 ): Promise<AgentProfileProducerPublicationV1> {
-  const commitLease = await options.store.prepareCommit({
+  const commitLease = await dependencies.prepareCommit({
     expectedHeadDigest: preparation.snapshot.currentHead?.objectDigest ?? null,
     expectedRootDescriptorDigest: preparation.snapshot.inventory?.descriptorDigest ?? null,
     publicationArtifacts: inventoryPlan.publicationArtifacts,
@@ -23,7 +23,7 @@ export async function commitAgentProfileProductionV1(
   let committed = false;
   try {
     signal.throwIfAborted();
-    await options.install({
+    await dependencies.install({
       head: preparation.head,
       envelope: signed.envelope,
       canonicalProjectionBytes: preparation.projectionBytes,

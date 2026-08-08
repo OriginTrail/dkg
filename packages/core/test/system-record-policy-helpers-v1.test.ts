@@ -84,6 +84,9 @@ const EXPECTED_IRI_OBJECT_PREDICATES_V1 = new Set([
   `${SKILL}pricing`,
   `${DKG}revokedBy`,
 ]);
+const EXPECTED_LINK_OBJECT_PREDICATES_V1 = new Set<string>(
+  Object.values(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1),
+);
 const EXPECTED_ALLOWED_TYPE_OBJECTS_V1 = {
   root: [`${DKG}Agent`, `${DKG}CoreNode`, `${DKG}EdgeNode`],
   capability: [`${ERC8004}Capability`],
@@ -189,8 +192,19 @@ describe('system-record V1 public policy helpers', () => {
         .toEqual(EXPECTED_ALLOWED_PROFILE_PREDICATES_V1[kind]);
       for (const predicate of subjectPolicy.predicates) {
         expect(Object.isFrozen(predicate), `${kind}: ${predicate.predicate}`).toBe(true);
-        expect(predicate.objectTermKind, `${kind}: ${predicate.predicate}`)
-          .toBe(EXPECTED_IRI_OBJECT_PREDICATES_V1.has(predicate.predicate) ? 'iri' : 'literal');
+        const expectedObjectPolicy = predicate.predicate === RDF_TYPE
+          ? 'allowed-iri'
+          : EXPECTED_LINK_OBJECT_PREDICATES_V1.has(predicate.predicate)
+            ? 'owned-subject-link'
+            : predicate.predicate === `${DKG}revokedBy`
+              ? 'profile-root-iri'
+              : predicate.predicate === `${DKG}publicEncryptionKey`
+                ? 'workspace-public-key'
+                : EXPECTED_IRI_OBJECT_PREDICATES_V1.has(predicate.predicate)
+                  ? 'iri'
+                  : 'literal';
+        expect(predicate.objectPolicy, `${kind}: ${predicate.predicate}`)
+          .toBe(expectedObjectPolicy);
         expect(agentProfilePredicatePolicyV1(kind, predicate.predicate)).toBe(predicate);
       }
     }
@@ -200,14 +214,20 @@ describe('system-record V1 public policy helpers', () => {
         kind as AgentProfileOwnedSubjectKindV1,
         RDF_TYPE,
       );
-      expect(typePolicy?.allowedObjects, kind).toEqual(objects);
-      expect(Object.isFrozen(typePolicy?.allowedObjects), kind).toBe(true);
+      expect(typePolicy?.objectPolicy, kind).toBe('allowed-iri');
+      if (typePolicy?.objectPolicy !== 'allowed-iri') throw new Error('expected type policy');
+      expect(typePolicy.allowedObjects, kind).toEqual(objects);
+      expect(Object.isFrozen(typePolicy.allowedObjects), kind).toBe(true);
     }
-    expect(agentProfilePredicatePolicyV1('root', `${ERC8004}capabilities`)?.linkTargetKind)
-      .toBe('capability');
-    expect(agentProfilePredicatePolicyV1('x25519', `${DKG}revokedBy`)?.objectBinding)
-      .toBe('profile-root');
-    expect(agentProfilePredicatePolicyV1('root', `${DKG}publicEncryptionKey`)?.capture)
+    const capabilityLink = agentProfilePredicatePolicyV1('root', `${ERC8004}capabilities`);
+    expect(capabilityLink?.objectPolicy).toBe('owned-subject-link');
+    if (capabilityLink?.objectPolicy !== 'owned-subject-link') {
+      throw new Error('expected capability link policy');
+    }
+    expect(capabilityLink.linkTargetKind).toBe('capability');
+    expect(agentProfilePredicatePolicyV1('x25519', `${DKG}revokedBy`)?.objectPolicy)
+      .toBe('profile-root-iri');
+    expect(agentProfilePredicatePolicyV1('root', `${DKG}publicEncryptionKey`)?.objectPolicy)
       .toBe('workspace-public-key');
     const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
     expect(deriveAgentProfileOwnedSubjectV1(root, 'capability', 2))
