@@ -5,45 +5,26 @@ import { fileURLToPath } from 'node:url';
 import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 
-type ParticipationMode = 'registered' | 'public-inner';
-
-interface DecoratorEvidence {
+interface DecoratorSource {
   readonly key: string;
   readonly location: string;
   readonly className: string;
   readonly innerParameter: string;
-  readonly registered: boolean;
-  readonly publicInner: boolean;
+  readonly directlyRegistered: boolean;
 }
 
 const STORAGE_SOURCE_ROOT = fileURLToPath(new URL('../src/', import.meta.url));
-
-const EXPECTED_STORAGE_DECORATORS: Readonly<Record<string, ParticipationMode>> = Object.freeze({
-  'changelog-store.ts#ChangelogStore': 'registered',
-  'graph-set-index-store.ts#GraphSetIndexStore': 'registered',
-  'shared-memory-literal-blob-store.ts#SharedMemoryLiteralBlobStore': 'registered',
-});
-
-function propertyNameText(name: ts.PropertyName | undefined): string | null {
-  if (name === undefined) return null;
-  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
-    return name.text;
-  }
-  return null;
-}
+const EXPECTED_STORAGE_DECORATORS = Object.freeze([
+  'changelog-store.ts#ChangelogStore',
+  'graph-set-index-store.ts#GraphSetIndexStore',
+  'shared-memory-literal-blob-store.ts#SharedMemoryLiteralBlobStore',
+]);
 
 function typeNamesTripleStore(type: ts.TypeNode | undefined, sourceFile: ts.SourceFile): boolean {
   return type !== undefined && /(?:^|\W)TripleStore(?:\W|$)/.test(type.getText(sourceFile));
 }
 
-function classImplementsTripleStore(node: ts.ClassDeclaration, sourceFile: ts.SourceFile): boolean {
-  return node.heritageClauses?.some(
-    (clause) => clause.token === ts.SyntaxKind.ImplementsKeyword
-      && clause.types.some((type) => typeNamesTripleStore(type, sourceFile)),
-  ) ?? false;
-}
-
-function constructorLinkCall(
+function directlyRegisters(
   constructor: ts.ConstructorDeclaration,
   innerParameter: string,
 ): boolean {
@@ -61,51 +42,7 @@ function constructorLinkCall(
   }) ?? false;
 }
 
-function constructorAssignsPublicInner(
-  node: ts.ClassDeclaration,
-  constructor: ts.ConstructorDeclaration,
-  innerParameter: string,
-): boolean {
-  const publicParameterProperty = constructor.parameters.some((parameter) =>
-    ts.isIdentifier(parameter.name)
-    && parameter.name.text === 'innerStore'
-    && innerParameter === 'innerStore'
-    && parameter.modifiers?.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.PublicKeyword
-        || modifier.kind === ts.SyntaxKind.ReadonlyKeyword,
-    ) === true
-    && !parameter.modifiers?.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword
-        || modifier.kind === ts.SyntaxKind.ProtectedKeyword,
-    ));
-  if (publicParameterProperty) return true;
-
-  const declaredPublicInner = node.members.some((member) => {
-    if (!ts.isPropertyDeclaration(member) || propertyNameText(member.name) !== 'innerStore') {
-      return false;
-    }
-    return !member.modifiers?.some(
-      (modifier) => modifier.kind === ts.SyntaxKind.PrivateKeyword
-        || modifier.kind === ts.SyntaxKind.ProtectedKeyword,
-    );
-  });
-  if (!declaredPublicInner) return false;
-
-  return constructor.body?.statements.some((statement) => {
-    if (!ts.isExpressionStatement(statement) || !ts.isBinaryExpression(statement.expression)) {
-      return false;
-    }
-    const assignment = statement.expression;
-    return assignment.operatorToken.kind === ts.SyntaxKind.EqualsToken
-      && ts.isPropertyAccessExpression(assignment.left)
-      && assignment.left.expression.kind === ts.SyntaxKind.ThisKeyword
-      && assignment.left.name.text === 'innerStore'
-      && ts.isIdentifier(assignment.right)
-      && assignment.right.text === innerParameter;
-  }) ?? false;
-}
-
-function discoverStorageDecorators(sourceText: string, fileName: string): DecoratorEvidence[] {
+function discoverDecorators(sourceText: string, fileName: string): DecoratorSource[] {
   const sourceFile = ts.createSourceFile(
     fileName,
     sourceText,
@@ -113,87 +50,73 @@ function discoverStorageDecorators(sourceText: string, fileName: string): Decora
     true,
     ts.ScriptKind.TS,
   );
-  const decorators: DecoratorEvidence[] = [];
-
+  const found: DecoratorSource[] = [];
   const visit = (node: ts.Node): void => {
     if (ts.isClassDeclaration(node) && node.name !== undefined
-      && classImplementsTripleStore(node, sourceFile)) {
+      && node.heritageClauses?.some(
+        (clause) => clause.token === ts.SyntaxKind.ImplementsKeyword
+          && clause.types.some((type) => typeNamesTripleStore(type, sourceFile)),
+      )) {
       const constructor = node.members.find(ts.isConstructorDeclaration);
       const inner = constructor?.parameters.find(
         (parameter) => ts.isIdentifier(parameter.name)
           && typeNamesTripleStore(parameter.type, sourceFile),
       );
       if (constructor !== undefined && inner !== undefined && ts.isIdentifier(inner.name)) {
-        const innerParameter = inner.name.text;
         const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-        decorators.push({
+        found.push({
           key: `${fileName}#${node.name.text}`,
           location: `${fileName}:${line}`,
           className: node.name.text,
-          innerParameter,
-          registered: constructorLinkCall(constructor, innerParameter),
-          publicInner: constructorAssignsPublicInner(node, constructor, innerParameter),
+          innerParameter: inner.name.text,
+          directlyRegistered: directlyRegisters(constructor, inner.name.text),
         });
       }
     }
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
-  return decorators;
-}
-
-function participationViolation(
-  evidence: DecoratorEvidence,
-  mode: ParticipationMode,
-): string | null {
-  if (mode === 'registered' && !evidence.registered) {
-    return `${evidence.location} ${evidence.className}: missing linkStoreChainV1(this, ${evidence.innerParameter})`;
-  }
-  if (mode === 'public-inner' && !evidence.publicInner) {
-    return `${evidence.location} ${evidence.className}: missing public innerStore assignment from ${evidence.innerParameter}`;
-  }
-  return null;
+  return found;
 }
 
 function listTypeScriptSources(directory: string): string[] {
-  const files: string[] = [];
-  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name);
-    if (entry.isDirectory()) {
-      files.push(...listTypeScriptSources(path));
-    } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')) {
-      files.push(path);
-    }
-  }
-  return files;
+    if (entry.isDirectory()) return listTypeScriptSources(path);
+    return entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.d.ts')
+      ? [path]
+      : [];
+  });
 }
 
-function normalizedRelativePath(root: string, path: string): string {
-  return relative(root, path).split(sep).join('/');
+function relativeSourcePath(path: string): string {
+  return relative(STORAGE_SOURCE_ROOT, path).split(sep).join('/');
+}
+
+function registrationViolation(decorator: DecoratorSource): string | null {
+  return decorator.directlyRegistered
+    ? null
+    : `${decorator.location} ${decorator.className}: missing linkStoreChainV1(this, ${decorator.innerParameter})`;
 }
 
 describe('first-party store-chain participation source contract', () => {
-  it('classifies every Storage decorator and verifies its traversal evidence', () => {
+  it('requires direct registration from every Storage-owned decorator', () => {
     const discovered = listTypeScriptSources(STORAGE_SOURCE_ROOT)
-      .flatMap((path) => discoverStorageDecorators(
+      .flatMap((path) => discoverDecorators(
         readFileSync(path, 'utf8'),
-        normalizedRelativePath(STORAGE_SOURCE_ROOT, path),
+        relativeSourcePath(path),
       ))
       .sort((left, right) => left.key.localeCompare(right.key));
 
-    expect(discovered.map(({ key }) => key)).toEqual(
-      Object.keys(EXPECTED_STORAGE_DECORATORS).sort(),
-    );
-    expect(discovered.flatMap((evidence) => {
-      const mode = EXPECTED_STORAGE_DECORATORS[evidence.key];
-      if (mode === undefined) return [`${evidence.location} ${evidence.className}: unclassified`];
-      const violation = participationViolation(evidence, mode);
+    expect(discovered.map(({ key }) => key)).toEqual(EXPECTED_STORAGE_DECORATORS);
+    expect(discovered.flatMap((decorator) => {
+      const violation = registrationViolation(decorator);
       return violation === null ? [] : [violation];
     })).toEqual([]);
   });
 
-  it('mechanically rejects a non-exported decorator that forgets participation', () => {
-    const [evidence] = discoverStorageDecorators(`
+  it('rejects a non-exported decorator whose registration is not executed', () => {
+    const [decorator] = discoverDecorators(`
       class ForgetfulDecoratorStore implements TripleStore {
         constructor(private readonly inner: TripleStore) {
           const neverCalled = () => linkStoreChainV1(this, inner);
@@ -202,37 +125,9 @@ describe('first-party store-chain participation source contract', () => {
       }
     `, 'fixture.ts');
 
-    expect(evidence).toBeDefined();
-    expect(participationViolation(evidence!, 'registered')).toBe(
+    expect(decorator).toBeDefined();
+    expect(registrationViolation(decorator!)).toBe(
       'fixture.ts:2 ForgetfulDecoratorStore: missing linkStoreChainV1(this, inner)',
     );
   });
-
-  it('accepts both supported first-party participation modes', () => {
-    const registered = discoverStorageDecorators(`
-      class RegisteredStore implements TripleStore {
-        constructor(private readonly inner: TripleStore) {
-          linkStoreChainV1(this, inner);
-        }
-      }
-    `, 'registered.ts')[0]!;
-    const publicInner = discoverStorageDecorators(`
-      class PublicInnerStore implements TripleStore {
-        readonly innerStore: TripleStore;
-        constructor(inner: TripleStore) {
-          this.innerStore = inner;
-        }
-      }
-    `, 'public-inner.ts')[0]!;
-    const publicParameter = discoverStorageDecorators(`
-      class PublicParameterStore implements TripleStore {
-        constructor(readonly innerStore: TripleStore) {}
-      }
-    `, 'public-parameter.ts')[0]!;
-
-    expect(participationViolation(registered, 'registered')).toBeNull();
-    expect(participationViolation(publicInner, 'public-inner')).toBeNull();
-    expect(participationViolation(publicParameter, 'public-inner')).toBeNull();
-  });
-
 });
