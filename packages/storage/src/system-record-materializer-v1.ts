@@ -389,11 +389,20 @@ export function __resetSystemRecordControllerRegistrationForTests(): void {
  * control barrier whose failure would make `store.close()` reject. The adapter
  * never owned the child, so it makes no claim about it.
  */
-export function releaseSystemRecordLaneControllerV1(
+export async function releaseSystemRecordLaneControllerV1(
   controller: SystemRecordLaneControllerV1,
-): void {
-  CONTROLLER_SESSIONS.get(controller)?.detach();
+  quiesceOwner: () => Promise<void> = () => Promise.resolve(),
+): Promise<void> {
+  const session = CONTROLLER_SESSIONS.get(controller);
+  const recoverySettlement = session?.detach() ?? Promise.resolve();
+  // Detach is synchronous up to its first return: new lane work is refused
+  // before owner quiescence starts. The global slot remains claimed until BOTH
+  // the store is drained and any already-owned uncertain-write recovery has
+  // physically settled. Promise.all also observes the recovery if quiescence
+  // fails, while deliberately retaining the registration on either failure.
+  await Promise.all([quiesceOwner(), recoverySettlement]);
   if (registeredController === controller) registeredController = null;
+  CONTROLLER_SESSIONS.delete(controller);
 }
 
 export function createSystemRecordLaneControllerV1(
@@ -1637,15 +1646,28 @@ class SystemRecordLaneSession {
    * the committed state is `detached` and not `shutdown`. Only `shutdown`
    * claims the child was proven dead, and a detach cannot make that claim.
    *
-   * It does NOT join an in-flight transition. Shutdown must, because it is about
-   * to touch the child; detach touches nothing, and awaiting a stalled enable
-   * inside `store.close()` would hang the close on a stalled supervisor.
+   * It does not join an ordinary open. It does join a transition that already
+   * owns uncertain-write recovery, because releasing the process-global writer
+   * slot before that recovery physically settles would admit a second writer
+   * over the same managed child.
    */
-  detach(): void {
+  detach(): Promise<void> {
     // A completed or in-flight shutdown made the STRONGER claim; overwriting it
     // with `detached` would downgrade the record of what was established.
     if (this.readState() !== 'shutdown') this.current = 'detached';
     this.descriptor = null;
+    const transition = this.transition;
+    const recovery = this.recoveryOf(transition);
+    if (transition === null || recovery === null || recovery.settled) {
+      return Promise.resolve();
+    }
+    return this.transitionSettlement(transition).then(() => {
+      if (!recovery.settled) {
+        throw new Error(
+          'system-record controller detach could not prove uncertain-write recovery settled',
+        );
+      }
+    });
   }
 
   /**
