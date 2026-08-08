@@ -7,9 +7,9 @@ import type { AgentProfileProductionInventoryV1 } from './agent-profile-producer
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
 
-export interface AgentProfileProducerCommitDependenciesV1 {
+interface AgentProfileProducerCommitContextV1 {
   readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'prepareCommit'>;
-  readonly producer: Pick<CreateAgentProfileProducerOptionsV1, 'install'>;
+  readonly install: CreateAgentProfileProducerOptionsV1['install'];
 }
 
 type AgentProfileProducerCommitPreparationV1 = Pick<
@@ -28,7 +28,7 @@ type AgentProfileProducerCommitSigningV1 = Pick<
 >;
 
 export async function commitAgentProfileProductionV1(
-  dependencies: AgentProfileProducerCommitDependenciesV1,
+  dependencies: AgentProfileProducerCommitContextV1,
   preparation: AgentProfileProducerCommitPreparationV1,
   signed: AgentProfileProducerCommitSigningV1,
   inventoryPlan: AgentProfileProductionInventoryV1,
@@ -44,7 +44,7 @@ export async function commitAgentProfileProductionV1(
   let committed = false;
   try {
     signal.throwIfAborted();
-    await dependencies.producer.install({
+    await dependencies.install({
       head: preparation.head,
       envelope: signed.envelope,
       canonicalProjectionBytes: preparation.projectionBytes,

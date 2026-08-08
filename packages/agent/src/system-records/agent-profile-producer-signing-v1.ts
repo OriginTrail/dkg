@@ -9,7 +9,7 @@ import type { EvmPersonalMessageSignerV1 } from '../evm-message-signer-v1.js';
 import type { SystemRecordPeerSignerV1 } from './agent-profile-producer-api-v1.js';
 import type { AgentProfileProductionPreparationV1 } from './agent-profile-producer-preparation-v1.js';
 
-export interface AgentProfileProducerSigningDependenciesV1 {
+interface AgentProfileProducerSigningContextV1 {
   readonly peerSigner: SystemRecordPeerSignerV1;
   readonly evmSigner: EvmPersonalMessageSignerV1;
 }
@@ -25,7 +25,7 @@ type AgentProfileProducerSigningInputV1 = Pick<
 >;
 
 export async function signAgentProfileProductionV1(
-  dependencies: AgentProfileProducerSigningDependenciesV1,
+  dependencies: AgentProfileProducerSigningContextV1,
   preparation: AgentProfileProducerSigningInputV1,
   signal: AbortSignal,
 ): Promise<SignedAgentProfileProductionV1> {

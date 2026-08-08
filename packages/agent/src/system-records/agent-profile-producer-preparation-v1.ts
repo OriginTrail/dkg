@@ -43,13 +43,13 @@ import type {
 } from './agent-profile-producer-api-v1.js';
 
 const UTF8 = new TextEncoder();
-export interface AgentProfileProducerPreparationDependenciesV1 {
+interface AgentProfileProducerPreparationContextV1 {
   readonly networkId: NetworkIdV1;
   readonly publicationDeployment: Readonly<CatalogSealDeploymentProfileV1>;
   readonly peerId: string;
   readonly peerPublicKey: SystemRecordPeerSignerV1['publicKey'];
   readonly evmIssuer: string;
-  readonly clock: Pick<CreateAgentProfileProducerOptionsV1, 'nowMs'>;
+  readonly nowMs: CreateAgentProfileProducerOptionsV1['nowMs'];
   readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'snapshot'>;
 }
 
@@ -60,7 +60,7 @@ export interface PreparedProfileProjectionSnapshotV1 {
 }
 
 export interface AgentProfileProductionPreparationV1 {
-  readonly snapshot: ReturnType<AgentProfileProducerPreparationDependenciesV1['store']['snapshot']>;
+  readonly snapshot: ReturnType<AgentProfileProducerPreparationContextV1['store']['snapshot']>;
   readonly verifierNowMs: number;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly projectionBytes: Uint8Array;
@@ -74,7 +74,7 @@ export interface AgentProfileProductionPreparationV1 {
 }
 
 export async function prepareAgentProfileProductionV1(
-  dependencies: AgentProfileProducerPreparationDependenciesV1,
+  dependencies: AgentProfileProducerPreparationContextV1,
   input: PreparedProfileProjectionSnapshotV1,
   inputPublication: AgentProfilePublicationBindingV1,
 ): Promise<AgentProfileProductionPreparationV1> {
@@ -87,7 +87,7 @@ export async function prepareAgentProfileProductionV1(
     'assertionFinalizedAt',
   );
   const assertionFinalizedAtMs = Date.parse(publication.seal.assertionFinalizedAt);
-  const verifierNowMs = producerNowMs(dependencies.clock.nowMs?.() ?? Date.now());
+  const verifierNowMs = producerNowMs(dependencies.nowMs?.() ?? Date.now());
   if (Date.parse(issuedAt) > verifierNowMs + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS) {
     throw new Error('agent-profile issuedAt exceeds the future clock-skew bound');
   }
@@ -213,7 +213,7 @@ export async function prepareAgentProfileProductionV1(
 
 export function snapshotAgentProfileProductionInputV1(
   dependencies: Pick<
-    AgentProfileProducerPreparationDependenciesV1,
+    AgentProfileProducerPreparationContextV1,
     'peerId' | 'peerPublicKey' | 'evmIssuer'
   >,
   prepared: PreparedAgentProfileV1,

@@ -1,10 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import type { PreparedAgentProfileV1 } from '../profile.js';
-import {
-  commitAgentProfileProductionV1,
-  type AgentProfileProducerCommitDependenciesV1,
-} from './agent-profile-producer-commit-v1.js';
+import { commitAgentProfileProductionV1 } from './agent-profile-producer-commit-v1.js';
 import type {
   AgentProfileProducerLeaseV1,
   AgentProfileProducerPublicationV1,
@@ -12,20 +9,13 @@ import type {
   AgentProfilePublicationBindingV1,
   CreateAgentProfileProducerOptionsV1,
 } from './agent-profile-producer-api-v1.js';
-import {
-  prepareAgentProfileProductionInventoryV1,
-  type AgentProfileProducerInventoryDependenciesV1,
-} from './agent-profile-producer-inventory-v1.js';
+import { prepareAgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
 import {
   prepareAgentProfileProductionV1,
   snapshotAgentProfileProductionInputV1,
-  type AgentProfileProducerPreparationDependenciesV1,
   type PreparedProfileProjectionSnapshotV1,
 } from './agent-profile-producer-preparation-v1.js';
-import {
-  signAgentProfileProductionV1,
-  type AgentProfileProducerSigningDependenciesV1,
-} from './agent-profile-producer-signing-v1.js';
+import { signAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
 
 export * from './agent-profile-producer-api-v1.js';
 export {
@@ -39,27 +29,17 @@ export {
 export function createAgentProfileProducerV1(
   options: CreateAgentProfileProducerOptionsV1,
 ): AgentProfileProducerV1 {
-  const preparationDependencies: AgentProfileProducerPreparationDependenciesV1 = Object.freeze({
+  const context = Object.freeze({
     networkId: options.networkId,
     publicationDeployment: options.publicationDeployment,
     peerId: options.peerSigner.peerId,
     peerPublicKey: options.peerSigner.publicKey,
     evmIssuer: options.evmSigner.address,
-    clock: options,
+    nowMs: options.nowMs,
     store: options.store,
-  });
-  const signingDependencies: AgentProfileProducerSigningDependenciesV1 = Object.freeze({
     peerSigner: options.peerSigner,
     evmSigner: options.evmSigner,
-  });
-  const inventoryDependencies: AgentProfileProducerInventoryDependenciesV1 = Object.freeze({
-    networkId: options.networkId,
-    peerSigner: options.peerSigner,
-    store: options.store,
-  });
-  const commitDependencies: AgentProfileProducerCommitDependenciesV1 = Object.freeze({
-    store: options.store,
-    producer: options,
+    install: options.install,
   });
   let active = false;
   const completePrepared = async (
@@ -69,23 +49,23 @@ export function createAgentProfileProducerV1(
   ): Promise<AgentProfileProducerPublicationV1> => {
     signal.throwIfAborted();
     const preparation = await prepareAgentProfileProductionV1(
-      preparationDependencies,
+      context,
       input,
       publication,
     );
     const signed = await signAgentProfileProductionV1(
-      signingDependencies,
+      context,
       preparation,
       signal,
     );
     const inventoryPlan = await prepareAgentProfileProductionInventoryV1(
-      inventoryDependencies,
+      context,
       preparation,
       signed,
       signal,
     );
     return commitAgentProfileProductionV1(
-      commitDependencies,
+      context,
       preparation,
       signed,
       inventoryPlan,
@@ -97,7 +77,7 @@ export function createAgentProfileProducerV1(
     async prepare(prepared: PreparedAgentProfileV1): Promise<AgentProfileProducerLeaseV1> {
       if (active) throw new Error('agent-profile producer is busy');
       const projectionSnapshot = snapshotAgentProfileProductionInputV1(
-        preparationDependencies,
+        context,
         prepared,
       );
       active = true;

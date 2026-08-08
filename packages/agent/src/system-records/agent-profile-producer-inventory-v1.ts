@@ -30,7 +30,7 @@ import type { SignedAgentProfileProductionV1 } from './agent-profile-producer-si
 import { flattenAgentProfileProducerPublicationArtifactsV1 } from './agent-profile-producer-artifacts-v1-internal.js';
 import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
 
-export interface AgentProfileProducerInventoryDependenciesV1 {
+interface AgentProfileProducerInventoryContextV1 {
   readonly networkId: NetworkIdV1;
   readonly peerSigner: SystemRecordPeerSignerV1;
   readonly store: Pick<AgentProfileProducerPublicationStoreV1, 'resolveArtifact'>;
@@ -46,7 +46,7 @@ export interface AgentProfileProductionInventoryV1 {
 }
 
 export async function prepareAgentProfileProductionInventoryV1(
-  dependencies: AgentProfileProducerInventoryDependenciesV1,
+  dependencies: AgentProfileProducerInventoryContextV1,
   preparation: AgentProfileProductionPreparationV1,
   signed: SignedAgentProfileProductionV1,
   signal: AbortSignal,

@@ -1,16 +1,13 @@
 import type { PreparedAgentProfileV1 } from '../src/profile.js';
 import {
-  type AgentProfileProducerPreparationDependenciesV1,
   type PreparedProfileProjectionSnapshotV1,
   prepareAgentProfileProductionV1,
 } from '../src/system-records/agent-profile-producer-preparation-v1.js';
 import type {
   AgentProfilePublicationBindingV1,
 } from '../src/system-records/agent-profile-producer-api-v1.js';
-// @ts-expect-error phase dependency DTOs are not exported by the producer entrypoint.
-import type { AgentProfileProducerPreparationDependenciesV1 as LeakedPreparationDeps } from '../src/system-records/agent-profile-producer-v1.js';
 
-declare const dependencies: AgentProfileProducerPreparationDependenciesV1;
+declare const dependencies: Parameters<typeof prepareAgentProfileProductionV1>[0];
 declare const prepared: PreparedAgentProfileV1;
 declare const validated: PreparedProfileProjectionSnapshotV1;
 declare const publication: AgentProfilePublicationBindingV1;
@@ -19,9 +16,6 @@ void prepareAgentProfileProductionV1(dependencies, validated, publication);
 
 // @ts-expect-error preparation accepts a snapshotted projection plan, not a raw profile.
 void prepareAgentProfileProductionV1(dependencies, prepared, publication);
-
-declare const leaked: LeakedPreparationDeps;
-void leaked;
 
 // @ts-expect-error package exports block the preparation implementation phase.
 type PublishedPreparationPhase = typeof import('@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js');
