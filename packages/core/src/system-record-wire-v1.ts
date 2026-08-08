@@ -9,10 +9,12 @@ import {
   computeAgentProfileForkResolutionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   parseCanonicalAgentProfileConflictEvidenceV1,
+} from './system-record-agent-profile-codecs-v1-internal.js';
+import {
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
-} from './system-record-objects-v1.js';
+} from './system-record-signatures-v1-internal.js';
 import {
   copyBoundedSystemRecordBytesV1,
   digestSystemRecordBytesV1,
@@ -23,7 +25,7 @@ import {
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   parseCanonicalSystemRecordInventoryInternalObjectV1,
   parseCanonicalSystemRecordInventoryLeafObjectV1,
-} from './system-record-inventory-v1.js';
+} from './system-record-inventory-codecs-v1-internal.js';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_KIND_V1,

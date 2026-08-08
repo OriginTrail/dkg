@@ -6,14 +6,14 @@ import {
 import {
   assertAgentRootV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
-  type AgentProfileAppliedTransitionV1,
-} from './system-record-objects-v1.js';
+} from './system-record-agent-profile-codecs-v1-internal.js';
+import type { AgentProfileAppliedTransitionV1 } from './system-record-authority-types-v1-internal.js';
 import { KA_BUNDLE_PROJECTION_DIGEST_DOMAIN_V1 } from './ka-bundle-v1.js';
 import {
   assertCanonicalSystemRecordPeerIdV1,
   digestSystemRecordBytesV1,
 } from './system-record-codec-primitives-v1.js';
-import { computeSystemRecordStableKeyHashV1 } from './system-record-inventory-v1.js';
+import { computeSystemRecordStableKeyHashV1 } from './system-record-inventory-codecs-v1-internal.js';
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX,
