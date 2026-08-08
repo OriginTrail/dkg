@@ -10,6 +10,7 @@ import {
   ManagedOxigraphBackendUnownedError,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
+import { StoreChainCycleError } from '../src/store-chain-capability.js';
 import type { TripleStore } from '../src/triple-store.js';
 
 /**
@@ -76,9 +77,11 @@ describe('managed read gate resolves through any wrapper chain', () => {
     expect(asManagedReadGateV1(bare)).toBeNull();
   });
 
-  it('resolves through every storage decorator via public innerStore', () => {
-    // All four wrappers expose a public `readonly innerStore`; traversal no
-    // longer reaches any TypeScript-private field.
+  it('resolves through every storage decorator', () => {
+    // Three different opt-in shapes in one chain: `ChangelogStore` and
+    // `GraphSetIndexStore` expose the symbol accessor (traversable without
+    // publishing their wrapped store), `SharedMemoryLiteralBlobStore` has a
+    // pre-existing public `innerStore`.
     const adapter = managedAdapter();
     const chain = new ChangelogStore(
       new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS)),
@@ -137,10 +140,26 @@ describe('managed read gate resolves through any wrapper chain', () => {
     expect(asGraphWriteGenSource(chain)).toBe(adapter);
   });
 
-  it('terminates on a cyclic chain instead of hanging', () => {
+  it('THROWS on a cyclic chain rather than reporting absence', () => {
+    // A cycle is a broken object graph, not "this store has no gate". Reporting
+    // it as `null` would read as an unleased store — fail-OPEN, the exact
+    // failure this whole change exists to prevent. Termination is by object
+    // identity, so there is no depth cap to silently convert a legitimately
+    // deep chain into a false absence either.
     const cyclic: { innerStore?: unknown } = {};
     cyclic.innerStore = cyclic;
-    expect(asManagedReadGateV1(cyclic)).toBeNull();
+
+    expect(() => asManagedReadGateV1(cyclic)).toThrow(StoreChainCycleError);
+  });
+
+  it('resolves through a chain far deeper than any previous depth cap', () => {
+    // The old implementation capped at 8 and returned `null` beyond it. Twenty
+    // transparent forwarders must still resolve.
+    const adapter = managedAdapter();
+    let chain: TripleStore = adapter;
+    for (let i = 0; i < 20; i++) chain = opaqueForwarder(chain);
+
+    expect(asManagedReadGateV1(chain)).toBe(adapter);
   });
 
   it('refuses a WARM read through an opaque forwarder — the end-to-end property', async () => {

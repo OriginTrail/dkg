@@ -163,6 +163,8 @@ jobs:
             test/system-record-controller-disposal-v1.test.ts \
             test/system-record-capability-probe-errors-v1.test.ts \
             test/graph-set-index-store.test.ts \
+            test/changelog-store.test.ts \
+            test/graph-write-gen.test.ts \
             test/system-record-decorator-apply-outcomes-v1.test.ts \
             test/store-priority-scheduler.test.ts \
             test/store-scheduler-system-record-admission.test.ts \

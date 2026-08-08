@@ -16,7 +16,10 @@ import {
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
-import { resolveStoreChainCapabilityV1 } from './store-chain-capability.js';
+import {
+  STORE_CHAIN_INNER,
+  resolveStoreChainCapabilityV1,
+} from './store-chain-capability.js';
 import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 
 /**
@@ -206,13 +209,17 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   }
 
   private readonly inner: TripleStore;
+
   /**
-   * Public alias of {@link inner}, the decorator-chain convention.
+   * Lets capability discovery pass through WITHOUT publishing the wrapped store.
    *
-   * Capability resolution walks `innerStore`; exposing it means that walk no
-   * longer has to reach a TypeScript-private field to traverse this class.
+   * A public `innerStore` here would be an escape hatch: `store.innerStore
+   * .insert(...)` bypasses the change-marker recording this class exists to
+   * enforce, which is the one invariant that makes the log complete.
    */
-  readonly innerStore: TripleStore;
+  get [STORE_CHAIN_INNER](): TripleStore {
+    return this.inner;
+  }
   private readonly enabled: boolean;
   private readonly reserved: ReadonlySet<string>;
   private readonly onAppend?: (record: ChangeRecord) => void;
@@ -237,7 +244,6 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   constructor(inner: TripleStore, options: ChangelogStoreOptions = {}) {
     this.inner = inner;
-    this.innerStore = inner;
     this.enabled = options.enabled !== false;
     const reserved = new Set<string>([CHANGELOG_GRAPH]);
     for (const g of options.reservedGraphs ?? []) reserved.add(g);

@@ -10,6 +10,7 @@ import type {
   UpdateOptions,
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
+import { STORE_CHAIN_INNER } from './store-chain-capability.js';
 import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
@@ -302,14 +303,18 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   private readonly inner: TripleStore;
+
   /**
-   * Public alias of {@link inner}, the decorator-chain convention.
+   * Lets capability discovery pass through WITHOUT publishing the wrapped store.
    *
-   * Capability resolution (`asChangelogReader`, `asGraphWriteGenSource`,
-   * `asManagedReadGateV1`) walks `innerStore`. Exposing it here means that walk
-   * no longer has to reach a TypeScript-private field to traverse this class.
+   * A public `innerStore` here would be an escape hatch: `store.innerStore
+   * .insert(...)` bypasses the index maintenance this class exists to enforce.
+   * The symbol keeps traversal working while keeping that bypass off the
+   * observable API.
    */
-  readonly innerStore: TripleStore;
+  get [STORE_CHAIN_INNER](): TripleStore {
+    return this.inner;
+  }
   private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
   /** The inner controller the memo wraps, so a replacement is not masked. */
   private systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
@@ -348,7 +353,6 @@ export class GraphSetIndexStore implements TripleStore {
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
-    this.innerStore = inner;
     this.managedReadGate = asManagedReadGateV1(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
