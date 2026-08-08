@@ -248,11 +248,6 @@ const SUBJECT_POLICY_BY_KIND = Object.freeze({
 
 const SUBJECT_POLICIES = Object.freeze(Object.values(SUBJECT_POLICY_BY_KIND));
 
-export const AGENT_PROFILE_SCHEMA_V1 = Object.freeze({
-  terms: AGENT_PROFILE_SCHEMA_TERMS_V1,
-  subjectPolicies: SUBJECT_POLICIES,
-});
-
 const ROOT_PATTERN = /^did:dkg:agent:(0x[0-9a-f]{40})$/;
 const PREDICATE_POLICY_BY_KIND = new Map(
   SUBJECT_POLICIES.map((policy) => [

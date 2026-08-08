@@ -2,15 +2,17 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AGENT_PROFILE_LINK_PREDICATES_V1,
-  AGENT_PROFILE_SCHEMA_V1,
-  agentProfilePredicatePolicyV1,
-  agentProfileSubjectPolicyV1,
+  assertAgentProfileProjectionSchemaV1,
   deriveAgentProfileOwnedSubjectV1,
   evaluateAuthorityTransitionConflictV1,
   isAllowedAgentProfilePredicateV1,
   type AgentProfileAuthorityTransitionV1,
   type AgentProfileOwnedSubjectKindV1,
 } from '../src/system-record-v1.js';
+import {
+  agentProfilePredicatePolicyV1,
+  agentProfileSubjectPolicyV1,
+} from '../src/agent-profile-schema-model-v1.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
@@ -176,13 +178,7 @@ describe('system-record V1 public policy helpers', () => {
       .toEqual(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1);
   });
 
-  it('exposes one immutable descriptor for subject, predicate, term, type, and link policy', () => {
-    expect(Object.isFrozen(AGENT_PROFILE_SCHEMA_V1)).toBe(true);
-    expect(Object.isFrozen(AGENT_PROFILE_SCHEMA_V1.terms)).toBe(true);
-    expect(Object.isFrozen(AGENT_PROFILE_SCHEMA_V1.subjectPolicies)).toBe(true);
-    expect(AGENT_PROFILE_SCHEMA_V1.subjectPolicies.map(({ kind }) => kind))
-      .toEqual(PROFILE_SUBJECT_KINDS_V1);
-
+  it('keeps one immutable internal policy for subject, predicate, term, type, and link rules', () => {
     for (const kind of PROFILE_SUBJECT_KINDS_V1) {
       const subjectPolicy = agentProfileSubjectPolicyV1(kind);
       expect(Object.isFrozen(subjectPolicy), kind).toBe(true);
@@ -241,5 +237,35 @@ describe('system-record V1 public policy helpers', () => {
     ) => string;
     expect(() => uncheckedDerive(root, 'offering', 0)).toThrow(/positive/);
     expect(() => uncheckedDerive(root, 'registration', 1)).toThrow(/ordinal/);
+  });
+
+  it('rejects literal objects for generic IRI predicates', () => {
+    const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
+    const offering = deriveAgentProfileOwnedSubjectV1(root, 'offering', 1);
+    expect(() => assertAgentProfileProjectionSchemaV1(
+      root,
+      [root, offering],
+      [
+        { subject: root, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: '' },
+        {
+          subject: root,
+          predicate: `${SKILL}offersSkill`,
+          object: offering,
+          graph: '',
+        },
+        {
+          subject: offering,
+          predicate: RDF_TYPE,
+          object: `${SKILL}SkillOffering`,
+          graph: '',
+        },
+        {
+          subject: offering,
+          predicate: `${SKILL}skill`,
+          object: '"ImageAnalysis"',
+          graph: '',
+        },
+      ],
+    )).toThrow(/invalid object term kind/);
   });
 });

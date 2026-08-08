@@ -118,9 +118,6 @@ export type { SystemRecordObjectErrorCodeV1, SystemRecordPeerPublicKeyV1 };
 export {
   AGENT_PROFILE_LINK_PREDICATES_V1,
   AGENT_PROFILE_SCHEMA_TERMS_V1,
-  AGENT_PROFILE_SCHEMA_V1,
-  agentProfilePredicatePolicyV1,
-  agentProfileSubjectPolicyV1,
   classifyAgentProfileOwnedSubjectV1,
   deriveAgentProfileOwnedSubjectV1,
   isAllowedAgentProfilePredicateV1,
@@ -130,9 +127,6 @@ export type {
   AgentProfileIndexedSubjectKindV1,
   AgentProfileLinkedSubjectKindV1,
   AgentProfileOwnedSubjectKindV1,
-  AgentProfilePredicatePolicyV1,
-  AgentProfileSubjectPolicyV1,
-  AgentProfileSubjectShapeV1,
 } from './agent-profile-schema-model-v1.js';
 
 export interface AgentProfileHeadCommonV1 {

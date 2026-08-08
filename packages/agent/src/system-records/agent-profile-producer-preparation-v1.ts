@@ -43,6 +43,12 @@ import type {
 
 const UTF8 = new TextEncoder();
 
+export interface ValidatedAgentProfileProductionInputV1 {
+  readonly preparedSnapshot: PreparedAgentProfileV1;
+  readonly projectionQuads: readonly Readonly<Quad>[];
+  readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+}
+
 export interface AgentProfileProductionPreparationV1 {
   readonly snapshot: ReturnType<AgentProfileProducerPreparationDependenciesV1['snapshot']>;
   readonly verifierNowMs: number;
@@ -59,10 +65,10 @@ export interface AgentProfileProductionPreparationV1 {
 
 export async function prepareAgentProfileProductionV1(
   dependencies: AgentProfileProducerPreparationDependenciesV1,
-  prepared: PreparedAgentProfileV1,
-  projectionQuads: readonly Readonly<Quad>[],
+  input: ValidatedAgentProfileProductionInputV1,
   inputPublication: AgentProfilePublicationBindingV1,
 ): Promise<AgentProfileProductionPreparationV1> {
+  const { preparedSnapshot: prepared, projectionQuads, ownedSubjectTable } = input;
   const publication = snapshotConfirmedPublicationBindingV1(inputPublication);
   const issuedAt = normalizePublicationTimestampV1(publication.issuedAt, 'issuedAt');
   const validUntil = normalizePublicationTimestampV1(publication.validUntil, 'validUntil');
@@ -118,7 +124,6 @@ export async function prepareAgentProfileProductionV1(
     evmIssuer,
   );
   assertRecoverableGraphScopedAuthorAttestationV1(publication.seal);
-  const ownedSubjectTable = ownedSubjects(prepared.rootEntity, projectionQuads);
   const ownedSubjectTableBytes = canonicalizeOwnedSubjectTableObjectV1(
     prepared.rootEntity,
     ownedSubjectTable,
@@ -196,29 +201,43 @@ export async function prepareAgentProfileProductionV1(
   });
 }
 
-export function validateAgentProfileProjectionV1(
+export function validateAgentProfileProductionInputV1(
+  dependencies: Pick<
+    AgentProfileProducerPreparationDependenciesV1,
+    'peerId' | 'peerPublicKey' | 'evmIssuer'
+  >,
   prepared: PreparedAgentProfileV1,
-): readonly Readonly<Quad>[] {
-  const projected = prepared.projectionQuads.map((quad) => Object.freeze({ ...quad }));
+): ValidatedAgentProfileProductionInputV1 {
+  const preparedSnapshot = snapshotPreparedProfileV1(prepared);
+  const projected = preparedSnapshot.projectionQuads
+    .map((quad) => Object.freeze({ ...quad }));
   projected.sort(compareQuads);
   for (let index = 1; index < projected.length; index += 1) {
     if (compareQuads(projected[index - 1]!, projected[index]!) === 0) {
       throw new Error('profile projection must be canonical and duplicate-free');
     }
   }
+  let ownedSubjectTable: OwnedSubjectTableObjectV1;
   try {
-    assertAgentProfileProjectionSchemaV1(
-      prepared.rootEntity,
-      ownedSubjects(prepared.rootEntity, projected),
-      projected,
-    );
+    ownedSubjectTable = ownedSubjects(preparedSnapshot.rootEntity, projected);
+    assertAgentProfileProjectionSchemaV1(preparedSnapshot.rootEntity, ownedSubjectTable, projected);
   } catch (cause) {
     throw new Error('profile projection is outside schema V1', { cause });
   }
-  return Object.freeze(projected);
+  assertAdvertisedAgentProfileIdentityV1(
+    preparedSnapshot.rootEntity,
+    projected,
+    { peerId: dependencies.peerId, publicKey: dependencies.peerPublicKey },
+    dependencies.evmIssuer,
+  );
+  return Object.freeze({
+    preparedSnapshot,
+    projectionQuads: Object.freeze(projected),
+    ownedSubjectTable,
+  });
 }
 
-export function snapshotPreparedProfileV1(
+function snapshotPreparedProfileV1(
   prepared: PreparedAgentProfileV1,
 ): PreparedAgentProfileV1 {
   if (!Array.isArray(prepared.publicationQuads)
@@ -239,10 +258,10 @@ export function snapshotPreparedProfileV1(
   });
 }
 
-export function assertAdvertisedAgentProfileIdentityV1(
+function assertAdvertisedAgentProfileIdentityV1(
   rootSubject: string,
   quads: readonly Readonly<Quad>[],
-  peerSigner: SystemRecordPeerSignerV1,
+  peerSigner: Pick<SystemRecordPeerSignerV1, 'peerId' | 'publicKey'>,
   evmAddress: string,
 ): void {
   assertCanonicalEvmAddress(evmAddress, 'profile EVM issuer');

@@ -1,7 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import type { Quad } from '@origintrail-official/dkg-storage';
-
 import type { PreparedAgentProfileV1 } from '../profile.js';
 import { commitAgentProfileProductionV1 } from './agent-profile-producer-commit-v1.js';
 import type {
@@ -17,10 +15,9 @@ import type {
 } from './agent-profile-producer-contract-v1.js';
 import { prepareAgentProfileProductionInventoryV1 } from './agent-profile-producer-inventory-v1.js';
 import {
-  assertAdvertisedAgentProfileIdentityV1,
   prepareAgentProfileProductionV1,
-  snapshotPreparedProfileV1,
-  validateAgentProfileProjectionV1,
+  validateAgentProfileProductionInputV1,
+  type ValidatedAgentProfileProductionInputV1,
 } from './agent-profile-producer-preparation-v1.js';
 import { signAgentProfileProductionV1 } from './agent-profile-producer-signing-v1.js';
 
@@ -63,16 +60,14 @@ export function createAgentProfileProducerV1(
   });
   let active = false;
   const completePrepared = async (
-    prepared: PreparedAgentProfileV1,
-    projectionQuads: readonly Readonly<Quad>[],
+    input: ValidatedAgentProfileProductionInputV1,
     publication: AgentProfilePublicationBindingV1,
     signal: AbortSignal,
   ): Promise<AgentProfileProducerPublicationV1> => {
     signal.throwIfAborted();
     const preparation = await prepareAgentProfileProductionV1(
       preparationDependencies,
-      prepared,
-      projectionQuads,
+      input,
       publication,
     );
     const signed = await signAgentProfileProductionV1(
@@ -98,18 +93,14 @@ export function createAgentProfileProducerV1(
   return Object.freeze({
     async prepare(prepared: PreparedAgentProfileV1): Promise<AgentProfileProducerLeaseV1> {
       if (active) throw new Error('agent-profile producer is busy');
-      const preparedSnapshot = snapshotPreparedProfileV1(prepared);
-      const projectionQuads = validateAgentProfileProjectionV1(preparedSnapshot);
-      assertAdvertisedAgentProfileIdentityV1(
-        preparedSnapshot.rootEntity,
-        projectionQuads,
-        options.peerSigner,
-        options.evmSigner.address,
+      const validatedInput = validateAgentProfileProductionInputV1(
+        preparationDependencies,
+        prepared,
       );
       active = true;
       const controller = new AbortController();
       try {
-        await options.fence(preparedSnapshot, controller.signal);
+        await options.fence(validatedInput.preparedSnapshot, controller.signal);
       } catch (error) {
         active = false;
         throw error;
@@ -123,8 +114,7 @@ export function createAgentProfileProducerV1(
           state = 'completing';
           try {
             return await completePrepared(
-              preparedSnapshot,
-              projectionQuads,
+              validatedInput,
               publication,
               controller.signal,
             );
