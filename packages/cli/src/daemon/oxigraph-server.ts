@@ -1138,17 +1138,25 @@ export async function startOxigraphServer(
       // close it outright: this supervisor is finished, and only a restart of
       // the node can make the port trustworthy again.
       //
-      // NOTE for operators: ordinary `query`/`insert`/`delete` traffic does NOT
-      // consult the ownership lease — only the system-record lane does — so the
-      // daemon will keep issuing SPARQL to that endpoint until it is restarted.
-      // Refusing that traffic is an adapter-side concern this module cannot
-      // reach; all it can do is stop being a supervisor and say so loudly.
+      // NOTE for operators, and the split is deliberate:
+      //
+      // - Ordinary MUTATIONS are refused at dispatch. The adapter reads this
+      //   lease before every update and rejects with
+      //   `ManagedOxigraphBackendUnownedError` and zero I/O, so nothing is
+      //   written into whatever is on that bind.
+      // - READS still route to the endpoint. Refusing them would take the
+      //   node's whole store down, and a read against a dead port fails at the
+      //   transport anyway — but against a FOREIGN listener a read can return
+      //   data that is not ours. That is the residual exposure here.
+      // - The lease is terminal, so no generation can ever be rebound in this
+      //   process: only a restart makes the port trustworthy again.
       beginTermination();
       state = 'closed';
       log(
         `[oxigraph] FATAL: could not prove ${bind} was released after retiring the managed ` +
-          'child. The supervisor is now closed and will never start another child, but ' +
-          'ordinary store traffic is still routed to that endpoint — restart the node.',
+          'child. The supervisor is now closed and will never start another child. Writes to ' +
+          'that endpoint are refused from here on, but READS are still routed to it and may ' +
+          'reach a listener this node cannot account for — restart the node.',
       );
       throw new Error(
         `Managed Oxigraph could not prove ${bind} was released after retiring the child; ` +

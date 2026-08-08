@@ -817,7 +817,7 @@ export class ContextGraphMethods extends DKGAgentBase {
     }
 
     if (!opts.private) {
-      this.subscribeToContextGraph(opts.id);
+      this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
 
       // Curated CGs: definition lives in _meta, NOT in ONTOLOGY. Do not
       // broadcast to the network — only invited nodes will discover it via
@@ -1483,8 +1483,11 @@ export class ContextGraphMethods extends DKGAgentBase {
       const next = { ...sub, onChainHash: nameHash };
       this.bindSubscriptionOnChainId(id, next, onChainId);
       this.setContextGraphSubscription(id, next, { persist: false });
+      this.subscribeToContextGraph(id, {
+        trackSyncScope: true,
+        syncMode: 'always-on',
+      });
       if (!next.subscribed) {
-        this.subscribeToContextGraph(id, { trackSyncScope: true });
         this.log.info(ctx, `Subscribed to newly registered context graph "${id}"`);
       }
       this.persistContextGraphSubscription(id);

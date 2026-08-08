@@ -13,16 +13,19 @@ name: System-record managed ownership evidence
 #      a second OS process is spawned, the first is dead and the second alive,
 #      the replacement serves the same data, and the store resumes on it.
 #   2. The capability fail-closed matrix over the real store composition.
-#   3. Owned-pool socket ownership: destroy leaves nothing behind.
-#   4. Reserved internal state is invisible to enumeration and undeletable by
-#      generic mutation, as a supported predecessor binary would see it.
+#   3. Reserved internal state is invisible to enumeration, unserved by
+#      `hasGraph`, and undeletable by generic mutation including an unscoped
+#      `deleteByPattern`.
 #
-# What it does NOT prove: predecessor entries run against the CURRENT binary,
-# not against each pinned commit — no predecessor is checked out or built. The
-# B3 active-replacement CAS exists, but this ownership artifact still does
-# not dispatch a verified apply. Atomic apply, lost-response recovery, and
-# maximum-size p99/RSS remain separate activation gates; this workflow must not
-# be cited as evidence for them.
+# What it does NOT prove:
+#   - `pinnedPredecessors` is an INVENTORY, not a set of verdicts. No predecessor
+#     is checked out or built — every check runs the current binary — so the
+#     manifest records WHICH commits must retain the property, and the measured
+#     half is one conformance probe against this build.
+#   - B3's active-replacement CAS is default-unused; this gate does not prove
+#     production receiver activation or end-to-end peer recovery.
+#   - Maximum-size p99/RSS and live lost-response recovery remain separate
+#     activation gates and must not be inferred from this workflow.
 
 on:
   push:
@@ -74,8 +77,25 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
-          # verify.ts pins HEAD on both sides of the run, so the checkout must
-          # carry real commit metadata rather than a synthetic merge ref.
+          # Test the CANDIDATE, not GitHub's synthetic merge.
+          #
+          # This previously carried a comment claiming the checkout "must carry
+          # real commit metadata rather than a synthetic merge ref" — with no
+          # `ref` to make that true. `fetch-depth: 0` controls history DEPTH; it
+          # cannot change WHICH commit is checked out. So on `pull_request`,
+          # `actions/checkout` took `refs/pull/N/merge`, and the published
+          # evidence recorded `sourceCommit: 8c7b4e935…` — a synthetic merge
+          # against another PR's head, not this PR's `91d38870e`. The comment
+          # asserted the property the config did not implement.
+          #
+          # Head, not merge, and specifically because this PR is STACKED: the
+          # merge ref is B2's head against B1's moving head, a composition that
+          # never ships — after B1 merges, B2 is rebased onto testnet-canary.
+          # `refs/pull/N/merge` is also a mutable GitHub-managed value with no
+          # re-trigger when the base moves, so an artifact naming it is
+          # unverifiable after the fact. Empty on `push`, where the default is
+          # already the commit itself.
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Install pnpm
@@ -136,7 +156,33 @@ jobs:
             test/system-record-state-snapshot-v1.test.ts \
             test/system-record-utf8-order-v1.test.ts \
             test/system-record-verified-replacement-v1.test.ts \
+            test/managed-backend-ownership-dispatch-v1.test.ts \
+            test/managed-terminal-read-through-index-v1.test.ts \
+            test/system-record-controller-disposal-v1.test.ts \
+            test/system-record-capability-probe-errors-v1.test.ts \
+            test/graph-set-index-store.test.ts \
+            test/system-record-decorator-apply-outcomes-v1.test.ts \
+            test/store-priority-scheduler.test.ts \
             test/store-scheduler-system-record-admission.test.ts
+
+      # Every test file this branch adds or modifies now runs SOMEWHERE.
+      #
+      # These were run by nothing. `ci.yml` triggers only on
+      # `pull_request: branches: [main, testnet-canary, …]`, and this PR's base
+      # is another open PR, so the full lanes have never fired on this branch —
+      # there was no fallback. The CLI suites carry 20 of the supervisor
+      # fault-injection cases this PR added.
+      - name: Agent facade conformance
+        run: |
+          pnpm --filter @origintrail-official/dkg-agent exec vitest run \
+            test/system-record-agent-facade-outcomes-v1.test.ts
+
+      - name: CLI supervisor conformance
+        run: |
+          pnpm --filter @origintrail-official/dkg exec vitest run \
+            test/oxigraph-server.test.ts
+          pnpm --filter @origintrail-official/dkg exec vitest run \
+            test/oxigraph-managed.test.ts
 
       - name: Run live managed-ownership gate
         # Downloads and checksum-verifies the pinned v0.5.8 binary, then runs

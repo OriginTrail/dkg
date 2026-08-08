@@ -342,8 +342,15 @@ program
   .action(async (contextGraph: string, opts: ActionOpts) => {
     try {
       const client = await ApiClient.connect();
-      const result = await client.subscribeToContextGraph(contextGraph);
+      const result = await client.subscribeToContextGraph(contextGraph, {
+        syncMode: opts.save ? 'always-on' : 'on-demand',
+      });
       console.log(`Subscribed to context graph: ${contextGraph}`);
+      console.log(
+        result.syncMode === 'always-on'
+          ? 'Synchronization mode: always on (restored after restart).'
+          : 'Synchronization mode: on demand (current node process only).',
+      );
       const catchup = result.catchup;
       if (catchup) {
         if ('peersTried' in catchup) {

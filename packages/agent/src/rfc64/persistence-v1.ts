@@ -1,8 +1,10 @@
 import {
   createRfc64InventoryOperationsViewV1,
+  createRfc64SwmAuthorInventoryOperationsViewV1,
   openInventoryV1,
   type Rfc64InventoryV1Foundation,
   type Rfc64InventoryV1OperationsV1,
+  type Rfc64SwmAuthorInventoryOperationsV1,
 } from './inventory-v1/index.js';
 import {
   type Rfc64ControlObjectOperationsV1,
@@ -27,6 +29,8 @@ export interface Rfc64PersistenceV1 {
   readonly rootPath: string;
   /** Non-owning inventory operations; lifecycle methods remain private to this owner. */
   readonly inventory: Rfc64InventoryV1OperationsV1;
+  /** Feature-owned SWM-only live-set persistence capability. */
+  readonly swmAuthorInventory: Rfc64SwmAuthorInventoryOperationsV1;
   /** Non-owning cache operations; lifecycle methods remain private to this owner. */
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
   /** Durable content-addressed opaque KA bundles served by the native catalog transport. */
@@ -43,6 +47,7 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
   readonly #ownedControlObjectStore: Rfc64ControlObjectStoreV1;
   readonly #ownedKaBundleStore: Rfc64KaBundleStoreV1;
   readonly inventory: Rfc64InventoryV1OperationsV1;
+  readonly swmAuthorInventory: Rfc64SwmAuthorInventoryOperationsV1;
   readonly controlObjects: Rfc64ControlObjectOperationsV1;
   readonly kaBundles: Rfc64KaBundleOperationsV1;
 
@@ -56,6 +61,10 @@ class OwnedRfc64PersistenceV1 implements Rfc64PersistenceV1 {
     this.#ownedControlObjectStore = ownedControlObjectStore;
     this.#ownedKaBundleStore = ownedKaBundleStore;
     this.inventory = createRfc64InventoryOperationsViewV1(
+      ownedInventory,
+      () => this.requireOpen(),
+    );
+    this.swmAuthorInventory = createRfc64SwmAuthorInventoryOperationsViewV1(
       ownedInventory,
       () => this.requireOpen(),
     );

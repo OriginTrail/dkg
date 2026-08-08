@@ -88,6 +88,8 @@ export default defineConfig({
       "test/sync-policy.test.ts",
       "test/catchup-policy.test.ts",
       "test/catchup-concurrency.test.ts",
+      // #2050 — the stop rule for the bounded repeat of the public SWM peer walk.
+      "test/catchup-pass-policy.test.ts",
       "test/map-with-concurrency.test.ts",
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",
@@ -101,6 +103,7 @@ export default defineConfig({
       "test/sync-responder-protection.test.ts",
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",
+      "test/system-context-graph-policy.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-fanout-peer-selection.test.ts",
@@ -117,6 +120,8 @@ export default defineConfig({
       "test/finalization-handler-defensive-cg-id.test.ts",
       "test/finalization-recovery.test.ts",
       "test/finalization-recovery-worker.test.ts",
+      "test/finalization-recovery-sqlite-deferred.test.ts",
+      "test/finalization-recovery-sqlite-migration.test.ts",
       "test/finalization-recovery-sqlite-store.test.ts",
       "test/named-ka-publish-recovery.test.ts",
       "test/ka-graph-finalization-handler.test.ts",
@@ -147,6 +152,10 @@ export default defineConfig({
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
       "test/swm-snapshot-materializer.test.ts",
+      // #2079 — the already-materialized witness: the warm-path win, the count
+      // gate that keeps it self-healing, and the digest binding that makes an
+      // equal-count version change safe.
+      "test/swm-materialization-witness.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
     ],
     testTimeout: 60_000,

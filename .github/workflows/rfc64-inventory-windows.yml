@@ -106,6 +106,8 @@ jobs:
         run: >-
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
+          test/finalization-recovery-sqlite-deferred.test.ts
+          test/finalization-recovery-sqlite-migration.test.ts
           test/finalization-recovery-sqlite-store.test.ts
           test/rfc64-inventory-v1
           test/rfc64-agent-inventory-lifecycle.test.ts

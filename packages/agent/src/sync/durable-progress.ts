@@ -280,6 +280,20 @@ export class DurableSyncAccumulator {
     return this.diagnostics.backoffWorthyFailures > 0;
   }
 
+  /**
+   * The peer never responded for a folded round. `failedPeers` is recorded by
+   * the requester runners only when a round's error carried the transport tag
+   * AND no phase of that round saw a response (`error-tags.ts`
+   * `isSyncTransportFailure` / `didSyncPeerRespond`); everything the peer did
+   * answer — denials, post-response failures, timeouts with pages — lands in
+   * the per-phase counters instead. That makes this the one signal that
+   * distinguishes "the peer is unreachable" from "this Context Graph's round
+   * went wrong".
+   */
+  hasPeerTransportFailure(): boolean {
+    return this.diagnostics.failedPeers > 0;
+  }
+
   hasTerminalBoundary(): boolean {
     return this.observedTerminalBoundaries > 0;
   }
@@ -350,6 +364,12 @@ export function durableSyncAccumulatorHasBackoffWorthyFailure(
   accumulator: DurableSyncAccumulator,
 ): boolean {
   return accumulator.hasBackoffWorthyFailure();
+}
+
+export function durableSyncAccumulatorHasPeerTransportFailure(
+  accumulator: DurableSyncAccumulator,
+): boolean {
+  return accumulator.hasPeerTransportFailure();
 }
 
 export function durableSyncAccumulatorHasTerminalBoundary(

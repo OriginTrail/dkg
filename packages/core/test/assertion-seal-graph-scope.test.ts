@@ -27,6 +27,38 @@ const baseArgs = {
 } as const;
 
 describe('graph-scoped assertion seal', () => {
+  it.each([
+    ['2026-07-19T12:34:56Z', '2026-07-19T12:34:56.000Z'],
+    ['2026-07-19T12:34:56.1Z', '2026-07-19T12:34:56.100Z'],
+    ['2026-07-19T12:34:56.12Z', '2026-07-19T12:34:56.120Z'],
+    ['2026-07-19T12:34:56.789+00:00', '2026-07-19T12:34:56.789Z'],
+  ])('canonicalizes the RDF dateTime lexical value %s', (input, expected) => {
+    const quads = buildAssertionSealQuads({
+      ...baseArgs,
+      finalizedAtIso: input,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
+
+    expect(parseAssertionSealQuads(quads, ASSERTION_URI)?.finalizedAtIso).toBe(expected);
+  });
+
+  it.each([
+    '2026-02-30T12:34:56Z',
+    '2026-07-19T24:00:00Z',
+  ])('rejects the non-round-tripping RDF dateTime value %s', (input) => {
+    const quads = buildAssertionSealQuads({
+      ...baseArgs,
+      finalizedAtIso: input,
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+    });
+
+    expect(() => parseAssertionSealQuads(quads, ASSERTION_URI)).toThrow(
+      /Invalid assertion seal xsd:dateTime value/u,
+    );
+  });
+
   it('round-trips one KA-level private commitment without root entities', () => {
     const privateMerkleRoot = new Uint8Array(32).fill(0xcd);
     const quads = buildAssertionSealQuads({

@@ -8,7 +8,6 @@
 // `pendingOpenClawUiAttachJobs` is module-private working memory
 // and is intentionally not exported.
 
-import type { IncomingMessage, ServerResponse } from 'node:http';
 import { join, resolve } from 'node:path';
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync, readFileSync } from 'node:fs';
@@ -48,6 +47,22 @@ import {
   getStoredLocalAgentIntegrations,
   getLocalAgentIntegration,
 } from './local-agents.js';
+
+export {
+  pipeLocalAgentSseStream,
+  pipeOpenClawStream,
+  writeLocalAgentSseChunk,
+  writeOpenClawStreamChunk,
+  type LocalAgentSseReader,
+  type LocalAgentSseRequest,
+  type LocalAgentSseResponse,
+  type LocalAgentSseFrame,
+  type LocalAgentSseFrameAction,
+  type LocalAgentSseStreamResult,
+  type OpenClawStreamReader,
+  type OpenClawStreamRequest,
+  type OpenClawStreamResponse,
+} from './local-agent-sse.js';
 
 const daemonRequire = createRequire(import.meta.url);
 const execFileAsync = promisify(execFile);
@@ -561,78 +576,6 @@ export async function ensureOpenClawBridgeAvailable(
         : err.message,
       offline: true,
     };
-  }
-}
-
-export type OpenClawStreamRequest = Pick<IncomingMessage, "on">;
-export type OpenClawStreamResponse = Pick<
-  ServerResponse,
-  "on" | "off" | "writeHead" | "write" | "end" | "writableEnded"
->;
-export type OpenClawStreamReader = {
-  read: () => Promise<{ done: boolean; value?: Uint8Array }>;
-  cancel: () => Promise<unknown>;
-  releaseLock: () => void;
-};
-
-export async function writeOpenClawStreamChunk(
-  res: OpenClawStreamResponse,
-  chunk: Uint8Array,
-): Promise<void> {
-  if (res.write(chunk)) return;
-  await new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      res.off("drain", onDrain);
-      res.off("close", onClose);
-      res.off("error", onError);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onClose = () => {
-      cleanup();
-      resolve();
-    };
-    const onError = (err: unknown) => {
-      cleanup();
-      reject(err);
-    };
-    res.on("drain", onDrain);
-    res.on("close", onClose);
-    res.on("error", onError);
-  });
-}
-
-export async function pipeOpenClawStream(
-  req: OpenClawStreamRequest,
-  res: OpenClawStreamResponse,
-  reader: OpenClawStreamReader,
-): Promise<void> {
-  let clientGone = false;
-  const cancelUpstream = () => {
-    if (clientGone) return;
-    clientGone = true;
-    void reader.cancel().catch(() => {});
-  };
-
-  req.on("aborted", cancelUpstream);
-  res.on("close", () => {
-    if (!res.writableEnded) cancelUpstream();
-  });
-  res.on("error", cancelUpstream);
-
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done || clientGone) break;
-      if (value !== undefined) {
-        await writeOpenClawStreamChunk(res, value);
-        if (clientGone) break;
-      }
-    }
-  } finally {
-    reader.releaseLock();
   }
 }
 
@@ -1586,4 +1529,3 @@ export function buildOpenClawAttachmentImportContextEntries(
     };
   });
 }
-

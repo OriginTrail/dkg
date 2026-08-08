@@ -109,6 +109,56 @@ describe('reserved internal graph mutation guard', () => {
       ).rejects.toThrow(ReservedInternalGraphWriteError);
     });
 
+    describe('the opaque update() channel is a KNOWN-OPEN route, closed in Stack C', () => {
+      /**
+       * These assert the gap, not a guard, and they are here so Stack C
+       * inherits a failing expectation instead of a forgotten one.
+       *
+       * A revision of this stack shipped a substring scan
+       * (`sparql.includes(SYSTEM_RECORD_V1_INTERNAL_PREFIX)`) and a
+       * `ReservedInternalGraphWriteError` on this path. It was reverted: the
+       * split-prefix case below is valid SPARQL that names the reserved graph
+       * without the reserved string ever appearing in the text, and it was
+       * demonstrated deleting a seeded reserved graph against a real Oxigraph.
+       * The scan also over-refused updates that merely mentioned the prefix. A
+       * check that looks like a boundary and is not is worse than a documented
+       * gap, so the gap is documented — and pinned.
+       *
+       * This is safe to defer only because reserved state is INERT in B2: the
+       * lane defers every apply and no production path here writes these graphs.
+       * Stack C activates the materializer, and must close this first.
+       */
+      const routes: ReadonlyArray<{ name: string; sparql: string }> = [
+        {
+          name: 'the literal IRI form',
+          sparql: `DROP SILENT GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}>`,
+        },
+        {
+          name: 'the split prefix/local form, which no substring scan can see',
+          sparql:
+            `PREFIX dkg: <${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}>\n` +
+            'DROP SILENT GRAPH dkg:system-record-v1:state',
+        },
+      ];
+
+      for (const route of routes) {
+        it(`does not refuse ${route.name} — Stack C must`, async () => {
+          const fetchSpy = stubFetch();
+          await expect(newStore().update(route.sparql)).resolves.toBeUndefined();
+          // Dispatched, not merely un-thrown: the request really does leave.
+          expect(fetchSpy).toHaveBeenCalledTimes(1);
+        });
+      }
+
+      it('the split-prefix form does not contain the reserved graph IRI at all', () => {
+        // The load-bearing fact behind the revert. If this ever becomes true,
+        // a lexical scan would have been sufficient after all — it is not.
+        const { sparql } = routes[1]!;
+        expect(sparql).not.toContain(SYSTEM_RECORD_V1_STATE_GRAPH);
+        expect(sparql).not.toContain('system-record-v1:state>');
+      });
+    });
+
     it('still allows ephemeral staging graphs so atomic-replace cleanup works', async () => {
       const fetchSpy = stubFetch();
       const staging = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
@@ -125,17 +175,6 @@ describe('reserved internal graph mutation guard', () => {
       const fetchSpy = stubFetch();
       await expect(
         newStore().dropGraph('did:dkg:context-graph:example'),
-      ).resolves.toBeUndefined();
-      expect(fetchSpy).toHaveBeenCalledTimes(1);
-    });
-
-    it('does not guard opaque update(), which rotates the epoch instead', async () => {
-      // Documented boundary, asserted so it is a decision rather than an
-      // oversight: scanning opaque SPARQL for reserved IRIs is evadable, so
-      // Stack C migrates raw callers instead.
-      const fetchSpy = stubFetch();
-      await expect(
-        newStore().update!(`DROP SILENT GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}>`),
       ).resolves.toBeUndefined();
       expect(fetchSpy).toHaveBeenCalledTimes(1);
     });

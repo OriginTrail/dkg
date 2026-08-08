@@ -593,6 +593,53 @@ describe('MessageStreamPool', () => {
     expect(POOLED_MESSAGE_PROTOCOL).toBe('/dkg/10.0.2/message');
   });
 
+  // closePeerIfIdle exists so a caller that has stopped routing sends
+  // through the pool for a peer (e.g. the peer is currently reachable
+  // only via circuit relays) can retire the held stream WITHOUT
+  // rejecting live work — force-closing a busy stream would reproduce
+  // the exact all-in-flight-requests-die teardown the caller is
+  // routing around.
+  it('closePeerIfIdle retires a quiescent stream but leaves an in-flight one alone', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+
+    // No stream held yet — nothing to retire.
+    await expect(pool.closePeerIfIdle(PEER_A)).resolves.toBe(false);
+
+    const pending = pool.send(PEER_A, new TextEncoder().encode('hi'));
+    await flush();
+    await flush();
+
+    // Request in flight — retire must refuse and leave it untouched.
+    await expect(pool.closePeerIfIdle(PEER_A)).resolves.toBe(false);
+    const stream = node.state.streams.get(PEER_A)!;
+    stream.feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok')));
+    expect(new TextDecoder().decode(await pending)).toBe('ok');
+    await flush();
+
+    // Quiescent — retire closes the held stream and drops the peer.
+    await expect(pool.closePeerIfIdle(PEER_A)).resolves.toBe(true);
+    expect(pool.size()).toBe(0);
+    expect(stream.writeStatus).toBe('closed');
+
+    // Next send re-dials from scratch rather than reusing the retired
+    // stream.
+    const second = pool.send(PEER_A, new TextEncoder().encode('again'));
+    await flush();
+    await flush();
+    expect(node.state.dials.get(PEER_A)).toBe(2);
+    node.state.streams
+      .get(PEER_A)!
+      .feed(encodeFrame(FrameType.RESPONSE, new TextEncoder().encode('ok2')));
+    expect(new TextDecoder().decode(await second)).toBe('ok2');
+
+    await pool.close();
+  });
+
   it('aborting an in-flight request tears down the stream so the pool does not stall (Codex #560 round 1)', async () => {
     const node = makeFakeNode();
     const pool = new MessageStreamPool(node, {

@@ -85,6 +85,12 @@ describe('RFC 8785 canonical JSON', () => {
     }
   });
 
+  it('rejects oversized strings before UTF-8 expansion and retains the exact byte cap', () => {
+    expect(() => parseJsonStrict('0'.repeat(9), { maxBytes: 8 })).toThrow(/exceeds 8 bytes/);
+    expect(() => parseJsonStrict('"é"', { maxBytes: 3 })).toThrow(/exceeds 3 bytes/);
+    expect(parseJsonStrict('"é"', { maxBytes: 4 })).toBe('é');
+  });
+
   it('rejects duplicate decoded keys, including differently escaped spellings', () => {
     expect(() => parseJsonStrict('{"a":1,"a":2}')).toThrow(/Duplicate object key/);
     expect(() => parseJsonStrict(String.raw`{"a":1,"\u0061":2}`)).toThrow(
@@ -131,6 +137,13 @@ describe('RFC 8785 canonical JSON', () => {
 
   it('enforces byte and nesting ceilings even for empty nested containers', () => {
     expect(() => parseJsonStrict('{"a":1}', { maxBytes: 6 })).toThrow(/exceeds 6 bytes/);
+    class MisleadingJsonBytes extends Uint8Array {
+      override get byteLength(): number { return 1; }
+    }
+    expect(() => parseJsonStrict(
+      new MisleadingJsonBytes(new TextEncoder().encode('{"a":1}')),
+      { maxBytes: 1 },
+    )).toThrow(/exceeds 1 byte/);
     expect(parseJsonStrict('{"a":1}', { maxDepth: 1 })).toEqual({ a: 1 });
     expect(() => parseJsonStrict('{"a":{}}', { maxDepth: 1 })).toThrow(
       /nesting exceeds 1/,

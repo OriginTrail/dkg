@@ -3,16 +3,13 @@
 
 [![CI](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/OriginTrail/dkg/actions/workflows/ci.yml)
 [![npm](https://img.shields.io/npm/v/@origintrail-official/dkg?label=npm)](https://www.npmjs.com/package/@origintrail-official/dkg)
-[![Releases](https://img.shields.io/badge/release-latest-2ea44f)](https://github.com/OriginTrail/dkg/releases)
+[![Releases](https://img.shields.io/github/v/release/OriginTrail/dkg?label=release)](https://github.com/OriginTrail/dkg/releases)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](https://github.com/OriginTrail/dkg/blob/main/LICENSE)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?logo=discord&logoColor=white)](https://discord.com/invite/xCaY7hvNwD)
 
 **Give your AI agents the ultimate memory that survives the session.**
 
-The Decentralized Knowledge Graph V10 is the shared, verifiable memory layer for multi-agent AI systems. Every finding your agents produce can flow from a private draft to a team-visible share to a permanent, cryptographically anchored record — queryable by any agent, owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends.
-
-> **Disclaimer:**
-> DKG V10 is in **release-candidate** on the testnet. Expect rapid iteration and breaking changes. Please avoid using in production environments and note that features, APIs, and stability may change as the project evolves.
+The Decentralized Knowledge Graph V10 is the shared, verifiable memory layer for multi-agent AI systems. Every finding your agents produce can flow from a private draft to a team-visible share to a durable, cryptographically anchored record — queryable by permitted agents and owned by the publisher. No black boxes. No vendor lock-in. No context that evaporates when the session ends.
 
 ---
 
@@ -20,7 +17,7 @@ The Decentralized Knowledge Graph V10 is the shared, verifiable memory layer for
 
 This is the monorepo for the **Decentralized Knowledge Graph V10 node** — the node software, CLI, dashboard UI, protocol packages, adapters, and tooling needed to run a DKG node and participate in the network.
 
-Any AI agent — whether built with [OpenClaw](https://github.com/OriginTrail/openclaw), [ElizaOS](https://elizaos.ai/), [Hermes](https://github.com/nousresearch/hermes-agent), or any custom framework — can run a DKG node and start exchanging knowledge with other agents across the network, without any central authority, API gateway, or vendor platform in between.
+Any AI agent — whether built with [OpenClaw](https://github.com/openclaw/openclaw), [ElizaOS](https://elizaos.ai/), [Hermes](https://github.com/nousresearch/hermes-agent), or any custom framework — can run a DKG node and start exchanging knowledge with other agents across the network, without any central authority, API gateway, or vendor platform in between.
 
 ### Why a Decentralized Knowledge Graph
 
@@ -28,13 +25,11 @@ Most agent memory today is flat: conversation logs, vector embeddings, Markdown 
 
 ### Why Knowledge Assets enable trust
 
-A **Knowledge Asset (KA)** is a unit of published knowledge: a set of RDF statements bundled with a Merkle proof and anchored to the blockchain. Once published, the content is immutable — anyone can verify that the data hasn't been tampered with by recomputing the proof against the on-chain root. Agents don't need to trust each other; they verify. Every claim has cryptographic provenance: who published it, when, and exactly what was said.
+A **Knowledge Asset (KA)** is a unit of published knowledge: a set of RDF statements committed by a Merkle root anchored to the blockchain. Each published version is integrity-bound to its on-chain commitment, so later updates cannot silently rewrite its history. Agents can verify the content against that commitment instead of trusting a data provider.
 
 ### Why context graphs enable collaboration
 
 A **Context Graph** is a scoped knowledge domain (the UI calls them "projects") with configurable access and governance. Agents can keep a context graph private, open it to specific peers, or back it with on-chain M-of-N signatures so a group must agree before anything is finalized. Every context graph can be further partitioned into named **sub-graphs** for finer-grained organization of knowledge within the same domain.
-
-In experiments with coding agents leveraging the DKG for shared knowledge, we observed both reduced completion time and lower costs compared to agents operating without a collective memory layer.
 
 ---
 
@@ -46,13 +41,13 @@ DKG V10 gives every agent a three-layer verifiable memory system. Knowledge is w
 |-------|-------|------|-------|-------------|
 | **Working Memory (WM)** | Private to your agent | Free | Self-attested | Local, survives restarts |
 | **Shared Working Memory (SWM)** | Visible to context-graph peers | Free | Self-attested, gossip-replicated | TTL-bounded |
-| **Verifiable Memory (VM)** | Permanent, on-chain | TRAC | Self-attested → endorsed → consensus-verified | Permanent |
+| **Verifiable Memory (VM)** | Network-queryable, chain-anchored | Gas + TRAC | Self-attested → endorsed → consensus-verified | Durable |
 
 The canonical flow for a new assertion is **WM → SWM → VM**:
 
 ```text
-create assertion ──► write triples ──► promote ──► publish ──► (optional) M-of-N verify
-     (WM)              (WM)            (WM→SWM)   (SWM→VM)              (VM)
+create KA ──► write triples ──► finalize ──► share ──► publish ──► (optional) M-of-N verify
+   (WM)          (WM)            (WM)       (WM→SWM)   (SWM→VM)              (VM)
 ```
 
 All on-chain publishing goes through SWM first — the chain transaction is a finality signal that seals data peers already hold via gossip. Assertions themselves carry a durable lifecycle record (`created → promoted → published → finalized`, or `discarded`) in the context graph's `_meta` graph, so their history is auditable independently of the data.
@@ -138,7 +133,7 @@ Skip the framework wiring — run the daemon directly and use the CLI or HTTP AP
 
 ```bash
 npm install -g @origintrail-official/dkg
-dkg init      # interactive: prompts for network (default: mainnet-gnosis), node name, role, store, port
+dkg init      # interactive: prompts for network (default: mainnet-gnosis), node name, role, triple-store backend, port
 dkg start     # starts the node daemon on http://127.0.0.1:9200
 ```
 
@@ -151,7 +146,7 @@ dkg init --role core --network mainnet-gnosis
 dkg start
 ```
 
-Core Nodes need an on-chain node profile (`identityId`). On startup the daemon checks the primary operational wallet; if it has no profile and `nodeRole` is `core`, it attempts to create the profile, approve TRAC to `StakingV10`, and mint the initial staking conviction. If the node is already running after you fund or repair wallets, trigger the same identity-creation path manually:
+Core Nodes need an on-chain node profile (`identityId`). The daemon attempts registration automatically on Core startup. The primary operational wallet needs native gas and TRAC for the initial staking conviction, while the admin wallet needs native gas for profile and key-management transactions. If the node is already running after you fund or repair wallets, trigger the same identity-creation path manually:
 
 ```bash
 TOKEN=$(dkg auth show)
@@ -175,7 +170,7 @@ To update DKG, run one command:
 ```bash
 dkg update                  # pull the latest release from npm and restart
 dkg update --check          # check what's available without applying
-dkg update --allow-prerelease   # follow the `next` dist-tag for pre-release builds
+dkg update --allow-prerelease   # allow published prerelease channels when the network policy permits
 dkg rollback                # revert to the previous version
 ```
 
@@ -203,8 +198,8 @@ already-built slot, not reinstall an arbitrary package version from npm.
 Do **not** manually `git pull` a running node tree. If anything looks off
 (multiple repositories on disk, served UI doesn't match version, version skew
 between daemon and CLI), run `dkg doctor` for a structured diagnostic of the
-install state. See [`OT-RFC-41`](https://github.com/OriginTrail/dkgv10-spec/blob/main/rfcs/OT-RFC-41-edge-node-npm-only-install-and-update.md)
-for the npm-first design rationale.
+install state. See [Migrate to npm](docs/use-dkg/migrate-to-npm.md) for the
+npm-first design rationale and legacy-install guidance.
 
 ### Contributors / monorepo development
 
@@ -221,7 +216,7 @@ Contributor state lives under `~/.dkg-dev/` (separated from `~/.dkg/` so a contr
 
 Switching between worktrees pinned to different `network/*.json#chainResetMarker` values would otherwise wipe your shared `~/.dkg-dev/store.nq` on each `dkg start`. Set `DKG_SKIP_CHAIN_RESET_WIPE=1` to keep your local context graphs across branch switches; even without it, `store.nq` is backed up to `store.nq.pre-wipe-<marker>-<timestamp>` (newest 3 kept) rather than destroyed, so a stray wipe is recoverable.
 
-The legacy `install.sh` git-checkout installer was removed in rc.12 (OT-RFC-41 §5 PR 6). If you have an existing `install.sh`-style install, run `npm install -g @origintrail-official/dkg` to take over the install; the daemon will detect the legacy `~/.dkg/releases/` tree on first start, record the active slot version into `~/.dkg/previous-version` (rollback target), and resume from the npm-global install. `dkg doctor` flags any leftover cleanable state. See [`docs/archive/MIGRATE_TO_NPM.md`](docs/archive/MIGRATE_TO_NPM.md) for historical context on the pre-rc.12 procedure.
+The legacy `install.sh` git-checkout installer was removed in rc.12. If you have an existing `install.sh`-style install, run `npm install -g @origintrail-official/dkg` to take over the install; the daemon will detect the legacy `~/.dkg/releases/` tree on first start, record the active slot version into `~/.dkg/previous-version` (rollback target), and resume from the npm-global install. `dkg doctor` flags any leftover cleanable state. See [`docs/use-dkg/migrate-to-npm.md`](docs/use-dkg/migrate-to-npm.md) for historical migration details.
 
 ---
 
@@ -239,19 +234,19 @@ dkg integration install <slug> --allow-community  # required to install a commun
 
 By design, `list` shows only verified and featured tiers and `install` refuses community-tier entries unless you opt in — community submissions haven't been peer-reviewed by the OriginTrail core team, so discovering and installing them is an explicit choice. The CLI automates the `cli` and `mcp` install kinds today; `service`, `agent-plugin`, and `manual` kinds aren't auto-installed yet — `install` exits with the entry's repo URL so you can follow its README. For `cli` installs, the CLI verifies the npm tarball's publish-time sigstore provenance against the registry-declared repo before running `npm install --global` (`--no-verify-provenance` to skip).
 
-**Building one:** fork the minimal reference template at [OriginTrail/dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world) — ~150 lines, zero dependencies, demonstrates the full Working Memory write → read round trip. Submission rules (schema, security checks, trust tiers) are in the registry's [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md).
+**Building one:** fork the minimal, zero-dependency reference template at [OriginTrail/dkg-hello-world](https://github.com/OriginTrail/dkg-hello-world), which demonstrates a full Working Memory write → read round trip. Submission rules (schema, security checks, trust tiers) are in the registry's [CONTRIBUTING.md](https://github.com/OriginTrail/dkg-integrations/blob/main/CONTRIBUTING.md).
 
 ---
 
 ## CLI commands
 
 ```bash
-dkg init                                 # interactive setup — network, node name, role, store (--network to skip the prompt)
+dkg init                                 # interactive setup — network, node name, role, triple-store backend
 dkg start [-f]                           # start the node daemon (-f for foreground)
 dkg stop                                 # graceful shutdown
 dkg status                               # node health, peer count, store status
 dkg logs                                 # tail the daemon log
-dkg peers                                # connected peers and transport info
+dkg peers                                # list discovered agents on the network
 dkg peer info <peer-id>                  # inspect a peer's identity and addresses
 
 # Direct messaging
@@ -262,13 +257,12 @@ dkg chat <name>                          # interactive chat with a peer
 dkg context-graph create <id>            # create a local context graph
 dkg context-graph register <id>          # register an existing CG on-chain (unlocks VM)
 dkg context-graph add-agent <id> --agent <addr>   # add an agent to a curated CG allowlist
-dkg context-graph list                   # list subscribed context graphs
+dkg context-graph list                   # list known context graphs and subscription state
 dkg context-graph info <id>              # show context-graph details
 dkg context-graph agents <id>            # list agents in the CG allowlist
 dkg context-graph request-join <id> <curatorPeerId>   # request to join a curated CG (peer id from V10 invite)
 dkg context-graph sign-join <id>         # sign a join-request delegation locally without forwarding
 dkg context-graph approve-join <id>      # approve a pending join request
-dkg context-graph subscribe <id>         # subscribe to a CG without creating it
 
 # Knowledge Assets: create -> write -> finalize -> share -> publish
 dkg ka create <name> -c <cg> --input-file <rdf-file> --share  # one-shot create/write/finalize/share; no VM publish
@@ -280,7 +274,7 @@ dkg ka publish <name> -c <cg>                                 # sync publish fro
 dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue VM publish
 dkg ka query <name> -c <cg>                                   # read KA WM quads
 dkg ka history <name> -c <cg>                                 # show lifecycle state/history
-dkg ka pull-from <name> -c <cg> --layer swm                   # seed WM from SWM or VM
+dkg ka pull-from <name> -c <cg> --layer swm|vm                # seed WM from SWM or VM
 dkg ka discard <name> -c <cg>                                 # discard a WM draft
 
 # Compatibility aliases
@@ -289,12 +283,12 @@ dkg assertion promote <name> -c <cg>                # compatibility alias for KA
 
 # Verification and endorsement
 dkg verify <batchId> --context-graph <cg> --verified-graph <id>  # propose M-of-N verification
-dkg endorse <ual> --context-graph <cg> --agent <addr>  # endorse a published KA
+dkg endorse <ual> --context-graph <cg> [--agent <addr>]  # endorse as the authenticated agent; --agent only asserts a match
 
 # Querying
 dkg query [cg] -q "<sparql>"             # SPARQL against a local context graph
 dkg query-remote <peer> -q "<sparql>"    # query a remote peer over P2P
-dkg sync                                 # catch up on data from peers
+dkg sync catchup-status <cg>             # show background catch-up status for a context graph
 dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 
 # Async publisher (optional, for batching)
@@ -306,7 +300,7 @@ dkg publisher stats                      # publisher throughput stats
 
 # Code & memory indexing
 dkg index [directory]                    # index a code repo into the dev-coordination CG
-dkg wallet                               # show operational wallet addresses & balances
+dkg wallet                               # show admin and operational wallet addresses and balances
 dkg set-ask <amount>                     # set the node's on-chain ask (TRAC per KB·epoch)
 
 # Identity & auth
@@ -391,117 +385,29 @@ analysis reports are under `bench/results/profiles/`, including
 
 | Guide | Use it when |
 |---|---|
+| [Quickstart](docs/getting-started/quickstart.md) | You want to install a node and connect an agent framework |
 | [MCP Setup](packages/mcp-dkg/README.md) | You want Cursor / Claude Code / Claude Desktop / Windsurf / VSCode + Copilot / Cline / Codex CLI to use DKG as memory |
-| [Join the Testnet](docs/archive/internal/setup/JOIN_TESTNET.md) | You want a full node setup and first publish/query flow |
+| [Publish & Query](docs/use-dkg/publish-and-query.md) | You want a first Knowledge Asset publish/query flow |
 | [OpenClaw Setup](packages/adapter-openclaw/README.md) | You want OpenClaw to use DKG as memory/tools |
 | [Hermes Setup](packages/adapter-hermes/README.md) | You want Hermes Agent to use DKG as memory/tools |
 | [ElizaOS Setup](packages/adapter-elizaos/README.md) | You want ElizaOS integration |
-| [Custom agent Setup](docs/archive/internal/setup/SETUP_CUSTOM.md) | You are wiring an agent framework not covered above |
-| [Testnet Faucet](docs/archive/internal/setup/TESTNET_FAUCET.md) | You need Base Sepolia ETH and TRAC |
+| [API Reference](docs/references/api.md) | You are wiring an agent framework not covered above |
+| [Funding](docs/use-dkg/funding.md) | You need gas or TRAC for chain operations |
 
 ---
 
-## Triple Store Backends
+## Triple-store backends
 
-A DKG node keeps every assertion in an [RDF](https://www.w3.org/RDF/) triple store. Out of the box the node runs an embedded [Oxigraph](https://github.com/oxigraph/oxigraph) instance, which is everything you need on a workstation — no extra process, no extra port, no extra config. Heavier deployments can swap in [Blazegraph](https://blazegraph.com/) (the mainnet store) or any SPARQL 1.1 server.
+A fresh setup uses a daemon-managed, disk-backed [Oxigraph](https://github.com/oxigraph/oxigraph) server (`oxigraph-server`). Existing configurations with no `store` block keep the embedded `oxigraph-worker` compatibility fallback. Operators can instead select Blazegraph or connect any SPARQL 1.1 Protocol server through `sparql-http`.
 
-| Backend | When to pick it |
+| Backend | Intended use |
 |---|---|
-| `oxigraph-worker` (default) | Single-operator nodes, dev, CI. No setup. File-backed, capped at process RAM. |
-| `blazegraph` | High-throughput nodes, mainnet parity, very large graphs (10M+ quads). Run as a separate daemon (Docker or `java -jar`). Shares cleanly with V6 / V8 instances — DKG scopes its writes to the `did:dkg:context-graph:` named-graph prefix. |
-| `sparql-http` | Any SPARQL 1.1 Protocol server (Fuseki, GraphDB, Stardog, Neptune…). Bring your own URL + (optional) auth header. |
+| `oxigraph-server` (new-node default) | Local, daemon-managed Oxigraph with RocksDB persistence and concurrent reads. |
+| `oxigraph-worker` (compatibility fallback) | Embedded single-process store for older configs, development, and small nodes. |
+| `blazegraph` | External Blazegraph deployment, optionally provisioned by `dkg init`. |
+| `sparql-http` | Any compatible external SPARQL endpoint, with optional authorization. |
 
-### Configure via `dkg init`
-
-Two paths:
-
-**1. Point at an existing Blazegraph instance:**
-
-```
-$ dkg init
-…
-Triple store backend (oxigraph / blazegraph) (oxigraph): blazegraph
-Blazegraph SPARQL endpoint URL: http://127.0.0.1:9999/bigdata/namespace/mynode/sparql
-  Store endpoint reachable: blazegraph http://127.0.0.1:9999/bigdata/namespace/mynode/sparql
-```
-
-**2. Let `dkg init` provision a Blazegraph container via Docker:**
-
-```
-$ dkg init
-…
-Triple store backend (oxigraph / blazegraph) (oxigraph): blazegraph
-Blazegraph SPARQL endpoint URL:                                    ← leave blank
-No URL provided. Provision a Blazegraph container via Docker? (y/n) (y): y
-  Starting Blazegraph in Docker (namespace: mynode)…
-  Docker available: Docker version 24.0.6, build ed223bc
-  Created container "dkg-blazegraph-mynode" on port 9999.
-  Created Blazegraph namespace "mynode".
-```
-
-The Docker provisioner pins `lyrasis/blazegraph:2.1.5` (same image and tag as mainnet and the devnet test fixture), uses `--restart unless-stopped`, auto-bumps the host port if 9999 is taken, and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
-
-The wizard validates non-Docker URLs via an `ASK { ?s ?p ?o }` probe before saving — typos or unreachable namespaces are caught at setup time, not at first boot. A 404 surfaces a specific "namespace likely doesn't exist" message rather than the generic network-failure hint.
-
-### Configure via flags (scripted setup)
-
-Every setup entry point honours `--store` / `--store-url`:
-
-```bash
-# Init only
-dkg init --store blazegraph --store-url http://127.0.0.1:9999/bigdata/namespace/mynode/sparql
-
-# Adapter setups (validated + persisted after the adapter step completes)
-dkg hermes setup    --store blazegraph --store-url http://blaze.example/sparql
-dkg openclaw setup  --store blazegraph --store-url http://blaze.example/sparql
-dkg mcp setup       --store blazegraph --store-url http://blaze.example/sparql
-```
-
-`--store oxigraph` on a previously-Blazegraph node clears the persisted block (force-fall-back to the local default).
-
-### Configure via `~/.dkg/config.json`
-
-```json
-{
-  "store": {
-    "backend": "blazegraph",
-    "options": {
-      "url": "http://127.0.0.1:9999/bigdata/namespace/mynode/sparql",
-      "managedByDkg": false
-    }
-  }
-}
-```
-
-For `sparql-http`:
-
-```json
-{
-  "store": {
-    "backend": "sparql-http",
-    "options": {
-      "queryEndpoint": "http://server.example/query",
-      "updateEndpoint": "http://server.example/update",
-      "auth": "Bearer YOUR_TOKEN"
-    }
-  }
-}
-```
-
-### What changes when you pick an external backend
-
-- **Boot-time health check**: the daemon refuses to start until the endpoint answers `ASK`. Unreachable URLs print an actionable message naming the URL — no half-broken daemon.
-- **Namespace identity tag**: on first boot the daemon writes a triple into a reserved `<urn:dkg:store-meta>` graph recording its node name. Subsequent boots verify the tag before doing any writes — two DKG nodes pointed at the same Blazegraph namespace can't silently corrupt each other any more. Mismatches print the cleanup recipe (`DELETE WHERE { ... }`).
-- **Backend-aware reset**: chain-reset (and rebooting against a different backend) scopes its `DELETE` to the `did:dkg:context-graph:` prefix, leaving any V6/V8 data on the same Blazegraph instance untouched. Docker-provisioned namespaces (`managedByDkg: true`) use the faster `DROP ALL` path.
-- **Backend-switch guard**: switching backends between boots is treated like a destructive operation. The daemon prints a multi-line warning and refuses to start unless you set `DKG_ACCEPT_STORE_RESET=1`. Reverting `store.backend` in your config recovers the previous backend's data.
-- **Chain-reset wipe — backup + dev opt-out**: when a testnet `chainResetMarker` bump signals a chain redeploy, the daemon wipes chain-derived local state (`store.nq`, publish journal, random-sampling WAL). By default `store.nq` is now *backed up* — renamed to `store.nq.pre-wipe-<marker>-<timestamp>` (newest 3 kept, older rotated out) rather than deleted — so an unexpected wipe is recoverable by moving the file back. Developers sharing one `DKG_HOME` across marker-pinned worktrees can set `DKG_SKIP_CHAIN_RESET_WIPE=1` to skip the wipe entirely; the marker is then not persisted, so unsetting the env var restores normal wipe-on-change on the next boot. Operator nodes with the env var unset still wipe by default — the safety net is unchanged.
-- **Metrics**: `/api/status` exposes `storeUrl` and `storeQuads` (cached for 30 s) instead of the `storeBytes` file size — quad count is what's meaningful when the store isn't a local file.
-- **Required config**: when you enable `largeLiteralStorage` or `sharedMemoryPublicSnapshotStorage` with an external backend, you must set their `directory` explicitly (no local store path to infer from). The daemon fails fast at config-load if either is missing.
-
-### Limitations
-
-- **Auth / TLS**: only the generic `sparql-http` backend accepts an `Authorization` header. For Blazegraph behind auth or HTTPS-with-custom-CA, run a reverse proxy in front of it for now.
-- **Migration tool**: there is no `dkg migrate-store` between backends. Plan a chain-reset window if you need to switch on a node that holds important non-VM state.
+See [Using an external SPARQL store](docs/use-dkg/storage-sparql-http.md) for configuration, managed-Oxigraph options, backend-switch safeguards, and limitations.
 
 ---
 
@@ -511,18 +417,16 @@ Every setup flow persists your chosen network into `config.networkConfig`; the d
 
 Async publisher wallets also need native gas, plus PCA agent registration or TRAC for direct spend.
 
-**Mainnet (gnosis / base) — no faucet.** Fund the node's operational wallets yourself with the chain's native gas token (xDAI on Gnosis, ETH on Base) and TRAC before publishing to Verified Memory. An edge node needs no funds just to run and sync; funds are only required to publish on-chain.
+**Mainnet (gnosis / base) — no faucet.** Fund the node's operational wallets yourself with the chain's native gas token (xDAI on Gnosis, ETH on Base) and TRAC before publishing to Verifiable Memory. An edge node needs no funds just to run and sync; funds are required only for chain operations.
 
-**Testnet — auto-funded.** A testnet node needs Base Sepolia ETH (gas) and test TRAC (staking / publishing). The OriginTrail testnet faucet hands out both in one call, so when you select `testnet` the first-setup paths auto-fund the generated admin wallet plus the three operational wallets. This step fires **only on testnet** — the mainnet network configs ship no faucet, so it is skipped automatically.
+**Testnet — auto-funded.** A testnet node needs Base Sepolia ETH (gas) and test TRAC (staking / publishing). The OriginTrail testnet faucet hands out both in one call, so when you select `testnet` the first-setup paths auto-fund the generated admin and operational wallets. This step fires **only on testnet** — the mainnet network configs ship no faucet, so it is skipped automatically.
 
 The faucet step applies to all entry points when testnet is selected:
 
 - **Manual install (`dkg init`)** — auto-funds when the selected network defines a faucet (testnet only).
 - **OpenClaw, Hermes, and MCP setup (`dkg openclaw setup`, `dkg hermes setup`, `dkg mcp setup`)** — run the same funding step on first setup. Pass `--no-fund` to skip it (pre-funded wallets, CI, offline runs); pass `--network <name>` to choose the network.
 
-Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding — you just can't publish or stake until it's topped up.
-
-On testnet, if the faucet is unreachable and you need ETH only, [`docs/archive/internal/setup/JOIN_TESTNET.md`](docs/archive/internal/setup/JOIN_TESTNET.md#get-base-sepolia-eth--trac) lists alternate Base Sepolia ETH faucets (Alchemy, Coinbase).
+Faucet calls are best-effort: a failed call logs a ready-to-paste `curl` block and setup continues. The node is usable without funding, but chain operations remain unavailable until the required wallets are funded.
 
 ---
 
@@ -614,7 +518,7 @@ DKG uses blue-green slots for safer upgrades and rollback.
 ```bash
 dkg update --check
 dkg update
-dkg update 10.0.0-rc.2 --allow-prerelease
+dkg update --allow-prerelease
 dkg rollback
 ```
 
@@ -654,37 +558,17 @@ This is a pnpm + Turborepo monorepo.
 
 ---
 
-## Specs
+## Documentation
 
 | Document | Scope |
 |---|---|
-| [Part 1: Agent Marketplace](docs/SPEC_PART1_MARKETPLACE.md) | Protocol and agent interaction flows |
-| [Part 2: Agent Economy](docs/SPEC_PART2_ECONOMY.md) | Incentives, rewards, and trust economics |
-| [Part 3: Extensions](docs/SPEC_PART3_EXTENSIONS.md) | Extended capabilities and roadmap |
-| [Attested Knowledge Assets](docs/SPEC_ATTESTED_KNOWLEDGE_ASSETS.md) | Multi-party attestation model |
-| [Trust Layer](docs/SPEC_TRUST_LAYER.md) | Endorsement and verification trust levels |
-| [Verified KAs](docs/SPEC_VERIFIED_KAS.md) | On-chain verification lifecycle |
-| [Capacity & Gas](docs/SPEC_CAPACITY_AND_GAS.md) | Node capacity and gas accounting |
-
----
-
-## Current maturity
-
-DKG V10 is a **release candidate** on the testnet. Core capabilities are implemented and exercised:
-
-- Three-layer memory model (WM → SWM → VM) with assertion lifecycle tracking
-- Context graphs with open and curated access policies, on-chain participant allowlists
-- P2P networking, gossip-based sync, and per-CG catch-up
-- RDF publish/query flows with Merkle proofs and M-of-N verification
-- File ingestion pipeline (PDF, DOCX, HTML, Markdown) into WM assertions
-- Agent discovery and encrypted messaging
-- Dashboard UI with chat memory, SPARQL explorer, project management
-- Framework adapters for OpenClaw, ElizaOS, Hermes
-- MCP server for Cursor / Claude Code / other coding assistants
-- Community integrations registry (`dkg integration list|info|install`) with install-time provenance verification for CLI-kind installs
-- Blue-green update and rollback flow
-
-Expect rapid iteration and breaking changes. Not yet recommended for production workloads.
+| [Documentation index](docs/SUMMARY.md) | Complete human and agent documentation map |
+| [Quickstart](docs/getting-started/quickstart.md) | Install a node and connect an agent |
+| [How DKG works](docs/how-dkg-works/key-concepts.md) | Current architecture and concepts |
+| [CLI reference](docs/references/cli.md) | Current commands and operational behavior |
+| [API reference](docs/references/api.md) | Authenticated node HTTP API |
+| [Networks & RPCs](docs/general/networks.md) | Supported networks and endpoints |
+| [Whitepaper & RFCs](docs/general/whitepaper-and-rfcs.md) | Protocol design sources |
 
 ---
 
@@ -700,7 +584,7 @@ pnpm test:coverage                               # tests + tier-based coverage g
 pnpm --filter @origintrail-official/dkg test     # run tests for a single package
 ```
 
-Tier-based thresholds (TORNADO / BURA / KOSAVA) and Solidity lcov checks are documented in [`docs/testing/COVERAGE.md`](docs/testing/COVERAGE.md).
+Tier-based test lanes and coverage gates are enforced in [`.github/workflows/ci.yml`](.github/workflows/ci.yml) and the package Vitest configurations.
 
 ---
 

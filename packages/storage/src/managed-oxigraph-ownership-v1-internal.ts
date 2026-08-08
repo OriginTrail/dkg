@@ -341,6 +341,62 @@ export function isManagedOxigraphOwnershipLeaseV1(
 }
 
 /**
+ * Allocation-free liveness read: is the supervisor-owned child the proven ready
+ * listener right now?
+ *
+ * Deliberately NOT expressed as `readManagedOxigraphOwnershipSnapshotV1(...)`.
+ * That function freezes and returns a new object, and this predicate sits on the
+ * adapter's mutation DISPATCH path, which every managed write crosses. One
+ * `WeakMap.get` plus two boolean reads is the whole cost; a snapshot is taken
+ * only on the refusal path, which is cold by construction.
+ */
+export function isManagedOxigraphOwnershipLiveV1(lease: unknown): boolean {
+  if (!isManagedOxigraphOwnershipLeaseV1(lease)) return false;
+  const current = LEASE_STATE.get(lease);
+  /* c8 ignore next -- guarded by isManagedOxigraphOwnershipLeaseV1 above */
+  if (!current) return false;
+  // `ready` alone, deliberately. This was written `ready && !terminal` and the
+  // `!terminal` term's solo mutant SURVIVED — because terminality implies
+  // not-ready by construction, in both directions: `invalidate()` clears `ready`
+  // on every reason including the terminal ones, and `bindReadyGeneration()`
+  // throws on a terminal lease, so a terminal lease can never become ready
+  // again. A second term that can never change the outcome reads as extra
+  // protection and is worse than none.
+  return current.ready;
+}
+
+/**
+ * Thrown when a managed store is asked to mutate a backend it cannot prove it
+ * owns.
+ *
+ * The two cases it covers are different harms, and both are real:
+ *
+ * - **terminal** (`port-release-unproven`): something may be serving the bind
+ *   that is not our child, so the write could land in a store we do not own.
+ * - **not ready** (a child exit, or a replacement being bound): the write has
+ *   nowhere correct to go, and today it is dispatched anyway and fails at the
+ *   transport after opening a socket.
+ *
+ * Refused with ZERO I/O rather than dispatched and hoped over.
+ */
+export class ManagedOxigraphBackendUnownedError extends Error {
+  readonly code = 'MANAGED_OXIGRAPH_BACKEND_UNOWNED' as const;
+
+  constructor(
+    readonly operation: string,
+    readonly terminal: boolean,
+    readonly lastInvalidation?: string,
+  ) {
+    super(
+      `${operation} refused: the managed Oxigraph child is not the proven ready listener ` +
+        `(terminal=${terminal}${lastInvalidation ? `, ${lastInvalidation}` : ''}). ` +
+        'The request was not dispatched.',
+    );
+    this.name = 'ManagedOxigraphBackendUnownedError';
+  }
+}
+
+/**
  * Read a lease's live state.
  *
  * `null` means "not a lease at all"; a snapshot with `ready === false` means

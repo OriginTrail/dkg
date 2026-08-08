@@ -243,13 +243,13 @@ describe('system-record lane control barrier (real adapter + scheduler)', () => 
     });
   });
 
-  it('disposes an opened controller on store close and releases registration once', async () => {
+  it('detaches an opened controller on store close and releases registration once', async () => {
     const controller = store.getSystemRecordLaneControllerV1?.();
     await controller!.open(ACTIVATION);
     supervisor.calls.length = 0;
 
     await store.close();
-    expect(supervisor.calls).toEqual(['stop']);
+    expect(supervisor.calls).toEqual([]);
 
     // The active controller, not just a passive capability probe, released the
     // process-global slot. The fake supervisor keeps the lease ready so this
