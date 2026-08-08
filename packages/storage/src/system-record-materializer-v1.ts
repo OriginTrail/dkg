@@ -169,8 +169,10 @@ export interface SystemRecordTransactionExecutorV1 {
    * B3 transaction boundary. Mutation settlement is explicit and an uncertain
    * write transfers ownership through `registerRecovery` while the executor's
    * exclusive scheduler permit is still live. The executor must pass the exact
-   * binding object it received, invoke the registrar synchronously at most once,
-   * and must not retain that invocation-scoped capability after settlement.
+   * binding object it received, invoke the registrar at most once before its
+   * returned promise settles, and must not retain that invocation-scoped
+   * capability afterward. The registrar call synchronously installs recovery
+   * ownership; the executor itself may have awaited inspection and dispatch.
    */
   applyVerifiedSettlementBound?(
     proof: unknown,
