@@ -7,8 +7,8 @@ import {
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import {
+  __readSystemRecordLaneExecutionBindingForTests,
   __resetSystemRecordControllerRegistrationForTests,
-  type SystemRecordLaneExecutionBindingV1,
 } from '../src/system-record-materializer-v1.js';
 import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
@@ -130,7 +130,7 @@ describe('sparql-http managed epoch handoff', () => {
     });
     expect(requests).toHaveLength(beforeForgedApply);
 
-    const binding = executionBindingOf(second);
+    const binding = __readSystemRecordLaneExecutionBindingForTests(second);
     const runtime = resolveOwnedSystemRecordRuntimeV1(ownership.lease);
     const proof = runtime.issuer.issueActive(makeAuthenticActiveReplacementIssueV1(
       binding,
@@ -158,21 +158,3 @@ describe('sparql-http managed epoch handoff', () => {
     await store.close();
   });
 });
-
-function executionBindingOf(session: unknown): SystemRecordLaneExecutionBindingV1 {
-  // The binding is deliberately not public authority. This test reads the
-  // runtime field only to mint the exact process-local handle that production's
-  // future verifier will issue; the adapter must consume it from the same lease.
-  const facade = session as Readonly<{
-    binding: SystemRecordLaneExecutionBindingV1 & { readonly descriptor: string };
-  }>;
-  return Object.freeze({
-    activationGeneration: facade.binding.activationGeneration,
-    networkId: facade.binding.networkId,
-    kind: facade.binding.kind,
-    mode: facade.binding.mode,
-    sessionIdentity: facade.binding.sessionIdentity,
-    childGeneration: facade.binding.childGeneration,
-    materializationEpoch: facade.binding.materializationEpoch,
-  });
-}
