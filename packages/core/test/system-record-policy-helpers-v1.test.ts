@@ -14,6 +14,11 @@ const DKG = 'https://dkg.network/ontology#';
 const PROV = 'http://www.w3.org/ns/prov#';
 const SKILL = 'https://dkg.origintrail.io/skill#';
 
+const FOREIGN_PEER = {
+  peerId: '12D3KooWHwCJEQ7p5idnD7iQAWyCJHEW7rngKQiXCnEfGef69SV4',
+  peerPublicKey: 'eJ1mZqeYaQKe779cgMrFD5sgUFYZzToKnNFEqVA43-8',
+} as const;
+
 const TRANSITION: AgentProfileAuthorityTransitionV1 = {
   objectType: 'authority-transition',
   kind: 'agents',
@@ -40,33 +45,109 @@ describe('system-record V1 public policy helpers', () => {
       issuedAt: '2026-08-07T12:00:01Z',
     })).toEqual({ decision: 'quarantine', reason: 'transition-equivocation' });
 
-    expect(evaluateAuthorityTransitionConflictV1(TRANSITION, {
-      ...TRANSITION,
-      priorAuthoritySequence: '1',
-      nextAuthoritySequence: '2',
-    })).toEqual({
-      decision: 'reject',
-      reason: 'transitions do not target the same authority tuple',
-    });
+    const foreignTuples: readonly Readonly<{
+      field: string;
+      transition: AgentProfileAuthorityTransitionV1;
+    }>[] = [
+      { field: 'networkId', transition: { ...TRANSITION, networkId: 'otp:20431' } },
+      { field: 'peerId', transition: { ...TRANSITION, ...FOREIGN_PEER } },
+      {
+        field: 'authority sequence',
+        transition: {
+          ...TRANSITION,
+          priorAuthoritySequence: '1',
+          nextAuthoritySequence: '2',
+        },
+      },
+    ];
+    for (const { field, transition } of foreignTuples) {
+      expect(evaluateAuthorityTransitionConflictV1(TRANSITION, transition), field).toEqual({
+        decision: 'reject',
+        reason: 'transitions do not target the same authority tuple',
+      });
+    }
+
+    for (const malformed of [
+      { ...TRANSITION, priorAuthoritySequence: '1' },
+      { ...TRANSITION, nextAuthoritySequence: '2' },
+    ] as const) {
+      expect(() => evaluateAuthorityTransitionConflictV1(TRANSITION, malformed))
+        .toThrow(/must increment/);
+    }
   });
 
-  it('pins allowed and forbidden predicates for every owned-subject kind', () => {
+  it('pins the complete allowed predicate set for every owned-subject kind', () => {
     const cases: readonly Readonly<{
       kind: AgentProfileOwnedSubjectKindV1;
-      allowed: string;
+      allowed: readonly string[];
       forbidden: string;
     }>[] = [
-      { kind: 'root', allowed: `${SCHEMA}name`, forbidden: `${PROV}atTime` },
-      { kind: 'capability', allowed: RDF_TYPE, forbidden: `${SKILL}skill` },
-      { kind: 'offering', allowed: `${SKILL}skill`, forbidden: `${PROV}atTime` },
-      { kind: 'registration', allowed: `${PROV}atTime`, forbidden: `${SCHEMA}name` },
-      { kind: 'hosting', allowed: `${SKILL}contextGraphsServed`, forbidden: `${SKILL}pricePerCall` },
-      { kind: 'x25519', allowed: `${DKG}revokedAt`, forbidden: RDF_TYPE },
+      {
+        kind: 'root',
+        allowed: [
+          RDF_TYPE,
+          `${SCHEMA}name`,
+          `${SCHEMA}description`,
+          `${DKG}peerId`,
+          `${DKG}nodeRole`,
+          `${DKG}publicKey`,
+          `${DKG}relayAddress`,
+          `${DKG}agentAddress`,
+          `${DKG}multiaddr`,
+          `${DKG}lastSeen`,
+          `${DKG}publicEncryptionKey`,
+          `${DKG}encryptionKeyAlgorithm`,
+          `${DKG}encryptionKeyProof`,
+          `${SKILL}framework`,
+          ...Object.values(AGENT_PROFILE_LINK_PREDICATES_V1),
+        ],
+        forbidden: `${PROV}atTime`,
+      },
+      {
+        kind: 'capability',
+        allowed: [RDF_TYPE, `${SCHEMA}name`],
+        forbidden: `${SKILL}skill`,
+      },
+      {
+        kind: 'offering',
+        allowed: [
+          RDF_TYPE,
+          `${SKILL}skill`,
+          `${SKILL}pricePerCall`,
+          `${SKILL}currency`,
+          `${SKILL}successRate`,
+          `${SKILL}pricing`,
+        ],
+        forbidden: `${PROV}atTime`,
+      },
+      {
+        kind: 'registration',
+        allowed: [RDF_TYPE, `${PROV}atTime`],
+        forbidden: `${SCHEMA}name`,
+      },
+      {
+        kind: 'hosting',
+        allowed: [RDF_TYPE, `${SKILL}contextGraphsServed`, `${SKILL}paranetsServed`],
+        forbidden: `${SKILL}pricePerCall`,
+      },
+      {
+        kind: 'x25519',
+        allowed: [
+          `${DKG}revokedAt`,
+          `${DKG}revokedBy`,
+          `${DKG}encryptionKeyRevocationProof`,
+        ],
+        forbidden: RDF_TYPE,
+      },
     ];
 
     for (const { kind, allowed, forbidden } of cases) {
-      expect(isAllowedAgentProfilePredicateV1(kind, allowed), `${kind} allowed predicate`).toBe(true);
-      expect(isAllowedAgentProfilePredicateV1(kind, forbidden), `${kind} forbidden predicate`).toBe(false);
+      for (const predicate of allowed) {
+        expect(isAllowedAgentProfilePredicateV1(kind, predicate), `${kind}: ${predicate}`)
+          .toBe(true);
+      }
+      expect(isAllowedAgentProfilePredicateV1(kind, forbidden), `${kind} forbidden predicate`)
+        .toBe(false);
     }
   });
 
