@@ -22,6 +22,10 @@ import { keccak256 } from './crypto/keccak.js';
 import { workspaceAgentEncryptionKeyId } from './crypto/workspace-encryption.js';
 import { parseDeterministicKnowledgeAssetUal } from './ka-content-scope.js';
 import {
+  classifyAgentProfileOwnedSubjectV1,
+  matchAgentProfileRootAddressV1,
+} from './agent-profile-schema-model-v1.js';
+import {
   assertCanonicalSystemRecordPeerIdV1,
   copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
@@ -100,7 +104,6 @@ import {
 
 const UTF8 = new TextEncoder();
 const RFC3339_SECONDS = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})Z$/;
-const AGENT_ROOT = /^did:dkg:agent:(0x[0-9a-f]{40})$/;
 const REQUEST_RECORD_KIND = SYSTEM_RECORD_KIND_V1;
 
 export type CanonicalRfc3339SecondsV1 = string & { readonly __rfc3339SecondsV1: true };
@@ -112,6 +115,19 @@ export {
   SystemRecordObjectErrorV1,
 };
 export type { SystemRecordObjectErrorCodeV1, SystemRecordPeerPublicKeyV1 };
+export {
+  AGENT_PROFILE_LINK_PREDICATES_V1,
+  AGENT_PROFILE_SCHEMA_TERMS_V1,
+  classifyAgentProfileOwnedSubjectV1,
+  deriveAgentProfileOwnedSubjectV1,
+  isAllowedAgentProfilePredicateV1,
+} from './agent-profile-schema-model-v1.js';
+export type {
+  AgentProfileExactLinkedSubjectKindV1,
+  AgentProfileIndexedSubjectKindV1,
+  AgentProfileLinkedSubjectKindV1,
+  AgentProfileOwnedSubjectKindV1,
+} from './agent-profile-schema-model-v1.js';
 
 export interface AgentProfileHeadCommonV1 {
   readonly objectType: 'agent-profile-head';
@@ -295,10 +311,10 @@ export function assertSystemRecordPeerBindingV1(
 }
 
 export function assertAgentRootV1(value: unknown, issuer?: string): asserts value is string {
-  if (typeof value !== 'string' || !AGENT_ROOT.test(value)) {
+  if (typeof value !== 'string' || matchAgentProfileRootAddressV1(value) === null) {
     fail('system-record-scalar', 'agent root must be a canonical did:dkg:agent address');
   }
-  const rootAddress = AGENT_ROOT.exec(value)![1];
+  const rootAddress = matchAgentProfileRootAddressV1(value)!;
   try {
     assertCanonicalEvmAddress(rootAddress, 'agent root address');
   } catch (cause) {
@@ -794,78 +810,6 @@ function validateConflictEvidence(value: unknown): AgentProfileConflictEvidenceV
   return Object.freeze({ ...evidence, entries: Object.freeze(entries) }) as unknown as AgentProfileConflictEvidenceV1;
 }
 
-export type AgentProfileOwnedSubjectKindV1 =
-  | 'root'
-  | 'capability'
-  | 'offering'
-  | 'registration'
-  | 'hosting'
-  | 'x25519';
-
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const SCHEMA = 'https://schema.org/';
-const DKG = 'https://dkg.network/ontology#';
-const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
-const PROV = 'http://www.w3.org/ns/prov#';
-const SKILL = 'https://dkg.origintrail.io/skill#';
-
-export const AGENT_PROFILE_LINK_PREDICATES_V1 = Object.freeze({
-  capability: `${ERC8004}capabilities`,
-  offering: `${SKILL}offersSkill`,
-  registration: `${PROV}wasGeneratedBy`,
-  hosting: `${SKILL}hostingProfile`,
-} as const);
-
-const AGENT_PROFILE_PREDICATES_V1: Readonly<Record<AgentProfileOwnedSubjectKindV1, ReadonlySet<string>>> = {
-  root: new Set([
-    RDF_TYPE, `${SCHEMA}name`, `${SCHEMA}description`, `${DKG}peerId`, `${DKG}nodeRole`,
-    `${DKG}publicKey`, `${DKG}relayAddress`, `${DKG}agentAddress`, `${DKG}multiaddr`,
-    `${DKG}lastSeen`, `${DKG}publicEncryptionKey`, `${DKG}encryptionKeyAlgorithm`,
-    `${DKG}encryptionKeyProof`, `${SKILL}framework`,
-    ...Object.values(AGENT_PROFILE_LINK_PREDICATES_V1),
-  ]),
-  capability: new Set([RDF_TYPE, `${SCHEMA}name`]),
-  offering: new Set([
-    RDF_TYPE, `${SKILL}skill`, `${SKILL}pricePerCall`, `${SKILL}currency`,
-    `${SKILL}successRate`, `${SKILL}pricing`,
-  ]),
-  registration: new Set([RDF_TYPE, `${PROV}atTime`]),
-  hosting: new Set([RDF_TYPE, `${SKILL}contextGraphsServed`, `${SKILL}paranetsServed`]),
-  x25519: new Set([`${DKG}revokedAt`, `${DKG}revokedBy`, `${DKG}encryptionKeyRevocationProof`]),
-};
-
-export function classifyAgentProfileOwnedSubjectV1(
-  rootSubject: string,
-  subject: string,
-): AgentProfileOwnedSubjectKindV1 | null {
-  if (typeof rootSubject !== 'string' || typeof subject !== 'string'
-    || rootSubject.length > SYSTEM_RECORD_OBJECT_CAPS_V1['owned-subject-table']
-    || subject.length > SYSTEM_RECORD_OBJECT_CAPS_V1['owned-subject-table']) return null;
-  if (!AGENT_ROOT.test(rootSubject)) return null;
-  if (subject === rootSubject) return 'root';
-  const wellKnown = `${rootSubject}/.well-known/genid/`;
-  if (subject.startsWith(wellKnown)) {
-    const suffix = subject.slice(wellKnown.length);
-    if (/^cap[1-9][0-9]*$/.test(suffix)) return 'capability';
-    if (/^offering[1-9][0-9]*$/.test(suffix)) return 'offering';
-    if (suffix === 'registration') return 'registration';
-    if (suffix === 'hosting') return 'hosting';
-    return null;
-  }
-  const encryptionPrefix = `${rootSubject}#x25519-`;
-  return subject.startsWith(encryptionPrefix)
-    && /^[0-9a-f]{32}$/.test(subject.slice(encryptionPrefix.length))
-    ? 'x25519'
-    : null;
-}
-
-export function isAllowedAgentProfilePredicateV1(
-  kind: AgentProfileOwnedSubjectKindV1,
-  predicate: string,
-): boolean {
-  return AGENT_PROFILE_PREDICATES_V1[kind].has(predicate);
-}
-
 export function assertDerivedAgentEncryptionSubjectV1(
   rootSubject: string,
   subject: string,
@@ -881,7 +825,7 @@ export function assertDerivedAgentEncryptionSubjectV1(
   if (ownedPublicKey.byteLength !== 32) {
     fail('system-record-binding', 'x25519 public key must contain exactly 32 bytes');
   }
-  const address = AGENT_ROOT.exec(rootSubject)![1];
+  const address = matchAgentProfileRootAddressV1(rootSubject)!;
   const expected = workspaceAgentEncryptionKeyId(address, ownedPublicKey);
   if (subject !== expected) {
     fail('system-record-binding', 'x25519 owned subject is not derived from its root and public key');

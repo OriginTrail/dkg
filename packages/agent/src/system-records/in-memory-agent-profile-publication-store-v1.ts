@@ -12,11 +12,11 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import {
-  flattenAgentProfileProducerPublicationArtifactsV1,
   type AgentProfileProducerPublicationCommitLeaseV1,
   type AgentProfileProducerPublicationCommitV1,
   type AgentProfileProducerPublicationStoreV1,
 } from './agent-profile-producer-v1.js';
+import { flattenAgentProfileProducerPublicationArtifactsV1 } from './agent-profile-producer-artifacts-v1-internal.js';
 import {
   cloneSystemRecordArtifactV1,
   systemRecordArtifactKeyV1,

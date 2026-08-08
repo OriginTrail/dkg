@@ -2,6 +2,7 @@ const api = await import('@origintrail-official/dkg-core/system-record-v1');
 
 const representativeExports = [
   'SYSTEM_RECORD_KIND_V1',
+  'AGENT_PROFILE_SCHEMA_TERMS_V1',
   'computeAgentProfileHeadObjectDigestV1',
   'parseCanonicalSystemRecordAppliedStateV1',
   'computeSystemRecordRootDescriptorDigestV1',

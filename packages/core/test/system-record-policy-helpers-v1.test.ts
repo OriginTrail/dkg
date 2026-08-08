@@ -2,11 +2,18 @@ import { describe, expect, it } from 'vitest';
 
 import {
   AGENT_PROFILE_LINK_PREDICATES_V1,
+  assertAgentProfileProjectionSchemaV1,
+  classifyAgentProfileOwnedSubjectV1,
+  deriveAgentProfileOwnedSubjectV1,
   evaluateAuthorityTransitionConflictV1,
   isAllowedAgentProfilePredicateV1,
   type AgentProfileAuthorityTransitionV1,
   type AgentProfileOwnedSubjectKindV1,
 } from '../src/system-record-v1.js';
+import {
+  agentProfilePredicatePolicyV1,
+  agentProfileSubjectPolicyV1,
+} from '../src/agent-profile-schema-model-v1.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
@@ -73,6 +80,23 @@ const UNLISTED_SAME_NAMESPACE_PREDICATES_V1 = [
 const PROFILE_SUBJECT_KINDS_V1 = Object.keys(
   EXPECTED_ALLOWED_PROFILE_PREDICATES_V1,
 ) as AgentProfileOwnedSubjectKindV1[];
+const EXPECTED_IRI_OBJECT_PREDICATES_V1 = new Set([
+  RDF_TYPE,
+  ...Object.values(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1),
+  `${SKILL}skill`,
+  `${SKILL}pricing`,
+  `${DKG}revokedBy`,
+]);
+const EXPECTED_LINK_OBJECT_PREDICATES_V1 = new Set<string>(
+  Object.values(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1),
+);
+const EXPECTED_ALLOWED_TYPE_OBJECTS_V1 = {
+  root: [`${DKG}Agent`, `${DKG}CoreNode`, `${DKG}EdgeNode`],
+  capability: [`${ERC8004}Capability`],
+  offering: [`${SKILL}SkillOffering`],
+  registration: [`${PROV}Activity`],
+  hosting: [`${SKILL}HostingProfile`],
+} as const;
 
 const FOREIGN_PEER = {
   peerId: '12D3KooWHwCJEQ7p5idnD7iQAWyCJHEW7rngKQiXCnEfGef69SV4',
@@ -153,5 +177,129 @@ describe('system-record V1 public policy helpers', () => {
   it('pins the exported profile link mapping independently', () => {
     expect(AGENT_PROFILE_LINK_PREDICATES_V1)
       .toEqual(EXPECTED_AGENT_PROFILE_LINK_PREDICATES_V1);
+  });
+
+  it('keeps one immutable internal policy for subject, predicate, term, type, and link rules', () => {
+    for (const kind of PROFILE_SUBJECT_KINDS_V1) {
+      const subjectPolicy = agentProfileSubjectPolicyV1(kind);
+      expect(Object.isFrozen(subjectPolicy), kind).toBe(true);
+      expect(Object.isFrozen(subjectPolicy.subjectShape), kind).toBe(true);
+      expect(Object.isFrozen(subjectPolicy.predicates), kind).toBe(true);
+      expect(subjectPolicy.predicates.map(({ predicate }) => predicate), kind)
+        .toEqual(EXPECTED_ALLOWED_PROFILE_PREDICATES_V1[kind]);
+      for (const predicate of subjectPolicy.predicates) {
+        expect(Object.isFrozen(predicate), `${kind}: ${predicate.predicate}`).toBe(true);
+        const expectedObjectPolicy = predicate.predicate === RDF_TYPE
+          ? 'allowed-iri'
+          : EXPECTED_LINK_OBJECT_PREDICATES_V1.has(predicate.predicate)
+            ? 'owned-subject-link'
+            : predicate.predicate === `${DKG}revokedBy`
+              ? 'profile-root-iri'
+              : predicate.predicate === `${DKG}publicEncryptionKey`
+                ? 'workspace-public-key'
+                : EXPECTED_IRI_OBJECT_PREDICATES_V1.has(predicate.predicate)
+                  ? 'iri'
+                  : 'literal';
+        expect(predicate.objectPolicy, `${kind}: ${predicate.predicate}`)
+          .toBe(expectedObjectPolicy);
+        expect(agentProfilePredicatePolicyV1(kind, predicate.predicate)).toBe(predicate);
+      }
+    }
+
+    for (const [kind, objects] of Object.entries(EXPECTED_ALLOWED_TYPE_OBJECTS_V1)) {
+      const typePolicy = agentProfilePredicatePolicyV1(
+        kind as AgentProfileOwnedSubjectKindV1,
+        RDF_TYPE,
+      );
+      expect(typePolicy?.objectPolicy, kind).toBe('allowed-iri');
+      if (typePolicy?.objectPolicy !== 'allowed-iri') throw new Error('expected type policy');
+      expect(typePolicy.allowedObjects, kind).toEqual(objects);
+      expect(Object.isFrozen(typePolicy.allowedObjects), kind).toBe(true);
+    }
+    const capabilityLink = agentProfilePredicatePolicyV1('root', `${ERC8004}capabilities`);
+    expect(capabilityLink?.objectPolicy).toBe('owned-subject-link');
+    if (capabilityLink?.objectPolicy !== 'owned-subject-link') {
+      throw new Error('expected capability link policy');
+    }
+    expect(capabilityLink.linkTargetKind).toBe('capability');
+    expect(agentProfilePredicatePolicyV1('x25519', `${DKG}revokedBy`)?.objectPolicy)
+      .toBe('profile-root-iri');
+    expect(agentProfilePredicatePolicyV1('root', `${DKG}publicEncryptionKey`)?.objectPolicy)
+      .toBe('workspace-public-key');
+    const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'capability', 2))
+      .toBe(`${root}/.well-known/genid/cap2`);
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'offering', 3))
+      .toBe(`${root}/.well-known/genid/offering3`);
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'registration'))
+      .toBe(`${root}/.well-known/genid/registration`);
+    expect(deriveAgentProfileOwnedSubjectV1(root, 'hosting'))
+      .toBe(`${root}/.well-known/genid/hosting`);
+    const x25519 = `${root}#x25519-${'a'.repeat(32)}`;
+    expect(classifyAgentProfileOwnedSubjectV1(root, x25519)).toBe('x25519');
+    const uncheckedDerive = deriveAgentProfileOwnedSubjectV1 as unknown as (
+      rootSubject: string,
+      kind: 'capability' | 'offering' | 'registration' | 'hosting',
+      ordinal?: number,
+    ) => string;
+    expect(() => uncheckedDerive(root, 'offering', 0)).toThrow(/positive/);
+    expect(() => uncheckedDerive(root, 'registration', 1)).toThrow(/ordinal/);
+  });
+
+  it('rejects literal objects for generic IRI predicates', () => {
+    const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
+    const offering = deriveAgentProfileOwnedSubjectV1(root, 'offering', 1);
+    expect(() => assertAgentProfileProjectionSchemaV1(
+      root,
+      [root, offering],
+      [
+        { subject: root, predicate: RDF_TYPE, object: `${DKG}Agent`, graph: '' },
+        {
+          subject: root,
+          predicate: `${SKILL}offersSkill`,
+          object: offering,
+          graph: '',
+        },
+        {
+          subject: offering,
+          predicate: RDF_TYPE,
+          object: `${SKILL}SkillOffering`,
+          graph: '',
+        },
+        {
+          subject: offering,
+          predicate: `${SKILL}skill`,
+          object: '"ImageAnalysis"',
+          graph: '',
+        },
+      ],
+    )).toThrow(/invalid object term kind/);
+  });
+
+  it('enforces workspace-key and revocation-root object policies in the validator', () => {
+    const root = `did:dkg:agent:0x${'11'.repeat(20)}`;
+    expect(() => assertAgentProfileProjectionSchemaV1(
+      root,
+      [root],
+      [{
+        subject: root,
+        predicate: `${DKG}publicEncryptionKey`,
+        object: '"not-a-canonical-workspace-key"',
+        graph: '',
+      }],
+    )).toThrow(/public encryption key is not canonical/);
+
+    const x25519 = `${root}#x25519-${'a'.repeat(32)}`;
+    const wrongRoot = `did:dkg:agent:0x${'22'.repeat(20)}`;
+    expect(() => assertAgentProfileProjectionSchemaV1(
+      root,
+      [root, x25519],
+      [{
+        subject: x25519,
+        predicate: `${DKG}revokedBy`,
+        object: wrongRoot,
+        graph: '',
+      }],
+    )).toThrow(/revocation does not bind the profile root/);
   });
 });

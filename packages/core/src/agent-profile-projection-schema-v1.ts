@@ -1,40 +1,19 @@
 import { decodeWorkspaceEncryptionKey } from './crypto/workspace-encryption.js';
 import { assertSafeIri, assertSafeRdfTerm, isSafeIri } from './sparql-safe.js';
 import {
-  AGENT_PROFILE_LINK_PREDICATES_V1,
+  AGENT_PROFILE_SCHEMA_TERMS_V1,
+  agentProfilePredicatePolicyV1,
+  agentProfileSubjectPolicyV1,
+  classifyAgentProfileOwnedSubjectV1,
+} from './agent-profile-schema-model-v1.js';
+import {
   assertDerivedAgentEncryptionSubjectV1,
   assertOwnedSubjectTableObjectV1,
-  classifyAgentProfileOwnedSubjectV1,
-  isAllowedAgentProfilePredicateV1,
   type AgentProfileHeadCommonV1,
-  type AgentProfileOwnedSubjectKindV1,
   type OwnedSubjectTableObjectV1,
 } from './system-record-objects-v1.js';
 
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const DKG = 'https://dkg.network/ontology#';
-const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
-const PROV = 'http://www.w3.org/ns/prov#';
-const SKILL = 'https://dkg.origintrail.io/skill#';
-
-const IRI_OBJECT_PREDICATES = new Set<string>([
-  RDF_TYPE,
-  ...Object.values(AGENT_PROFILE_LINK_PREDICATES_V1),
-  `${SKILL}skill`,
-  `${SKILL}pricing`,
-  `${DKG}revokedBy`,
-]);
-const PUBLIC_ENCRYPTION_KEY = `${DKG}publicEncryptionKey`;
-const ALLOWED_TYPE_OBJECTS: Readonly<
-  Record<AgentProfileOwnedSubjectKindV1, ReadonlySet<string>>
-> = Object.freeze({
-  root: new Set([`${DKG}Agent`, `${DKG}CoreNode`, `${DKG}EdgeNode`]),
-  capability: new Set([`${ERC8004}Capability`]),
-  offering: new Set([`${SKILL}SkillOffering`]),
-  registration: new Set([`${PROV}Activity`]),
-  hosting: new Set([`${SKILL}HostingProfile`]),
-  x25519: new Set<string>(),
-});
+const T = AGENT_PROFILE_SCHEMA_TERMS_V1;
 
 export interface AgentProfileProjectionQuadV1 {
   readonly subject: string;
@@ -69,13 +48,13 @@ export function agentProfileIdentityFactsV1(
 ): AgentProfileIdentityFactsV1 {
   return Object.freeze({
     rootSubject: input.rootSubject,
-    peerId: Object.freeze({ predicate: `${DKG}peerId`, object: `"${input.peerId}"` }),
+    peerId: Object.freeze({ predicate: T.dkgPeerId, object: `"${input.peerId}"` }),
     ...(input.publicKey === undefined ? {} : {
-      publicKey: Object.freeze({ predicate: `${DKG}publicKey`, object: `"${input.publicKey}"` }),
+      publicKey: Object.freeze({ predicate: T.dkgPublicKey, object: `"${input.publicKey}"` }),
     }),
     ...(input.agentAddress === undefined ? {} : {
       agentAddress: Object.freeze({
-        predicate: `${DKG}agentAddress`,
+        predicate: T.dkgAgentAddress,
         object: `"${input.agentAddress}"`,
       }),
     }),
@@ -133,7 +112,10 @@ export function assertAgentProfileProjectionSchemaV1(
       throw new Error(`profile projection quad ${index} has an unowned subject`);
     }
     const subjectKind = classifyAgentProfileOwnedSubjectV1(rootSubject, quad.subject);
-    if (subjectKind === null || !isAllowedAgentProfilePredicateV1(subjectKind, quad.predicate)) {
+    const predicatePolicy = subjectKind === null
+      ? undefined
+      : agentProfilePredicatePolicyV1(subjectKind, quad.predicate);
+    if (subjectKind === null || predicatePolicy === undefined) {
       throw new Error(`profile projection quad ${index} uses a disallowed profile predicate`);
     }
     const objectIsLiteral = quad.object.startsWith('"');
@@ -143,25 +125,40 @@ export function assertAgentProfileProjectionSchemaV1(
     } else assertSafeIri(quad.object);
     if (quad.graph !== '') throw new Error('profile projections must be graphless');
     seenSubjects.add(quad.subject);
-    if (IRI_OBJECT_PREDICATES.has(quad.predicate) === objectIsLiteral) {
-      throw new Error('profile projection predicate has an invalid object term kind');
-    }
-    if (quad.predicate === RDF_TYPE && !ALLOWED_TYPE_OBJECTS[subjectKind].has(quad.object)) {
-      throw new Error('profile projection rdf:type object is outside the frozen profile schema');
-    }
-    if (quad.subject === rootSubject) {
-      const linkKind = Object.entries(AGENT_PROFILE_LINK_PREDICATES_V1)
-        .find(([, predicate]) => predicate === quad.predicate)?.[0] as
-          | Exclude<AgentProfileOwnedSubjectKindV1, 'root' | 'x25519'>
-          | undefined;
-      if (linkKind !== undefined) {
-        if (objectIsLiteral || !ownedSubjects.has(quad.object)
-          || classifyAgentProfileOwnedSubjectV1(rootSubject, quad.object) !== linkKind) {
+    switch (predicatePolicy.objectPolicy) {
+      case 'literal':
+        if (!objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        break;
+      case 'iri':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        break;
+      case 'allowed-iri':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        if (!predicatePolicy.allowedObjects.includes(quad.object)) {
+          throw new Error('profile projection rdf:type object is outside the frozen profile schema');
+        }
+        break;
+      case 'owned-subject-link':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        if (!ownedSubjects.has(quad.object)
+          || classifyAgentProfileOwnedSubjectV1(rootSubject, quad.object)
+            !== predicatePolicy.linkTargetKind) {
           throw new Error('profile link does not target its exact derived-subject kind');
         }
         linked.add(quad.object);
-      }
-      if (quad.predicate === PUBLIC_ENCRYPTION_KEY) {
+        break;
+      case 'workspace-public-key': {
+        if (!objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
         const match = /^"([A-Za-z0-9_-]{43})"$/.exec(quad.object);
         if (match === null) throw new Error('profile public encryption key is not canonical');
         try {
@@ -169,11 +166,20 @@ export function assertAgentProfileProjectionSchemaV1(
         } catch (cause) {
           throw new Error('profile public encryption key is invalid', { cause });
         }
+        break;
       }
-    }
-    if (subjectKind === 'x25519' && quad.predicate === `${DKG}revokedBy`
-      && quad.object !== rootSubject) {
-      throw new Error('x25519 revocation does not bind the profile root');
+      case 'profile-root-iri':
+        if (objectIsLiteral) {
+          throw new Error('profile projection predicate has an invalid object term kind');
+        }
+        if (quad.object !== rootSubject) {
+          throw new Error('x25519 revocation does not bind the profile root');
+        }
+        break;
+      default: {
+        const unsupported: never = predicatePolicy;
+        throw new TypeError(`unsupported profile predicate policy: ${String(unsupported)}`);
+      }
     }
   }
   for (const subject of ownedSubjectTable) {
@@ -181,9 +187,13 @@ export function assertAgentProfileProjectionSchemaV1(
       throw new Error('owned-subject table contains a subject absent from the projection');
     }
     const kind = classifyAgentProfileOwnedSubjectV1(rootSubject, subject);
-    if (kind === 'capability' || kind === 'offering' || kind === 'registration' || kind === 'hosting') {
+    if (kind === null) {
+      throw new Error('owned-subject table contains an invalid subject');
+    }
+    const subjectPolicy = agentProfileSubjectPolicyV1(kind);
+    if (subjectPolicy.rootLinkPredicate !== undefined) {
       if (!linked.has(subject)) throw new Error('derived profile subject is not linked from the root');
-    } else if (kind === 'x25519') {
+    } else if (subjectPolicy.derivation === 'workspace-public-key') {
       const derived = publicKeys.some((key) => {
         try {
           assertDerivedAgentEncryptionSubjectV1(rootSubject, subject, key);

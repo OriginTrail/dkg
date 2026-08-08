@@ -1,11 +1,12 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
-  DKG_ONTOLOGY,
   SYSTEM_CONTEXT_GRAPHS,
   isPublicLikeAddress,
 } from '@origintrail-official/dkg-core';
 import {
+  AGENT_PROFILE_SCHEMA_TERMS_V1,
   agentProfileIdentityFactsV1,
+  deriveAgentProfileOwnedSubjectV1,
   type AgentProfileIdentityFactsV1,
   type AgentProfileProjectionQuadV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -77,12 +78,7 @@ export function collectPublishableMultiaddrs(
   return out;
 }
 
-const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-const SCHEMA = 'https://schema.org/';
-const DKG = 'https://dkg.network/ontology#';
-const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
-const PROV = 'http://www.w3.org/ns/prov#';
-const SKILL = 'https://dkg.origintrail.io/skill#';
+const T = AGENT_PROFILE_SCHEMA_TERMS_V1;
 
 export const AGENT_REGISTRY_CONTEXT_GRAPH = SYSTEM_CONTEXT_GRAPHS.AGENTS;
 export const AGENT_REGISTRY_GRAPH = `did:dkg:context-graph:${AGENT_REGISTRY_CONTEXT_GRAPH}`;
@@ -267,24 +263,24 @@ function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModel
     facts.push({ subject: s, predicate: p, object: o });
 
   // Type: dkg:Agent + role-specific subclass
-  q(entity, RDF_TYPE, `${DKG}Agent`);
-  q(entity, RDF_TYPE, role === 'core' ? `${DKG}CoreNode` : `${DKG}EdgeNode`);
+  q(entity, T.rdfType, T.dkgAgent);
+  q(entity, T.rdfType, role === 'core' ? T.dkgCoreNode : T.dkgEdgeNode);
 
   // schema.org metadata
-  q(entity, `${SCHEMA}name`, `"${config.name}"`);
+  q(entity, T.schemaName, `"${config.name}"`);
   if (config.description) {
-    q(entity, `${SCHEMA}description`, `"${config.description}"`);
+    q(entity, T.schemaDescription, `"${config.description}"`);
   }
 
   // DKG P2P properties
   q(entity, identity.peerId.predicate, identity.peerId.object);
-  q(entity, `${DKG}nodeRole`, `"${role}"`);
+  q(entity, T.dkgNodeRole, `"${role}"`);
 
   if (identity.publicKey !== undefined) {
     q(entity, identity.publicKey.predicate, identity.publicKey.object);
   }
   if (config.relayAddress) {
-    q(entity, `${DKG}relayAddress`, `"${config.relayAddress}"`);
+    q(entity, T.dkgRelayAddress, `"${config.relayAddress}"`);
   }
   if (identity.agentAddress !== undefined) {
     q(entity, identity.agentAddress.predicate, identity.agentAddress.object);
@@ -304,76 +300,76 @@ function buildAgentProfileModelV1(config: AgentProfileConfig): AgentProfileModel
       // contain quote characters; this guard is purely against
       // malformed callers.
       if (!ma || ma.includes('"')) continue;
-      q(entity, `${DKG}multiaddr`, `"${ma}"`);
+      q(entity, T.dkgMultiaddr, `"${ma}"`);
     }
   }
-  q(entity, `${DKG}lastSeen`, `"${profileTimestamp}"`);
+  q(entity, T.dkgLastSeen, `"${profileTimestamp}"`);
   // Encryption keys: prefer the multi-key array; fall back to the deprecated
   // singular fields only when the array isn't supplied (legacy callers /
   // test fixtures). Retired keys still get published so peers learn their
   // wallet-signed revocations and the resolver can prune them.
   if (config.encryptionKeys && config.encryptionKeys.length > 0) {
     for (const key of config.encryptionKeys) {
-      q(entity, `${DKG}publicEncryptionKey`, `"${key.publicEncryptionKey}"`);
-      q(entity, `${DKG}encryptionKeyAlgorithm`, `"${key.encryptionKeyAlgorithm}"`);
-      q(entity, `${DKG}encryptionKeyProof`, `"${key.encryptionKeyProof}"`);
+      q(entity, T.dkgPublicEncryptionKey, `"${key.publicEncryptionKey}"`);
+      q(entity, T.dkgEncryptionKeyAlgorithm, `"${key.encryptionKeyAlgorithm}"`);
+      q(entity, T.dkgEncryptionKeyProof, `"${key.encryptionKeyProof}"`);
       if (key.revokedAt && key.revocationProof) {
-        q(key.encryptionKeyId, `${DKG}revokedAt`, `"${key.revokedAt}"`);
-        q(key.encryptionKeyId, `${DKG}revokedBy`, entity);
-        q(key.encryptionKeyId, `${DKG}encryptionKeyRevocationProof`, `"${key.revocationProof}"`);
+        q(key.encryptionKeyId, T.dkgRevokedAt, `"${key.revokedAt}"`);
+        q(key.encryptionKeyId, T.dkgRevokedBy, entity);
+        q(key.encryptionKeyId, T.dkgEncryptionKeyRevocationProof, `"${key.revocationProof}"`);
       }
     }
   } else if (config.publicEncryptionKey && config.encryptionKeyAlgorithm && config.encryptionKeyProof) {
-    q(entity, `${DKG}publicEncryptionKey`, `"${config.publicEncryptionKey}"`);
-    q(entity, `${DKG}encryptionKeyAlgorithm`, `"${config.encryptionKeyAlgorithm}"`);
-    q(entity, `${DKG}encryptionKeyProof`, `"${config.encryptionKeyProof}"`);
+    q(entity, T.dkgPublicEncryptionKey, `"${config.publicEncryptionKey}"`);
+    q(entity, T.dkgEncryptionKeyAlgorithm, `"${config.encryptionKeyAlgorithm}"`);
+    q(entity, T.dkgEncryptionKeyProof, `"${config.encryptionKeyProof}"`);
   }
   if (config.framework) {
-    q(entity, `${SKILL}framework`, `"${config.framework}"`);
+    q(entity, T.skillFramework, `"${config.framework}"`);
   }
 
   // ERC-8004 capabilities (skills as capabilities)
   for (let i = 0; i < config.skills.length; i++) {
     const skill = config.skills[i];
-    const capUri = `${entity}/.well-known/genid/cap${i + 1}`;
+    const capUri = deriveAgentProfileOwnedSubjectV1(entity, 'capability', i + 1);
 
-    q(entity, `${ERC8004}capabilities`, capUri);
-    q(capUri, RDF_TYPE, `${ERC8004}Capability`);
-    q(capUri, `${SCHEMA}name`, `"${skill.skillType}"`);
+    q(entity, T.erc8004Capabilities, capUri);
+    q(capUri, T.rdfType, T.erc8004Capability);
+    q(capUri, T.schemaName, `"${skill.skillType}"`);
 
     // Keep backward-compatible skill offering triples
-    const offeringUri = `${entity}/.well-known/genid/offering${i + 1}`;
-    q(entity, `${SKILL}offersSkill`, offeringUri);
-    q(offeringUri, RDF_TYPE, `${SKILL}SkillOffering`);
-    q(offeringUri, `${SKILL}skill`, `${SKILL}${skill.skillType}`);
+    const offeringUri = deriveAgentProfileOwnedSubjectV1(entity, 'offering', i + 1);
+    q(entity, T.skillOffersSkill, offeringUri);
+    q(offeringUri, T.rdfType, T.skillSkillOffering);
+    q(offeringUri, T.skillSkill, `${T.skillNamespace}${skill.skillType}`);
 
     if (skill.pricePerCall !== undefined) {
-      q(offeringUri, `${SKILL}pricePerCall`, `"${skill.pricePerCall}"`);
+      q(offeringUri, T.skillPricePerCall, `"${skill.pricePerCall}"`);
     }
     if (skill.currency) {
-      q(offeringUri, `${SKILL}currency`, `"${skill.currency}"`);
+      q(offeringUri, T.skillCurrency, `"${skill.currency}"`);
     }
     if (skill.successRate !== undefined) {
-      q(offeringUri, `${SKILL}successRate`, `"${skill.successRate}"`);
+      q(offeringUri, T.skillSuccessRate, `"${skill.successRate}"`);
     }
     if (skill.pricingModel) {
-      q(offeringUri, `${SKILL}pricing`, `${SKILL}${skill.pricingModel}`);
+      q(offeringUri, T.skillPricing, `${T.skillNamespace}${skill.pricingModel}`);
     }
   }
 
   // PROV provenance
-  const activityUri = `${entity}/.well-known/genid/registration`;
-  q(entity, `${PROV}wasGeneratedBy`, activityUri);
-  q(activityUri, RDF_TYPE, `${PROV}Activity`);
-  q(activityUri, `${PROV}atTime`, `"${profileTimestamp}"`);
+  const activityUri = deriveAgentProfileOwnedSubjectV1(entity, 'registration');
+  q(entity, T.provWasGeneratedBy, activityUri);
+  q(activityUri, T.rdfType, T.provActivity);
+  q(activityUri, T.provAtTime, `"${profileTimestamp}"`);
 
   const served = config.contextGraphsServed;
   if (served?.length) {
-    const hostingUri = `${entity}/.well-known/genid/hosting`;
-    q(entity, `${SKILL}hostingProfile`, hostingUri);
-    q(hostingUri, RDF_TYPE, `${SKILL}HostingProfile`);
+    const hostingUri = deriveAgentProfileOwnedSubjectV1(entity, 'hosting');
+    q(entity, T.skillHostingProfile, hostingUri);
+    q(hostingUri, T.rdfType, T.skillHostingProfileType);
     for (const cg of served) {
-      q(hostingUri, `${SKILL}contextGraphsServed`, `"${cg}"`);
+      q(hostingUri, T.skillContextGraphsServed, `"${cg}"`);
     }
   }
 
