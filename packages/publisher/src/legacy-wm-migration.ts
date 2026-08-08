@@ -10,17 +10,28 @@
  * through `LegacyWmMigrationHost`; this module owns phase ordering and
  * classification:
  *
- *   load marker → load lifecycle → summarize → classify → load + validate
- *   content → prepare backup → apply graph-scoped draft → complete marker
+ *   load marker → load lifecycle → summarize → classify → load content →
+ *   VALIDATE content → [per-phase steps] → resolve target → copy → complete
  *
  * `classifyLegacyWmMigration` is the ONLY place a migration is decided: it
  * takes the marker × lifecycle matrix and returns an exhaustive typed
- * `LegacyWmMigrationPlan` — `not-needed` (already graph-scoped, or no legacy
- * draft), `eligible-fresh`, or `prepared-resume` — or throws a coded refusal
- * (`KA_LEGACY_WM_MIGRATION_REFUSED`, `KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY`).
- * `eligible-fresh` genuinely means eligible; no later phase re-decides
- * whether a draft may migrate, so the restart states and allowed transitions
- * are explicit rather than implicit in one long mutable procedure.
+ * `LegacyWmMigrationPlan` — `not-needed` (with a reason), `migrate-fresh`,
+ * `resume-create`, or `resume-copy` — or throws `KA_LEGACY_WM_MIGRATION_REFUSED`
+ * for a draft that is not a purely local legacy draft. One exhaustive
+ * `switch` maps each phase to the steps it still owes, so a new phase is a
+ * compile error rather than a silent no-op.
+ *
+ * DECLINE, DO NOT THROW. This runs ahead of `createAssertion` and outside
+ * its idempotent catch, so any throw here permanently breaks chat memory on
+ * that node — the failure mode this module exists to remove. Every state
+ * that merely means "cannot migrate" therefore returns `not-needed` with a
+ * reason and a log, never an error: no identity lane, no active lifecycle,
+ * or a target that is no longer an open draft. Only a draft that IS a live
+ * legacy draft but is unsafe to touch (shared/sealed/promoting) refuses.
+ *
+ * The content gate is its own phase: `validateMigratableContent` is the only
+ * constructor of `ValidatedMigratableContent`, and every mutating step takes
+ * that branded type, so un-gated legacy content cannot reach a mutation.
  *
  * Safety properties:
  * - only an active `created`/`WM` lifecycle with no SWM/VM/promote state is
@@ -66,6 +77,53 @@ export interface LegacyWmMigrationRequest {
   allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }>;
 }
 
+/**
+ * Identifies exactly one legacy draft's content. Both halves are derived
+ * from the same request, so public and private reads cannot diverge.
+ */
+export interface LegacyWmContentSelector {
+  /** The legacy name-keyed public graph the draft's triples live in. */
+  sourceGraph: string;
+  contextGraphId: string;
+  agentAddress: string;
+  name: string;
+  subGraphName: string | undefined;
+}
+
+/** Legacy content as read, before the migration content gate has run. */
+export interface RawMigratableContent {
+  publicQuads: Quad[];
+  privateQuads: Quad[];
+}
+
+declare const validatedContentBrand: unique symbol;
+
+/**
+ * Legacy content PROVEN to have passed the content gate.
+ *
+ * `validateMigratableContent` is the only way to obtain one, so a mutating
+ * phase cannot be handed un-gated content: the pre-mutation invariant is
+ * carried by the type, not by a comment or a method name. Restoring the gate
+ * as its own phase (rather than folding it into the loader) is what makes it
+ * visible in the orchestration.
+ */
+type ValidatedMigratableContent = RawMigratableContent & {
+  readonly [validatedContentBrand]: true;
+};
+
+/**
+ * The content gate, as an explicit migration phase. Runs the host's rejection
+ * rules and brands the result; throwing leaves the draft untouched because
+ * this happens before any mutation.
+ */
+function validateMigratableContent(
+  host: Pick<LegacyWmMigrationHost, 'assertContentMigratable'>,
+  raw: RawMigratableContent,
+): ValidatedMigratableContent {
+  host.assertContentMigratable(raw.publicQuads, raw.privateQuads);
+  return raw as ValidatedMigratableContent;
+}
+
 export interface LegacyWmMigrationResult {
   status: 'not-needed' | 'migrated' | 'resumed';
   copiedPublic: number;
@@ -82,18 +140,32 @@ export interface LegacyWmMigrationResult {
  */
 export interface LegacyWmMigrationHost {
   store: Pick<TripleStore, 'query' | 'insert' | 'createGraph' | 'deleteByPattern'>;
-  validateOptionalSubGraph(subGraphName: string | undefined): void;
-  ensureSubGraphRegistered(contextGraphId: string, subGraphName: string | undefined): Promise<void>;
-  /** All quads reachable from the assertion-scoped graph family of `graphUri`. */
-  loadAssertionScopedQuads(graphUri: string): Promise<Quad[]>;
-  loadPrivateDraftQuads(
-    contextGraphId: string,
-    agentAddress: string,
-    name: string,
-    subGraphName: string | undefined,
-  ): Promise<Quad[]>;
-  /** Content gate: throws unless the legacy content may enter the graph-scoped boundary. */
-  validateMigratableContent(publicQuads: Quad[], privateQuads: Quad[]): void;
+  /** Validate the sub-graph name and assert it is registered. */
+  prepareSubGraph(contextGraphId: string, subGraphName: string | undefined): Promise<void>;
+  /**
+   * Read the legacy draft's public + private content. A plain read — the
+   * content gate is a separate, explicit phase (`validateMigratableContent`)
+   * owned by this module, so the invariant is enforced by the type system
+   * rather than by a host implementation's good behavior.
+   *
+   * Takes only the identity of the draft to read — not the whole request —
+   * so a host cannot load public quads for one draft and private quads for
+   * another.
+   */
+  loadMigratableContent(selector: LegacyWmContentSelector): Promise<RawMigratableContent>;
+  /**
+   * The content gate: throws unless this legacy content may enter the
+   * graph-scoped assertion boundary. Never called directly by the
+   * orchestration — see `validateMigratableContent`.
+   */
+  assertContentMigratable(publicQuads: Quad[], privateQuads: Quad[]): void;
+  /**
+   * Does the legacy draft still hold content anywhere in its assertion-scoped
+   * graph family? Diagnostic only — must cover the same graphs
+   * `loadMigratableContent` reads, or it will report "nothing stranded" for
+   * content sitting in a named child graph.
+   */
+  hasRetainedSourceContent(sourceGraph: string): Promise<boolean>;
   /** Whether the publisher can mint a KA number itself for this author. */
   canSelfAllocateGraphIdentity(agentAddress: string): boolean;
   createGraphScopedDraft(
@@ -120,17 +192,28 @@ export interface LegacyWmMigrationHost {
 }
 
 /**
- * The typed migration phases a request can classify into. Refusals throw.
+ * The typed migration transitions. Refusals throw, so every value here is a
+ * run that may proceed, and the variant NAMES the earliest mutating step
+ * still owed — the apply phase executes the variant rather than re-deriving
+ * progress from ambient state.
  *
- * The two `not-needed` reasons differ in what they may report: an
- * already-migrated draft echoes its recorded marker counts/target, while a
- * draft that never existed (or was since discarded) reports nothing — its
- * marker rows, if any survived a crash, describe an assertion that is gone.
+ * Transitions, not flags: an invalid combination (a fresh migration that
+ * skips both preparation and draft creation, say) is not representable.
+ *
+ * The durable marker vocabulary stays `prepared`/`completed` and is
+ * deliberately NOT widened — markers written by already-shipped nodes must
+ * keep classifying. The two resume variants are therefore derived from the
+ * observed lifecycle shape, which is sound because every step is idempotent.
+ *
+ * - `migrate-fresh`   — back up, mint the graph-scoped draft, copy, complete.
+ * - `resume-create`   — prepared, draft not yet minted: mint, copy, complete.
+ * - `resume-copy`     — prepared, draft already minted: copy, complete.
  */
 export type LegacyWmMigrationPlan =
-  | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' }
-  | { phase: 'eligible-fresh' }
-  | { phase: 'prepared-resume' };
+  | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' | 'target-not-writable' | 'no-identity-lane' }
+  | { phase: 'migrate-fresh' }
+  | { phase: 'resume-create' }
+  | { phase: 'resume-copy' };
 
 interface MigrationUris {
   lifecycle: string;
@@ -165,9 +248,15 @@ export function toLifecycleRow(binding: Record<string, string | undefined>): Lif
   return s && p && o != null ? { s, p, o } : null;
 }
 
-/** The complete lifecycle picture the classifier decides from. */
+/**
+ * The complete lifecycle picture the classifier decides from.
+ *
+ * Deliberately carries NO total-row count. `loadLifecycleRows` returns the
+ * active lifecycle subject AND its `…/event/{id}` provenance children, and
+ * every decision here is about the active subject only — a count spanning
+ * both reads as "a draft exists" when only orphan event rows survive.
+ */
 export interface LifecycleSummary {
-  rowCount: number;
   activeRows: LifecycleRow[];
   scopeVersions: Set<string>;
   isGraphScoped: boolean;
@@ -177,17 +266,16 @@ export interface LifecycleSummary {
   hasDurableOrInFlightState: boolean;
 }
 
-function migrationRefused(message: string): Error {
-  return Object.assign(new Error(message), { code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
+/** Is this lifecycle an open `created`/`WM` draft the publisher will write? */
+function isOpenWorkingMemoryDraft(summary: LifecycleSummary): boolean {
+  return summary.states.size === 1
+    && summary.states.has('created')
+    && summary.layers.size === 1
+    && summary.layers.has(MemoryLayer.WorkingMemory);
 }
 
-function identityAllocatorRequired(contextGraphId: string, name: string): Error {
-  return Object.assign(
-    new Error(
-      `Legacy WM migration requires a graph-scoped identity allocator for ${contextGraphId}/${name}`,
-    ),
-    { code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' },
-  );
+function migrationRefused(message: string): Error {
+  return Object.assign(new Error(message), { code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
 }
 
 function migrationUris(request: LegacyWmMigrationRequest): MigrationUris {
@@ -278,7 +366,6 @@ export function summarizeLifecycle(
   );
   const scopeVersions = activeValues(`${DKG}contentScopeVersion`);
   return {
-    rowCount: lifecycleRows.length,
     activeRows,
     scopeVersions,
     isGraphScoped: scopeVersions.size === 1
@@ -296,18 +383,25 @@ export function summarizeLifecycle(
 
 /**
  * The single classifier for the migration state machine: marker × lifecycle
- * in, an exhaustive plan out, refusals thrown. `eligible-fresh` genuinely
- * means eligible — nothing downstream re-decides whether a draft may migrate.
+ * in, an exhaustive plan out, refusals thrown. Nothing downstream re-decides
+ * whether a draft may migrate: `migrate-fresh` has passed the full legacy
+ * eligibility gate, and `resume-copy` has confirmed its target is still an
+ * open `created`/`WM` draft (a discard/share/seal inside the prepared window
+ * makes the outstanding copy impossible, and declining beats throwing on a
+ * path that runs ahead of `createAssertion`).
  *
  * Ordering is part of the durable contract:
  * 1. an already graph-scoped draft is done, even under a stale marker;
  * 2. an unrecognized marker state refuses rather than guessing;
  * 3. a `prepared` marker resumes — preparation deliberately clears the legacy
  *    rows, so zero rows there means "resume", not "nothing to do";
- * 4. no active lifecycle at all means there is nothing to migrate, whether we
- *    never saw a draft or a completed migration's assertion was since
- *    discarded (that case must stay a no-op, or a later `createAssertion`
- *    would be blocked forever by its own success marker);
+ * 4. no rows on the ACTIVE lifecycle subject means there is nothing to
+ *    migrate — whether a draft was never created, or one was cleared and only
+ *    orphan `…/event/{id}` provenance rows survive. This must stay a no-op:
+ *    the daemon runs migration ahead of `createAssertion`, so refusing here
+ *    would permanently block the create that would otherwise sweep those
+ *    orphans away (and, after any successful migration, the `completed`
+ *    marker is durable forever);
  * 5. otherwise the draft must pass the full local-draft eligibility gate.
  *
  * `loadSeal` is a thunk so the seal ASK is only issued for a draft that has
@@ -332,17 +426,34 @@ export async function classifyLegacyWmMigration(
     );
   }
   if (markerState === 'prepared') {
-    return { phase: 'prepared-resume' };
+    // Preparation already happened; what remains depends on how far the
+    // interrupted run got, which the lifecycle shape reports.
+    if (!summary.isGraphScoped) {
+      // The draft was never minted. `resume-create` clears the legacy
+      // lifecycle and creates fresh, so a since-discarded draft self-heals.
+      return { phase: 'resume-create' };
+    }
+    // The draft exists and only the copy is outstanding — but the copy is a
+    // WRITE, and the publisher refuses to write a lifecycle that is no
+    // longer an open `created`/`WM` draft. If the assertion was discarded,
+    // shared, or sealed inside the prepared window, attempting it would
+    // throw, and this migration runs ahead of `createAssertion` outside its
+    // idempotent catch: the throw would permanently break chat memory with
+    // no way back, since `resume-copy` never re-mints and only
+    // `completeMarker` clears the marker. Decline instead. The marker stays
+    // `prepared`, so if the draft returns to a writable state the copy still
+    // completes, and the source content is retained meanwhile.
+    if (!isOpenWorkingMemoryDraft(summary) || summary.hasDurableOrInFlightState) {
+      return { phase: 'not-needed', reason: 'target-not-writable' };
+    }
+    return { phase: 'resume-copy' };
   }
-  if (summary.rowCount === 0) {
+  if (summary.activeRows.length === 0) {
     return { phase: 'not-needed', reason: 'no-legacy-draft' };
   }
   if (
     summary.scopeVersions.size > 1
-    || summary.states.size !== 1
-    || !summary.states.has('created')
-    || summary.layers.size !== 1
-    || !summary.layers.has(MemoryLayer.WorkingMemory)
+    || !isOpenWorkingMemoryDraft(summary)
     || summary.hasDurableOrInFlightState
     || await loadSeal()
   ) {
@@ -350,7 +461,9 @@ export async function classifyLegacyWmMigration(
       `Legacy WM migration refused for ${input.contextGraphId}/${input.name}: only an active, local created/WM draft is eligible`,
     );
   }
-  return { phase: 'eligible-fresh' };
+  // Reaching here means not graph-scoped: step 1 already returned for an
+  // already-graph-scoped draft under a non-`prepared` marker.
+  return { phase: 'migrate-fresh' };
 }
 
 /** Is the legacy source graph carrying any assertion seal? */
@@ -409,31 +522,34 @@ async function prepareBackup(
 }
 
 /**
- * Phase 5 — replace the legacy active metadata with a graph-scoped draft and
- * copy the public triples into the newly resolved WM graph. The legacy source
- * graph itself is deliberately NOT deleted: it is the durable data backup.
+ * Step — replace the legacy active metadata with a freshly minted
+ * graph-scoped draft. The legacy source GRAPH is deliberately NOT deleted:
+ * it is the durable data backup.
  */
-async function applyGraphScopedDraft(
+async function createGraphScopedDraft(
   host: LegacyWmMigrationHost,
   request: LegacyWmMigrationRequest,
   uris: MigrationUris,
   lifecycleRows: LifecycleRow[],
-  isGraphScoped: boolean,
-  publicQuads: Quad[],
-): Promise<string> {
-  if (!isGraphScoped) {
-    for (const subject of new Set(lifecycleRows.map((row) => row.s))) {
-      await host.store.deleteByPattern({ graph: uris.metaGraph, subject });
-    }
-    await host.createGraphScopedDraft(
-      request.contextGraphId,
-      request.name,
-      request.agentAddress,
-      request.subGraphName,
-      { allocateKaNumber: request.allocateKaNumber },
-    );
+): Promise<void> {
+  for (const subject of new Set(lifecycleRows.map((row) => row.s))) {
+    await host.store.deleteByPattern({ graph: uris.metaGraph, subject });
   }
+  await host.createGraphScopedDraft(
+    request.contextGraphId,
+    request.name,
+    request.agentAddress,
+    request.subGraphName,
+    { allocateKaNumber: request.allocateKaNumber },
+  );
+}
 
+/** Step — resolve the graph-scoped WM graph, asserting it is not the legacy one. */
+async function resolveTargetGraph(
+  host: LegacyWmMigrationHost,
+  request: LegacyWmMigrationRequest,
+  uris: MigrationUris,
+): Promise<string> {
   const targetGraph = await host.wmGraphUri(
     request.contextGraphId,
     request.agentAddress,
@@ -448,16 +564,28 @@ async function applyGraphScopedDraft(
       { code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' },
     );
   }
-  if (publicQuads.length > 0) {
-    await host.writeGraphScopedDraft(
-      request.contextGraphId,
-      request.name,
-      request.agentAddress,
-      publicQuads,
-      request.subGraphName,
-    );
-  }
   return targetGraph;
+}
+
+/** Step — copy the validated legacy public triples into the graph-scoped draft. */
+async function copyPublicContent(
+  host: LegacyWmMigrationHost,
+  request: LegacyWmMigrationRequest,
+  content: ValidatedMigratableContent,
+): Promise<void> {
+  if (content.publicQuads.length === 0) return;
+  await host.writeGraphScopedDraft(
+    request.contextGraphId,
+    request.name,
+    request.agentAddress,
+    content.publicQuads,
+    request.subGraphName,
+  );
+}
+
+/** Compile-time proof that every plan phase is handled. */
+function assertNeverPhase(plan: never): never {
+  throw new Error(`Unhandled legacy WM migration phase: ${JSON.stringify(plan)}`);
 }
 
 /** Phase 6 — flip the durable marker from `prepared` to `completed`. */
@@ -501,8 +629,7 @@ export async function runLegacyWorkingMemoryMigration(
   host: LegacyWmMigrationHost,
   request: LegacyWmMigrationRequest,
 ): Promise<LegacyWmMigrationResult> {
-  host.validateOptionalSubGraph(request.subGraphName);
-  await host.ensureSubGraphRegistered(request.contextGraphId, request.subGraphName);
+  await host.prepareSubGraph(request.contextGraphId, request.subGraphName);
 
   const uris = migrationUris(request);
   const marker = await loadMigrationMarker(host.store, uris);
@@ -519,6 +646,42 @@ export async function runLegacyWorkingMemoryMigration(
   );
 
   if (plan.phase === 'not-needed') {
+    // Orphan `…/event/{id}` rows with no active lifecycle subject mean the
+    // draft's metadata was lost mid-sweep. Migration cannot proceed — there
+    // is no state/layer to prove eligibility against, and migrating an
+    // unprovable draft is exactly what the gate exists to stop — but any
+    // content still in the legacy graph would then be invisible to reads of
+    // the graph-scoped draft that `createAssertion` goes on to mint. The
+    // data is retained (the source graph is never deleted), so surface it
+    // rather than abandoning it silently. Probed ONLY in this anomalous
+    // case, so the healthy no-draft path costs no extra query.
+    if (plan.reason === 'target-not-writable') {
+      host.logInfo(
+        `Legacy WM ${request.contextGraphId}/${request.name}: an interrupted migration still `
+        + `owes a content copy, but the assertion is no longer an open created/WM draft, so `
+        + `the copy is declined rather than failing the create that follows. The legacy `
+        + `content remains in ${uris.sourceGraph} and the copy resumes if the draft reopens.`,
+      );
+    }
+    if (plan.reason === 'no-legacy-draft' && lifecycleRows.length > 0) {
+      // Diagnostic only, and deliberately fail-soft: this branch exists so
+      // the daemon SURVIVES a corrupt-metadata draft. A probe that could
+      // throw would re-break exactly the path it reports on.
+      let stranded = false;
+      try {
+        stranded = await host.hasRetainedSourceContent(uris.sourceGraph);
+      } catch {
+        stranded = false;
+      }
+      if (stranded) {
+        host.logInfo(
+          `Legacy WM ${request.contextGraphId}/${request.name}: active lifecycle metadata is `
+          + `missing but ${uris.sourceGraph} still holds content. Migration cannot verify `
+          + `eligibility without it, so the draft is left in place and NOT migrated; the data `
+          + `is retained in that graph for manual recovery.`,
+        );
+      }
+    }
     const migrated = plan.reason === 'already-graph-scoped';
     return {
       status: 'not-needed',
@@ -530,53 +693,91 @@ export async function runLegacyWorkingMemoryMigration(
     };
   }
 
-  // Load and gate the content BEFORE any mutation: a draft whose legacy
-  // content cannot enter the graph-scoped assertion boundary must fail
-  // while its active metadata is still untouched.
-  const publicQuads = await host.loadAssertionScopedQuads(uris.sourceGraph);
-  const privateQuads = await host.loadPrivateDraftQuads(
-    request.contextGraphId,
-    request.agentAddress,
-    request.name,
-    request.subGraphName,
-  );
-  host.validateMigratableContent(publicQuads, privateQuads);
-
-  // Both remaining phases mutate, so both need a graph-scoped identity lane
-  // before anything is written.
-  const canAllocateGraphIdentity = request.allocateKaNumber !== undefined
-    || host.canSelfAllocateGraphIdentity(request.agentAddress);
-  if (!summary.isGraphScoped && !canAllocateGraphIdentity) {
-    throw identityAllocatorRequired(request.contextGraphId, request.name);
-  }
-
-  if (plan.phase === 'eligible-fresh') {
-    await prepareBackup(host, uris, lifecycleRows, {
-      publicQuads: publicQuads.length,
-      privateQuads: privateQuads.length,
-    });
-  }
-
-  const targetGraph = await applyGraphScopedDraft(
+  // Read, then GATE the content — both before any mutation, so a draft whose
+  // legacy content cannot enter the graph-scoped assertion boundary fails
+  // while its active metadata is still untouched. Only the branded result is
+  // accepted downstream, so no mutating step can receive un-gated content.
+  const content = validateMigratableContent(
     host,
-    request,
-    uris,
-    lifecycleRows,
-    summary.isGraphScoped,
-    publicQuads,
+    await host.loadMigratableContent({
+      sourceGraph: uris.sourceGraph,
+      contextGraphId: request.contextGraphId,
+      agentAddress: request.agentAddress,
+      name: request.name,
+      subGraphName: request.subGraphName,
+    }),
   );
+
+  // Identity requirement reads off the PLAN, not off `summary`: only
+  // `resume-copy` finds the draft already minted, so it is the one phase that
+  // needs no allocator. (Equivalent to the old `!summary.isGraphScoped` test —
+  // `migrate-fresh` cannot be graph-scoped, since step 1 returns `not-needed`
+  // for that — but derived from the transition model rather than beside it.)
+  if (plan.phase !== 'resume-copy') {
+    const canAllocateGraphIdentity = request.allocateKaNumber !== undefined
+      || host.canSelfAllocateGraphIdentity(request.agentAddress);
+    if (!canAllocateGraphIdentity) {
+      // No identity lane — the author is not an allocatable EVM address (a
+      // node with no registered default agent authors as its libp2p peerId).
+      // There is nothing to migrate TO: without a mintable KA number the
+      // draft's WM graph IS the legacy name-keyed graph, which
+      // `assertionCreate` keeps using. Declining leaves that draft exactly
+      // as-is, which is correct AND survivable; throwing here would escape
+      // `createAssertion` outside its idempotent catch and permanently break
+      // chat memory on every such node. No mutation has happened yet.
+      host.logInfo(
+        `Legacy WM ${request.contextGraphId}/${request.name}: no graph-scoped identity lane `
+        + `for author ${request.agentAddress}, so the legacy draft is left in place and keeps `
+        + `working under its name-keyed graph.`,
+      );
+      return {
+        status: 'not-needed',
+        copiedPublic: 0,
+        preservedPrivate: 0,
+        sourceGraph: uris.sourceGraph,
+        backupGraph: uris.backupGraph,
+      };
+    }
+  }
+
+  // One exhaustive dispatch over the transition: each phase performs the
+  // steps it still owes and names its result status. Adding a phase without
+  // handling it here is a compile error, so the mapping cannot drift.
+  let status: 'migrated' | 'resumed';
+  switch (plan.phase) {
+    case 'migrate-fresh':
+      await prepareBackup(host, uris, lifecycleRows, {
+        publicQuads: content.publicQuads.length,
+        privateQuads: content.privateQuads.length,
+      });
+      await createGraphScopedDraft(host, request, uris, lifecycleRows);
+      status = 'migrated';
+      break;
+    case 'resume-create':
+      await createGraphScopedDraft(host, request, uris, lifecycleRows);
+      status = 'resumed';
+      break;
+    case 'resume-copy':
+      status = 'resumed';
+      break;
+    default:
+      assertNeverPhase(plan);
+  }
+
+  const targetGraph = await resolveTargetGraph(host, request, uris);
+  await copyPublicContent(host, request, content);
   await completeMarker(host.store, uris, targetGraph);
 
   host.logInfo(
     `Migrated legacy WM ${request.contextGraphId}/${request.name} from ${uris.sourceGraph} to ${targetGraph} `
-    + `(public=${publicQuads.length}, private-preserved=${privateQuads.length}, `
-    + `recovery=${plan.phase === 'prepared-resume' ? 'resumed' : 'fresh'})`,
+    + `(public=${content.publicQuads.length}, `
+    + `private-preserved=${content.privateQuads.length}, phase=${plan.phase})`,
   );
 
   return {
-    status: plan.phase === 'prepared-resume' ? 'resumed' : 'migrated',
-    copiedPublic: publicQuads.length,
-    preservedPrivate: privateQuads.length,
+    status,
+    copiedPublic: content.publicQuads.length,
+    preservedPrivate: content.privateQuads.length,
     sourceGraph: uris.sourceGraph,
     targetGraph,
     backupGraph: uris.backupGraph,

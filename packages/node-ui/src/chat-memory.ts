@@ -472,6 +472,16 @@ export class ChatMemoryManager {
     return this.agentContextGraph;
   }
 
+  /**
+   * The chat-turns assertion this manager writes to. Exposed so a caller
+   * wiring a storage-upgrade policy can assert it covers the assertion the
+   * manager ACTUALLY uses, rather than comparing its own configuration to
+   * itself (#2149).
+   */
+  get assertionName(): string {
+    return this.chatTurnsAssertion;
+  }
+
   updateConfig(llmConfig: LlmConfig): void {
     this.llmConfig = llmConfig;
   }

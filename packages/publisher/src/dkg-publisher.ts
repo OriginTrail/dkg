@@ -7393,23 +7393,31 @@ export class DKGPublisher implements Publisher {
   private legacyWmMigrationHost(): LegacyWmMigrationHost {
     return {
       store: this.store,
-      validateOptionalSubGraph: (subGraphName) =>
-        DKGPublisher.validateOptionalSubGraph(subGraphName),
-      ensureSubGraphRegistered: (contextGraphId, subGraphName) =>
-        this.ensureSubGraphRegistered(contextGraphId, subGraphName),
-      loadAssertionScopedQuads: (graphUri) => this.assertionScopedQuads(graphUri),
-      loadPrivateDraftQuads: (contextGraphId, agentAddress, name, subGraphName) =>
-        this.privateStore.getKnowledgeAssetPrivateDraftTriples(
-          contextGraphId,
-          agentAddress,
-          name,
-          subGraphName,
-        ),
-      validateMigratableContent: (publicQuads, privateQuads) => {
+      prepareSubGraph: async (contextGraphId, subGraphName) => {
+        DKGPublisher.validateOptionalSubGraph(subGraphName);
+        await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+      },
+      loadMigratableContent: async (selector) => {
+        // Two independent reads off one selector — no ordering requirement
+        // between them, so read them together.
+        const [publicQuads, privateQuads] = await Promise.all([
+          this.assertionScopedQuads(selector.sourceGraph),
+          this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+            selector.contextGraphId,
+            selector.agentAddress,
+            selector.name,
+            selector.subGraphName,
+          ),
+        ]);
+        return { publicQuads, privateQuads };
+      },
+      assertContentMigratable: (publicQuads, privateQuads) => {
         rejectUserAuthoredProtocolMetadata(publicQuads);
         rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
         rejectOversizedRdfLiterals(privateQuads, 'legacyWorkingMemoryMigration.privateQuads');
       },
+      hasRetainedSourceContent: async (sourceGraph) =>
+        (await this.assertionScopedQuads(sourceGraph)).length > 0,
       canSelfAllocateGraphIdentity: (agentAddress) =>
         this.kaAllocator !== undefined && isAllocatableKaAuthorV1(agentAddress),
       createGraphScopedDraft: (contextGraphId, name, agentAddress, subGraphName, opts) =>
