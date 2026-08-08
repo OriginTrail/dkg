@@ -605,7 +605,10 @@ async function main(): Promise<void> {
       (await countQuadsInGraph(server.queryEndpoint, SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH));
 
     // ---- Capability fail-closed matrix against the LIVE endpoint.
-    const ownership = createManagedOxigraphOwnershipControllerV1();
+    const ownership = createManagedOxigraphOwnershipControllerV1(
+      server.queryEndpoint,
+      server.updateEndpoint,
+    );
     ownership.bindReadyGeneration();
     const handoff: ManagedOxigraphSupervisorHandoffV1 = {
       stopAndProveOwnedChildDead: async () => undefined,
@@ -661,7 +664,10 @@ async function main(): Promise<void> {
     capability.throughEnabledChangelog =
       withChangelog.getSystemRecordLaneControllerV1?.() !== undefined;
 
-    const terminalOwnership = createManagedOxigraphOwnershipControllerV1();
+    const terminalOwnership = createManagedOxigraphOwnershipControllerV1(
+      server.queryEndpoint,
+      server.updateEndpoint,
+    );
     terminalOwnership.bindReadyGeneration();
     terminalOwnership.invalidate('port-release-unproven');
     const terminal = await build(

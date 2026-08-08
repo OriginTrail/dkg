@@ -38,7 +38,10 @@ import {
   formatSparqlJsonBindings,
   type AdapterSparqlJsonSelectResponse,
 } from './sparql-json-results.js';
-import { externalStorePriorityScheduler } from '../store-priority-scheduler.js';
+import {
+  externalStorePriorityScheduler,
+  type StoreAdmissionV1,
+} from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
 import {
@@ -56,9 +59,10 @@ import {
   ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
-  isManagedOxigraphOwnershipLiveV1,
+  managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
+  type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from '../managed-oxigraph-ownership-v1-internal.js';
 import {
@@ -68,7 +72,12 @@ import {
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerV1,
+  type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
+import { createSystemRecordAtomicApplyExecutorV1 } from '../system-record-atomic-apply-executor-v1-internal.js';
+import { createSystemRecordVerifiedReplacementRegistryV1 } from '../system-record-verified-replacement-v1-internal.js';
+import { OwnedManagedHttpClient } from './managed-http-client.js';
+import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
@@ -109,6 +118,25 @@ const DEFAULT_SLOW_QUERY_THRESHOLD_MS = 10_000;
 const DEFAULT_SLOW_QUERY_SAMPLE_RATE = 1;
 const MANAGED_LIST_GRAPHS_CACHE_MS = 30_000;
 const monotonicNow = (): number => performance.now();
+const CONTEXT_GRAPH_IRI_PREFIX = 'did:dkg:context-graph:';
+const SYSTEM_CONTEXT_GRAPH_IRIS = [
+  `${CONTEXT_GRAPH_IRI_PREFIX}agents`,
+  `${CONTEXT_GRAPH_IRI_PREFIX}ontology`,
+] as const;
+
+interface ManagedMutationBindingV1 {
+  readonly admission: StoreAdmissionV1;
+  readonly generation: string;
+}
+
+export class ManagedOxigraphMutationUnavailableError extends Error {
+  readonly code = 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE' as const;
+
+  constructor(reason: string) {
+    super(`managed Oxigraph mutation is unavailable: ${reason}`);
+    this.name = 'ManagedOxigraphMutationUnavailableError';
+  }
+}
 
 export interface SparqlHttpQueryOptions extends QueryOptions {
   /** Caller tag used in slow-query telemetry, e.g. `agent.listContextGraphs`. */
@@ -173,6 +201,10 @@ export class SparqlHttpStore implements TripleStore {
 
   private readonly queryEndpoint: string;
   private readonly updateEndpoint: string;
+  /** Raw endpoint facts used only for exact ownership-lease identity matching. */
+  private readonly systemRecordQueryEndpoint: string;
+  private readonly systemRecordUpdateEndpoint: string;
+  private readonly systemRecordHasCredentials: boolean;
   private readonly timeout: number;
   private readonly headers: Record<string, string>;
   private readonly managedByDkg: boolean;
@@ -202,11 +234,26 @@ export class SparqlHttpStore implements TripleStore {
   private readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 | null;
   /** Lazily built so a store that is never asked for the lane allocates nothing. */
   private systemRecordLane: SystemRecordLaneControllerV1 | null | undefined;
+  /**
+   * Ordinary mutations stay on the existing untagged path until activation
+   * intent synchronously claims admission. The control barrier already waits
+   * for untagged in-flight work, so disabled mode needs no per-write metadata.
+   */
+  private systemRecordAdmissionActive = false;
+  /** The owned pool for the CURRENT child generation. */
+  private managedClient: OwnedManagedHttpClient | null = null;
+  /** A pool retired by `destroyClient`, still awaiting drain by `awaitRetiredWork`. */
+  private retiredClient: OwnedManagedHttpClient | null = null;
+  /** Terminal lifecycle fault: once set, no ordinary managed mutation may dispatch. */
+  private managedMutationFailure: string | null = null;
 
   constructor(options: SparqlHttpStoreOptions) {
     if (!options.queryEndpoint?.trim()) {
       throw new Error('sparql-http adapter requires options.queryEndpoint');
     }
+    this.systemRecordQueryEndpoint = options.queryEndpoint;
+    this.systemRecordUpdateEndpoint = options.updateEndpoint ?? options.queryEndpoint;
+    this.systemRecordHasCredentials = options.auth !== undefined;
     this.queryEndpoint = options.queryEndpoint.replace(/\/$/, '');
     this.updateEndpoint = (options.updateEndpoint ?? options.queryEndpoint).replace(/\/$/, '');
     this.timeout = options.timeout ?? 30_000;
@@ -241,16 +288,105 @@ export class SparqlHttpStore implements TripleStore {
     operation: string,
     options: QueryOptions | undefined,
     work: (signal: AbortSignal | undefined) => Promise<T>,
+    mutationBinding?: ManagedMutationBindingV1,
+    guardUnboundManagedMutation = false,
   ): Promise<T> {
     return this.workLifecycle.run(
       options?.signal,
       (signal) => externalStorePriorityScheduler.run(
         options?.priority,
         options?.source ?? `sparql-http.${operation}`,
-        () => work(signal),
+        () => {
+          if (mutationBinding) this.assertManagedMutationBinding(mutationBinding);
+          else if (guardUnboundManagedMutation) this.assertUnboundManagedMutationStillPermitted();
+          return work(signal);
+        },
         signal,
+        mutationBinding?.admission,
       ),
     );
+  }
+
+  /**
+   * Bind one managed mutation to the exact live child generation before it is
+   * admitted. Ordinary/operator-configured SPARQL endpoints keep the legacy
+   * untagged fast path.
+   */
+  private createManagedMutationBinding(
+    graphs: Iterable<string | undefined> | undefined,
+  ): ManagedMutationBindingV1 | undefined {
+    if (!this.ownershipLease) return undefined;
+    if (this.managedMutationFailure !== null) {
+      throw new ManagedOxigraphMutationUnavailableError(this.managedMutationFailure);
+    }
+    if (!this.systemRecordAdmissionActive) return undefined;
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    const attributable = this.attributableManagedOwnership(snapshot);
+    if (!attributable) {
+      throw new ManagedOxigraphMutationUnavailableError('ownership is not live and attributable');
+    }
+
+    const domain = this.managedMutationDomain(graphs);
+    return Object.freeze({
+      generation: attributable.childGeneration,
+      admission: Object.freeze({
+        storeId: this,
+        generation: attributable.childGeneration,
+        domain,
+        mode: 'shared' as const,
+      }),
+    });
+  }
+
+  /** Recheck after queueing and immediately before any update byte can leave. */
+  private assertManagedMutationBinding(binding: ManagedMutationBindingV1): void {
+    if (this.managedMutationFailure !== null) {
+      throw new ManagedOxigraphMutationUnavailableError(this.managedMutationFailure);
+    }
+    if (!this.ownershipLease) {
+      throw new ManagedOxigraphMutationUnavailableError('ownership lease was revoked');
+    }
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    const attributable = this.attributableManagedOwnership(snapshot);
+    if (
+      !attributable ||
+      attributable.childGeneration !== binding.generation
+    ) {
+      throw new ManagedOxigraphMutationUnavailableError('child generation changed before dispatch');
+    }
+  }
+
+  /** Refuse a managed write whose admission state changed while it was queued. */
+  private assertUnboundManagedMutationStillPermitted(): void {
+    if (this.managedMutationFailure !== null) {
+      throw new ManagedOxigraphMutationUnavailableError(this.managedMutationFailure);
+    }
+    if (this.systemRecordAdmissionActive) {
+      throw new ManagedOxigraphMutationUnavailableError(
+        'mutation was queued before system-record admission became active',
+      );
+    }
+  }
+
+  /**
+   * Explicit, non-system graph scopes stay outside the `agents` ordering
+   * domain. Unknown/default/system scopes conservatively serialize with the
+   * system-record apply. Hashing keeps attacker-controlled IRIs out of
+   * scheduler diagnostics and caps the domain key at a fixed size.
+   */
+  private managedMutationDomain(graphs: Iterable<string | undefined> | undefined): string {
+    if (!graphs) return 'agents';
+    const explicit = new Set<string>();
+    for (const graph of graphs) {
+      if (!graph || !graph.startsWith(CONTEXT_GRAPH_IRI_PREFIX)) return 'agents';
+      if (SYSTEM_CONTEXT_GRAPH_IRIS.some(
+        (system) => graph === system || graph.startsWith(`${system}/`),
+      )) return 'agents';
+      explicit.add(graph);
+    }
+    if (explicit.size === 0) return 'agents';
+    const canonicalScope = [...explicit].sort().join('\n');
+    return `cg:${createHash('sha256').update(canonicalScope).digest('hex')}`;
   }
 
   getPressureSnapshot(): StorePressureSnapshot {
@@ -320,10 +456,17 @@ export class SparqlHttpStore implements TripleStore {
     update: string,
     options?: QueryOptions,
     operation = 'update',
+    graphs?: Iterable<string | undefined>,
   ): Promise<void> {
     // Direct POST (W3C SPARQL 1.1 Protocol §2.2.2): the update is the raw
     // request body with `application/sparql-update`, not URL-encoded form
     // data. See postQuery for why form encoding breaks large payloads.
+    const mutationBinding = this.createManagedMutationBinding(graphs);
+    // A managed mutation admitted before activation intentionally remains
+    // untagged. Recheck it at dispatch so a control barrier cannot enable the
+    // lane and then release that stale entry under the legacy rules.
+    const guardUnboundManagedMutation = this.ownershipLease !== null
+      && mutationBinding === undefined;
     return this.runStoreWork(operation, options, async (lifecycleSignal) => {
       // AT DISPATCH, and the placement is the entire guarantee.
       //
@@ -370,7 +513,7 @@ export class SparqlHttpStore implements TripleStore {
       } finally {
         signalScope.dispose();
       }
-    });
+    }, mutationBinding, guardUnboundManagedMutation);
   }
 
   /**
@@ -419,16 +562,17 @@ export class SparqlHttpStore implements TripleStore {
    * it — lives in `releaseSystemRecordLaneControllerV1`, where the registration
    * does.
    */
-  private releaseSystemRecordLane(): void {
+  private releaseSystemRecordLane(quiesceOwner: () => Promise<void>): Promise<void> {
     const controller = this.systemRecordLane;
     this.systemRecordLane = null;
-    if (controller) releaseSystemRecordLaneControllerV1(controller);
+    if (!controller) return quiesceOwner();
+    return releaseSystemRecordLaneControllerV1(controller, quiesceOwner);
   }
 
   private assertManagedBackendReadable(operation: string): void {
     if (!this.ownershipLease) return;
-    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    if (this.attributableManagedOwnership(snapshot)) return;
     throw new ManagedOxigraphBackendUnownedError(
       `sparql-http.${operation}`,
       snapshot?.terminal ?? false,
@@ -438,14 +582,30 @@ export class SparqlHttpStore implements TripleStore {
 
   private assertManagedBackendOwned(operation: string): void {
     if (!this.ownershipLease) return;
-    if (isManagedOxigraphOwnershipLiveV1(this.ownershipLease)) return;
-    // Cold path only: the snapshot allocates, so it is taken to build the error
-    // and nowhere else.
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+    if (this.attributableManagedOwnership(snapshot)) return;
     throw new ManagedOxigraphBackendUnownedError(
       `sparql-http.${operation}`,
       snapshot?.terminal ?? false,
       snapshot?.lastInvalidation,
+    );
+  }
+
+  private attributableManagedOwnership(
+    snapshot: ManagedOxigraphOwnershipSnapshotV1 | null,
+  ): ManagedOxigraphOwnershipSnapshotV1 | null {
+    return (
+      snapshot &&
+      !snapshot.terminal &&
+      snapshot.ready &&
+      !this.systemRecordHasCredentials &&
+      managedOxigraphOwnershipEndpointsMatchV1(
+        snapshot,
+        this.systemRecordQueryEndpoint,
+        this.systemRecordUpdateEndpoint,
+      )
+        ? snapshot
+        : null
     );
   }
 
@@ -464,24 +624,12 @@ export class SparqlHttpStore implements TripleStore {
    * enumerate: no legitimate iterate-and-drop loop can reach one, only a
    * hardcoded IRI can.
    *
-   * `update()` is NOT guarded, and that is a scoped claim rather than an
-   * oversight. Its argument is an opaque SPARQL program, so there are no graph
-   * terms to inspect, and a lexical scan of the text is not a boundary: a
-   * `PREFIX dkg: <urn:dkg:internal:atomic-graph-replace:>` declaration plus
-   * `DROP SILENT GRAPH dkg:system-record-v1:state` is valid SPARQL that names
-   * the reserved graph without the reserved string ever appearing. A revision of
-   * this file shipped that scan; it was reverted once the split-prefix form was
-   * demonstrated deleting a seeded reserved graph, because a check that looks
-   * like a boundary and is not is worse than a documented gap.
-   *
-   * Closing it for real needs either a SPARQL AST with prefix/base resolution
-   * validating every resolved write target, or the migration of the raw callers
-   * — both Stack C, which is also where the materializer is first activated.
-   * Nothing in B2 writes reserved state (the lane defers every apply and no
-   * production path here even names these graphs), so the gap is inert in this
-   * stack. `reserved-internal-graph-mutation-guard.test.ts` pins BOTH the
-   * literal and split-prefix routes as known-open, so Stack C inherits a failing
-   * expectation rather than a forgotten one.
+   * `update()` cannot use this graph guard. Its argument is an opaque SPARQL
+   * program, and scanning it for reserved IRIs would be exactly the evadable
+   * best-effort string check that `ChangelogStore.assertNoReservedRef` already
+   * documents as insufficient. While system-record admission is active, that
+   * public raw-update path is refused before dispatch; Stack C can replace the
+   * refusal after its callers are migrated to an epoch-invalidating boundary.
    */
   private assertGenericMutationScope(
     graphs: Iterable<string | undefined>,
@@ -516,8 +664,9 @@ export class SparqlHttpStore implements TripleStore {
    * Advertising is gated on a LIVE lease, not merely on holding one: a store
    * whose child has exited still holds the lease object, but its snapshot is
    * not ready and the lane must not be advertised as usable. The controller
-   * itself is built lazily and memoized, so a store nobody asks allocates
-   * nothing and the default-off path stays free.
+   * itself is built lazily and memoized, so a store nobody asks allocates no
+   * per-store lane/controller state and the default-off path stays free of
+   * runtime I/O, scheduling, and timers.
    */
   getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
     // Fail-closed on all three preconditions. A store missing ANY of them is
@@ -529,7 +678,17 @@ export class SparqlHttpStore implements TripleStore {
     // still holds the lease object; advertising then would hand out a lane over
     // a child that is not the proven listener. Absence here is transient by
     // design, which is why the decorators above re-probe rather than latch it.
-    if (!snapshot || snapshot.terminal || !snapshot.ready) return undefined;
+    if (
+      !snapshot ||
+      snapshot.terminal ||
+      !snapshot.ready ||
+      this.systemRecordHasCredentials ||
+      !managedOxigraphOwnershipEndpointsMatchV1(
+        snapshot,
+        this.systemRecordQueryEndpoint,
+        this.systemRecordUpdateEndpoint,
+      )
+    ) return undefined;
 
     // `=== undefined`, NOT `!this.systemRecordLane`, and it is the whole
     // never-advertise-after-close guarantee. One field, three meanings:
@@ -547,12 +706,30 @@ export class SparqlHttpStore implements TripleStore {
     // already carries the property.
     if (this.systemRecordLane === undefined) {
       try {
-        this.systemRecordLane = createSystemRecordLaneControllerV1({
+        // Pair issuer and consumer in one private registry, but retain only the
+        // consumer at this storage boundary. The issuer is intentionally not a
+        // store property, option, facade member, or export. B3 deliberately
+        // discards it, leaving this production lane default-unused; the later
+        // structured-verifier stack must move registry creation to its private
+        // composition closure and hand this boundary the SAME consumer. Until
+        // then every caller-authored object fails before inspection/mutation.
+        const { consumer } = createSystemRecordVerifiedReplacementRegistryV1();
+        const atomicExecutor = createSystemRecordAtomicApplyExecutorV1({
+          consumer,
+          storeId: this,
+          queryEndpoint: this.systemRecordQueryEndpoint,
+          updateEndpoint: this.systemRecordUpdateEndpoint,
+          resolveClient: (binding) => this.resolveSystemRecordManagedClient(binding),
+        });
+        const owner = createSystemRecordLaneControllerV1({
           lease: this.ownershipLease,
           handoff: this.buildChildHandoff(this.supervisorHandoff),
           executor: {
             applyVerified: (proof, childGeneration) =>
-              this.executeSystemRecordApply(proof, childGeneration),
+              this.executeSystemRecordApplyLegacy(proof, childGeneration),
+            discardVerified: (proof) => atomicExecutor.discard(proof),
+            applyVerifiedSettlementBound: (proof, binding, registerRecovery) =>
+              atomicExecutor.execute(proof, binding, registerRecovery),
           },
           // Every lifecycle transition runs under the scheduler's control
           // barrier, which is what actually makes "the child is stopped only
@@ -579,7 +756,11 @@ export class SparqlHttpStore implements TripleStore {
                 ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
                 : undefined,
             ),
+          setAdmissionActive: (active) => {
+            this.systemRecordAdmissionActive = active;
+          },
         });
+        this.systemRecordLane = owner;
       } catch (error) {
         // ONLY the registration refusal, and only because absence is the
         // CORRECT answer to it: another managed store in this process holds the
@@ -611,78 +792,149 @@ export class SparqlHttpStore implements TripleStore {
    *
    * Process facts — the child exited, the port was released, a replacement is
    * the proven listener — belong to the supervisor, which holds the
-   * `ChildProcess`. The connection-pool half belongs to whoever owns the pool,
-   * which in B2 is nobody: see the empty steps below. Composing them here keeps
-   * the ORDER in one place while letting each half assert only what it can
-   * actually observe.
+   * `ChildProcess`. The adapter owns the managed HTTP client and its pool.
+   * Composing those responsibilities here keeps the ORDER in one place while
+   * letting each half assert only what it can actually observe.
    */
   private buildChildHandoff(
     supervisor: ManagedOxigraphSupervisorHandoffV1,
   ): SystemRecordChildHandoffV1 {
     return {
-      // B2 owns no connection pool, so both pool steps are genuinely empty here
-      // — and saying so is the point. What B2 does own and pin is the ORDER:
-      // destroy the pool, THEN prove the child dead, THEN drain what the retired
-      // pool still had inflight, THEN prove a clean replacement. The materializer
-      // is what imposes that order, and it is asserted there
-      // (`system-record-materializer-lifecycle-v1.test.ts`, "Order is the
-      // invariant, not merely the set"), so the sequence is protected before
-      // anything fills these steps in.
-      //
-      // Stack B3 supplies the pool half, because B3 is where the first byte is
-      // actually dispatched. Carrying an owned HTTP client here would be 260
-      // lines that no production path can reach — and it already caused one real
-      // defect: a pool built solely to be discarded turned an ordinary child
-      // recovery into a permanent `capability-lost`.
-      destroyClient: async () => {},
-      stopAndProveOwnedChildDead: () => supervisor.stopAndProveOwnedChildDead(),
-      awaitRetiredWork: async () => {},
-      startAndProveCleanGeneration: () => supervisor.startAndProveCleanGeneration(),
-      rotateMaterializationEpoch: async () => {
+      // `destroyClient` moves the live client to `retiredClient` rather than
+      // dropping it, so `awaitRetiredWork` still has something to drain. The
+      // previous shape nulled the field and then re-read that same null, which
+      // made step 3 of the sequence a structural no-op — harmless only because
+      // step 1 happened to await settlement, and actively wrong in `disable`,
+      // which calls `awaitRetiredWork` with no preceding `destroyClient` and so
+      // would have destroyed the CURRENT client and left the field pointing at
+      // a dead pool bound to the live generation.
+      destroyClient: async (absoluteDeadlineMs) => {
+        const retired = this.managedClient;
+        this.managedClient = null;
+        if (retired) {
+          this.retiredClient = retired;
+          if (absoluteDeadlineMs === undefined) await retired.destroyAndSettle();
+          else await retired.destroyAndSettleUntil(absoluteDeadlineMs);
+        }
+      },
+      stopAndProveOwnedChildDead: (absoluteDeadlineMs) =>
+        supervisor.stopAndProveOwnedChildDead(absoluteDeadlineMs),
+      awaitRetiredWork: async (absoluteDeadlineMs) => {
+        const retired = this.retiredClient;
+        if (retired) {
+          if (absoluteDeadlineMs === undefined) await retired.destroyAndSettle();
+          else await retired.destroyAndSettleUntil(absoluteDeadlineMs);
+          if (this.retiredClient === retired) this.retiredClient = null;
+        }
+      },
+      startAndProveCleanGeneration: (absoluteDeadlineMs) =>
+        supervisor.startAndProveCleanGeneration(absoluteDeadlineMs),
+      failManagedMutationsClosed: (reason) => {
+        this.managedMutationFailure ??= reason;
+      },
+      rotateMaterializationEpoch: async (networkId) => {
+        if (networkId === undefined) {
+          throw new Error('system-record materialization epoch rotation requires a network ID');
+        }
+        if (!this.ownershipLease) {
+          throw new Error('managed Oxigraph ownership lease is unavailable');
+        }
+        const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+        if (
+          !snapshot ||
+          snapshot.terminal ||
+          !snapshot.ready ||
+          this.systemRecordHasCredentials ||
+          !managedOxigraphOwnershipEndpointsMatchV1(
+            snapshot,
+            this.systemRecordQueryEndpoint,
+            this.systemRecordUpdateEndpoint,
+          )
+        ) {
+          throw new Error('managed Oxigraph ownership changed before epoch rotation');
+        }
+        if (!this.managedClient) {
+          this.managedClient = new OwnedManagedHttpClient(snapshot.childGeneration);
+        } else if (this.managedClient.childGeneration !== snapshot.childGeneration) {
+          throw new Error('managed HTTP client is bound to a different child generation');
+        }
+        const rotated = await rotateSystemRecordMaterializationEpochV1({
+          networkId,
+          lease: this.ownershipLease,
+          client: this.managedClient,
+          queryEndpoint: this.systemRecordQueryEndpoint,
+          updateEndpoint: this.systemRecordUpdateEndpoint,
+        });
         this.invalidateListGraphsCache();
         this.writeGen.recordUnscopedWrite();
+        return rotated;
+      },
+      createRecoveryRuntime: (binding, absoluteDeadlineMs, signal) => {
+        const client = this.resolveSystemRecordManagedClient(binding);
+        if (!client) {
+          throw new Error('managed Oxigraph recovery client is unavailable');
+        }
+        const capturedClient = client;
+        const capturedGeneration = binding.childGeneration;
+        return Object.freeze({
+          client: capturedClient,
+          queryEndpoint: this.systemRecordQueryEndpoint,
+          absoluteDeadlineMs,
+          signal,
+          assertAttributable: () => {
+            if (!this.ownershipLease || capturedClient.isDestroyed) return false;
+            const current = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
+            return Boolean(
+              current &&
+              !current.terminal &&
+              current.ready &&
+              current.childGeneration === capturedGeneration &&
+              this.managedClient === capturedClient &&
+              managedOxigraphOwnershipEndpointsMatchV1(
+                current,
+                this.systemRecordQueryEndpoint,
+                this.systemRecordUpdateEndpoint,
+              ),
+            );
+          },
+        });
       },
     };
   }
 
-  /**
-   * Decide one verified apply against an explicitly named child generation.
-   *
-   * B2 dispatches NO bytes: every path below returns `capability-lost` or
-   * `deferred`. What it does establish is the decision order — ownership, then
-   * terminality, then the generation the caller was bound to — so that when B3
-   * adds the send, the send is already gated on a generation rechecked at the
-   * last moment rather than on a snapshot taken when the session opened.
-   */
-  private async executeSystemRecordApply(
-    _proof: unknown,
-    childGeneration: string,
-  ): Promise<SystemRecordApplyOutcomeV1> {
-    if (!this.ownershipLease) return { outcome: 'capability-lost' };
+  /** Resolve exactly one live generation-owned client, or fail before I/O. */
+  private resolveSystemRecordManagedClient(
+    binding: SystemRecordLaneExecutionBindingV1,
+  ): OwnedManagedHttpClient | null {
+    if (!this.ownershipLease || this.systemRecordHasCredentials) return null;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
-    if (!snapshot || snapshot.terminal) return { outcome: 'capability-lost' };
-    if (!snapshot.ready || snapshot.childGeneration !== childGeneration) {
-      return { outcome: 'deferred', reason: 'generation-changed' };
+    if (
+      !snapshot ||
+      snapshot.terminal ||
+      !snapshot.ready ||
+      snapshot.childGeneration !== binding.childGeneration ||
+      !managedOxigraphOwnershipEndpointsMatchV1(
+        snapshot,
+        this.systemRecordQueryEndpoint,
+        this.systemRecordUpdateEndpoint,
+      )
+    ) return null;
+    if (this.managedClient === null) {
+      this.managedClient = new OwnedManagedHttpClient(binding.childGeneration);
     }
+    if (
+      this.managedClient.isDestroyed ||
+      this.managedClient.childGeneration !== binding.childGeneration
+    ) return null;
+    return this.managedClient;
+  }
 
-    // NO owned pool is created here, and its absence is a fix rather than an
-    // omission.
-    //
-    // This method used to construct an `OwnedManagedHttpClient(childGeneration)`
-    // and then return `deferred` without sending a byte. After any ordinary
-    // child recovery advanced the generation, the next apply found a cached
-    // generation-1 pool, took the "a pool is bound to one generation for its
-    // whole life" branch, and returned `capability-lost` — turning a RECOVERABLE
-    // generation change into a permanently lost capability, caused entirely by a
-    // pool that never carried a request.
-    //
-    // The pool, and the generation-binding invariant that stops a stale facade
-    // reaching a replacement listener, belong with the code that actually
-    // dispatches: the verified-replacement command construction and the
-    // full-state CAS are the next increment of this stack. Until they land the
-    // lane refuses rather than dispatching an unproven write, and leaves nothing
-    // behind while doing so.
-    return { outcome: 'deferred', reason: 'validation-mismatch' };
+  /** Compatibility-only B2 entry point; production sessions prefer the atomic bound path. */
+  private executeSystemRecordApplyLegacy(
+    _proof: unknown,
+    _childGeneration: string,
+  ): Promise<SystemRecordApplyOutcomeV1> {
+    return Promise.resolve({ outcome: 'deferred', reason: 'validation-mismatch' });
   }
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
@@ -711,7 +963,7 @@ export class SparqlHttpStore implements TripleStore {
     await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.insert',
-    }, 'insert');
+    }, 'insert', byGraph.keys());
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites(byGraph.keys());
   }
@@ -728,12 +980,13 @@ export class SparqlHttpStore implements TripleStore {
     // structure over the SPARQL protocol. See the helper for details.
     const update = buildBlankNodeSafeDelete(quads);
     if (!update) return;
+    const graphs = new Set(quads.map((q) => q.graph || ''));
     await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.delete',
-    }, 'delete');
+    }, 'delete', graphs);
     this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites(new Set(quads.map((q) => q.graph || '')));
+    this.writeGen.recordGraphWrites(graphs);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -774,7 +1027,7 @@ export class SparqlHttpStore implements TripleStore {
     await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteByPattern',
-    }, 'deleteByPattern');
+    }, 'deleteByPattern', [graphUri]);
     this.invalidateListGraphsCache();
     if (graphUri) this.writeGen.recordGraphWrites([graphUri]);
     else this.writeGen.recordUnscopedWrite();
@@ -799,7 +1052,7 @@ export class SparqlHttpStore implements TripleStore {
     await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.deleteBySubjectPrefix',
-    }, 'deleteBySubjectPrefix');
+    }, 'deleteBySubjectPrefix', [graphUri]);
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
     const after = await this.countQuads(graphUri, {
@@ -815,8 +1068,14 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    // Deliberately unguarded — see `assertGenericMutationScope` for the scope of
-    // that decision and why a lexical scan was reverted rather than expanded.
+    // `touchedGraphs` is only a cache hint and cannot prove the scope of an
+    // arbitrary SPARQL program. Until opaque writes rotate the materialization
+    // epoch, accepting one here could silently invalidate signed projections.
+    if (this.systemRecordAdmissionActive) {
+      throw new ManagedOxigraphMutationUnavailableError(
+        'opaque SPARQL updates are unavailable while system-record admission is active',
+      );
+    }
     await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
@@ -850,7 +1109,7 @@ export class SparqlHttpStore implements TripleStore {
     });
     const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
     const execute = async (update: string, source: string): Promise<void> => {
-      await this.postUpdate(update, { ...options, source }, 'replaceGraph');
+      await this.postUpdate(update, { ...options, source }, 'replaceGraph', [graphUri]);
     };
     try {
       await execute(plan.update, options?.source ?? 'sparql-http.replaceGraph');
@@ -892,7 +1151,12 @@ export class SparqlHttpStore implements TripleStore {
       metadataQuads,
     );
     const execute = async (update: string, source: string): Promise<void> => {
-      await this.postUpdate(update, { ...options, source }, 'replaceGraphAndSubject');
+      await this.postUpdate(
+        update,
+        { ...options, source },
+        'replaceGraphAndSubject',
+        [graphUri, metaGraphUri],
+      );
     };
     try {
       await execute(plan.update, options?.source ?? 'sparql-http.replaceGraphAndSubject');
@@ -928,6 +1192,7 @@ export class SparqlHttpStore implements TripleStore {
         update,
         { ...options, source: options?.source ?? 'sparql-http.replaceSubject' },
         'replaceSubject',
+        [graphUri],
       );
     } catch (error) {
       // Indeterminate remote failure: a timeout / lost response can occur AFTER
@@ -1052,7 +1317,7 @@ export class SparqlHttpStore implements TripleStore {
     await this.postUpdate(update, {
       ...options,
       source: options?.source ?? 'sparql-http.dropGraph',
-    }, 'dropGraph');
+    }, 'dropGraph', [graphUri]);
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
   }
@@ -1184,12 +1449,14 @@ export class SparqlHttpStore implements TripleStore {
     // Releasing here also latches this store's session terminal, so nothing can
     // be admitted into a lane whose store is draining; doing it after the await
     // would leave that window open.
-    this.releaseSystemRecordLane();
-    // A managed endpoint is stopped immediately after store.close(). The
-    // lifecycle owns one complete generation, aborting and draining every
-    // operation admitted before close while rejecting work attempted during
-    // close. A fresh generation is installed only after the drain completes.
-    await this.workLifecycle.close(new Error('SparqlHttpStore closed'));
+    await this.releaseSystemRecordLane(() =>
+      // A managed endpoint is stopped immediately after store.close(). The
+      // lifecycle owns one complete generation, aborting and draining every
+      // operation admitted before close while rejecting work attempted during
+      // close. A fresh controller is admitted only after this drain and any
+      // uncertain-write recovery both settle.
+      this.workLifecycle.close(new Error('SparqlHttpStore closed')),
+    );
   }
 }
 

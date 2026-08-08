@@ -19,7 +19,8 @@ import {
 } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
-const ENDPOINT = 'http://oxigraph-ownership-dispatch.test/query';
+const QUERY_ENDPOINT = 'http://127.0.0.1:7901/query';
+const UPDATE_ENDPOINT = 'http://127.0.0.1:7901/update';
 
 const EMPTY_RESULTS = JSON.stringify({ head: { vars: [] }, results: { bindings: [] } });
 
@@ -75,7 +76,11 @@ describe('managed backend ownership at mutation dispatch', () => {
     createTripleStore({
       backend: 'sparql-http',
       options: attachManagedOxigraphLeaseV1(
-        { queryEndpoint: ENDPOINT, managedByDkg: true },
+        {
+          queryEndpoint: QUERY_ENDPOINT,
+          updateEndpoint: UPDATE_ENDPOINT,
+          managedByDkg: true,
+        },
         ownership.lease,
         supervisor,
       ) as unknown as Record<string, unknown>,
@@ -84,7 +89,10 @@ describe('managed backend ownership at mutation dispatch', () => {
 
   beforeEach(() => {
     __resetSystemRecordControllerRegistrationForTests();
-    ownership = createManagedOxigraphOwnershipControllerV1();
+    ownership = createManagedOxigraphOwnershipControllerV1(
+      QUERY_ENDPOINT,
+      UPDATE_ENDPOINT,
+    );
     ownership.bindReadyGeneration();
     requests = [];
     recordFetch();
@@ -160,7 +168,7 @@ describe('managed backend ownership at mutation dispatch', () => {
     // untouched by any of this.
     const plain = await createTripleStore({
       backend: 'sparql-http',
-      options: { queryEndpoint: ENDPOINT },
+      options: { queryEndpoint: QUERY_ENDPOINT },
       graphSetIndex: false,
     });
 
@@ -170,40 +178,26 @@ describe('managed backend ownership at mutation dispatch', () => {
     await plain.close().catch(() => undefined);
   });
 
-  it('keeps deferring across a proven generation change, never capability-lost', async () => {
-    // The regression for a fix that had none. B2's placeholder apply used to
-    // construct a generation-bound `OwnedManagedHttpClient` and then return
-    // `deferred` without sending a byte; after an ordinary child recovery
-    // advanced the generation, the next apply found that stale pool and returned
-    // `capability-lost` — a RECOVERABLE generation change made permanent by a
-    // client that never carried a request.
-    //
-    // Without this test a future eager-client refactor restores the sticky
-    // failure with CI still green.
-    const store = await managedStore();
-    const lane = store.getSystemRecordLaneControllerV1?.();
-    expect(lane).toBeDefined();
-    const session = await lane!.open({
-      networkId: 'testnet',
-      kinds: ['agents'],
-      mode: 'shadow',
+  it('refuses a default-off managed store whose endpoints do not match its lease', async () => {
+    const store = await createTripleStore({
+      backend: 'sparql-http',
+      options: attachManagedOxigraphLeaseV1(
+        {
+          queryEndpoint: 'http://127.0.0.1:7904/query',
+          updateEndpoint: 'http://127.0.0.1:7904/update',
+          managedByDkg: true,
+        },
+        ownership.lease,
+        supervisor,
+      ) as unknown as Record<string, unknown>,
+      graphSetIndex: false,
     });
 
-    expect(await session.applyVerified({})).toEqual({
-      outcome: 'deferred',
-      reason: 'validation-mismatch',
-    });
-
-    // An ordinary recovery: the child exits and a replacement is proven.
-    ownership.invalidate('child-exit');
-    ownership.bindReadyGeneration();
-
-    // Still the ordinary fail-closed deferral, NOT a lost capability. Same
-    // reason as before the recovery: the lane re-reads the lease per call, so
-    // once the replacement is proven the generations agree again.
-    const after = await session.applyVerified({});
-    expect(after.outcome).not.toBe('capability-lost');
-    expect(after).toEqual({ outcome: 'deferred', reason: 'validation-mismatch' });
+    await expect(store.insert([QUAD])).rejects.toThrow(/not the proven ready listener/);
+    await expect(store.query('ASK { ?s ?p ?o }')).rejects.toThrow(
+      /not the proven ready listener/,
+    );
+    expect(requests).toEqual([]);
 
     await store.close().catch(() => undefined);
   });
@@ -352,7 +346,11 @@ describe('managed backend ownership at mutation dispatch', () => {
     const store = await createTripleStore({
       backend: 'sparql-http',
       options: attachManagedOxigraphLeaseV1(
-        { queryEndpoint: ENDPOINT, managedByDkg: true },
+        {
+          queryEndpoint: QUERY_ENDPOINT,
+          updateEndpoint: UPDATE_ENDPOINT,
+          managedByDkg: true,
+        },
         ownership.lease,
         failing,
       ) as unknown as Record<string, unknown>,
@@ -372,7 +370,7 @@ describe('managed backend ownership at mutation dispatch', () => {
     expect(await opening).toBe('rejected');
     expect(stopCalled).toBe(true);
 
-    await expect(queued).rejects.toThrow(/not the proven ready listener/);
+    await expect(queued).rejects.toThrow(/managed Oxigraph mutation is unavailable/);
     // The whole property: the barrier released it and it put NOTHING on the wire.
     expect(requests).toEqual([]);
 

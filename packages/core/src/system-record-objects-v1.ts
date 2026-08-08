@@ -106,6 +106,7 @@ const REQUEST_RECORD_KIND = SYSTEM_RECORD_KIND_V1;
 export type CanonicalRfc3339SecondsV1 = string & { readonly __rfc3339SecondsV1: true };
 export {
   assertCanonicalSystemRecordPeerIdV1,
+  copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   digestSystemRecordBytesV1,
   SystemRecordObjectErrorV1,
@@ -1767,6 +1768,8 @@ class AgentProfileVerifiedAuthoritySummaryValueV1 {
     public readonly candidateHeadDigest: Digest32V1,
     public readonly transitionLineage: readonly AgentProfileAppliedTransitionV1[],
     public readonly historicalRoots: readonly string[],
+    /** Prior head bound by the latest verified authority transition, if any. */
+    public readonly lastAuthorityTransitionPriorHeadDigest?: Digest32V1,
     public readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1,
     public readonly deletionTableDigest?: Digest32V1,
   ) {
@@ -1784,6 +1787,20 @@ class AgentProfileVerifiedAuthoritySummaryValueV1 {
  * reconstruction intentionally destroys its authority.
  */
 export type AgentProfileVerifiedAuthoritySummaryV1 = AgentProfileVerifiedAuthoritySummaryValueV1;
+
+/**
+ * Runtime authority check for storage bridges that cannot rely on the opaque
+ * TypeScript type alone. Structural copies are intentionally rejected.
+ */
+export function assertAgentProfileVerifiedAuthoritySummaryV1(
+  value: unknown,
+): asserts value is AgentProfileVerifiedAuthoritySummaryV1 {
+  if (value === null || typeof value !== 'object'
+    || !MINTED_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARIES_V1.has(value)
+    || !(value instanceof AgentProfileVerifiedAuthoritySummaryValueV1)) {
+    fail('system-record-closure', 'verified authority summary was not minted by closure verification');
+  }
+}
 
 export interface SystemRecordClosureArtifactV1 {
   readonly objectKind: SystemRecordObjectKindV1;
@@ -2182,11 +2199,18 @@ export async function buildAgentProfileVerificationClosureV1(
     if (tombstonePredecessor !== undefined && tombstonePredecessor.state !== 'active') {
       fail('system-record-history', 'verified tombstone closure lost its active predecessor');
     }
+    const latestTransition = current.acceptedTransitionDigest === undefined
+      ? undefined
+      : parsedTransitions.get(current.acceptedTransitionDigest);
+    if (current.authoritySequence !== '0' && latestTransition === undefined) {
+      fail('system-record-history', 'verified closure lost its latest authority transition');
+    }
     return new AgentProfileVerifiedAuthoritySummaryValueV1(
       MINT_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARY_V1,
       currentHeadDigest,
       Object.freeze(reverseLineage.reverse()),
       Object.freeze(reverseRoots.reverse()),
+      latestTransition?.priorHeadDigest,
       tombstonePredecessor?.state === 'active' ? tombstonePredecessor : undefined,
       tombstonePredecessor?.ownedSubjectTableDigest,
     );

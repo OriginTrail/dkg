@@ -716,6 +716,10 @@ roots (15 current-plus-historical roots total), 16 fixed preallocated conflict-d
 materialization epoch, and accounted bytes. Its digest domain is
 `dkg-system-record-applied-state-v1\n` and excludes only the digest field. Global
 capacity state has its own revision, live-record count, and accounted bytes.
+The current authority sequence is derived from the retained contiguous lineage;
+the current head version is stored as a separate storage-private predicate in the
+same reserved RDF tuple. This keeps the frozen B1 applied-state codec and digest
+stable while allowing the atomic writer to reject stale same-authority heads.
 For every present record, `accountedBytes` is canonical and exact:
 `64 KiB fixed state/security precharge + ownedSubjectTableBytes + projectionBytes +
 pendingDeletionTableBytes`. The pending term is zero when omitted; current JSON size is
@@ -733,6 +737,11 @@ The exact canonical sorted duplicate-free prior subject list lives in a separate
 indexed per-record reserved table in the same transaction boundary. Its encoded bytes
 are capped at 256 KiB and committed by the state table digest/count; header and table
 bytes both count toward per-record and aggregate accounting.
+For every nonzero verified candidate authority sequence, the opaque authority summary also
+binds the latest transition's prior-head digest. Storage consults that value only for a
+local `+1` authority transition and requires it to equal the currently applied head digest;
+ordinary same-sequence version advancement never derives predecessor authority from local
+state or from a caller-authored field.
 
 The storage B layer ships as TWO stacks, and this section states the B-layer target
 surface rather than any single PR's contents. **Stack B2** (#2110) delivers the
@@ -883,6 +892,18 @@ callers cannot author a delete scope. Storage consumes it once and, for tombston
 recomputes the table digest/count against the verified predecessor head before deriving
 the exact deletion. Missing/mismatched/reused/cross-session payloads fail before dispatch.
 
+The storage transition is guarded by both the reserved-state CAS and a
+scheduler-fenced projection preflight. While holding the exclusive `agents` permit,
+storage reads the exact prior/next subject union from the selected projection graph,
+incrementally hashes its strict canonical graphless N-Triples lines under
+`dkg-ka-projection-v1\n`, and compares digest, byte count, and quad count with the
+applied snapshot. Canonical line-order failure or any present-state mismatch defers
+with zero update dispatch, as does a pre-existing candidate-subject row in absent
+shadow storage. For absent authoritative state, bounded rows on the exact next-subject
+union are legacy content and the initial transaction replaces them. Equal-head
+projection drift always defers. Inspected prior rows are never enumerated into the
+SPARQL update.
+
 The expected-state CAS covers `(stateRevision, appliedStateDigest, headDigest,
 transitionLineage,
 conflictEvidenceDigest?, ownedSubjectTableDigest,
@@ -991,15 +1012,18 @@ The controller owns at most one aggregate session per store for the enabled
 `disabled|enabling|enabled|reconciling|disabling|shutdown|unavailable`; transition
 precedence is `shutdown > disable > recovery/revive > open`. Same-descriptor calls
 coalesce/idempotently return and incompatible opens reject. `disabled -> enabling`
-atomically seals admission before enqueueing its epoch transition. Every queued/running
-mutation and V1 call binds activation and child-generation abort scopes at enqueue;
+atomically seals admission before enqueueing its epoch transition. Every mutation
+enqueued after activation intent and every V1 call binds activation and child-generation
+abort scopes at enqueue. A managed mutation already queued on the default-off path is
+rechecked at dispatch and rejected if activation has committed in the meantime;
 transitions cancel queued retired scopes and drain or physically terminate running
 ones before state changes. A different enabled-set descriptor requires disabling and
 reopening this same aggregate session; `ontology` never creates a second controller,
 barrier, epoch, or accountant.
 
-The process-global scheduler accepts exactly one daemon-managed owned-store controller
-registration. A second registration fails before capability exposure, open, or any
+The process-global scheduler is the explicit single managed-writer activation gate:
+it accepts exactly one daemon-managed owned-store controller registration. A second
+registration fails before capability exposure, open, or any
 mutation and can never enter recovery. Other unowned/legacy store
 identities stay outside the capability and never wait on ordinary enabled-lane barriers,
 although each enable handoff conservatively drains pre-existing untagged work.
@@ -1017,8 +1041,9 @@ honor the bound; only ACK/health work in unrelated domains bypasses `agents`. A
 generation/control transition seals every mutation for the managed store only. The default-off undefined path keeps current
 O(1) head selection with no metadata allocation/evaluation. Because the scheduler is
 process-global and disabled-mode work has no store identity, each enable takes one
-conservative global watermark. Queued predispatch work may run or be removed/timeout
-before dispatch. Active work must physically settle; a logical timeout never decrements
+conservative global watermark. Queued predispatch reads may run or be removed/timeout;
+managed writes queued before activation fail closed if they reach dispatch after commit.
+Active work must physically settle; a logical timeout never decrements
 the transition watermark. If an untagged active operation cannot be attributed and
 proven settled, activation fails closed. Regardless of apparent completion, every
 `disabled -> enabling` transition destroys the old managed HTTP client, stops/proves
@@ -1042,7 +1067,7 @@ SPARQL mutation consumes and reports one ordinary store slot as
 `control_epoch_active_slot_ms` plus latency.
 
 An HTTP 204 does not reveal whether a conditional update matched. The transaction
-writes one bounded nonce/receipt only when full state, every root claim/reverse binding,
+writes one deterministic state-bound receipt only when full state, every root claim/reverse binding,
 epoch, and capacity match; a bounded post-read maps it to a typed result. Timeout,
 lost/malformed response, or child-generation change in flight is indeterminate:
 validated state is invalidated, wrappers dirty, and generation admission seals.
@@ -1200,8 +1225,11 @@ claim about serialized payload size. The object cache is disk-only.
 
 One atomic record additionally has distinct preflight ceilings: 1 MiB encoded
 bundle, 64 KiB signed head envelope, 10,000 quads/2,048 union subjects, 2 MiB
-canonical decoded terms, 4 MiB encoded SPARQL request body, and 12 MiB weighted
-end-to-end transient heap. Only one bundle decode/apply lease and one materializer write
+canonical decoded terms, 1 MiB encoded exact-reserved inspection response, 4 MiB
+encoded projection-inspection response and SPARQL request body, 8 MiB storage-local
+retained preparation/inspection/receipt buffers, and 12 MiB weighted end-to-end
+transient heap. The 8-MiB bound is a subset of, not an addition to, the 12-MiB
+lease. Only one bundle decode/apply lease and one materializer write
 may be physically in flight. Exact-object transport has two separate process-wide,
 nonqueued permits: one outbound requester response stream and one inbound provider
 response stream. Requester permit absence is typed slice-deferred; provider permit or
@@ -1490,6 +1518,26 @@ epoch; per-node fallback is forbidden. A rollback drains admitted slices, rotate
 the materialization epoch, restores legacy authority for the cohort, and requires a
 fresh complete activation gate before re-entry. Mainnet needs its own reviewed
 activation release.
+
+The B3 storage transaction may merge only as a default-unused boundary: production
+composition retains the registry consumer and deliberately discards its matching issuer,
+and no lifecycle path opens the lane. Before any producer or receiver receives that
+issuer or opens the lane, the remaining storage activation gates are mandatory:
+
+- verified same-version forks and root-claim collisions atomically quarantine the
+  incumbent with exact post-read and uncertain-write recovery;
+- a tuple from a prior materialization epoch is recovered or replaced under the current
+  epoch instead of becoming a permanent validation mismatch;
+- the 64-MiB runtime accountant is one injected process owner shared by decode, apply,
+  recovery, transport, control, and signature-verification reservations;
+- the maximum 10,000-row/2,048-subject transaction fits the 12-MiB weighted lease and
+  8-MiB prepared subcap in a live test, or the frozen row/byte limits are lowered; and
+- producer/receiver caller abort, lost-response recovery, and maximum-size p99/RSS
+  evidence pass the live activation gate.
+
+Until those conditions are implemented and measured, the private consumer must reject
+every caller-authored proof before inspection or mutation, and the ownership workflow
+must continue to report only lifecycle evidence rather than atomic-apply conformance.
 
 ## Rollout and Rollback
 

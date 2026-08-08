@@ -18,15 +18,14 @@ name: System-record managed ownership evidence
 #      `deleteByPattern`.
 #
 # What it does NOT prove:
-#   - Nothing here measures a connection pool. B2 owns none; the owned client
-#     moved to Stack B3, which is where the first byte is dispatched.
 #   - `pinnedPredecessors` is an INVENTORY, not a set of verdicts. No predecessor
 #     is checked out or built — every check runs the current binary — so the
 #     manifest records WHICH commits must retain the property, and the measured
 #     half is one conformance probe against this build.
-#   - The full-state CAS has not landed, so no verified apply is dispatched.
-#   - Raw `update()` can still reach reserved state through a split prefix/local
-#     IRI. Inert in B2 (nothing writes reserved state) and gated in Stack C.
+#   - B3's active-replacement CAS is default-unused; this gate does not prove
+#     production receiver activation or end-to-end peer recovery.
+#   - Maximum-size p99/RSS and live lost-response recovery remain separate
+#     activation gates and must not be inferred from this workflow.
 
 on:
   push:
@@ -143,9 +142,20 @@ jobs:
             test/internal-graph-policy.test.ts \
             test/managed-oxigraph-ownership-v1.test.ts \
             test/reserved-internal-graph-mutation-guard.test.ts \
+            test/system-record-apply-command-v1.test.ts \
+            test/system-record-atomic-apply-executor-v1.test.ts \
             test/system-record-materializer-lifecycle-v1.test.ts \
             test/system-record-control-barrier-integration-v1.test.ts \
             test/system-record-capability-discovery-v1.test.ts \
+            test/system-record-inspection-v1.test.ts \
+            test/system-record-managed-mutation-admission-v1.test.ts \
+            test/system-record-materialization-epoch-adapter-v1.test.ts \
+            test/system-record-materialization-epoch-v1.test.ts \
+            test/system-record-next-state-v1.test.ts \
+            test/system-record-rdf-schema-v1.test.ts \
+            test/system-record-state-snapshot-v1.test.ts \
+            test/system-record-utf8-order-v1.test.ts \
+            test/system-record-verified-replacement-v1.test.ts \
             test/managed-backend-ownership-dispatch-v1.test.ts \
             test/managed-terminal-read-through-index-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \
@@ -153,7 +163,8 @@ jobs:
             test/graph-set-index-store.test.ts \
             test/system-record-decorator-apply-outcomes-v1.test.ts \
             test/store-priority-scheduler.test.ts \
-            test/store-scheduler-system-record-admission.test.ts
+            test/store-scheduler-system-record-admission.test.ts \
+            test/managed-http-client-v1.test.ts
 
       # Every test file this branch adds or modifies now runs SOMEWHERE.
       #

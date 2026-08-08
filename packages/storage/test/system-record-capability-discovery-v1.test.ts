@@ -17,7 +17,8 @@ import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const ENDPOINT = 'http://127.0.0.1:1/query';
+const QUERY_ENDPOINT = 'http://127.0.0.1:1/query';
+const UPDATE_ENDPOINT = 'http://127.0.0.1:1/update';
 
 const noopHandoff: ManagedOxigraphSupervisorHandoffV1 = {
   stopAndProveOwnedChildDead: async () => undefined,
@@ -29,7 +30,11 @@ describe('system-record V1 capability discovery', () => {
 
   const managedOptions = (opts: { handoff?: boolean } = {}) =>
     attachManagedOxigraphLeaseV1(
-      { queryEndpoint: ENDPOINT, managedByDkg: true },
+      {
+        queryEndpoint: QUERY_ENDPOINT,
+        updateEndpoint: UPDATE_ENDPOINT,
+        managedByDkg: true,
+      },
       ownership.lease,
       opts.handoff === false ? undefined : noopHandoff,
     );
@@ -47,7 +52,7 @@ describe('system-record V1 capability discovery', () => {
 
   beforeEach(() => {
     __resetSystemRecordControllerRegistrationForTests();
-    ownership = createManagedOxigraphOwnershipControllerV1();
+    ownership = createManagedOxigraphOwnershipControllerV1(QUERY_ENDPOINT, UPDATE_ENDPOINT);
     ownership.bindReadyGeneration();
   });
 
@@ -57,14 +62,14 @@ describe('system-record V1 capability discovery', () => {
 
   describe('fail-closed preconditions', () => {
     it('is absent on an ordinary operator-configured endpoint', async () => {
-      const store = await build({ queryEndpoint: ENDPOINT });
+      const store = await build({ queryEndpoint: QUERY_ENDPOINT });
       expect(store.getSystemRecordLaneControllerV1?.()).toBeUndefined();
       await store.close().catch(() => undefined);
     });
 
     it('is absent for config booleans alone, however generous', async () => {
       const store = await build({
-        queryEndpoint: ENDPOINT,
+        queryEndpoint: QUERY_ENDPOINT,
         managedByDkg: true,
         atomicUpdates: true,
       });
@@ -90,6 +95,31 @@ describe('system-record V1 capability discovery', () => {
     it('is present with a live lease AND a handoff', async () => {
       const store = await build(managedOptions());
       expect(store.getSystemRecordLaneControllerV1?.()).toBeDefined();
+      await store.close().catch(() => undefined);
+    });
+
+    it.each([
+      ['wrong query path', UPDATE_ENDPOINT, UPDATE_ENDPOINT, undefined],
+      ['wrong update path', QUERY_ENDPOINT, QUERY_ENDPOINT, undefined],
+      ['different port', QUERY_ENDPOINT, 'http://127.0.0.1:2/update', undefined],
+      ['localhost alias', 'http://localhost:1/query', UPDATE_ENDPOINT, undefined],
+      ['credentials in URL', 'http://user:pass@127.0.0.1:1/query', UPDATE_ENDPOINT, undefined],
+      ['query string', `${QUERY_ENDPOINT}?x=1`, UPDATE_ENDPOINT, undefined],
+      ['fragment', `${QUERY_ENDPOINT}#x`, UPDATE_ENDPOINT, undefined],
+      ['trailing slash', `${QUERY_ENDPOINT}/`, UPDATE_ENDPOINT, undefined],
+      ['authorization option', QUERY_ENDPOINT, UPDATE_ENDPOINT, 'Bearer secret'],
+    ])('is absent when adapter identity has %s', async (_label, queryEndpoint, updateEndpoint, auth) => {
+      const options = attachManagedOxigraphLeaseV1(
+        {
+          queryEndpoint,
+          updateEndpoint,
+          ...(auth === undefined ? {} : { auth }),
+        },
+        ownership.lease,
+        noopHandoff,
+      );
+      const store = await build(options);
+      expect(store.getSystemRecordLaneControllerV1?.()).toBeUndefined();
       await store.close().catch(() => undefined);
     });
   });

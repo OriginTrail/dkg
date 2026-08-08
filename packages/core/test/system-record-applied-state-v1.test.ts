@@ -4,8 +4,11 @@ import {
   canonicalizeSystemRecordAppliedStateV1,
   canonicalizeSystemRecordCapacityStateV1,
   canonicalizeSystemRecordMaterializationReceiptV1,
+  canonicalizeSystemRecordRootClaimSetV1,
   computeSystemRecordAccountedBytesV1,
   computeSystemRecordAppliedStateDigestV1,
+  computeSystemRecordCapacityStateDigestV1,
+  computeSystemRecordMaterializationReceiptDigestV1,
   computeSystemRecordRootClaimSetDigestV1,
   parseCanonicalSystemRecordAppliedStateV1,
   parseCanonicalSystemRecordCapacityStateV1,
@@ -131,6 +134,51 @@ describe('system-record applied-state codecs', () => {
       conflictDigestSlots: Array.from({ length: 16 }, (_, index) =>
         `0x${index.toString(16).padStart(64, '0')}`),
     })).not.toThrow();
+  });
+
+  it('pins canonical persisted-object bytes and digests as cross-version vectors', () => {
+    const state = activeState();
+    const claims = {
+      objectType: 'system-record-root-claim-set', kind: 'agents', networkId: 'otp:20430',
+      stableKeyHash: STABLE_KEY, currentRoot: ROOT_A, historicalRoots: [],
+    } as const;
+    const capacity = {
+      objectType: 'system-record-capacity-state', kind: 'agents', networkId: 'otp:20430',
+      revision: '1', liveRecordCount: '1', stateBytes: '1024', tableBytes: '80',
+      projectionBytes: '4096', projectionQuads: '3',
+    } as const;
+    const receipt = {
+      objectType: 'system-record-materialization-receipt', kind: 'agents', networkId: 'otp:20430',
+      stableKeyHash: STABLE_KEY, stateRevision: '1',
+      appliedStateDigest: '0x0d16b0303417641e8294a1d63fcfaa9cc5872de1d4db50d4ca25886e2ceff0d2',
+      headDigest: HASH_A, materializationEpoch: '2',
+    } as const;
+    const decode = (bytes: Uint8Array) => new TextDecoder().decode(bytes);
+
+    expect(decode(canonicalizeSystemRecordAppliedStateV1(state))).toBe(
+      '{"accountedBytes":"69712","conflictDigestSlots":[],"conflictOverflow":false,"currentRoot":"did:dkg:agent:0x1111111111111111111111111111111111111111","headDigest":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","historicalRoots":[],"kind":"agents","materializationEpoch":"2","networkId":"otp:20430","objectType":"system-record-applied-state","ownedSubjectCount":"1","ownedSubjectTableBytes":"80","ownedSubjectTableDigest":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","peerId":"12D3KooWJ1TsijH7H5F74hfAD5XishQz3sxrmAtVY37GtNd9CqYf","projectionBytes":"4096","projectionDigest":"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","projectionQuads":"3","rootClaimSetDigest":"0xae363b4306d08b33f900c57a4c5ca0bc8e9f5812d8542f034f42f46800feaf75","stableKeyHash":"0xf7e783a2873b287221fb826ca7c83a1adf5dadd785f6c39d6b2ff1fe1640a32e","state":"present","stateRevision":"1","status":"active","transitionLineage":[]}',
+    );
+    expect(computeSystemRecordAppliedStateDigestV1(state)).toBe(
+      '0x0d16b0303417641e8294a1d63fcfaa9cc5872de1d4db50d4ca25886e2ceff0d2',
+    );
+    expect(decode(canonicalizeSystemRecordCapacityStateV1(capacity))).toBe(
+      '{"kind":"agents","liveRecordCount":"1","networkId":"otp:20430","objectType":"system-record-capacity-state","projectionBytes":"4096","projectionQuads":"3","revision":"1","stateBytes":"1024","tableBytes":"80"}',
+    );
+    expect(computeSystemRecordCapacityStateDigestV1(capacity)).toBe(
+      '0x01382cb6928f5c893f42cc883a575ac70293faaddafa2b41a220639241518954',
+    );
+    expect(decode(canonicalizeSystemRecordRootClaimSetV1(claims))).toBe(
+      '{"currentRoot":"did:dkg:agent:0x1111111111111111111111111111111111111111","historicalRoots":[],"kind":"agents","networkId":"otp:20430","objectType":"system-record-root-claim-set","stableKeyHash":"0xf7e783a2873b287221fb826ca7c83a1adf5dadd785f6c39d6b2ff1fe1640a32e"}',
+    );
+    expect(computeSystemRecordRootClaimSetDigestV1(claims)).toBe(
+      '0xae363b4306d08b33f900c57a4c5ca0bc8e9f5812d8542f034f42f46800feaf75',
+    );
+    expect(decode(canonicalizeSystemRecordMaterializationReceiptV1(receipt))).toBe(
+      '{"appliedStateDigest":"0x0d16b0303417641e8294a1d63fcfaa9cc5872de1d4db50d4ca25886e2ceff0d2","headDigest":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","kind":"agents","materializationEpoch":"2","networkId":"otp:20430","objectType":"system-record-materialization-receipt","stableKeyHash":"0xf7e783a2873b287221fb826ca7c83a1adf5dadd785f6c39d6b2ff1fe1640a32e","stateRevision":"1"}',
+    );
+    expect(computeSystemRecordMaterializationReceiptDigestV1(receipt)).toBe(
+      '0xf984b56d3f87bcb5301798ab365a69dce9e7c8803550803a2425047d2b38f63e',
+    );
   });
 
   it('binds a root-claim-set digest into present state', () => {

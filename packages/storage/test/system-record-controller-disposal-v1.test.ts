@@ -1,4 +1,6 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { createServer, type Server } from 'node:http';
+import type { AddressInfo } from 'node:net';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 // Adapter registration is a side effect of importing the module.
 import '../src/adapters/sparql-http.js';
@@ -12,7 +14,8 @@ import {
 import type { SystemRecordLaneActivationV1 } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
-const ENDPOINT = 'http://oxigraph-disposal.test/query';
+let QUERY_ENDPOINT: string;
+let UPDATE_ENDPOINT: string;
 const ACTIVATION: SystemRecordLaneActivationV1 = {
   networkId: 'testnet',
   kinds: ['agents'],
@@ -31,6 +34,44 @@ const ACTIVATION: SystemRecordLaneActivationV1 = {
  */
 describe('system-record controller disposal', () => {
   let stores: TripleStore[];
+  let server: Server;
+  let epoch: string | null;
+
+  beforeAll(async () => {
+    server = createServer((request, response) => {
+      let body = '';
+      request.setEncoding('utf8');
+      request.on('data', (chunk) => {
+        body += chunk;
+      });
+      request.on('end', () => {
+        if (request.url === '/query') {
+          response.writeHead(200, { 'Content-Type': 'application/sparql-results+json' });
+          response.end(JSON.stringify({
+            head: { vars: ['epoch'] },
+            results: {
+              bindings: epoch === null ? [] : [{ epoch: { type: 'literal', value: epoch } }],
+            },
+          }));
+          return;
+        }
+        const inserted = /INSERT[\s\S]*?materialization-epoch> "([0-9]+)"/u.exec(body)?.[1];
+        if (inserted !== undefined) epoch = inserted;
+        response.writeHead(204);
+        response.end();
+      });
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const { port } = server.address() as AddressInfo;
+    QUERY_ENDPOINT = `http://127.0.0.1:${port}/query`;
+    UPDATE_ENDPOINT = `http://127.0.0.1:${port}/update`;
+  });
+
+  afterAll(async () => {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  });
 
   const recordingSupervisor = () => {
     const calls: string[] = [];
@@ -52,7 +93,11 @@ describe('system-record controller disposal', () => {
     const store = await createTripleStore({
       backend: 'sparql-http',
       options: attachManagedOxigraphLeaseV1(
-        { queryEndpoint: ENDPOINT, managedByDkg: true },
+        {
+          queryEndpoint: QUERY_ENDPOINT,
+          updateEndpoint: UPDATE_ENDPOINT,
+          managedByDkg: true,
+        },
         ownership.lease,
         handoff,
       ) as unknown as Record<string, unknown>,
@@ -63,13 +108,17 @@ describe('system-record controller disposal', () => {
   };
 
   const freshOwnership = () => {
-    const ownership = createManagedOxigraphOwnershipControllerV1();
+    const ownership = createManagedOxigraphOwnershipControllerV1(
+      QUERY_ENDPOINT,
+      UPDATE_ENDPOINT,
+    );
     ownership.bindReadyGeneration();
     return ownership;
   };
 
   beforeEach(() => {
     stores = [];
+    epoch = null;
   });
 
   afterEach(async () => {

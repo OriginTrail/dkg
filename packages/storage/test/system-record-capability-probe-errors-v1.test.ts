@@ -40,7 +40,8 @@ import {
 import { SystemRecordControllerRegistrationError } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
-const ENDPOINT = 'http://oxigraph-probe-errors.test/query';
+const QUERY_ENDPOINT = 'http://127.0.0.1:7903/query';
+const UPDATE_ENDPOINT = 'http://127.0.0.1:7903/update';
 
 const supervisor: ManagedOxigraphSupervisorHandoffV1 = {
   stopAndProveOwnedChildDead: async () => undefined,
@@ -51,12 +52,19 @@ describe('capability probe error handling', () => {
   let stores: TripleStore[];
 
   const managedStore = async (): Promise<TripleStore> => {
-    const ownership = createManagedOxigraphOwnershipControllerV1();
+    const ownership = createManagedOxigraphOwnershipControllerV1(
+      QUERY_ENDPOINT,
+      UPDATE_ENDPOINT,
+    );
     ownership.bindReadyGeneration();
     const store = await createTripleStore({
       backend: 'sparql-http',
       options: attachManagedOxigraphLeaseV1(
-        { queryEndpoint: ENDPOINT, managedByDkg: true },
+        {
+          queryEndpoint: QUERY_ENDPOINT,
+          updateEndpoint: UPDATE_ENDPOINT,
+          managedByDkg: true,
+        },
         ownership.lease,
         supervisor,
       ) as unknown as Record<string, unknown>,

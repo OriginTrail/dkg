@@ -569,6 +569,8 @@ describe('startManagedOxigraph (real download + real server)', () => {
         // Exactly one proven generation was bound by the supervised start.
         expect(result!.ownership.snapshot()).toEqual({
           childGeneration: '1',
+          queryEndpoint: result!.handle.queryEndpoint,
+          updateEndpoint: result!.handle.updateEndpoint,
           ready: true,
           terminal: false,
         });

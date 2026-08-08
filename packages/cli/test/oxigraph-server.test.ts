@@ -267,6 +267,30 @@ describe('startOxigraphServer (real child processes)', () => {
     }
   });
 
+  it('preserves non-canonical test hosts without exposing the endpoint-bound B3 capability', async () => {
+    const port = await freePort();
+    const handle = await startOxigraphServer(startOpts(port, { host: 'localhost' }));
+    const store = new SparqlHttpStore(attachManagedOxigraphLeaseV1(
+      {
+        queryEndpoint: handle.queryEndpoint,
+        updateEndpoint: handle.updateEndpoint,
+      },
+      handle.ownership.lease,
+      handle.supervisorHandoff,
+    ) as SparqlHttpStoreOptions);
+    try {
+      expect(handle.ownership.snapshot()).toEqual({
+        childGeneration: '1',
+        ready: true,
+        terminal: false,
+      });
+      expect(store.getSystemRecordLaneControllerV1()).toBeUndefined();
+    } finally {
+      await store.close();
+      await handle.stop();
+    }
+  });
+
   it('passes the native Oxigraph query timeout to the child process', async () => {
     const port = await freePort();
     const handle = await startOxigraphServer(startOpts(port, { queryTimeoutS: 35 }));
@@ -445,6 +469,8 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
     try {
       expect(handle.ownership.snapshot()).toEqual({
         childGeneration: '1',
+        queryEndpoint: handle.queryEndpoint,
+        updateEndpoint: handle.updateEndpoint,
         ready: true,
         terminal: false,
       });
@@ -507,6 +533,8 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
         // Capability is revoked BEFORE any replacement generation exists —
         // there is no window in which a dead child still looks live.
         childGeneration: '1',
+        queryEndpoint: handle.queryEndpoint,
+        updateEndpoint: handle.updateEndpoint,
         ready: false,
         terminal: false,
         lastInvalidation: 'child-exit',
@@ -523,6 +551,8 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
     await handle.stop();
     expect(handle.ownership.snapshot()).toEqual({
       childGeneration: '1',
+      queryEndpoint: handle.queryEndpoint,
+      updateEndpoint: handle.updateEndpoint,
       ready: false,
       terminal: true,
       lastInvalidation: 'shutdown',
@@ -553,6 +583,8 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
     // SIGKILL, and never closed the lease.
     expect(handle.ownership.snapshot()).toEqual({
       childGeneration: '1',
+      queryEndpoint: handle.queryEndpoint,
+      updateEndpoint: handle.updateEndpoint,
       ready: false,
       terminal: true,
       lastInvalidation: 'shutdown',
@@ -579,6 +611,8 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
     expect(await portAnswers(port)).toBe(false);
     expect(handle.ownership.snapshot()).toEqual({
       childGeneration: '1',
+      queryEndpoint: handle.queryEndpoint,
+      updateEndpoint: handle.updateEndpoint,
       ready: false,
       terminal: true,
       lastInvalidation: 'shutdown',
@@ -758,6 +792,8 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
         // Liveness is gone but the supervisor is NOT closed: a replacement is
         // expected, so this must not be terminal the way stop() is.
         childGeneration: '1',
+        queryEndpoint: handle.queryEndpoint,
+        updateEndpoint: handle.updateEndpoint,
         ready: false,
         terminal: false,
         lastInvalidation: 'stop',
@@ -767,6 +803,31 @@ describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
       expect(state.spawns.length).toBe(2);
       expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
       expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('refuses expired recovery deadlines before stop or replacement spawn side effects', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+    try {
+      const expired = performance.now() - 1;
+      await expect(handle.supervisorHandoff.stopAndProveOwnedChildDead(expired))
+        .rejects.toThrow(/deadline expired/i);
+      expect(state.spawns).toHaveLength(1);
+      expect(handle.ownership.snapshot()).toMatchObject({ ready: true, childGeneration: '1' });
+
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      await expect(handle.supervisorHandoff.startAndProveCleanGeneration(expired))
+        .rejects.toThrow(/deadline expired/i);
+      expect(state.spawns).toHaveLength(1);
+      expect(await portAnswers(port)).toBe(false);
+
+      await handle.supervisorHandoff.startAndProveCleanGeneration();
+      expect(state.spawns).toHaveLength(2);
+      expect(handle.ownership.snapshot()).toMatchObject({ ready: true, childGeneration: '2' });
     } finally {
       await handle.stop();
     }

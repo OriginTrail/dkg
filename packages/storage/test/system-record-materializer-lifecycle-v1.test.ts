@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createManagedOxigraphOwnershipControllerV1,
+  readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import {
@@ -9,17 +10,29 @@ import {
   SystemRecordLaneActivationConflictError,
   __resetSystemRecordControllerRegistrationForTests,
   createSystemRecordLaneControllerV1,
+  releaseSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneActivationV1,
+  type SystemRecordLaneExecutionBindingV1,
   type SystemRecordLaneSessionV1,
 } from '../src/system-record-materializer-v1.js';
+import type {
+  SystemRecordAtomicApplySettlementV1,
+  SystemRecordAtomicRecoveryRegistrarV1,
+  SystemRecordAtomicRecoveryRegistrationV1,
+  SystemRecordAtomicRecoveryResolutionV1,
+  SystemRecordAtomicRecoveryRuntimeV1,
+} from '../src/system-record-atomic-apply-executor-v1-internal.js';
 
 const ACTIVATION: SystemRecordLaneActivationV1 = {
   networkId: 'testnet',
   kinds: ['agents'],
   mode: 'shadow',
 };
+
+const OWNERSHIP_QUERY_ENDPOINT = 'http://127.0.0.1:7878/query';
+const OWNERSHIP_UPDATE_ENDPOINT = 'http://127.0.0.1:7878/update';
 
 /** Records the exact handoff order so the ordering invariant is observable. */
 class RecordingHandoff implements SystemRecordChildHandoffV1 {
@@ -37,7 +50,15 @@ class RecordingHandoff implements SystemRecordChildHandoffV1 {
   stopAndProveOwnedChildDead = () => this.step('stopAndProveOwnedChildDead');
   awaitRetiredWork = () => this.step('awaitRetiredWork');
   startAndProveCleanGeneration = () => this.step('startAndProveCleanGeneration');
-  rotateMaterializationEpoch = () => this.step('rotateMaterializationEpoch');
+  failManagedMutationsClosed = (reason: string) => {
+    this.calls.push(`failManagedMutationsClosed:${reason}`);
+  };
+  private epoch = 0;
+  rotateMaterializationEpoch = async (_networkId?: string) => {
+    await this.step('rotateMaterializationEpoch');
+    this.epoch += 1;
+    return Object.freeze({ epoch: String(this.epoch), childGeneration: '1' });
+  };
 }
 
 /**
@@ -90,8 +111,13 @@ class StubExecutor {
     appliedStateDigest: `0x${'a'.repeat(64)}`,
   };
 
-  calls: Array<{ childGeneration: string }> = [];
+  calls: SystemRecordLaneExecutionBindingV1[] = [];
+  discarded: unknown[] = [];
   onDispatch?: () => void;
+
+  discardVerified = (proof: unknown): void => {
+    this.discarded.push(proof);
+  };
 
   /** Park the dispatch so a whole lifecycle transition can run underneath it. */
   private gate: Promise<void> | null = null;
@@ -109,13 +135,297 @@ class StubExecutor {
   }
 
   async applyVerified(_proof: unknown, childGeneration: string): Promise<SystemRecordApplyOutcomeV1> {
-    this.calls.push({ childGeneration });
+    return this.dispatch({
+      activationGeneration: 'legacy',
+      networkId: 'legacy',
+      kind: 'agents',
+      mode: 'shadow',
+      sessionIdentity: Object.freeze(Object.create(null) as object),
+      childGeneration,
+      materializationEpoch: '0',
+    });
+  }
+
+  async applyVerifiedBound(
+    _proof: unknown,
+    binding: SystemRecordLaneExecutionBindingV1,
+  ): Promise<SystemRecordApplyOutcomeV1> {
+    return this.dispatch(binding);
+  }
+
+  private async dispatch(
+    binding: SystemRecordLaneExecutionBindingV1,
+  ): Promise<SystemRecordApplyOutcomeV1> {
+    this.calls.push(binding);
     this.onDispatch?.();
     if (this.gate) {
       this.reachedGate?.();
       await this.gate;
     }
     return this.outcome;
+  }
+}
+
+class AtomicRecoveryExecutor extends StubExecutor {
+  settlement: 'uncertain' | 'no-mutation' = 'uncertain';
+  noMutationOutcome: SystemRecordApplyOutcomeV1 = { outcome: 'stale' };
+  recoveryResolution: SystemRecordAtomicRecoveryResolutionV1 = {
+    resolution: 'applied',
+    stateRevision: '2',
+    appliedStateDigest: `0x${'2'.repeat(64)}`,
+  };
+  registration: SystemRecordAtomicRecoveryRegistrationV1 | null = null;
+  recoveredRuntime: SystemRecordAtomicRecoveryRuntimeV1 | null = null;
+
+  private beforeRegistrationGate: Promise<void> | null = null;
+  private releaseBeforeRegistration: (() => void) | null = null;
+  private reachedBeforeRegistration: (() => void) | null = null;
+  registrationReached: Promise<void> = Promise.resolve();
+  private reconcileGate: Promise<void> | null = null;
+  private releaseReconcileGate: (() => void) | null = null;
+  private reachedReconcile: (() => void) | null = null;
+  reconcileReached: Promise<void> = Promise.resolve();
+  private waitForReconcileAbort = false;
+
+  parkBeforeRegistration(): void {
+    this.beforeRegistrationGate = new Promise<void>((resolve) => {
+      this.releaseBeforeRegistration = resolve;
+    });
+    this.registrationReached = new Promise<void>((resolve) => {
+      this.reachedBeforeRegistration = resolve;
+    });
+  }
+
+  releaseRegistration(): void {
+    this.releaseBeforeRegistration?.();
+  }
+
+  parkReconcile(): void {
+    this.reconcileGate = new Promise<void>((resolve) => {
+      this.releaseReconcileGate = resolve;
+    });
+    this.reconcileReached = new Promise<void>((resolve) => {
+      this.reachedReconcile = resolve;
+    });
+  }
+
+  releaseReconcile(): void {
+    this.releaseReconcileGate?.();
+  }
+
+  parkReconcileUntilAbort(): void {
+    this.waitForReconcileAbort = true;
+    this.reconcileReached = new Promise<void>((resolve) => {
+      this.reachedReconcile = resolve;
+    });
+  }
+
+  async applyVerifiedSettlementBound(
+    _proof: unknown,
+    binding: SystemRecordLaneExecutionBindingV1,
+    registerRecovery: SystemRecordAtomicRecoveryRegistrarV1,
+  ): Promise<SystemRecordAtomicApplySettlementV1> {
+    this.calls.push(binding);
+    this.onDispatch?.();
+    if (this.settlement === 'no-mutation') {
+      return Object.freeze({ settlement: 'no-mutation', outcome: this.noMutationOutcome }) as never;
+    }
+    if (this.beforeRegistrationGate) {
+      this.reachedBeforeRegistration?.();
+      await this.beforeRegistrationGate;
+    }
+    const ownership = Object.freeze(Object.create(null) as object);
+    const registration = registerRecovery(Object.freeze({
+      ownership,
+      binding,
+      reconcile: async (runtime: SystemRecordAtomicRecoveryRuntimeV1) => {
+        this.recoveredRuntime = runtime;
+        if (this.waitForReconcileAbort) {
+          this.reachedReconcile?.();
+          if (!runtime.signal.aborted) {
+            await new Promise<void>((resolve) => {
+              runtime.signal.addEventListener('abort', () => resolve(), { once: true });
+            });
+          }
+          return { resolution: 'unavailable' };
+        }
+        if (this.reconcileGate) {
+          this.reachedReconcile?.();
+          await this.reconcileGate;
+        }
+        return this.recoveryResolution;
+      },
+    }));
+    this.registration = registration;
+    return Object.freeze({
+      settlement: 'recovery-owned',
+      outcome: Object.freeze({
+        outcome: 'indeterminate',
+        recoveryGeneration: registration.recoveryGeneration,
+      }),
+      recovery: registration,
+    });
+  }
+}
+
+class RecoveryHandoff extends RecordingHandoff {
+  private epoch = 0;
+  readonly recoveryDeadlines: Array<{ phase: string; value: number | undefined }> = [];
+
+  constructor(private readonly ownership: ManagedOxigraphOwnershipControllerV1) {
+    super();
+  }
+
+  override stopAndProveOwnedChildDead = async (absoluteDeadlineMs?: number): Promise<void> => {
+    this.recoveryDeadlines.push({ phase: 'stop', value: absoluteDeadlineMs });
+    await this.step('stopAndProveOwnedChildDead');
+  };
+
+  override destroyClient = async (absoluteDeadlineMs?: number): Promise<void> => {
+    this.recoveryDeadlines.push({ phase: 'destroy', value: absoluteDeadlineMs });
+    await this.step('destroyClient');
+  };
+
+  override awaitRetiredWork = async (absoluteDeadlineMs?: number): Promise<void> => {
+    this.recoveryDeadlines.push({ phase: 'drain', value: absoluteDeadlineMs });
+    await this.step('awaitRetiredWork');
+  };
+
+  override startAndProveCleanGeneration = async (absoluteDeadlineMs?: number): Promise<void> => {
+    this.recoveryDeadlines.push({ phase: 'start', value: absoluteDeadlineMs });
+    await this.step('startAndProveCleanGeneration');
+    // Initial enable already has generation 1. Every later start is a
+    // controlled recovery/re-enable and must bind a genuinely new listener.
+    if (this.epoch > 0) {
+      this.ownership.invalidate('child-exit');
+      this.ownership.bindReadyGeneration();
+    }
+  };
+
+  override rotateMaterializationEpoch = async (_networkId?: string) => {
+    await this.step('rotateMaterializationEpoch');
+    this.epoch += 1;
+    const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownership.lease);
+    if (!snapshot?.ready) throw new Error('test ownership is not ready');
+    return Object.freeze({ epoch: String(this.epoch), childGeneration: snapshot.childGeneration });
+  };
+
+  override createRecoveryRuntime = (
+    binding: SystemRecordLaneExecutionBindingV1,
+    absoluteDeadlineMs: number,
+    signal: AbortSignal,
+  ): SystemRecordAtomicRecoveryRuntimeV1 => {
+    this.recoveryDeadlines.push({ phase: 'exact-read', value: absoluteDeadlineMs });
+    this.calls.push('createRecoveryRuntime');
+    this.barrier?.note('createRecoveryRuntime');
+    if (this.failAt === 'createRecoveryRuntime') {
+      throw new Error('handoff failed at createRecoveryRuntime');
+    }
+    return Object.freeze({
+      client: {
+        childGeneration: binding.childGeneration,
+        isDestroyed: false,
+        post: async () => { throw new Error('test recovery callback owns the read'); },
+      },
+      queryEndpoint: OWNERSHIP_QUERY_ENDPOINT,
+      absoluteDeadlineMs,
+      signal,
+      assertAttributable: () => {
+        const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownership.lease);
+        return Boolean(snapshot?.ready && snapshot.childGeneration === binding.childGeneration);
+      },
+    });
+  };
+}
+
+class GateBarrier extends RecordingBarrier {
+  private readonly gates = new Map<string, Promise<void>>();
+  private readonly releases = new Map<string, () => void>();
+  private readonly arrivals = new Map<string, Promise<void>>();
+  private readonly arrived = new Map<string, () => void>();
+
+  constructor() {
+    super();
+    const recordAndRun = this.run;
+    this.run = async <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+      const gate = this.gates.get(purpose);
+      if (gate) {
+        this.arrived.get(purpose)?.();
+        await gate;
+      }
+      return recordAndRun(purpose, transition);
+    };
+  }
+
+  gate(purpose: string): void {
+    let release!: () => void;
+    this.gates.set(purpose, new Promise<void>((resolve) => { release = resolve; }));
+    this.releases.set(purpose, release);
+    let arrive!: () => void;
+    this.arrivals.set(purpose, new Promise<void>((resolve) => { arrive = resolve; }));
+    this.arrived.set(purpose, arrive);
+  }
+
+  reached(purpose: string): Promise<void> {
+    return this.arrivals.get(purpose) ?? Promise.resolve();
+  }
+
+  release(purpose: string): void {
+    this.releases.get(purpose)?.();
+  }
+
+}
+
+/**
+ * Scheduler-faithful transition-timeout model.
+ *
+ * Like `StorePriorityScheduler.runControlBarrier`, the public promise can
+ * reject after the callback started while the callback and exclusive section
+ * remain alive until their own promise settles.
+ */
+class TransitionTimeoutBarrier extends RecordingBarrier {
+  physicalSettled = false;
+  private readonly rejects = new Map<string, (reason: unknown) => void>();
+
+  constructor() {
+    super();
+    const recordAndRun = this.run;
+    this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+      if (
+        purpose !== 'system-record.shutdown' &&
+        purpose !== 'system-record.disable' &&
+        purpose !== 'system-record.recovery'
+      ) return recordAndRun(purpose, transition);
+
+      const physical = recordAndRun(purpose, transition);
+      void physical.finally(() => { this.physicalSettled = true; }).catch(() => undefined);
+      return new Promise<T>((resolve, reject) => {
+        this.rejects.set(purpose, reject);
+        physical.then(resolve, reject);
+      });
+    };
+  }
+
+  timeoutShutdown(): void {
+    this.timeout('system-record.shutdown');
+  }
+
+  timeout(purpose: string): void {
+    this.rejects.get(purpose)?.(new Error('STORE_CONTROL_BARRIER_TRANSITION_TIMEOUT'));
+  }
+}
+
+/** Models the scheduler rejecting before the shutdown callback is admitted. */
+class WaitPhaseTimeoutBarrier extends RecordingBarrier {
+  constructor() {
+    super();
+    const recordAndRun = this.run;
+    this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+      if (purpose === 'system-record.shutdown') {
+        return Promise.reject(new Error('STORE_CONTROL_BARRIER_WAIT_TIMEOUT'));
+      }
+      return recordAndRun(purpose, transition);
+    };
   }
 }
 
@@ -137,7 +447,10 @@ describe('system-record lane session lifecycle V1', () => {
 
   beforeEach(() => {
     __resetSystemRecordControllerRegistrationForTests();
-    ownership = createManagedOxigraphOwnershipControllerV1();
+    ownership = createManagedOxigraphOwnershipControllerV1(
+      OWNERSHIP_QUERY_ENDPOINT,
+      OWNERSHIP_UPDATE_ENDPOINT,
+    );
     ownership.bindReadyGeneration();
     barrier = new RecordingBarrier();
     handoff = new RecordingHandoff();
@@ -187,6 +500,11 @@ describe('system-record lane session lifecycle V1', () => {
       expect(b).toBe(c);
       expect(handoff.calls.filter((s) => s === 'startAndProveCleanGeneration')).toHaveLength(1);
       expect(a.activationGeneration).toBe('1');
+      expect(b.activationGeneration).toBe('1');
+      expect(c.activationGeneration).toBe('1');
+      expect((await a.applyVerified({})).outcome).toBe('applied');
+      expect((await b.applyVerified({})).outcome).toBe('applied');
+      expect(executor.calls.map((call) => call.activationGeneration)).toEqual(['1', '1']);
     });
 
     it('is idempotent for a repeated same-descriptor open', async () => {
@@ -204,6 +522,48 @@ describe('system-record lane session lifecycle V1', () => {
       await expect(
         controller.open({ ...ACTIVATION, mode: 'authoritative' }),
       ).rejects.toThrow(SystemRecordLaneActivationConflictError);
+    });
+
+    it('snapshots a closed activation without invoking caller accessors or iterators', async () => {
+      let accessorCalls = 0;
+      const accessorBacked = Object.create(null) as Record<string, unknown>;
+      Object.defineProperties(accessorBacked, {
+        networkId: {
+          enumerable: true,
+          get: () => { accessorCalls += 1; return 'testnet'; },
+        },
+        kinds: { enumerable: true, value: ['agents'] },
+        mode: { enumerable: true, value: 'shadow' },
+      });
+
+      await expect(build().open(accessorBacked as never)).rejects.toThrow(/data properties/);
+      expect(accessorCalls).toBe(0);
+      expect(handoff.calls).toEqual([]);
+    });
+
+    it('rejects unknown activation fields and a non-closed kinds tuple', async () => {
+      const controller = build();
+      await expect(controller.open({ ...ACTIVATION, extra: true } as never)).rejects.toThrow(
+        /unknown or missing fields/,
+      );
+
+      const kinds = ['agents'] as string[] & { extra?: boolean };
+      kinds.extra = true;
+      await expect(controller.open({ ...ACTIVATION, kinds } as never)).rejects.toThrow(
+        /closed \[agents\] tuple/,
+      );
+      expect(handoff.calls).toEqual([]);
+    });
+
+    it('rejects a non-canonical network and invalid mode before handoff', async () => {
+      const controller = build();
+      await expect(controller.open({ ...ACTIVATION, networkId: 'not a network' })).rejects.toThrow(
+        /networkId is not canonical/,
+      );
+      await expect(controller.open({ ...ACTIVATION, mode: 'observe' } as never)).rejects.toThrow(
+        /mode is invalid/,
+      );
+      expect(handoff.calls).toEqual([]);
     });
 
     for (const failAt of [
@@ -240,6 +600,56 @@ describe('system-record lane session lifecycle V1', () => {
       await expect(build().open(ACTIVATION)).rejects.toThrow(/terminal/);
       expect(handoff.calls).toEqual([]);
     });
+
+    it('keeps a B2 void epoch rotation compatible with the legacy executor', async () => {
+      const legacyHandoff: SystemRecordChildHandoffV1 = {
+        destroyClient: async () => undefined,
+        stopAndProveOwnedChildDead: async () => undefined,
+        awaitRetiredWork: async () => undefined,
+        startAndProveCleanGeneration: async () => undefined,
+        rotateMaterializationEpoch: async () => undefined,
+      };
+      const legacyCalls: string[] = [];
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: legacyHandoff,
+        executor: {
+          applyVerified: async (_proof, childGeneration) => {
+            legacyCalls.push(childGeneration);
+            return {
+              outcome: 'applied',
+              stateRevision: '1',
+              appliedStateDigest: `0x${'e'.repeat(64)}`,
+            };
+          },
+        },
+        barrier: barrier.run,
+      });
+
+      const session = await controller.open(ACTIVATION);
+      expect(session.state).toBe('enabled');
+      expect((await session.applyVerified({})).outcome).toBe('applied');
+      expect(legacyCalls).toEqual(['1']);
+    });
+
+    it('fails closed when a B3 settlement executor receives no epoch binding', async () => {
+      const legacyHandoff: SystemRecordChildHandoffV1 = {
+        destroyClient: async () => undefined,
+        stopAndProveOwnedChildDead: async () => undefined,
+        awaitRetiredWork: async () => undefined,
+        startAndProveCleanGeneration: async () => undefined,
+        rotateMaterializationEpoch: async () => undefined,
+      };
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: legacyHandoff,
+        executor: new AtomicRecoveryExecutor(),
+        barrier: barrier.run,
+      });
+
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/materialization epoch binding/);
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+    });
   });
 
   describe('registration invariant', () => {
@@ -266,6 +676,7 @@ describe('system-record lane session lifecycle V1', () => {
       handoff.calls.length = 0;
 
       const reopened = await controller.open(ACTIVATION);
+      expect(reopened).not.toBe(session);
       expect(reopened.state).toBe('enabled');
       expect(reopened.activationGeneration).toBe('2');
       expect(handoff.calls).toEqual([
@@ -298,6 +709,26 @@ describe('system-record lane session lifecycle V1', () => {
       // A process that is going away must never believe the lane is still live.
       expect(session.state).toBe('shutdown');
     });
+
+    for (const failAt of ['destroyClient', 'stopAndProveOwnedChildDead'] as const) {
+      it(`keeps registration claimed after physical shutdown fails at ${failAt}`, async () => {
+        const session = await build().open(ACTIVATION);
+        handoff.failAt = failAt;
+
+        await expect(session.close('shutdown')).rejects.toThrow(/handoff failed/);
+        const callsAfterFailure = handoff.calls.length;
+        await expect(session.close('shutdown')).rejects.toThrow(/handoff failed/);
+        expect(handoff.calls).toHaveLength(callsAfterFailure);
+        expect(() =>
+          createSystemRecordLaneControllerV1({
+            lease: ownership.lease,
+            handoff: new RecordingHandoff(),
+            executor,
+            barrier: barrier.run,
+          }),
+        ).toThrow(SystemRecordControllerRegistrationError);
+      });
+    }
 
     it('is idempotent for a repeated shutdown', async () => {
       const session = await build().open(ACTIVATION);
@@ -603,6 +1034,134 @@ describe('system-record lane session lifecycle V1', () => {
       expect(second.state.rejected).toBe(true);
       expect(String((second.state.value as Error).message)).toMatch(/handoff failed/);
       expect(gated.calls.filter((c) => c === 'stopAndProveOwnedChildDead')).toHaveLength(2);
+    });
+
+    it('retains a timed-out shutdown until the scheduler callback physically settles', async () => {
+      const timeoutBarrier = new TransitionTimeoutBarrier();
+      const gated = new GatedHandoff();
+      gated.barrier = timeoutBarrier;
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: gated,
+        executor,
+        barrier: timeoutBarrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+      gated.gate('destroyClient');
+
+      const first = track(session.close('shutdown'));
+      await gated.reached('destroyClient');
+      timeoutBarrier.timeoutShutdown();
+      await first.done;
+
+      expect(first.state.rejected).toBe(true);
+      expect(String((first.state.value as Error).message)).toMatch(/TRANSITION_TIMEOUT/);
+      expect(session.state).toBe('shutdown');
+      expect(timeoutBarrier.physicalSettled).toBe(false);
+
+      // The first close reports the scheduler timeout, but ownership remains
+      // with the callback still parked under the scheduler's exclusive seal.
+      const second = track(session.close('shutdown'));
+      await drain();
+      expect(second.state.settled).toBe(false);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor,
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+
+      gated.release('destroyClient');
+      await second.done;
+      expect(second.state.rejected).toBe(false);
+      expect(timeoutBarrier.physicalSettled).toBe(true);
+      expect(gated.calls.filter((c) => c === 'destroyClient')).toHaveLength(2);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor,
+          barrier: barrier.run,
+        }),
+      ).not.toThrow();
+    });
+
+    it('retains a wait-phase timed-out shutdown without claiming physical teardown', async () => {
+      const timeoutBarrier = new WaitPhaseTimeoutBarrier();
+      const gated = new GatedHandoff();
+      gated.barrier = timeoutBarrier;
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: gated,
+        executor,
+        barrier: timeoutBarrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+      gated.calls.length = 0;
+
+      await expect(session.close('shutdown')).rejects.toThrow(/WAIT_TIMEOUT/);
+      expect(session.state).toBe('shutdown');
+      expect(gated.calls).toEqual([
+        'failManagedMutationsClosed:shutdown transition did not physically settle',
+      ]);
+
+      // No callback ran, so no physical child/client proof exists. Replaying a
+      // teardown outside the rejected scheduler request would violate the
+      // control boundary; retain and report the same failure instead.
+      await expect(session.close('shutdown')).rejects.toThrow(/WAIT_TIMEOUT/);
+      expect(gated.calls).toEqual([
+        'failManagedMutationsClosed:shutdown transition did not physically settle',
+      ]);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor,
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+    });
+
+    it('retains a timed-out disable until its scheduler callback settles', async () => {
+      const timeoutBarrier = new TransitionTimeoutBarrier();
+      const gated = new GatedHandoff();
+      gated.barrier = timeoutBarrier;
+      __resetSystemRecordControllerRegistrationForTests();
+      const admissionStates: boolean[] = [];
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: gated,
+        executor,
+        barrier: timeoutBarrier.run,
+        setAdmissionActive: (active) => admissionStates.push(active),
+      });
+      const session = await controller.open(ACTIVATION);
+      expect(admissionStates).toEqual([true]);
+      gated.gate('awaitRetiredWork');
+
+      const first = track(session.close('disable'));
+      await gated.reached('awaitRetiredWork');
+      timeoutBarrier.timeout('system-record.disable');
+      await first.done;
+      expect(first.state.rejected).toBe(true);
+      expect(session.state).toBe('disabling');
+      expect(admissionStates).toEqual([true]);
+
+      const second = track(session.close('disable'));
+      await drain();
+      expect(second.state.settled).toBe(false);
+
+      gated.release('awaitRetiredWork');
+      await second.done;
+      expect(second.state.rejected).toBe(false);
+      expect(session.state).toBe('disabled');
+      expect(admissionStates).toEqual([true, false]);
+      expect(gated.calls.filter((call) => call === 'rotateMaterializationEpoch'))
+        .toHaveLength(2);
     });
 
     it('runs ONE teardown when a superseded open settles under a stalled shutdown', async () => {
@@ -933,7 +1492,10 @@ describe('system-record lane session lifecycle V1', () => {
 
     it('refuses to report enabled when the handoff bound no ready generation', async () => {
       // The handoff resolves every step but never binds a proven-ready child.
-      const silent = createManagedOxigraphOwnershipControllerV1();
+      const silent = createManagedOxigraphOwnershipControllerV1(
+        OWNERSHIP_QUERY_ENDPOINT,
+        OWNERSHIP_UPDATE_ENDPOINT,
+      );
       __resetSystemRecordControllerRegistrationForTests();
       const controller = createSystemRecordLaneControllerV1({
         lease: silent.lease,
@@ -1003,7 +1565,9 @@ describe('system-record lane session lifecycle V1', () => {
       const controller = build();
 
       await expect(controller.open(ACTIVATION)).rejects.toThrow(/BARRIER_TIMEOUT/);
-      expect(handoff.calls).toEqual([]);
+      expect(handoff.calls).toEqual([
+        'failManagedMutationsClosed:enable transition did not physically settle',
+      ]);
       await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
     });
 
@@ -1034,7 +1598,117 @@ describe('system-record lane session lifecycle V1', () => {
       const session = await build().open(ACTIVATION);
       const result = await session.applyVerified({});
       expect(result.outcome).toBe('applied');
-      expect(executor.calls).toEqual([{ childGeneration: '1' }]);
+      expect(executor.calls).toEqual([{
+        activationGeneration: '1',
+        networkId: 'testnet',
+        kind: 'agents',
+        mode: 'shadow',
+        sessionIdentity: expect.any(Object),
+        childGeneration: '1',
+        materializationEpoch: '1',
+      }]);
+      expect(Object.getPrototypeOf(executor.calls[0]?.sessionIdentity)).toBeNull();
+      expect(Reflect.ownKeys(executor.calls[0]?.sessionIdentity ?? {})).toHaveLength(0);
+      expect(Object.isFrozen(executor.calls[0]?.sessionIdentity)).toBe(true);
+      expect(Object.isFrozen(executor.calls[0])).toBe(true);
+    });
+
+    it('keeps an explicit child-generation fallback for the current adapter', async () => {
+      const legacyCalls: string[] = [];
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff,
+        barrier: barrier.run,
+        executor: {
+          applyVerified: async (_proof, childGeneration) => {
+            legacyCalls.push(childGeneration);
+            return {
+              outcome: 'applied',
+              stateRevision: '1',
+              appliedStateDigest: `0x${'e'.repeat(64)}`,
+            };
+          },
+        },
+      });
+
+      const session = await controller.open(ACTIVATION);
+      expect((await session.applyVerified({})).outcome).toBe('applied');
+      expect(legacyCalls).toEqual(['1']);
+    });
+
+    it('refuses a facade from before disable/reopen even for the same descriptor', async () => {
+      const controller = build();
+      const stale = await controller.open(ACTIVATION);
+      await stale.close('disable');
+      const current = await controller.open(ACTIVATION);
+
+      expect(stale.activationGeneration).toBe('1');
+      expect(current.activationGeneration).toBe('2');
+      const refusedProof = Object.freeze({ proof: 'stale-facade' });
+      expect(await stale.applyVerified(refusedProof)).toEqual({
+        outcome: 'deferred',
+        reason: 'generation-changed',
+      });
+      expect(executor.calls).toHaveLength(0);
+      expect(executor.discarded).toEqual([refusedProof]);
+
+      expect((await current.applyVerified({})).outcome).toBe('applied');
+      expect(executor.calls).toHaveLength(1);
+      expect(executor.calls[0]?.activationGeneration).toBe('2');
+      expect(executor.calls[0]?.materializationEpoch).toBe('3');
+    });
+
+    it('does not let a shadow facade inherit a later authoritative activation', async () => {
+      const controller = build();
+      const shadow = await controller.open(ACTIVATION);
+      await shadow.close('disable');
+      const authoritative = await controller.open({ ...ACTIVATION, mode: 'authoritative' });
+
+      expect(await shadow.applyVerified({})).toEqual({
+        outcome: 'deferred',
+        reason: 'generation-changed',
+      });
+      expect((await authoritative.applyVerified({})).outcome).toBe('applied');
+      expect(executor.calls).toEqual([expect.objectContaining({
+        activationGeneration: '2',
+        networkId: 'testnet',
+        mode: 'authoritative',
+      })]);
+    });
+
+    it('does not let a facade cross into a later network activation', async () => {
+      const controller = build();
+      const testnet = await controller.open(ACTIVATION);
+      await testnet.close('disable');
+      const mainnet = await controller.open({ ...ACTIVATION, networkId: 'mainnet-gnosis' });
+
+      expect(await testnet.applyVerified({})).toEqual({
+        outcome: 'deferred',
+        reason: 'generation-changed',
+      });
+      expect((await mainnet.applyVerified({})).outcome).toBe('applied');
+      expect(executor.calls).toEqual([expect.objectContaining({
+        activationGeneration: '2',
+        networkId: 'mainnet-gnosis',
+        mode: 'shadow',
+      })]);
+    });
+
+    it('keeps close aggregate while apply remains activation-scoped', async () => {
+      const controller = build();
+      const stale = await controller.open(ACTIVATION);
+      await stale.close('disable');
+      const current = await controller.open(ACTIVATION);
+
+      // A facade is not an independently owned lane. Its close still controls
+      // the one aggregate session, even though its apply authority is stale.
+      await stale.close('disable');
+      expect(current.state).toBe('disabled');
+      expect(await current.applyVerified({})).toEqual({
+        outcome: 'deferred',
+        reason: 'generation-changed',
+      });
+      expect(executor.calls).toHaveLength(0);
     });
 
     it('refuses before enable without dispatching', async () => {
@@ -1048,34 +1722,42 @@ describe('system-record lane session lifecycle V1', () => {
       const session = (await controller.open(ACTIVATION)) as SystemRecordLaneSessionV1;
       await session.close('disable');
 
-      const result = await session.applyVerified({});
+      const refusedProof = Object.freeze({ proof: 'disabled' });
+      const result = await session.applyVerified(refusedProof);
       expect(result).toEqual({ outcome: 'deferred', reason: 'generation-changed' });
       expect(executor.calls).toHaveLength(0);
+      expect(executor.discarded).toEqual([refusedProof]);
     });
 
     it('returns capability-lost after shutdown with zero dispatch', async () => {
       const session = await build().open(ACTIVATION);
       await session.close('shutdown');
-      expect(await session.applyVerified({})).toEqual({ outcome: 'capability-lost' });
+      const refusedProof = Object.freeze({ proof: 'shutdown' });
+      expect(await session.applyVerified(refusedProof)).toEqual({ outcome: 'capability-lost' });
       expect(executor.calls).toHaveLength(0);
+      expect(executor.discarded).toEqual([refusedProof]);
     });
 
     it('defers without dispatch while ownership is not ready', async () => {
       const session = await build().open(ACTIVATION);
       ownership.invalidate('child-exit');
+      const refusedProof = Object.freeze({ proof: 'not-ready' });
 
-      expect(await session.applyVerified({})).toEqual({
+      expect(await session.applyVerified(refusedProof)).toEqual({
         outcome: 'deferred',
         reason: 'generation-changed',
       });
       expect(executor.calls).toHaveLength(0);
+      expect(executor.discarded).toEqual([refusedProof]);
     });
 
     it('returns capability-lost without dispatch on terminal ownership', async () => {
       const session = await build().open(ACTIVATION);
       ownership.invalidate('shutdown');
-      expect(await session.applyVerified({})).toEqual({ outcome: 'capability-lost' });
+      const refusedProof = Object.freeze({ proof: 'terminal-lease' });
+      expect(await session.applyVerified(refusedProof)).toEqual({ outcome: 'capability-lost' });
       expect(executor.calls).toHaveLength(0);
+      expect(executor.discarded).toEqual([refusedProof]);
     });
 
     it('seals admission into reconciling after an indeterminate dispatch', async () => {
@@ -1088,11 +1770,13 @@ describe('system-record lane session lifecycle V1', () => {
       // No further work is admitted against a generation whose last write may
       // or may not have committed.
       executor.outcome = { outcome: 'applied', stateRevision: '2', appliedStateDigest: `0x${'b'.repeat(64)}` };
-      expect(await session.applyVerified({})).toEqual({
+      const refusedProof = Object.freeze({ proof: 'reconciling' });
+      expect(await session.applyVerified(refusedProof)).toEqual({
         outcome: 'deferred',
         reason: 'generation-changed',
       });
       expect(executor.calls).toHaveLength(1);
+      expect(executor.discarded).toEqual([refusedProof]);
     });
 
     it('downgrades a success to indeterminate when the child changed under dispatch', async () => {
@@ -1119,6 +1803,452 @@ describe('system-record lane session lifecycle V1', () => {
       // `stale` means the CAS did not match; it carries no uncertainty about
       // whether bytes were written, so it must not be inflated to indeterminate.
       expect(await session.applyVerified({})).toEqual({ outcome: 'stale' });
+    });
+  });
+
+  describe('atomic uncertain-write recovery', () => {
+    const buildRecovery = (chosenBarrier: RecordingBarrier = barrier) => {
+      __resetSystemRecordControllerRegistrationForTests();
+      const recoveryHandoff = new RecoveryHandoff(ownership);
+      recoveryHandoff.barrier = chosenBarrier;
+      const recoveryExecutor = new AtomicRecoveryExecutor();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: recoveryHandoff,
+        executor: recoveryExecutor,
+        barrier: chosenBarrier.run,
+      });
+      return { controller, recoveryHandoff, recoveryExecutor, chosenBarrier };
+    };
+
+    it('settles on a clean child at the existing epoch, then requires a fresh facade', async () => {
+      const { controller, recoveryHandoff, recoveryExecutor, chosenBarrier } = buildRecovery();
+      const staleFacade = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryHandoff.recoveryDeadlines.length = 0;
+      const recoveryStartedAt = performance.now();
+
+      const result = await staleFacade.applyVerified({});
+      expect(result).toEqual({ outcome: 'indeterminate', recoveryGeneration: '1' });
+      expect(recoveryExecutor.registration?.ownership).toBeTruthy();
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'applied',
+        stateRevision: '2',
+        appliedStateDigest: `0x${'2'.repeat(64)}`,
+      });
+
+      expect(recoveryHandoff.calls).toEqual([
+        'stopAndProveOwnedChildDead',
+        'destroyClient',
+        'awaitRetiredWork',
+        'startAndProveCleanGeneration',
+        'createRecoveryRuntime',
+      ]);
+      expect(chosenBarrier.purposes).toEqual([
+        'system-record.enable',
+        'system-record.recovery',
+      ]);
+      expect(recoveryExecutor.recoveredRuntime?.client.childGeneration).toBe('2');
+      const deadlines = recoveryHandoff.recoveryDeadlines.map(({ value }) => value);
+      expect(recoveryHandoff.recoveryDeadlines.map(({ phase }) => phase)).toEqual([
+        'stop', 'destroy', 'drain', 'start', 'exact-read',
+      ]);
+      expect(new Set(deadlines).size).toBe(1);
+      expect(deadlines[0]).toBeGreaterThan(recoveryStartedAt);
+      expect(deadlines[0]).toBeLessThanOrEqual(recoveryStartedAt + 30_100);
+      // Receipt/state reconciliation MUST precede any epoch rotation. Rotating
+      // first would make the exact old-epoch receipt unobservable.
+      expect(recoveryHandoff.calls).not.toContain('rotateMaterializationEpoch');
+      expect(staleFacade.state).toBe('enabled');
+      expect(staleFacade.activationGeneration).toBe('1');
+      expect(await staleFacade.applyVerified({})).toEqual({
+        outcome: 'deferred',
+        reason: 'generation-changed',
+      });
+
+      const freshFacade = await controller.open(ACTIVATION);
+      expect(freshFacade.activationGeneration).toBe('1');
+      recoveryExecutor.settlement = 'no-mutation';
+      expect(await freshFacade.applyVerified({})).toEqual({ outcome: 'stale' });
+      expect(recoveryExecutor.calls.at(-1)).toEqual(expect.objectContaining({
+        childGeneration: '2',
+        materializationEpoch: '1',
+      }));
+    });
+
+    it('retains the single-writer registration until detached recovery settles', async () => {
+      const { controller, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkReconcile();
+
+      await expect(session.applyVerified({})).resolves.toEqual({
+        outcome: 'indeterminate',
+        recoveryGeneration: '1',
+      });
+      await recoveryExecutor.reconcileReached;
+
+      let released = false;
+      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
+        released = true;
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+
+      expect(released).toBe(false);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+
+      recoveryExecutor.releaseReconcile();
+      await release;
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('accepts an attributable exact result that returns after its dispatch deadline', async () => {
+      const { controller, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkReconcile();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.reconcileReached;
+      const runtime = recoveryExecutor.recoveredRuntime;
+      expect(runtime?.assertAttributable()).toBe(true);
+      const now = vi.spyOn(performance, 'now')
+        .mockReturnValue((runtime?.absoluteDeadlineMs ?? 0) + 1);
+      try {
+        recoveryExecutor.releaseReconcile();
+        await apply;
+        await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+          resolution: 'applied',
+          stateRevision: '2',
+          appliedStateDigest: `0x${'2'.repeat(64)}`,
+        });
+      } finally {
+        now.mockRestore();
+      }
+      expect(session.state).toBe('enabled');
+    });
+
+    it('uses retained terminal cleanup when a late exact result is unavailable', async () => {
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.recoveryResolution = { resolution: 'unavailable' };
+      recoveryExecutor.parkReconcile();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.reconcileReached;
+      const runtime = recoveryExecutor.recoveredRuntime;
+      const now = vi.spyOn(performance, 'now')
+        .mockReturnValue((runtime?.absoluteDeadlineMs ?? 0) + 1);
+      try {
+        recoveryExecutor.releaseReconcile();
+        await apply;
+        await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+          resolution: 'unavailable',
+        });
+      } finally {
+        now.mockRestore();
+      }
+
+      expect(recoveryHandoff.recoveryDeadlines.slice(-3)).toEqual([
+        { phase: 'stop', value: undefined },
+        { phase: 'destroy', value: undefined },
+        { phase: 'drain', value: undefined },
+      ]);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(session.state).toBe('unavailable');
+    });
+
+    it('retains recovery ownership after a transition timeout until late settlement', async () => {
+      const timeoutBarrier = new TransitionTimeoutBarrier();
+      const { controller, recoveryExecutor } = buildRecovery(timeoutBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkReconcile();
+
+      await session.applyVerified({});
+      await recoveryExecutor.reconcileReached;
+      let settled = false;
+      void recoveryExecutor.registration?.completion.then(() => { settled = true; });
+      timeoutBarrier.timeout('system-record.recovery');
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(session.state).toBe('reconciling');
+
+      recoveryExecutor.releaseReconcile();
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'applied',
+        stateRevision: '2',
+        appliedStateDigest: `0x${'2'.repeat(64)}`,
+      });
+      expect(session.state).toBe('enabled');
+    });
+
+    it('keeps a never-settling timed-out recovery and shutdown claimed', async () => {
+      const timeoutBarrier = new TransitionTimeoutBarrier();
+      const { controller, recoveryExecutor } = buildRecovery(timeoutBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkReconcile();
+
+      await session.applyVerified({});
+      await recoveryExecutor.reconcileReached;
+      let recoverySettled = false;
+      void recoveryExecutor.registration?.completion.then(() => { recoverySettled = true; });
+      timeoutBarrier.timeout('system-record.recovery');
+      const shutdownState = { settled: false };
+      void session.close('shutdown').then(
+        () => { shutdownState.settled = true; },
+        () => { shutdownState.settled = true; },
+      );
+      for (let i = 0; i < 10; i += 1) await new Promise((resolve) => setImmediate(resolve));
+
+      expect(recoverySettled).toBe(false);
+      expect(shutdownState.settled).toBe(false);
+      expect(session.state).toBe('shutdown');
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+    });
+
+    it('attaches uncertainty to a disable barrier that already owns the close', async () => {
+      const gatedBarrier = new GateBarrier();
+      gatedBarrier.gate('system-record.disable');
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery(gatedBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const disable = session.close('disable');
+      expect(session.state).toBe('disabling');
+      await gatedBarrier.reached('system-record.disable');
+
+      recoveryExecutor.releaseRegistration();
+      await expect(apply).resolves.toEqual({ outcome: 'indeterminate', recoveryGeneration: '1' });
+      // Registration joined the already-enqueued close; a second recovery
+      // barrier behind disable would return too late and permit legacy bypass.
+      expect(gatedBarrier.purposes).toEqual(['system-record.enable']);
+      gatedBarrier.release('system-record.disable');
+      await disable;
+
+      expect(gatedBarrier.purposes).toEqual([
+        'system-record.enable',
+        'system-record.disable',
+      ]);
+      expect(recoveryHandoff.calls).toEqual([
+        'stopAndProveOwnedChildDead',
+        'destroyClient',
+        'awaitRetiredWork',
+        'startAndProveCleanGeneration',
+        'createRecoveryRuntime',
+        'rotateMaterializationEpoch',
+      ]);
+      expect(session.state).toBe('disabled');
+    });
+
+    it('keeps disable intent latched when recovery was registered first', async () => {
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryExecutor.parkReconcile();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.reconcileReached;
+      expect(session.state).toBe('reconciling');
+      const disable = session.close('disable');
+      expect(session.state).toBe('disabling');
+
+      recoveryExecutor.releaseReconcile();
+      await apply;
+      await disable;
+      expect(session.state).toBe('disabled');
+      expect(recoveryHandoff.calls.at(-1)).toBe('rotateMaterializationEpoch');
+      expect(recoveryHandoff.calls.filter((call) => call === 'startAndProveCleanGeneration'))
+        .toHaveLength(1);
+    });
+
+    it('attaches uncertainty to shutdown without restart, post-read, or epoch rotation', async () => {
+      const gatedBarrier = new GateBarrier();
+      gatedBarrier.gate('system-record.shutdown');
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery(gatedBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const shutdown = session.close('shutdown');
+      expect(session.state).toBe('shutdown');
+      await gatedBarrier.reached('system-record.shutdown');
+
+      recoveryExecutor.releaseRegistration();
+      await apply;
+      gatedBarrier.release('system-record.shutdown');
+      await shutdown;
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'unavailable',
+      });
+
+      expect(recoveryHandoff.calls).toEqual([
+        'stopAndProveOwnedChildDead',
+        'destroyClient',
+        'awaitRetiredWork',
+      ]);
+      expect(recoveryHandoff.calls).not.toContain('startAndProveCleanGeneration');
+      expect(recoveryHandoff.calls).not.toContain('createRecoveryRuntime');
+      expect(recoveryHandoff.calls).not.toContain('rotateMaterializationEpoch');
+      expect(session.state).toBe('shutdown');
+    });
+
+    it('reports an attached shutdown that cannot prove the uncertain child dead', async () => {
+      const gatedBarrier = new GateBarrier();
+      gatedBarrier.gate('system-record.shutdown');
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery(gatedBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.parkBeforeRegistration();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const shutdown = session.close('shutdown');
+      await gatedBarrier.reached('system-record.shutdown');
+      recoveryHandoff.failAt = 'stopAndProveOwnedChildDead';
+      recoveryExecutor.releaseRegistration();
+      await apply;
+      gatedBarrier.release('system-record.shutdown');
+
+      await expect(shutdown).rejects.toThrow(/could not prove uncertain write settled/);
+      let recoverySettled = false;
+      void recoveryExecutor.registration?.completion.then(() => { recoverySettled = true; });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(recoverySettled).toBe(false);
+      expect(session.state).toBe('shutdown');
+    });
+
+    it('never republishes enabled when shutdown latches during exact settlement', async () => {
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryExecutor.parkReconcile();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.reconcileReached;
+      const shutdown = session.close('shutdown');
+      expect(session.state).toBe('shutdown');
+      recoveryExecutor.releaseReconcile();
+
+      await apply;
+      await shutdown;
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'unavailable',
+      });
+      expect(session.state).toBe('shutdown');
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+      // The replacement was already started before shutdown intent, so the
+      // shutdown transition must perform one additional teardown for it.
+      expect(recoveryHandoff.calls.filter((call) => call === 'stopAndProveOwnedChildDead'))
+        .toHaveLength(2);
+    });
+
+    it('fails terminally closed when exact settlement is unavailable', async () => {
+      const { controller, recoveryExecutor } = buildRecovery();
+      const session = await controller.open(ACTIVATION);
+      recoveryExecutor.recoveryResolution = { resolution: 'unavailable' };
+
+      expect((await session.applyVerified({})).outcome).toBe('indeterminate');
+      await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+        resolution: 'unavailable',
+      });
+      // Completion resolves before the lifecycle tail publishes terminality;
+      // yield once to observe the fail-closed state transition.
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(session.state).toBe('unavailable');
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+    });
+
+    for (const failAt of [
+      'stopAndProveOwnedChildDead',
+      'destroyClient',
+      'awaitRetiredWork',
+      'startAndProveCleanGeneration',
+      'createRecoveryRuntime',
+    ] as const) {
+      it(`fails closed and retains ownership safely when recovery fails at ${failAt}`, async () => {
+        const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery();
+        const session = await controller.open(ACTIVATION);
+        recoveryHandoff.calls.length = 0;
+        recoveryHandoff.failAt = failAt;
+
+        expect((await session.applyVerified({})).outcome).toBe('indeterminate');
+        if (
+          failAt === 'stopAndProveOwnedChildDead' ||
+          failAt === 'destroyClient' ||
+          failAt === 'awaitRetiredWork'
+        ) {
+          let recoverySettled = false;
+          void recoveryExecutor.registration?.completion.then(() => { recoverySettled = true; });
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(recoverySettled).toBe(false);
+        } else {
+          await expect(recoveryExecutor.registration?.completion).resolves.toEqual({
+            resolution: 'unavailable',
+          });
+        }
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(session.state).toBe('unavailable');
+        expect(recoveryHandoff.calls.some((call) =>
+          call.startsWith('failManagedMutationsClosed:'))).toBe(true);
+      });
+    }
+
+    it('shutdown cancels and joins disable-attached exact recovery without a second teardown', async () => {
+      const gatedBarrier = new GateBarrier();
+      gatedBarrier.gate('system-record.disable');
+      const { controller, recoveryHandoff, recoveryExecutor } = buildRecovery(gatedBarrier);
+      const session = await controller.open(ACTIVATION);
+      recoveryHandoff.calls.length = 0;
+      recoveryExecutor.parkBeforeRegistration();
+      recoveryExecutor.parkReconcileUntilAbort();
+
+      const apply = session.applyVerified({});
+      await recoveryExecutor.registrationReached;
+      const disable = session.close('disable');
+      await gatedBarrier.reached('system-record.disable');
+      recoveryExecutor.releaseRegistration();
+      await apply;
+      gatedBarrier.release('system-record.disable');
+      await recoveryExecutor.reconcileReached;
+
+      // No test release exists for the exact read. Shutdown must abort the
+      // lifecycle-owned signal, await that rejection, then reuse the recovery's
+      // physical-settlement token instead of stopping the replacement twice.
+      const shutdown = session.close('shutdown');
+      await Promise.allSettled([disable, shutdown]);
+
+      expect(recoveryExecutor.recoveredRuntime?.signal.aborted).toBe(true);
+      expect(recoveryHandoff.calls.filter((call) =>
+        call === 'stopAndProveOwnedChildDead')).toHaveLength(2);
+      expect(gatedBarrier.purposes).toEqual([
+        'system-record.enable',
+        'system-record.disable',
+      ]);
+      expect(session.state).toBe('shutdown');
     });
   });
 });

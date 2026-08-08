@@ -64,6 +64,13 @@ export function computeKaProjectionDigestV1(projectionBytes: Uint8Array): Digest
   return digestToLowerHex(PROJECTION_DIGEST_DOMAIN_BYTES, projectionBytes);
 }
 
+/** Compatibility name used by the system-record atomic-apply boundary. */
+export function computeKaBundleProjectionDigestV1(
+  projectionBytes: Uint8Array,
+): Digest32V1 {
+  return computeKaProjectionDigestV1(projectionBytes);
+}
+
 /**
  * Validate the exact v1 component-length arithmetic without allocating a bundle.
  * Inputs are bigint so no candidate u64 ever passes through binary floating point.
