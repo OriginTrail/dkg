@@ -24,6 +24,12 @@ import type {
   SystemRecordAtomicRecoveryResolutionV1,
   SystemRecordAtomicRecoveryRuntimeV1,
 } from '../src/system-record-atomic-apply-executor-v1-internal.js';
+import {
+  expectSystemRecordControllerSlotRetainedV1,
+  nextSystemRecordLifecycleTurnV1,
+  releaseReplacementSystemRecordControllerV1,
+  trackSystemRecordControllerReleaseV1,
+} from './helpers/system-record-lifecycle-race-v1.js';
 
 const ACTIVATION: SystemRecordLaneActivationV1 = {
   networkId: 'testnet',
@@ -1318,6 +1324,68 @@ describe('system-record lane session lifecycle V1', () => {
         .toHaveLength(2);
     });
 
+    it('keeps detach waiting for a timed-out disable physical settlement', async () => {
+      const timeoutBarrier = new TransitionTimeoutBarrier();
+      const gated = new GatedHandoff();
+      gated.barrier = timeoutBarrier;
+      __resetSystemRecordControllerRegistrationForTests();
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: gated,
+        executor,
+        barrier: timeoutBarrier.run,
+      });
+      const session = await controller.open(ACTIVATION);
+      gated.gate('awaitRetiredWork');
+
+      const disable = track(session.close('disable'));
+      await gated.reached('awaitRetiredWork');
+      timeoutBarrier.timeout('system-record.disable');
+      await disable.done;
+      expect(disable.state.rejected).toBe(true);
+
+      const detach = track(releaseSystemRecordLaneControllerV1(controller));
+      await drain();
+      expect(detach.state.settled).toBe(false);
+
+      gated.release('awaitRetiredWork');
+      await detach.done;
+      expect(detach.state.rejected).toBe(false);
+      expect(session.state).toBe('detached');
+
+      const replacement = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff: new RecordingHandoff(),
+        executor: new StubExecutor(),
+        barrier: barrier.run,
+      });
+      await releaseSystemRecordLaneControllerV1(replacement);
+    });
+
+    it('retains the controller when a rejecting transition self-releases during detach', async () => {
+      const { gated, controller } = buildGated();
+      gated.gate('destroyClient');
+      const open = track(controller.open(ACTIVATION));
+      await gated.reached('destroyClient');
+      gated.failAt = 'stopAndProveOwnedChildDead';
+
+      const detach = track(releaseSystemRecordLaneControllerV1(controller));
+      gated.release('destroyClient');
+      await Promise.all([open.done, detach.done]);
+
+      expect(open.state.rejected).toBe(true);
+      expect(detach.state.rejected).toBe(true);
+      expect(String((detach.state.value as Error).message)).toMatch(/handoff failed/);
+      expect(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }),
+      ).toThrow(SystemRecordControllerRegistrationError);
+    });
+
     it('runs ONE teardown when a superseded open settles under a stalled shutdown', async () => {
       const { gated, controller } = buildGated();
       const first = await controller.open(ACTIVATION);
@@ -2041,32 +2109,28 @@ describe('system-record lane session lifecycle V1', () => {
       });
       await recoveryExecutor.reconcileReached;
 
-      let released = false;
-      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
-        released = true;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
+      const release = trackSystemRecordControllerReleaseV1(controller);
+      await nextSystemRecordLifecycleTurnV1();
 
-      expect(released).toBe(false);
-      expect(() =>
+      expect(release.hasSettled()).toBe(false);
+      expectSystemRecordControllerSlotRetainedV1(() =>
         createSystemRecordLaneControllerV1({
           lease: ownership.lease,
           handoff: new RecordingHandoff(),
           executor: new StubExecutor(),
           barrier: barrier.run,
-        }),
-      ).toThrow(SystemRecordControllerRegistrationError);
+        }));
 
       recoveryExecutor.releaseReconcile();
-      await release;
+      await release.completion;
 
-      const replacement = createSystemRecordLaneControllerV1({
-        lease: ownership.lease,
-        handoff: new RecordingHandoff(),
-        executor: new StubExecutor(),
-        barrier: barrier.run,
-      });
-      await releaseSystemRecordLaneControllerV1(replacement);
+      await releaseReplacementSystemRecordControllerV1(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }));
     });
 
     it('retains the single-writer registration when release wins before recovery registration', async () => {
@@ -2245,30 +2309,26 @@ describe('system-record lane session lifecycle V1', () => {
       });
       await tailBarrier.tailReached;
 
-      let released = false;
-      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
-        released = true;
-      });
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(released).toBe(false);
-      expect(() =>
+      const release = trackSystemRecordControllerReleaseV1(controller);
+      await nextSystemRecordLifecycleTurnV1();
+      expect(release.hasSettled()).toBe(false);
+      expectSystemRecordControllerSlotRetainedV1(() =>
         createSystemRecordLaneControllerV1({
           lease: ownership.lease,
           handoff: new RecordingHandoff(),
           executor: new StubExecutor(),
           barrier: barrier.run,
-        }),
-      ).toThrow(SystemRecordControllerRegistrationError);
+        }));
 
       tailBarrier.release();
-      await release;
-      const replacement = createSystemRecordLaneControllerV1({
-        lease: ownership.lease,
-        handoff: new RecordingHandoff(),
-        executor: new StubExecutor(),
-        barrier: barrier.run,
-      });
-      await releaseSystemRecordLaneControllerV1(replacement);
+      await release.completion;
+      await releaseReplacementSystemRecordControllerV1(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }));
     });
 
     it('accepts late bound recovery after a disable wait timeout clears the active binding', async () => {
@@ -2280,29 +2340,26 @@ describe('system-record lane session lifecycle V1', () => {
       const apply = session.applyVerified({});
       await recoveryExecutor.registrationReached;
       const disable = session.close('disable');
-      let released = false;
-      const release = releaseSystemRecordLaneControllerV1(controller).then(() => {
-        released = true;
-      });
+      const release = trackSystemRecordControllerReleaseV1(controller);
       await expect(disable).rejects.toThrow(/WAIT_TIMEOUT/);
-      await new Promise((resolve) => setImmediate(resolve));
-      expect(released).toBe(false);
+      await nextSystemRecordLifecycleTurnV1();
+      expect(release.hasSettled()).toBe(false);
 
       recoveryExecutor.releaseRegistration();
       await expect(apply).resolves.toEqual({
         outcome: 'indeterminate',
         recoveryGeneration: '1',
       });
-      await release;
-      expect(released).toBe(true);
+      await release.completion;
+      expect(release.hasSettled()).toBe(true);
 
-      const replacement = createSystemRecordLaneControllerV1({
-        lease: ownership.lease,
-        handoff: new RecordingHandoff(),
-        executor: new StubExecutor(),
-        barrier: barrier.run,
-      });
-      await releaseSystemRecordLaneControllerV1(replacement);
+      await releaseReplacementSystemRecordControllerV1(() =>
+        createSystemRecordLaneControllerV1({
+          lease: ownership.lease,
+          handoff: new RecordingHandoff(),
+          executor: new StubExecutor(),
+          barrier: barrier.run,
+        }));
     });
 
     it('keeps unavailable terminal when recovery registers after a disable wait timeout', async () => {

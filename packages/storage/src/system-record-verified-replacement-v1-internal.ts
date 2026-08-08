@@ -35,7 +35,13 @@ import {
 
 import type { Quad } from './triple-store.js';
 import {
+  assertSystemRecordOpaqueIdentityV1,
+  snapshotSystemRecordDenseArrayV1,
+  snapshotSystemRecordExactDataRecordV1 as exactRecord,
+} from './system-record-input-guards-v1-internal.js';
+import {
   createSystemRecordNonQueuedReservationGateV1,
+  type SystemRecordRuntimeReservationLeaseV1,
   type SystemRecordRuntimeReservationGateV1,
 } from './system-record-reservation-gate-v1-internal.js';
 
@@ -156,6 +162,7 @@ type RuntimeReservationPhaseV1 = 'proof' | 'facts' | 'recovery' | 'released';
 interface RuntimeReservationV1 {
   readonly registryIdentity: object;
   readonly identity: object;
+  readonly gateLease: SystemRecordRuntimeReservationLeaseV1;
   readonly bytes: number;
   readonly admittedDeadlineMs: number;
   readonly charges: Record<SystemRecordAtomicChargeCategoryV1, number>;
@@ -226,65 +233,8 @@ const LANE_BINDING_KEYS = [
   'materializationEpoch',
 ] as const;
 
-function exactRecord<const Keys extends readonly string[]>(
-  value: unknown,
-  keys: Keys,
-  label: string,
-): Readonly<Record<Keys[number], unknown>> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    throw new Error(`${label} must be a plain data object`);
-  }
-  if (utilTypes.isProxy(value)) throw new Error(`${label} must not be a Proxy`);
-  const prototype = Object.getPrototypeOf(value);
-  if (prototype !== Object.prototype && prototype !== null) {
-    throw new Error(`${label} must be a plain data object`);
-  }
-  const ownKeys = Reflect.ownKeys(value);
-  if (ownKeys.length !== keys.length) throw new Error(`${label} has unknown or missing fields`);
-  const expected = new Set<string>(keys);
-  const result: Record<string, unknown> = Object.create(null);
-  for (const key of ownKeys) {
-    if (typeof key !== 'string' || !expected.has(key)) {
-      throw new Error(`${label} has unknown or missing fields`);
-    }
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} fields must be enumerable data properties`);
-    }
-    result[key] = descriptor.value;
-  }
-  return Object.freeze(result) as Readonly<Record<Keys[number], unknown>>;
-}
-
 function denseArray(value: unknown, maxLength: number, label: string): readonly unknown[] {
-  if (!Array.isArray(value)) throw new Error(`${label} must be an array`);
-  if (utilTypes.isProxy(value)) throw new Error(`${label} must not be a Proxy`);
-  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
-  if (!lengthDescriptor || !Object.prototype.hasOwnProperty.call(lengthDescriptor, 'value')
-    || lengthDescriptor.enumerable === true
-    || !Number.isSafeInteger(lengthDescriptor.value)
-    || lengthDescriptor.value < 1
-    || lengthDescriptor.value > maxLength) {
-    throw new Error(`${label} length is outside its bound`);
-  }
-  const length = lengthDescriptor.value as number;
-  const keys = Reflect.ownKeys(value);
-  if (keys.length !== length + 1) throw new Error(`${label} must be a dense closed array`);
-  const result = new Array<unknown>(length);
-  for (const key of keys) {
-    if (key === 'length') continue;
-    if (typeof key !== 'string' || !/^(0|[1-9][0-9]*)$/.test(key)) {
-      throw new Error(`${label} must contain only array indexes`);
-    }
-    const index = Number(key);
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    if (!Number.isSafeInteger(index) || index >= length || !descriptor?.enumerable
-      || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
-      throw new Error(`${label} must contain only enumerable data elements`);
-    }
-    result[index] = descriptor.value;
-  }
-  return Object.freeze(result);
+  return snapshotSystemRecordDenseArrayV1(value, { label, minLength: 1, maxLength });
 }
 
 function canonicalU64(value: unknown, label: string): string {
@@ -297,15 +247,7 @@ function canonicalU64(value: unknown, label: string): string {
 }
 
 function identity(value: unknown, label: string): object {
-  if (value === null || typeof value !== 'object') {
-    throw new Error(`${label} must be an opaque object identity`);
-  }
-  if (utilTypes.isProxy(value)) throw new Error(`${label} must not be a Proxy`);
-  if (Object.getPrototypeOf(value) !== null || !Object.isFrozen(value)
-    || Reflect.ownKeys(value).length !== 0) {
-    throw new Error(`${label} must be a frozen propertyless null-prototype capability`);
-  }
-  return value;
+  return assertSystemRecordOpaqueIdentityV1(value, label);
 }
 
 function snapshotLaneBinding(value: unknown): SystemRecordVerifiedReplacementLaneBindingV1 {
@@ -496,6 +438,7 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
     const reservation: RuntimeReservationV1 = {
       registryIdentity,
       identity: Object.freeze(Object.create(null) as object),
+      gateLease: reservationGate.acquire(SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES),
       bytes: SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
       admittedDeadlineMs,
       charges: {
@@ -506,7 +449,6 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
       },
       phase: 'proof',
     };
-    reservationGate.acquire(reservation.identity, reservation.bytes);
     return reservation;
   };
 
@@ -514,7 +456,7 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
     if (reservation.registryIdentity !== registryIdentity || reservation.phase === 'released') {
       throw new Error('system-record atomic transient reservation was already released');
     }
-    reservationGate.release(reservation.identity, reservation.bytes);
+    reservation.gateLease.release();
     reservation.phase = 'released';
     reservation.charges.decoded = 0;
     reservation.charges.request = 0;

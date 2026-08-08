@@ -106,22 +106,12 @@ export interface SystemRecordRootClaimGuardV1 {
   readonly recordSubject: string;
 }
 
-export interface SystemRecordCompleteConditionalApplyV1 {
+export interface SystemRecordMaterializationPlanV1 {
+  readonly stableKeyHash: Digest32V1;
   readonly projectionGraph: string;
-  readonly priorSubjects: readonly string[];
-  readonly nextSubjects: readonly string[];
-  readonly previousReservedQuads: readonly Readonly<Quad>[];
-  readonly requiredAbsentReservedSubjects: readonly string[];
-  readonly nextReservedQuads: readonly Readonly<Quad>[];
-  readonly nextProjectionQuads: readonly Readonly<Quad>[];
+  readonly prior: SystemRecordPriorMaterializationV1;
+  readonly next: SystemRecordNextMaterializationV1;
   readonly rootClaimGuards: readonly SystemRecordRootClaimGuardV1[];
-}
-
-export interface SystemRecordCompletePostReadExpectationV1 {
-  readonly reservedQuads: readonly Readonly<Quad>[];
-  readonly projectionSubjects: readonly string[];
-  readonly projectionQuads: readonly Readonly<Quad>[];
-  readonly receipt: SystemRecordMaterializationReceiptV1;
   readonly success: Readonly<{
     readonly stateRevision: string;
     readonly appliedStateDigest: Digest32V1;
@@ -132,24 +122,7 @@ export interface SystemRecordActiveReplacementCompleteV1<
   Outcome extends 'ready' | 'already-applied' = 'ready' | 'already-applied',
 > {
   readonly outcome: Outcome;
-  readonly stableKeyHash: Digest32V1;
-  readonly projectionGraph: string;
-  readonly priorSubjects: readonly string[];
-  readonly nextSubjects: readonly string[];
-  readonly previousReservedQuads: readonly Readonly<Quad>[];
-  readonly requiredAbsentReservedSubjects: readonly string[];
-  readonly nextReservedQuads: readonly Readonly<Quad>[];
-  readonly nextProjectionQuads: readonly Readonly<Quad>[];
-  readonly nextAppliedState: SystemRecordAppliedStatePresentV1;
-  readonly conditionalApply: SystemRecordCompleteConditionalApplyV1;
-  readonly postReadExpectation: SystemRecordCompletePostReadExpectationV1;
-  readonly prior: SystemRecordPriorMaterializationV1;
-  readonly next: SystemRecordNextMaterializationV1;
-  readonly rootClaimGuards: readonly SystemRecordRootClaimGuardV1[];
-  readonly success: Readonly<{
-    readonly stateRevision: string;
-    readonly appliedStateDigest: Digest32V1;
-  }>;
+  readonly plan: SystemRecordMaterializationPlanV1;
 }
 
 export type SystemRecordActiveReplacementReadyV1 =
@@ -232,8 +205,7 @@ export function deriveSystemRecordActiveReplacementV1(input: {
     ? snapshot.ownedSubjectTable
     : Object.freeze([]) as OwnedSubjectTableObjectV1;
 
-  if (authority.equalHead && !(snapshot.state === 'present'
-      && requiresSystemRecordSnapshotRematerializationV1(snapshot))) {
+  if (authority.materialization === 'reuse') {
     if (snapshot.state !== 'present') {
       throw new Error('equal system-record head cannot exist in absent state');
     }
@@ -287,40 +259,16 @@ export function deriveSystemRecordActiveReplacementV1(input: {
       reservedQuads: previousReservedQuads,
       projectionQuads: facts.projectionQuads,
     });
-    const conditionalApply = completeConditionalApply({
-      projectionGraph,
-      priorSubjects: priorTable,
-      nextSubjects: nextTable,
-      previousReservedQuads,
-      requiredAbsentReservedSubjects,
-      nextReservedQuads: previousReservedQuads,
-      nextProjectionQuads: facts.projectionQuads,
-      rootClaimGuards,
-    });
-    const postReadExpectation = Object.freeze({
-      reservedQuads: previousReservedQuads,
-      projectionSubjects: nextTable,
-      projectionQuads: facts.projectionQuads,
-      receipt: snapshot.receipt,
-      success,
-    });
     return markComplete(Object.freeze({
       outcome: 'already-applied',
-      stableKeyHash,
-      projectionGraph,
-      priorSubjects: priorTable,
-      nextSubjects: nextTable,
-      previousReservedQuads,
-      requiredAbsentReservedSubjects,
-      nextReservedQuads: previousReservedQuads,
-      nextProjectionQuads: facts.projectionQuads,
-      nextAppliedState: snapshot.appliedState,
-      conditionalApply,
-      postReadExpectation,
-      prior,
-      next,
-      rootClaimGuards,
-      success,
+      plan: Object.freeze({
+        stableKeyHash,
+        projectionGraph,
+        prior,
+        next,
+        rootClaimGuards,
+        success,
+      }),
     }));
   }
 
@@ -446,40 +394,16 @@ export function deriveSystemRecordActiveReplacementV1(input: {
     reservedQuads: nextReservedQuads,
     projectionQuads: facts.projectionQuads,
   });
-  const conditionalApply = completeConditionalApply({
-    projectionGraph,
-    priorSubjects: priorTable,
-    nextSubjects: nextTable,
-    previousReservedQuads: priorReservedQuads,
-    requiredAbsentReservedSubjects,
-    nextReservedQuads,
-    nextProjectionQuads: facts.projectionQuads,
-    rootClaimGuards,
-  });
-  const postReadExpectation = Object.freeze({
-    reservedQuads: nextReservedQuads,
-    projectionSubjects: nextTable,
-    projectionQuads: facts.projectionQuads,
-    receipt,
-    success,
-  });
   return markComplete(Object.freeze({
     outcome: 'ready',
-    stableKeyHash,
-    projectionGraph,
-    priorSubjects: priorTable,
-    nextSubjects: nextTable,
-    previousReservedQuads: priorReservedQuads,
-    requiredAbsentReservedSubjects,
-    nextReservedQuads,
-    nextProjectionQuads: facts.projectionQuads,
-    nextAppliedState: appliedState,
-    conditionalApply,
-    postReadExpectation,
-    prior,
-    next,
-    rootClaimGuards,
-    success,
+    plan: Object.freeze({
+      stableKeyHash,
+      projectionGraph,
+      prior,
+      next,
+      rootClaimGuards,
+      success,
+    }),
   }));
 }
 
@@ -570,7 +494,10 @@ function assertTrustedReplacement(
 }
 
 type AuthorityAdvance =
-  | Readonly<{ readonly outcome: 'advance'; readonly equalHead: boolean }>
+  | Readonly<{
+      readonly outcome: 'advance';
+      readonly materialization: 'reuse' | 'rematerialize';
+    }>
   | Exclude<SystemRecordActiveReplacementDerivationV1, SystemRecordActiveReplacementReadyV1>;
 
 function classifyAuthorityAdvance(
@@ -578,7 +505,9 @@ function classifyAuthorityAdvance(
   facts: SystemRecordVerifiedReplacementFactsV1,
   headDigest: Digest32V1,
 ): AuthorityAdvance {
-  if (snapshot.state === 'absent') return Object.freeze({ outcome: 'advance', equalHead: false });
+  if (snapshot.state === 'absent') {
+    return Object.freeze({ outcome: 'advance', materialization: 'rematerialize' });
+  }
   const current = snapshot.appliedState;
   if (current.status !== 'active') {
     return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
@@ -604,10 +533,15 @@ function classifyAuthorityAdvance(
     if (candidateVersion < currentVersion) return Object.freeze({ outcome: 'stale' });
     if (candidateVersion === currentVersion) {
       return headDigest === current.headDigest
-        ? Object.freeze({ outcome: 'advance', equalHead: true })
+        ? Object.freeze({
+            outcome: 'advance',
+            materialization: requiresSystemRecordSnapshotRematerializationV1(snapshot)
+              ? 'rematerialize'
+              : 'reuse',
+          })
         : Object.freeze({ outcome: 'deferred', reason: 'authority-fork' });
     }
-    return Object.freeze({ outcome: 'advance', equalHead: false });
+    return Object.freeze({ outcome: 'advance', materialization: 'rematerialize' });
   }
   const expectedHistory = [...currentHistory, current.currentRoot];
   const tail = summary.transitionLineage.at(-1);
@@ -623,7 +557,7 @@ function classifyAuthorityAdvance(
       || currentHistory.includes(candidate.rootSubject)) {
     return Object.freeze({ outcome: 'deferred', reason: 'authority-history-mismatch' });
   }
-  return Object.freeze({ outcome: 'advance', equalHead: false });
+  return Object.freeze({ outcome: 'advance', materialization: 'rematerialize' });
 }
 
 type RootSnapshotClassification =
@@ -825,12 +759,6 @@ function rootGuards(
     claimSubject,
     recordSubject,
   })));
-}
-
-function completeConditionalApply(
-  value: SystemRecordCompleteConditionalApplyV1,
-): SystemRecordCompleteConditionalApplyV1 {
-  return Object.freeze({ ...value });
 }
 
 function markComplete<Outcome extends 'ready' | 'already-applied'>(

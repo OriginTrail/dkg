@@ -1,5 +1,3 @@
-import { types as utilTypes } from 'node:util';
-
 import {
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
@@ -11,6 +9,14 @@ import type {
   SystemRecordAtomicRecoveryResolutionV1,
   SystemRecordAtomicRecoveryRuntimeV1,
 } from './system-record-atomic-apply-executor-v1-internal.js';
+import {
+  SystemRecordApplyAdmissionTrackerV1,
+  type SystemRecordOwnedRecoverySettlementV1,
+} from './system-record-lane-coordination-v1-internal.js';
+import {
+  snapshotSystemRecordDenseArrayV1,
+  snapshotSystemRecordExactDataRecordV1,
+} from './system-record-input-guards-v1-internal.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).
@@ -271,35 +277,12 @@ const UTF8 = new TextEncoder();
 
 /** Snapshot the closed activation record without invoking caller traps or accessors. */
 const snapshotActivation = (activation: unknown): SystemRecordLaneActivationSnapshotV1 => {
-  if (
-    activation === null ||
-    typeof activation !== 'object' ||
-    Array.isArray(activation) ||
-    utilTypes.isProxy(activation) ||
-    ![Object.prototype, null].includes(Object.getPrototypeOf(activation))
-  ) {
-    throw new Error('system-record lane activation must be a plain data object');
-  }
-
-  const expected = ['kinds', 'mode', 'networkId'];
-  const ownKeys = Reflect.ownKeys(activation);
-  if (
-    ownKeys.length !== expected.length ||
-    ownKeys.some((key) => typeof key !== 'string') ||
-    [...(ownKeys as string[])].sort().some((key, index) => key !== expected[index])
-  ) {
-    throw new Error('system-record lane activation has unknown or missing fields');
-  }
-
-  const readDataField = (key: string): unknown => {
-    const field = Object.getOwnPropertyDescriptor(activation, key);
-    if (!field?.enumerable || !Object.prototype.hasOwnProperty.call(field, 'value')) {
-      throw new Error('system-record lane activation fields must be enumerable data properties');
-    }
-    return field.value;
-  };
-
-  const networkId = readDataField('networkId');
+  const record = snapshotSystemRecordExactDataRecordV1(
+    activation,
+    ['kinds', 'mode', 'networkId'],
+    'system-record lane activation',
+  );
+  const networkId = record.networkId;
   if (
     typeof networkId !== 'string' ||
     networkId.length === 0 ||
@@ -309,27 +292,21 @@ const snapshotActivation = (activation: unknown): SystemRecordLaneActivationSnap
     throw new Error('system-record lane activation networkId is not canonical');
   }
 
-  const kinds = readDataField('kinds');
-  if (!Array.isArray(kinds) || utilTypes.isProxy(kinds)) {
+  let kinds: readonly unknown[];
+  try {
+    kinds = snapshotSystemRecordDenseArrayV1(record.kinds, {
+      label: 'system-record lane activation kinds',
+      minLength: 1,
+      maxLength: 1,
+    });
+  } catch {
     throw new Error('system-record lane activation kinds must be the closed [agents] tuple');
   }
-  const kindKeys = Reflect.ownKeys(kinds);
-  const length = Object.getOwnPropertyDescriptor(kinds, 'length');
-  const first = Object.getOwnPropertyDescriptor(kinds, '0');
-  if (
-    kindKeys.length !== 2 ||
-    !kindKeys.includes('length') ||
-    !kindKeys.includes('0') ||
-    length?.value !== 1 ||
-    length.enumerable ||
-    !first?.enumerable ||
-    !Object.prototype.hasOwnProperty.call(first, 'value') ||
-    first.value !== 'agents'
-  ) {
+  if (kinds[0] !== 'agents') {
     throw new Error('system-record lane activation kinds must be the closed [agents] tuple');
   }
 
-  const mode = readDataField('mode');
+  const mode = record.mode;
   if (mode !== 'shadow' && mode !== 'authoritative') {
     throw new Error('system-record lane activation mode is invalid');
   }
@@ -444,13 +421,12 @@ interface SystemRecordLaneFacadeBindingV1 {
 
 interface SystemRecordPendingRecoveryV1 {
   readonly request: SystemRecordAtomicRecoveryRequestV1;
-  readonly recoveryGeneration: string;
   readonly absoluteDeadlineMs: number;
-  readonly completion: Promise<SystemRecordAtomicRecoveryResolutionV1>;
-  readonly resolve: (resolution: SystemRecordAtomicRecoveryResolutionV1) => void;
+  readonly settlement: SystemRecordOwnedRecoverySettlementV1<
+    SystemRecordAtomicRecoveryResolutionV1
+  >;
   readonly exactReadAbort: AbortController;
   readonly physicalSettlement: SystemRecordPhysicalSettlementV1;
-  settled: boolean;
 }
 
 interface SystemRecordPhysicalSettlementV1 {
@@ -471,8 +447,8 @@ type SystemRecordLaneTransitionV1 =
   | {
       readonly kind: 'disable';
       readonly descriptor: null;
-      work: Promise<void>;
-      settlement: Promise<void>;
+      readonly work: Promise<void>;
+      readonly settlement: Promise<void>;
       physicalWork: Promise<void> | null;
       physicalSettled: boolean;
       reportedSettled: boolean;
@@ -481,8 +457,8 @@ type SystemRecordLaneTransitionV1 =
   | {
       readonly kind: 'shutdown';
       readonly descriptor: null;
-      work: Promise<void>;
-      settlement: Promise<void>;
+      readonly work: Promise<void>;
+      readonly settlement: Promise<void>;
       physicalWork: Promise<void> | null;
       physicalSettled: boolean;
       physicalSucceeded: boolean;
@@ -492,12 +468,129 @@ type SystemRecordLaneTransitionV1 =
   | {
       readonly kind: 'recovery';
       readonly descriptor: null;
-      work: Promise<void>;
+      readonly work: Promise<void>;
       physicalWork: Promise<void> | null;
       physicalSettled: boolean;
       readonly recovery: SystemRecordPendingRecoveryV1;
       shutdownTeardownComplete: boolean;
     };
+
+interface SystemRecordDeferredV1<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T | PromiseLike<T>) => void;
+  readonly reject: (reason?: unknown) => void;
+}
+
+function createSystemRecordDeferredV1<T>(): SystemRecordDeferredV1<T> {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((settle, fail) => {
+    resolve = settle;
+    reject = fail;
+  });
+  return Object.freeze({ promise, resolve, reject });
+}
+
+/** The lane-specific owner of transition publication and detach settlements. */
+class SystemRecordLaneTransitionsV1 {
+  private active: SystemRecordLaneTransitionV1 | null = null;
+  private recoverySequence = 0n;
+  private settlementVersion = 0;
+  private readonly ownedSettlements = new Map<
+    SystemRecordLaneTransitionV1,
+    Readonly<{ settlement: Promise<void>; assertSettled?: () => void }>
+  >();
+
+  get current(): SystemRecordLaneTransitionV1 | null {
+    return this.active;
+  }
+
+  startOpen(entry: Extract<SystemRecordLaneTransitionV1, { kind: 'open' }>): void {
+    this.start(entry, entry.work);
+  }
+
+  startDisable(entry: Extract<SystemRecordLaneTransitionV1, { kind: 'disable' }>): void {
+    this.start(entry, entry.settlement, () => this.assertRecoverySettled(entry));
+  }
+
+  startShutdown(entry: Extract<SystemRecordLaneTransitionV1, { kind: 'shutdown' }>): void {
+    this.start(entry, entry.settlement, () => this.assertRecoverySettled(entry));
+  }
+
+  startRecovery(entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }>): void {
+    this.start(entry, entry.work, () => this.assertRecoverySettled(entry));
+  }
+
+  release(entry: SystemRecordLaneTransitionV1): void {
+    if (this.active === entry) this.active = null;
+    if (this.ownedSettlements.delete(entry)) this.settlementVersion += 1;
+  }
+
+  createRecoverySettlement<Resolution>(): SystemRecordOwnedRecoverySettlementV1<Resolution> {
+    this.recoverySequence += 1n;
+    const recoveryGeneration = this.recoverySequence.toString(10);
+    let settled = false;
+    let resolve!: (resolution: Resolution) => void;
+    const completion = new Promise<Resolution>((settle) => { resolve = settle; });
+    return Object.freeze({
+      recoveryGeneration,
+      completion,
+      get settled() { return settled; },
+      settle: (resolution: Resolution) => {
+        if (settled) return;
+        settled = true;
+        resolve(resolution);
+      },
+    });
+  }
+
+  async drainForDetach(): Promise<void> {
+    for (;;) {
+      const version = this.settlementVersion;
+      const owned = [...this.ownedSettlements.entries()];
+      const results = await Promise.allSettled(owned.map(([, value]) => value.settlement));
+      // A settlement can release itself in `finally`, changing the version
+      // before this continuation runs. Validate the captured results first so
+      // a failed physical transition cannot disappear behind an empty retry.
+      for (const [index, [, value]] of owned.entries()) {
+        const result = results[index];
+        if (result?.status === 'rejected') throw result.reason;
+        value.assertSettled?.();
+      }
+      if (version !== this.settlementVersion) continue;
+      return;
+    }
+  }
+
+  private start(
+    entry: SystemRecordLaneTransitionV1,
+    settlement: Promise<void>,
+    assertSettled?: () => void,
+  ): void {
+    if (this.ownedSettlements.has(entry)) {
+      throw new Error('system-record transition settlement is already owned');
+    }
+    // One current transition plus one shutdown-superseded predecessor is the
+    // complete lane state space. This is not a general-purpose work queue.
+    if (this.ownedSettlements.size >= 2) {
+      throw new Error('system-record transition settlement ownership exceeded its bound');
+    }
+    this.active = entry;
+    this.ownedSettlements.set(entry, Object.freeze({ settlement, assertSettled }));
+    this.settlementVersion += 1;
+    void settlement.catch(() => undefined);
+  }
+
+  private assertRecoverySettled(
+    entry: Exclude<SystemRecordLaneTransitionV1, { kind: 'open' }>,
+  ): void {
+    if (entry.recovery !== null && !entry.recovery.settlement.settled) {
+      throw new Error(
+        'system-record controller detach could not prove uncertain-write recovery settled',
+      );
+    }
+  }
+}
 
 const SYSTEM_RECORD_RECOVERY_DEADLINE_MS_V1 = 30_000;
 
@@ -550,14 +643,8 @@ class SystemRecordLaneSession {
   private activeMaterializationEpoch: string | null = null;
   /** One facade per activation binding; a new generation gets a new facade. */
   private activeFacade: SystemRecordLaneSessionV1 | null = null;
-  /** In-flight transition, so same-intent callers coalesce instead of racing. */
-  private transition: SystemRecordLaneTransitionV1 | null = null;
-  private recoverySequence = 0n;
-  /** Already-admitted executor calls that may still transfer recovery ownership. */
-  private admittedApplyCount = 0;
-  /** Allocated only when detach actually has to wait for admitted work. */
-  private admittedApplyDrain: Promise<void> | null = null;
-  private resolveAdmittedApplyDrain: (() => void) | null = null;
+  private readonly admissions = new SystemRecordApplyAdmissionTrackerV1();
+  private readonly transitions = new SystemRecordLaneTransitionsV1();
   /** Concurrent disposal callers join one ownership decision. */
   private detachSettlement: Promise<void> | null = null;
 
@@ -586,14 +673,15 @@ class SystemRecordLaneSession {
     // Same-descriptor concurrent opens coalesce; a different descriptor is a
     // caller error rather than an implicit reconfiguration, because switching
     // the enabled set silently would strand rows charged under the old one.
-    if (this.transition) {
-      if (this.transition.kind === 'open' && this.transition.descriptor === wanted) {
-        await this.transition.work;
+    const activeTransition = this.transitions.current;
+    if (activeTransition) {
+      if (activeTransition.kind === 'open' && activeTransition.descriptor === wanted) {
+        await activeTransition.work;
         // Re-check: the joined open may itself have failed into `unavailable`.
         this.assertNotTerminal();
         return this.createFacade(wanted, activationSnapshot);
       }
-      if (this.transition.kind !== 'open') {
+      if (activeTransition.kind !== 'open') {
         // Only a DISABLE can be here now: a shutdown makes `current` terminal at
         // intent, so `assertNotTerminal()` above has already thrown.
         //
@@ -604,11 +692,11 @@ class SystemRecordLaneSession {
         // that: state `enabled`, activation generation 2, and a subsequent
         // `applyVerified` dispatched to the executor on a lane the process had
         // already shut down.
-        await this.transitionSettlement(this.transition).catch(() => undefined);
+        await this.transitionSettlement(activeTransition).catch(() => undefined);
         this.assertNotTerminal();
       } else {
         throw new SystemRecordLaneActivationConflictError(
-          this.transition.descriptor ?? 'unknown',
+          activeTransition.descriptor ?? 'unknown',
           wanted,
         );
       }
@@ -624,7 +712,7 @@ class SystemRecordLaneSession {
       descriptor: wanted,
       work: this.runEnable(wanted, activationSnapshot),
     };
-    this.transition = entry;
+    this.transitions.startOpen(entry);
     try {
       await entry.work;
     } finally {
@@ -746,11 +834,12 @@ class SystemRecordLaneSession {
     if (this.current === 'shutdown' || this.current === 'detached') return;
     if (this.current === 'disabled' || this.current === 'unavailable') return;
 
-    if (this.transition) {
-      if (this.transition.kind === 'disable') {
-        return this.transition.reportedSettled
-          ? this.transition.settlement
-          : this.transition.work;
+    const activeTransition = this.transitions.current;
+    if (activeTransition) {
+      if (activeTransition.kind === 'disable') {
+        return activeTransition.reportedSettled
+          ? activeTransition.settlement
+          : activeTransition.work;
       }
       // A `kind === 'shutdown'` branch used to sit here. Under the latch it is
       // unreachable: a shutdown makes `current` terminal at intent, so the
@@ -761,11 +850,11 @@ class SystemRecordLaneSession {
       // Disable outranks recovery at INTENT. Latch `disabling` before joining
       // so the recovery continuation cannot briefly republish `enabled` and
       // admit legacy/V1 work between settlement and this close.
-      if (this.transition.kind === 'recovery') this.commitState('disabling');
+      if (activeTransition.kind === 'recovery') this.commitState('disabling');
       // Disable outranks an in-flight open/recovery: join it, then disable the
       // resulting clean generation. The recovery itself cannot be skipped;
       // physical ambiguity must settle before legacy can bypass.
-      await this.transitionSettlement(this.transition).catch(() => undefined);
+      await this.transitionSettlement(activeTransition).catch(() => undefined);
       // The joined open may have ended terminal, or a shutdown may have latched
       // while we waited. Re-read rather than acting on stale state.
       const after = this.readState();
@@ -786,18 +875,35 @@ class SystemRecordLaneSession {
       }
     }
 
+    const publicWork = createSystemRecordDeferredV1<void>();
+    const physicalSettlement = createSystemRecordDeferredV1<void>();
     const entry: Extract<SystemRecordLaneTransitionV1, { kind: 'disable' }> = {
       kind: 'disable',
       descriptor: null,
       recovery: null,
-      work: Promise.resolve(),
-      settlement: Promise.resolve(),
+      work: publicWork.promise,
+      settlement: physicalSettlement.promise,
       physicalWork: null,
       physicalSettled: false,
       reportedSettled: false,
     };
-    this.transition = entry;
-    entry.work = this.runDisable(entry);
+    this.transitions.startDisable(entry);
+    const operation = this.runDisable(entry);
+    void operation.then(publicWork.resolve, publicWork.reject);
+    const settlement = (async () => {
+      try {
+        await operation;
+      } catch (reportedError) {
+        if (entry.physicalWork) await entry.physicalWork;
+        else throw reportedError;
+      }
+    })().finally(() => {
+      // Preserve an unresolved recovery token for a later shutdown attempt.
+      // Its executor reservation remains charged, and losing this pointer would
+      // make a subsequently successful physical teardown unable to settle it.
+      if (entry.recovery === null || entry.recovery.settlement.settled) this.release(entry);
+    });
+    void settlement.then(physicalSettlement.resolve, physicalSettlement.reject);
     return entry.work;
   }
 
@@ -818,7 +924,6 @@ class SystemRecordLaneSession {
         new Error('system-record lane has no active network binding to disable'),
       );
       entry.reportedSettled = true;
-      entry.settlement = failure;
       void failure.catch(() => undefined);
       this.release(entry);
       return failure;
@@ -875,26 +980,11 @@ class SystemRecordLaneSession {
         entry.reportedSettled = true;
         if (
           entry.physicalWork === null &&
-          (entry.recovery === null || entry.recovery.settled)
+          (entry.recovery === null || entry.recovery.settlement.settled)
         ) this.release(entry);
       }
     })();
 
-    entry.work = work;
-    entry.settlement = (async () => {
-      try {
-        await work;
-      } catch (reportedError) {
-        if (entry.physicalWork) await entry.physicalWork;
-        else throw reportedError;
-      }
-    })().finally(() => {
-      // Preserve an unresolved recovery token for a later shutdown attempt.
-      // Its executor reservation remains charged, and losing this pointer would
-      // make a subsequently successful physical teardown unable to settle it.
-      if (entry.recovery === null || entry.recovery.settled) this.release(entry);
-    });
-    void entry.settlement.catch(() => undefined);
     return work;
   }
 
@@ -927,10 +1017,11 @@ class SystemRecordLaneSession {
     // get a RESOLVED promise while the child was still being stopped, and would
     // never see the teardown's failure. Joining first keeps "close('shutdown')
     // resolved" meaning "the teardown finished".
-    if (this.transition?.kind === 'shutdown') {
-      return this.transition.reportedSettled
-        ? this.transition.settlement
-        : this.transition.work;
+    const activeTransition = this.transitions.current;
+    if (activeTransition?.kind === 'shutdown') {
+      return activeTransition.reportedSettled
+        ? activeTransition.settlement
+        : activeTransition.work;
     }
     if (this.readState() === 'shutdown') return Promise.resolve();
     // A DETACHED lane has no store behind it and no claim on the child: its
@@ -955,7 +1046,7 @@ class SystemRecordLaneSession {
     // terminal lane and returns `capability-lost` instead of being admitted.
     this.current = 'shutdown';
 
-    const superseded = this.transition;
+    const superseded = activeTransition;
     // If exact settlement is already reading the replacement generation, make
     // shutdown cancel that owned request NOW. The transition below still joins
     // the superseded work before touching the child, so cancellation cannot
@@ -964,18 +1055,20 @@ class SystemRecordLaneSession {
     supersededRecovery?.exactReadAbort.abort(
       new Error('system-record exact recovery cancelled by shutdown'),
     );
+    const publicWork = createSystemRecordDeferredV1<void>();
+    const physicalSettlement = createSystemRecordDeferredV1<void>();
     const entry: Extract<SystemRecordLaneTransitionV1, { kind: 'shutdown' }> = {
       kind: 'shutdown',
       descriptor: null,
       recovery: supersededRecovery,
-      work: Promise.resolve(),
-      settlement: Promise.resolve(),
+      work: publicWork.promise,
+      settlement: physicalSettlement.promise,
       physicalWork: null,
       physicalSettled: false,
       physicalSucceeded: false,
       reportedSettled: false,
     };
-    this.transition = entry;
+    this.transitions.startShutdown(entry);
 
     let cleaned = false;
     const cleanup = () => {
@@ -1085,8 +1178,8 @@ class SystemRecordLaneSession {
       }
     })();
 
-    // THE fix, and it is this one line's PLACEMENT rather than its content:
-    // the assignment happens synchronously, before any await, so a second
+    // THE fix is the publication placement: the transition and the exact
+    // settlement detach owns are published synchronously, before any await, so a second
     // shutdown caller sees `kind === 'shutdown'` at the top and joins instead
     // of building its own teardown. Previously this method was `async` and the
     // assignment landed AFTER the join, so both callers passed the check while
@@ -1096,8 +1189,8 @@ class SystemRecordLaneSession {
     // It also makes the shutdown visible to `open()` and `close('disable')`,
     // which join `this.transition.work` and then re-check terminal state.
     //
-    entry.work = work;
-    entry.settlement = (async () => {
+    void work.then(publicWork.resolve, publicWork.reject);
+    const settlement = (async () => {
       try {
         await work;
       } catch (reportedError) {
@@ -1108,11 +1201,8 @@ class SystemRecordLaneSession {
         else throw reportedError;
       }
     })().finally(cleanup);
-    // The retained settlement may reject after the first caller has already
-    // handled the public timeout. Observe it here without changing the promise
-    // later callers receive.
-    void entry.settlement.catch(() => undefined);
-    return work;
+    void settlement.then(physicalSettlement.resolve, physicalSettlement.reject);
+    return entry.work;
   }
 
   /* -------------------------------------------------------------- */
@@ -1181,35 +1271,20 @@ class SystemRecordLaneSession {
       childGeneration: boundGeneration,
       materializationEpoch: facade.materializationEpoch,
     });
-    this.admittedApplyCount += 1;
-    try {
+    return this.admissions.run(
+      (request) => this.registerRecoveryForInvocation(request, executionBinding),
+      async (registerForInvocation) => {
       if (this.deps.executor.applyVerifiedSettlementBound) {
-        let registrarOpen = true;
-        let registrationAttempted = false;
-        const registerForInvocation: SystemRecordAtomicRecoveryRegistrarV1 = (request) => {
-          if (!registrarOpen || registrationAttempted) {
-            throw new Error(
-              'system-record recovery registrar is no longer live for this apply invocation',
-            );
-          }
-          registrationAttempted = true;
-          return this.registerRecoveryForInvocation(request, executionBinding);
-        };
-        try {
-          const settlement = await this.deps.executor.applyVerifiedSettlementBound(
-            proof,
-            executionBinding,
-            registerForInvocation,
-          );
-          // The internal carrier is authoritative. In particular, a public
-          // `root-collision` may eventually include a settled quarantine mutation,
-          // while an `applied` result has already been exact-postread. Neither fact
-          // may be reconstructed from the public outcome spelling here.
-          return settlement.outcome;
-        } finally {
-          // A retained callback cannot borrow a later invocation's detach window.
-          registrarOpen = false;
-        }
+        const settlement = await this.deps.executor.applyVerifiedSettlementBound(
+          proof,
+          executionBinding,
+          registerForInvocation,
+        );
+        // The internal carrier is authoritative. In particular, a public
+        // `root-collision` may eventually include a settled quarantine mutation,
+        // while an `applied` result has already been exact-postread. Neither fact
+        // may be reconstructed from the public outcome spelling here.
+        return settlement.outcome;
       }
 
       const result = this.deps.executor.applyVerifiedBound
@@ -1264,9 +1339,8 @@ class SystemRecordLaneSession {
       // terminal state, after which the lane reopened and dispatched again.
       if (final.outcome === 'indeterminate') this.commitState('reconciling');
       return final;
-    } finally {
-      this.releaseAdmittedApply();
-    }
+      },
+    );
   }
 
   private refuseVerifiedBeforeDispatch(
@@ -1296,24 +1370,18 @@ class SystemRecordLaneSession {
     executionBinding: SystemRecordLaneExecutionBindingV1,
   ): ReturnType<SystemRecordAtomicRecoveryRegistrarV1> {
     this.assertRecoveryRequestBound(request, executionBinding);
-    this.recoverySequence += 1n;
-
-    let resolve!: (resolution: SystemRecordAtomicRecoveryResolutionV1) => void;
-    const completion = new Promise<SystemRecordAtomicRecoveryResolutionV1>((settle) => {
-      resolve = settle;
-    });
+    const settlement = this.transitions.createRecoverySettlement<
+      SystemRecordAtomicRecoveryResolutionV1
+    >();
     const recovery: SystemRecordPendingRecoveryV1 = {
       request,
-      recoveryGeneration: this.recoverySequence.toString(10),
       absoluteDeadlineMs: performance.now() + SYSTEM_RECORD_RECOVERY_DEADLINE_MS_V1,
-      completion,
-      resolve,
+      settlement,
       exactReadAbort: new AbortController(),
       physicalSettlement: { state: 'unsettled' },
-      settled: false,
     };
 
-    const active = this.transition;
+    const active = this.transitions.current;
     if (active?.kind === 'disable' || active?.kind === 'shutdown') {
       if (active.recovery !== null) {
         throw new Error('system-record lifecycle already owns an uncertain write');
@@ -1331,28 +1399,30 @@ class SystemRecordLaneSession {
       ) {
         throw new Error('system-record terminal lane cannot enqueue recovery');
       }
+      const work = createSystemRecordDeferredV1<void>();
       const entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }> = {
         kind: 'recovery',
         descriptor: null,
         recovery,
         shutdownTeardownComplete: false,
-        work: Promise.resolve(),
+        work: work.promise,
         physicalWork: null,
         physicalSettled: false,
       };
-      this.transition = entry;
-      entry.work = this.runRecovery(entry);
+      this.transitions.startRecovery(entry);
+      const operation = this.runRecovery(entry);
+      void operation.then(work.resolve, work.reject);
       // Recovery is intentionally detached from the original sync call after
       // ownership transfer, but never allowed to reject unobserved.
       void entry.work.finally(() => {
-        if (entry.recovery.settled) this.release(entry);
+        if (entry.recovery.settlement.settled) this.release(entry);
       }).catch(() => undefined);
     }
 
     return Object.freeze({
       ownership: request.ownership,
-      recoveryGeneration: recovery.recoveryGeneration,
-      completion,
+      recoveryGeneration: settlement.recoveryGeneration,
+      completion: settlement.completion,
     });
   }
 
@@ -1617,9 +1687,7 @@ class SystemRecordLaneSession {
     recovery: SystemRecordPendingRecoveryV1,
     resolution: SystemRecordAtomicRecoveryResolutionV1,
   ): void {
-    if (recovery.settled) return;
-    recovery.settled = true;
-    recovery.resolve(Object.freeze(resolution));
+    recovery.settlement.settle(Object.freeze(resolution));
   }
 
   private assertRecoveryRequestBound(
@@ -1710,50 +1778,16 @@ class SystemRecordLaneSession {
   }
 
   private async finishDetach(): Promise<void> {
-    await this.waitForAdmittedApplies();
+    await this.admissions.drain();
 
-    // Recovery registration is synchronous inside the executor permit, so the
-    // transition visible after the admitted cohort drains is the complete
-    // ownership handoff. Join every transition kind: an open/disable/shutdown
-    // can manipulate the same child even when it carries no recovery token.
-    let transition = this.transition;
-    while (transition !== null) {
-      await this.transitionSettlement(transition);
-      const recovery = this.recoveryOf(transition);
-      if (recovery !== null && !recovery.settled) {
-        throw new Error(
-          'system-record controller detach could not prove uncertain-write recovery settled',
-        );
-      }
-      const successor = this.transition;
-      if (successor === transition) break;
-      transition = successor;
-    }
+    // Recovery registration is synchronous inside the executor permit. Once
+    // the admitted cohort drains, every transition capable of touching the
+    // child is owned by this explicit settlement chain, including successors
+    // published while an earlier transition was suspended.
+    await this.transitions.drainForDetach();
 
     this.descriptor = null;
     this.clearActiveBinding();
-  }
-
-  private waitForAdmittedApplies(): Promise<void> {
-    if (this.admittedApplyCount === 0) return Promise.resolve();
-    if (this.admittedApplyDrain === null) {
-      this.admittedApplyDrain = new Promise<void>((resolve) => {
-        this.resolveAdmittedApplyDrain = resolve;
-      });
-    }
-    return this.admittedApplyDrain;
-  }
-
-  private releaseAdmittedApply(): void {
-    if (this.admittedApplyCount <= 0) {
-      throw new Error('system-record admitted apply count underflow');
-    }
-    this.admittedApplyCount -= 1;
-    if (this.admittedApplyCount !== 0) return;
-    const resolve = this.resolveAdmittedApplyDrain;
-    this.admittedApplyDrain = null;
-    this.resolveAdmittedApplyDrain = null;
-    resolve?.();
   }
 
   /**
@@ -1769,8 +1803,8 @@ class SystemRecordLaneSession {
    * whether a transition runs or what state results. A stale one degrades to a
    * redundant join rather than a wrong transition.
    */
-  private release(entry: object): void {
-    if (this.transition === entry) this.transition = null;
+  private release(entry: SystemRecordLaneTransitionV1): void {
+    this.transitions.release(entry);
   }
 
   /**
@@ -1846,8 +1880,8 @@ class SystemRecordLaneSession {
    * changed is reported as an impossible comparison. That report is the compiler
    * asserting the assumption this class exists to break.
    */
-  private readTransition(): SystemRecordLaneSession['transition'] {
-    return this.transition;
+  private readTransition(): SystemRecordLaneTransitionV1 | null {
+    return this.transitions.current;
   }
 
   private assertLeaseLive(): void {

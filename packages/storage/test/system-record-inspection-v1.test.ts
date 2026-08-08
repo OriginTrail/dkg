@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 
-import { SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES,
+  SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES,
+  SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
+  SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
+  SYSTEM_RECORD_MAX_SHALLOW_JSON_DEPTH,
+} from '@origintrail-official/dkg-core/system-record-v1';
 
 import {
   SYSTEM_RECORD_MAX_PROJECTION_INSPECTION_ROWS_V1,
@@ -50,6 +56,24 @@ describe('system-record bounded inspection', () => {
     const encodedBytes = Buffer.byteLength(query, 'utf8');
     expect(charges).toEqual([encodedBytes * 3, encodedBytes * 2]);
     expect(query).toContain(`VALUES ?s { <${S1}> <${S2}> }`);
+  });
+
+  it('preserves the full encoded request contract above the prepared-state cap', () => {
+    const subjects = Array.from(
+      { length: SYSTEM_RECORD_MAX_OWNED_SUBJECTS },
+      (_, index) => `urn:test:large:${index}:${'a'.repeat(1_400)}`,
+    );
+    const charges: number[] = [];
+    const query = buildSystemRecordProjectionInspectionQueryV1(
+      'shadow',
+      subjects,
+      (bytes) => charges.push(bytes),
+    );
+    const encodedBytes = Buffer.byteLength(query, 'utf8');
+    expect(encodedBytes * 3).toBeGreaterThan(SYSTEM_RECORD_MAX_ATOMIC_PREPARED_BYTES);
+    expect(encodedBytes).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_ATOMIC_SPARQL_REQUEST_BYTES);
+    expect(encodedBytes * 3).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES);
+    expect(charges).toEqual([encodedBytes * 3, encodedBytes * 2]);
   });
 
   it('strictly decodes, canonicalizes, sorts and freezes URI/literal rows', () => {
