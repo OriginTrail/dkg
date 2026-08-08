@@ -278,9 +278,47 @@ console.log("\ngradual release — at most one un-countersigned billable leg (Q3
   ok("the cleared obligation is durable (journal-derived, not in-memory)",
     M.outstandingLegs(home, GR) === 0);
 
+  // OpenClaw-found (Gate-B review): the "at most one un-countersigned billable
+  // leg" limit must be per-PRINCIPAL across ALL capabilities, not per-capability.
+  // Attack: capability A gets a billable leg, withhold countersign; open
+  // capability B for the SAME principal; if B sees zero outstanding, the limit is
+  // bypassed and a buyer reads unboundedly on credit. Re-establish the
+  // outstanding leg (undo the countersign we just did) by making a fresh one.
+  {
+    const leg2 = M.settleMeteredRead({ home, cfg: { ...enforceCfg, enforcedPrincipals: new Set([GR]) }, principal: GR, sparql: SPARQL, responseBody: BODY, scopeQuads: 26200 });
+    ok("capability A produced a second un-countersigned billable leg", leg2.ok && M.outstandingLegs(home, GR) === 1);
+    // Now a DIFFERENT capability B for the SAME principal must still see the
+    // outstanding leg and be refused — the limit is principal-scoped.
+    const grDelegB = (() => {
+      const d = {
+        domain: "odysseus-dkg:delegation:v1", capabilityId: "cap-gr-B", tabPrincipal: GR,
+        sessionPublicKeyPem: pem(session.publicKey, "pub"), agentUrn: "urn:gr",
+        audience: { settlement: "settle-main", nodeClasses: ["dkg-edge-mainnet"] },
+        routes: ["POST /api/metering/read"], bindings: { scheduleDigest: sched, priceVectorDigest: sched },
+        caps: { absoluteMicroTrac: 1_000_000, windowMicroTrac: 500_000, windowMs: 3_600_000 },
+        notBefore: new Date(Date.now() - 3600e3).toISOString(),
+        expiresAt: new Date(Date.now() + 3600e3).toISOString(), tier: "session-key",
+      };
+      return { ...d, walletSignature: edSign(null, C.delegationPreimage(d), createPrivateKey(pem(grWallet.privateKey, "priv"))).toString("base64") };
+    })();
+    const bypass = M.authoriseMeteredRead({
+      home, chainId: CHAIN, cfg: { ...enforceCfg, enforcedPrincipals: new Set([GR]) },
+      request: { delegation: grDelegB, sparql: SPARQL, bindingProof: grProof, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
+      state: freshState(), route: "POST /api/metering/read", nodeClass: "dkg-edge-mainnet", settlementId: "settle-main", scheduleDigest: sched, priceVectorDigest: sched,
+    });
+    ok("a SECOND capability for the same principal CANNOT bypass gradual release (limit is per-principal)",
+      bypass.ok === false && bypass.code === "E_AWAITING_COUNTERSIGNATURE", JSON.stringify(bypass));
+    // Clear it so the idempotency check below is unaffected.
+    const d2 = "sha256:" + sha(L.canonicalize(leg2.leg));
+    const s2 = edSign(null, Buffer.concat([Buffer.from(C.CAPABILITY_DOMAIN + "\n"), Buffer.from(d2)]), createPrivateKey(pem(session.privateKey, "priv"))).toString("base64");
+    M.countersignLeg({ home, leg: leg2.leg, countersignature: s2, sessionPublicKeyPem: pem(session.publicKey, "pub") });
+    ok("...and the per-principal count clears when THAT leg is countersigned", M.outstandingLegs(home, GR) === 0);
+  }
+
   const cs2 = M.countersignLeg({ home, leg: leg1.leg, countersignature: sig1, sessionPublicKeyPem: pem(session.publicKey, "pub") });
-  const signedRecords = readFileSync(join(process.env.DKG_HOME, "metering", "read-journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((r) => r.kind === "leg-countersigned" && r.principal === GR);
-  ok("re-countersigning the same leg is idempotent — exactly one record", cs2.ok && signedRecords.length === 1, `${signedRecords.length} records`);
+  const leg1Id = String(leg1.leg.legId);
+  const signedRecords = readFileSync(join(process.env.DKG_HOME, "metering", "read-journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((r) => r.kind === "leg-countersigned" && r.legId === leg1Id);
+  ok("re-countersigning the same leg is idempotent — exactly one record for THAT leg", cs2.ok && signedRecords.length === 1, `${signedRecords.length} records`);
 }
 
 console.log(`\n${pass}/${pass + fail} metered-read gates pass\n`);

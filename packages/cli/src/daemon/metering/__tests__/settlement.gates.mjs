@@ -94,6 +94,26 @@ ok("a correct statement verifies and yields the net + withdrawalId", good.ok && 
   ok("a RE-SIGNED incomplete statement is caught by the close-sequence boundary (Q2 completeness, not the signature)",
     v.code === "E_CLOSE_SEQUENCE_GAP", v.code);
 }
+{ // OpenClaw-found (Gate-B #1): the EXACT interval-completeness case. Legs
+  // 1,2,3 exist; a close that includes only 1 and 3 (skipping 2) must reject
+  // even when re-signed so totals and signatures balance. Interval-completeness
+  // is a distinct property from arithmetic correctness.
+  const threeLegs = legs.slice(0, 3); // seq 1,2,3, all accepted
+  const full = S.buildCloseStatement(home, {
+    chain: CHAIN, tracContract: TRAC, providerAddress: PROVIDER, tabPrincipal: BUYER, tabEpoch: "e",
+    priorDeposit: { txHash: "0x", blockNumber: 1, amountMicroTrac: DEPOSIT }, legs: threeLegs, destination: BUYER,
+  });
+  // Drop leg 2, re-sign so the provider signature is VALID over the gapped set.
+  const gapped = { ...full.statement, legs: full.statement.legs.filter((l) => l.sequence !== 2) };
+  const digest = "sha256:" + sha256(L.canonicalize(gapped));
+  const resigned = L.providerSign(home, "odysseus-dkg:close-statement:v1", digest.slice(7));
+  const cs = new Set(threeLegs.filter((l) => l.status === "accepted").map((l) => l.legHash));
+  const v = S.verifyCloseStatement({ providerPublicPem: providerPub, statement: gapped, providerSignature: resigned,
+    buyerCountersigned: cs, sessionPublicKeyPem: pem(session.publicKey), expectedDestination: BUYER });
+  ok("close of legs {1,3} skipping 2 is REJECTED even when re-signed and balanced (interval-completeness)",
+    v.ok === false && v.code === "E_CLOSE_SEQUENCE_GAP", JSON.stringify(v));
+}
+
 { // provider marks a leg accepted the buyer never signed
   const forged = { ...built.statement, legs: built.statement.legs.map((l) => l.sequence === 7 ? { ...l, status: "accepted", countersignature: countersign("wrong") } : l) };
   const v = S.verifyCloseStatement({ providerPublicPem: providerPub, statement: forged, providerSignature: built.providerSignature,
