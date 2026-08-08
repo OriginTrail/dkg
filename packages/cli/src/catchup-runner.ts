@@ -1054,7 +1054,7 @@ class WorkerCatchupRunner implements CatchupRunner {
     const agent = this.agent as any;
     switch (method) {
       case 'prepareCatchup': {
-        const [contextGraphId] = args as [string];
+        const [contextGraphId, includeSharedMemory = true] = args as [string, boolean?];
         const isPrivateContextGraph = await agent.isPrivateContextGraph(contextGraphId);
         // ONE resolution, two notions. Ranking uses whatever peer is available;
         // letting one peer's answer stand for the whole graph requires the
@@ -1078,22 +1078,43 @@ class WorkerCatchupRunner implements CatchupRunner {
         // of it: a renamed or added provenance value has to break here rather
         // than silently downgrade every curator to non-authoritative.
         const authoritativePeerId = authoritativeSyncPeerId(resolution);
+        const authoritativeSharedMemoryPeerIds: readonly string[] =
+          includeSharedMemory
+          && typeof agent.resolveRfc64CompleteSwmProviderPeerIdsV1 === 'function'
+            ? agent.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)
+            : [];
         if (preferredPeerId) {
           await agent.ensurePeerConnected(preferredPeerId);
         }
+        await Promise.allSettled(
+          authoritativeSharedMemoryPeerIds.map(
+            (peerId) => agent.ensurePeerConnected(peerId),
+          ),
+        );
         await agent.primeCatchupConnections();
 
-        const peerIds = agent.selectCatchupPeers(
+        const selectedPeerIds = agent.selectCatchupPeers(
           [...new Map(
             agent.node.libp2p.getConnections().map((connection: any) => [connection.remotePeer.toString(), connection.remotePeer]),
           ).values()],
           preferredPeerId,
           isPrivateContextGraph,
         ).map((peer: { toString(): string }) => peer.toString());
+        const prioritizedPeerIds = [...new Set([
+          ...authoritativeSharedMemoryPeerIds,
+          ...(preferredPeerId === undefined ? [] : [preferredPeerId]),
+        ])];
+        const selectedPeerIdSet = new Set(selectedPeerIds);
+        const prioritizedPeerIdSet = new Set(prioritizedPeerIds);
+        const peerIds = [
+          ...prioritizedPeerIds.filter((peerId) => selectedPeerIdSet.has(peerId)),
+          ...selectedPeerIds.filter((peerId: string) => !prioritizedPeerIdSet.has(peerId)),
+        ];
 
         return {
           preferredPeerId,
           authoritativePeerId,
+          authoritativeSharedMemoryPeerIds,
           isPrivateContextGraph,
           peerIds,
           connectedPeers: peerIds.length,

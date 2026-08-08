@@ -24,6 +24,11 @@ export interface SyncGlobalBackpressureConfig {
   syncGlobalMaxInflight?: number;
   syncGlobalLimit?: number;
   syncGlobalQueueLimit?: number;
+  rfc64PublicCatalogBootstrap?: {
+    acceptedPublicPolicies?: readonly {
+      completeSwmProviders?: readonly string[];
+    }[];
+  };
 }
 
 declare const syncGlobalBackpressurePolicyBrand: unique symbol;
@@ -35,9 +40,11 @@ export type SyncGlobalBackpressurePolicy = Readonly<(
 
 interface GlobalQueuePayload {
   limit: number;
+  automaticBackgroundLimit: number;
   label: string;
   contextGraphId?: string;
   source: SyncAdmissionSource;
+  selectedSwmPriority: boolean;
 }
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
@@ -71,22 +78,37 @@ function syncAdmissionOperation(payload: GlobalQueuePayload): string {
 }
 
 let inflight = 0;
+let automaticBackgroundInflight = 0;
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   now: () => performance.now(),
-  canRun: (entry) => inflight < entry.payload.limit,
+  canRun: (entry) => (
+    inflight < entry.payload.limit
+    && (
+      !isAutomaticBackgroundSync(entry)
+      || automaticBackgroundInflight < entry.payload.automaticBackgroundLimit
+    )
+  ),
   onStart: (entry) => {
     inflight += 1;
+    const automaticBackground = isAutomaticBackgroundSync(entry);
+    if (automaticBackground) automaticBackgroundInflight += 1;
     lastLimit = entry.payload.limit;
     getMetrics().syncGlobalInflight.record(inflight);
     return () => {
       inflight = Math.max(0, inflight - 1);
+      if (automaticBackground) {
+        automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
+      }
       getMetrics().syncGlobalInflight.record(inflight);
     };
   },
-  onStartFailureRollback: () => {
+  onStartFailureRollback: (entry) => {
     inflight = Math.max(0, inflight - 1);
+    if (isAutomaticBackgroundSync(entry)) {
+      automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
+    }
     getMetrics().syncGlobalInflight.record(inflight);
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
@@ -104,6 +126,16 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     register: true,
   },
 });
+const automaticBackgroundLimits = new WeakMap<object, number>();
+
+function isAutomaticBackgroundSync(entry: { payload: GlobalQueuePayload }): boolean {
+  if (entry.payload.selectedSwmPriority) return false;
+  return entry.payload.source === 'on-connect'
+    || entry.payload.source === 'reconcile'
+    || entry.payload.source === 'vm-recovery'
+    || entry.payload.source === 'swm-recovery'
+    || entry.payload.source === 'catchup-background';
+}
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'displaced';
 
@@ -140,6 +172,7 @@ function acquire(
     priority: number;
     priorityClass: SyncPriorityClass;
     source: SyncAdmissionSource;
+    selectedSwmPriority: boolean;
     signal?: AbortSignal;
     agingThresholdMs: number;
   },
@@ -153,9 +186,11 @@ function acquire(
   return queue.acquire({
     payload: {
       limit,
+      automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
       label: options.label,
       contextGraphId: options.contextGraphId,
       source: options.source,
+      selectedSwmPriority: options.selectedSwmPriority,
     },
     ownerKey: 'global',
     lane: options.lane,
@@ -242,10 +277,19 @@ export function resolveSyncGlobalBackpressure(
   const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
     ?? nonNegativeInteger(config.syncGlobalQueueLimit)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
-  return Object.freeze({
+  const hasCompleteSwmProvider = config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+    ?.some((acceptedPolicy) => (acceptedPolicy.completeSwmProviders?.length ?? 0) > 0) ?? false;
+  const policy = Object.freeze({
     limit,
     queueLimit,
   }) as SyncGlobalBackpressurePolicy;
+  // A selected complete SWM provider is useful only if its transfer can enter
+  // the scheduler. Keep one slot out of every automatic background source,
+  // including VM/SWM recovery, because those sources can start during daemon
+  // bootstrap before the selected Edge provider becomes dialable. Explicit
+  // foreground catch-up retains the full cap.
+  automaticBackgroundLimits.set(policy, hasCompleteSwmProvider && limit > 1 ? limit - 1 : limit);
+  return policy;
 }
 
 export function getSyncBackpressureSnapshot(
@@ -284,6 +328,8 @@ export async function withGlobalSyncBackpressure<T>(
      * `unspecified`.
      */
     source?: SyncAdmissionSource;
+    /** The selected graph-complete RFC-64 SWM transfer may use the reserved slot. */
+    selectedSwmPriority?: boolean;
     signal?: AbortSignal;
     agingThresholdMs?: number;
     logInfo?: (ctx: OperationContext, message: string) => void;
@@ -313,6 +359,7 @@ export async function withGlobalSyncBackpressure<T>(
       priority,
       priorityClass,
       source: normalizeSyncAdmissionSource(options.source),
+      selectedSwmPriority: options.selectedSwmPriority === true,
       signal: options.signal,
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
     });

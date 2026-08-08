@@ -21,6 +21,7 @@ import { mapWithConcurrency } from './map-with-concurrency.js';
 
 const MAX_STATUS_ERROR_BYTES_V1 = 1024;
 const MAX_CONCURRENT_TARGETS_V1 = 4;
+const COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1 = 10_000;
 const UTF8 = new TextEncoder();
 
 export type Rfc64PublicCatalogBootstrapOutcomeV1 =
@@ -81,6 +82,23 @@ interface BootstrapStateV1 {
 const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
 
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
+  /**
+   * Exact operator-pinned graph-complete SWM providers for one accepted policy.
+   * These are deliberately separate from per-author catalog providers: only
+   * this explicit graph-wide assertion may let one peer end the SWM walk.
+   */
+  resolveRfc64CompleteSwmProviderPeerIdsV1(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): readonly string[] {
+    const config = this.config.rfc64PublicCatalogBootstrap;
+    if (config === undefined) return Object.freeze([]);
+    const policy = config.acceptedPublicPolicies.find(
+      ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId === contextGraphId,
+    );
+    return policy?.completeSwmProviders ?? Object.freeze([]);
+  }
+
   /** Accept pinned policies and start the first bounded provider pass. */
   startRfc64PublicCatalogBootstrapV1(this: DKGAgent, ctx: OperationContext): void {
     const config = this.config.rfc64PublicCatalogBootstrap;
@@ -212,6 +230,41 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
     const abortController = new AbortController();
     state.abortController = abortController;
     try {
+      const completeSwmProviders = [...new Set(
+        state.config.acceptedPublicPolicies.flatMap(
+          ({ completeSwmProviders: providers = [] }) => providers,
+        ),
+      )];
+      await mapWithConcurrency(
+        completeSwmProviders,
+        MAX_CONCURRENT_TARGETS_V1,
+        async (providerPeerId) => {
+          if (state.closed || abortController.signal.aborted) return;
+          try {
+            await this.connectToPeerId(providerPeerId, {
+              timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
+            });
+            // A pre-existing connection has no new connection:open event. Feed
+            // it through the normal cooldown/backoff-aware automatic scheduler
+            // so a selected provider is actionable after every cold start.
+            this.queueSyncFromPeerOnConnect(
+              providerPeerId,
+              (_peerId, error) => {
+                this.log.warn(
+                  state.ctx,
+                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                );
+              },
+              0,
+            );
+          } catch (error) {
+            this.log.warn(
+              state.ctx,
+              `RFC-64 complete SWM provider ${providerPeerId.slice(-8)} is not dialable: ${errorMessageV1(error)}`,
+            );
+          }
+        },
+      );
       await mapWithConcurrency(
         state.targets,
         MAX_CONCURRENT_TARGETS_V1,

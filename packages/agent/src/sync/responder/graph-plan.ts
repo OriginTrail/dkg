@@ -2314,6 +2314,9 @@ async function readCachedRowsPage(
   const rows = await cache.memo.get(cache.key, loadRows, {
     refresh: cache.refresh,
     refreshGeneration: cache.refreshGeneration,
+    // No prefix has been consumed at offset zero, so an entry evicted under
+    // responder memory pressure can be rebuilt without mixing snapshots.
+    refreshExpired: safeOffset === 0,
     requireExisting: safeOffset > 0,
     signal,
   });

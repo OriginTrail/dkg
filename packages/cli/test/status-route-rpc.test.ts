@@ -255,6 +255,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: false,
       selectedContextGraphs: [],
       autoPublishEnabled: false,
+      completeSwmProviders: [],
       service: null,
       bootstrap: null,
     });
@@ -292,7 +293,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
             catalogIssuerDelegationExpiresAt: '1893456000000',
           },
           bootstrap: {
-            acceptedPublicPolicies: [rfc64PublicCatalogPolicy('selected-public-cg')],
+            acceptedPublicPolicies: [{
+              ...rfc64PublicCatalogPolicy('selected-public-cg'),
+              completeSwmProviders: ['12D3KooCompleteSwm'],
+            }],
           },
         },
       },
@@ -303,6 +307,10 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: true,
       selectedContextGraphs: ['selected-public-cg'],
       autoPublishEnabled: true,
+      completeSwmProviders: [{
+        contextGraphId: 'selected-public-cg',
+        providers: ['12D3KooCompleteSwm'],
+      }],
       service,
       bootstrap,
     });
@@ -335,6 +343,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       enabled: true,
       selectedContextGraphs: ['receiver-only-cg'],
       autoPublishEnabled: false,
+      completeSwmProviders: [],
       bootstrap,
     });
   });

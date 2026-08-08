@@ -1271,6 +1271,13 @@ export interface Rfc64PublicCatalogBootstrapPolicyV1 {
   readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
   /** Author catalogs under the policy graph/era. */
   readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /**
+   * Operator-pinned peers that each serve a complete public-SWM snapshot for
+   * this exact accepted policy generation.  Unlike a catalog target provider,
+   * one of these peers may settle the graph-wide SWM catch-up plane by itself.
+   * Omission preserves the ordinary multi-provider union walk.
+   */
+  readonly completeSwmProviders?: readonly string[];
 }
 
 /**
