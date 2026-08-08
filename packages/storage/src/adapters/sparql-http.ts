@@ -569,6 +569,25 @@ export class SparqlHttpStore implements TripleStore {
     return releaseSystemRecordLaneControllerV1(controller, quiesceOwner);
   }
 
+  /**
+   * Public so a caching decorator can fail closed WITHOUT a round trip.
+   *
+   * `GraphSetIndexStore` answers `listGraphs()` from a warm set for up to its
+   * revalidation interval, and this adapter answers from `listGraphsCache` for
+   * up to 30 s. Neither path touches the endpoint, so neither reaches the
+   * ownership checks on `query`/`update` — a lost lease kept serving
+   * enumeration for a whole cache window. A decorator that holds cached state
+   * derived from this store needs to ask, cheaply, whether that state is still
+   * attributable to a backend we own. This is a lease-snapshot read: no I/O.
+   *
+   * Named `…V1` and optional on `TripleStore` because only the managed adapter
+   * can answer it; stores without a lease are always readable and simply do not
+   * implement it.
+   */
+  assertManagedBackendReadableV1(operation: string): void {
+    this.assertManagedBackendReadable(operation);
+  }
+
   private assertManagedBackendReadable(operation: string): void {
     if (!this.ownershipLease) return;
     const snapshot = readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease);
@@ -1327,6 +1346,11 @@ export class SparqlHttpStore implements TripleStore {
       return this.listGraphsDirect(options);
     }
     throwIfAborted(options?.signal);
+    // BEFORE the cache, not after. The warm branch below returns without
+    // touching the endpoint, so it never reaches the ownership check on
+    // `query` — a lost lease kept answering enumeration from this cache for up
+    // to MANAGED_LIST_GRAPHS_CACHE_MS.
+    this.assertManagedBackendReadable(options?.source ?? 'listGraphs');
     if (
       this.listGraphsCache &&
       this.now() - this.listGraphsCachedAt < MANAGED_LIST_GRAPHS_CACHE_MS

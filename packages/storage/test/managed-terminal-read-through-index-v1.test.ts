@@ -26,18 +26,32 @@ class FakeInnerStore implements Partial<TripleStore> {
   failWith: Error | null = null;
   listGraphCalls = 0;
 
+  /** Ownership, independent of `failWith`, so the warm path can be driven alone. */
+  unowned: ManagedOxigraphBackendUnownedError | null = null;
+  readableChecks = 0;
+
+  assertManagedBackendReadableV1(_operation: string): void {
+    this.readableChecks += 1;
+    if (this.unowned) throw this.unowned;
+  }
+
   async listGraphs(): Promise<string[]> {
     this.listGraphCalls += 1;
     if (this.failWith) throw this.failWith;
     return [...this.graphs];
   }
 
+  // The real adapter refuses every delegated read once the lease is lost, so
+  // the fake must too — otherwise a test could "pass" through a path that
+  // production would have refused anyway.
   async hasGraph(): Promise<boolean> {
+    if (this.unowned) throw this.unowned;
     if (this.failWith) throw this.failWith;
     return true;
   }
 
   async query(): Promise<QueryResult> {
+    if (this.unowned) throw this.unowned;
     if (this.failWith) throw this.failWith;
     return { type: 'boolean', value: true };
   }
@@ -83,6 +97,57 @@ describe('terminal read refusal through the graph-set index', () => {
     await expect(store.listGraphsByPrefix('urn:g:')).rejects.toThrow(
       ManagedOxigraphBackendUnownedError,
     );
+  });
+
+  it('refuses from the WARM cache, before the revalidation window opens', async () => {
+    // The gap the three tests above cannot see. Each of them first waits out
+    // `revalidateMs`, so they only ever exercise the REFRESH path. Inside the
+    // window `ensureGraphSet()` returns `this.graphs` without touching the
+    // inner store at all, so ownership is never consulted and a lost lease
+    // keeps serving enumeration for up to the revalidation interval (30s in
+    // production).
+    //
+    // No `setTimeout` here on purpose: the read happens while the cache is
+    // still fresh. `unowned` rather than `failWith`, so ONLY the ownership
+    // predicate can produce the refusal — if the cache were silently expiring
+    // and refreshing, the inner `listGraphs()` would succeed and this would not
+    // reject at all.
+    inner.unowned = unowned();
+    const listCallsBefore = inner.listGraphCalls;
+
+    await expect(store.listGraphs()).rejects.toThrow(ManagedOxigraphBackendUnownedError);
+
+    // The refusal came from consulting ownership on the warm path, not from a
+    // refresh: the inner store was never re-scanned.
+    expect(inner.readableChecks).toBeGreaterThan(0);
+    expect(inner.listGraphCalls).toBe(listCallsBefore);
+  });
+
+  it('consults ownership on the warm path for listGraphsByPrefix too', async () => {
+    // The other entry point through `ensureGraphSet`. Without this, a fix
+    // applied to `listGraphs` alone would look complete.
+    //
+    // `hasGraph` is deliberately absent: on the enabled path it always
+    // delegates to the inner store, so it is not a warm-serving path and the
+    // adapter's own read check already covers it.
+    inner.unowned = unowned();
+    const listCallsBefore = inner.listGraphCalls;
+
+    await expect(store.listGraphsByPrefix('urn:g:')).rejects.toThrow(
+      ManagedOxigraphBackendUnownedError,
+    );
+    expect(inner.listGraphCalls).toBe(listCallsBefore);
+  });
+
+  it('does not refuse a warm read while ownership is still live', async () => {
+    // The positive control. Without it, "always throw on the warm path" would
+    // pass every assertion above.
+    const callsBefore = inner.listGraphCalls;
+
+    await expect(store.listGraphs()).resolves.toEqual(['urn:g:1', 'urn:g:2']);
+
+    expect(inner.readableChecks).toBeGreaterThan(0);
+    expect(inner.listGraphCalls).toBe(callsBefore);
   });
 
   it('STILL tolerates an ordinary transient failure on a warm index', async () => {

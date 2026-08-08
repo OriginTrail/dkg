@@ -618,6 +618,13 @@ export class GraphSetIndexStore implements TripleStore {
       this.revalidateMs > 0 &&
       this.now() < this.nextRevalidateAt
     ) {
+      // The warm path returns WITHOUT touching the inner store, so the
+      // ownership refusal that `refreshIndex` rethrows is unreachable here.
+      // Serving this set after the lease is lost attributes stale enumeration
+      // to a backend the node may no longer own — for up to `revalidateMs`
+      // (30 s in production), which is the window a foreign listener needs.
+      // Cheap: a lease-snapshot read, no I/O.
+      this.inner.assertManagedBackendReadableV1?.('graph-set-index.warm');
       return this.graphs;
     }
     return raceAgainstAbort(

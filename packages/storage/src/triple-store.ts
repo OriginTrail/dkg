@@ -137,6 +137,20 @@ export interface TripleStore {
    */
   getSystemRecordLaneControllerV1?(): SystemRecordLaneControllerV1 | undefined;
 
+  /**
+   * Throw `ManagedOxigraphBackendUnownedError` if this store's backend is no
+   * longer proven owned. No I/O — a lease-snapshot read.
+   *
+   * Exists for CACHING decorators. A decorator that answers a read from warm
+   * state never reaches the ownership checks on `query`/`update`, so without
+   * this it keeps serving data attributed to a backend the node may no longer
+   * own — for a whole cache window. Any wrapper that can return a read without
+   * delegating downward must call this first; see `GraphSetIndexStore`.
+   *
+   * Absent on stores with no ownership lease, which are always readable.
+   */
+  assertManagedBackendReadableV1?(operation: string): void;
+
   insert(quads: Quad[], options?: QueryOptions): Promise<void>;
   delete(quads: Quad[], options?: QueryOptions): Promise<void>;
   deleteByPattern(pattern: Partial<Quad>, options?: QueryOptions): Promise<number>;
