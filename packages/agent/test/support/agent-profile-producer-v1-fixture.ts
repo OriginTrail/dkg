@@ -122,7 +122,7 @@ export async function publicationFor(
 ): Promise<AgentProfilePublicationBindingV1> {
   const canonicalAddress = address.toLowerCase();
   const reservedKaId = (BigInt(canonicalAddress) << 96n) | 7n;
-  const assertionMerkleRoot = projectionContentDigest(prepared);
+  const assertionMerkleRoot = publicationContentDigest(prepared);
   const typedData = buildAuthorAttestationTypedData({
     chainId: 84532n,
     kav10Address: `0x${'44'.repeat(20)}`,
@@ -151,7 +151,7 @@ export async function publicationFor(
       contentScopeVersion: '2',
       kaUal: `did:dkg:base:84532/${canonicalAddress}/7`,
       assertionVersion: '1',
-      publicTripleCount: String(prepared.projectionQuads.length),
+      publicTripleCount: String(prepared.publicationQuads.length),
       privateTripleCount: '0',
       privateMerkleRoot: null,
     }) as CanonicalGraphScopedAuthorSealV1,
@@ -275,8 +275,8 @@ export function controlRequest(digest: Digest32V1): SystemRecordArtifactLookupV1
   return { type: 'object', objectKind: 'agent-profile-head', objectDigest: digest };
 }
 
-function projectionContentDigest(prepared: PreparedAgentProfileV1): Digest32V1 {
-  const quads = [...prepared.projectionQuads].sort((left, right) => Buffer.compare(
+function publicationContentDigest(prepared: PreparedAgentProfileV1): Digest32V1 {
+  const quads = [...prepared.publicationQuads].sort((left, right) => Buffer.compare(
     tripleContentV10(left.subject, left.predicate, left.object),
     tripleContentV10(right.subject, right.predicate, right.object),
   ));

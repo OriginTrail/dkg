@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { tripleContentV10 } from '@origintrail-official/dkg-core';
 import type { Publisher, PublishResult } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -49,6 +50,43 @@ describe('prepared agent profile V1', () => {
       predicate: 'http://www.w3.org/ns/prov#atTime',
       object: '"2026-08-07T11:00:00.000Z"',
     }));
+  });
+
+  it('keeps the legacy publication and signed projection on the same canonical facts', () => {
+    const prepared = prepareAgentProfileV1({
+      peerId: 'fixture-peer',
+      publicKey: Buffer.alloc(32, 7).toString('base64'),
+      agentAddress: `0x${'11'.repeat(20)}`,
+      name: 'Representative fixture',
+      description: 'Exercises both prepared profile views',
+      framework: 'fixture-framework',
+      nodeRole: 'edge',
+      relayAddress: '/dns4/relay.example.test/tcp/4001',
+      multiaddrs: ['/dns4/node.example.test/tcp/4001'],
+      contextGraphsServed: ['public-places', 'public-threats'],
+      lastSeen: '2026-08-07T12:00:00.000Z',
+      skills: [{
+        skillType: 'GraphQuery',
+        pricePerCall: 1,
+        currency: 'TRAC',
+        successRate: 0.99,
+        pricingModel: 'PerInvocation',
+      }],
+      publicEncryptionKey: Buffer.alloc(32, 9).toString('base64'),
+      encryptionKeyAlgorithm: 'x25519-xsalsa20-poly1305',
+      encryptionKeyProof: `0x${'ab'.repeat(65)}`,
+    });
+
+    const canonicalFacts = (quads: typeof prepared.publicationQuads) => quads
+      .map((quad) => Buffer.from(tripleContentV10(
+        quad.subject,
+        quad.predicate,
+        quad.object,
+      )).toString('hex'))
+      .sort();
+
+    expect(canonicalFacts(prepared.publicationQuads))
+      .toEqual(canonicalFacts(prepared.projectionQuads));
   });
 
   it('publishes a clone of the exact prepared profile quads', async () => {
