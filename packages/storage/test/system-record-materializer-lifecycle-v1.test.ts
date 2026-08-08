@@ -289,6 +289,7 @@ class CapturingSettlementExecutor extends StubExecutor {
 
 class MismatchedBindingExecutor extends StubExecutor {
   registrationError: unknown = null;
+  retryError: unknown = null;
 
   async applyVerifiedSettlementBound(
     _proof: unknown,
@@ -304,6 +305,15 @@ class MismatchedBindingExecutor extends StubExecutor {
       }));
     } catch (error) {
       this.registrationError = error;
+    }
+    try {
+      registerRecovery(Object.freeze({
+        ownership: Object.freeze(Object.create(null) as object),
+        binding,
+        reconcile: async () => Object.freeze({ resolution: 'unavailable' as const }),
+      }));
+    } catch (error) {
+      this.retryError = error;
     }
     return Object.freeze({
       settlement: 'no-mutation',
@@ -2179,6 +2189,9 @@ describe('system-record lane session lifecycle V1', () => {
       await expect(session.applyVerified({})).resolves.toEqual({ outcome: 'stale' });
       expect(mismatchedExecutor.registrationError).toEqual(expect.objectContaining({
         message: expect.stringMatching(/not bound to the admitted apply invocation/),
+      }));
+      expect(mismatchedExecutor.retryError).toEqual(expect.objectContaining({
+        message: expect.stringMatching(/no longer live for this apply invocation/),
       }));
       await releaseSystemRecordLaneControllerV1(controller);
     });
