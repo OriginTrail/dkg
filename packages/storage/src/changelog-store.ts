@@ -1011,15 +1011,17 @@ export function asChangelogReader(store: unknown): ChangelogReader | null {
   // `createListContextGraphsCacheInvalidatingStore(...)` (dkg-agent-base.ts), a
   // hand-rolled forwarder that exposes `.innerStore` but does NOT forward the
   // changelog API — so a direct check misses it even when the changelog is on.
-  return resolveStoreChainCapabilityV1<ChangelogReader>(store, (candidate) => {
-    if (candidate instanceof ChangelogStore) return true;
-    const c = candidate as Partial<ChangelogReader>;
-    return (
-      typeof c.changelogHead === 'function' &&
-      typeof c.readChanges === 'function' &&
-      typeof c.headSeq === 'function' &&
-      typeof c.clearReconcileFlag === 'function' &&
-      typeof c.needsReconcile === 'boolean'
-    );
-  });
+  return resolveStoreChainCapabilityV1(store, isChangelogReader);
+}
+
+function isChangelogReader(candidate: unknown): candidate is ChangelogReader {
+  if (candidate instanceof ChangelogStore) return true;
+  const c = candidate as Partial<ChangelogReader> | null | undefined;
+  return (
+    typeof c?.changelogHead === 'function' &&
+    typeof c.readChanges === 'function' &&
+    typeof c.headSeq === 'function' &&
+    typeof c.clearReconcileFlag === 'function' &&
+    typeof c.needsReconcile === 'boolean'
+  );
 }

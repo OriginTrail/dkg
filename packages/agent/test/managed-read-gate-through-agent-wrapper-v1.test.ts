@@ -1,7 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  asManagedReadGateV1,
+  GraphSetIndexStore,
+  ManagedOxigraphBackendUnownedError,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -12,21 +13,24 @@ import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-
  * drives an external read cache through its `invalidate()` callback — so reads
  * genuinely can be answered above it without delegating downward.
  *
- * Under the previous design the managed read gate was an optional method every
- * wrapper had to re-declare, and this one (in a different package) did not. A
- * cache-owning layer above it would have called `assertManagedBackendReadableV1?.()`,
- * found nothing, and treated the absence as permission — the exact fail-open
- * shape the gate exists to prevent. A source-scanning test in packages/storage
- * could never have seen it.
+ * A previous design made the managed read gate an optional method every wrapper
+ * had to re-declare; this one, in a different package, did not, so the gate
+ * silently vanished here and warm reads went fail-open. A source-scanning test
+ * inside packages/storage could never have seen it, which is why the coverage
+ * lives here.
  *
- * Resolution walks `.innerStore`, which this wrapper already exposes, so it is
- * transparent without knowing the capability exists.
+ * This asserts the PRODUCTION property — a warm read refuses once ownership is
+ * lost — rather than the resolver mechanism. The resolver is storage-internal
+ * and deliberately not part of the published API, so testing it from here would
+ * have meant widening that API for a test.
  */
 const managedAdapter = () => {
   const store = {
+    // The one thing only the managed adapter declares. Stands in for the real
+    // lease-snapshot check, which needs no I/O.
     assertManagedBackendReadableV1: vi.fn(),
-    listGraphs: async () => [],
-    listGraphsByPrefix: async () => [],
+    listGraphs: async () => ['urn:g:1'],
+    listGraphsByPrefix: async () => ['urn:g:1'],
     query: async () => ({ type: 'boolean' as const, value: true }),
     insert: async () => undefined,
     delete: async () => undefined,
@@ -43,39 +47,63 @@ const managedAdapter = () => {
   };
 };
 
-describe('managed read gate resolves through the agent store wrapper', () => {
-  it('is transparent: the gate resolves to the adapter beneath it', () => {
+/** The production shape: index over the agent forwarder over the managed adapter. */
+const composed = (adapter: TripleStore) =>
+  new GraphSetIndexStore(
+    createListContextGraphsCacheInvalidatingStore(adapter, () => undefined),
+  );
+
+describe('managed read gate survives the agent store wrapper', () => {
+  it('refuses a WARM listGraphs once ownership is lost', async () => {
     const adapter = managedAdapter();
-    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
+    const index = composed(adapter);
 
-    expect(asManagedReadGateV1(wrapped)).toBe(adapter);
-  });
-
-  it('a resolved gate on the wrapper refuses exactly when the adapter refuses', () => {
-    const adapter = managedAdapter();
-    const wrapped = createListContextGraphsCacheInvalidatingStore(adapter, () => undefined);
-    const gate = asManagedReadGateV1(wrapped);
-
-    // Live: no refusal.
-    expect(() => gate?.assertManagedBackendReadableV1('probe')).not.toThrow();
+    await index.listGraphs(); // warm the index
 
     adapter.assertManagedBackendReadableV1.mockImplementation(() => {
-      throw new Error('managed backend is not the proven ready listener');
+      throw new ManagedOxigraphBackendUnownedError('probe', true, 'port-release-unproven');
     });
-    expect(() => gate?.assertManagedBackendReadableV1('probe')).toThrow(
-      /not the proven ready listener/,
+
+    await expect(index.listGraphs()).rejects.toThrow(ManagedOxigraphBackendUnownedError);
+  });
+
+  it('refuses a WARM listGraphsByPrefix once ownership is lost', async () => {
+    const adapter = managedAdapter();
+    const index = composed(adapter);
+
+    await index.listGraphs();
+
+    adapter.assertManagedBackendReadableV1.mockImplementation(() => {
+      throw new ManagedOxigraphBackendUnownedError('probe', true, 'port-release-unproven');
+    });
+
+    await expect(index.listGraphsByPrefix('urn:')).rejects.toThrow(
+      ManagedOxigraphBackendUnownedError,
     );
   });
 
-  it('stays null for an unleased store behind the same wrapper', () => {
-    // Forwarding must not invent a gate where there is no managed backend.
+  it('still serves a warm read while ownership is live', async () => {
+    // Positive control: without it, "always refuse" would satisfy both cases
+    // above and the wrapper could be breaking reads rather than gating them.
+    const adapter = managedAdapter();
+    const index = composed(adapter);
+
+    await index.listGraphs();
+    await expect(index.listGraphs()).resolves.toEqual(['urn:g:1']);
+    expect(adapter.assertManagedBackendReadableV1).toHaveBeenCalled();
+  });
+
+  it('leaves an unleased store behind the same wrapper untouched', async () => {
+    // No managed backend anywhere in the chain must mean no refusal invented.
     const bare = {
-      listGraphs: async () => [],
+      listGraphs: async () => ['urn:g:1'],
+      query: async () => ({ type: 'boolean' as const, value: true }),
       close: async () => undefined,
     } as unknown as TripleStore;
 
-    expect(
-      asManagedReadGateV1(createListContextGraphsCacheInvalidatingStore(bare, () => undefined)),
-    ).toBeNull();
+    const index = composed(bare);
+
+    await index.listGraphs();
+    await expect(index.listGraphs()).resolves.toEqual(['urn:g:1']);
   });
 });

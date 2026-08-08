@@ -54,7 +54,6 @@ export {
   ManagedOxigraphBackendUnownedError,
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
-  asManagedReadGateV1,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   isManagedOxigraphOwnershipLeaseV1,
@@ -64,7 +63,6 @@ export {
   type ManagedOxigraphOwnershipInvalidationV1,
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphOwnershipSnapshotV1,
-  type ManagedReadGateHostV1,
   type ManagedOxigraphSupervisorHandoffV1,
 } from './managed-oxigraph-ownership-v1-internal.js';
 export {

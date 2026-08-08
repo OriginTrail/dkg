@@ -447,10 +447,12 @@ export interface ManagedReadGateHostV1 {
  * case for an operator-configured store: such a store is always readable.
  */
 export function asManagedReadGateV1(store: unknown): ManagedReadGateHostV1 | null {
-  return resolveStoreChainCapabilityV1<ManagedReadGateHostV1>(
-    store,
-    (candidate) =>
-      typeof (candidate as Partial<ManagedReadGateHostV1>).assertManagedBackendReadableV1 ===
-      'function',
+  return resolveStoreChainCapabilityV1(store, isManagedReadGateHostV1);
+}
+
+function isManagedReadGateHostV1(candidate: unknown): candidate is ManagedReadGateHostV1 {
+  return (
+    typeof (candidate as Partial<ManagedReadGateHostV1>)?.assertManagedBackendReadableV1 ===
+    'function'
   );
 }

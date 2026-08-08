@@ -76,9 +76,9 @@ describe('managed read gate resolves through any wrapper chain', () => {
     expect(asManagedReadGateV1(bare)).toBeNull();
   });
 
-  it('resolves through every storage decorator, including private inner fields', () => {
-    // `inner` is TypeScript-private on these two but present at runtime, which
-    // is exactly what lets resolution work without them opting in.
+  it('resolves through every storage decorator via public innerStore', () => {
+    // All four wrappers expose a public `readonly innerStore`; traversal no
+    // longer reaches any TypeScript-private field.
     const adapter = managedAdapter();
     const chain = new ChangelogStore(
       new GraphSetIndexStore(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS)),

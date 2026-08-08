@@ -85,8 +85,9 @@ export class GraphWriteGenTracker implements GraphWriteGenSource {
 export function asGraphWriteGenSource(store: unknown): GraphWriteGenSource | null {
   // Traversal is shared — see `resolveStoreChainCapabilityV1`. This carried its
   // own copy of the walk, which had already drifted from `asChangelogReader`'s.
-  return resolveStoreChainCapabilityV1<GraphWriteGenSource>(
-    store,
-    (candidate) => typeof (candidate as Partial<GraphWriteGenSource>).getWriteGen === 'function',
-  );
+  return resolveStoreChainCapabilityV1(store, isGraphWriteGenSource);
+}
+
+function isGraphWriteGenSource(candidate: unknown): candidate is GraphWriteGenSource {
+  return typeof (candidate as Partial<GraphWriteGenSource>)?.getWriteGen === 'function';
 }
