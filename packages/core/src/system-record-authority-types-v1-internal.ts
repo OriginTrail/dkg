@@ -6,3 +6,12 @@ export interface AgentProfileAppliedTransitionV1 {
   readonly nextAuthoritySequence: DecimalU64V1;
   readonly transitionDigest: Digest32V1;
 }
+
+export type SystemRecordAuthorityDecisionV1 =
+  | { readonly decision: 'accept' }
+  | { readonly decision: 'stale' }
+  | {
+      readonly decision: 'quarantine';
+      readonly reason: 'head-fork' | 'transition-equivocation';
+    }
+  | { readonly decision: 'reject'; readonly reason: string };

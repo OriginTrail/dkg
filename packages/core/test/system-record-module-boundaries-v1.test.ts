@@ -36,6 +36,7 @@ describe('System Record V1 module ownership', () => {
       'system-record-owned-subject-codecs-v1-internal.ts',
       'system-record-signatures-v1-internal.ts',
       'system-record-authority-summary-v1-internal.ts',
+      'system-record-authority-verification-v1-internal.ts',
       'system-record-authority-v1-internal.ts',
       'system-record-verification-closure-v1-internal.ts',
       'system-record-cache-accounting-v1-internal.ts',
@@ -69,6 +70,18 @@ describe('System Record V1 module ownership', () => {
     ]) {
       expect(source(unit)).not.toMatch(/system-record-signatures-v1-internal/u);
     }
+  });
+
+  it('keeps closure verification below authority policy and summary minting private', () => {
+    expect(source('system-record-verification-closure-v1-internal.ts')).not.toMatch(
+      /system-record-authority-v1-internal/u,
+    );
+    expect(source('system-record-authority-verification-v1-internal.ts')).not.toMatch(
+      /system-record-(authority-summary|verification-closure)-v1-internal/u,
+    );
+    expect(source('system-record-authority-summary-v1-internal.ts')).not.toMatch(
+      /mintAgentProfileVerifiedAuthoritySummaryV1/u,
+    );
   });
 
   it('keeps wire and applied-state codecs off authority and closure implementations', () => {

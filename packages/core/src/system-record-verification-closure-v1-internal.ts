@@ -44,7 +44,7 @@ import {
   isIssuedTooFarInFuture,
   isSafeNow,
   isTombstoneBoundToPredecessorV1,
-} from './system-record-authority-v1-internal.js';
+} from './system-record-authority-verification-v1-internal.js';
 import {
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
