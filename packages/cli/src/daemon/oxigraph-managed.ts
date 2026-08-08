@@ -21,13 +21,25 @@
  * `managedByDkg: true` is set on the rewritten options so chain-reset wipe
  * uses `DROP ALL` (the local RocksDB is owned end-to-end by this daemon),
  * matching the Blazegraph-Docker provisioner's contract.
+ *
+ * # Why `managedByDkg` is not enough (#2052 B2)
+ *
+ * That boolean is plain, operator-writable config: anyone can put it in
+ * `config.json`, and `resolveAdapterOptions` in the storage package actively
+ * rewrites it. It says "treat this store as ours", not "this daemon started,
+ * checksum-verified, and still owns the process behind this URL". Capabilities
+ * that are only safe on the latter (the system-record materializer) therefore
+ * gate on the live ownership LEASE attached below, which only the supervisor
+ * can mint and which dies the instant the child does.
  */
 import { join } from 'node:path';
+import { attachManagedOxigraphLeaseV1 } from '@origintrail-official/dkg-storage';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,
   type OxigraphServerHandle,
   type OxigraphServerIo,
+  type OxigraphServerOwnershipV1,
 } from './oxigraph-server.js';
 import {
   normalizeOxigraphMemoryLimits,
@@ -230,7 +242,23 @@ export function planManagedOxigraph(
 
 export interface ManagedOxigraphResult {
   handle: OxigraphServerHandle;
-  /** Drop-in replacement for `config.store`. */
+  /**
+   * Live ownership view for the supervised child (same object as
+   * `handle.ownership`). Surfaced on the result so boot code that threads the
+   * managed result around — rather than the handle — can still read the
+   * current generation and drive controlled recovery.
+   */
+  ownership: OxigraphServerOwnershipV1;
+  /**
+   * Drop-in replacement for `config.store`.
+   *
+   * `options` carries the ownership lease under a symbol key. That is NOT
+   * incidental: object spread (which `resolveAdapterOptions` performs) copies
+   * own enumerable symbol keys, so capability survives the rewrite into the
+   * adapter, while `JSON.stringify` omits them, so a lease can never be
+   * written to `config.json` and replayed on a later boot against a store this
+   * daemon does not own.
+   */
   storeConfig: {
     backend: 'sparql-http';
     options: Record<string, unknown>;
@@ -286,13 +314,27 @@ export async function startManagedOxigraph(
     io: opts.serverIo,
   });
 
+  // Widened to allow the symbol key. `attachManagedOxigraphLeaseV1` returns a
+  // NEW object rather than mutating, so the plan's template stays lease-free
+  // and reusable.
+  const rewrittenOptions: Record<string | symbol, unknown> = {
+    ...plan.storeConfigTemplate.options,
+    queryEndpoint: handle.queryEndpoint,
+    updateEndpoint: handle.updateEndpoint,
+  };
+  // The lease ALONE is valid but deliberately does not advertise the lane:
+  // without a handoff nothing could prove the retired child dead before a
+  // replacement binds. Passing the supervisor handoff is what makes the
+  // composition live — only the supervisor holds the `ChildProcess` and can
+  // assert process facts, so the adapter composes the ordered handoff around
+  // steps it cannot perform itself.
   const storeConfig: ManagedOxigraphResult['storeConfig'] = {
     backend: 'sparql-http',
-    options: {
-      ...plan.storeConfigTemplate.options,
-      queryEndpoint: handle.queryEndpoint,
-      updateEndpoint: handle.updateEndpoint,
-    },
+    options: attachManagedOxigraphLeaseV1(
+      rewrittenOptions,
+      handle.ownership.lease,
+      handle.supervisorHandoff,
+    ),
   };
   if (plan.storeConfigTemplate.graphSetIndex !== undefined) {
     storeConfig.graphSetIndex = plan.storeConfigTemplate.graphSetIndex;
@@ -300,6 +342,7 @@ export async function startManagedOxigraph(
 
   return {
     handle,
+    ownership: handle.ownership,
     storeConfig,
     largeLiteralStorage: plan.largeLiteralStorage,
     sharedMemoryPublicSnapshotStorage: plan.sharedMemoryPublicSnapshotStorage,

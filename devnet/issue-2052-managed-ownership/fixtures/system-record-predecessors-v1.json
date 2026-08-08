@@ -1,0 +1,74 @@
+{
+  "schemaVersion": "dkg-system-record-predecessors-v1",
+  "purpose": "Every binary revision whose enumeration, responder, restart and failed-atomic-replace cleanup paths must be proven unable to enumerate, serve or delete system-record V1 reserved state. CI does NOT execute these revisions: no predecessor is checked out or built, so this list is a reviewed compatibility INVENTORY plus a commit-resolution check, and the behavioural probe is reported once as current-binary conformance. Changing supported predecessors requires reviewing a diff of this file; a moving branch head or a new-binary-only filter is explicitly insufficient.",
+  "reservedGraphs": [
+    "urn:dkg:internal:atomic-graph-replace:system-record-v1:state",
+    "urn:dkg:internal:atomic-graph-replace:system-record-v1:shadow:agents"
+  ],
+  "oxigraph": {
+    "version": "0.5.8",
+    "checksumSource": "packages/cli/src/daemon/oxigraph-binary.ts OXIGRAPH_ASSETS",
+    "note": "The gate resolves the platform asset and its pinned SHA-256 from the production constant rather than restating it, so a version bump cannot silently desynchronise this manifest from the binary actually launched."
+  },
+  "entries": [
+    {
+      "id": "stack-a-merged",
+      "description": "Stack A merged into testnet-canary. Predates every system-record storage path; its enumeration filter is the pre-existing prefix-wide isAtomicGraphReplaceStagingGraph.",
+      "commit": "26c27a99eaf7040d83810e2e67fec7b05d6ff9eb",
+      "nodeVersion": "22",
+      "seededReservedState": "reserved-state-fixture-v1",
+      "expected": {
+        "enumeratesReservedGraphs": false,
+        "servesReservedGraphs": false,
+        "deletesReservedGraphsOnCleanup": false,
+        "advertisesSystemRecordLane": false
+      }
+    },
+    {
+      "id": "stack-b1-core",
+      "description": "Stack B1 (#2103) core protocol codecs. Adds no storage path; reserved state must remain invisible for exactly the same reason as Stack A.",
+      "commit": "5f3f89e814eea0ff2d2cc32d7fce6cf628ca79dd",
+      "nodeVersion": "22",
+      "seededReservedState": "reserved-state-fixture-v1",
+      "expected": {
+        "enumeratesReservedGraphs": false,
+        "servesReservedGraphs": false,
+        "deletesReservedGraphsOnCleanup": false,
+        "advertisesSystemRecordLane": false
+      }
+    },
+    {
+      "id": "release-10-0-12",
+      "description": "Shipped release line operators are running today. This is the entry that proves the downgrade property for real deployments rather than only for branch heads.",
+      "commit": "843f5213d172096500a176eeda56e7e3ec0233c3",
+      "nodeVersion": "22",
+      "seededReservedState": "reserved-state-fixture-v1",
+      "expected": {
+        "enumeratesReservedGraphs": false,
+        "servesReservedGraphs": false,
+        "deletesReservedGraphsOnCleanup": false,
+        "advertisesSystemRecordLane": false
+      }
+    }
+  ],
+  "fixtures": {
+    "reserved-state-fixture-v1": {
+      "description": "Seeded directly into a live Oxigraph v0.5.8 store so a predecessor observes state it has no code for. Quad counts are pinned so a silent partial seed fails the gate instead of passing it.",
+      "quads": [
+        {
+          "graph": "urn:dkg:internal:atomic-graph-replace:system-record-v1:state",
+          "subject": "urn:dkg:system-record:v1:capacity",
+          "predicate": "urn:dkg:system-record:v1#revision",
+          "object": "\"1\""
+        },
+        {
+          "graph": "urn:dkg:internal:atomic-graph-replace:system-record-v1:shadow:agents",
+          "subject": "did:dkg:agent:0x0000000000000000000000000000000000000001",
+          "predicate": "urn:dkg:system-record:v1#projectionMarker",
+          "object": "\"shadow\""
+        }
+      ],
+      "expectedQuadCount": 2
+    }
+  }
+}

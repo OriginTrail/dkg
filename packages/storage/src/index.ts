@@ -33,6 +33,51 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+// System-record V1 (#2052 Stack B2). Default-unused: these modules perform no
+// work until the daemon supervisor supplies a live ownership lease.
+// Only the members with real consumers are public. `isInternalGraphUriV1` and
+// `isEphemeralInternalStagingGraphUriV1` stay module-scoped (imported directly
+// by tests, which pin the reserved/ephemeral partition) rather than being
+// exported as API nothing calls.
+export {
+  RESERVED_INTERNAL_GRAPHS_V1,
+  ReservedInternalGraphWriteError,
+  SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
+  SYSTEM_RECORD_V1_STATE_GRAPH,
+  assertNotReservedInternalGraphV1,
+  isReservedInternalGraphUriV1,
+} from './internal-graph-policy.js';
+export {
+  MANAGED_OXIGRAPH_LEASE_OPTION_KEY,
+  ManagedOxigraphBackendUnownedError,
+  attachManagedOxigraphLeaseV1,
+  createManagedOxigraphOwnershipControllerV1,
+  extractManagedOxigraphHandoffV1,
+  extractManagedOxigraphLeaseV1,
+  isManagedOxigraphOwnershipLeaseV1,
+  isManagedOxigraphOwnershipLiveV1,
+  readManagedOxigraphOwnershipSnapshotV1,
+  type ManagedOxigraphOwnershipControllerV1,
+  type ManagedOxigraphOwnershipInvalidationV1,
+  type ManagedOxigraphOwnershipLeaseV1,
+  type ManagedOxigraphOwnershipSnapshotV1,
+  type ManagedOxigraphSupervisorHandoffV1,
+} from './managed-oxigraph-ownership-v1-internal.js';
+export {
+  SystemRecordControllerRegistrationError,
+  SystemRecordLaneActivationConflictError,
+  createSystemRecordLaneControllerV1,
+  releaseSystemRecordLaneControllerV1,
+  type SystemRecordApplyOutcomeV1,
+  type SystemRecordChildHandoffV1,
+  type SystemRecordDeferralReasonV1,
+  type SystemRecordLaneActivationV1,
+  type SystemRecordLaneControllerDepsV1,
+  type SystemRecordLaneControllerV1,
+  type SystemRecordLaneSessionV1,
+  type SystemRecordLaneStateV1,
+  type SystemRecordTransactionExecutorV1,
+} from './system-record-materializer-v1.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,

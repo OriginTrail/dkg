@@ -21,9 +21,14 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtemp, rm, writeFile, chmod } from 'node:fs/promises';
 import { createServer, type Server } from 'node:net';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import {
+  SparqlHttpStore,
+  attachManagedOxigraphLeaseV1,
+  type SparqlHttpStoreOptions,
+} from '@origintrail-official/dkg-storage';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';
@@ -350,6 +355,654 @@ describe('startOxigraphServer (real child processes)', () => {
     // respawned by now and the probe would answer.
     await sleep(600);
     expect(await portAnswers(port)).toBe(false);
+  });
+});
+
+/**
+ * Ownership lease, lifecycle state machine and controlled recovery (#2052 B2).
+ *
+ * These cases are PLATFORM-NEUTRAL by construction, unlike the suites above:
+ *
+ *   - the stand-in is launched through `process.execPath` instead of by its
+ *     shebang, because Windows has no shebang support (that is exactly why the
+ *     suites above are environmentally red there); and
+ *   - listener ownership is resolved by an injected probe that reproduces the
+ *     production contract rather than shelling out to `lsof`/`netstat`: it
+ *     yields a pid only while the tracked child is alive, and fails CLOSED
+ *     (null) otherwise — the same fail-closed shape as `findListenOwnerPid`,
+ *     which returns null for an exited child.
+ *
+ * Everything else is real: real processes, real ports, real HTTP, real
+ * signals, real timers. No `vi.mock`, no fake timers.
+ */
+describe('startOxigraphServer ownership lease and lifecycle (#2052 B2)', () => {
+  /**
+   * Launch the stand-in via the Node executable. With no memory limits the
+   * launch strategy runs the binary directly, so `command` is the stand-in
+   * path and `args` are Oxigraph's own arguments.
+   */
+  function nodeSpawn(onSpawn: (child: ChildProcess) => void): typeof spawn {
+    return ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+      const child = spawn(process.execPath, [command, ...args], options);
+      onSpawn(child);
+      return child;
+    }) as typeof spawn;
+  }
+
+  /** Fail-closed listener-ownership probe: never attributes a dead child. */
+  function ownerProbe(provable: () => boolean) {
+    return async (child: ChildProcess): Promise<number | null> =>
+      provable() && child.pid !== undefined && child.exitCode === null && child.signalCode === null
+        ? child.pid
+        : null;
+  }
+
+  async function waitUntil(
+    predicate: () => boolean,
+    what: string,
+    timeoutMs = 8_000,
+  ): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (predicate()) return;
+      await sleep(25);
+    }
+    throw new Error(`timed out after ${timeoutMs}ms waiting for: ${what}`);
+  }
+
+  /** Standard injected io: real child, real port, deterministic ownership. */
+  function supervisorIo(state: { spawns: ChildProcess[]; provable: boolean }) {
+    return {
+      spawn: nodeSpawn((child) => state.spawns.push(child)),
+      findListenOwnerPid: ownerProbe(() => state.provable),
+    };
+  }
+
+  it('binds generation 1 only once the spawned child is the PROVEN listener owner', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: false };
+    const start = startOxigraphServer(startOpts(port, {
+      readyTimeoutMs: 6_000,
+      io: supervisorIo(state),
+    }));
+    let settled = false;
+    void start.then(() => { settled = true; }, () => { settled = true; });
+
+    // The child really binds and really answers the readiness ASK ...
+    await waitUntil(() => state.spawns.length === 1, 'the child to spawn');
+    let serving = false;
+    for (let i = 0; i < 100 && !serving; i += 1) {
+      serving = await portAnswers(port);
+      if (!serving) await sleep(25);
+    }
+    expect(serving, 'the stand-in never bound the port').toBe(true);
+    // ... but ownership is unprovable, so the supervisor must NOT report ready.
+    await sleep(200);
+    expect(settled, 'became ready on an HTTP 200 alone').toBe(false);
+
+    state.provable = true;
+    const handle = await start;
+    try {
+      expect(handle.ownership.snapshot()).toEqual({
+        childGeneration: '1',
+        ready: true,
+        terminal: false,
+      });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('does NOT advance the generation while a respawned child cannot be proven to own the port', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: supervisorIo(state),
+    }));
+    try {
+      expect(handle.ownership.snapshot().childGeneration).toBe('1');
+
+      // From here the respawned child binds the port and answers HTTP 200 for
+      // real — we just can no longer attribute the listener to it. This is the
+      // EADDRINUSE-adoption hazard: a supervisor that trusted the 200 would
+      // hand capability to a process it does not own.
+      state.provable = false;
+      state.spawns[0].kill('SIGKILL');
+
+      await waitUntil(() => state.spawns.length >= 2, 'the supervisor to respawn');
+      await waitUntil(() => !handle.ownership.snapshot().ready, 'the lease to drop liveness');
+      await sleep(800); // several probe cycles against the unprovable listener
+
+      expect(await portAnswers(port), 'the respawned child really is serving').toBe(true);
+      expect(handle.ownership.snapshot()).toMatchObject({
+        childGeneration: '1',
+        ready: false,
+      });
+
+      state.provable = true;
+      await waitUntil(() => handle.ownership.snapshot().ready, 'ownership to be re-proven');
+      expect(handle.ownership.snapshot().childGeneration).toBe('2');
+    } finally {
+      state.provable = true;
+      await handle.stop();
+    }
+  });
+
+  it('invalidates the lease with child-exit the instant the proven child dies', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      // Long backoff so nothing revives during the assertions: we are pinning
+      // the state BETWEEN the death and the restart.
+      restartBackoffBaseMs: 30_000,
+      restartBackoffMaxMs: 30_000,
+      io: supervisorIo(state),
+    }));
+    try {
+      state.spawns[0].kill('SIGKILL');
+      await waitUntil(() => !handle.ownership.snapshot().ready, 'the lease to go not-ready');
+      expect(handle.ownership.snapshot()).toEqual({
+        // Capability is revoked BEFORE any replacement generation exists —
+        // there is no window in which a dead child still looks live.
+        childGeneration: '1',
+        ready: false,
+        terminal: false,
+        lastInvalidation: 'child-exit',
+      });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('stop() closes the lease as terminal shutdown and freezes the generation', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+    await handle.stop();
+    expect(handle.ownership.snapshot()).toEqual({
+      childGeneration: '1',
+      ready: false,
+      terminal: true,
+      lastInvalidation: 'shutdown',
+    });
+    // Idempotent, and a terminal lease can never be recovered.
+    await handle.stop();
+    expect(handle.ownership.snapshot().lastInvalidation).toBe('shutdown');
+    await expect(handle.ownership.recoverGeneration('1')).rejects.toThrow(/terminal/i);
+  });
+
+  it('killSync() does not disarm a later stop() — it still closes and escalates', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+
+    handle.killSync();
+    // Terminating, but NOT closed: the escalation killSync() cannot perform
+    // itself must still be available to stop().
+    expect(handle.ownership.snapshot()).toMatchObject({
+      ready: false,
+      terminal: false,
+      lastInvalidation: 'stop',
+    });
+
+    await handle.stop();
+    // The retired single-`stopping`-flag version returned at stop()'s
+    // idempotency guard here, so it never awaited the exit, never escalated to
+    // SIGKILL, and never closed the lease.
+    expect(handle.ownership.snapshot()).toEqual({
+      childGeneration: '1',
+      ready: false,
+      terminal: true,
+      lastInvalidation: 'shutdown',
+    });
+    // stop() resolved only after the port was proven released — no sleep here.
+    expect(await portAnswers(port)).toBe(false);
+  });
+
+  it('cancels an armed restart at stop(): nothing is spawned after close', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 300,
+      restartBackoffMaxMs: 300,
+      io: supervisorIo(state),
+    }));
+    state.spawns[0].kill('SIGKILL');
+    await waitUntil(() => !handle.ownership.snapshot().ready, 'the crash to be observed');
+    // A restart is now armed for ~300ms. Close before it fires.
+    await handle.stop();
+
+    await sleep(1_200); // well past the backoff the crash armed
+    expect(state.spawns.length, 'a child was spawned after close').toBe(1);
+    expect(await portAnswers(port)).toBe(false);
+    expect(handle.ownership.snapshot()).toEqual({
+      childGeneration: '1',
+      ready: false,
+      terminal: true,
+      lastInvalidation: 'shutdown',
+    });
+  });
+
+  it('coalesces concurrent recoveries of the SAME broken generation into one restart', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      // No automatic revive during the test: the recovery must be the thing
+      // that restarts the child.
+      restartBackoffBaseMs: 30_000,
+      restartBackoffMaxMs: 30_000,
+      io: supervisorIo(state),
+    }));
+    try {
+      state.spawns[0].kill('SIGKILL');
+      await waitUntil(() => !handle.ownership.snapshot().ready, 'the lease to drop liveness');
+
+      const first = handle.ownership.recoverGeneration('1');
+      const second = handle.ownership.recoverGeneration('1');
+      const third = handle.ownership.recoverGeneration('1');
+      // Every holder that observed the same broken generation shares ONE
+      // operation — not N queued behind the lifecycle mutex.
+      expect(second).toBe(first);
+      expect(third).toBe(first);
+
+      await expect(Promise.all([first, second, third])).resolves.toEqual(['2', '2', '2']);
+      expect(state.spawns.length, 'more than one respawn for one outage').toBe(2);
+      expect(handle.ownership.snapshot()).toMatchObject({
+        childGeneration: '2',
+        ready: true,
+      });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('a controlled recovery pre-empts the armed backoff instead of waiting it out', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const backoffMs = 2_500;
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: backoffMs,
+      restartBackoffMaxMs: backoffMs,
+      io: supervisorIo(state),
+    }));
+    try {
+      state.spawns[0].kill('SIGKILL');
+      await waitUntil(() => !handle.ownership.snapshot().ready, 'the crash to be observed');
+
+      const startedAt = Date.now();
+      await expect(handle.ownership.recoverGeneration('1')).resolves.toBe('2');
+      expect(
+        Date.now() - startedAt,
+        'recovery waited for the backoff instead of taking over from it',
+      ).toBeLessThan(backoffMs - 500);
+      expect(state.spawns.length).toBe(2);
+
+      // The superseded timer must never fire behind the recovery.
+      await sleep(backoffMs);
+      expect(state.spawns.length, 'the disarmed backoff still spawned a child').toBe(2);
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('a STALE expected generation restarts nothing and does not queue behind a live recovery', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      readyTimeoutMs: 6_000,
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: supervisorIo(state),
+    }));
+    try {
+      // Reach generation 2 through the ordinary crash/revive path.
+      state.spawns[0].kill('SIGKILL');
+      await waitUntil(
+        () => handle.ownership.snapshot().childGeneration === '2' && handle.ownership.snapshot().ready,
+        'generation 2 to be bound',
+      );
+      expect(state.spawns.length).toBe(2);
+
+      // Wedge the lifecycle mutex: kill generation 2 and drive a recovery that
+      // cannot prove ownership, so it holds the lock for its full deadline.
+      state.provable = false;
+      state.spawns[1].kill('SIGKILL');
+      await waitUntil(() => !handle.ownership.snapshot().ready, 'generation 2 to die');
+      const wedged = handle.ownership.recoverGeneration('2');
+      wedged.catch(() => { /* asserted by the state checks below */ });
+      await waitUntil(() => state.spawns.length >= 3, 'the wedging recovery to respawn');
+
+      // A holder still on generation 1 asks to recover. Its answer does not
+      // depend on how generation 2's recovery turns out, so it must be served
+      // from the stale fast path — never queued behind the wedged mutex.
+      const stale = handle.ownership.recoverGeneration('1');
+      await expect(
+        Promise.race([stale, sleep(800).then(() => 'QUEUED_BEHIND_THE_MUTEX')]),
+      ).resolves.toBe('2');
+      expect(state.spawns.length, 'a stale recovery restarted a child').toBe(3);
+    } finally {
+      state.provable = true;
+      await handle.stop();
+    }
+  });
+
+  it('burns the lease as terminal when the bind is still served after the child exited', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const realFetch = globalThis.fetch;
+    let foreignServerHoldsPort = false;
+    const handle = await startOxigraphServer(startOpts(port, {
+      stopGraceMs: 500,
+      io: {
+        ...supervisorIo(state),
+        // Once shutdown starts, something else answers SPARQL on our bind. The
+        // supervisor cannot attribute it (findListenOwnerPid fails closed on
+        // the exited child), so port release is NOT provable.
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (!foreignServerHoldsPort) return await realFetch(input, init);
+          return new Response(JSON.stringify({ head: {}, boolean: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/sparql-results+json' },
+          });
+        }) as typeof globalThis.fetch,
+      },
+    }));
+    expect(handle.ownership.snapshot().childGeneration).toBe('1');
+
+    foreignServerHoldsPort = true;
+    await handle.stop();
+
+    const snapshot = handle.ownership.snapshot();
+    expect(snapshot.terminal).toBe(true);
+    // The specific reason must survive: 'shutdown' is equally terminal but
+    // tells an operator nothing about a bind we could not account for.
+    expect(snapshot.lastInvalidation).toBe('port-release-unproven');
+    await expect(handle.ownership.recoverGeneration('1')).rejects.toThrow(/terminal/i);
+  });
+
+  it('rejects recovery of a generation that was never bound', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+    try {
+      await expect(handle.ownership.recoverGeneration('7')).rejects.toThrow(/never bound/i);
+      await expect(handle.ownership.recoverGeneration('01')).rejects.toThrow(/canonical decimal/i);
+      // A live generation needs no recovery: the caller's view was stale.
+      await expect(handle.ownership.recoverGeneration('1')).resolves.toBe('1');
+      expect(state.spawns.length).toBe(1);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  // -------------------------------------------------------------------
+  // Clean-generation handoff (#2052 B2)
+  // -------------------------------------------------------------------
+
+  it('retires the owned child and then binds a clean replacement generation', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+    try {
+      expect(handle.ownership.snapshot().childGeneration).toBe('1');
+
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      // Resolving means the child is really gone AND the bind is really free —
+      // proven by a real probe, not assumed from the exit event.
+      expect(await portAnswers(port)).toBe(false);
+      expect(state.spawns.length, 'retiring must not start anything').toBe(1);
+      expect(handle.ownership.snapshot()).toEqual({
+        // Liveness is gone but the supervisor is NOT closed: a replacement is
+        // expected, so this must not be terminal the way stop() is.
+        childGeneration: '1',
+        ready: false,
+        terminal: false,
+        lastInvalidation: 'stop',
+      });
+
+      await handle.supervisorHandoff.startAndProveCleanGeneration();
+      expect(state.spawns.length).toBe(2);
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+      expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('REJECTS the retire, and goes terminal, when port release cannot be proven', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const realFetch = globalThis.fetch;
+    let foreignServerHoldsPort = false;
+    const handle = await startOxigraphServer(startOpts(port, {
+      stopGraceMs: 500,
+      io: {
+        ...supervisorIo(state),
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (!foreignServerHoldsPort) return await realFetch(input, init);
+          return new Response(JSON.stringify({ head: {}, boolean: true }), {
+            status: 200,
+            headers: { 'Content-Type': 'application/sparql-results+json' },
+          });
+        }) as typeof globalThis.fetch,
+      },
+    }));
+
+    foreignServerHoldsPort = true;
+    // Unlike stop(), which logs and carries on because it runs from teardown,
+    // this MUST reject: its caller is about to bind a replacement, and a silent
+    // resolve would let that happen over a listener we cannot account for.
+    await expect(handle.supervisorHandoff.stopAndProveOwnedChildDead())
+      .rejects.toThrow(/could not prove/i);
+    expect(handle.ownership.snapshot()).toMatchObject({
+      terminal: true,
+      lastInvalidation: 'port-release-unproven',
+    });
+    // Refused outright, not merely discouraged. The message is the observable
+    // proxy for `state === 'closed'`: a failed retire must CLOSE the supervisor,
+    // not merely leave it ownership-terminal but open, because "open" is a
+    // state some later path could still spawn from.
+    await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+      .rejects.toThrow(/shutting down/i);
+    expect(state.spawns.length, 'a replacement bound over an unaccounted listener').toBe(1);
+  });
+
+  it('refuses a clean-generation start that no proven-dead predecessor precedes', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+    try {
+      await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+        .rejects.toThrow(/proven-dead predecessor/i);
+      // The live child is untouched — refusing must not damage the generation
+      // the caller still holds.
+      expect(state.spawns.length).toBe(1);
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '1', ready: true });
+      expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('lets nothing else bind a generation between the two handoff halves', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: supervisorIo(state),
+    }));
+    try {
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      // The mutex is RELEASED between the two halves, so this window is the one
+      // place an ordinary revive or a caller recovery could bind a generation
+      // the lane never asked for, over a port the lane believes is free.
+      await sleep(600); // many backoff periods
+      expect(state.spawns.length, 'automatic supervision spawned into the handoff window').toBe(1);
+      await expect(handle.ownership.recoverGeneration('1')).rejects.toThrow(/handoff/i);
+      expect(state.spawns.length, 'a caller recovery spawned into the handoff window').toBe(1);
+
+      await handle.supervisorHandoff.startAndProveCleanGeneration();
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+      expect(state.spawns.length).toBe(2);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('recovers the phase when spawn throws SYNCHRONOUSLY during a clean-generation start', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const io = supervisorIo(state);
+    let failNextSpawnSynchronously = false;
+    const handle = await startOxigraphServer(startOpts(port, {
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: {
+        ...io,
+        // `child_process.spawn` raises EACCES/EFTYPE/E2BIG/EINVAL synchronously
+        // rather than delivering them to the `error` event, so this is the real
+        // shape of a bad binary — not a contrived failure.
+        spawn: ((command: string, args: readonly string[], options: Parameters<typeof spawn>[2]) => {
+          if (failNextSpawnSynchronously) {
+            failNextSpawnSynchronously = false;
+            throw Object.assign(new Error('spawn EACCES'), { code: 'EACCES' });
+          }
+          return io.spawn(command, args, options);
+        }) as typeof spawn,
+      },
+    }));
+    try {
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      failNextSpawnSynchronously = true;
+      await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+        .rejects.toThrow(/EACCES/);
+
+      // The throw must not escape past the recovery tail. If it does, the phase
+      // stays 'retired' for the life of the process: no replacement, no
+      // automatic revive, and a lease reporting "momentarily not ready" forever
+      // instead of failing closed — the daemon's triple store is simply dead.
+      await waitUntil(
+        () => handle.ownership.snapshot().childGeneration === '2',
+        'ordinary supervision to resume after the synchronous spawn failure',
+      );
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+      expect(await portAnswers(port)).toBe(true);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('does NOT accept an inconclusive probe as proof that the bind was released', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const realFetch = globalThis.fetch;
+    let probesTimeOut = false;
+    const handle = await startOxigraphServer(startOpts(port, {
+      stopGraceMs: 500,
+      io: {
+        ...supervisorIo(state),
+        // A loaded listener that misses the probe deadline. #2052 is a store
+        // PRESSURE issue, so this is the expected case, not an exotic one — and
+        // it is NOT evidence that the socket is gone, unlike ECONNREFUSED.
+        fetch: (async (input: RequestInfo | URL, init?: RequestInit) => {
+          if (!probesTimeOut) return await realFetch(input, init);
+          throw Object.assign(new Error('The operation was aborted due to timeout'), {
+            name: 'TimeoutError',
+          });
+        }) as typeof globalThis.fetch,
+      },
+    }));
+
+    probesTimeOut = true;
+    await expect(handle.supervisorHandoff.stopAndProveOwnedChildDead())
+      .rejects.toThrow(/could not prove/i);
+    expect(handle.ownership.snapshot()).toMatchObject({
+      terminal: true,
+      lastInvalidation: 'port-release-unproven',
+    });
+    // A failed retire must not leave an open, childless supervisor that could
+    // still spawn against a listener it cannot account for.
+    await sleep(600);
+    expect(state.spawns.length, 'spawned after a retire that could not be proven').toBe(1);
+    await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+      .rejects.toThrow(/shutting down/i);
+    // stop() stays safe and idempotent on that path, and does not overwrite the
+    // more specific terminal reason.
+    await handle.stop();
+    expect(handle.ownership.snapshot().lastInvalidation).toBe('port-release-unproven');
+  });
+
+  it('resumes ordinary supervision when a lane retires and never binds a replacement', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, {
+      handoffAbandonMs: 400,
+      restartBackoffBaseMs: 100,
+      restartBackoffMaxMs: 100,
+      io: supervisorIo(state),
+    }));
+    try {
+      // Exactly what a lane SHUTDOWN does: destroy the client, retire the
+      // child, drain — and never come back. This child is the daemon's whole
+      // triple store, not the lane's private one, so one consumer's teardown
+      // must not park it childless for the life of the process.
+      await handle.supervisorHandoff.stopAndProveOwnedChildDead();
+      expect(state.spawns.length).toBe(1);
+
+      await waitUntil(
+        () => handle.ownership.snapshot().ready,
+        'the abandoned handoff to be backstopped',
+      );
+      expect(handle.ownership.snapshot()).toMatchObject({ childGeneration: '2', ready: true });
+      expect(await portAnswers(port)).toBe(true);
+      // A lane that returns late is refused — fail-closed for the lane, alive
+      // for every other consumer of the store.
+      await expect(handle.supervisorHandoff.startAndProveCleanGeneration())
+        .rejects.toThrow(/proven-dead predecessor/i);
+    } finally {
+      await handle.stop();
+    }
+  });
+
+  it('advertises the system-record lane only with BOTH a live lease and a handoff', async () => {
+    const port = await freePort();
+    const state = { spawns: [] as ChildProcess[], provable: true };
+    const handle = await startOxigraphServer(startOpts(port, { io: supervisorIo(state) }));
+    const base = (): Record<string | symbol, unknown> => ({
+      queryEndpoint: handle.queryEndpoint,
+      updateEndpoint: handle.updateEndpoint,
+    });
+    const laneOf = (options: Record<string | symbol, unknown>) =>
+      new SparqlHttpStore(options as unknown as SparqlHttpStoreOptions)
+        .getSystemRecordLaneControllerV1();
+    try {
+      // Neither: an ordinary external SPARQL endpoint.
+      expect(laneOf(base())).toBeUndefined();
+      // Lease only. Ownership is genuinely proven here, which is what makes
+      // this the discriminating case: without a handoff nothing could prove the
+      // retired child dead before a replacement binds, so the lane stays
+      // unadvertised rather than advertising one that can never open.
+      expect(laneOf(attachManagedOxigraphLeaseV1(base(), handle.ownership.lease)))
+        .toBeUndefined();
+      // Both.
+      expect(laneOf(attachManagedOxigraphLeaseV1(
+        base(),
+        handle.ownership.lease,
+        handle.supervisorHandoff,
+      ))).toBeDefined();
+    } finally {
+      await handle.stop();
+    }
+    // A terminal lease stops advertising even with the handoff still attached.
+    expect(laneOf(attachManagedOxigraphLeaseV1(
+      base(),
+      handle.ownership.lease,
+      handle.supervisorHandoff,
+    ))).toBeUndefined();
   });
 });
 

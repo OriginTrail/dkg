@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 import type {
   ConstructResult,
   Quad,
@@ -38,6 +39,27 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
 
   getPressureSnapshot(): StorePressureSnapshot | undefined {
     return this.inner.getPressureSnapshot?.();
+  }
+
+  /**
+   * No-rewrite, no-memo facade for the system-record V1 lane (#2052 B2).
+   *
+   * This decorator externalises oversized SWM literal object terms into blob
+   * files, but the lane never routes through `insert()` — it builds one
+   * immutable transaction internally, and its projection terms are bounded far
+   * below the externalisation threshold by the per-record 2-MiB/10,000-quad
+   * caps. So the correct behaviour is to pass the capability through UNCHANGED.
+   * A rewriting facade would have to re-externalise terms the materializer has
+   * already committed to a digest, which would break the projection digest that
+   * applied state pins and make every restart revalidation fail.
+   */
+  getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
+    // Straight through, no memo. Because this forwards the inner controller
+    // UNCHANGED, caching bought no identity stability — it could only go stale
+    // and keep advertising a lane the adapter would now deny. Capability
+    // discovery is the safety gate callers use, so a stale "yes" is the
+    // dangerous direction.
+    return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
   readonly innerStore: TripleStore;

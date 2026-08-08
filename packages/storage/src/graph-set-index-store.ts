@@ -17,6 +17,13 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
+import type {
+  SystemRecordApplyOutcomeV1,
+  SystemRecordLaneActivationV1,
+  SystemRecordLaneControllerV1,
+  SystemRecordLaneSessionV1,
+} from './system-record-materializer-v1.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -47,7 +54,19 @@ type TouchedGraphMutationSource =
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
   | 'update';
-type GraphSetRefreshSource = 'seed' | 'revalidate' | TouchedGraphMutationSource | 'query';
+/**
+ * `system-record.*` (#2052 B2) are dirty-sources rather than touched-graph
+ * sources: the lane's reserved graphs are never listed, so there is no exact
+ * membership delta to apply incrementally, and the shadow projection becomes
+ * authoritative content at cutover. A full refresh is the only sound answer.
+ */
+type GraphSetRefreshSource =
+  | 'seed'
+  | 'revalidate'
+  | TouchedGraphMutationSource
+  | 'query'
+  | 'system-record.applied'
+  | 'system-record.indeterminate';
 type PendingFullRefreshSource = Exclude<GraphSetRefreshSource, 'seed' | 'revalidate'>;
 
 export type GraphSetMutationEvent =
@@ -196,7 +215,92 @@ export class GraphSetIndexStore implements TripleStore {
     return this.inner.getPressureSnapshot?.();
   }
 
+  /**
+   * Memoized outcome-mapping facade for the system-record V1 lane (#2052 B2).
+   *
+   * The lane writes reserved graphs that this index deliberately never lists,
+   * so a naive passthrough would be harmless for membership — but NOT for the
+   * shadow projection, whose rows land in a reserved graph today and become
+   * authoritative graph content at cutover. The facade therefore mirrors the
+   * discipline this class already applies to `replace*`: advance only on a
+   * definite success, and mark dirty when the result is indeterminate.
+   *
+   * `indeterminate` specifically must dirty rather than no-op. It means the
+   * endpoint may or may not have committed, which is exactly the state in which
+   * a stale membership set becomes a silent wrong answer; `scheduleFullRefresh`
+   * is the same escape hatch used for an indeterminate `replaceGraph`.
+   */
+  getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
+    // PROBE THE INNER STORE EVERY TIME. The memo preserves wrapper identity; it
+    // must never answer the capability question itself.
+    //
+    // Absence was already re-probed — the adapter reports undefined during any
+    // window in which the managed child is not the proven-ready listener, and
+    // latching that would disable the lane for the whole process on one probe
+    // landing inside an ordinary revive. But PRESENCE was latched, so once a
+    // wrapper had been cached this kept advertising a lane after the lease went
+    // terminal, while the adapter underneath would have denied it. Discovery is
+    // the safety gate callers use, so a stale "yes" is the dangerous direction.
+    const inner = this.inner.getSystemRecordLaneControllerV1?.();
+    if (!inner) {
+      this.systemRecordLaneMemo = null;
+      this.systemRecordLaneInner = null;
+      return undefined;
+    }
+    // Keyed on the inner controller's identity, so a replacement is wrapped
+    // afresh rather than masked by a facade over the old one.
+    if (this.systemRecordLaneMemo && this.systemRecordLaneInner === inner) {
+      return this.systemRecordLaneMemo;
+    }
+    this.systemRecordLaneInner = inner;
+    this.systemRecordLaneMemo = Object.freeze({
+      open: async (activation: SystemRecordLaneActivationV1) => {
+        const session = await inner.open(activation);
+        return this.wrapSystemRecordSession(session);
+      },
+    });
+    return this.systemRecordLaneMemo;
+  }
+
+  private wrapSystemRecordSession(session: SystemRecordLaneSessionV1): SystemRecordLaneSessionV1 {
+    const owner = this;
+    return {
+      get state() {
+        return session.state;
+      },
+      get activationGeneration() {
+        return session.activationGeneration;
+      },
+      async applyVerified(proof: unknown): Promise<SystemRecordApplyOutcomeV1> {
+        const outcome = await session.applyVerified(proof);
+        if (outcome.outcome === 'applied') {
+          owner.bumpMutation();
+          owner.scheduleFullRefresh('system-record.applied');
+        } else if (outcome.outcome === 'indeterminate') {
+          owner.scheduleFullRefresh('system-record.indeterminate');
+        }
+        // Every other outcome (`already-applied`, `stale`, `root-collision`,
+        // `capacity-exhausted`, `deferred`, `capability-lost`) leaves GRAPH
+        // MEMBERSHIP unchanged, so dirtying the index on them would force a
+        // full-store scan for no reason — the exact cost this class exists to
+        // avoid.
+        //
+        // Membership, not "wrote nothing", and the distinction matters for
+        // `root-collision` specifically: it can durably quarantine state, so it
+        // is not a no-op write. It is still irrelevant HERE because it does not
+        // add or remove a named graph. The agent cache facade, which tracks
+        // readable content rather than graph membership, therefore treats it
+        // differently and invalidates.
+        return outcome;
+      },
+      close: (mode: 'disable' | 'shutdown') => session.close(mode),
+    };
+  }
+
   private readonly inner: TripleStore;
+  private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
+  /** The inner controller the memo wraps, so a replacement is not masked. */
+  private systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
@@ -531,6 +635,21 @@ export class GraphSetIndexStore implements TripleStore {
       try {
         return await this.refreshIndexLoop(source, options, flight);
       } catch (error: unknown) {
+        // NEVER swallow a proven-unowned backend.
+        //
+        // The tolerance below exists for TRANSIENT store failures: serving the
+        // last known graph set beats making every reader repeat an expensive
+        // scan. `ManagedOxigraphBackendUnownedError` is the opposite kind of
+        // failure — the adapter has PROVEN it cannot account for whatever is
+        // answering, and that condition never clears on its own.
+        //
+        // Measured before this line existed: with a WARM index, a terminal lease
+        // made the adapter refuse correctly and this handler returned the stale
+        // set as a SUCCESS, so `listGraphs()` and `listGraphsByPrefix()` kept
+        // answering forever. A fail-closed guard one layer down became silently
+        // fail-open here — and a regression test written against the adapter
+        // alone would have passed while the guarantee was absent.
+        if (error instanceof ManagedOxigraphBackendUnownedError) throw error;
         if (source !== 'revalidate') throw error;
         // Cancellation, cold seeds, and mutation-dirty rebuilds are strict
         // correctness paths even if another refresh published in parallel.

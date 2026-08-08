@@ -1,0 +1,17 @@
+{
+  "name": "@devnet/issue-2052-managed-ownership",
+  "private": true,
+  "type": "module",
+  "version": "0.0.0",
+  "description": "Live managed-Oxigraph ownership conformance gate for issue #2052 Stack B2.",
+  "scripts": {
+    "gate": "node --import tsx run.ts && node --import tsx verify.ts",
+    "generate": "node --import tsx run.ts",
+    "verify": "node --import tsx verify.ts",
+    "typecheck": "tsc --project tsconfig.json"
+  },
+  "dependencies": {
+    "@origintrail-official/dkg-core": "workspace:*",
+    "@origintrail-official/dkg-storage": "workspace:*"
+  }
+}

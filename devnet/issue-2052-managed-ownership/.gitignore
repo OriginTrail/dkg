@@ -1,0 +1,3 @@
+# Run outputs, not committed evidence. The verdict is produced per run and
+# uploaded by CI; committing it would let a stale pass masquerade as a fresh one.
+artifacts/

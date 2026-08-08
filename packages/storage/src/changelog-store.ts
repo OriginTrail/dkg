@@ -15,6 +15,8 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
+import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -241,6 +243,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.insert(quads, options);
+    this.assertNoPersistentReservedQuads(quads, 'insert');
     // The reserved plane is not writable through the public API: strip any
     // caller-supplied quads targeting it so a forged marker (e.g. a fake seq to
     // jump the high-water mark) can never reach the inner store. Only the
@@ -271,6 +274,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async delete(quads: Quad[], options?: QueryOptions): Promise<void> {
     if (!this.enabled) return this.inner.delete(quads, options);
+    this.assertNoPersistentReservedQuads(quads, 'delete');
     // Strip reserved-graph quads: callers cannot delete markers out of the log.
     const safe = this.stripReserved(quads);
     const touched = this.attributableGraphs(safe);
@@ -595,6 +599,31 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     return this.inner.getPressureSnapshot?.();
   }
 
+  /**
+   * Explicitly DENY the system-record V1 lane while the changelog is enabled
+   * (#2052 B2).
+   *
+   * The lane's contract is that one record apply is a single durability unit:
+   * projection, applied state, root claims, accounting and receipt commit or
+   * roll back together. This decorator cannot honour that. Every mutation other
+   * than `insert()` appends its marker in a SECOND transaction
+   * (`markPostMutation` -> `appendMarkers`), and that split is exactly the
+   * "benign lost-marker window" documented at the top of this file. Benign for a
+   * derived log; not benign for a CAS whose whole purpose is to make partial
+   * application impossible.
+   *
+   * Denying is safe in practice because the changelog is default-off, so such a
+   * node simply stays on the legacy lane. Returning `undefined` (rather than
+   * throwing) is deliberate: capability absence is the established way a store
+   * declines an optional feature, and it keeps `createTripleStore` composable.
+   *
+   * A disabled changelog is a pure passthrough decorator, so it forwards.
+   */
+  getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
+    if (this.enabled) return undefined;
+    return this.inner.getSystemRecordLaneControllerV1?.();
+  }
+
   async flush(options?: QueryOptions): Promise<void> {
     // Drain queued mutations (data + their markers) before flushing the inner
     // store, so a durability flush cannot return while a write is still queued.
@@ -819,6 +848,28 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   /** Drop caller quads that target the reserved plane (marker forgery guard). */
   private stripReserved(quads: readonly Quad[]): Quad[] {
     return quads.filter((q) => !(q.graph && this.isReservedGraph(q.graph)));
+  }
+
+  /**
+   * Deny — rather than strip — a batch touching persistent system-record V1
+   * state (#2052 B2).
+   *
+   * Stripping is right for the changelog plane and for ephemeral staging
+   * graphs: both are decorator-internal, and a caller that names one is either
+   * confused or forging a marker, so dropping the quad and continuing is
+   * harmless. It is WRONG for persistent reserved state, because there the
+   * caller's write silently does not happen and it receives a resolved promise
+   * saying it did — a lost update with no signal, exactly the failure the
+   * materializer's full-state CAS exists to prevent.
+   *
+   * Applied before `stripReserved` so the refusal does not depend on whether
+   * the changelog happens to be enabled; the adapter beneath enforces the same
+   * rule for the disabled path.
+   */
+  private assertNoPersistentReservedQuads(quads: readonly Quad[], op: string): void {
+    for (const q of quads) {
+      if (q.graph) assertNotReservedInternalGraphV1(q.graph, op, 'ChangelogStore');
+    }
   }
 
   /** Reject a graph-targeted mutation aimed at the reserved plane. Safe as a

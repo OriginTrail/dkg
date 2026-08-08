@@ -1,0 +1,191 @@
+name: System-record managed ownership evidence
+
+# Live conformance gate for issue #2052 Stack B2, against the checksum-pinned
+# Oxigraph v0.5.8 binary. Unit tests and the embedded adapter explicitly cannot
+# satisfy it: the properties are about separate OS processes and their listen
+# sockets.
+#
+# What it proves, precisely — the artifact is the authority, not this comment:
+#
+#   1. ONE real generation handoff, driven by the production supervisor
+#      (`startOxigraphServer`) with a genuinely in-flight ordinary write:
+#      the child is stopped only after that write drains, the write survives,
+#      a second OS process is spawned, the first is dead and the second alive,
+#      the replacement serves the same data, and the store resumes on it.
+#   2. The capability fail-closed matrix over the real store composition.
+#   3. Reserved internal state is invisible to enumeration, unserved by
+#      `hasGraph`, and undeletable by generic mutation including an unscoped
+#      `deleteByPattern`.
+#
+# What it does NOT prove:
+#   - Nothing here measures a connection pool. B2 owns none; the owned client
+#     moved to Stack B3, which is where the first byte is dispatched.
+#   - `pinnedPredecessors` is an INVENTORY, not a set of verdicts. No predecessor
+#     is checked out or built — every check runs the current binary — so the
+#     manifest records WHICH commits must retain the property, and the measured
+#     half is one conformance probe against this build.
+#   - The full-state CAS has not landed, so no verified apply is dispatched.
+#   - Raw `update()` can still reach reserved state through a split prefix/local
+#     IRI. Inert in B2 (nothing writes reserved state) and gated in Stack C.
+
+on:
+  push:
+    branches:
+      - testnet-canary
+    paths:
+      - '.github/workflows/system-record-managed-ownership.yml'
+      - 'devnet/issue-2052-managed-ownership/**'
+      - 'docs/adr/0002-system-record-sync-v1.md'
+      - 'package.json'
+      - 'packages/agent/**'
+      - 'packages/cli/**'
+      - 'packages/core/**'
+      - 'packages/rdf-utils/**'
+      - 'packages/storage/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.base.json'
+  pull_request:
+    paths:
+      - '.github/workflows/system-record-managed-ownership.yml'
+      - 'devnet/issue-2052-managed-ownership/**'
+      - 'docs/adr/0002-system-record-sync-v1.md'
+      - 'package.json'
+      - 'packages/agent/**'
+      - 'packages/cli/**'
+      - 'packages/core/**'
+      - 'packages/rdf-utils/**'
+      - 'packages/storage/**'
+      - 'pnpm-lock.yaml'
+      - 'pnpm-workspace.yaml'
+      - 'tsconfig.base.json'
+  workflow_dispatch:
+
+concurrency:
+  group: system-record-managed-ownership-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  managed-ownership:
+    name: Managed Oxigraph ownership (live)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout candidate
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          # Test the CANDIDATE, not GitHub's synthetic merge.
+          #
+          # This previously carried a comment claiming the checkout "must carry
+          # real commit metadata rather than a synthetic merge ref" — with no
+          # `ref` to make that true. `fetch-depth: 0` controls history DEPTH; it
+          # cannot change WHICH commit is checked out. So on `pull_request`,
+          # `actions/checkout` took `refs/pull/N/merge`, and the published
+          # evidence recorded `sourceCommit: 8c7b4e935…` — a synthetic merge
+          # against another PR's head, not this PR's `91d38870e`. The comment
+          # asserted the property the config did not implement.
+          #
+          # Head, not merge, and specifically because this PR is STACKED: the
+          # merge ref is B2's head against B1's moving head, a composition that
+          # never ships — after B1 merges, B2 is rebased onto testnet-canary.
+          # `refs/pull/N/merge` is also a mutable GitHub-managed value with no
+          # re-trigger when the base moves, so an artifact naming it is
+          # unverifiable after the fact. Empty on `push`, where the default is
+          # already the commit itself.
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build harness dependency closure
+        # The harness resolves `@origintrail-official/dkg-storage` through its
+        # published `dist/` types, so the closure must exist before ANY
+        # typecheck. Omitting this passes locally (where a dist is usually left
+        # over from a previous build) and fails only in CI.
+        #
+        # The CLI closure is included, not just storage's: the harness imports
+        # `daemon/oxigraph-binary` and `daemon/oxigraph-server` by relative
+        # SOURCE path, because the CLI package exports neither subpath. tsc then
+        # follows the CLI's own imports, so every workspace package the CLI
+        # depends on must have real `dist/` types. Without them tsc reports a
+        # wall of TS2307 plus the implicit-any and unknown-catch errors that
+        # cascade from the degraded types — which is exactly what it did, while
+        # the same typecheck passed locally on leftover builds.
+        #
+        # Matches what `test:live:system-record-managed-ownership:generate`
+        # already builds, deliberately: a typecheck over a narrower closure than
+        # the run uses can only produce false results in one direction or the
+        # other.
+        run: >-
+          pnpm -r --filter @origintrail-official/dkg...
+          --filter '!@origintrail-official/dkg-evm-module' run build
+
+      - name: Typecheck the ownership gate harness
+        run: pnpm typecheck:live:system-record-managed-ownership
+
+      - name: Storage unit conformance
+        run: |
+          pnpm --filter @origintrail-official/dkg-storage exec vitest run \
+            test/internal-graph-policy.test.ts \
+            test/managed-oxigraph-ownership-v1.test.ts \
+            test/reserved-internal-graph-mutation-guard.test.ts \
+            test/system-record-materializer-lifecycle-v1.test.ts \
+            test/system-record-control-barrier-integration-v1.test.ts \
+            test/system-record-capability-discovery-v1.test.ts \
+            test/managed-backend-ownership-dispatch-v1.test.ts \
+            test/managed-terminal-read-through-index-v1.test.ts \
+            test/system-record-controller-disposal-v1.test.ts \
+            test/system-record-capability-probe-errors-v1.test.ts \
+            test/graph-set-index-store.test.ts \
+            test/system-record-decorator-apply-outcomes-v1.test.ts \
+            test/store-priority-scheduler.test.ts \
+            test/store-scheduler-system-record-admission.test.ts
+
+      # Every test file this branch adds or modifies now runs SOMEWHERE.
+      #
+      # These were run by nothing. `ci.yml` triggers only on
+      # `pull_request: branches: [main, testnet-canary, …]`, and this PR's base
+      # is another open PR, so the full lanes have never fired on this branch —
+      # there was no fallback. The CLI suites carry 20 of the supervisor
+      # fault-injection cases this PR added.
+      - name: Agent facade conformance
+        run: |
+          pnpm --filter @origintrail-official/dkg-agent exec vitest run \
+            test/system-record-agent-facade-outcomes-v1.test.ts
+
+      - name: CLI supervisor conformance
+        run: |
+          pnpm --filter @origintrail-official/dkg exec vitest run \
+            test/oxigraph-server.test.ts
+          pnpm --filter @origintrail-official/dkg exec vitest run \
+            test/oxigraph-managed.test.ts
+
+      - name: Run live managed-ownership gate
+        # Downloads and checksum-verifies the pinned v0.5.8 binary, then runs
+        # the predecessor matrix against a real server.
+        run: pnpm test:live:system-record-managed-ownership
+
+      - name: Publish evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: managed-ownership-verdict
+          path: |
+            devnet/issue-2052-managed-ownership/artifacts/managed-ownership-result.json
+            devnet/issue-2052-managed-ownership/artifacts/managed-ownership-verdict.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -18,6 +18,13 @@ import { tmpdir } from 'node:os';
 import { delimiter, join } from 'node:path';
 
 import {
+  SparqlHttpStore,
+  extractManagedOxigraphHandoffV1,
+  extractManagedOxigraphLeaseV1,
+  type SparqlHttpStoreOptions,
+} from '@origintrail-official/dkg-storage';
+
+import {
   planManagedOxigraph,
   resolveManagedOxigraphPort,
   startManagedOxigraph,
@@ -499,13 +506,16 @@ describe('startManagedOxigraph (real download + real server)', () => {
       });
       try {
         expect(result).not.toBeNull();
-        expect(result!.storeConfig).toEqual({
-          backend: 'sparql-http',
-          options: {
-            managedByDkg: true,
-            queryEndpoint: `http://127.0.0.1:${port}/query`,
-            updateEndpoint: `http://127.0.0.1:${port}/update`,
-          },
+        // Asserted on the STRING-keyed projection: `options` also carries the
+        // ownership lease under a symbol key (see the lease case below), which
+        // a whole-object toEqual would compare — symbol keys and all. Everything
+        // an operator or a persisted config can see is still pinned exactly.
+        expect(result!.storeConfig.backend).toBe('sparql-http');
+        expect(result!.storeConfig.graphSetIndex).toBeUndefined();
+        expect(Object.fromEntries(Object.entries(result!.storeConfig.options))).toEqual({
+          managedByDkg: true,
+          queryEndpoint: `http://127.0.0.1:${port}/query`,
+          updateEndpoint: `http://127.0.0.1:${port}/update`,
         });
         expect(result!.largeLiteralStorage.directory).toBe(join(dataDir, 'literal-blobs'));
 
@@ -532,6 +542,102 @@ describe('startManagedOxigraph (real download + real server)', () => {
       await expect(
         fetch(`http://127.0.0.1:${port}/query`, { signal: AbortSignal.timeout(400) }),
       ).rejects.toThrow();
+    },
+    120_000,
+  );
+
+  it(
+    'attaches a live ownership lease that survives a spread but never a JSON round trip',
+    async () => {
+      // Same STABLE cache as the case above: a REAL oxigraph, really
+      // downloaded and sha256-verified, really supervised.
+      const cacheDir = join(tmpdir(), 'dkg-test-oxigraph-cache');
+      await mkdir(cacheDir, { recursive: true });
+      const dataDir = await mkdtemp(join(tmpdir(), 'oxi-managed-lease-'));
+      const port = await freePort();
+
+      const result = await startManagedOxigraph({
+        config: {
+          store: { backend: MANAGED_OXIGRAPH_BACKEND, options: { port, cacheDir } },
+        },
+        dataDir,
+        log: () => {},
+        readyTimeoutMs: 30_000,
+      });
+      try {
+        expect(result).not.toBeNull();
+        // Exactly one proven generation was bound by the supervised start.
+        expect(result!.ownership.snapshot()).toEqual({
+          childGeneration: '1',
+          ready: true,
+          terminal: false,
+        });
+        expect(result!.ownership).toBe(result!.handle.ownership);
+
+        // The lease on the rewritten options is the LIVE one, by identity
+        // against the storage package's private table — not a look-alike.
+        expect(extractManagedOxigraphLeaseV1(result!.storeConfig.options))
+          .toBe(result!.ownership.lease);
+        // The supervisor handoff rides along too. Without it the store would
+        // hold a valid lease and still refuse to advertise the lane, because
+        // nothing could prove the retired child dead before a replacement binds.
+        expect(extractManagedOxigraphHandoffV1(result!.storeConfig.options))
+          .toBe(result!.handle.supervisorHandoff);
+
+        // `resolveAdapterOptions` rewrites options with an object spread;
+        // spread copies own enumerable symbol keys, so BOTH survive it.
+        expect(extractManagedOxigraphLeaseV1({ ...result!.storeConfig.options }))
+          .toBe(result!.ownership.lease);
+        expect(extractManagedOxigraphHandoffV1({ ...result!.storeConfig.options }))
+          .toBe(result!.handle.supervisorHandoff);
+
+        // The real composed options advertise the lane end to end — the whole
+        // point of attaching the handoff rather than the lease alone.
+        expect(
+          new SparqlHttpStore(result!.storeConfig.options as unknown as SparqlHttpStoreOptions)
+            .getSystemRecordLaneControllerV1(),
+        ).toBeDefined();
+
+        // A JSON round trip — what persisting `config.json` does — destroys
+        // both. A lease or handoff that could be written to disk and replayed
+        // on a later boot would prove nothing about who owns the process today.
+        const persisted = JSON.parse(JSON.stringify(result!.storeConfig)) as {
+          backend: string;
+          options: Record<string, unknown>;
+        };
+        expect(Object.getOwnPropertySymbols(persisted.options)).toEqual([]);
+        expect(extractManagedOxigraphLeaseV1(persisted.options)).toBeNull();
+        expect(extractManagedOxigraphHandoffV1(persisted.options)).toBeNull();
+        // A store rebuilt from the persisted config is therefore inert.
+        expect(
+          new SparqlHttpStore(persisted.options as unknown as SparqlHttpStoreOptions)
+            .getSystemRecordLaneControllerV1(),
+        ).toBeUndefined();
+        // ...and the string-keyed config an operator would see is unchanged.
+        expect(persisted).toEqual({
+          backend: 'sparql-http',
+          options: {
+            managedByDkg: true,
+            queryEndpoint: `http://127.0.0.1:${port}/query`,
+            updateEndpoint: `http://127.0.0.1:${port}/update`,
+          },
+        });
+
+        // structuredClone drops symbol keys too (and could not carry identity
+        // even if it kept them).
+        expect(extractManagedOxigraphLeaseV1(structuredClone(persisted.options))).toBeNull();
+        expect(extractManagedOxigraphHandoffV1(structuredClone(persisted.options))).toBeNull();
+      } finally {
+        await result?.handle.stop();
+        await rm(dataDir, { recursive: true, force: true });
+      }
+
+      // Shutdown burns the lease: a stopped supervisor owns nothing.
+      expect(result!.ownership.snapshot()).toMatchObject({
+        ready: false,
+        terminal: true,
+        lastInvalidation: 'shutdown',
+      });
     },
     120_000,
   );
