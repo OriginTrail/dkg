@@ -55,8 +55,8 @@ import {
   assertNotReservedInternalGraphV1,
   isInternalGraphUriV1,
 } from '../internal-graph-policy.js';
+import { CACHED_READ_GATE_V1 } from '../cached-read-gate-v1.js';
 import {
-  MANAGED_READ_GATE_V1,
   ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
@@ -589,7 +589,7 @@ export class SparqlHttpStore implements TripleStore {
    * any unrelated store declaring the same name would have been treated as a
    * managed backend.
    */
-  [MANAGED_READ_GATE_V1](operation: string): void {
+  [CACHED_READ_GATE_V1](operation: string): void {
     this.assertManagedBackendReadable(operation);
   }
 

@@ -18,12 +18,12 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
 import {
-  MANAGED_READ_GATE_V1,
-  ManagedOxigraphBackendUnownedError,
-  asManagedReadGateV1,
-  type ManagedReadGateHostV1,
-} from './managed-oxigraph-ownership-v1-internal.js';
+  CACHED_READ_GATE_V1,
+  asCachedReadGateV1,
+  type CachedReadGateHostV1,
+} from './cached-read-gate-v1.js';
 import type {
   SystemRecordApplyOutcomeV1,
   SystemRecordLaneActivationV1,
@@ -339,7 +339,7 @@ export class GraphSetIndexStore implements TripleStore {
    *
    * `null` for every store with no managed backend: those are always readable.
    */
-  private readonly managedReadGate: ManagedReadGateHostV1 | null;
+  private readonly cachedReadGate: CachedReadGateHostV1 | null;
 
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
@@ -347,7 +347,7 @@ export class GraphSetIndexStore implements TripleStore {
     // A public handle — named or symbol-keyed — would let a caller reach past
     // this decorator and skip the index maintenance it exists to enforce.
     linkStoreChainV1(this, inner);
-    this.managedReadGate = asManagedReadGateV1(inner);
+    this.cachedReadGate = asCachedReadGateV1(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -649,7 +649,7 @@ export class GraphSetIndexStore implements TripleStore {
       // to a backend the node may no longer own — for up to `revalidateMs`
       // (30 s in production), which is the window a foreign listener needs.
       // Cheap: a lease-snapshot read, no I/O.
-      this.managedReadGate?.[MANAGED_READ_GATE_V1]('graph-set-index.warm');
+      this.cachedReadGate?.[CACHED_READ_GATE_V1]('graph-set-index.warm');
       return this.graphs;
     }
     return raceAgainstAbort(

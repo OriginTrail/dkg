@@ -5,11 +5,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChangelogStore, asChangelogReader } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { asGraphWriteGenSource } from '../src/graph-write-gen.js';
+import { ManagedOxigraphBackendUnownedError } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import {
-  MANAGED_READ_GATE_V1,
-  asManagedReadGateV1,
-  ManagedOxigraphBackendUnownedError,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+  CACHED_READ_GATE_V1,
+  asCachedReadGateV1,
+} from '../src/cached-read-gate-v1.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
 import { StoreChainCycleError } from '../src/store-chain-capability.js';
 import type { TripleStore } from '../src/triple-store.js';
@@ -37,7 +37,7 @@ const BLOB_OPTIONS = {
 /** Stands in for the managed adapter: the only thing that declares the gate. */
 const managedAdapter = () => {
   const store = {
-    [MANAGED_READ_GATE_V1]: vi.fn(),
+    [CACHED_READ_GATE_V1]: vi.fn(),
     listGraphs: async () => [],
     query: async () => ({ type: 'boolean' as const, value: true }),
     insert: async () => undefined,
@@ -45,7 +45,7 @@ const managedAdapter = () => {
     close: async () => undefined,
   };
   return store as unknown as TripleStore & {
-    [MANAGED_READ_GATE_V1]: ReturnType<typeof vi.fn>;
+    [CACHED_READ_GATE_V1]: ReturnType<typeof vi.fn>;
   };
 };
 
@@ -66,16 +66,16 @@ const opaqueForwarder = (innerStore: TripleStore): TripleStore =>
     close: () => innerStore.close(),
   }) as unknown as TripleStore;
 
-describe('managed read gate resolves through any wrapper chain', () => {
+describe('cached-read gate resolves through any wrapper chain', () => {
   it('finds the gate on the adapter itself', () => {
     const adapter = managedAdapter();
-    expect(asManagedReadGateV1(adapter)).toBe(adapter);
+    expect(asCachedReadGateV1(adapter)).toBe(adapter);
   });
 
   it('returns null for a store with no managed backend anywhere', () => {
     // Unleased stores are always readable; resolution must not invent a gate.
     const bare = { listGraphs: async () => [] } as unknown as TripleStore;
-    expect(asManagedReadGateV1(bare)).toBeNull();
+    expect(asCachedReadGateV1(bare)).toBeNull();
   });
 
   it('resolves through every storage decorator', () => {
@@ -89,7 +89,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
       { enabled: true },
     );
 
-    expect(asManagedReadGateV1(chain)).toBe(adapter);
+    expect(asCachedReadGateV1(chain)).toBe(adapter);
   });
 
   it('resolves through a wrapper that declares NOTHING but innerStore', () => {
@@ -98,9 +98,9 @@ describe('managed read gate resolves through any wrapper chain', () => {
     // this capability. Under the old shape the call evaporated here.
     const adapter = managedAdapter();
 
-    expect(asManagedReadGateV1(opaqueForwarder(adapter))).toBe(adapter);
+    expect(asCachedReadGateV1(opaqueForwarder(adapter))).toBe(adapter);
     expect(
-      asManagedReadGateV1(opaqueForwarder(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS))),
+      asCachedReadGateV1(opaqueForwarder(new SharedMemoryLiteralBlobStore(adapter, BLOB_OPTIONS))),
     ).toBe(adapter);
   });
 
@@ -119,7 +119,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
     const wrapped = opaqueForwarder(chain);
 
     // Read gate lives on the innermost adapter.
-    expect(asManagedReadGateV1(wrapped)).toBe(adapter);
+    expect(asCachedReadGateV1(wrapped)).toBe(adapter);
     // Changelog reader lives on the OUTERMOST decorator — opposite direction,
     // so this also proves the walk starts where it should.
     expect(asChangelogReader(wrapped)).toBe(chain);
@@ -168,7 +168,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
       node = next;
     }
 
-    expect(asManagedReadGateV1(chain)).toBe(adapter);
+    expect(asCachedReadGateV1(chain)).toBe(adapter);
   });
 
   it('THROWS on a cyclic chain rather than reporting absence', () => {
@@ -180,7 +180,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
     const cyclic: { innerStore?: unknown } = {};
     cyclic.innerStore = cyclic;
 
-    expect(() => asManagedReadGateV1(cyclic)).toThrow(StoreChainCycleError);
+    expect(() => asCachedReadGateV1(cyclic)).toThrow(StoreChainCycleError);
   });
 
   it('resolves through a chain far deeper than any previous depth cap', () => {
@@ -190,7 +190,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
     let chain: TripleStore = adapter;
     for (let i = 0; i < 20; i++) chain = opaqueForwarder(chain);
 
-    expect(asManagedReadGateV1(chain)).toBe(adapter);
+    expect(asCachedReadGateV1(chain)).toBe(adapter);
   });
 
   it('refuses a WARM read through an opaque forwarder — the end-to-end property', async () => {
@@ -204,7 +204,7 @@ describe('managed read gate resolves through any wrapper chain', () => {
     // already fail-closed. The warm branch is the one under test.
     await index.listGraphs();
 
-    adapter[MANAGED_READ_GATE_V1].mockImplementation(() => {
+    adapter[CACHED_READ_GATE_V1].mockImplementation(() => {
       throw new ManagedOxigraphBackendUnownedError('probe', true, 'port-release-unproven');
     });
 

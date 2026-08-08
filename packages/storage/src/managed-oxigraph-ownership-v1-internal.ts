@@ -35,8 +35,6 @@
  * obtains the lease still cannot extend or revive it, failing (3).
  */
 
-import { resolveStoreChainCapabilityV1 } from './store-chain-capability.js';
-
 /** Opaque, non-inspectable lease handle. Compare by identity only. */
 declare const MANAGED_OXIGRAPH_LEASE_BRAND: unique symbol;
 export type ManagedOxigraphOwnershipLeaseV1 = {
@@ -416,50 +414,4 @@ export function readManagedOxigraphOwnershipSnapshotV1(
   return snapshotLeaseState(current);
 }
 
-/**
- * The managed read gate, keyed by symbol rather than by method name.
- *
- * Symbol-keyed for two reasons the review drew out. It keeps a managed-Oxigraph
- * lease concern OFF the public surface of `SparqlHttpStore`, which is a general
- * SPARQL-over-HTTP adapter and has no business advertising one; and it makes
- * discovery an identity check rather than a structural match on a magic string,
- * so an unrelated store that happens to declare a same-named method is not
- * mistaken for a managed backend.
- *
- * Deliberately NOT a member of `TripleStore` either: putting it on the
- * vendor-neutral interface made it a cross-cutting obligation that every present
- * and future wrapper had to remember, policed by nothing.
- */
-export const MANAGED_READ_GATE_V1: unique symbol = Symbol('dkg.managedReadGate.v1');
 
-export interface ManagedReadGateHostV1 {
-  [MANAGED_READ_GATE_V1](operation: string): void;
-}
-
-/**
- * Recover the managed read gate from anywhere in a decorator chain.
- *
- * The point of resolving rather than forwarding: a wrapper CANNOT silently
- * erase the gate by failing to re-declare it. The previous shape called
- * `store.assertManagedBackendReadableV1?.(…)` on the immediate inner store, and
- * optional chaining treats an absent method as PERMISSION — so one intervening
- * decorator turned a fail-closed read into a fail-open one, and keeping that
- * safe meant every wrapper in every package had to opt in forever.
- *
- * Traversal itself lives in `resolveStoreChainCapabilityV1`, shared with
- * `asGraphWriteGenSource` and `asChangelogReader`. Reusing that convention is
- * the point: wrappers already have to expose their inner store for those two to
- * resolve, so this adds no new obligation on any wrapper.
- *
- * `null` means no managed backend anywhere in the chain, which is the ordinary
- * case for an operator-configured store: such a store is always readable.
- */
-export function asManagedReadGateV1(store: unknown): ManagedReadGateHostV1 | null {
-  return resolveStoreChainCapabilityV1(store, isManagedReadGateHostV1);
-}
-
-function isManagedReadGateHostV1(candidate: unknown): candidate is ManagedReadGateHostV1 {
-  return (
-    typeof (candidate as Partial<ManagedReadGateHostV1>)?.[MANAGED_READ_GATE_V1] === 'function'
-  );
-}
