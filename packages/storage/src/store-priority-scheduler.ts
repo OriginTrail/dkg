@@ -617,6 +617,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   get snapshot(): StorePrioritySchedulerSnapshot {
+    // Read once: the getter builds a fresh object, so six reads meant six
+    // allocations for one snapshot.
+    const barrier = this.barrierCoordinator.metrics;
     return {
       ackInflight: this.ackInflight,
       healthInflight: this.healthInflight,
@@ -645,12 +648,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
       admissionHeldRuns: this.heldRunCount,
       admissionSealedStores: this.sealedStoreCount,
       admissionGenerationsInflight: this.countGenerationsInflight(),
-      barrierPending: this.barrierCoordinator.metrics.pending,
-      barrierInflight: this.barrierCoordinator.metrics.inflight,
-      barrierCoalesced: this.barrierCoordinator.metrics.coalesced,
-      barrierTimeouts: this.barrierCoordinator.metrics.timeouts,
-      barrierWaitMs: this.barrierCoordinator.metrics.waitMs,
-      barrierWaitOccupiedSlotMs: this.barrierCoordinator.metrics.waitOccupiedSlotMs,
+      barrierPending: barrier.pending,
+      barrierInflight: barrier.inflight,
+      barrierCoalesced: barrier.coalesced,
+      barrierTimeouts: barrier.timeouts,
+      barrierWaitMs: barrier.waitMs,
+      barrierWaitOccupiedSlotMs: barrier.waitOccupiedSlotMs,
     };
   }
 
