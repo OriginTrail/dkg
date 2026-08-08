@@ -20,7 +20,7 @@ import type { StoreControlBarrierBlockers, StoreGenerationSeal } from './store-b
 import { StoreControlBarrierTimeoutError } from './store-barrier-contract.js';
 
 /** Label carried on a seal when the caller does not name a generation. */
-export const BARRIER_ANY_GENERATION = '*';
+const BARRIER_ANY_GENERATION = '*';
 
 interface BarrierEntry {
   storeId: object;
