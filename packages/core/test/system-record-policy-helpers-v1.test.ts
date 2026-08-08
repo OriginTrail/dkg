@@ -9,6 +9,7 @@ import {
 } from '../src/system-record-v1.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const SCHEMA = 'https://schema.org/';
 const DKG = 'https://dkg.network/ontology#';
 const ERC8004 = 'https://eips.ethereum.org/erc-8004#';
@@ -61,6 +62,14 @@ const EXPECTED_ALLOWED_PROFILE_PREDICATES_V1 = {
 const PROFILE_PREDICATE_UNIVERSE_V1 = [
   ...new Set(Object.values(EXPECTED_ALLOWED_PROFILE_PREDICATES_V1).flat()),
 ];
+const UNLISTED_SAME_NAMESPACE_PREDICATES_V1 = [
+  `${RDF}value`,
+  `${SCHEMA}url`,
+  `${DKG}privateKey`,
+  `${ERC8004}agentRegistry`,
+  `${PROV}used`,
+  `${SKILL}endpoint`,
+] as const;
 const PROFILE_SUBJECT_KINDS_V1 = Object.keys(
   EXPECTED_ALLOWED_PROFILE_PREDICATES_V1,
 ) as AgentProfileOwnedSubjectKindV1[];
@@ -134,8 +143,10 @@ describe('system-record V1 public policy helpers', () => {
         expect(isAllowedAgentProfilePredicateV1(kind, predicate), `${kind}: ${predicate}`)
           .toBe(allowed.has(predicate));
       }
-      expect(isAllowedAgentProfilePredicateV1(kind, 'https://example.org/not-in-v1'), kind)
-        .toBe(false);
+      for (const predicate of UNLISTED_SAME_NAMESPACE_PREDICATES_V1) {
+        expect(isAllowedAgentProfilePredicateV1(kind, predicate), `${kind}: ${predicate}`)
+          .toBe(false);
+      }
     }
   });
 
