@@ -15,13 +15,19 @@
  *
  * `classifyLegacyWmMigration` is the ONLY place a migration is decided: it
  * takes the marker × lifecycle matrix and returns an exhaustive typed
- * `LegacyWmMigrationPlan` — `not-needed` (already graph-scoped, or no legacy
- * draft), `migrate-fresh`, `resume-create`, or `resume-copy` — or throws a
- * coded refusal (`KA_LEGACY_WM_MIGRATION_REFUSED`,
- * `KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY`). Every mutating variant means
- * the draft is already known eligible; no later phase re-decides whether it
- * may migrate. One exhaustive `switch` maps each phase to the steps it still
- * owes, so a new phase is a compile error rather than a silent no-op.
+ * `LegacyWmMigrationPlan` — `not-needed` (with a reason), `migrate-fresh`,
+ * `resume-create`, or `resume-copy` — or throws `KA_LEGACY_WM_MIGRATION_REFUSED`
+ * for a draft that is not a purely local legacy draft. One exhaustive
+ * `switch` maps each phase to the steps it still owes, so a new phase is a
+ * compile error rather than a silent no-op.
+ *
+ * DECLINE, DO NOT THROW. This runs ahead of `createAssertion` and outside
+ * its idempotent catch, so any throw here permanently breaks chat memory on
+ * that node — the failure mode this module exists to remove. Every state
+ * that merely means "cannot migrate" therefore returns `not-needed` with a
+ * reason and a log, never an error: no identity lane, no active lifecycle,
+ * or a target that is no longer an open draft. Only a draft that IS a live
+ * legacy draft but is unsafe to touch (shared/sealed/promoting) refuses.
  *
  * The content gate is its own phase: `validateMigratableContent` is the only
  * constructor of `ValidatedMigratableContent`, and every mutating step takes
@@ -197,7 +203,7 @@ export interface LegacyWmMigrationHost {
  * - `resume-copy`     — prepared, draft already minted: copy, complete.
  */
 export type LegacyWmMigrationPlan =
-  | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' | 'target-not-writable' }
+  | { phase: 'not-needed'; reason: 'already-graph-scoped' | 'no-legacy-draft' | 'target-not-writable' | 'no-identity-lane' }
   | { phase: 'migrate-fresh' }
   | { phase: 'resume-create' }
   | { phase: 'resume-copy' };
@@ -263,15 +269,6 @@ function isOpenWorkingMemoryDraft(summary: LifecycleSummary): boolean {
 
 function migrationRefused(message: string): Error {
   return Object.assign(new Error(message), { code: 'KA_LEGACY_WM_MIGRATION_REFUSED' });
-}
-
-function identityAllocatorRequired(contextGraphId: string, name: string): Error {
-  return Object.assign(
-    new Error(
-      `Legacy WM migration requires a graph-scoped identity allocator for ${contextGraphId}/${name}`,
-    ),
-    { code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' },
-  );
 }
 
 function migrationUris(request: LegacyWmMigrationRequest): MigrationUris {
@@ -439,7 +436,7 @@ export async function classifyLegacyWmMigration(
     // `completeMarker` clears the marker. Decline instead. The marker stays
     // `prepared`, so if the draft returns to a writable state the copy still
     // completes, and the source content is retained meanwhile.
-    if (!isOpenWorkingMemoryDraft(summary)) {
+    if (!isOpenWorkingMemoryDraft(summary) || summary.hasDurableOrInFlightState) {
       return { phase: 'not-needed', reason: 'target-not-writable' };
     }
     return { phase: 'resume-copy' };
@@ -707,7 +704,26 @@ export async function runLegacyWorkingMemoryMigration(
     const canAllocateGraphIdentity = request.allocateKaNumber !== undefined
       || host.canSelfAllocateGraphIdentity(request.agentAddress);
     if (!canAllocateGraphIdentity) {
-      throw identityAllocatorRequired(request.contextGraphId, request.name);
+      // No identity lane — the author is not an allocatable EVM address (a
+      // node with no registered default agent authors as its libp2p peerId).
+      // There is nothing to migrate TO: without a mintable KA number the
+      // draft's WM graph IS the legacy name-keyed graph, which
+      // `assertionCreate` keeps using. Declining leaves that draft exactly
+      // as-is, which is correct AND survivable; throwing here would escape
+      // `createAssertion` outside its idempotent catch and permanently break
+      // chat memory on every such node. No mutation has happened yet.
+      host.logInfo(
+        `Legacy WM ${request.contextGraphId}/${request.name}: no graph-scoped identity lane `
+        + `for author ${request.agentAddress}, so the legacy draft is left in place and keeps `
+        + `working under its name-keyed graph.`,
+      );
+      return {
+        status: 'not-needed',
+        copiedPublic: 0,
+        preservedPrivate: 0,
+        sourceGraph: uris.sourceGraph,
+        backupGraph: uris.backupGraph,
+      };
     }
   }
 

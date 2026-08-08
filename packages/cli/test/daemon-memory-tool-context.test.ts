@@ -241,20 +241,23 @@ describe('buildChatMemoryStack — the manager and the migration policy cannot d
       agentAddress: AGENT_OPTS.agentAddress,
     });
 
-    // The manager reads/writes the context graph the policy names...
+    // BOTH halves are read back off the MANAGER, never off the policy the
+    // context was built from — comparing the policy to itself would leave
+    // the exact divergence this test exists to catch invisible.
     expect(manager.contextGraphId).toBe(chatMemoryIds.contextGraphId);
+    expect(manager.assertionName).toBe(chatMemoryIds.assertionName);
 
-    // ...and driving createAssertion with the manager's OWN identifiers
-    // triggers the migration. If a future edit handed different pairs to the
+    // Driving createAssertion with the manager's OWN identifiers must
+    // trigger the migration. If a future edit handed different pairs to the
     // two halves, this call would not migrate.
     await toolContext.createAssertion(
       manager.contextGraphId,
-      chatMemoryIds.assertionName,
+      manager.assertionName,
       AGENT_OPTS,
     );
     expect(agent.order).toEqual(['migrate', 'create']);
     expect(agent.migrateCalls[0]?.[0]).toBe(manager.contextGraphId);
-    expect(agent.migrateCalls[0]?.[1]).toBe(chatMemoryIds.assertionName);
+    expect(agent.migrateCalls[0]?.[1]).toBe(manager.assertionName);
   });
 
   it('forwards the resolved agentAddress into the manager', () => {

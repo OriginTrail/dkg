@@ -22,6 +22,7 @@ import {
   MemoryLayer,
   ASSERTION_SEAL_PREDICATES,
   assertionLifecycleUri,
+  LegacyKnowledgeAssetReadOnlyError,
 } from '@origintrail-official/dkg-core';
 import { DKGPublisher } from '../src/index.js';
 import { createEVMAdapter, getSharedContext, HARDHAT_KEYS } from '../../chain/test/evm-test-context.js';
@@ -307,7 +308,10 @@ describe('Legacy root-scoped WM migration', () => {
     if (state.type === 'bindings') expect(state.bindings[0]?.['state']).toBe('"shared"');
   });
 
-  it('requires a numbered identity before changing eligible legacy WM metadata', async () => {
+  it(
+    'with no identity lane the migration DECLINES and leaves the draft usable — '
+    + 'throwing would brick chat memory on every node without a default agent',
+    async () => {
     const name = 'legacy-without-allocator';
     const lifecycle = assertionLifecycleUri(CG_ID, AGENT, name);
     const metaGraph = contextGraphMetaUri(CG_ID);
@@ -323,10 +327,16 @@ describe('Legacy root-scoped WM migration', () => {
       { subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph: metaGraph },
     ]);
 
-    await expect(
-      publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT),
-    ).rejects.toMatchObject({ code: 'KA_LEGACY_WM_MIGRATION_REQUIRES_IDENTITY' });
+    // No allocator is passed and this publisher has no `kaAllocator`, which
+    // is the shape of a node with no registered default agent: the author is
+    // its libp2p peerId, which cannot own a graph-scoped KA number. There is
+    // nothing to migrate TO, so declining is correct — and survivable, which
+    // throwing was not: this runs ahead of `createAssertion` outside its
+    // idempotent catch.
+    const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+    expect(result.status).toBe('not-needed');
 
+    // Metadata untouched and the draft still holds its content...
     const unchanged = await store.query(
       `ASK { GRAPH <${metaGraph}> { <${lifecycle}> `
       + '<http://dkg.io/ontology/state> "created" } }',
@@ -335,7 +345,19 @@ describe('Legacy root-scoped WM migration', () => {
     expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
       expect.objectContaining({ subject: 'urn:test:allocator-required', object: '"must remain"' }),
     ]);
-  });
+
+    // ...and migration is no longer what fails. Such a node still cannot
+    // WRITE this draft — a legacy root-scoped KA is read-only by design,
+    // which is the whole premise of #2149 — but the error it gets is now
+    // that accurate one rather than a migration-internal refusal, and the
+    // migration no longer throws from ahead of `createAssertion`.
+    await expect(
+      publisher.assertionWrite(CG_ID, name, AGENT, [
+        { subject: 'urn:test:still-legacy', predicate: 'http://schema.org/text', object: '"x"' },
+      ]),
+    ).rejects.toBeInstanceOf(LegacyKnowledgeAssetReadOnlyError);
+  },
+  );
 
   it('a completed marker with no active lifecycle is a no-op, not a refusal', async () => {
     // Regression: a successful migration leaves a `completed` marker behind
@@ -489,10 +511,21 @@ describe('Legacy root-scoped WM migration', () => {
       expect(result.status).toBe('not-needed');
 
       // The daemon's create-after-migrate proceeds (the whole point of the
-      // no-op) and mints a graph-scoped draft.
-      await publisher.assertionCreate(CG_ID, name, AGENT);
+      // no-op) and mints a GRAPH-SCOPED draft. The allocator is essential:
+      // without one the new draft's WM graph resolves back to the legacy
+      // name-keyed graph, which would make the retention assertion below
+      // trivially true for the wrong reason.
+      await publisher.assertionCreate(CG_ID, name, AGENT, undefined, {
+        allocateKaNumber: recordingAllocator(44n).allocateKaNumber,
+      });
       await publisher.assertionWrite(CG_ID, name, AGENT, [
         { subject: 'urn:test:new-turn', predicate: 'http://schema.org/text', object: '"new"' },
+      ]);
+
+      // The new draft is genuinely a DIFFERENT graph: it reads back only the
+      // new turn, not the stranded one.
+      expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+        expect.objectContaining({ subject: 'urn:test:new-turn' }),
       ]);
 
       // The legacy content was NOT deleted by any of that — it is still
