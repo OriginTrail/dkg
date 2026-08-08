@@ -618,6 +618,28 @@ export async function runLegacyWorkingMemoryMigration(
   );
 
   if (plan.phase === 'not-needed') {
+    // Orphan `…/event/{id}` rows with no active lifecycle subject mean the
+    // draft's metadata was lost mid-sweep. Migration cannot proceed — there
+    // is no state/layer to prove eligibility against, and migrating an
+    // unprovable draft is exactly what the gate exists to stop — but any
+    // content still in the legacy graph would then be invisible to reads of
+    // the graph-scoped draft that `createAssertion` goes on to mint. The
+    // data is retained (the source graph is never deleted), so surface it
+    // rather than abandoning it silently. Probed ONLY in this anomalous
+    // case, so the healthy no-draft path costs no extra query.
+    if (plan.reason === 'no-legacy-draft' && lifecycleRows.length > 0) {
+      const stranded = await host.store.query(
+        `ASK { GRAPH <${uris.sourceGraph}> { ?s ?p ?o } }`,
+      );
+      if (stranded.type === 'boolean' && stranded.value) {
+        host.logInfo(
+          `Legacy WM ${request.contextGraphId}/${request.name}: active lifecycle metadata is `
+          + `missing but ${uris.sourceGraph} still holds content. Migration cannot verify `
+          + `eligibility without it, so the draft is left in place and NOT migrated; the data `
+          + `is retained in that graph for manual recovery.`,
+        );
+      }
+    }
     const migrated = plan.reason === 'already-graph-scoped';
     return {
       status: 'not-needed',

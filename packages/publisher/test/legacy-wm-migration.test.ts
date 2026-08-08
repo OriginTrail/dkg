@@ -459,6 +459,100 @@ describe('Legacy root-scoped WM migration', () => {
     expect(markerStamped.type === 'boolean' && markerStamped.value).toBe(false);
   });
 
+  it(
+    'orphan lifecycle rows with surviving source content: create is unblocked AND the '
+    + 'legacy data is retained, not destroyed',
+    async () => {
+      // The trade this no-op makes. Migration cannot verify eligibility with
+      // no active lifecycle rows, so it declines rather than migrating an
+      // unprovable draft — but it must not let the subsequent create DESTROY
+      // the old content. It does not: the legacy source graph is never
+      // deleted, so the turns remain recoverable.
+      const name = 'legacy-orphan-with-content';
+      const { lifecycle, metaGraph, sourceGraph } = legacyMigrationUris(name);
+      await store.insert([
+        {
+          subject: `${lifecycle}/event/orphaned`,
+          predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+          object: 'http://dkg.io/ontology/AssertionCreated',
+          graph: metaGraph,
+        },
+        {
+          subject: 'urn:test:stranded-turn',
+          predicate: 'http://schema.org/text',
+          object: '"an old chat turn"',
+          graph: sourceGraph,
+        },
+      ]);
+
+      const result = await publisher.migrateLegacyRootScopedWorkingMemory(CG_ID, name, AGENT);
+      expect(result.status).toBe('not-needed');
+
+      // The daemon's create-after-migrate proceeds (the whole point of the
+      // no-op) and mints a graph-scoped draft.
+      await publisher.assertionCreate(CG_ID, name, AGENT);
+      await publisher.assertionWrite(CG_ID, name, AGENT, [
+        { subject: 'urn:test:new-turn', predicate: 'http://schema.org/text', object: '"new"' },
+      ]);
+
+      // The legacy content was NOT deleted by any of that — it is still
+      // queryable in the source graph, which is the documented backup.
+      const retained = await store.query(
+        `ASK { GRAPH <${sourceGraph}> { <urn:test:stranded-turn> <http://schema.org/text> "an old chat turn" } }`,
+      );
+      expect(retained.type === 'boolean' && retained.value).toBe(true);
+    },
+  );
+
+  it('a prepared marker resumes from the EARLIEST crash window, with legacy metadata still present', async () => {
+    // The first durable `prepared` state: `prepareBackup` stamped the marker
+    // and then the process died BEFORE `createGraphScopedDraft` cleared the
+    // legacy active lifecycle rows. The rerun must take `resume-create` —
+    // replace that legacy metadata, mint the identity, and copy the content.
+    const name = 'legacy-resume-earliest';
+    const { lifecycle, metaGraph, sourceGraph } = legacyMigrationUris(name);
+    await store.insert([
+      {
+        subject: 'urn:test:earliest-resume',
+        predicate: 'http://schema.org/text',
+        object: '"must be preserved"',
+        graph: sourceGraph,
+      },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/state', object: '"created"', graph: metaGraph },
+      { subject: lifecycle, predicate: 'http://dkg.io/ontology/memoryLayer', object: '"WM"', graph: metaGraph },
+    ]);
+    await stampMigrationMarker(name, 'prepared');
+
+    const allocator = recordingAllocator(66n);
+    const result = await publisher.migrateLegacyRootScopedWorkingMemory(
+      CG_ID,
+      name,
+      AGENT,
+      undefined,
+      { allocateKaNumber: allocator.allocateKaNumber },
+    );
+
+    expect(result.status).toBe('resumed');
+    expect(result.copiedPublic).toBe(1);
+    // A fresh identity WAS minted on this path (unlike resume-copy).
+    expect(allocator.calls).toHaveLength(1);
+    // Content reached the graph-scoped draft...
+    expect(await publisher.assertionQuery(CG_ID, name, AGENT)).toEqual([
+      expect.objectContaining({ subject: 'urn:test:earliest-resume' }),
+    ]);
+    // ...the legacy root-scoped metadata was replaced...
+    const legacyScope = await store.query(
+      `SELECT ?v WHERE { GRAPH <${metaGraph}> { <${lifecycle}> `
+      + '<http://dkg.io/ontology/contentScopeVersion> ?v } }',
+    );
+    expect(legacyScope.type).toBe('bindings');
+    if (legacyScope.type === 'bindings') {
+      expect(legacyScope.bindings[0]?.['v']).toBe('"2"^^<http://www.w3.org/2001/XMLSchema#integer>');
+    }
+    // ...and the marker completed.
+    expect(await migrationMarkerCompleted(name)).toBe(true);
+  });
+
   it('refuses to migrate unsafe PRIVATE legacy content, before touching metadata', async () => {
     // The private half of the content gate. The store rejects an oversized
     // literal at insert, so an unsafe private draft cannot be seeded through
