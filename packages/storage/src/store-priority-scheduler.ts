@@ -128,13 +128,13 @@ export interface StoreAdmissionV1 {
   readonly mode: StoreAdmissionMode;
 }
 
-import { StoreControlBarrierCoordinator } from './store-control-barrier.js';
+import { StoreControlBarrierCoordinator } from './store-control-barrier-v1-internal.js';
 import {
   StoreControlBarrierTimeoutError,
   type StoreControlBarrierBlockers,
   type StoreControlBarrierPhase,
   type StoreGenerationSeal,
-} from './store-barrier-contract.js';
+} from './store-barrier-contract-v1-internal.js';
 // Re-exported: these were declared here before the barrier subsystem moved out,
 // and they are part of the package's published surface.
 export {
@@ -567,6 +567,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       'DKG_STORE_BARRIER_TIMEOUT_MS',
       DEFAULT_STORE_CONTROL_BARRIER_TIMEOUT_MS,
     );
+    this.now = resolvedNow;
     // The coordinator asks this scheduler for inflight rather than tracking it:
     // one source of truth for the counters quiescence is decided from.
     this.barrierCoordinator = new StoreControlBarrierCoordinator(
@@ -589,7 +590,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
       },
       barrierTimeoutMs,
     );
-    this.now = resolvedNow;
     this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
     const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
     this.updatePressureCapacity({

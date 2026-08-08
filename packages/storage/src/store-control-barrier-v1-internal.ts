@@ -1,4 +1,11 @@
 /**
+ * INTERNAL to `StorePriorityScheduler`. Named `…-v1-internal` following this
+ * package's convention for a module that is not API: this package publishes
+ * `dist` wholesale, so the file name is the only signal a deep importer gets.
+ * `StoreBarrierHostV1` in particular is a private callback contract between
+ * two scheduler internals, not a surface to couple to. The stable public
+ * types stay the ones re-exported from `store-priority-scheduler.ts`.
+ *
  * The control-barrier subsystem: sequencing a store-exclusive transition.
  *
  * Split out of `StorePriorityScheduler`, which had grown two responsibilities —
@@ -16,8 +23,8 @@
  * not drift.
  */
 
-import type { StoreControlBarrierBlockers, StoreGenerationSeal } from './store-barrier-contract.js';
-import { StoreControlBarrierTimeoutError } from './store-barrier-contract.js';
+import type { StoreControlBarrierBlockers, StoreGenerationSeal } from './store-barrier-contract-v1-internal.js';
+import { StoreControlBarrierTimeoutError } from './store-barrier-contract-v1-internal.js';
 
 /** Label carried on a seal when the caller does not name a generation. */
 const BARRIER_ANY_GENERATION = '*';
