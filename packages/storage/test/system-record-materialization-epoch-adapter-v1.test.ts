@@ -6,16 +6,49 @@ import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
-import {
-  __readSystemRecordLaneExecutionBindingForTests,
-  __resetSystemRecordControllerRegistrationForTests,
-} from '../src/system-record-materializer-v1.js';
+import type { SystemRecordLaneExecutionBindingV1 } from '../src/system-record-materializer-v1.js';
+import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
 import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
 import {
   makeAuthenticActiveReplacementIssueV1,
   SYSTEM_RECORD_FIXTURE_NETWORK,
 } from './helpers/system-record-active-replacement-fixture.js';
+
+const atomicExecutorTestHook = vi.hoisted(() => ({
+  proofRequest: Object.freeze({}),
+  mintProof: null as null | ((binding: unknown) => unknown),
+}));
+
+vi.mock('../src/system-record-atomic-apply-executor-v1-internal.js', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('../src/system-record-atomic-apply-executor-v1-internal.js')
+  >();
+  return {
+    ...actual,
+    createSystemRecordAtomicApplyExecutorV1: (
+      ...args: Parameters<typeof actual.createSystemRecordAtomicApplyExecutorV1>
+    ) => {
+      const executor = actual.createSystemRecordAtomicApplyExecutorV1(...args);
+      return Object.freeze({
+        discard: executor.discard,
+        execute: (
+          proof: unknown,
+          binding: SystemRecordLaneExecutionBindingV1,
+          registerRecovery: Parameters<typeof executor.execute>[2],
+        ) => {
+          const admittedProof = proof === atomicExecutorTestHook.proofRequest
+            ? atomicExecutorTestHook.mintProof?.(binding)
+            : proof;
+          if (admittedProof === undefined) {
+            throw new Error('authentic proof factory is not installed');
+          }
+          return executor.execute(admittedProof, binding, registerRecovery);
+        },
+      });
+    },
+  };
+});
 
 let server: Server;
 let queryEndpoint: string;
@@ -130,18 +163,20 @@ describe('sparql-http managed epoch handoff', () => {
     });
     expect(requests).toHaveLength(beforeForgedApply);
 
-    const binding = __readSystemRecordLaneExecutionBindingForTests(second);
     const runtime = resolveOwnedSystemRecordRuntimeV1(ownership.lease);
-    const proof = runtime.issuer.issueActive(makeAuthenticActiveReplacementIssueV1(
-      binding,
-      Math.ceil(performance.now() + 10_000),
-    ));
+    atomicExecutorTestHook.mintProof = (binding) => runtime.issuer.issueActive(
+      makeAuthenticActiveReplacementIssueV1(
+        binding as SystemRecordLaneExecutionBindingV1,
+        Math.ceil(performance.now() + 10_000),
+      ),
+    );
     const beforeAuthenticApply = requests.length;
-    await expect(second.applyVerified(proof)).resolves.toEqual({
+    await expect(second.applyVerified(atomicExecutorTestHook.proofRequest)).resolves.toEqual({
       outcome: 'deferred',
       reason: 'validation-mismatch',
     });
     expect(requests.slice(beforeAuthenticApply).map((request) => request.path)).toEqual(['/query']);
+    atomicExecutorTestHook.mintProof = null;
 
     await second.close('shutdown');
     const barrierKeys = resultBarrier.mock.calls.map((call) => call[1]);

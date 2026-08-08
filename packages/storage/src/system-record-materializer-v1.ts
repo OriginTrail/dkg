@@ -470,20 +470,6 @@ interface SystemRecordLaneFacadeBindingV1 {
   readonly materializationEpoch: string;
 }
 
-const SYSTEM_RECORD_FACADE_TEST_BINDINGS = new WeakMap<
-  SystemRecordLaneSessionV1,
-  SystemRecordLaneExecutionBindingV1
->();
-
-/** Test-only access to the exact binding captured by a real opened facade. */
-export function __readSystemRecordLaneExecutionBindingForTests(
-  session: SystemRecordLaneSessionV1,
-): SystemRecordLaneExecutionBindingV1 {
-  const binding = SYSTEM_RECORD_FACADE_TEST_BINDINGS.get(session);
-  if (binding === undefined) throw new Error('system-record session is not an opened lane facade');
-  return binding;
-}
-
 interface SystemRecordPendingRecoveryV1 {
   readonly request: SystemRecordAtomicRecoveryRequestV1;
   readonly absoluteDeadlineMs: number;
@@ -678,15 +664,6 @@ class SystemRecordLaneFacade implements SystemRecordLaneSessionV1 {
     private readonly aggregate: SystemRecordLaneSession,
     private readonly binding: SystemRecordLaneFacadeBindingV1,
   ) {
-    SYSTEM_RECORD_FACADE_TEST_BINDINGS.set(this, Object.freeze({
-      activationGeneration: binding.activationGeneration,
-      networkId: binding.networkId,
-      kind: binding.kind,
-      mode: binding.mode,
-      sessionIdentity: binding.sessionIdentity,
-      childGeneration: binding.childGeneration,
-      materializationEpoch: binding.materializationEpoch,
-    }));
     Object.freeze(this);
   }
 
