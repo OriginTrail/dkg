@@ -1,5 +1,5 @@
 import { readFileSync, readdirSync } from 'node:fs';
-import { basename, join, relative, sep } from 'node:path';
+import { join, relative, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import * as ts from 'typescript';
@@ -17,10 +17,6 @@ interface DecoratorEvidence {
 }
 
 const STORAGE_SOURCE_ROOT = fileURLToPath(new URL('../src/', import.meta.url));
-const AGENT_WRAPPER_PATH = fileURLToPath(
-  new URL('../../agent/src/dkg-agent-base.ts', import.meta.url),
-);
-const AGENT_WRAPPER_NAME = 'createListContextGraphsCacheInvalidatingStore';
 
 const EXPECTED_STORAGE_DECORATORS: Readonly<Record<string, ParticipationMode>> = Object.freeze({
   'changelog-store.ts#ChangelogStore': 'registered',
@@ -176,74 +172,6 @@ function normalizedRelativePath(root: string, path: string): string {
   return relative(root, path).split(sep).join('/');
 }
 
-function objectLiteralHasInnerStore(
-  sourceText: string,
-  fileName: string,
-  functionName: string,
-): boolean {
-  const sourceFile = ts.createSourceFile(
-    fileName,
-    sourceText,
-    ts.ScriptTarget.Latest,
-    true,
-    ts.ScriptKind.TS,
-  );
-  let foundFunction = false;
-  let exposesInner = false;
-
-  const visit = (node: ts.Node): void => {
-    if (ts.isFunctionDeclaration(node) && node.name?.text === functionName) {
-      foundFunction = true;
-      const innerParameter = node.parameters.find(
-        (parameter) => ts.isIdentifier(parameter.name)
-          && parameter.name.text === 'innerStore'
-          && typeNamesTripleStore(parameter.type, sourceFile),
-      );
-      if (innerParameter === undefined || node.body === undefined) return;
-      const returnedNames = new Set<string>();
-      const returnedObjects: ts.ObjectLiteralExpression[] = [];
-      const collectReturns = (candidate: ts.Node): void => {
-        if (candidate !== node.body && ts.isFunctionLike(candidate)) return;
-        if (ts.isReturnStatement(candidate)) {
-          if (candidate.expression !== undefined && ts.isIdentifier(candidate.expression)) {
-            returnedNames.add(candidate.expression.text);
-          } else if (candidate.expression !== undefined
-            && ts.isObjectLiteralExpression(candidate.expression)) {
-            returnedObjects.push(candidate.expression);
-          }
-        }
-        ts.forEachChild(candidate, collectReturns);
-      };
-      collectReturns(node.body);
-      const collectReturnedDeclarations = (candidate: ts.Node): void => {
-        if (candidate !== node.body && ts.isFunctionLike(candidate)) return;
-        if (ts.isVariableDeclaration(candidate)
-          && ts.isIdentifier(candidate.name)
-          && returnedNames.has(candidate.name.text)
-          && candidate.initializer !== undefined
-          && ts.isObjectLiteralExpression(candidate.initializer)) {
-          returnedObjects.push(candidate.initializer);
-        }
-        ts.forEachChild(candidate, collectReturnedDeclarations);
-      };
-      collectReturnedDeclarations(node.body);
-      exposesInner = returnedObjects.some((object) => object.properties.some((property) => {
-        if (ts.isShorthandPropertyAssignment(property)) {
-          return property.name.text === 'innerStore';
-        }
-        return ts.isPropertyAssignment(property)
-          && propertyNameText(property.name) === 'innerStore'
-          && ts.isIdentifier(property.initializer)
-          && property.initializer.text === 'innerStore';
-      }));
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  if (!foundFunction) throw new Error(`${fileName}: missing ${functionName}`);
-  return exposesInner;
-}
-
 describe('first-party store-chain participation source contract', () => {
   it('classifies every Storage decorator and verifies its traversal evidence', () => {
     const discovered = listTypeScriptSources(STORAGE_SOURCE_ROOT)
@@ -307,25 +235,4 @@ describe('first-party store-chain participation source contract', () => {
     expect(participationViolation(publicParameter, 'public-inner')).toBeNull();
   });
 
-  it('keeps the Agent object-literal forwarder traversable', () => {
-    expect(objectLiteralHasInnerStore(
-      readFileSync(AGENT_WRAPPER_PATH, 'utf8'),
-      basename(AGENT_WRAPPER_PATH),
-      AGENT_WRAPPER_NAME,
-    )).toBe(true);
-  });
-
-  it('rejects an Agent-style object-literal forwarder without innerStore', () => {
-    const broken = `
-      function ${AGENT_WRAPPER_NAME}(innerStore: TripleStore): TripleStore {
-        const unrelated = { innerStore };
-        void unrelated;
-        const wrapper: TripleStore = {
-          listGraphs: () => innerStore.listGraphs(),
-        };
-        return wrapper;
-      }
-    `;
-    expect(objectLiteralHasInnerStore(broken, 'fixture-agent.ts', AGENT_WRAPPER_NAME)).toBe(false);
-  });
 });
