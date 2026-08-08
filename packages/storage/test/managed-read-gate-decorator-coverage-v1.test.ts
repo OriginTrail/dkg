@@ -12,7 +12,11 @@ import {
 } from '../src/cached-read-gate-v1.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
 import { StoreChainCycleError } from '../src/store-chain-capability.js';
-import type { TripleStore } from '../src/triple-store.js';
+import {
+  createTripleStore,
+  registerTripleStoreAdapter,
+  type TripleStore,
+} from '../src/triple-store.js';
 
 /**
  * The read gate is RESOLVED through the chain, not forwarded by each wrapper.
@@ -209,5 +213,30 @@ describe('cached-read gate resolves through any wrapper chain', () => {
     });
 
     await expect(index.listGraphs()).rejects.toThrow(ManagedOxigraphBackendUnownedError);
+  });
+
+  it('the PRODUCTION resolver reaches the backend through the whole FACTORY chain', async () => {
+    // The composition callers actually get, asserted with the production
+    // resolver rather than a hand-rolled walk. Every case above builds its
+    // chain by hand; this one lets `createTripleStore` build it, so a wrapper
+    // added to the factory that does not participate breaks resolution here
+    // regardless of what it names its fields.
+    const probe = managedAdapter();
+    const backend = 'store-chain-participation-probe';
+    registerTripleStoreAdapter(backend, async () => probe);
+
+    const store = await createTripleStore({
+      backend,
+      changelog: { enabled: true },
+      graphSetIndex: true,
+      largeLiteralStorage: {
+        enabled: true,
+        directory: join(process.cwd(), 'test', '.tmp-unused'),
+      },
+    });
+
+    expect(asCachedReadGateV1(store)).toBe(probe);
+
+    await store.close().catch(() => undefined);
   });
 });
