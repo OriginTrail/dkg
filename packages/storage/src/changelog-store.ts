@@ -624,22 +624,6 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     return this.inner.getSystemRecordLaneControllerV1?.();
   }
 
-  /**
-   * Pass-through for the managed read gate (#2052) — unconditionally, unlike
-   * the lane above.
-   *
-   * The lane getter DENIES when enabled, because handing out a mutation
-   * capability past this decorator would let a CAS bypass the changelog. This
-   * is the opposite kind of thing: a refusal, and suppressing a refusal is
-   * never the safe direction. An enabled changelog that swallowed it would let
-   * a cache-owning wrapper above serve reads attributed to a backend the node
-   * no longer owns — the caller uses optional chaining, so absence reads as
-   * permission.
-   */
-  assertManagedBackendReadableV1(operation: string): void {
-    this.inner.assertManagedBackendReadableV1?.(operation);
-  }
-
   async flush(options?: QueryOptions): Promise<void> {
     // Drain queued mutations (data + their markers) before flushing the inner
     // store, so a durability flush cannot return while a write is still queued.

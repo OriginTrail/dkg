@@ -17,7 +17,11 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
-import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
+import {
+  ManagedOxigraphBackendUnownedError,
+  asManagedReadGateV1,
+  type ManagedReadGateHostV1,
+} from './managed-oxigraph-ownership-v1-internal.js';
 import type {
   SystemRecordApplyOutcomeV1,
   SystemRecordLaneActivationV1,
@@ -216,24 +220,6 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   /**
-   * Pass-through for the managed read gate (#2052).
-   *
-   * This class is the main CONSUMER of the gate — see the warm branch in
-   * `ensureGraphSet` — but it must also RE-EXPOSE it, which is easy to miss.
-   * `createTripleStore` can put a `ChangelogStore` outside this one, so a
-   * cache-owning wrapper above would call this method on the index; without a
-   * declaration here the optional call evaporates and reads go fail-open again,
-   * one layer higher than the bug this was written to fix.
-   *
-   * Consuming a capability is not the same as forwarding it. Grepping for the
-   * NAME is what hides this: the call site above matches, the declaration does
-   * not exist.
-   */
-  assertManagedBackendReadableV1(operation: string): void {
-    this.inner.assertManagedBackendReadableV1?.(operation);
-  }
-
-  /**
    * Memoized outcome-mapping facade for the system-record V1 lane (#2052 B2).
    *
    * The lane writes reserved graphs that this index deliberately never lists,
@@ -339,8 +325,22 @@ export class GraphSetIndexStore implements TripleStore {
    */
   private pendingFullRefresh: PendingFullRefreshSource | null = null;
 
+  /**
+   * The managed read gate, resolved ONCE through the whole inner chain.
+   *
+   * Resolved rather than probed per call: `this.inner.assert…?.()` asked only
+   * the immediate wrapper, and optional chaining treats an absent method as
+   * PERMISSION — so a single intervening decorator turned this fail-closed read
+   * into a fail-open one. `asManagedReadGateV1` walks to the adapter that
+   * actually holds the lease, so no wrapper can erase it by omission.
+   *
+   * `null` for every store with no managed backend: those are always readable.
+   */
+  private readonly managedReadGate: ManagedReadGateHostV1 | null;
+
   constructor(inner: TripleStore, options: GraphSetIndexStoreOptions = {}) {
     this.inner = inner;
+    this.managedReadGate = asManagedReadGateV1(inner);
     this.enabled = options.enabled !== false;
     this.revalidateMs = Math.max(0, options.revalidateMs ?? DEFAULT_GRAPH_SET_REVALIDATE_MS);
     this.revalidateFailureBackoffMs = positiveFiniteMs(
@@ -642,7 +642,7 @@ export class GraphSetIndexStore implements TripleStore {
       // to a backend the node may no longer own — for up to `revalidateMs`
       // (30 s in production), which is the window a foreign listener needs.
       // Cheap: a lease-snapshot read, no I/O.
-      this.inner.assertManagedBackendReadableV1?.('graph-set-index.warm');
+      this.managedReadGate?.assertManagedBackendReadableV1('graph-set-index.warm');
       return this.graphs;
     }
     return raceAgainstAbort(

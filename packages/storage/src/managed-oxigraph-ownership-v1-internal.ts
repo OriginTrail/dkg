@@ -413,3 +413,47 @@ export function readManagedOxigraphOwnershipSnapshotV1(
   if (!current) return null;
   return snapshotLeaseState(current);
 }
+
+/**
+ * A store that can answer "is my backend still proven owned?" without I/O.
+ *
+ * Declared by the managed adapter only. This is deliberately NOT a member of
+ * `TripleStore`: the read gate is a managed-Oxigraph concern, and putting it on
+ * the vendor-neutral interface made it a cross-cutting obligation every present
+ * and future wrapper had to remember, policed by nothing.
+ */
+export interface ManagedReadGateHostV1 {
+  assertManagedBackendReadableV1(operation: string): void;
+}
+
+/**
+ * Recover the managed read gate from anywhere in a decorator chain.
+ *
+ * The point of resolving rather than forwarding: a wrapper CANNOT silently
+ * erase the gate by failing to re-declare it. The previous shape called
+ * `store.assertManagedBackendReadableV1?.(…)` on the immediate inner store, and
+ * optional chaining treats an absent method as PERMISSION — so one intervening
+ * decorator turned a fail-closed read into a fail-open one, and keeping that
+ * safe meant every wrapper in every package had to opt in forever.
+ *
+ * Mirrors `asGraphWriteGenSource` / `asChangelogReader` exactly, including the
+ * `.innerStore ?? .inner` walk — `inner` is TypeScript-private on the storage
+ * decorators but present at runtime — and the depth bound against a cyclic
+ * chain. Reusing that convention is the point: wrappers already have to expose
+ * their inner store for the changelog and write-gen capabilities to resolve, so
+ * this adds no new obligation.
+ *
+ * `null` means no managed backend anywhere in the chain, which is the ordinary
+ * case for an operator-configured store: such a store is always readable.
+ */
+export function asManagedReadGateV1(store: unknown): ManagedReadGateHostV1 | null {
+  let s = store as
+    | { assertManagedBackendReadableV1?: unknown; innerStore?: unknown; inner?: unknown }
+    | null
+    | undefined;
+  for (let depth = 0; s && depth < 8; depth++) {
+    if (typeof s.assertManagedBackendReadableV1 === 'function') return s as ManagedReadGateHostV1;
+    s = (s.innerStore ?? s.inner) as typeof s;
+  }
+  return null;
+}
