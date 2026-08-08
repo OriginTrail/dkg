@@ -209,6 +209,30 @@ describe('system-record provider V1', () => {
     expect(resolve).not.toHaveBeenCalled();
   });
 
+  it('resets a schema-invalid canonical request before admission or repository lookup', async () => {
+    const headerBytes = new TextEncoder().encode(
+      `{"kind":"agents","networkId":"${NETWORK}","operation":"bogus",`
+      + `"payloadBytes":"0","requestId":"${'a'.repeat(32)}","wireVersion":"1"}`,
+    );
+    const requestFrame = new Uint8Array(4 + headerBytes.byteLength);
+    new DataView(requestFrame.buffer).setUint32(0, headerBytes.byteLength, false);
+    requestFrame.set(headerBytes, 4);
+    const resolve = vi.fn(async () => null);
+    const tryReserve = vi.fn(frameAdmission().tryReserve);
+    const provider = createSystemRecordProviderV1({
+      networkId: NETWORK,
+      repository: { resolve },
+      frameAdmission: { tryReserve },
+    });
+    const exchange = fixtureExchange(bundleRequest(), async () => requestFrame);
+
+    await expect(provider.serve(exchange.value)).resolves.toBe('reset-invalid-frame');
+    expect(exchange.reset).toHaveBeenCalledWith('invalid-frame');
+    expect(tryReserve).not.toHaveBeenCalled();
+    expect(resolve).not.toHaveBeenCalled();
+    expect(provider.stats()).toMatchObject({ active: 0, queued: 0 });
+  });
+
   it('returns an empty not-found response for a missing object', async () => {
     const provider = createSystemRecordProviderV1({
       networkId: NETWORK,

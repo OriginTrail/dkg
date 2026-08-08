@@ -1256,6 +1256,30 @@ describe('agent-profile system-record producer V1', () => {
     expect(install).not.toHaveBeenCalled();
   });
 
+  it('releases the local single-flight when the publication fence rejects', async () => {
+    const fixture = await producerFixture();
+    const fence = vi.fn()
+      .mockRejectedValueOnce(new Error('transient fence failure'))
+      .mockResolvedValue(undefined);
+    const install = vi.fn();
+    const producer = createAgentProfileProducerV1({
+      networkId: NETWORK,
+      publicationDeployment: DEPLOYMENT,
+      peerSigner: fixture.peerSigner,
+      evmSigner: fixture.evmSigner,
+      store: fixture.store,
+      fence,
+      install,
+    });
+
+    await expect(producer.prepare(fixture.prepared)).rejects.toThrow(/transient fence failure/);
+    const retry = await producer.prepare(fixture.prepared);
+    retry.abort();
+    expect(fence).toHaveBeenCalledTimes(2);
+    expect(install).not.toHaveBeenCalled();
+    expect(fixture.store.snapshot().currentHead).toBeNull();
+  });
+
   it('aborts a reserved commit when cancellation races a blocked install', async () => {
     const fixture = await producerFixture();
     const installStarted = Promise.withResolvers<void>();

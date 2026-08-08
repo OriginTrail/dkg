@@ -73,6 +73,27 @@ describe('shared EVM personal-message signer V1', () => {
     expect(ethers.verifyMessage(MESSAGE, signature).toLowerCase()).toBe(signer.address);
   });
 
+  it('rejects a chain-as signature that recovers to another wallet', async () => {
+    const expected = new ethers.Wallet(KEY);
+    const wrong = new ethers.Wallet(OTHER_KEY);
+    const signMessageAs = vi.fn(async (_address: string, message: Uint8Array) => {
+      const signature = ethers.Signature.from(await wrong.signMessage(message));
+      return {
+        r: ethers.getBytes(signature.r),
+        vs: ethers.getBytes(signature.yParityAndS),
+      };
+    });
+    const signer = createEvmPersonalMessageSignerV1({
+      mode: 'chain-as',
+      address: expected.address,
+      signMessageAs,
+      purpose: 'fixture',
+    });
+
+    await expect(signer.signMessage(MESSAGE)).rejects.toThrow(/cannot sign for/);
+    expect(signMessageAs).toHaveBeenCalledWith(expected.address.toLowerCase(), MESSAGE);
+  });
+
   it('rejects a custodial key that does not own the requested address', () => {
     expect(() => createEvmPersonalMessageSignerV1({
       mode: 'custodial',
