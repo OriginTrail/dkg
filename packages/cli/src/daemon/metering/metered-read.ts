@@ -274,6 +274,29 @@ export function countersignLeg(args: {
   sessionPublicKeyPem: string;
   now?: number;
 }): { ok: boolean; code: string } {
+  // Buyer-found (Hermes/Bo, live A1 probe (b)): countersign verified the
+  // SIGNATURE over the leg but never checked the leg was actually SERVED. A
+  // caller could fabricate a leg, sign it with their own session key, and get
+  // settleable=true — and, worse, the leg-countersigned record it appended
+  // could inflate the `signed` count and drive outstandingLegs to a clamped 0,
+  // bypassing gradual release entirely (unbounded reads on credit). A
+  // countersignature is only meaningful over a leg the PROVIDER actually issued.
+  //
+  // So: the leg must exist in the journal as a debit for the claimed principal,
+  // matched by BOTH legId and the provider's recorded hash. A signature over a
+  // never-served leg is rejected before any verification or recording.
+  const principal = String((args.leg as any)?.requester?.principal ?? "");
+  const legId = String((args.leg as any)?.legId ?? "");
+  if (args.home) {
+    const served = readJournal(args.home).some((rec) =>
+      rec.kind === "debit"
+      && String((rec.leg as any)?.legId ?? "") === legId
+      && String((rec.leg as any)?.requester?.principal ?? "").toLowerCase() === principal.toLowerCase()
+      && legId !== "",
+    );
+    if (!served) return { ok: false, code: "E_LEG_NOT_SERVED" };
+  }
+
   const r = admissibleForSettlement({
     leg: args.leg,
     sessionPublicKeyPem: args.sessionPublicKeyPem,
@@ -284,8 +307,6 @@ export function countersignLeg(args: {
   // release lets the next read through and a restart does not resurrect the
   // outstanding obligation. Idempotent: a leg already recorded is not doubled.
   if (r.ok && args.home) {
-    const principal = String((args.leg as any)?.requester?.principal ?? "");
-    const legId = String((args.leg as any)?.legId ?? "");
     const already = readJournal(args.home).some(
       (rec) => rec.kind === "leg-countersigned" && rec.legId === legId,
     );

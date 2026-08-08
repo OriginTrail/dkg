@@ -321,5 +321,34 @@ console.log("\ngradual release — at most one un-countersigned billable leg (Q3
   ok("re-countersigning the same leg is idempotent — exactly one record for THAT leg", cs2.ok && signedRecords.length === 1, `${signedRecords.length} records`);
 }
 
+console.log("\ncountersign requires a SERVED leg (buyer-found, live A1 probe b):");
+{
+  const { createHash } = await import("node:crypto");
+  const sha = (b) => createHash("sha256").update(b).digest("hex");
+  // A fabricated leg for a principal, signed with a real session key, must NOT
+  // be accepted — it was never served by the provider.
+  const DEAD = "0x000000000000000000000000000000000000dEaD";
+  const fakeLeg = {
+    legType: "read", schemaVersion: "receipt-v0.3", legId: "fabricated-" + sha("x").slice(0, 8),
+    sequence: 1, previousLegHash: "genesis",
+    requester: { principal: DEAD, keyRef: null },
+    pricing: { costMicroTrac: 3 }, tab: { before: 1000000, after: 999997 },
+  };
+  const digest = "sha256:" + sha(L.canonicalize(fakeLeg));
+  const sig = edSign(null, Buffer.concat([Buffer.from(C.CAPABILITY_DOMAIN + "\n"), Buffer.from(digest)]), createPrivateKey(pem(session.privateKey, "priv"))).toString("base64");
+  const r = M.countersignLeg({ home, leg: fakeLeg, countersignature: sig, sessionPublicKeyPem: pem(session.publicKey, "pub") });
+  ok("a never-served fabricated leg is REJECTED (E_LEG_NOT_SERVED), not settleable=true",
+    r.ok === false && r.code === "E_LEG_NOT_SERVED", JSON.stringify(r));
+
+  // The gradual-release bypass this enabled: a fabricated leg-countersigned must
+  // NOT be recorded, so it cannot inflate `signed` and clamp outstanding to 0.
+  const before = M.outstandingLegs(home, DEAD);
+  M.countersignLeg({ home, leg: fakeLeg, countersignature: sig, sessionPublicKeyPem: pem(session.publicKey, "pub") });
+  const journal = readFileSync(join(process.env.DKG_HOME, "metering", "read-journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  ok("no leg-countersigned record was written for the fabricated leg (no gradual-release bypass)",
+    journal.filter((x) => x.kind === "leg-countersigned" && x.legId === fakeLeg.legId).length === 0);
+  ok("the fabricated principal's outstanding count is unchanged", M.outstandingLegs(home, DEAD) === before);
+}
+
 console.log(`\n${pass}/${pass + fail} metered-read gates pass\n`);
 process.exit(fail === 0 ? 0 : 1);
