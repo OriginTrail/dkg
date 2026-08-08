@@ -2,11 +2,14 @@ import { join } from 'node:path';
 
 import { describe, expect, it, vi } from 'vitest';
 
+// Adapter registration is a side effect of importing the adapter module.
+import '../src/adapters/oxigraph.js';
+
 import { ChangelogStore } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { SharedMemoryLiteralBlobStore } from '../src/shared-memory-literal-blob-store.js';
 import { CACHED_READ_GATE_V1, asCachedReadGateV1 } from '../src/cached-read-gate-v1.js';
-import type { TripleStore } from '../src/triple-store.js';
+import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 
 /**
  * Every first-party storage decorator passes capability discovery through.
@@ -99,14 +102,32 @@ describe('first-party decorators pass capability discovery through', () => {
     expect(asCachedReadGateV1(unregistered)).toBeNull();
   });
 
-  it('covers every decorator this package composes into a store', () => {
-    // Anti-vacuity, and a deliberate tripwire: `createTripleStore` builds a
-    // chain from exactly these three, so if that composition grows a fourth,
-    // this count is the thing that fails and points here.
-    expect(DECORATORS.map(({ name }) => name)).toEqual([
-      'ChangelogStore',
-      'GraphSetIndexStore',
-      'SharedMemoryLiteralBlobStore',
-    ]);
+  it('covers exactly the decorators createTripleStore composes', async () => {
+    // Tied to the FACTORY, not to itself. The previous version asserted the
+    // inventory against a literal copy of its own contents, so it could only
+    // fail if someone edited both — it would not have noticed a fourth
+    // decorator entering the chain, which is the thing it claimed to catch.
+    //
+    // This builds the real composition with every decorator enabled and walks
+    // it, so a new wrapper in `createTripleStore` fails here by name and points
+    // at the inventory above.
+    const store = await createTripleStore({
+      backend: 'oxigraph',
+      changelog: { enabled: true },
+      graphSetIndex: true,
+      largeLiteralStorage: { enabled: true, directory: BLOB_OPTIONS.blobDir },
+    });
+
+    const composed: string[] = [];
+    for (let node: unknown = store; node; ) {
+      const current = node as { innerStore?: unknown; inner?: unknown };
+      const next = current.innerStore ?? current.inner;
+      if (next) composed.push(Object.getPrototypeOf(current).constructor.name);
+      node = next;
+    }
+
+    expect(composed.sort()).toEqual(DECORATORS.map(({ name }) => name).sort());
+
+    await store.close().catch(() => undefined);
   });
 });
