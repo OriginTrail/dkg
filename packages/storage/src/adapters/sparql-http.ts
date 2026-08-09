@@ -90,7 +90,11 @@ import {
 import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
-import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
+import {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
+  UnsupportedTripleStoreCapabilityError,
+  type TripleStoreCapability,
+} from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -417,6 +421,18 @@ export class SparqlHttpStore implements TripleStore {
       ? 'raw SPARQL update() is unavailable on an ownership-leased store'
       : 'query() accepts only recognized read operations on an ownership-leased store';
     throw new ManagedOxigraphMutationUnavailableError(reason);
+  }
+
+  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean {
+    if (capability === 'update') return this.ownershipLease === null;
+    if (
+      capability === 'replaceGraph'
+      || capability === 'replaceGraphAndSubject'
+      || capability === 'replaceSubject'
+    ) {
+      return this.atomicUpdates;
+    }
+    return capability === 'structuredMutation';
   }
 
   /**

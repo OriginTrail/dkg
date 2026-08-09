@@ -13,6 +13,7 @@ import {
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { createTripleStore, type Quad, type TripleStore } from '../src/triple-store.js';
+import { supportsTripleStoreCapability } from '../src/unsupported-capability-error.js';
 
 /**
  * The endpoint is never contacted: every refusal below must be raised BEFORE
@@ -253,6 +254,16 @@ describe('reserved internal graph mutation guard', () => {
           expect(fetchSpy).not.toHaveBeenCalled();
         });
       }
+
+      it('reports raw update as unavailable while preserving structured mutation', () => {
+        const leased = newLeasedStore();
+        const unleased = newStore();
+
+        expect(supportsTripleStoreCapability(leased, 'update')).toBe(false);
+        expect(supportsTripleStoreCapability(leased, 'structuredMutation')).toBe(true);
+        expect(supportsTripleStoreCapability(unleased, 'update')).toBe(true);
+        expect(supportsTripleStoreCapability(unleased, 'structuredMutation')).toBe(true);
+      });
 
       it('the split-prefix form does not contain the reserved graph IRI at all', () => {
         // The load-bearing fact behind the revert. If this ever becomes true,

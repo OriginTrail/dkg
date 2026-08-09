@@ -1,25 +1,74 @@
 #!/usr/bin/env node
 
+import { createHash } from 'node:crypto';
 import { dirname, resolve, sep } from 'node:path';
+import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
   analyzeSparqlOperation,
   recognizedReadOnlySparqlForm,
-} from '../packages/core/dist/sparql-operation.js';
+} from '../packages/core/src/sparql-operation.ts';
 import ts from 'typescript';
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const PACKAGE_CONFIGS = [
-  ['agent', 'packages/agent/tsconfig.json'],
-  ['cli', 'packages/cli/tsconfig.json'],
-  ['publisher', 'packages/publisher/tsconfig.json'],
-  ['query', 'packages/query/tsconfig.json'],
-];
+const STORAGE_PACKAGE_NAME = '@origintrail-official/dkg-storage';
+// Reviewed dynamic read call sites are sealed per package. A new package, call,
+// or changed query expression fails the gate and prints the exact inventory
+// that needs review before this baseline may be deliberately advanced.
+const DYNAMIC_QUERY_BASELINE = Object.freeze({
+  agent: Object.freeze({
+    count: 149,
+    sha256: '7f0c5415793ae19d2547ea18e651537716a93a165e69321bc82d050c8903939e',
+  }),
+  cli: Object.freeze({
+    count: 16,
+    sha256: '53295425b84f6e3e8c31e46be5bd4c02bb0635e573eec7e68ade2cbdf44f9b46',
+  }),
+  publisher: Object.freeze({
+    count: 110,
+    sha256: '76eb399cb8d4b0abbb9916cd5f86eead37044bc1dc78cbd1858f885218fd6207',
+  }),
+  query: Object.freeze({
+    count: 3,
+    sha256: 'b42b47da1be2ee11825f4aff29ad57341c862558f9a048a85708237514bd3d2f',
+  }),
+  'random-sampling': Object.freeze({
+    count: 9,
+    sha256: 'f17b2ab6570a946515879aeee70555702f506f68f2579bb1c188ca40ac9f0439',
+  }),
+});
 const TRIPLE_STORE_DECLARATION = /\/packages\/storage\/(?:src\/triple-store\.ts|dist\/triple-store\.d\.ts)$/u;
 
 function normalized(path) {
   return resolve(path).split(sep).join('/');
+}
+
+function workspaceStorageConsumers() {
+  const packagesRoot = resolve(REPOSITORY_ROOT, 'packages');
+  const consumers = [];
+  for (const name of readdirSync(packagesRoot).sort()) {
+    const packageJsonPath = resolve(packagesRoot, name, 'package.json');
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    } catch (error) {
+      if (error?.code === 'ENOENT') continue;
+      throw error;
+    }
+    const dependencies = {
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+      ...manifest.peerDependencies,
+    };
+    if (!(STORAGE_PACKAGE_NAME in dependencies)) continue;
+    const configPath = `packages/${name}/tsconfig.json`;
+    consumers.push([name, configPath]);
+  }
+  if (consumers.length === 0) {
+    throw new Error('no workspace package depending on dkg-storage was discovered');
+  }
+  return consumers;
 }
 
 function loadProgram(configPath) {
@@ -173,6 +222,7 @@ function scanPackage(name, configPath) {
   let recognizedCalls = 0;
   let staticallyAnalyzedQueries = 0;
   let dynamicQueries = 0;
+  const dynamicQueryFingerprints = [];
   let scannedFiles = 0;
 
   for (const sourceFile of program.getSourceFiles()) {
@@ -202,6 +252,11 @@ function scanPackage(name, configPath) {
               }
             } else {
               dynamicQueries += 1;
+              const argument = node.arguments[0];
+              const argumentText = argument?.getText(sourceFile).replace(/\s+/gu, ' ').trim()
+                ?? '<missing>';
+              const sourcePath = fileName.slice(REPOSITORY_ROOT.length + 1);
+              dynamicQueryFingerprints.push(`${sourcePath} ${argumentText}`);
             }
           }
         }
@@ -219,20 +274,50 @@ function scanPackage(name, configPath) {
     recognizedCalls,
     staticallyAnalyzedQueries,
     dynamicQueries,
+    dynamicQueryFingerprints,
     scannedFiles,
     violations,
   };
 }
 
 selfTestStaticSparql();
-const results = PACKAGE_CONFIGS.map(([name, config]) => scanPackage(name, config));
+const packageConfigs = workspaceStorageConsumers();
+const results = packageConfigs.map(([name, config]) => scanPackage(name, config));
 const violations = results.flatMap((result) => result.violations);
+let dynamicQueryCount = 0;
+for (const result of results) {
+  const fingerprints = [...result.dynamicQueryFingerprints].sort();
+  const observed = {
+    count: fingerprints.length,
+    sha256: createHash('sha256').update(fingerprints.join('\n')).digest('hex'),
+  };
+  dynamicQueryCount += observed.count;
+  const expected = DYNAMIC_QUERY_BASELINE[result.name];
+  if (
+    expected?.count !== observed.count
+    || expected?.sha256 !== observed.sha256
+  ) {
+    violations.push(
+      `${result.name}: dynamic TripleStore.query() baseline changed: `
+      + `expected ${expected?.count ?? 0}/${expected?.sha256 ?? '<unset>'}, `
+      + `received ${observed.count}/${observed.sha256}`,
+    );
+    for (const fingerprint of fingerprints) {
+      violations.push(`dynamic query review required: ${fingerprint}`);
+    }
+  }
+}
+for (const name of Object.keys(DYNAMIC_QUERY_BASELINE)) {
+  if (!results.some((result) => result.name === name)) {
+    violations.push(`${name}: dynamic query baseline names a package outside the derived scope`);
+  }
+}
 for (const result of results) {
   console.log(
     `[managed-store-raw-channels] ${result.name}: ` +
     `${result.scannedFiles} files, ${result.recognizedCalls} typed call(s), ` +
     `${result.staticallyAnalyzedQueries} static query program(s), ` +
-    `${result.dynamicQueries} runtime-guarded dynamic query call(s)`,
+    `${result.dynamicQueries} baseline-reviewed dynamic query call(s)`,
   );
 }
 if (violations.length > 0) {
@@ -240,5 +325,10 @@ if (violations.length > 0) {
   for (const violation of violations) console.error(`  - ${violation}`);
   process.exitCode = 1;
 } else {
-  console.log('[managed-store-raw-channels] PASS: no first-party raw mutating store calls');
+  console.log(
+    '[managed-store-raw-channels] PASS: no first-party raw update() or statically mutating '
+    + 'query() calls; '
+    + `${dynamicQueryCount} dynamic query call site(s) match the reviewed per-package baseline `
+    + '(runtime ownership guard remains authoritative)',
+  );
 }

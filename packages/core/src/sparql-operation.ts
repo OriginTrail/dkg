@@ -153,7 +153,49 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
 }
 
 function isSparqlNameAdjacent(ch: string | undefined): boolean {
-  return ch !== undefined && /[\p{L}\p{N}\p{M}_?$:@.-]/u.test(ch);
+  return ch !== undefined && (
+    isSparqlWordContinuation(ch)
+    || /[\p{L}\p{N}\p{M}?$:@.-]/u.test(ch)
+  );
+}
+
+function isSparqlWordStart(ch: string | undefined): boolean {
+  return !!ch && (
+    (ch >= 'A' && ch <= 'Z')
+    || (ch >= 'a' && ch <= 'z')
+    || ch === '_'
+  );
+}
+
+/** Shared ASCII keyword boundary used by admission and query rewriting. */
+export function isSparqlWordContinuation(ch: string | undefined): ch is string {
+  return isSparqlWordStart(ch) || (!!ch && ch >= '0' && ch <= '9');
+}
+
+export function isSparqlKeywordStart(src: string, idx: number): boolean {
+  const ch = src[idx];
+  if (!isSparqlWordStart(ch)) return false;
+  const prev = idx > 0 ? src[idx - 1] : '';
+  return !prev || (
+    !isSparqlWordContinuation(prev)
+    && prev !== '?'
+    && prev !== '$'
+    && prev !== ':'
+    && prev !== '#'
+  );
+}
+
+export function isSparqlKeyword(
+  src: string,
+  start: number,
+  end: number,
+  keyword: string,
+): boolean {
+  const next = src[end];
+  return src.slice(start, end).toUpperCase() === keyword
+    && next !== ':'
+    && next !== '-'
+    && next !== '.';
 }
 
 /**
