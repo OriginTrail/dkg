@@ -54,10 +54,9 @@ import {
 } from '../atomic-graph-replace.js';
 import {
   buildStructuredMutationUpdate,
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
   structuredMutationGuardedGraphs,
-  structuredMutationMightMutate,
-  structuredMutationTouchedGraphs,
 } from '../bounded-structured-mutation.js';
 import {
   assertNotReservedInternalGraphV1,
@@ -90,13 +89,19 @@ import {
 import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
-import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
+import {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
+  UnsupportedTripleStoreCapabilityError,
+  type TripleStoreCapability,
+} from '../unsupported-capability-error.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
+  analyzeSparqlOperation,
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  recognizedReadOnlySparqlForm,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -152,6 +157,13 @@ interface ManagedMutationBindingV1 {
   readonly admission: StoreQueuedAdmissionV1;
   readonly generation: string;
 }
+
+type RawSparqlChannelV1 =
+  | { readonly kind: 'update' }
+  | {
+      readonly kind: 'query';
+      readonly readForm: ReturnType<typeof recognizedReadOnlySparqlForm>;
+    };
 
 export class ManagedOxigraphMutationUnavailableError extends Error {
   readonly code = 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE' as const;
@@ -390,6 +402,36 @@ export class SparqlHttpStore implements TripleStore {
         'mutation was queued before system-record admission became active',
       );
     }
+  }
+
+  /**
+   * Canonical raw-SPARQL boundary for ownership-leased daemon stores.
+   * Structured adapter methods bypass this helper and reach postUpdate()
+   * directly; unleased operator endpoints retain their legacy raw channels.
+   */
+  private assertRawSparqlChannelAvailable(channel: RawSparqlChannelV1): void {
+    if (this.ownershipLease === null) return;
+    if (
+      channel.kind === 'query'
+      && channel.readForm !== null
+    ) return;
+
+    const reason = channel.kind === 'update'
+      ? 'raw SPARQL update() is unavailable on an ownership-leased store'
+      : 'query() accepts only recognized read operations on an ownership-leased store';
+    throw new ManagedOxigraphMutationUnavailableError(reason);
+  }
+
+  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean {
+    if (capability === 'update') return this.ownershipLease === null;
+    if (
+      capability === 'replaceGraph'
+      || capability === 'replaceGraphAndSubject'
+      || capability === 'replaceSubject'
+    ) {
+      return this.atomicUpdates;
+    }
+    return capability === 'structuredMutation';
   }
 
   /**
@@ -1105,14 +1147,12 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    // `touchedGraphs` is only a cache hint and cannot prove the scope of an
-    // arbitrary SPARQL program. Until opaque writes rotate the materialization
-    // epoch, accepting one here could silently invalidate signed projections.
-    if (this.systemRecordAdmissionActive) {
-      throw new ManagedOxigraphMutationUnavailableError(
-        'opaque SPARQL updates are unavailable while system-record admission is active',
-      );
-    }
+    // An ownership lease is the authentic daemon-managed boundary. Raw SPARQL
+    // cannot prove its graph scope, participate in the structured mutation
+    // policy, or preserve system-record invariants, so close this channel for
+    // the full lifetime of every leased store. Do this before scheduler
+    // admission or I/O; private structured operations still use postUpdate().
+    this.assertRawSparqlChannelAvailable({ kind: 'update' });
     await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
@@ -1249,7 +1289,7 @@ export class SparqlHttpStore implements TripleStore {
     options?: QueryOptions,
   ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
-    const touchedGraphs = structuredMutationTouchedGraphs(normalized);
+    const effects = captureStructuredMutationEffects(normalized);
     this.assertGenericMutationScope(structuredMutationGuardedGraphs(normalized), 'structuredMutation');
     if (normalized.kind === 'replace-subject-predicates') {
       assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
@@ -1258,27 +1298,34 @@ export class SparqlHttpStore implements TripleStore {
       });
     }
     const update = buildStructuredMutationUpdate(normalized);
-    if (!update || !structuredMutationMightMutate(normalized)) return;
+    if (!update || !effects) return;
     try {
       await this.postUpdate(
         update,
         { ...options, source: options?.source ?? 'sparql-http.structuredMutation' },
         'structuredMutation',
-        touchedGraphs,
+        effects.touchedGraphs,
       );
     } catch (error) {
       // A remote endpoint may commit before its response is lost. Fail open for
       // cache coherence: invalidate graph enumeration and advance each affected
       // write generation even though the caller still receives the failure.
       this.invalidateListGraphsCache();
-      this.writeGen.recordGraphWrites(touchedGraphs);
+      this.writeGen.recordGraphWrites(effects.touchedGraphs);
       throw error;
     }
     this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites(touchedGraphs);
+    this.writeGen.recordGraphWrites(effects.touchedGraphs);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
+    const analysis = analyzeSparqlOperation(sparql);
+    const operation = analysis.operation;
+    this.assertRawSparqlChannelAvailable({
+      kind: 'query',
+      readForm: recognizedReadOnlySparqlForm(analysis),
+    });
+
     return this.runStoreWork('query', options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
@@ -1288,8 +1335,12 @@ export class SparqlHttpStore implements TripleStore {
       throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
-      const isAsk = upper.startsWith('ASK');
-      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+      const isAsk = operation.kind === 'read'
+        ? operation.form === 'ASK'
+        : upper.startsWith('ASK');
+      const isConstruct = operation.kind === 'read'
+        ? operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE'
+        : upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
       try {
         if (isConstruct) {

@@ -34,8 +34,8 @@ import {
 } from '../atomic-graph-replace.js';
 import {
   buildStructuredMutationUpdate,
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
-  structuredMutationMightMutate,
 } from '../bounded-structured-mutation.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
@@ -417,6 +417,7 @@ export class BlazegraphStore implements TripleStore {
     options?: QueryOptions,
   ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
+    const effects = captureStructuredMutationEffects(normalized);
     if (normalized.kind === 'replace-subject-predicates') {
       assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
         maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
@@ -424,7 +425,7 @@ export class BlazegraphStore implements TripleStore {
       });
     }
     const update = buildStructuredMutationUpdate(normalized);
-    if (!update || !structuredMutationMightMutate(normalized)) return;
+    if (!update || !effects) return;
     await this.sparqlUpdate(
       update,
       { ...options, source: options?.source ?? 'blazegraph.structuredMutation' },

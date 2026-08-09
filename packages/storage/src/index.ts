@@ -51,9 +51,11 @@ export {
 } from './atomic-graph-replace.js';
 export {
   BOUNDED_MUTATION_MAX_PRUNE_DELETE,
+  captureStructuredMutationEffects,
   chunkCopySubjectProjectionInput,
   structuredMutationMightMutate,
   structuredMutationTouchedGraphs,
+  type StructuredMutationEffects,
 } from './bounded-structured-mutation.js';
 // System-record V1 (#2052 Stack B2). Default-unused: these modules perform no
 // I/O, scheduling, timer, or per-store lane work until the daemon supervisor

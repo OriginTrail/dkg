@@ -1,4 +1,7 @@
 export {
+  isSparqlKeyword,
+  isSparqlKeywordStart,
+  isSparqlWordContinuation,
   stripSparqlLiteralsAndComments as stripLiteralsAndComments,
 } from '@origintrail-official/dkg-core';
 
@@ -162,44 +165,6 @@ export function skipSparqlSpaceAndLineComments(sparql: string, start: number): n
     break;
   }
   return i;
-}
-
-export function isSparqlKeywordStart(src: string, idx: number): boolean {
-  const ch = src[idx];
-  if (!isWordStart(ch)) return false;
-  const prev = idx > 0 ? src[idx - 1] : '';
-  return !prev || (
-    !isSparqlWordContinuation(prev) &&
-    prev !== '?' &&
-    prev !== '$' &&
-    prev !== ':' &&
-    prev !== '#'
-  );
-}
-
-export function isSparqlKeyword(
-  src: string,
-  start: number,
-  end: number,
-  keyword: string,
-): boolean {
-  const next = src[end];
-  return src.slice(start, end).toUpperCase() === keyword
-    && next !== ':'
-    && next !== '-'
-    && next !== '.';
-}
-
-function isWordStart(ch: string | undefined): boolean {
-  return !!ch && (
-    (ch >= 'A' && ch <= 'Z') ||
-    (ch >= 'a' && ch <= 'z') ||
-    ch === '_'
-  );
-}
-
-export function isSparqlWordContinuation(ch: string | undefined): ch is string {
-  return isWordStart(ch) || (!!ch && ch >= '0' && ch <= '9');
 }
 
 /** Find the closing brace while treating strings, comments, and IRIREFs as opaque. */
