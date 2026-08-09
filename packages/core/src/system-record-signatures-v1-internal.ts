@@ -26,7 +26,7 @@ import {
 } from './system-record-signed-envelope-codecs-v1-internal.js';
 import {
   assertCanonicalEip191SignatureV1,
-  buildSystemRecordSignatureMessageV1,
+  buildSystemRecordSignatureMessageFromPolicyV1,
 } from './system-record-signature-policy-v1-internal.js';
 
 export {
@@ -65,17 +65,15 @@ export async function verifySignedSystemRecordEnvelopeV1<
 ): Promise<boolean> {
   const verifyEip1271 = options.verifyEip1271;
   if (verifyEip1271 !== undefined && typeof verifyEip1271 !== 'function') return false;
-  const { validated } = validateDispatchedSignedEnvelopeV1(envelope) as {
-    readonly validated: SignedSystemRecordEnvelopeV1<T>;
-  };
+  const { validated, policy } = validateDispatchedSignedEnvelopeV1(envelope);
   const publicKey = decodeUnpaddedBase64UrlV1(
     validated.object.peerPublicKey,
     SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
     'peerPublicKey',
   );
   for (const entry of validated.signatures) {
-    const message = buildSystemRecordSignatureMessageV1(
-      validated.object,
+    const message = buildSystemRecordSignatureMessageFromPolicyV1(
+      policy,
       validated.objectDigest,
       entry.role,
     );
