@@ -3,6 +3,8 @@ import {
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
   SYSTEM_RECORD_WIRE_VERSION_V1,
+  canonicalizeSystemRecordInventoryLeafObjectV1,
+  computeSystemRecordInventoryLeafDigestV1,
   decodeSystemRecordRequestFrameV1,
   digestSystemRecordBytesV1,
   encodeSystemRecordResponseFrameV1,
@@ -149,6 +151,47 @@ describe('system-record requester V1', () => {
       activeLeases: 0,
       retainedPayloadBytes: 0,
     });
+  });
+
+  it('fetches and verifies an exact inventory object through the public requester', async () => {
+    const leaf = { objectType: 'inventory-leaf', rows: [] } as const;
+    const payload = canonicalizeSystemRecordInventoryLeafObjectV1(leaf, NETWORK, true);
+    const digest = computeSystemRecordInventoryLeafDigestV1(leaf, NETWORK, true);
+    const bytes = byteAdmission();
+    let active = fixtureExchange(async (request) => (
+      successResponse(request, payload, digest, 'inventory-leaf')
+    ));
+    const requester = createRequester({
+      bytes,
+      openExchange: async () => active.value,
+    });
+    const lookup = Object.freeze({
+      type: 'inventory-object' as const,
+      rootDescriptorDigest: DIGEST,
+      path: Object.freeze([]),
+      objectKind: 'inventory-leaf' as const,
+      objectDigest: digest,
+    });
+
+    const result = await requester.fetch(lookup, new AbortController().signal);
+    expect(result.outcome).toBe('ok');
+    if (result.outcome !== 'ok') return;
+    expect(result.lease.artifact).toMatchObject({
+      objectKind: 'inventory-leaf',
+      objectDigest: digest,
+      canonicalBytes: payload,
+    });
+    result.lease.release();
+
+    active = fixtureExchange(async (request) => (
+      successResponse(request, payload, digest, 'inventory-internal')
+    ));
+    await expect(requester.fetch(
+      lookup,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'invalid-response' });
+    expect(active.reset).toHaveBeenCalledWith('invalid-response');
+    expect(bytes.reservations.every(({ released }) => released)).toBe(true);
   });
 
   it('never queues an unrelated digest behind the one requester stream', async () => {
@@ -696,12 +739,13 @@ function successResponse(
   request: SystemRecordRequestHeaderV1,
   payload: Uint8Array,
   digest: Digest32V1,
+  objectKind: 'profile-bundle' | 'inventory-internal' | 'inventory-leaf' = 'profile-bundle',
 ): Uint8Array {
   return encodeSystemRecordResponseFrameV1({
     wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
     requestId: request.requestId,
     status: 'ok',
-    objectKind: 'profile-bundle',
+    objectKind,
     objectDigest: digest,
     payloadBytes: payload.byteLength.toString(),
   }, payload);

@@ -16,8 +16,13 @@ export type SystemRecordRemoteFetchOutcomeV1 =
   | 'remote-busy'
   | 'remote-error';
 
+type SystemRecordExactRequestHeaderV1 = Exclude<
+  SystemRecordRequestHeaderV1,
+  Readonly<{ operation: 'get-root' }>
+>;
+
 export interface SystemRecordExactRequestV1 {
-  readonly request: SystemRecordRequestHeaderV1;
+  readonly request: SystemRecordExactRequestHeaderV1;
   readonly key: string;
 }
 
@@ -35,44 +40,56 @@ export function createSystemRecordExactRequestV1(
   };
   if (lookup.type === 'inventory-object') {
     const path = Object.freeze([...lookup.path]);
-    return Object.freeze({
-      request: Object.freeze({
-        ...common,
-        operation: 'get-inventory-object',
-        rootDescriptorDigest: lookup.rootDescriptorDigest,
-        path,
-        objectKind: lookup.objectKind,
-        objectDigest: lookup.objectDigest,
-      }),
-      key: JSON.stringify([
-        'get-inventory-object',
-        lookup.rootDescriptorDigest,
-        path,
-        lookup.objectKind,
-        lookup.objectDigest,
-      ]),
-    });
-  }
-  if (lookup.objectKind === 'profile-bundle') {
-    return Object.freeze({
-      request: Object.freeze({
-        ...common,
-        operation: 'get-bundle',
-        objectKind: lookup.objectKind,
-        objectDigest: lookup.objectDigest,
-      }),
-      key: JSON.stringify(['get-bundle', lookup.objectKind, lookup.objectDigest]),
-    });
-  }
-  return Object.freeze({
-    request: Object.freeze({
+    return exactRequest(Object.freeze({
       ...common,
-      operation: 'get-control-object',
+      operation: 'get-inventory-object',
+      rootDescriptorDigest: lookup.rootDescriptorDigest,
+      path,
       objectKind: lookup.objectKind,
       objectDigest: lookup.objectDigest,
-    }),
-    key: JSON.stringify(['get-control-object', lookup.objectKind, lookup.objectDigest]),
-  });
+    }));
+  }
+  if (lookup.objectKind === 'profile-bundle') {
+    return exactRequest(Object.freeze({
+      ...common,
+      operation: 'get-bundle',
+      objectKind: lookup.objectKind,
+      objectDigest: lookup.objectDigest,
+    }));
+  }
+  return exactRequest(Object.freeze({
+    ...common,
+    operation: 'get-control-object',
+    objectKind: lookup.objectKind,
+    objectDigest: lookup.objectDigest,
+  }));
+}
+
+function exactRequest(request: SystemRecordExactRequestHeaderV1): SystemRecordExactRequestV1 {
+  return Object.freeze({ request, key: systemRecordExactRequestKeyV1(request) });
+}
+
+function systemRecordExactRequestKeyV1(request: SystemRecordExactRequestHeaderV1): string {
+  switch (request.operation) {
+    case 'get-inventory-object':
+      return JSON.stringify([
+        request.operation,
+        request.rootDescriptorDigest,
+        request.path,
+        request.objectKind,
+        request.objectDigest,
+      ]);
+    case 'get-bundle':
+    case 'get-control-object':
+      return JSON.stringify([
+        request.operation,
+        request.objectKind,
+        request.objectDigest,
+      ]);
+  }
+  throw new Error(`unsupported exact System Record operation: ${String(
+    (request as SystemRecordRequestHeaderV1).operation,
+  )}`);
 }
 
 export function systemRecordExactResponseOutcomeV1(
