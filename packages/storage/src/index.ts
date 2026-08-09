@@ -75,6 +75,8 @@ export {
   type SystemRecordDeferralReasonV1,
   type SystemRecordLaneActivationV1,
   type SystemRecordLaneControllerDepsV1,
+  type SystemRecordLaneControllerSharedDepsV1,
+  type SystemRecordLaneControllerTypedDepsV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneSessionV1,
   type SystemRecordLaneStateV1,
