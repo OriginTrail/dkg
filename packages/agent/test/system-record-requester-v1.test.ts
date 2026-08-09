@@ -279,15 +279,40 @@ describe('system-record requester V1', () => {
     expect(exchange.reset).toHaveBeenCalledWith('cancelled');
   });
 
-  it('maps remote errors and rejects invalid payload identity fail closed', async () => {
-    const notFound = fixtureExchange(async (request) => errorResponse(request, 'not-found'));
+  it('does not attach an immediate retry to a cancelled single-flight', async () => {
+    const exchange = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
     const requester = createRequester();
-    await expect(requester.fetch(
-      LOOKUP,
-      async () => notFound.value,
-      new AbortController().signal,
-    )).resolves.toMatchObject({ outcome: 'not-found', wireBytes: expect.any(Number) });
-    expect(notFound.reset).not.toHaveBeenCalled();
+    const controller = new AbortController();
+    const first = requester.fetch(LOOKUP, async () => exchange.value, controller.signal);
+    await exchange.requestWritten.promise;
+    controller.abort(new Error('caller left'));
+
+    const unopened = vi.fn(async () => fixtureExchange().value);
+    const retry = requester.fetch(LOOKUP, unopened, new AbortController().signal);
+    await expect(retry).resolves.toEqual({ outcome: 'busy', wireBytes: 0 });
+    expect(unopened).not.toHaveBeenCalled();
+    await expect(first).rejects.toThrow('caller left');
+    await vi.waitFor(() => expect(requester.stats().pendingDigests).toBe(0));
+  });
+
+  it('maps every remote status and rejects invalid payload identity fail closed', async () => {
+    const requester = createRequester();
+    const statuses = [
+      ['not-found', 'not-found'],
+      ['unsupported', 'unsupported'],
+      ['busy', 'remote-busy'],
+      ['invalid-request', 'remote-error'],
+      ['internal', 'remote-error'],
+    ] as const;
+    for (const [remote, local] of statuses) {
+      const response = fixtureExchange(async (request) => errorResponse(request, remote));
+      await expect(requester.fetch(
+        LOOKUP,
+        async () => response.value,
+        new AbortController().signal,
+      )).resolves.toMatchObject({ outcome: local, wireBytes: expect.any(Number) });
+      expect(response.reset).not.toHaveBeenCalled();
+    }
 
     const wrongPayload = Uint8Array.of(9, 9, 9);
     const invalid = fixtureExchange(async (request) => successResponse(request, wrongPayload, DIGEST));

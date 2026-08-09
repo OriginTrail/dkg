@@ -10,6 +10,7 @@ import {
   type SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
+import { cloneSystemRecordArtifactV1 } from './artifact-v1.js';
 import type {
   CreateSystemRecordRequesterOptionsV1,
   SystemRecordExactArtifactLookupV1,
@@ -103,6 +104,9 @@ export function createSystemRecordRequesterV1(
     const key = systemRecordExactRequestKeyV1(request);
     let entry = entries.get(key);
     if (entry !== undefined) {
+      if (!entry.settled && entry.controller.signal.aborted) {
+        return Object.freeze({ outcome: 'busy', wireBytes: 0 });
+      }
       // The first observer owns the transfer; the frozen limit counts followers.
       if (entry.waiters.size + entry.leaseCount >= maxWaitersPerDigest + 1) {
         return Object.freeze({ outcome: 'waiter-limit', wireBytes: 0 });
@@ -264,9 +268,9 @@ export function createSystemRecordRequesterV1(
       releaseRetainedIfUnobserved(entry);
       return;
     }
-    let canonicalBytes: Uint8Array;
+    let artifact: ReturnType<typeof cloneSystemRecordArtifactV1>;
     try {
-      canonicalBytes = Uint8Array.from(retained.artifact.canonicalBytes);
+      artifact = cloneSystemRecordArtifactV1(retained.artifact);
     } catch {
       reservation.release();
       waiter.resolve(Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes }));
@@ -280,11 +284,7 @@ export function createSystemRecordRequesterV1(
     waiter.resolve(Object.freeze({
       outcome: 'ok',
       lease: Object.freeze({
-        artifact: Object.freeze({
-          objectKind: retained.artifact.objectKind,
-          objectDigest: retained.artifact.objectDigest,
-          canonicalBytes,
-        }),
+        artifact,
         wireBytes: retained.wireBytes,
         release(): void {
           if (released) return;

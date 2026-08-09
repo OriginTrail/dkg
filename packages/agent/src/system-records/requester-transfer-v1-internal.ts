@@ -9,7 +9,10 @@ import {
   type SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type { SystemRecordArtifactV1 } from './artifact-v1.js';
+import {
+  cloneSystemRecordArtifactV1,
+  type SystemRecordArtifactV1,
+} from './artifact-v1.js';
 import type {
   SystemRecordRequesterAdmissionV1,
   SystemRecordRequesterByteAdmissionV1,
@@ -119,15 +122,15 @@ export function retainVerifiedSystemRecordResponseV1(input: {
       return Object.freeze({ outcome: 'capacity', wireBytes });
     }
     try {
-      const canonicalBytes = Uint8Array.from(decoded.payload);
+      const artifact = cloneSystemRecordArtifactV1({
+        objectKind: decoded.header.objectKind,
+        objectDigest: decoded.header.objectDigest,
+        canonicalBytes: decoded.payload,
+      });
       return Object.freeze({
         outcome: 'ok',
         retained: Object.freeze({
-          artifact: Object.freeze({
-            objectKind: decoded.header.objectKind,
-            objectDigest: decoded.header.objectDigest,
-            canonicalBytes,
-          }),
+          artifact,
           reservation: payloadReservation,
           decodePermit,
           wireBytes,
