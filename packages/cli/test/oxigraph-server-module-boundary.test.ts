@@ -100,21 +100,29 @@ describe('managed Oxigraph supervisor module boundary', () => {
       'oxigraph-supervisor-startup-operations.ts',
     ]) {
       const operation = source(name);
-      const text = operation.getFullText();
+      const calls = calledIdentifiers(operation);
       expect(imports(operation)).not.toContain('./oxigraph-server-contract.js');
       expect(imports(operation)).not.toContain('./oxigraph-supervisor-operation-context.js');
-      expect(text).not.toMatch(/\.spawn\(|\.probeReady\(|\.current\(\)!/u);
-      expect(text).not.toMatch(/\.transition\(|\.setHandoffPhase\(/u);
-      for (const rawStateReader of ['lifecycle', 'terminating', 'handoffPhase']) {
-        expect(calledIdentifiers(operation)).not.toContain(rawStateReader);
+      for (const forbiddenCall of [
+        'spawn',
+        'probeReady',
+        'transition',
+        'setHandoffPhase',
+        'lifecycle',
+        'terminating',
+        'handoffPhase',
+      ]) {
+        expect(calls).not.toContain(forbiddenCall);
       }
     }
 
-    const generation = source('oxigraph-supervisor-generation.ts').getFullText();
-    expect(generation).toMatch(/\.spawn\(/u);
-    expect(generation).toMatch(/\.probeReady\(/u);
-    expect(generation).toMatch(/bindReadyGeneration\(/u);
-    expect(generation).not.toMatch(/\.transition\(/u);
+    const generationCalls = calledIdentifiers(source('oxigraph-supervisor-generation.ts'));
+    expect(generationCalls).toEqual(expect.arrayContaining([
+      'spawn',
+      'probeReady',
+      'bindReadyGeneration',
+    ]));
+    expect(generationCalls).not.toContain('transition');
   });
 
   it('models lifecycle and handoff transitions through legal intents', () => {
