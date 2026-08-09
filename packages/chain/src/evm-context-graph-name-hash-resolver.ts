@@ -23,10 +23,11 @@ export class EvmContextGraphNameHashResolver {
   private readonly source: EvmContextGraphNameHashSource;
 
   constructor(dependencies: EvmContextGraphNameHashResolverDependencies) {
+    this.source = dependencies.source;
     this.resolutionCache = new ContextGraphNameHashResolver({
       load: (nameHash) => this.loadFromChain(nameHash),
+      generation: () => this.source.currentSlotRevision,
     });
-    this.source = dependencies.source;
   }
 
   resolve(nameHash: string, signal?: AbortSignal): Promise<bigint | null> {
@@ -40,9 +41,6 @@ export class EvmContextGraphNameHashResolver {
 
   /** One uncached, fully fenced lookup across the adapter-owned chain source. */
   async loadFromChain(normalizedNameHash: string): Promise<bigint | null> {
-    return this.source.resolve(
-      normalizedNameHash,
-      () => this.resolutionCache.invalidateAll(),
-    );
+    return this.source.resolve(normalizedNameHash);
   }
 }

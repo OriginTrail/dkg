@@ -127,6 +127,7 @@ import {
   type LocalAgentIntegrationStatus,
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
+  resolveContextGraphSubscriptionRehydrationEnabled,
   resolveNetworkDefaultContextGraphs,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -1150,6 +1151,11 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  const contextGraphSubscriptionRehydrationEnabled =
+    resolveContextGraphSubscriptionRehydrationEnabled(
+      config.contextGraphSubscriptionRehydrationEnabled,
+      process.env.DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED,
+    );
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1763,6 +1769,7 @@ export async function runDaemonInner(
         ? config.rfc64PublicCatalog
         : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
     // strip kill-switch) from config.json. Without this forward the whole
@@ -1915,6 +1922,34 @@ export async function runDaemonInner(
       },
       deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
         dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
+      },
+      loadSelectedVmReconcileCursor: async (
+        deploymentId,
+        contextGraphId,
+        onChainContextGraphId,
+      ) => {
+        const row = dashDb.getSelectedVmReconcileCursor(
+          deploymentId,
+          contextGraphId,
+          onChainContextGraphId,
+        );
+        return row ? {
+          deploymentId: row.deployment_id,
+          contextGraphId: row.context_graph_id,
+          onChainContextGraphId: row.on_chain_context_graph_id,
+          nameHash: row.name_hash,
+          watermark: row.watermark,
+        } : null;
+      },
+      saveSelectedVmReconcileCursor: async (record) => {
+        dashDb.upsertSelectedVmReconcileCursor({
+          deployment_id: record.deploymentId,
+          context_graph_id: record.contextGraphId,
+          on_chain_context_graph_id: record.onChainContextGraphId,
+          name_hash: record.nameHash,
+          watermark: record.watermark,
+          updated_at: Date.now(),
+        });
       },
     },
     contextGraphMembershipStore: {

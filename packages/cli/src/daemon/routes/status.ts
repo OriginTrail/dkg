@@ -56,7 +56,11 @@ const daemonRequire = createRequire(import.meta.url);
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 import { enrichEvmError, MockChainAdapter, resolveRpcUrls, getRpcFailoverStats } from '@origintrail-official/dkg-chain';
-import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
+import {
+  DKGAgent,
+  loadOpWallets,
+  resolveSyncReconcilerEnabled,
+} from '@origintrail-official/dkg-agent';
 import { isExternalBackend } from '@origintrail-official/dkg-storage';
 import { resolveManagedOxigraphPort } from '../oxigraph-managed.js';
 import { backpressureRegistry, computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
@@ -853,6 +857,15 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           state: scheduler.state,
         })),
         diagnosticsAvailable: '/api/diagnostics/backpressure',
+      },
+      // The certification harness must be able to distinguish an operator
+      // setting from the switch the agent actually honors. This projection
+      // deliberately uses the same resolver as both runtime reconcile gates,
+      // including environment-variable precedence.
+      syncLifecycle: {
+        syncReconcilerEnabled: resolveSyncReconcilerEnabled(
+          config.syncReconcilerEnabled,
+        ),
       },
       connectedPeers: uniquePeers.size,
       connections: {

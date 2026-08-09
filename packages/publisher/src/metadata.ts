@@ -429,6 +429,17 @@ export type ConfirmedGraphKnowledgeAssetMetadataRead =
   | { state: 'invalid' }
   | { state: 'confirmed'; envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope };
 
+export interface LocallyTrustedKnowledgeAssetControlAnchor {
+  readonly assertionVersion: string;
+  readonly merkleRoot: Uint8Array;
+}
+
+export interface LocallyTrustedKnowledgeAssetControlEnvelope {
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+  publisherPeerId: string;
+}
+
 function rdfLiteralLexicalValue(value: string): string | undefined {
   const match = /^("(?:\\.|[^"\\])*")/.exec(value);
   if (!match) return undefined;
@@ -629,31 +640,36 @@ export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
   };
 }
 
-/** Persist locally authored access controls outside sync-visible metadata. */
-export async function replaceLocallyTrustedKnowledgeAssetControls(
+/**
+ * Persist one validated local-control entry. Both the rolling-compatible
+ * metadata-quad API and the typed envelope API terminate here; neither needs
+ * to adapt through the other.
+ */
+async function writeLocallyTrustedKnowledgeAssetControlEntry(
   store: TripleStore,
   ual: string,
-  metadataQuads: readonly Quad[],
+  version: bigint,
+  root: string,
+  sidecarQuads: readonly Quad[],
 ): Promise<void> {
   assertSafeGraphIriForSparql(ual);
-  const version = parseControlVersion(
-    readControlAnchor(metadataQuads, `${DKG}assertionVersion`, 'assertionVersion'),
-  );
-  const root = normalizeControlRoot(
-    readControlAnchor(metadataQuads, `${DKG}merkleRoot`, 'merkleRoot'),
-  );
   const entry = `${ual}/_local_controls/${version}/${root}`;
   assertSafeGraphIriForSparql(entry);
-  const controls = metadataQuads
-    .filter(
-      (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
-    )
-    .map((quad) => ({
-      ...quad,
-      subject: entry,
-      graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-    }));
+  const controls = sidecarQuads.map((quad) => ({
+    ...quad,
+    subject: entry,
+    graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  }));
   validateLocallyTrustedControlRows(controls);
+  const storedVersion = parseControlVersion(
+    readControlAnchor(controls, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const storedRoot = normalizeControlRoot(
+    readControlAnchor(controls, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  if (storedVersion !== version || storedRoot !== root) {
+    throw new Error('Locally trusted KA control entry does not match its assertion anchor');
+  }
   await store.insert([
     ...controls,
     {
@@ -662,6 +678,59 @@ export async function replaceLocallyTrustedKnowledgeAssetControls(
       object: ual,
       graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
     },
+  ]);
+}
+
+/** Persist locally authored access controls outside sync-visible metadata. */
+export async function replaceLocallyTrustedKnowledgeAssetControls(
+  store: TripleStore,
+  ual: string,
+  metadataQuads: readonly Quad[],
+): Promise<void> {
+  const sidecarQuads = metadataQuads.filter(
+    (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
+  );
+  const version = parseControlVersion(
+    readControlAnchor(sidecarQuads, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const root = normalizeControlRoot(
+    readControlAnchor(sidecarQuads, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  await writeLocallyTrustedKnowledgeAssetControlEntry(
+    store,
+    ual,
+    version,
+    root,
+    sidecarQuads,
+  );
+}
+
+/**
+ * Replace one receiver-authenticated local control envelope directly. The
+ * caller supplies only the assertion anchor and controls; visible KA metadata
+ * is deliberately not part of this local-only persistence contract.
+ */
+export async function replaceLocallyTrustedKnowledgeAssetControlEnvelope(
+  store: TripleStore,
+  ual: string,
+  anchor: LocallyTrustedKnowledgeAssetControlAnchor,
+  controls: LocallyTrustedKnowledgeAssetControlEnvelope,
+): Promise<void> {
+  const scope = createGraphKnowledgeAssetScope(ual, anchor.assertionVersion);
+  if (anchor.merkleRoot.length !== 32) {
+    throw new Error('Locally trusted KA controls require one 32-byte merkleRoot');
+  }
+  const graph = LOCAL_TRUSTED_KA_CONTROLS_GRAPH;
+  const version = BigInt(scope.assertionVersion);
+  const root = toHex(anchor.merkleRoot).toLowerCase();
+  await writeLocallyTrustedKnowledgeAssetControlEntry(store, scope.ual, version, root, [
+    mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), graph),
+    mq(scope.ual, `${DKG}merkleRoot`, lit(root), graph),
+    mq(scope.ual, `${DKG}accessPolicy`, lit(controls.accessPolicy), graph),
+    mq(scope.ual, `${DKG}publisherPeerId`, lit(controls.publisherPeerId), graph),
+    ...[...new Set(controls.allowedPeers)].sort().map((peerId) => (
+      mq(scope.ual, `${DKG}allowedPeer`, lit(peerId), graph)
+    )),
   ]);
 }
 
@@ -737,6 +806,55 @@ export async function readLocallyTrustedKnowledgeAssetControls(
   return highest[0]!.rows
     .filter((quad) => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
     .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
+}
+
+/**
+ * Read the local-only control sidecar through the publisher-owned RDF contract.
+ * Consumers receive a typed envelope instead of duplicating predicate and
+ * literal parsing rules outside this module.
+ */
+export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
+  incomingMetadataQuads: readonly Quad[],
+  options: QueryOptions = {},
+): Promise<LocallyTrustedKnowledgeAssetControlEnvelope | undefined> {
+  const rows = await readLocallyTrustedKnowledgeAssetControls(
+    store,
+    metaGraph,
+    ual,
+    incomingMetadataQuads,
+    options,
+  );
+  if (rows.length === 0) return undefined;
+
+  const lexicalValues = (predicate: string): string[] => [...new Set(
+    rows
+      .filter((quad) => quad.predicate === predicate)
+      .map((quad) => rdfLiteralLexicalValue(quad.object))
+      .filter((value): value is string => value !== undefined),
+  )];
+  const policies = lexicalValues(`${DKG}accessPolicy`);
+  const publishers = lexicalValues(`${DKG}publisherPeerId`);
+  const allowedPeers = lexicalValues(`${DKG}allowedPeer`).sort();
+  const accessPolicy = policies[0];
+  if (
+    policies.length !== 1
+    || publishers.length !== 1
+    || (
+      accessPolicy !== 'public'
+      && accessPolicy !== 'ownerOnly'
+      && accessPolicy !== 'allowList'
+    )
+  ) {
+    throw new Error('Locally trusted KA controls could not be decoded');
+  }
+  return {
+    accessPolicy,
+    allowedPeers,
+    publisherPeerId: publishers[0]!,
+  };
 }
 
 function validateLocallyTrustedControlRows(rows: readonly Quad[]): void {
