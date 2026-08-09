@@ -128,7 +128,10 @@ export interface StoreAdmissionV1 {
   readonly mode: StoreAdmissionMode;
 }
 
-import { StoreControlBarrierCoordinator } from './store-control-barrier-v1-internal.js';
+import {
+  StoreControlBarrierCoordinator,
+  type StoreBarrierHostV1,
+} from './store-control-barrier-v1-internal.js';
 import {
   StoreControlBarrierTimeoutError,
   type StoreControlBarrierBlockers,
@@ -568,26 +571,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
       DEFAULT_STORE_CONTROL_BARRIER_TIMEOUT_MS,
     );
     this.now = resolvedNow;
-    // The coordinator asks this scheduler for inflight rather than tracking it:
-    // one source of truth for the counters quiescence is decided from.
     this.barrierCoordinator = new StoreControlBarrierCoordinator(
-      {
-        now: () => this.now(),
-        sealStoreGeneration: (storeId, generation) =>
-          this.sealStoreGeneration(storeId, generation),
-        untaggedInflight: () =>
-          Math.max(
-            0,
-            this.ackInflight + this.healthInflight + this.normalInflight
-              + this.backgroundInflight - this.countTaggedInflight(),
-          ),
-        taggedInflightForStore: (storeId) =>
-          this.storeStates.get(storeId)?.taggedInflight ?? 0,
-        generationsInflight: () => this.countGenerationsInflight(),
-        heldRunCount: () => this.heldRunCount,
-        occupiedSlots: () => this.barrierOccupiedSlots,
-        observeDepths: () => this.observeDepths(),
-      },
+      this.createBarrierHost(),
       barrierTimeoutMs,
     );
     this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
@@ -614,6 +599,38 @@ export class StorePriorityScheduler extends ObservableScheduler {
         },
       },
     });
+  }
+
+  /**
+   * The scheduler's half of the barrier boundary.
+   *
+   * Every member is a QUERY over state this class owns, or an instruction to
+   * it. There is deliberately no setter: the coordinator decides quiescence
+   * from these counters but cannot record inflight, so there is one source of
+   * truth for the invariant that must not drift.
+   */
+  private createBarrierHost(): StoreBarrierHostV1 {
+    return {
+      now: () => this.now(),
+      sealStoreGeneration: (storeId, generation) =>
+        this.sealStoreGeneration(storeId, generation),
+      untaggedInflight: () => this.untaggedInflight(),
+      taggedInflightForStore: (storeId) =>
+        this.storeStates.get(storeId)?.taggedInflight ?? 0,
+      generationsInflight: () => this.countGenerationsInflight(),
+      heldRunCount: () => this.heldRunCount,
+      occupiedSlots: () => this.barrierOccupiedSlots,
+      observeDepths: () => this.observeDepths(),
+    };
+  }
+
+  /** Inflight work carrying no store identity, so unattributable to any store. */
+  private untaggedInflight(): number {
+    return Math.max(
+      0,
+      this.ackInflight + this.healthInflight + this.normalInflight
+        + this.backgroundInflight - this.countTaggedInflight(),
+    );
   }
 
   get snapshot(): StorePrioritySchedulerSnapshot {

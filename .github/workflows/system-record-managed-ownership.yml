@@ -167,6 +167,7 @@ jobs:
             test/changelog-store.test.ts \
             test/graph-write-gen.test.ts \
             test/system-record-decorator-apply-outcomes-v1.test.ts \
+            test/store-control-barrier-contract-v1.test.ts \
             test/store-priority-scheduler.test.ts \
             test/store-scheduler-system-record-admission.test.ts \
             test/managed-http-client-v1.test.ts
