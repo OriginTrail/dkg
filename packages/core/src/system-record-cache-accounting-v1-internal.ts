@@ -317,13 +317,7 @@ function accountCacheAccountingRowV1(
   const rowSidecarMetadataBytes = hasSidecarMetadata
     ? requireCacheMetadataBytes(exactRow.sidecarMetadata, 'cache row sidecar metadata')
     : 0;
-  const closureReferencedBytes = accountCacheReferenceSetV1(
-    accumulator,
-    closure,
-    'closure',
-    accumulator.closurePhysical,
-    true,
-  );
+  const closureReferencedBytes = accountClosureReferencesV1(accumulator, closure);
   if (closureReferencedBytes > SYSTEM_RECORD_MAX_CLOSURE_BYTES) {
     fail('system-record-closure', 'row closure exceeds its byte bound');
   }
@@ -343,12 +337,7 @@ function accountCacheAccountingRowV1(
         'row sidecar must contain one evidence object and only signed controls',
       );
     }
-    const sidecarReferencedBytes = accountCacheReferenceSetV1(
-      accumulator,
-      sidecar,
-      'sidecar',
-      accumulator.sidecarPhysical,
-    );
+    const sidecarReferencedBytes = accountSidecarReferencesV1(accumulator, sidecar);
     if (sidecarReferencedBytes > SYSTEM_RECORD_MAX_SIDECAR_BYTES) {
       fail('system-record-closure', 'row sidecar exceeds its byte bound');
     }
@@ -377,12 +366,51 @@ function accountCacheAccountingRowV1(
   }
 }
 
+function accountClosureReferencesV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  references: readonly SystemRecordCacheReferenceV1[],
+): number {
+  return accountCacheReferenceSetV1(
+    accumulator,
+    references,
+    'closure',
+    accumulator.closurePhysical,
+    true,
+  );
+}
+
+function accountSidecarReferencesV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  references: readonly SystemRecordCacheReferenceV1[],
+): number {
+  return accountCacheReferenceSetV1(
+    accumulator,
+    references,
+    'sidecar',
+    accumulator.sidecarPhysical,
+    false,
+  );
+}
+
+function accountInventoryLeavesV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  references: readonly SystemRecordCacheReferenceV1[],
+): number {
+  return accountCacheReferenceSetV1(
+    accumulator,
+    references,
+    'activation inventory',
+    undefined,
+    false,
+  );
+}
+
 function accountCacheReferenceSetV1(
   accumulator: CacheAccountingAccumulatorV1,
   references: readonly SystemRecordCacheReferenceV1[],
   label: string,
-  category?: Map<Digest32V1, SystemRecordCacheReferenceFactsV1>,
-  trackBundles = false,
+  category: Map<Digest32V1, SystemRecordCacheReferenceFactsV1> | undefined,
+  trackBundles: boolean,
 ): number {
   let referencedBytes = 0;
   const logical = new Set<string>();
@@ -527,11 +555,7 @@ export function preflightSystemRecordCacheAccountingV1(
     accountCacheAccountingRowV1(accumulator, row);
     assertIncrementalCacheAccountingBoundsV1(accumulator);
   }
-  accountCacheReferenceSetV1(
-    accumulator,
-    normalized.inventoryLeaves,
-    'activation inventory',
-  );
+  accountInventoryLeavesV1(accumulator, normalized.inventoryLeaves);
   if (
     normalized.inventoryLeaves.some((reference) => reference.objectKind !== 'inventory-leaf')
   ) {

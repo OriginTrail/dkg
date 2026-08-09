@@ -28,8 +28,9 @@ export type SignableSystemRecordObjectV1 =
   | AgentProfileForkResolutionV1;
 
 export type SignableSystemRecordKindV1 = 'head' | 'transition' | 'fork';
+type SignableSystemRecordObjectTypeV1 = SignableSystemRecordObjectV1['objectType'];
 
-interface SignableSystemRecordDescriptorV1<T extends SignableSystemRecordObjectV1> {
+interface SignableSystemRecordDescriptorDefinitionV1<T extends SignableSystemRecordObjectV1> {
   readonly kind: SignableSystemRecordKindV1;
   readonly objectType: T['objectType'];
   readonly objectKind: SystemRecordObjectKindV1;
@@ -37,6 +38,14 @@ interface SignableSystemRecordDescriptorV1<T extends SignableSystemRecordObjectV
   readonly validate: (value: unknown) => T;
   readonly digest: (object: T) => Digest32V1;
   readonly bindRoles: (object: T) => readonly SignableSystemRecordRolePolicyV1[];
+}
+
+interface SignableSystemRecordDescriptorV1 {
+  readonly kind: SignableSystemRecordKindV1;
+  readonly objectType: SignableSystemRecordObjectTypeV1;
+  readonly objectKind: SystemRecordObjectKindV1;
+  readonly maxJsonDepth: number;
+  readonly bind: (value: unknown) => BoundSignableSystemRecordPolicyV1;
 }
 
 interface SignableSystemRecordRolePolicyV1 {
@@ -132,32 +141,32 @@ const SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1 = Object.freeze({
       ], object.evmIssuer),
     ]),
   }),
-});
+}) satisfies Readonly<
+  Record<SignableSystemRecordObjectTypeV1, SignableSystemRecordDescriptorV1>
+>;
+
+const SIGNABLE_SYSTEM_RECORD_DESCRIPTOR_BY_OBJECT_TYPE_V1 = indexSignableDescriptorsV1<string>(
+  (descriptor) => descriptor.objectType,
+);
+const SIGNABLE_SYSTEM_RECORD_DESCRIPTOR_BY_KIND_V1 =
+  indexSignableDescriptorsV1<SignableSystemRecordKindV1>((descriptor) => descriptor.kind);
 
 export function bindSignableSystemRecordPolicyV1(
   value: unknown,
 ): BoundSignableSystemRecordPolicyV1 {
   const record = snapshotSystemRecordDataRecord(value, 'signed envelope object');
-  if (record.objectType === 'agent-profile-head') {
-    return bindDescriptor(SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1['agent-profile-head'], record);
-  }
-  if (record.objectType === 'authority-transition') {
-    return bindDescriptor(SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1['authority-transition'], record);
-  }
-  if (record.objectType === 'fork-resolution') {
-    return bindDescriptor(SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1['fork-resolution'], record);
-  }
-  return fail('system-record-schema', 'signed envelope object type is unsupported');
+  const descriptor = typeof record.objectType === 'string'
+    ? SIGNABLE_SYSTEM_RECORD_DESCRIPTOR_BY_OBJECT_TYPE_V1.get(record.objectType)
+    : undefined;
+  return descriptor?.bind(record)
+    ?? fail('system-record-schema', 'signed envelope object type is unsupported');
 }
 
 export function signableSystemRecordStaticPolicyV1(
   kind: SignableSystemRecordKindV1,
 ): SignableSystemRecordStaticPolicyV1 {
-  const descriptor = kind === 'head'
-    ? SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1['agent-profile-head']
-    : kind === 'transition'
-      ? SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1['authority-transition']
-      : SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1['fork-resolution'];
+  const descriptor = SIGNABLE_SYSTEM_RECORD_DESCRIPTOR_BY_KIND_V1.get(kind)
+    ?? fail('system-record-schema', 'signable object kind is unsupported');
   return Object.freeze({
     kind: descriptor.kind,
     objectKind: descriptor.objectKind,
@@ -166,13 +175,19 @@ export function signableSystemRecordStaticPolicyV1(
 }
 
 function defineDescriptor<T extends SignableSystemRecordObjectV1>(
-  descriptor: SignableSystemRecordDescriptorV1<T>,
-): SignableSystemRecordDescriptorV1<T> {
-  return Object.freeze(descriptor);
+  definition: SignableSystemRecordDescriptorDefinitionV1<T>,
+): SignableSystemRecordDescriptorV1 {
+  return Object.freeze({
+    kind: definition.kind,
+    objectType: definition.objectType,
+    objectKind: definition.objectKind,
+    maxJsonDepth: definition.maxJsonDepth,
+    bind: (value: unknown) => bindDescriptor(definition, value),
+  });
 }
 
 function bindDescriptor<T extends SignableSystemRecordObjectV1>(
-  descriptor: SignableSystemRecordDescriptorV1<T>,
+  descriptor: SignableSystemRecordDescriptorDefinitionV1<T>,
   value: unknown,
 ): BoundSignableSystemRecordPolicyV1 {
   const object = descriptor.validate(value);
@@ -193,6 +208,20 @@ function bindDescriptor<T extends SignableSystemRecordObjectV1>(
       role: SystemRecordSignatureRoleV1,
     ) => rolePolicy(rolePolicies, role, object.objectType).signatureMessageTuple(objectDigest),
   });
+}
+
+function indexSignableDescriptorsV1<K extends string>(
+  keyOf: (descriptor: SignableSystemRecordDescriptorV1) => K,
+): ReadonlyMap<K, SignableSystemRecordDescriptorV1> {
+  const index = new Map<K, SignableSystemRecordDescriptorV1>();
+  for (const descriptor of Object.values(SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1)) {
+    const key = keyOf(descriptor);
+    if (index.has(key)) {
+      fail('system-record-schema', `duplicate signable descriptor key ${key}`);
+    }
+    index.set(key, descriptor);
+  }
+  return index;
 }
 
 function defineRolePolicy(
