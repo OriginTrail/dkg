@@ -2,12 +2,10 @@ import { snapshotExactDataRecord } from './sync-wire-objects.js';
 import { parseCanonicalDecimalU64, type Digest32V1 } from './sync-wire-scalars.js';
 import {
   copyBoundedSystemRecordBytesV1,
-  digestSystemRecordBytesV1,
   failSystemRecordObjectV1 as fail,
 } from './system-record-codec-primitives-v1.js';
 import {
   SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX,
-  SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_CLOSURE_BYTES,
   SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
   SYSTEM_RECORD_MAX_CONFLICT_DIGESTS,
@@ -31,25 +29,19 @@ import type {
   AgentProfileHeadObjectV1,
 } from './system-record-agent-profile-head-codec-v1-internal.js';
 import { digest } from './system-record-agent-profile-primitives-v1-internal.js';
-import {
-  computeOwnedSubjectTableDigestV1,
-  parseCanonicalOwnedSubjectTableObjectV1,
-} from './system-record-owned-subject-codecs-v1-internal.js';
 import type { AgentProfileAppliedTransitionV1 } from './system-record-authority-types-v1-internal.js';
 import {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAuthorityTransitionV1,
   isAgentProfileHeadBoundToAcceptedTransitionV1,
   isDirectResolvingSuccessorV1,
-  isIssuedTooFarInFuture,
   isSafeNow,
   isTombstoneBoundToPredecessorV1,
 } from './system-record-authority-verification-v1-internal.js';
 import {
-  parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
-  parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
-  parseCanonicalSignedAgentProfileHeadEnvelopeV1,
-} from './system-record-signatures-v1-internal.js';
+  interpretClosureObjectV1,
+  type ClosureVisitEffectsV1,
+} from './system-record-verification-closure-visitors-v1-internal.js';
 
 const MINT_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARY_V1 = Symbol(
   'mint-agent-profile-verified-authority-summary-v1',
@@ -284,160 +276,39 @@ async function visitClosureObjectV1(
   references: ClosureReferenceV1[],
   execution: ClosureExecutionV1,
 ): Promise<void> {
-  const objectKind = context.objectKind;
-  const objectDigest = context.digest;
-  const add = (
-    referencedKind: SystemRecordObjectKindV1,
-    referencedDigest: Digest32V1,
-    purpose: ClosurePurposeV1,
-    rootSubject?: string,
-    referencedByHeadDigest?: Digest32V1,
-  ) => {
+  const effects: ClosureVisitEffectsV1 = await interpretClosureObjectV1(
+    Object.freeze({
+      currentHeadDigest: state.currentHeadDigest,
+      parsedHeads: state.parsedHeads,
+    }),
+    context,
+    canonicalBytes,
+    execution,
+  );
+  for (const reference of effects.references) {
     enqueueClosureReferenceV1(
       state,
-      referencedKind,
-      referencedDigest,
-      purpose,
-      rootSubject,
-      referencedByHeadDigest,
+      reference.objectKind,
+      reference.digest,
+      reference.purpose,
+      reference.rootSubject,
+      reference.referencedByHeadDigest,
     );
-    references.push(Object.freeze({ objectKind: referencedKind, digest: referencedDigest }));
-  };
-
-  if (objectKind === 'agent-profile-head') {
-    const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(canonicalBytes);
-    if (
-      envelope.objectDigest !== objectDigest ||
-      (await execution.verifyAuthorityEnvelope(envelope)) !== true
-    ) {
-      fail('system-record-closure', 'head authority verification failed');
-    }
-    const head = envelope.object;
-    if (isIssuedTooFarInFuture(head.issuedAt, execution.nowMs)) {
-      fail('system-record-closure', 'head issuedAt exceeds the future clock-skew bound');
-    }
-    state.parsedHeads.set(objectDigest, head);
-    state.rootClaims.add(head.rootSubject);
-    if (head.acceptedTransitionDigest !== undefined) {
-      add(
-        'authority-transition',
-        head.acceptedTransitionDigest,
-        'history',
-        undefined,
-        objectDigest,
-      );
-    }
-    if (
-      objectDigest === state.currentHeadDigest &&
-      head.forkResolutionDigest !== undefined
-    ) {
-      add('fork-resolution', head.forkResolutionDigest, 'history', undefined, objectDigest);
-    }
-    if (context.purpose === 'current' && head.state === 'active') {
-      add('profile-bundle', head.bundleDigest, 'current');
-    }
-    if (head.state === 'tombstone') {
-      add(
-        'agent-profile-head',
-        head.previousHeadDigest,
-        context.purpose === 'current' ? 'deletion-predecessor' : 'tombstone-predecessor',
-      );
-    }
-    if (
-      context.purpose === 'deletion-predecessor' ||
-      context.purpose === 'tombstone-predecessor'
-    ) {
-      if (head.state !== 'active') {
-        fail('system-record-closure', 'tombstone predecessor must be active');
-      }
-      if (context.purpose === 'deletion-predecessor') {
-        add('owned-subject-table', head.ownedSubjectTableDigest, 'history', head.rootSubject);
-      }
-    }
-    return;
+    references.push(Object.freeze({
+      objectKind: reference.objectKind,
+      digest: reference.digest,
+    }));
   }
-
-  if (objectKind === 'authority-transition') {
-    const envelope = parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1(canonicalBytes);
-    if (
-      envelope.objectDigest !== objectDigest ||
-      (await execution.verifyAuthorityEnvelope(envelope)) !== true
-    ) {
-      fail('system-record-closure', 'authority-transition verification failed');
-    }
-    state.parsedTransitions.set(objectDigest, envelope.object);
-    if (context.referencedByHeadDigest !== undefined) {
-      const referencingHead = state.parsedHeads.get(context.referencedByHeadDigest);
-      if (
-        referencingHead === undefined ||
-        !isAgentProfileHeadBoundToAcceptedTransitionV1(referencingHead, envelope.object)
-      ) {
-        fail('system-record-closure', 'head does not bind its accepted authority transition');
-      }
-    }
-    state.rootClaims.add(envelope.object.nextRoot);
-    add('agent-profile-head', envelope.object.priorHeadDigest, 'history');
-    return;
+  if (effects.head !== undefined) {
+    state.parsedHeads.set(effects.head.digest, effects.head.object);
   }
-
-  if (objectKind === 'fork-resolution') {
-    const envelope = parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1(canonicalBytes);
-    if (
-      envelope.objectDigest !== objectDigest ||
-      (await execution.verifyAuthorityEnvelope(envelope)) !== true
-    ) {
-      fail('system-record-closure', 'fork-resolution verification failed');
-    }
-    state.parsedResolutions.push(envelope.object);
-    if (isIssuedTooFarInFuture(envelope.object.issuedAt, execution.nowMs)) {
-      fail('system-record-closure', 'fork resolution issuedAt exceeds the future clock-skew bound');
-    }
-    if (context.referencedByHeadDigest !== undefined) {
-      const referencingHead = state.parsedHeads.get(context.referencedByHeadDigest);
-      if (
-        referencingHead === undefined ||
-        !isDirectResolvingSuccessorV1(referencingHead, envelope.object)
-      ) {
-        fail(
-          'system-record-closure',
-          'current head is not the direct successor of its fork resolution',
-        );
-      }
-    }
-    for (const headDigest of envelope.object.evidenceHeadDigests) {
-      add('agent-profile-head', headDigest, 'fork-evidence');
-    }
-    if (envelope.object.forkBaseHeadDigest !== undefined) {
-      add('agent-profile-head', envelope.object.forkBaseHeadDigest, 'history');
-    }
-    return;
+  if (effects.transition !== undefined) {
+    state.parsedTransitions.set(effects.transition.digest, effects.transition.object);
   }
-
-  if (objectKind === 'profile-bundle') {
-    const current = state.parsedHeads.get(state.currentHeadDigest);
-    if (
-      current?.state !== 'active' ||
-      digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, canonicalBytes) !==
-        objectDigest ||
-      (await execution.verifyCurrentBundle(current, canonicalBytes.slice())) !== true
-    ) {
-      fail('system-record-closure', 'current profile bundle verification failed');
-    }
-    return;
+  if (effects.resolution !== undefined) {
+    state.parsedResolutions.push(effects.resolution);
   }
-
-  if (objectKind === 'owned-subject-table') {
-    if (context.rootSubject === undefined) {
-      fail('system-record-closure', 'subject table lacks root context');
-    }
-    const table = parseCanonicalOwnedSubjectTableObjectV1(context.rootSubject, canonicalBytes);
-    if (computeOwnedSubjectTableDigestV1(context.rootSubject, table) !== objectDigest) {
-      fail('system-record-closure', 'owned-subject table digest mismatch');
-    }
-    return;
-  }
-
-  fail('system-record-closure', `${objectKind} is not part of an advertised row closure`);
+  for (const rootClaim of effects.rootClaims) state.rootClaims.add(rootClaim);
 }
 
 async function collectVerificationClosureV1(

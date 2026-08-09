@@ -224,6 +224,21 @@ interface CacheAccountingTotalsV1 {
   readonly activationBundleBytes: number;
 }
 
+interface CacheAccountingReferenceContributionV1 {
+  readonly entries: readonly Readonly<{
+    reference: SystemRecordCacheReferenceV1;
+    facts: SystemRecordCacheReferenceFactsV1;
+  }>[];
+  readonly referencedBytes: number;
+}
+
+interface CacheAccountingRowContributionV1 {
+  readonly closure: CacheAccountingReferenceContributionV1;
+  readonly sidecar?: CacheAccountingReferenceContributionV1;
+  readonly metadataBytes: number;
+  readonly sidecarMetadataBytes: number;
+}
+
 function normalizeCachePreflightInputV1(
   input: SystemRecordCachePreflightInputV1,
 ): NormalizedCachePreflightInputV1 {
@@ -278,9 +293,8 @@ function createCacheAccountingAccumulatorV1(): CacheAccountingAccumulatorV1 {
 }
 
 function collectCacheAccountingRowV1(
-  accumulator: CacheAccountingAccumulatorV1,
   row: SystemRecordCacheRowAccountingV1,
-): void {
+): CacheAccountingRowContributionV1 {
   const hasSidecar = hasOwnDataProperty(row, 'sidecar');
   const hasSidecarMetadata = hasOwnDataProperty(row, 'sidecarMetadata');
   const exactRow = snapshotExactDataRecord(
@@ -317,39 +331,13 @@ function collectCacheAccountingRowV1(
   const rowSidecarMetadataBytes = hasSidecarMetadata
     ? requireCacheMetadataBytes(exactRow.sidecarMetadata, 'cache row sidecar metadata')
     : 0;
-  const rowClosureBytes = accountCacheReferencesV1(
-    accumulator,
-    closure,
-    'closure',
-    accumulator.closurePhysical,
-  );
-  if (rowClosureBytes > SYSTEM_RECORD_MAX_CLOSURE_BYTES) {
+  const closureContribution = collectCacheReferenceContributionV1(closure, 'closure');
+  if (closureContribution.referencedBytes > SYSTEM_RECORD_MAX_CLOSURE_BYTES) {
     fail('system-record-closure', 'row closure exceeds its byte bound');
   }
-  accumulator.closureReferences += closure.length;
-  accumulator.closureReferencedBytes += rowClosureBytes;
-  if (
-    !Number.isSafeInteger(accumulator.closureReferences) ||
-    !Number.isSafeInteger(accumulator.closureReferencedBytes)
-  ) {
-    fail('system-record-closure', 'aggregate closure accounting overflow');
-  }
-  for (const reference of closure) {
-    if (reference.objectKind === 'profile-bundle') {
-      accumulator.bundlePhysical.set(
-        reference.cacheDigest,
-        requireCacheReferenceFacts(reference, 'closure'),
-      );
-    }
-  }
+  let sidecarContribution: CacheAccountingReferenceContributionV1 | undefined;
   if (sidecar !== undefined) {
-    accumulator.sidecars += 1;
-    const rowSidecarBytes = accountCacheReferencesV1(
-      accumulator,
-      sidecar,
-      'sidecar',
-      accumulator.sidecarPhysical,
-    );
+    sidecarContribution = collectCacheReferenceContributionV1(sidecar, 'sidecar');
     if (
       sidecar.filter((reference) => reference.objectKind === 'conflict-evidence').length !== 1 ||
       sidecar.some(
@@ -365,33 +353,28 @@ function collectCacheAccountingRowV1(
         'row sidecar must contain one evidence object and only signed controls',
       );
     }
-    if (rowSidecarBytes > SYSTEM_RECORD_MAX_SIDECAR_BYTES) {
+    if (sidecarContribution.referencedBytes > SYSTEM_RECORD_MAX_SIDECAR_BYTES) {
       fail('system-record-closure', 'row sidecar exceeds its byte bound');
     }
-    accumulator.sidecarReferences += sidecar.length;
-    accumulator.sidecarReferencedBytes += rowSidecarBytes;
-    if (
-      !Number.isSafeInteger(accumulator.sidecarReferences) ||
-      !Number.isSafeInteger(accumulator.sidecarReferencedBytes)
-    ) {
-      fail('system-record-closure', 'aggregate sidecar accounting overflow');
-    }
   }
-  accumulator.metadataBytes += rowMetadataBytes + rowSidecarMetadataBytes;
-  accumulator.sidecarMetadataBytes += rowSidecarMetadataBytes;
-  if (!Number.isSafeInteger(accumulator.metadataBytes)) {
-    fail('system-record-closure', 'cache metadata accounting overflow');
-  }
+  return Object.freeze({
+    closure: closureContribution,
+    ...(sidecarContribution === undefined ? {} : { sidecar: sidecarContribution }),
+    metadataBytes: rowMetadataBytes,
+    sidecarMetadataBytes: rowSidecarMetadataBytes,
+  });
 }
 
-function accountCacheReferencesV1(
-  accumulator: CacheAccountingAccumulatorV1,
+function collectCacheReferenceContributionV1(
   references: readonly SystemRecordCacheReferenceV1[],
   label: string,
-  category?: Map<Digest32V1, SystemRecordCacheReferenceFactsV1>,
-): number {
+): CacheAccountingReferenceContributionV1 {
   let total = 0;
   const logical = new Set<string>();
+  const entries: Array<Readonly<{
+    reference: SystemRecordCacheReferenceV1;
+    facts: SystemRecordCacheReferenceFactsV1;
+  }>> = [];
   for (const reference of references) {
     const facts = requireCacheReferenceFacts(reference, label);
     digest(reference.digest, `${label} digest`);
@@ -401,14 +384,69 @@ function accountCacheReferencesV1(
       fail('system-record-closure', `${label} contains a duplicate semantic reference`);
     }
     logical.add(logicalKey);
-    accountCachePhysicalReferenceV1(accumulator, reference, facts);
-    category?.set(reference.cacheDigest, facts);
+    entries.push(Object.freeze({ reference, facts }));
     total += facts.byteLength;
     if (!Number.isSafeInteger(total)) {
       fail('system-record-closure', `${label} byte accounting overflow`);
     }
   }
-  return total;
+  return Object.freeze({ entries: Object.freeze(entries), referencedBytes: total });
+}
+
+function mergeCacheAccountingRowV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  contribution: CacheAccountingRowContributionV1,
+): void {
+  mergeCacheReferenceContributionV1(
+    accumulator,
+    contribution.closure,
+    accumulator.closurePhysical,
+  );
+  for (const { reference, facts } of contribution.closure.entries) {
+    if (reference.objectKind === 'profile-bundle') {
+      accumulator.bundlePhysical.set(reference.cacheDigest, facts);
+    }
+  }
+  accumulator.closureReferences += contribution.closure.entries.length;
+  accumulator.closureReferencedBytes += contribution.closure.referencedBytes;
+  if (contribution.sidecar !== undefined) {
+    mergeCacheReferenceContributionV1(
+      accumulator,
+      contribution.sidecar,
+      accumulator.sidecarPhysical,
+    );
+    accumulator.sidecars += 1;
+    accumulator.sidecarReferences += contribution.sidecar.entries.length;
+    accumulator.sidecarReferencedBytes += contribution.sidecar.referencedBytes;
+  }
+  accumulator.metadataBytes += contribution.metadataBytes + contribution.sidecarMetadataBytes;
+  accumulator.sidecarMetadataBytes += contribution.sidecarMetadataBytes;
+  if (
+    !Number.isSafeInteger(accumulator.closureReferences) ||
+    !Number.isSafeInteger(accumulator.closureReferencedBytes)
+  ) {
+    fail('system-record-closure', 'aggregate closure accounting overflow');
+  }
+  if (
+    !Number.isSafeInteger(accumulator.sidecarReferences) ||
+    !Number.isSafeInteger(accumulator.sidecarReferencedBytes)
+  ) {
+    fail('system-record-closure', 'aggregate sidecar accounting overflow');
+  }
+  if (!Number.isSafeInteger(accumulator.metadataBytes)) {
+    fail('system-record-closure', 'cache metadata accounting overflow');
+  }
+}
+
+function mergeCacheReferenceContributionV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  contribution: CacheAccountingReferenceContributionV1,
+  category?: Map<Digest32V1, SystemRecordCacheReferenceFactsV1>,
+): void {
+  for (const { reference, facts } of contribution.entries) {
+    accountCachePhysicalReferenceV1(accumulator, reference, facts);
+    category?.set(reference.cacheDigest, facts);
+  }
 }
 
 function accountCachePhysicalReferenceV1(
@@ -527,13 +565,12 @@ export function preflightSystemRecordCacheAccountingV1(
   const normalized = normalizeCachePreflightInputV1(input);
   const accumulator = createCacheAccountingAccumulatorV1();
   for (const row of normalized.rows) {
-    collectCacheAccountingRowV1(accumulator, row);
+    mergeCacheAccountingRowV1(accumulator, collectCacheAccountingRowV1(row));
     assertIncrementalCacheAccountingBoundsV1(accumulator);
   }
-  accountCacheReferencesV1(
+  mergeCacheReferenceContributionV1(
     accumulator,
-    normalized.inventoryLeaves,
-    'activation inventory',
+    collectCacheReferenceContributionV1(normalized.inventoryLeaves, 'activation inventory'),
   );
   if (
     normalized.inventoryLeaves.some((reference) => reference.objectKind !== 'inventory-leaf')
