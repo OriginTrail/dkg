@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
+  SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS,
   buildSystemRecordInventoryTreeV1,
   buildSystemRecordProviderSignatureMessageV1,
   computeSystemRecordRootDescriptorDigestV1,
@@ -169,6 +170,43 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(apply).toHaveBeenCalledTimes(9);
     expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 3 });
     expect(reconciler.stats()).toMatchObject({ processedRows: 9, pendingRows: 0 });
+  });
+
+  it('enforces the continuation wall-clock cap across admitted slices', async () => {
+    const fixture = await publishedFixture();
+    let nowMs = 0;
+    const admission = admissionGate(false, () => nowMs);
+    const apply = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '5',
+      appliedStateDigest: `0x${'ee'.repeat(32)}`,
+    }));
+    const prepareActive = vi.fn(async () => Object.freeze({ apply }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    nowMs = SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS;
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'continuation-limit',
+      processedRows: 0,
+      pendingRows: 1,
+    });
+    expect(prepareActive).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
   });
 
   it('probes an ambiguous root kind across separate admitted slices', async () => {
@@ -494,6 +532,42 @@ describe('agent-profile System Record reconciler V1', () => {
       active: 0,
       queued: 0,
     });
+  });
+
+  it('rejects an admitted context whose original deadline changes', async () => {
+    const fixture = await publishedFixture();
+    const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
+    const release = vi.fn();
+    const loadInventoryObject = vi.fn(fixture.loadInventoryObject);
+    const apply = vi.fn();
+    const prepareActive = vi.fn(async () => Object.freeze({ apply }));
+    let inspections = 0;
+    const admission: AgentProfileReconcileAdmissionV1 = Object.freeze({
+      tryAcquire: () => Object.freeze({ admittedContext: context, release }),
+      inspectAdmittedContext: () => {
+        inspections += 1;
+        return inspections === 1
+          ? Object.freeze({ nowMs: 1_000, admittedDeadlineMs: 4_000 })
+          : Object.freeze({ nowMs: 1_200, admittedDeadlineMs: 4_200 });
+      },
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject,
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal))
+      .rejects.toThrow(/clock failed/);
+    expect(inspections).toBe(2);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(loadInventoryObject).not.toHaveBeenCalled();
+    expect(prepareActive).not.toHaveBeenCalled();
+    expect(apply).not.toHaveBeenCalled();
+    expect(reconciler.stats()).toMatchObject({ admittedSlices: 1, active: 0, queued: 0 });
   });
 
   it('accounts exact wire for malformed and aborted inventory responses', async () => {

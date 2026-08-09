@@ -11,7 +11,6 @@ import {
   SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
   SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
-  SystemRecordInventoryTraversalErrorV1,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
   createSystemRecordInventoryTraversalV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
@@ -121,10 +120,16 @@ export interface AgentProfileReconcilerV1 {
 
 interface AgentProfileAdmittedSliceRuntimeV1 {
   readonly admittedContext: AgentProfileAdmittedSliceContextV1;
-  readonly callerSignal: AbortSignal;
+  readonly admittedAtMs: number;
   readonly signal: AbortSignal;
   readonly deadlineMs: number;
   readonly nowMs: () => number;
+  stop(
+    phase: AgentProfileReconcileSliceResultV1['phase'],
+    outcomes: readonly SystemRecordApplyOutcomeV1[],
+    requests?: number,
+    wireBytes?: number,
+  ): AgentProfileReconcileSliceResultV1;
 }
 
 /**
@@ -178,11 +183,21 @@ export async function createAgentProfileReconcilerV1(
     if (closed) return result('closed', currentPhase(), 0, 0, []);
     if (completed) return result('complete', 'complete', 0, 0, []);
     if (active) throw new Error('agent-profile reconciler already has an active slice');
-    return runAdmittedSlice(signal);
+    return withAdmittedSlice(signal, async (runtime) => {
+      if (continuationLimitReached(runtime.admittedAtMs)) {
+        return result('blocked', currentPhase(), 0, 0, [], 'continuation-limit');
+      }
+      return pendingRows.length > 0
+        ? applyPendingRows(runtime)
+        : advanceInventory(runtime);
+    });
   }
 
-  async function runAdmittedSlice(
+  async function withAdmittedSlice(
     callerSignal: AbortSignal,
+    run: (
+      runtime: AgentProfileAdmittedSliceRuntimeV1,
+    ) => Promise<AgentProfileReconcileSliceResultV1>,
   ): Promise<AgentProfileReconcileSliceResultV1> {
     const permit = tryAcquire();
     if (permit === null) return result('deferred', currentPhase(), 0, 0, []);
@@ -227,19 +242,23 @@ export async function createAgentProfileReconcilerV1(
       }
       const runtime: AgentProfileAdmittedSliceRuntimeV1 = Object.freeze({
         admittedContext,
-        callerSignal,
+        admittedAtMs: initial.nowMs,
         signal: controller.signal,
         deadlineMs,
         nowMs,
+        stop: (
+          phase: AgentProfileReconcileSliceResultV1['phase'],
+          outcomes: readonly SystemRecordApplyOutcomeV1[],
+          requests = 0,
+          wireBytes = 0,
+        ): AgentProfileReconcileSliceResultV1 => {
+          if (closed) return result('closed', phase, requests, wireBytes, outcomes);
+          callerSignal.throwIfAborted();
+          return result('paused', phase, requests, wireBytes, outcomes);
+        },
       });
-      if (runtime.signal.aborted) return stoppedSliceResult(runtime, currentPhase(), []);
-      if (continuationLimitReached(initial.nowMs)) {
-        return result('blocked', currentPhase(), 0, 0, [], 'continuation-limit');
-      }
-      if (pendingRows.length > 0) {
-        return await applyPendingRows(runtime);
-      }
-      return await advanceInventory(runtime);
+      if (runtime.signal.aborted) return runtime.stop(currentPhase(), []);
+      return await run(runtime);
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       if (listening && onAbort !== undefined) {
@@ -255,62 +274,56 @@ export async function createAgentProfileReconcilerV1(
     runtime: AgentProfileAdmittedSliceRuntimeV1,
   ): Promise<AgentProfileReconcileSliceResultV1> {
     advances += 1;
-    let slice: Awaited<ReturnType<typeof traversal.advance>>;
-    try {
-      slice = await traversal.advance(
-        async (objectDigest, expectedKind, loadSignal, path) => {
-          const loaded = await loadInventoryObject(
-            Object.freeze({
-              rootDescriptorDigest: rootEnvelope.objectDigest,
-              objectDigest,
-              expectedKind,
-              path,
-            }),
-            loadSignal ?? runtime.signal,
-          );
-          if (loaded.outcome === 'ok' && loaded.objectKind !== expectedKind) {
-            return Object.freeze({
-              outcome: 'rejected' as const,
-              wireBytes: loaded.wireBytes,
-              rejection: 'invalid-response' as const,
-            });
-          }
-          return loaded;
-        },
-        {
-          signal: runtime.signal,
-          maxRequests: 1,
-          maxWireBytes: SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
-          deadlineMs: runtime.deadlineMs,
-          nowMs: runtime.nowMs,
-          emitRows: true,
-        },
-      );
-    } catch (error) {
-      if (!(error instanceof SystemRecordInventoryTraversalErrorV1)) throw error;
-      inventoryRequests += error.requests;
-      inventoryWireBytes += error.wireBytes;
-      if (error.reason === 'invalid-slice') throw error;
-      if (error.reason === 'aborted' || error.reason === 'deadline') {
-        return stoppedSliceResult(
-          runtime,
+    const slice = await traversal.advance(
+      async (objectDigest, expectedKind, loadSignal, path) => {
+        const loaded = await loadInventoryObject(
+          Object.freeze({
+            rootDescriptorDigest: rootEnvelope.objectDigest,
+            objectDigest,
+            expectedKind,
+            path,
+          }),
+          loadSignal ?? runtime.signal,
+        );
+        if (loaded.outcome === 'ok' && loaded.objectKind !== expectedKind) {
+          return Object.freeze({
+            outcome: 'rejected' as const,
+            wireBytes: loaded.wireBytes,
+            rejection: 'invalid-response' as const,
+          });
+        }
+        return loaded;
+      },
+      {
+        signal: runtime.signal,
+        maxRequests: 1,
+        maxWireBytes: SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
+        deadlineMs: runtime.deadlineMs,
+        nowMs: runtime.nowMs,
+        emitRows: true,
+      },
+    );
+    inventoryRequests += slice.requests;
+    inventoryWireBytes += slice.wireBytes;
+    if (slice.status === 'failed') {
+      if (slice.failure.reason === 'invalid-slice') throw new Error(slice.failure.message);
+      if (slice.failure.reason === 'aborted' || slice.failure.reason === 'deadline') {
+        return runtime.stop(
           currentPhase(),
           [],
-          error.requests,
-          error.wireBytes,
+          slice.requests,
+          slice.wireBytes,
         );
       }
       return result(
         'blocked',
         'inventory',
-        error.requests,
-        error.wireBytes,
+        slice.requests,
+        slice.wireBytes,
         [],
-        inventoryFailureBlockReason(error.reason),
+        inventoryFailureBlockReason(slice.failure.reason),
       );
     }
-    inventoryRequests += slice.requests;
-    inventoryWireBytes += slice.wireBytes;
     if (slice.validatedLeaves > SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES) {
       return result(
         'blocked',
@@ -343,18 +356,6 @@ export async function createAgentProfileReconcilerV1(
     return result('paused', currentPhase(), slice.requests, slice.wireBytes, []);
   }
 
-  function stoppedSliceResult(
-    runtime: AgentProfileAdmittedSliceRuntimeV1,
-    phase: AgentProfileReconcileSliceResultV1['phase'],
-    outcomes: readonly SystemRecordApplyOutcomeV1[],
-    requests = 0,
-    wireBytes = 0,
-  ): AgentProfileReconcileSliceResultV1 {
-    if (closed) return result('closed', phase, requests, wireBytes, outcomes);
-    runtime.callerSignal.throwIfAborted();
-    return result('paused', phase, requests, wireBytes, outcomes);
-  }
-
   async function applyPendingRows(
     runtime: AgentProfileAdmittedSliceRuntimeV1,
   ): Promise<AgentProfileReconcileSliceResultV1> {
@@ -376,21 +377,21 @@ export async function createAgentProfileReconcilerV1(
           runtime.signal,
         );
         if (preparation.status === 'aborted') {
-          return stoppedSliceResult(runtime, 'records', outcomes);
+          return runtime.stop('records', outcomes);
         }
         if (
           runtime.signal.aborted
           || runtime.deadlineMs - readNow(runtime.nowMs)
             < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
         ) {
-          return stoppedSliceResult(runtime, 'records', outcomes);
+          return runtime.stop('records', outcomes);
         }
         // Do not race this promise. Dispatch may already have reached the atomic
         // materializer and its returned promise is the physical settlement boundary.
         outcome = await preparation.prepared.apply(runtime.admittedContext, runtime.signal);
       } catch (error) {
         if (outcomes.length > 0 && runtime.signal.aborted) {
-          return stoppedSliceResult(runtime, 'records', outcomes);
+          return runtime.stop('records', outcomes);
         }
         throw error;
       }
@@ -407,7 +408,7 @@ export async function createAgentProfileReconcilerV1(
       return result('complete', 'complete', 0, 0, outcomes);
     }
     if (runtime.signal.aborted) {
-      return stoppedSliceResult(runtime, currentPhase(), outcomes);
+      return runtime.stop(currentPhase(), outcomes);
     }
     return result('paused', currentPhase(), 0, 0, outcomes);
   }

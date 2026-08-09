@@ -6,7 +6,6 @@ import {
   assertSystemRecordInventoryCowUpdateBoundV1,
   buildSystemRecordInventoryTreeV1,
   createSystemRecordInventoryTraversalV1,
-  SystemRecordInventoryTraversalErrorV1,
   chooseSystemRecordByteAwareSplitIndexV1,
   chooseSystemRecordRebalanceV1,
   canonicalizeSystemRecordInventoryInternalObjectV1,
@@ -259,7 +258,6 @@ describe('system-record immutable B+tree objects', () => {
     const rootLoaded = loadedInventoryObject(
       snapshot.objects.get(snapshot.descriptor.treeRootDigest)!,
     );
-    let abortedError: unknown;
     const abortedAdvance = aborted.advance(() => {
       requested.resolve();
       return delivery.promise;
@@ -275,40 +273,29 @@ describe('system-record immutable B+tree objects', () => {
     await Promise.resolve();
     await Promise.resolve();
     controller.abort(new Error('aborted-after-load'));
-    try {
-      await abortedAdvance;
-    } catch (error) {
-      abortedError = error;
-    }
-    expect(abortedError).toBeInstanceOf(Error);
-    expect(abortedError).toBeInstanceOf(SystemRecordInventoryTraversalErrorV1);
-    expect((abortedError as Error).message).toMatch(/aborted-after-load/);
-    expect(abortedError).toMatchObject({
-      reason: 'aborted',
+    await expect(abortedAdvance).resolves.toMatchObject({
+      status: 'failed',
       requests: 1,
       wireBytes: rootLoaded.wireBytes,
+      failure: {
+        reason: 'aborted',
+        message: expect.stringMatching(/aborted-after-load/),
+      },
     });
 
     const malformed = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
-    let malformedError: unknown;
-    try {
-      await malformed.advance(async () => ({
-        ...rootLoaded,
-        canonicalBytes: Uint8Array.from([0, ...rootLoaded.canonicalBytes.subarray(1)]),
-      }), {
-        maxRequests: 1,
-        maxWireBytes: 2 * 1024 * 1024,
-        deadlineMs: Date.now() + 3_000,
-      });
-    } catch (error) {
-      malformedError = error;
-    }
-    expect(malformedError).toBeInstanceOf(Error);
-    expect(malformedError).toBeInstanceOf(SystemRecordInventoryTraversalErrorV1);
-    expect(malformedError).toMatchObject({
-      reason: 'invalid-response',
+    await expect(malformed.advance(async () => ({
+      ...rootLoaded,
+      canonicalBytes: Uint8Array.from([0, ...rootLoaded.canonicalBytes.subarray(1)]),
+    }), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).resolves.toMatchObject({
+      status: 'failed',
       requests: 1,
       wireBytes: rootLoaded.wireBytes,
+      failure: { reason: 'invalid-response' },
     });
   });
 
@@ -340,7 +327,10 @@ describe('system-record immutable B+tree objects', () => {
       deadlineSlice.deadlineMs = 3;
       const stored = snapshot.objects.get(digest)!;
       return loadedInventoryObject(stored);
-    }, deadlineSlice)).rejects.toThrow(/deadline expired during load/);
+    }, deadlineSlice)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'deadline', message: expect.stringMatching(/deadline expired/) },
+    });
 
     const abortTraversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     const admitted = new AbortController();
@@ -356,7 +346,10 @@ describe('system-record immutable B+tree objects', () => {
       abortSlice.signal = replacement.signal;
       const stored = snapshot.objects.get(digest)!;
       return loadedInventoryObject(stored);
-    }, abortSlice)).rejects.toThrow(/admitted-signal-aborted/);
+    }, abortSlice)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'aborted', message: expect.stringMatching(/admitted-signal-aborted/) },
+    });
   });
 
   it('latches traversal admission before invoking a reentrant clock', async () => {
@@ -404,7 +397,10 @@ describe('system-record immutable B+tree objects', () => {
       maxWireBytes: 2 * 1024 * 1024,
       deadlineMs: SYSTEM_RECORD_SLICE_TIMEOUT_MS + 1,
       nowMs: () => 0,
-    })).rejects.toThrow(/slice budget/);
+    })).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-slice', message: expect.stringMatching(/slice budget/) },
+    });
     expect(loads).toBe(0);
 
     const boundary = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
@@ -433,7 +429,10 @@ describe('system-record immutable B+tree objects', () => {
         maxWireBytes: 2 * 1024 * 1024,
         deadlineMs: Date.now() + 20,
       },
-    )).rejects.toThrow(/deadline expired during load/);
+    )).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'deadline', message: expect.stringMatching(/deadline expired/) },
+    });
 
     const recovered = await traversal.advance(
       async () => loadedInventoryObject({
@@ -473,7 +472,10 @@ describe('system-record immutable B+tree objects', () => {
         if (clockReads === 3) controller.abort(new Error('test abort'));
         return 0;
       },
-    })).rejects.toThrow(/test abort/);
+    })).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'aborted', message: expect.stringMatching(/test abort/) },
+    });
     expect(loaderCalls).toBe(0);
   });
 
@@ -491,13 +493,22 @@ describe('system-record immutable B+tree objects', () => {
     const invalidOutcome = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(invalidOutcome.advance(async () => ({
       outcome: 'unexpected', wireBytes: 128,
-    } as never), slice)).rejects.toThrow(/invalid outcome/);
+    } as never), slice)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-response', message: expect.stringMatching(/invalid outcome/) },
+    });
 
     const extraField = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(extraField.advance(async (digest) => ({
       ...loadedInventoryObject(snapshot.objects.get(digest)!),
       unexpected: true,
-    }), slice)).rejects.toThrow(/unknown or missing fields/);
+    }), slice)).resolves.toMatchObject({
+      status: 'failed',
+      failure: {
+        reason: 'invalid-response',
+        message: expect.stringMatching(/unknown or missing fields/),
+      },
+    });
 
     const accessor = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(accessor.advance(async (digest) => {
@@ -506,7 +517,10 @@ describe('system-record immutable B+tree objects', () => {
         enumerable: true,
         get: () => loaded.canonicalBytes,
       });
-    }, slice)).rejects.toThrow(/data properties/);
+    }, slice)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-response', message: expect.stringMatching(/data properties/) },
+    });
 
     const undercounted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(undercounted.advance(async (digest) => {
@@ -517,7 +531,10 @@ describe('system-record immutable B+tree objects', () => {
         canonicalBytes: stored.canonicalBytes,
         wireBytes: 4 + stored.canonicalBytes.byteLength,
       };
-    }, slice)).rejects.toThrow(/over-cap object/);
+    }, slice)).resolves.toMatchObject({
+      status: 'failed',
+      failure: { reason: 'invalid-response', message: expect.stringMatching(/over-cap object/) },
+    });
 
     const subclassBytes = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(subclassBytes.advance(async (digest) => {
@@ -562,6 +579,39 @@ describe('system-record immutable B+tree objects', () => {
     expect(result).toMatchObject({ status: 'complete', validatedRows: 256 });
     expect(requestedKinds).toEqual([
       'inventory-leaf',
+      'inventory-leaf',
+      'inventory-leaf',
+    ]);
+
+    const missingProbe = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    const probedKinds: string[] = [];
+    const firstProbe = await missingProbe.advance(async (digest, expectedKind) => {
+      probedKinds.push(expectedKind);
+      if (digest === snapshot.descriptor.treeRootDigest && expectedKind === 'inventory-leaf') {
+        return undefined;
+      }
+      return loadedInventoryObject(snapshot.objects.get(digest)!);
+    }, {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    });
+    expect(firstProbe).toMatchObject({ status: 'paused', requests: 1, wireBytes: 0 });
+    let probedResult: Awaited<ReturnType<typeof missingProbe.advance>> = firstProbe;
+    do {
+      probedResult = await missingProbe.advance(async (digest, expectedKind) => {
+        probedKinds.push(expectedKind);
+        return loadedInventoryObject(snapshot.objects.get(digest)!);
+      }, {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 3_000,
+      });
+    } while (probedResult.status === 'paused');
+    expect(probedResult).toMatchObject({ status: 'complete', validatedRows: 256 });
+    expect(probedKinds).toEqual([
+      'inventory-leaf',
+      'inventory-internal',
       'inventory-leaf',
       'inventory-leaf',
     ]);
@@ -1169,6 +1219,9 @@ async function validateTreeArtifacts(
       deadlineMs: 3_000,
       nowMs: () => 0,
     });
+    if (result.status === 'failed') {
+      throw new Error(result.failure.message);
+    }
     if (result.status === 'complete') return result.result!;
   }
 }
