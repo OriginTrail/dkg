@@ -7,6 +7,7 @@ import {
   type CanonicalJsonValue,
 } from './canonical-json.js';
 import {
+  concatSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   type SystemRecordPeerPublicKeyV1,
 } from './system-record-codec-primitives-v1.js';
@@ -38,7 +39,7 @@ export function buildSystemRecordProviderSignatureMessageV1(
     providerPeerId,
     descriptorObjectDigest,
   ];
-  return concatBytes(
+  return concatSystemRecordBytesV1(
     UTF8.encode(SYSTEM_RECORD_SIGNATURE_DOMAINS_V1.provider),
     canonicalizeJsonBytes(tuple),
   );
@@ -71,14 +72,4 @@ export async function verifySignedSystemRecordRootDescriptorEnvelopeV1(
     ),
     keyBytes,
   );
-}
-
-function concatBytes(...values: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(values.reduce((sum, value) => sum + value.byteLength, 0));
-  let offset = 0;
-  for (const value of values) {
-    output.set(value, offset);
-    offset += value.byteLength;
-  }
-  return output;
 }

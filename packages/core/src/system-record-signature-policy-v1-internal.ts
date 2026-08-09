@@ -15,23 +15,14 @@ import {
   type Digest32V1,
 } from './sync-wire-scalars.js';
 import {
-  validateAuthorityTransition,
-  validateForkResolution,
-  type AgentProfileAuthorityTransitionV1,
-  type AgentProfileForkResolutionV1,
   type SystemRecordEip1271EvidenceV1,
   type SystemRecordNoSignatureEvidenceV1,
   type SystemRecordSignatureEntryV1,
   type SystemRecordSignatureRoleV1,
 } from './system-record-agent-profile-control-codecs-v1-internal.js';
 import {
-  validateAgentProfileHeadObjectV1,
-  type AgentProfileHeadObjectV1,
-} from './system-record-agent-profile-head-codec-v1-internal.js';
-import {
   digest,
   numericChainIdForNetworkV1,
-  snapshotSystemRecordDataRecord,
 } from './system-record-agent-profile-primitives-v1-internal.js';
 import {
   concatSystemRecordBytesV1,
@@ -46,6 +37,11 @@ import {
   SYSTEM_RECORD_MAX_EIP1271_SIGNATURE_BYTES,
   SYSTEM_RECORD_SIGNATURE_DOMAINS_V1,
 } from './system-record-limits-v1.js';
+import {
+  bindSignableSystemRecordPolicyV1,
+  type BoundSignableSystemRecordPolicyV1,
+  type SignableSystemRecordObjectV1,
+} from './system-record-signable-object-policy-v1-internal.js';
 
 const UTF8 = new TextEncoder();
 
@@ -56,15 +52,10 @@ const SIGNATURE_ROLE_ORDER: Readonly<Record<SystemRecordSignatureRoleV1, number>
   'current-evm': 3,
 };
 
-type SignableSystemRecordObjectV1 =
-  | AgentProfileHeadObjectV1
-  | AgentProfileAuthorityTransitionV1
-  | AgentProfileForkResolutionV1;
-
 export function validateSystemRecordSignatureEntryV1(
   value: unknown,
   requiredRole: SystemRecordSignatureRoleV1,
-  object: SignableSystemRecordObjectV1,
+  policy: BoundSignableSystemRecordPolicyV1,
 ): SystemRecordSignatureEntryV1 {
   const entry = snapshotExactDataRecord(
     value,
@@ -77,7 +68,7 @@ export function validateSystemRecordSignatureEntryV1(
   const isPeer = requiredRole === 'peer';
   let evidence: SystemRecordSignatureEntryV1['evidence'];
   if (isPeer) {
-    if (entry.suite !== 'ed25519-v1' || entry.signer !== object.peerId) {
+    if (entry.suite !== 'ed25519-v1' || entry.signer !== policy.object.peerId) {
       fail('system-record-signature', 'peer signature suite/signer is invalid');
     }
     evidence = exactNoneEvidence(entry.evidence);
@@ -87,7 +78,7 @@ export function validateSystemRecordSignatureEntryV1(
       'Ed25519 signature',
     );
   } else {
-    const issuer = issuerForRole(object, requiredRole);
+    const issuer = policy.issuerForRole(requiredRole);
     if (entry.signer !== issuer) {
       fail('system-record-signature', `${requiredRole} signer does not match the object authority`);
     }
@@ -95,7 +86,7 @@ export function validateSystemRecordSignatureEntryV1(
       evidence = exactNoneEvidence(entry.evidence);
       assertCanonicalEip191SignatureV1(entry.signature);
     } else if (entry.suite === 'eip1271-current-finalized-v1') {
-      evidence = validateEip1271Evidence(entry.evidence, issuer, object.networkId);
+      evidence = validateEip1271Evidence(entry.evidence, issuer, policy.object.networkId);
       try {
         assertCanonicalHexBytes(
           entry.signature,
@@ -144,50 +135,24 @@ export function buildSystemRecordSignatureMessageV1(
   objectDigest: Digest32V1,
   role: SystemRecordSignatureRoleV1,
 ): Uint8Array {
+  return buildSystemRecordSignatureMessageFromPolicyV1(
+    bindSignableSystemRecordPolicyV1(object),
+    objectDigest,
+    role,
+  );
+}
+
+export function buildSystemRecordSignatureMessageFromPolicyV1(
+  policy: BoundSignableSystemRecordPolicyV1,
+  objectDigest: Digest32V1,
+  role: SystemRecordSignatureRoleV1,
+): Uint8Array {
   digest(objectDigest, 'objectDigest');
-  const validatedObject = validateSignableObject(object);
-  const recordKey: CanonicalJsonValue = [validatedObject.networkId, validatedObject.peerId];
-  let tuple: CanonicalJsonValue;
-  if (validatedObject.objectType === 'agent-profile-head') {
-    if (role !== 'peer' && role !== 'current-evm')
-      fail('system-record-signature', 'head role is invalid');
-    tuple = [
-      'agent-profile-head', objectDigest, validatedObject.networkId, recordKey,
-      validatedObject.authoritySequence, validatedObject.version,
-      ...(role === 'peer' ? [] : ['current-evm', validatedObject.evmIssuer]),
-    ];
-  } else if (validatedObject.objectType === 'authority-transition') {
-    if (role !== 'peer' && role !== 'prior-evm' && role !== 'next-evm') {
-      fail('system-record-signature', 'transition role is invalid');
-    }
-    tuple = [
-      'authority-transition', objectDigest, validatedObject.networkId, recordKey,
-      validatedObject.priorAuthoritySequence, validatedObject.nextAuthoritySequence,
-      validatedObject.priorHeadDigest, role,
-      ...(role === 'peer' ? [] : [issuerForRole(validatedObject, role)]),
-    ];
-  } else {
-    if (role !== 'peer' && role !== 'current-evm')
-      fail('system-record-signature', 'resolution role is invalid');
-    tuple = [
-      'fork-resolution', objectDigest, validatedObject.networkId, recordKey,
-      validatedObject.authoritySequence, validatedObject.forkedVersion,
-      validatedObject.resolutionVersion, role,
-      ...(role === 'peer' ? [] : [validatedObject.evmIssuer]),
-    ];
-  }
+  const tuple: CanonicalJsonValue = policy.signatureMessageTuple(objectDigest, role);
   const domain = role === 'peer'
     ? SYSTEM_RECORD_SIGNATURE_DOMAINS_V1.peer
     : SYSTEM_RECORD_SIGNATURE_DOMAINS_V1.evm;
   return concatSystemRecordBytesV1(UTF8.encode(domain), canonicalizeJsonBytes(tuple));
-}
-
-function validateSignableObject(object: SignableSystemRecordObjectV1): SignableSystemRecordObjectV1 {
-  const record = snapshotSystemRecordDataRecord(object, 'signed envelope object');
-  if (record.objectType === 'agent-profile-head') return validateAgentProfileHeadObjectV1(record);
-  if (record.objectType === 'authority-transition') return validateAuthorityTransition(record);
-  if (record.objectType === 'fork-resolution') return validateForkResolution(record);
-  fail('system-record-schema', 'signed envelope object type is unsupported');
 }
 
 function validateEip1271Evidence(
@@ -224,19 +189,6 @@ function exactNoneEvidence(value: unknown): SystemRecordNoSignatureEvidenceV1 {
   const evidence = snapshotExactDataRecord(value, ['kind'], 'signature evidence');
   if (evidence.kind !== 'none') fail('system-record-signature', 'signature evidence must be none');
   return Object.freeze({ kind: 'none' });
-}
-
-function issuerForRole(
-  object: SignableSystemRecordObjectV1,
-  role: Exclude<SystemRecordSignatureRoleV1, 'peer'>,
-): string {
-  if (object.objectType === 'authority-transition') {
-    if (role === 'prior-evm') return object.priorEvmIssuer;
-    if (role === 'next-evm') return object.nextEvmIssuer;
-  } else if (role === 'current-evm') {
-    return object.evmIssuer;
-  }
-  fail('system-record-signature', `${role} is not valid for ${object.objectType}`);
 }
 
 function bytesToBigInt(value: Uint8Array): bigint {
