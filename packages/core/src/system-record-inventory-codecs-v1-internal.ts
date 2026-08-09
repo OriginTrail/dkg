@@ -1,6 +1,3 @@
-import { publicKeyFromRaw } from '@libp2p/crypto/keys';
-import { peerIdFromPublicKey } from '@libp2p/peer-id';
-import { verifyAsync as verifyEd25519 } from '@noble/ed25519';
 import { sha256 } from '@noble/hashes/sha2.js';
 
 import {
@@ -27,12 +24,10 @@ import {
   copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   digestSystemRecordBytesV1,
-  type SystemRecordPeerPublicKeyV1,
 } from './system-record-codec-primitives-v1.js';
 import {
   SYSTEM_RECORD_AUTHORITY_SEQUENCE_MAX,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
-  SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
   SYSTEM_RECORD_ED25519_SIGNATURE_BYTES,
   SYSTEM_RECORD_INTERNAL_MAX_ENTRIES,
   SYSTEM_RECORD_INTERNAL_MIN_ENTRIES,
@@ -51,7 +46,6 @@ import {
   SYSTEM_RECORD_OBJECT_CAPS_V1,
   SYSTEM_RECORD_ROOT_MAX_ENTRIES,
   SYSTEM_RECORD_ROOT_MIN_ENTRIES,
-  SYSTEM_RECORD_SIGNATURE_DOMAINS_V1,
 } from './system-record-limits-v1.js';
 
 const UTF8 = new TextEncoder();
@@ -591,55 +585,9 @@ export function parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(
   );
 }
 
-export function buildSystemRecordProviderSignatureMessageV1(
-  descriptor: SystemRecordRootDescriptorObjectV1,
-  descriptorObjectDigest: Digest32V1,
-  providerPeerId: string,
-): Uint8Array {
-  const validatedDescriptor = validateRootDescriptor(descriptor);
-  assertCanonicalDigest(descriptorObjectDigest);
-  const tuple: CanonicalJsonValue = [
-    validatedDescriptor.kind,
-    validatedDescriptor.networkId,
-    providerPeerId,
-    descriptorObjectDigest,
-  ];
-  return concatBytes(
-    UTF8.encode(SYSTEM_RECORD_SIGNATURE_DOMAINS_V1.provider),
-    canonicalizeJsonBytes(tuple),
-  );
-}
-
-export async function verifySignedSystemRecordRootDescriptorEnvelopeV1(
-  envelope: SignedSystemRecordRootDescriptorEnvelopeV1,
-  providerPeerPublicKey: SystemRecordPeerPublicKeyV1,
-): Promise<boolean> {
-  const validated = validateSignedRootDescriptor(envelope);
-  const keyBytes = decodeUnpaddedBase64UrlV1(
-    providerPeerPublicKey,
-    SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
-    'providerPeerPublicKey',
-  );
-  if (peerIdFromPublicKey(publicKeyFromRaw(keyBytes)).toString() !== validated.providerPeerId) {
-    return false;
-  }
-  const signature = decodeUnpaddedBase64UrlV1(
-    validated.signature,
-    SYSTEM_RECORD_ED25519_SIGNATURE_BYTES,
-    'provider signature',
-  );
-  return verifyEd25519(
-    signature,
-    buildSystemRecordProviderSignatureMessageV1(
-      validated.object,
-      validated.objectDigest,
-      validated.providerPeerId,
-    ),
-    keyBytes,
-  );
-}
-
-function validateSignedRootDescriptor(value: unknown): SignedSystemRecordRootDescriptorEnvelopeV1 {
+export function validateSignedRootDescriptor(
+  value: unknown,
+): SignedSystemRecordRootDescriptorEnvelopeV1 {
   const envelope = snapshotExactDataRecord(
     value,
     ['object', 'objectDigest', 'providerPeerId', 'signatureSuite', 'signature'],
@@ -759,14 +707,4 @@ function hexDigestBytes(value: Digest32V1): Uint8Array {
 function bytesDigest(value: Uint8Array): Digest32V1 {
   if (value.byteLength !== 32) throw new Error('digest must be 32 bytes');
   return `0x${Buffer.from(value).toString('hex')}` as Digest32V1;
-}
-
-function concatBytes(...values: readonly Uint8Array[]): Uint8Array {
-  const output = new Uint8Array(values.reduce((sum, value) => sum + value.byteLength, 0));
-  let offset = 0;
-  for (const value of values) {
-    output.set(value, offset);
-    offset += value.byteLength;
-  }
-  return output;
 }

@@ -8,12 +8,9 @@ import {
 import { type Digest32V1 } from './sync-wire-scalars.js';
 import {
   copyBoundedSystemRecordBytesV1,
-  digestSystemRecordBytesV1,
   failSystemRecordObjectV1 as fail,
 } from './system-record-codec-primitives-v1.js';
-import { parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1 } from './system-record-inventory-codecs-v1-internal.js';
 import {
-  SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_ACTIVATION_BUNDLE_BYTES,
   SYSTEM_RECORD_MAX_ACTIVATION_CLOSURE_BYTES,
   SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES,
@@ -38,12 +35,7 @@ import {
 } from './system-record-limits-v1.js';
 
 import { digest } from './system-record-agent-profile-primitives-v1-internal.js';
-import {
-  computeSignedSystemRecordEnvelopeDigestV1,
-  parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
-  parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
-  parseCanonicalSignedAgentProfileHeadEnvelopeV1,
-} from './system-record-signatures-v1-internal.js';
+import { deriveSystemRecordArtifactIdentitiesV1 } from './system-record-object-identity-descriptors-v1-internal.js';
 
 interface SystemRecordCacheReferenceFactsV1 {
   readonly byteLength: number;
@@ -104,7 +96,7 @@ export function createSystemRecordCacheReferenceV1(
   }
   if (ownedBytes.byteLength < 1)
     fail('system-record-closure', 'cache reference bytes must not be empty');
-  const identities = deriveCacheReferenceArtifactIdentitiesV1(
+  const identities = deriveSystemRecordArtifactIdentitiesV1(
     objectKind,
     ownedBytes,
     'cache reference',
@@ -474,53 +466,4 @@ function requireCacheReferenceFacts(
     fail('system-record-closure', `${label} object kind is invalid`);
   }
   return facts;
-}
-
-function deriveCacheReferenceArtifactIdentitiesV1(
-  objectKind: SystemRecordObjectKindV1,
-  canonicalBytes: Uint8Array,
-  label: string,
-): Readonly<{ semanticDigest: Digest32V1; cacheDigest: Digest32V1 }> {
-  let semanticDigest: Digest32V1;
-  let cacheDigest: Digest32V1;
-  if (objectKind === 'agent-profile-head') {
-    const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(canonicalBytes);
-    semanticDigest = envelope.objectDigest;
-    cacheDigest = computeSignedSystemRecordEnvelopeDigestV1(envelope);
-  } else if (objectKind === 'authority-transition') {
-    const envelope = parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1(canonicalBytes);
-    semanticDigest = envelope.objectDigest;
-    cacheDigest = computeSignedSystemRecordEnvelopeDigestV1(envelope);
-  } else if (objectKind === 'fork-resolution') {
-    const envelope = parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1(canonicalBytes);
-    semanticDigest = envelope.objectDigest;
-    cacheDigest = computeSignedSystemRecordEnvelopeDigestV1(envelope);
-  } else if (objectKind === 'root-descriptor') {
-    const envelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(canonicalBytes);
-    semanticDigest = envelope.objectDigest;
-    cacheDigest = digestSystemRecordBytesV1(
-      SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedRootDescriptorEnvelope,
-      canonicalBytes,
-    );
-  } else {
-    const domains: Record<
-      Exclude<
-        SystemRecordObjectKindV1,
-        'agent-profile-head' | 'authority-transition' | 'fork-resolution' | 'root-descriptor'
-      >,
-      string
-    > = {
-      'inventory-internal': SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryInternal,
-      'inventory-leaf': SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf,
-      'conflict-evidence': SYSTEM_RECORD_DIGEST_DOMAINS_V1.conflictEvidence,
-      'owned-subject-table': SYSTEM_RECORD_DIGEST_DOMAINS_V1.ownedSubjectTable,
-      'profile-bundle': SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
-    };
-    semanticDigest = digestSystemRecordBytesV1(domains[objectKind], canonicalBytes);
-    cacheDigest = semanticDigest;
-  }
-  if (semanticDigest.length !== 66 || cacheDigest.length !== 66) {
-    fail('system-record-closure', `${label} artifact identity is invalid`);
-  }
-  return Object.freeze({ semanticDigest, cacheDigest });
 }
