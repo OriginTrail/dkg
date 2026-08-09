@@ -21,7 +21,7 @@ import type {
 import {
   createSystemRecordRequesterV1,
 } from '../src/system-records/requester-v1.js';
-import { createSystemRecordPermitGateV1 } from '../src/system-records/transport-v1.js';
+import { createSystemRecordPermitGateV1 } from '../src/system-records/resource-admission-v1-internal.js';
 
 const NETWORK = 'base:84532' as const;
 const PAYLOAD = Uint8Array.of(1, 2, 3);

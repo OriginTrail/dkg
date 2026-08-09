@@ -24,7 +24,7 @@ import {
   systemRecordExactResponseOutcomeV1,
   type SystemRecordRemoteFetchOutcomeV1,
 } from './requester-wire-v1-internal.js';
-import { raceSystemRecordAbortV1 } from './transport-v1.js';
+import { raceSystemRecordAbortV1 } from './resource-admission-v1-internal.js';
 
 export interface SystemRecordDecodedTransferV1 {
   readonly decoded: SystemRecordDecodedResponseFrameV1;

@@ -25,14 +25,16 @@ import type {
   SystemRecordArtifactV1,
 } from './artifact-v1.js';
 import {
-  createSystemRecordProviderPermitGateV1,
   createSystemRecordProviderTokenBucketV1,
-  raceSystemRecordAbortV1,
   type SystemRecordProviderFrameAdmissionV1,
   type SystemRecordProviderFrameReservationV1,
   type SystemRecordProviderPermitGateV1,
   type SystemRecordProviderTokenBucketV1,
 } from './transport-v1.js';
+import {
+  createSystemRecordPermitGateV1,
+  raceSystemRecordAbortV1,
+} from './resource-admission-v1-internal.js';
 
 const EMPTY = new Uint8Array();
 
@@ -91,7 +93,7 @@ export function createSystemRecordProviderV1(
   options: CreateSystemRecordProviderOptionsV1,
 ): SystemRecordProviderV1 {
   const bucket = options.tokenBucket ?? createSystemRecordProviderTokenBucketV1();
-  const permits = options.permitGate ?? createSystemRecordProviderPermitGateV1();
+  const permits = options.permitGate ?? createSystemRecordPermitGateV1();
   const timeoutMs = positiveTimeout(
     options.timeoutMs ?? SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS,
   );

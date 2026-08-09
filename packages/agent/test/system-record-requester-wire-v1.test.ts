@@ -1,4 +1,6 @@
 import {
+  SYSTEM_RECORD_KIND_V1,
+  SYSTEM_RECORD_WIRE_VERSION_V1,
   decodeSystemRecordRequestFrameV1,
   encodeSystemRecordRequestFrameV1,
   type Digest32V1,
@@ -26,7 +28,7 @@ describe('system-record exact requester wire mapping V1', () => {
       objectKind: 'profile-bundle',
       objectDigest: DIGEST_A,
     });
-    expect(key).toBe(JSON.stringify(['get-bundle', 'profile-bundle', DIGEST_A]));
+    expect(key).toBe(JSON.stringify(['object', 'profile-bundle', DIGEST_A]));
   });
 
   it('writes non-bundle exact lookups as get-control-object requests', () => {
@@ -42,7 +44,7 @@ describe('system-record exact requester wire mapping V1', () => {
       objectDigest: DIGEST_A,
     });
     expect(key).toBe(JSON.stringify([
-      'get-control-object',
+      'object',
       'owned-subject-table',
       DIGEST_A,
     ]));
@@ -65,7 +67,7 @@ describe('system-record exact requester wire mapping V1', () => {
       objectDigest: DIGEST_B,
     });
     expect(key).toBe(JSON.stringify([
-      'get-inventory-object',
+      'inventory-object',
       DIGEST_A,
       [1, 7],
       'inventory-leaf',
@@ -75,7 +77,7 @@ describe('system-record exact requester wire mapping V1', () => {
 
   it('snapshots and freezes mutable inventory paths before asynchronous transfer', () => {
     const path = [1, 7];
-    const { request } = createSystemRecordExactRequestV1(NETWORK, {
+    const { key, request } = createSystemRecordExactRequestV1(NETWORK, {
       type: 'inventory-object',
       rootDescriptorDigest: DIGEST_A,
       path,
@@ -87,6 +89,13 @@ describe('system-record exact requester wire mapping V1', () => {
     expect(request.operation).toBe('get-inventory-object');
     if (request.operation !== 'get-inventory-object') return;
     expect(request.path).toEqual([1, 7]);
+    expect(key).toBe(JSON.stringify([
+      'inventory-object',
+      DIGEST_A,
+      [1, 7],
+      'inventory-leaf',
+      DIGEST_B,
+    ]));
     expect(Object.isFrozen(request.path)).toBe(true);
     expect(Object.isFrozen(request)).toBe(true);
   });
@@ -94,8 +103,18 @@ describe('system-record exact requester wire mapping V1', () => {
 
 function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {
   const mapped = createSystemRecordExactRequestV1(NETWORK, lookup, REQUEST_ID);
+  const request = decodeSystemRecordRequestFrameV1(
+    encodeSystemRecordRequestFrameV1(mapped.request),
+  );
+  expect(request).toMatchObject({
+    wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
+    requestId: REQUEST_ID,
+    kind: SYSTEM_RECORD_KIND_V1,
+    networkId: NETWORK,
+    payloadBytes: '0',
+  });
   return Object.freeze({
     key: mapped.key,
-    request: decodeSystemRecordRequestFrameV1(encodeSystemRecordRequestFrameV1(mapped.request)),
+    request,
   });
 }

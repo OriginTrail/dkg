@@ -8,6 +8,27 @@ import {
   SYSTEM_RECORD_PROVIDER_RESPONSE_TOKEN_REFILL_PER_MINUTE,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
+import {
+  createSystemRecordPermitGateV1,
+  raceSystemRecordAbortV1,
+  type SystemRecordByteAdmissionV1,
+  type SystemRecordByteReservationV1,
+  type SystemRecordPermitGateV1,
+  type SystemRecordPermitV1,
+} from './resource-admission-v1-internal.js';
+
+export {
+  createSystemRecordPermitGateV1,
+  raceSystemRecordAbortV1,
+};
+export type {
+  SystemRecordByteAdmissionV1,
+  SystemRecordByteReservationV1,
+  SystemRecordPermitAdmissionV1,
+  SystemRecordPermitGateV1,
+  SystemRecordPermitV1,
+} from './resource-admission-v1-internal.js';
+
 export interface SystemRecordProviderTokenBucketSnapshotV1 {
   readonly requestTokens: number;
   readonly responseTokens: number;
@@ -118,40 +139,6 @@ export function createSystemRecordProviderTokenBucketV1(
   });
 }
 
-export interface SystemRecordPermitV1 {
-  release(): void;
-}
-
-export interface SystemRecordPermitAdmissionV1 {
-  tryAcquire(): SystemRecordPermitV1 | null;
-}
-
-export interface SystemRecordPermitGateV1 extends SystemRecordPermitAdmissionV1 {
-  readonly active: 0 | 1;
-}
-
-/** One nonqueued permit. Absence is an immediate refusal, never a waiter. */
-export function createSystemRecordPermitGateV1(): SystemRecordPermitGateV1 {
-  let held = false;
-  return Object.freeze({
-    tryAcquire(): SystemRecordPermitV1 | null {
-      if (held) return null;
-      held = true;
-      let released = false;
-      return Object.freeze({
-        release(): void {
-          if (released) return;
-          released = true;
-          held = false;
-        },
-      });
-    },
-    get active(): 0 | 1 {
-      return held ? 1 : 0;
-    },
-  });
-}
-
 export type SystemRecordProviderPermitV1 = SystemRecordPermitV1;
 export type SystemRecordProviderPermitGateV1 = SystemRecordPermitGateV1;
 
@@ -160,35 +147,8 @@ export function createSystemRecordProviderPermitGateV1(): SystemRecordProviderPe
   return createSystemRecordPermitGateV1();
 }
 
-export interface SystemRecordByteReservationV1 {
-  /** Return unused capacity while preserving the exact retained bytes. */
-  shrinkTo(bytes: number): void;
-  release(): void;
-}
-
-/**
- * Supplied by the one lifecycle-owned runtime accountant. This module never
- * constructs a private accountant or queues for capacity.
- */
-export interface SystemRecordByteAdmissionV1 {
-  tryReserve(bytes: number): SystemRecordByteReservationV1 | null;
-}
-
 export type SystemRecordProviderFrameReservationV1 = SystemRecordByteReservationV1;
 export type SystemRecordProviderFrameAdmissionV1 = SystemRecordByteAdmissionV1;
-
-/** Shared abort race for bounded System Record requester/provider exchanges. */
-export function raceSystemRecordAbortV1<T>(
-  work: Promise<T>,
-  signal: AbortSignal,
-): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
-}
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {

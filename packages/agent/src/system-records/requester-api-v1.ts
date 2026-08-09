@@ -15,7 +15,7 @@ import type {
   SystemRecordByteReservationV1,
   SystemRecordPermitAdmissionV1,
   SystemRecordPermitV1,
-} from './transport-v1.js';
+} from './resource-admission-v1-internal.js';
 
 type SystemRecordExactControlObjectKindV1 = Exclude<
   SystemRecordObjectKindV1,

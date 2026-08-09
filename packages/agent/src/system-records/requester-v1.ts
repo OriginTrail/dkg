@@ -34,7 +34,7 @@ import {
 import {
   createSystemRecordExactRequestV1,
 } from './requester-wire-v1-internal.js';
-import { raceSystemRecordAbortV1 } from './transport-v1.js';
+import { raceSystemRecordAbortV1 } from './resource-admission-v1-internal.js';
 
 export type {
   CreateSystemRecordRequesterOptionsV1,
@@ -80,17 +80,26 @@ type FetchPhaseV1 = PendingFetchPhaseV1 | RetainedFetchPhaseV1 | SettledFetchPha
 
 interface FetchEntryV1 {
   readonly key: string;
-  phase: FetchPhaseV1;
-  observerCount: number;
-  leaseCount: number;
+  readonly pendingSignal: AbortSignal;
+  readonly participantCount: number;
+  readonly pendingAborted: boolean;
+  subscribe(signal: AbortSignal): Promise<SystemRecordExactFetchResultV1>;
+  completeRetained(source: SystemRecordRetainedSourceV1): SystemRecordRequesterSettlementV1;
+  completeFailure(result: SystemRecordRequesterFailureV1): SystemRecordRequesterSettlementV1;
+  abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void;
+  resetReason(): SystemRecordRequesterResetReasonV1;
+  close(): void;
+  accounting(): Readonly<{
+    waitingCallers: number;
+    activeLeases: number;
+    retainedPayloadBytes: number;
+  }>;
 }
 
 class ExactFetchRegistryV1 {
   readonly #entries = new Map<string, FetchEntryV1>();
+  readonly #tracked = new Set<FetchEntryV1>();
   readonly #byteAdmission: SystemRecordRequesterByteAdmissionV1;
-  #waitingCallers = 0;
-  #activeLeases = 0;
-  #retainedPayloadBytes = 0;
 
   constructor(byteAdmission: SystemRecordRequesterByteAdmissionV1) {
     this.#byteAdmission = byteAdmission;
@@ -100,72 +109,164 @@ class ExactFetchRegistryV1 {
     return this.#entries.size;
   }
 
-  get waitingCallers(): number {
-    return this.#waitingCallers;
-  }
-
-  get activeLeases(): number {
-    return this.#activeLeases;
-  }
-
-  get retainedPayloadBytes(): number {
-    return this.#retainedPayloadBytes;
-  }
-
   get(key: string): FetchEntryV1 | undefined {
     return this.#entries.get(key);
   }
 
   create(key: string, pending: PendingFetchPhaseV1): FetchEntryV1 {
-    const entry: FetchEntryV1 = { key, phase: pending, observerCount: 0, leaseCount: 0 };
+    const entry = new ExactFetchEntryV1(key, pending, this.#byteAdmission, this);
     this.#entries.set(key, entry);
+    this.#tracked.add(entry);
     return entry;
   }
 
-  snapshot(entry: FetchEntryV1): FetchPhaseV1 {
-    return entry.phase;
+  stats(): Readonly<{
+    waitingCallers: number;
+    activeLeases: number;
+    retainedPayloadBytes: number;
+  }> {
+    let waitingCallers = 0;
+    let activeLeases = 0;
+    let retainedPayloadBytes = 0;
+    for (const entry of this.#tracked) {
+      const accounting = entry.accounting();
+      waitingCallers += accounting.waitingCallers;
+      activeLeases += accounting.activeLeases;
+      retainedPayloadBytes += accounting.retainedPayloadBytes;
+    }
+    return Object.freeze({ waitingCallers, activeLeases, retainedPayloadBytes });
   }
 
-  pendingAborted(entry: FetchEntryV1): boolean {
-    return entry.phase.state === 'pending' && entry.phase.controller.signal.aborted;
+  close(): void {
+    for (const entry of this.#tracked) entry.close();
   }
 
-  participantCount(entry: FetchEntryV1): number {
-    return entry.observerCount + entry.leaseCount;
+  unpublish(entry: FetchEntryV1): void {
+    if (this.#entries.get(entry.key) === entry) this.#entries.delete(entry.key);
   }
 
-  addObserver(entry: FetchEntryV1): void {
-    entry.observerCount += 1;
-    this.#waitingCallers += 1;
+  dispose(entry: FetchEntryV1): void {
+    this.unpublish(entry);
+    this.#tracked.delete(entry);
+  }
+}
+
+class ExactFetchEntryV1 implements FetchEntryV1 {
+  readonly key: string;
+  readonly #byteAdmission: SystemRecordRequesterByteAdmissionV1;
+  readonly #registry: ExactFetchRegistryV1;
+  #phase: FetchPhaseV1;
+  #observerCount = 0;
+  #leaseCount = 0;
+  #retainedPayloadBytes = 0;
+  #lastResetReason: SystemRecordRequesterResetReasonV1 = 'cancelled';
+
+  constructor(
+    key: string,
+    pending: PendingFetchPhaseV1,
+    byteAdmission: SystemRecordRequesterByteAdmissionV1,
+    registry: ExactFetchRegistryV1,
+  ) {
+    this.key = key;
+    this.#phase = pending;
+    this.#byteAdmission = byteAdmission;
+    this.#registry = registry;
   }
 
-  releaseObserver(entry: FetchEntryV1): void {
-    if (entry.observerCount < 1) throw new Error('System Record observer underflow');
-    entry.observerCount -= 1;
-    this.#waitingCallers -= 1;
-    this.#disposeIfIdle(entry);
+  get pendingSignal(): AbortSignal {
+    const phase = this.#phase;
+    if (phase.state !== 'pending') throw new Error('System Record entry is not pending');
+    return phase.controller.signal;
   }
 
-  retainSource(entry: FetchEntryV1, source: SystemRecordRetainedSourceV1): void {
-    if (entry.phase.state !== 'pending') {
+  get participantCount(): number {
+    return this.#observerCount + this.#leaseCount;
+  }
+
+  get pendingAborted(): boolean {
+    return this.#phase.state === 'pending' && this.#phase.controller.signal.aborted;
+  }
+
+  async subscribe(signal: AbortSignal): Promise<SystemRecordExactFetchResultV1> {
+    this.#observerCount += 1;
+    let observing = true;
+    const releaseObserver = () => {
+      if (!observing) return;
+      observing = false;
+      this.#observerCount -= 1;
+      this.#disposeIfIdle();
+    };
+    signal.addEventListener('abort', releaseObserver, { once: true });
+    if (signal.aborted) {
+      releaseObserver();
+      signal.throwIfAborted();
+    }
+    try {
+      const phase = this.#phase;
+      if (phase.state === 'retained') return this.#deliverLease(phase.source);
+      if (phase.state !== 'pending') {
+        return Object.freeze({ outcome: 'busy', wireBytes: 0 });
+      }
+      const shared = await raceSystemRecordAbortV1(phase.transfer, signal);
+      return shared.state === 'retained'
+        ? this.#deliverLease(shared.source)
+        : shared.result;
+    } finally {
+      signal.removeEventListener('abort', releaseObserver);
+      releaseObserver();
+    }
+  }
+
+  completeRetained(source: SystemRecordRetainedSourceV1): SystemRecordRequesterSettlementV1 {
+    if (this.#phase.state !== 'pending') {
       source.release();
       throw new Error('System Record source retained outside the pending phase');
     }
-    entry.phase = Object.freeze({ state: 'retained', source });
+    this.#phase = Object.freeze({ state: 'retained', source });
     this.#retainedPayloadBytes += source.artifact.canonicalBytes.byteLength;
+    return Object.freeze({ state: 'retained', source });
   }
 
-  settleFailure(entry: FetchEntryV1): void {
-    if (entry.phase.state !== 'pending') return;
-    entry.phase = Object.freeze({ state: 'failed' });
-    this.#remove(entry);
+  completeFailure(result: SystemRecordRequesterFailureV1): SystemRecordRequesterSettlementV1 {
+    if (this.#phase.state !== 'pending') {
+      throw new Error('System Record failure completed outside the pending phase');
+    }
+    this.#phase = Object.freeze({ state: 'failed' });
+    this.#registry.unpublish(this);
+    this.#disposeIfIdle();
+    return Object.freeze({ state: 'failed', result });
   }
 
-  deliverLease(
-    entry: FetchEntryV1,
-    source: SystemRecordRetainedSourceV1,
-  ): SystemRecordExactFetchResultV1 {
-    if (entry.phase.state !== 'retained' || entry.phase.source !== source) {
+  abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void {
+    const phase = this.#phase;
+    if (phase.state !== 'pending' || phase.controller.signal.aborted) return;
+    phase.abortReason = reason;
+    this.#lastResetReason = reason;
+    phase.controller.abort(error);
+  }
+
+  resetReason(): SystemRecordRequesterResetReasonV1 {
+    return this.#lastResetReason;
+  }
+
+  close(): void {
+    this.abort('closed', new Error('system-record requester closed'));
+  }
+
+  accounting(): Readonly<{
+    waitingCallers: number;
+    activeLeases: number;
+    retainedPayloadBytes: number;
+  }> {
+    return Object.freeze({
+      waitingCallers: this.#observerCount,
+      activeLeases: this.#leaseCount,
+      retainedPayloadBytes: this.#retainedPayloadBytes,
+    });
+  }
+
+  #deliverLease(source: SystemRecordRetainedSourceV1): SystemRecordExactFetchResultV1 {
+    if (this.#phase.state !== 'retained' || this.#phase.source !== source) {
       throw new Error('System Record lease source is not retained by its entry');
     }
     const payloadBytes = source.artifact.canonicalBytes.byteLength;
@@ -180,8 +281,7 @@ class ExactFetchRegistryV1 {
       reservation.release();
       return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
     }
-    entry.leaseCount += 1;
-    this.#activeLeases += 1;
+    this.#leaseCount += 1;
     this.#retainedPayloadBytes += payloadBytes;
     let released = false;
     return Object.freeze({
@@ -192,49 +292,30 @@ class ExactFetchRegistryV1 {
         release: () => {
           if (released) return;
           released = true;
-          entry.leaseCount -= 1;
-          this.#activeLeases -= 1;
+          this.#leaseCount -= 1;
           this.#retainedPayloadBytes -= payloadBytes;
           reservation.release();
-          this.#disposeIfIdle(entry);
+          this.#disposeIfIdle();
         },
       }),
     });
   }
 
-  abort(
-    entry: FetchEntryV1,
-    reason: SystemRecordRequesterResetReasonV1,
-    error: Error,
-  ): void {
-    const phase = entry.phase;
-    if (phase.state !== 'pending' || phase.controller.signal.aborted) return;
-    phase.abortReason = reason;
-    phase.controller.abort(error);
-  }
-
-  close(): void {
-    for (const entry of this.#entries.values()) {
-      this.abort(entry, 'closed', new Error('system-record requester closed'));
-    }
-  }
-
-  #disposeIfIdle(entry: FetchEntryV1): void {
-    if (entry.observerCount !== 0 || entry.leaseCount !== 0) return;
-    const phase = entry.phase;
+  #disposeIfIdle(): void {
+    if (this.#observerCount !== 0 || this.#leaseCount !== 0) return;
+    const phase = this.#phase;
     if (phase.state === 'pending') {
-      this.abort(entry, 'cancelled', new Error('system-record requester has no callers'));
+      this.abort('cancelled', new Error('system-record requester has no callers'));
       return;
     }
-    if (phase.state !== 'retained') return;
-    entry.phase = Object.freeze({ state: 'disposed' });
-    this.#remove(entry);
-    this.#retainedPayloadBytes -= phase.source.artifact.canonicalBytes.byteLength;
-    phase.source.release();
-  }
-
-  #remove(entry: FetchEntryV1): void {
-    if (this.#entries.get(entry.key) === entry) this.#entries.delete(entry.key);
+    if (phase.state === 'retained') {
+      this.#retainedPayloadBytes -= phase.source.artifact.canonicalBytes.byteLength;
+      phase.source.release();
+    }
+    if (phase.state === 'retained' || phase.state === 'failed') {
+      this.#phase = Object.freeze({ state: 'disposed' });
+      this.#registry.dispose(this);
+    }
   }
 }
 
@@ -281,15 +362,15 @@ export function createSystemRecordRequesterV1(
     const { key, request } = exact;
     let entry = registry.get(key);
     if (entry !== undefined) {
-      if (registry.pendingAborted(entry)) {
+      if (entry.pendingAborted) {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       // The first observer owns the transfer; the frozen limit counts followers.
-      if (registry.participantCount(entry) >= maxWaitersPerDigest + 1) {
+      if (entry.participantCount >= maxWaitersPerDigest + 1) {
         return Object.freeze({ outcome: 'waiter-limit', wireBytes: 0 });
       }
       joined += 1;
-      return subscribe(entry, signal);
+      return entry.subscribe(signal);
     }
     if (registry.size >= maxPendingDigests) {
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
@@ -322,41 +403,7 @@ export function createSystemRecordRequesterV1(
       resolveTransfer,
       rejectTransfer,
     );
-    return subscribe(entry, signal);
-  }
-
-  async function subscribe(
-    entry: FetchEntryV1,
-    signal: AbortSignal,
-  ): Promise<SystemRecordExactFetchResultV1> {
-    registry.addObserver(entry);
-    let observing = true;
-    const releaseObserver = () => {
-      if (!observing) return;
-      observing = false;
-      registry.releaseObserver(entry);
-    };
-    signal.addEventListener('abort', releaseObserver, { once: true });
-    if (signal.aborted) {
-      releaseObserver();
-      signal.throwIfAborted();
-    }
-    try {
-      const phase = registry.snapshot(entry);
-      if (phase.state === 'retained') {
-        return registry.deliverLease(entry, phase.source);
-      }
-      if (phase.state !== 'pending') {
-        return Object.freeze({ outcome: 'busy', wireBytes: 0 });
-      }
-      const shared = await raceSystemRecordAbortV1(phase.transfer, signal);
-      return shared.state === 'retained'
-        ? registry.deliverLease(entry, shared.source)
-        : shared.result;
-    } finally {
-      signal.removeEventListener('abort', releaseObserver);
-      releaseObserver();
-    }
+    return entry.subscribe(signal);
   }
 
   async function run(
@@ -365,15 +412,11 @@ export function createSystemRecordRequesterV1(
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
   ): Promise<SystemRecordRequesterSettlementV1> {
-    const pending = registry.snapshot(entry);
-    if (pending.state !== 'pending') {
-      throw new Error('System Record transfer started outside the pending phase');
-    }
+    const pendingSignal = entry.pendingSignal;
     let exchange: SystemRecordRequesterExchangeV1 | undefined;
     let wireBytes = 0;
     const timeout = setTimeout(
-      () => registry.abort(
-        entry,
+      () => entry.abort(
         'deadline',
         new Error('system-record requester deadline exceeded'),
       ),
@@ -384,14 +427,14 @@ export function createSystemRecordRequesterV1(
     try {
       exchange = await openSystemRecordRequesterExchangeV1({
         openExchange: options.openExchange,
-        signal: pending.controller.signal,
-        resetReason: () => pending.abortReason ?? 'cancelled',
+        signal: pendingSignal,
+        resetReason: () => entry.resetReason(),
       });
       const transfer = await exchangeSystemRecordResponseV1({
         request,
         exchange,
         frameReservation,
-        signal: pending.controller.signal,
+        signal: pendingSignal,
       });
       wireBytes = transfer.wireBytes;
       const retained = retainVerifiedSystemRecordResponseV1({
@@ -401,8 +444,7 @@ export function createSystemRecordRequesterV1(
         byteAdmission: options.byteAdmission,
       });
       if (retained.outcome === 'ok') {
-        registry.retainSource(entry, retained.retained);
-        settlement = Object.freeze({ state: 'retained', source: retained.retained });
+        settlement = entry.completeRetained(retained.retained);
       } else {
         settlement = Object.freeze({ state: 'failed', result: retained });
       }
@@ -412,10 +454,10 @@ export function createSystemRecordRequesterV1(
       }
       const outcome = error instanceof InvalidSystemRecordResponseError
         ? 'invalid-response'
-        : pending.controller.signal.aborted
-          ? pending.abortReason === 'closed'
+        : pendingSignal.aborted
+          ? entry.resetReason() === 'closed'
             ? 'closed'
-            : pending.abortReason === 'deadline'
+            : entry.resetReason() === 'deadline'
               ? 'deadline'
               : 'transport'
           : 'transport';
@@ -423,7 +465,7 @@ export function createSystemRecordRequesterV1(
         exchange?.reset(
           outcome === 'invalid-response'
             ? 'invalid-response'
-            : pending.abortReason ?? outcome,
+            : pendingSignal.aborted ? entry.resetReason() : outcome,
         );
       } catch {
         // Reset is best-effort cleanup and cannot strand the single-flight entry.
@@ -439,22 +481,24 @@ export function createSystemRecordRequesterV1(
       activeStream = 0;
       completed += 1;
     }
-    if (settlement.state === 'failed') registry.settleFailure(entry);
-    return settlement;
+    return settlement.state === 'failed'
+      ? entry.completeFailure(settlement.result)
+      : settlement;
   }
 
   function stats(): SystemRecordRequesterStatsV1 {
+    const entryStats = registry.stats();
     return Object.freeze({
       started,
       joined,
       completed,
       pendingDigests: registry.size,
-      waitingCallers: registry.waitingCallers,
-      activeLeases: registry.activeLeases,
+      waitingCallers: entryStats.waitingCallers,
+      activeLeases: entryStats.activeLeases,
       activeStream,
       peakActiveStream,
       queuedStreams: 0,
-      retainedPayloadBytes: registry.retainedPayloadBytes,
+      retainedPayloadBytes: entryStats.retainedPayloadBytes,
       closed,
     });
   }
