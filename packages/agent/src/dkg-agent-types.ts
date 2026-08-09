@@ -1152,6 +1152,11 @@ export interface SharedMemorySyncDiagnostics {
    * into backoff for our own budget decision.
    */
   snapshotPlaneIncomplete?: number;
+  /**
+   * Metadata phases that hit their local round deadline only after retaining
+   * the exact verified-to-date prefix for an immediate selected continuation.
+   */
+  metadataContinuationYields?: number;
   /** Extra catch-up passes spent over the peer set beyond the first. */
   continuationPasses?: number;
   /**
@@ -1165,6 +1170,8 @@ export interface SharedMemorySyncDiagnostics {
    * `0 <= resolved <= snapshotPlaneIncomplete <= failedPhases`.
    */
   resolvedSnapshotPlaneIncomplete?: number;
+  /** Historical selected metadata yields superseded by exact completion. */
+  resolvedMetadataContinuationYields?: number;
   /**
    * Why the bounded repeat stopped. Typed as the policy's own closed union
    * rather than `string`, so a new stop reason cannot reach the terminal message

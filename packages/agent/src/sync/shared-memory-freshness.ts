@@ -12,6 +12,8 @@ import {
 export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
   readonly snapshotPlaneIncomplete?: number;
   readonly resolvedSnapshotPlaneIncomplete?: number;
+  readonly metadataContinuationYields?: number;
+  readonly resolvedMetadataContinuationYields?: number;
 }
 
 /**
@@ -20,10 +22,12 @@ export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
  */
 export interface SelectedSwmFreshnessResolution {
   readonly recoverableSnapshotYieldFailures: number;
+  readonly recoverableMetadataContinuationYields?: number;
 }
 
 export interface SelectedSwmRoundFreshness {
   readonly recoverableSnapshotYieldFailures: number;
+  readonly recoverableMetadataContinuationYields: number;
   readonly snapshotPlaneComplete: boolean;
 }
 
@@ -59,9 +63,20 @@ export function classifySelectedSwmRoundFreshness(
     && coverage.snapshotsResolved < coverage.snapshotsTotal
       ? incomplete
       : 0;
+  const metadataYields = result.metadataContinuationYields ?? 0;
+  const recoverableMetadataContinuationYields = metadataYields > 0
+    && result.failedPeers === 0
+    && result.failedPhases === 0
+    && result.deniedPhases === 0
+    && (result.backoffWorthyFailures ?? 0) === 0
+    && (result.deferredBackpressure ?? 0) === 0
+    && result.timedOutPhases === metadataYields
+      ? metadataYields
+      : 0;
 
   return {
     recoverableSnapshotYieldFailures,
+    recoverableMetadataContinuationYields,
     snapshotPlaneComplete: coverage?.contextGraphId === contextGraphId
       && coverage.manifestComplete
       && coverage.descriptorsAuthoritative === true
@@ -75,11 +90,17 @@ export function classifySelectedSwmRoundFreshness(
 export function mergeSharedMemoryFreshnessDiagnostics(
   a: SharedMemorySyncDiagnostics,
   b: SharedMemorySyncDiagnostics,
-): Pick<SharedMemorySyncDiagnostics, 'resolvedSnapshotPlaneIncomplete'> {
+): Pick<
+  SharedMemorySyncDiagnostics,
+  'resolvedSnapshotPlaneIncomplete' | 'resolvedMetadataContinuationYields'
+> {
   return {
     resolvedSnapshotPlaneIncomplete:
       (a.resolvedSnapshotPlaneIncomplete ?? 0)
       + (b.resolvedSnapshotPlaneIncomplete ?? 0),
+    resolvedMetadataContinuationYields:
+      (a.resolvedMetadataContinuationYields ?? 0)
+      + (b.resolvedMetadataContinuationYields ?? 0),
   };
 }
 
@@ -108,9 +129,23 @@ export function applySelectedSwmFreshnessResolution(
       failed,
     )
     : 0;
+  const requestedMetadata = resolution.recoverableMetadataContinuationYields ?? 0;
+  const metadataYields = result.metadataContinuationYields ?? 0;
+  const timedOut = result.timedOutPhases;
+  const metadataCountersAreValid = Number.isSafeInteger(requestedMetadata)
+    && requestedMetadata > 0
+    && Number.isSafeInteger(metadataYields)
+    && metadataYields >= 0
+    && Number.isSafeInteger(timedOut)
+    && timedOut >= 0
+    && metadataYields <= timedOut;
+  const resolvedMetadataContinuationYields = metadataCountersAreValid
+    ? Math.min(requestedMetadata, metadataYields, timedOut)
+    : 0;
   return {
     ...result,
     resolvedSnapshotPlaneIncomplete,
+    resolvedMetadataContinuationYields,
   };
 }
 
@@ -135,5 +170,14 @@ export function classifySharedMemoryFreshness(
     && incomplete <= failed
       ? { ...result, failedPhases: failed - resolved }
       : result;
-  return classifyDurableProgress(normalized, options);
+  const resolvedMetadata = result.resolvedMetadataContinuationYields ?? 0;
+  const metadataYields = result.metadataContinuationYields ?? 0;
+  const timedOut = normalized.timedOutPhases ?? 0;
+  const metadataNormalized = Number.isSafeInteger(resolvedMetadata)
+    && resolvedMetadata > 0
+    && resolvedMetadata <= metadataYields
+    && metadataYields <= timedOut
+      ? { ...normalized, timedOutPhases: timedOut - resolvedMetadata }
+      : normalized;
+  return classifyDurableProgress(metadataNormalized, options);
 }

@@ -1,5 +1,15 @@
 import type { SyncPhase } from '../auth/request-build.js';
 
+/**
+ * Requester-only namespace for one selected-SWM invocation.
+ *
+ * The suffix is deliberately invocation-unique: overlapping selected calls can
+ * cover the same peer and Context Graph while retaining different in-memory
+ * prefixes, so sharing a cursor/session between them would make either prefix
+ * unsafe to resume.
+ */
+export type SyncCheckpointScope = `selected-swm-meta:${string}`;
+
 export const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface SyncCheckpointEntry {
@@ -186,6 +196,7 @@ export function getSyncCheckpointKey(
   sinceBatchId?: string,
   recovery?: boolean,
   assetFilterKey?: string,
+  requesterScope?: SyncCheckpointScope,
 ): string {
   const refSuffix = phase === 'snapshot' && snapshotRef ? `|${snapshotRef}` : '';
   // Phase C: `sinceBatchId` changes the responder's result set, so a delta
@@ -203,5 +214,6 @@ export function getSyncCheckpointKey(
   // recovery path), so normal sync keeps its unscoped key.
   const recoverySuffix = recovery ? '|recovery' : '';
   const assetsSuffix = assetFilterKey ? `|assets:${encodeURIComponent(assetFilterKey)}` : '';
-  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}${recoverySuffix}${assetsSuffix}`;
+  const requesterScopeSuffix = requesterScope ? `|requester:${requesterScope}` : '';
+  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}${recoverySuffix}${assetsSuffix}${requesterScopeSuffix}`;
 }

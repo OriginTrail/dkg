@@ -84,6 +84,7 @@ export default defineConfig({
       "test/sync-operation-telemetry.test.ts",
       "test/sync-fetch-coalescing.test.ts",
       "test/sync-fetch-coalescing-durable.test.ts",
+      "test/sync-exact-accumulation.test.ts",
       "test/sync-backpressure.test.ts",
       "test/sync-policy.test.ts",
       "test/catchup-policy.test.ts",
@@ -91,6 +92,8 @@ export default defineConfig({
       // #2050 — the stop rule for the bounded repeat of the public SWM peer walk.
       "test/catchup-pass-policy.test.ts",
       "test/selected-swm-continuation.test.ts",
+      "test/selected-swm-meta-budget.test.ts",
+      "test/sync-checkpoint-key.test.ts",
       "test/map-with-concurrency.test.ts",
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",

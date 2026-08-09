@@ -15,6 +15,7 @@ import {
 } from './shared-memory-freshness.js';
 import type { SyncContextGraphPriorityConfig } from './policy.js';
 import {
+  MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES,
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './requester/ordered-sync.js';
@@ -22,6 +23,14 @@ import {
 export interface SelectedSwmContinuationUnit {
   readonly work: ContextGraphSyncWork<SharedMemorySyncResult>;
   readonly initialResult: SharedMemorySyncResult;
+  /**
+   * Exact pre-snapshot progress retained by the selected-provider invocation.
+   * Presence means another bounded pass can resume useful work; absence clears
+   * that capability without erasing its monotone high-water mark.
+   */
+  readonly metadataContinuationProgress?: () => number | undefined;
+  /** Generation of that prefix; changes when the responder restarts at zero. */
+  readonly metadataContinuationGeneration?: () => number | undefined;
 }
 
 export interface SelectedSwmContinuationStop {
@@ -32,8 +41,8 @@ export interface SelectedSwmContinuationStop {
 
 export interface SelectedSwmContinuationProgress {
   readonly contextGraphId: string;
-  readonly coverageBefore: number;
-  readonly coverageAfter: number;
+  readonly progressBefore: number;
+  readonly progressAfter: number;
 }
 
 export interface SelectedSwmContinuationExecution {
@@ -74,6 +83,8 @@ interface SelectedSwmContinuationState {
   tracker: SwmCatchupPassTracker<SwmSnapshotCoverage>;
   planeProven: boolean;
   recoverableIncomplete: number;
+  recoverableMetadataYields: number;
+  metadataCompleted: boolean;
   completed: boolean;
 }
 
@@ -111,6 +122,11 @@ export async function runSelectedSwmContinuations(
       unit.initialResult.swmCoverage,
       progress.completedWithoutFailure,
     );
+    tracker.recordPeerAuxiliaryProgress(
+      options.providerPeerId,
+      unit.metadataContinuationProgress?.(),
+      unit.metadataContinuationGeneration?.() ?? 0,
+    );
     const freshness = classifySelectedSwmRoundFreshness(
       contextGraphId,
       unit.initialResult,
@@ -121,11 +137,21 @@ export async function runSelectedSwmContinuations(
       planeProven:
         unit.initialResult.insertedDataTriples > 0 && progress.completedWithoutFailure,
       recoverableIncomplete: freshness.recoverableSnapshotYieldFailures,
+      recoverableMetadataYields: freshness.recoverableMetadataContinuationYields,
+      metadataCompleted:
+        unit.metadataContinuationProgress?.() === undefined
+        && progress.completedWithoutFailure,
       completed: freshness.snapshotPlaneComplete,
     });
   }
 
   let summary = options.emptyResult();
+  // `runOrderedContextGraphSyncs` owns the peer-dead cutoff for one batch, but
+  // this adapter can re-enter it with the candidates that the prior batch did
+  // not start. Preserve the same streak across those outer passes or eight
+  // selected CGs against one dead provider become eight full transport waits.
+  let consecutivePeerTransportFailures = 0;
+  let peerTransportCutoffReached = false;
   const execution = await runSwmCatchupContinuations({
     units: [...stateByContextGraph.values()].map((state) => ({
       key: state,
@@ -153,19 +179,29 @@ export async function runSelectedSwmContinuations(
                 result.swmCoverage,
                 progress.completedWithoutFailure,
               );
+              state.tracker.recordPeerAuxiliaryProgress(
+                options.providerPeerId,
+                state.unit.metadataContinuationProgress?.(),
+                state.unit.metadataContinuationGeneration?.() ?? 0,
+              );
               const freshness = classifySelectedSwmRoundFreshness(
                 item.contextGraphId,
                 result,
               );
               state.recoverableIncomplete += freshness.recoverableSnapshotYieldFailures;
+              state.recoverableMetadataYields += freshness.recoverableMetadataContinuationYields;
+              state.metadataCompleted = state.metadataCompleted || (
+                state.unit.metadataContinuationProgress?.() === undefined
+                && progress.completedWithoutFailure
+              );
               state.completed = freshness.snapshotPlaneComplete;
               state.planeProven = state.planeProven || (
                 result.insertedDataTriples > 0 && progress.completedWithoutFailure
               );
               options.onContinuation?.({
                 contextGraphId: item.contextGraphId,
-                coverageBefore: pass.progressBefore,
-                coverageAfter: pass.progress(),
+                progressBefore: pass.progressBefore,
+                progressAfter: pass.progress(),
               });
               return withoutContinuationPasses(result);
             });
@@ -192,14 +228,30 @@ export async function runSelectedSwmContinuations(
         // boundary.
         shouldContinue: () => !deadlineExpired,
         ...(options.isPeerTransportFailure
-          ? { isPeerTransportFailure: options.isPeerTransportFailure }
+          ? {
+            isPeerTransportFailure: (part: SharedMemorySyncResult) => {
+              const failed = options.isPeerTransportFailure!(part);
+              consecutivePeerTransportFailures = failed
+                ? consecutivePeerTransportFailures + 1
+                : 0;
+              if (
+                consecutivePeerTransportFailures
+                >= MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES
+              ) {
+                peerTransportCutoffReached = true;
+              }
+              return failed;
+            },
+          }
           : {}),
         ...(options.onDeferred ? { onDeferred: options.onDeferred } : {}),
       }));
       summary = withoutContinuationPasses(options.merge(summary, part));
       return part;
     },
-    shouldStopAfterPass: (part) => (part.deferredBackpressure ?? 0) > 0,
+    shouldStopAfterPass: (part) => (
+      peerTransportCutoffReached || (part.deferredBackpressure ?? 0) > 0
+    ),
     onStop: (stop) => options.onStop?.({
       contextGraphId: stop.key.unit.work.contextGraphId,
       continuationPasses: stop.continuationPasses,
@@ -207,9 +259,15 @@ export async function runSelectedSwmContinuations(
     }),
   });
 
-  if (execution.stoppedAfterPass) options.onBackpressure?.();
+  if (execution.stoppedAfterPass && !peerTransportCutoffReached) {
+    options.onBackpressure?.();
+  }
   const recoverableSnapshotYieldFailures = [...stateByContextGraph.values()].reduce(
     (total, state) => total + (state.completed ? state.recoverableIncomplete : 0),
+    0,
+  );
+  const recoverableMetadataContinuationYields = [...stateByContextGraph.values()].reduce(
+    (total, state) => total + (state.metadataCompleted ? state.recoverableMetadataYields : 0),
     0,
   );
   return {
@@ -217,6 +275,9 @@ export async function runSelectedSwmContinuations(
       ...summary,
       continuationPasses: execution.continuationPasses,
     },
-    freshnessResolution: { recoverableSnapshotYieldFailures },
+    freshnessResolution: {
+      recoverableSnapshotYieldFailures,
+      recoverableMetadataContinuationYields,
+    },
   };
 }

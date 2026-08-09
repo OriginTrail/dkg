@@ -7,7 +7,11 @@ import {
   getSyncCheckpointKey,
   MemorySyncCheckpointStore,
 } from '../src/sync/checkpoint/state.js';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  deleteSyncPageCheckpoint,
+  fetchSyncPages,
+} from '../src/sync/requester/page-fetch.js';
+import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
 const encoder = new TextEncoder();
@@ -130,6 +134,98 @@ describe('exact sync accumulation limits', () => {
       dimension: 'quads',
       actual: 2,
       limit: 1,
+    });
+
+    expect(sends).toBe(2);
+    expect(parses).toBe(2);
+  });
+
+  it('deletes the process-local responder token for a completed scoped requester', async () => {
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const requesterScope = 'selected-swm-meta:cleanup-test' as const;
+    const checkpointKey = getSyncCheckpointKey(
+      'legacy-peer',
+      'large-legacy-cg',
+      true,
+      'meta',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      requesterScope,
+    );
+    let sends = 0;
+    await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      maxAcceptedQuads: undefined,
+      parseAndFilter: async () => ({
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+        totalQuads: 1,
+      }),
+      send: async () => {
+        sends += 1;
+        return sends === 1 ? encoder.encode('page') : new Uint8Array();
+      },
+    }));
+
+    expect(checkpointStore.get(checkpointKey)?.responderSessionId).toBeTruthy();
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+    // Recreate only an offset. If the compatibility cache leaked the scoped
+    // token, this fetch would incorrectly report a resumed responder session.
+    checkpointStore.set(checkpointKey, 7);
+    const retry = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      maxAcceptedQuads: undefined,
+      send: async () => new Uint8Array(),
+    }));
+    expect(retry.responderSessionStartedFresh).toBe(true);
+    expect(retry.resumedFromOffset).toBe(0);
+  });
+
+  it('rejects a multi-page heap estimate before appending the excess page', async () => {
+    const quad = {
+      subject: 'urn:heap:s:0',
+      predicate: 'urn:heap:p',
+      object: '"heap"',
+      graph: 'urn:meta',
+    };
+    const onePageHeap = estimateQuadHeapBytes(quad);
+    let sends = 0;
+    let parses = 0;
+
+    await expect(fetchSyncPages(fetchParams({
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      maxAcceptedQuads: undefined,
+      maxAcceptedHeapBytesEstimate: onePageHeap,
+      parseAndFilter: async () => {
+        parses += 1;
+        return {
+          quads: [{ ...quad, subject: `${quad.subject.slice(0, -1)}${parses}` }],
+          totalQuads: 1,
+        };
+      },
+      send: async () => {
+        sends += 1;
+        return encoder.encode(`page-${sends}`);
+      },
+    }))).rejects.toMatchObject({
+      code: 'SYNC_PAGE_ACCUMULATION_LIMIT',
+      dimension: 'heap-bytes',
+      actual: onePageHeap * 2,
+      limit: onePageHeap,
     });
 
     expect(sends).toBe(2);

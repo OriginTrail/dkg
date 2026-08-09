@@ -119,6 +119,20 @@ export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
 
   private readonly peerProgressHighWater = new Map<string, number>();
 
+  /**
+   * Progress that is exact but precedes snapshot coverage, such as a retained
+   * metadata prefix. Kept separate so callers never have to manufacture a
+   * `SwmSnapshotCoverage` record for work that has not reached the snapshot
+   * plane yet.
+   */
+  private readonly auxiliaryProgressHighWater = new Map<string, number>();
+
+  /** Responder-prefix generation paired with each auxiliary high-water mark. */
+  private readonly auxiliaryProgressGeneration = new Map<string, number>();
+
+  /** Peers with exact retained work that can advance in another bounded pass. */
+  private readonly auxiliaryCapablePeers = new Set<string>();
+
   private coverageHighWaterMark = 0;
 
   private completedContinuationPasses = 0;
@@ -142,23 +156,65 @@ export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
     if (completedWithoutFailure) this.lastCoverageByPeer.delete(peerId);
   }
 
+  /**
+   * Record exact pre-snapshot progress for a peer.
+   *
+   * `progress === undefined` clears current capability but deliberately keeps
+   * the high-water mark: progress must remain monotone when a metadata prefix
+   * completes and the same round begins reporting snapshot coverage.
+   */
+  recordPeerAuxiliaryProgress(
+    peerId: string,
+    progress: number | undefined,
+    generation = 0,
+  ): void {
+    // An allocated accumulator at offset zero has retained no responder row
+    // and proves no useful retry capability. Treat it exactly like absence so
+    // a zero-byte transport failure does not earn another full timeout.
+    if (progress === undefined || progress === 0) {
+      this.auxiliaryCapablePeers.delete(peerId);
+      return;
+    }
+    if (!Number.isSafeInteger(progress) || progress < 0) {
+      throw new Error(`Invalid SWM auxiliary continuation progress for ${peerId}: ${progress}`);
+    }
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error(`Invalid SWM auxiliary continuation generation for ${peerId}: ${generation}`);
+    }
+    const previousGeneration = this.auxiliaryProgressGeneration.get(peerId);
+    if (previousGeneration !== undefined && previousGeneration !== generation) {
+      // A responder session restarted at offset zero. Its replacement prefix is
+      // a new exact baseline, not a regression against the discarded prefix.
+      // Remove the old generation before recording the new one and reset the
+      // decision baseline to the progress that remains on other peers/planes.
+      this.auxiliaryProgressHighWater.delete(peerId);
+      this.auxiliaryCapablePeers.delete(peerId);
+      this.coverageHighWaterMark = this.progress();
+    }
+    this.auxiliaryProgressGeneration.set(peerId, generation);
+    this.auxiliaryCapablePeers.add(peerId);
+    const seen = this.auxiliaryProgressHighWater.get(peerId) ?? 0;
+    if (progress > seen) this.auxiliaryProgressHighWater.set(peerId, progress);
+  }
+
   capablePeers(): string[] {
-    const capable: string[] = [];
+    const capable = new Set(this.auxiliaryCapablePeers);
     for (const [peerId, coverage] of this.lastCoverageByPeer) {
       if (
         coverage.manifestComplete
         && coverage.snapshotsTotal > 0
         && coverage.snapshotsResolved < coverage.snapshotsTotal
       ) {
-        capable.push(peerId);
+        capable.add(peerId);
       }
     }
-    return capable;
+    return [...capable];
   }
 
   progress(): number {
     let total = 0;
     for (const resolved of this.peerProgressHighWater.values()) total += resolved;
+    for (const auxiliary of this.auxiliaryProgressHighWater.values()) total += auxiliary;
     return total;
   }
 

@@ -19,6 +19,8 @@ import {
   classifySharedMemoryFreshness,
 } from '../src/sync/shared-memory-freshness.js';
 import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import { SyncPageAccumulationLimitError } from '../src/sync/requester/page-fetch.js';
+import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 
 const PEER = '12D3KooWSelectedCompleteSwmProvider';
 
@@ -230,10 +232,36 @@ interface SelectedSwmLifecycleHarnessOptions {
     readonly contextGraphId: string;
     readonly publicAdmission: number;
   }) => Promise<void> | void;
+  readonly onMetaFetch?: (probe: {
+    readonly fetch: number;
+    readonly requesterScope: string | undefined;
+    readonly maxAcceptedQuads: number | undefined;
+    readonly maxAcceptedHeapBytesEstimate: number | undefined;
+  }) => Promise<void> | void;
+  readonly metaContinuationLimits?: {
+    readonly rows: number;
+    readonly bytesEstimate: number;
+  };
+  /** Deterministic metadata slices returned by consecutive selected passes. */
+  readonly metaPages?: readonly {
+    readonly quads: Quad[];
+    readonly resumedFromOffset: number;
+    readonly nextOffset: number;
+    readonly completed: boolean;
+    readonly timedOut: boolean;
+    readonly responderSessionStartedFresh?: boolean;
+  }[];
+  /** Number of aggregate-data calls that fail after metadata completed. */
+  readonly dataFailuresBeforeSuccess?: number;
 }
 
 interface SelectedSwmLifecycleAgentFixture {
-  config: { syncContextGraphPriorities: Readonly<Record<string, number>> };
+  config: {
+    syncContextGraphPriorities: Readonly<Record<string, number>>;
+    syncResponderSnapshotLimits?: {
+      local?: { rows?: number; bytesEstimate?: number };
+    };
+  };
   store: OxigraphStore;
   writeLocks: Map<string, Promise<void>>;
   publicSnapshotStore: {
@@ -251,6 +279,14 @@ interface SelectedSwmLifecycleAgentFixture {
     graphUri: string,
     deadline: number,
     snapshotRef?: string,
+    sinceBatchId?: string,
+    signal?: AbortSignal,
+    recovery?: boolean,
+    forceFreshSession?: boolean,
+    assetUals?: string[],
+    requesterScope?: `selected-swm-meta:${string}`,
+    maxAcceptedQuads?: number,
+    maxAcceptedHeapBytesEstimate?: number,
   ) => Promise<{
     quads: Quad[];
     bytesReceived: number;
@@ -259,6 +295,7 @@ interface SelectedSwmLifecycleAgentFixture {
     checkpointKey: string;
     completed: boolean;
     timedOut: boolean;
+    responderSessionStartedFresh?: boolean;
   }>;
   getOrCreateSyncVerifyWorker: () => {
     processSharedMemoryBatch: (dataQuads: Quad[], metaQuads: Quad[]) => Promise<{
@@ -295,6 +332,10 @@ interface SelectedSwmLifecycleHarness {
     readonly publicAdmissions: () => number;
     readonly snapshotReads: () => number;
     readonly metaFetches: () => number;
+    readonly processedMetaBatches: readonly Quad[][];
+    readonly dataFetches: () => number;
+    readonly metaRequesterScopes: readonly (string | undefined)[];
+    readonly metaSinceBatchIds: readonly (string | undefined)[];
     readonly maxActiveAdmissions: () => number;
   };
   readonly close: () => Promise<void>;
@@ -329,10 +370,23 @@ function createSelectedSwmLifecycleHarness(
   let publicAdmissions = 0;
   let snapshotReads = 0;
   let metaFetches = 0;
+  let dataFetches = 0;
+  const metaRequesterScopes: Array<string | undefined> = [];
+  const metaSinceBatchIds: Array<string | undefined> = [];
+  const processedMetaBatches: Quad[][] = [];
   const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
 
   const agent: SelectedSwmLifecycleAgentFixture = {
-    config: { syncContextGraphPriorities: options.priorities ?? {} },
+    config: {
+      syncContextGraphPriorities: options.priorities ?? {},
+      ...(options.metaContinuationLimits
+        ? {
+          syncResponderSnapshotLimits: {
+            local: options.metaContinuationLimits,
+          },
+        }
+        : {}),
+    },
     store,
     writeLocks: new Map(),
     publicSnapshotStore: {
@@ -354,12 +408,74 @@ function createSelectedSwmLifecycleHarness(
       _graphUri,
       _deadline,
       snapshotRef,
+      sinceBatchId,
+      _signal,
+      _recovery,
+      _forceFreshSession,
+      _assetUals,
+      requesterScope,
+      maxAcceptedQuads,
+      maxAcceptedHeapBytesEstimate,
     ) => {
       if (phase === 'snapshot') {
         snapshotFetches.push(snapshotRef ?? 'missing-ref');
         throw new Error('all snapshot fixtures should be cache hits');
       }
-      if (phase === 'meta') metaFetches += 1;
+      if (phase === 'meta') {
+        metaFetches += 1;
+        metaRequesterScopes.push(requesterScope);
+        metaSinceBatchIds.push(sinceBatchId);
+        await options.onMetaFetch?.({
+          fetch: metaFetches,
+          requesterScope,
+          maxAcceptedQuads,
+          maxAcceptedHeapBytesEstimate,
+        });
+        const planned = options.metaPages?.[metaFetches - 1];
+        if (planned) {
+          if (
+            maxAcceptedQuads !== undefined
+            && planned.quads.length > maxAcceptedQuads
+          ) {
+            const error = new SyncPageAccumulationLimitError(
+              'quads',
+              planned.quads.length,
+              maxAcceptedQuads,
+            );
+            error.responderSessionStartedFresh =
+              planned.responderSessionStartedFresh;
+            throw error;
+          }
+          const heapBytesEstimate = planned.quads.reduce(
+            (total, quad) => total + estimateQuadHeapBytes(quad),
+            0,
+          );
+          if (
+            maxAcceptedHeapBytesEstimate !== undefined
+            && heapBytesEstimate > maxAcceptedHeapBytesEstimate
+          ) {
+            const error = new SyncPageAccumulationLimitError(
+              'heap-bytes',
+              heapBytesEstimate,
+              maxAcceptedHeapBytesEstimate,
+            );
+            error.responderSessionStartedFresh =
+              planned.responderSessionStartedFresh;
+            throw error;
+          }
+          return {
+            ...planned,
+            bytesReceived: planned.quads.length,
+            checkpointKey: `${contextGraphId}:${phase}`,
+          };
+        }
+      }
+      if (phase === 'data') {
+        dataFetches += 1;
+        if (dataFetches <= (options.dataFailuresBeforeSuccess ?? 0)) {
+          throw new Error('simulated aggregate-data transport failure');
+        }
+      }
       const quads = phase === 'meta' && contextGraphId === options.contextGraphs.public
         ? options.manifest.meta
         : [];
@@ -374,15 +490,18 @@ function createSelectedSwmLifecycleHarness(
       };
     },
     getOrCreateSyncVerifyWorker: () => ({
-      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
-        verifiedData: dataQuads,
-        verifiedMeta: metaQuads,
-        totalFetchedDataQuads: dataQuads.length,
-        totalFetchedMetaQuads: metaQuads.length,
-        droppedDataTriples: 0,
-        emptyResponses: 0,
-        entityCreators: [],
-      }),
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => {
+        processedMetaBatches.push([...metaQuads]);
+        return {
+          verifiedData: dataQuads,
+          verifiedMeta: metaQuads,
+          totalFetchedDataQuads: dataQuads.length,
+          totalFetchedMetaQuads: metaQuads.length,
+          droppedDataTriples: 0,
+          emptyResponses: 0,
+          entityCreators: [],
+        };
+      },
     }),
     runContextGraphSyncWithBackpressure: async (
       _ctx,
@@ -425,6 +544,10 @@ function createSelectedSwmLifecycleHarness(
       publicAdmissions: () => publicAdmissions,
       snapshotReads: () => snapshotReads,
       metaFetches: () => metaFetches,
+      processedMetaBatches,
+      dataFetches: () => dataFetches,
+      metaRequesterScopes,
+      metaSinceBatchIds,
       maxActiveAdmissions: () => maxActiveAdmissions,
     },
     close: async () => {
@@ -440,6 +563,7 @@ describe('shared-memory freshness classification', () => {
     const incomplete = result(contextGraphId, 1, 2);
     expect(classifySelectedSwmRoundFreshness(contextGraphId, incomplete)).toEqual({
       recoverableSnapshotYieldFailures: 1,
+      recoverableMetadataContinuationYields: 0,
       snapshotPlaneComplete: false,
     });
     expect(classifySelectedSwmRoundFreshness(contextGraphId, {
@@ -509,6 +633,32 @@ describe('shared-memory freshness classification', () => {
     }, {
       recoverableSnapshotYieldFailures: 1,
     }).resolvedSnapshotPlaneIncomplete).toBe(0);
+
+    const retainedMetadataYield = {
+      ...cleanDurableResult(),
+      timedOutPhases: 1,
+      metadataContinuationYields: 1,
+    };
+    expect(classifySelectedSwmRoundFreshness(
+      contextGraphId,
+      retainedMetadataYield,
+    ).recoverableMetadataContinuationYields).toBe(1);
+    const metadataResolved = applySelectedSwmFreshnessResolution(
+      {
+        ...retainedMetadataYield,
+        completedPhases: 2,
+      },
+      {
+        recoverableSnapshotYieldFailures: 0,
+        recoverableMetadataContinuationYields: 1,
+      },
+    );
+    expect(classifySharedMemoryFreshness(metadataResolved).timedOut).toBe(false);
+    expect(classifySharedMemoryFreshness({
+      ...retainedMetadataYield,
+      completedPhases: 2,
+      resolvedMetadataContinuationYields: 2,
+    }).timedOut).toBe(true);
   });
 });
 
@@ -574,6 +724,35 @@ describe('selected RFC-64 SWM continuation', () => {
     }));
   });
 
+  it('does not treat an allocated zero-offset metadata accumulator as retry capability', async () => {
+    const contextGraphId = 'selected-zero-meta-progress';
+    const run = vi.fn(async () => cleanDurableResult());
+    const stop = vi.fn();
+    const unit = {
+      ...selectedUnit(contextGraphId, cleanDurableResult(), run),
+      metadataContinuationProgress: () => 0,
+    };
+
+    const { summary } = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
+      units: [unit],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, work) => work(),
+      merge,
+      markDeferred: (current) => current,
+      onStop: stop,
+    });
+
+    expect(run).not.toHaveBeenCalled();
+    expect(summary.continuationPasses).toBe(0);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      reason: 'coverage-stalled',
+    }));
+  });
+
   it('keeps independent per-CG coverage and continues only the incomplete graph', async () => {
     const runs: string[] = [];
     const stop = vi.fn();
@@ -612,8 +791,8 @@ describe('selected RFC-64 SWM continuation', () => {
     const admissions: string[] = [];
     const progress: Array<{
       contextGraphId: string;
-      coverageBefore: number;
-      coverageAfter: number;
+      progressBefore: number;
+      progressAfter: number;
     }> = [];
 
     const execution = await runSelectedSwmContinuations({
@@ -642,12 +821,13 @@ describe('selected RFC-64 SWM continuation', () => {
     expect(admissions).toEqual([publicB, publicA]);
     expect(runs).toEqual([publicB, publicA]);
     expect(progress).toEqual([
-      { contextGraphId: publicB, coverageBefore: 1, coverageAfter: 3 },
-      { contextGraphId: publicA, coverageBefore: 1, coverageAfter: 3 },
+      { contextGraphId: publicB, progressBefore: 1, progressAfter: 3 },
+      { contextGraphId: publicA, progressBefore: 1, progressAfter: 3 },
     ]);
     expect(execution.summary.continuationPasses).toBe(2);
     expect(execution.freshnessResolution).toEqual({
       recoverableSnapshotYieldFailures: 2,
+      recoverableMetadataContinuationYields: 0,
     });
   });
 
@@ -727,6 +907,41 @@ describe('selected RFC-64 SWM continuation', () => {
     });
     expect(continuationRun).toHaveBeenCalledOnce();
     expect(continuationStop).toHaveBeenCalledOnce();
+  });
+
+  it('preserves the three-failure peer-dead cutoff across outer continuation batches', async () => {
+    const calls: string[] = [];
+    const onBackpressure = vi.fn();
+    const contextGraphIds = Array.from({ length: 8 }, (_, index) => `selected-dead-${index}`);
+    const failed = {
+      ...cleanDurableResult(),
+      failedPeers: 1,
+      backoffWorthyFailures: 1,
+    };
+
+    const execution = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
+      units: contextGraphIds.map((contextGraphId) => selectedUnit(
+        contextGraphId,
+        result(contextGraphId, 1, 2),
+        async () => {
+          calls.push(contextGraphId);
+          return failed;
+        },
+      )),
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => run(),
+      merge,
+      markDeferred: (current) => current,
+      isPeerTransportFailure: (part) => part.failedPeers > 0,
+      onBackpressure,
+    });
+
+    expect(calls).toEqual(contextGraphIds.slice(0, 3));
+    expect(execution.summary.continuationPasses).toBe(3);
+    expect(onBackpressure).not.toHaveBeenCalled();
   });
 
   it('owns continuationPasses even when a part result carries a nonzero counter', async () => {
@@ -900,6 +1115,387 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         fresh: true,
         progress: false,
       });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('retains an exact metadata prefix across bounded passes and verifies the combined manifest once', async () => {
+    const publicCg = 'selected-multi-pass-metadata';
+    const manifest = snapshotManifest(publicCg, 3);
+    const firstPrefix = manifest.meta.slice(0, 4);
+    const finalSuffix = manifest.meta.slice(4);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: firstPrefix,
+          resumedFromOffset: 0,
+          nextOffset: firstPrefix.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: finalSuffix,
+          resumedFromOffset: firstPrefix.length,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          stopOnBackoffWorthyFailure: true,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.metaFetches()).toBe(2);
+      expect(harness.probes.metaRequesterScopes).toHaveLength(2);
+      expect(harness.probes.metaRequesterScopes[0]).toMatch(/^selected-swm-meta:\d+$/);
+      expect(harness.probes.metaRequesterScopes[1]).toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.metaSinceBatchIds).toEqual([undefined, undefined]);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(harness.probes.publicAdmissions()).toBe(2);
+      expect(summary.continuationPasses).toBe(1);
+      expect(summary.metadataContinuationYields).toBe(1);
+      expect(summary.timedOutPhases).toBe(1);
+      expect(summary.resolvedMetadataContinuationYields).toBe(1);
+      expect(classifySharedMemoryFreshness(summary).timedOut).toBe(false);
+      expect(summary.swmCoverage).toMatchObject({
+        contextGraphId: publicCg,
+        snapshotsResolved: 3,
+        snapshotsTotal: 3,
+        missingCount: 0,
+      });
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('treats a responder restart as a new progress generation and completes its replacement prefix', async () => {
+    const publicCg = 'selected-restarted-metadata-generation';
+    const manifest = snapshotManifest(publicCg, 3);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: manifest.meta.slice(0, 2),
+          resumedFromOffset: 0,
+          nextOffset: 14_000,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: manifest.meta.slice(0, 2),
+          resumedFromOffset: 0,
+          nextOffset: 5_000,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: manifest.meta.slice(2),
+          resumedFromOffset: 5_000,
+          nextOffset: 19_000,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.metaFetches()).toBe(3);
+      expect(harness.probes.publicAdmissions()).toBe(3);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(summary.continuationPasses).toBe(2);
+      expect(summary.metadataContinuationYields).toBe(2);
+      expect(summary.resolvedMetadataContinuationYields).toBe(2);
+      expect(summary.swmCoverage).toMatchObject({
+        snapshotsResolved: 3,
+        snapshotsTotal: 3,
+        missingCount: 0,
+      });
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('drops a full old prefix and retries once when a fresh responder generation replaces it', async () => {
+    const publicCg = 'selected-full-prefix-fresh-generation';
+    const manifest = snapshotManifest(publicCg, 1);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaContinuationLimits: { rows: manifest.meta.length, bytesEstimate: 1024 * 1024 },
+      metaPages: [
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: 14_000,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          // The old prefix owns the entire row allowance, so this first fresh
+          // replacement attempt proves the restart by hitting the zero append
+          // cap. The requester must discard the old generation and retry.
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: 2,
+          completed: true,
+          timedOut: false,
+          responderSessionStartedFresh: true,
+        },
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: 2,
+          completed: true,
+          timedOut: false,
+          responderSessionStartedFresh: true,
+        },
+      ],
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.metaFetches()).toBe(3);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(summary.continuationPasses).toBe(1);
+      expect(summary.metadataContinuationYields).toBe(1);
+      expect(summary.resolvedMetadataContinuationYields).toBe(1);
+      expect(summary.failedPhases).toBe(0);
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('isolates overlapping selected invocations with unique requester scopes', async () => {
+    const publicCg = 'selected-overlap-isolation';
+    const manifest = snapshotManifest(publicCg, 0);
+    let releaseBoth!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { releaseBoth = resolve; });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      onMetaFetch: ({ fetch }) => {
+        if (fetch === 2) releaseBoth();
+        return bothStarted;
+      },
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      await Promise.all([
+        callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: plan,
+        }),
+        callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+          selectedSwmPriority: true,
+          priority: 2_001,
+          sharedMemorySyncPlan: plan,
+        }),
+      ]);
+
+      expect(harness.probes.metaRequesterScopes).toHaveLength(2);
+      expect(new Set(harness.probes.metaRequesterScopes).size).toBe(2);
+      expect(harness.probes.metaSinceBatchIds).toEqual([undefined, undefined]);
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('fails closed when a retained metadata prefix exceeds the local resource budget', async () => {
+    const publicCg = 'selected-metadata-resource-cap';
+    const manifest = snapshotManifest(publicCg, 2);
+    const onMetaFetch = vi.fn();
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaContinuationLimits: { rows: 1, bytesEstimate: 1024 * 1024 },
+      onMetaFetch,
+      metaPages: [{
+        quads: manifest.meta.slice(0, 2),
+        resumedFromOffset: 0,
+        nextOffset: 2,
+        completed: false,
+        timedOut: true,
+      }],
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(onMetaFetch).toHaveBeenCalledWith(expect.objectContaining({
+        maxAcceptedQuads: 1,
+        maxAcceptedHeapBytesEstimate: 1024 * 1024,
+      }));
+      expect(harness.probes.processedMetaBatches).toEqual([]);
+      expect(summary.failedPhases).toBe(1);
+      expect(summary.continuationPasses).toBe(0);
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('reuses a complete retained manifest when a later aggregate-data phase fails', async () => {
+    const publicCg = 'selected-complete-metadata-reuse';
+    const manifest = snapshotManifest(publicCg, 3);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      dataFailuresBeforeSuccess: 1,
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.publicAdmissions()).toBe(2);
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(harness.probes.dataFetches()).toBe(2);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(summary.continuationPasses).toBe(1);
+      expect(summary.swmCoverage).toMatchObject({
+        snapshotsResolved: 3,
+        snapshotsTotal: 3,
+      });
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('fails closed instead of splicing a tail from an incompatible metadata offset', async () => {
+    const publicCg = 'selected-metadata-offset-mismatch';
+    const manifest = snapshotManifest(publicCg, 3);
+    const firstPrefix = manifest.meta.slice(0, 4);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: firstPrefix,
+          resumedFromOffset: 0,
+          nextOffset: firstPrefix.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: manifest.meta.slice(1),
+          resumedFromOffset: 1,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          stopOnBackoffWorthyFailure: true,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.metaFetches()).toBe(2);
+      expect(harness.probes.processedMetaBatches).toEqual([]);
+      expect(summary.failedPhases).toBe(1);
+      expect(summary.swmCoverage).toBeUndefined();
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
       await harness.close();
     }

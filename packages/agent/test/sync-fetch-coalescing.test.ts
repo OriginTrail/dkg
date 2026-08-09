@@ -11,6 +11,7 @@ import {
 import type { ContextGraphMembershipStore, SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
+import type { SyncCheckpointScope } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
@@ -35,6 +36,9 @@ type FetchArgs = {
   signal?: AbortSignal;
   recovery?: boolean;
   assetUals?: string[];
+  requesterScope?: SyncCheckpointScope;
+  maxAcceptedQuads?: number;
+  maxAcceptedHeapBytesEstimate?: number;
 };
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
@@ -245,6 +249,9 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
     args.recovery,
     undefined,
     args.assetUals,
+    args.requesterScope,
+    args.maxAcceptedQuads,
+    args.maxAcceptedHeapBytesEstimate,
   );
 }
 
@@ -291,6 +298,9 @@ describe('DKGAgent sync fetch coalescing', () => {
       // sequence, and an exact batch must never join a full sync.
       { name: 'assetUals', base: { assetUals: [EXACT_UAL_7] }, variant: { assetUals: [EXACT_UAL_8] } },
       { name: 'assetUals-vs-full', base: {}, variant: { assetUals: [EXACT_UAL_7] } },
+      { name: 'requesterScope', base: {}, variant: { requesterScope: 'selected-swm-meta:test' } },
+      { name: 'maxAcceptedQuads', base: {}, variant: { maxAcceptedQuads: 10 } },
+      { name: 'maxAcceptedHeapBytesEstimate', base: {}, variant: { maxAcceptedHeapBytesEstimate: 4096 } },
     ];
 
     for (const testCase of cases) {

@@ -248,7 +248,11 @@ import {
 import { waitForPeerProtocol } from './p2p/protocol-readiness.js';
 import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
-import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
+import {
+  deleteSyncPageCheckpoint,
+  fetchSyncPages,
+  type SyncPageResult,
+} from './sync/requester/page-fetch.js';
 import {
   exactAssetFilterKey,
   exactSyncPhaseAccumulationLimits,
@@ -256,7 +260,10 @@ import {
 } from './sync/exact-assets.js';
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
-import { getSyncCheckpointKey } from './sync/checkpoint/state.js';
+import {
+  getSyncCheckpointKey,
+  type SyncCheckpointScope,
+} from './sync/checkpoint/state.js';
 import {
   createContextGraphSyncDeadline,
   createDurableSyncBudget,
@@ -275,7 +282,16 @@ import {
   type ExactDurableFetchDisposition,
 } from './sync/requester/exact-durable-fetch.js';
 import { resolveSyncAgentsMeta, shouldWithholdAgentsDurableMeta } from './sync/agents-meta-policy.js';
-import { runSharedMemorySync, selectSwmSnapshotCoverage, sharedMemoryOwnershipKeyFromGraph } from './sync/requester/shared-memory-sync.js';
+import {
+  createSelectedSwmMetaRetentionBudget,
+  type SelectedSwmMetaRetentionLimits,
+} from './sync/selected-swm-meta-budget.js';
+import {
+  runSharedMemorySync,
+  selectSwmSnapshotCoverage,
+  sharedMemoryOwnershipKeyFromGraph,
+  type SharedMemoryMetaContinuationState,
+} from './sync/requester/shared-memory-sync.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -717,6 +733,9 @@ function syncPageFetchCoalescingKey(params: {
   recovery?: boolean;
   forceFreshSession?: boolean;
   assetUals?: readonly string[];
+  requesterScope?: SyncCheckpointScope;
+  maxAcceptedQuads?: number;
+  maxAcceptedHeapBytesEstimate?: number;
 }): string {
   return JSON.stringify([
     params.remotePeerId,
@@ -729,6 +748,9 @@ function syncPageFetchCoalescingKey(params: {
     params.recovery === true,
     params.forceFreshSession === true,
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
+    params.requesterScope ?? null,
+    params.maxAcceptedQuads ?? null,
+    params.maxAcceptedHeapBytesEstimate ?? null,
   ]);
 }
 
@@ -874,6 +896,34 @@ function sharedMemorySyncSingleFlightKey(params: {
     privateRecoverFromCurator: params.privateRecoverFromCurator,
     priority: params.priority ?? null,
   });
+}
+
+let selectedSwmMetaInvocationSequence = 0;
+
+type SelectedSwmMetaRetentionBudget = ReturnType<
+  typeof createSelectedSwmMetaRetentionBudget
+>;
+
+const selectedSwmMetaRetentionBudgets = new WeakMap<
+  object,
+  { signature: string; budget: SelectedSwmMetaRetentionBudget }
+>();
+
+function selectedSwmMetaRetentionBudgetFor(
+  owner: object,
+  limits: SelectedSwmMetaRetentionLimits,
+): SelectedSwmMetaRetentionBudget {
+  const signature = JSON.stringify(limits);
+  const existing = selectedSwmMetaRetentionBudgets.get(owner);
+  if (existing?.signature === signature) return existing.budget;
+  const budget = createSelectedSwmMetaRetentionBudget(limits);
+  selectedSwmMetaRetentionBudgets.set(owner, { signature, budget });
+  return budget;
+}
+
+function nextSelectedSwmMetaRequesterScope(): SyncCheckpointScope {
+  selectedSwmMetaInvocationSequence += 1;
+  return `selected-swm-meta:${selectedSwmMetaInvocationSequence}`;
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -1262,6 +1312,7 @@ function emptySharedMemorySyncResult(): SharedMemorySyncResult {
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
     snapshotPlaneIncomplete: 0,
+    metadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };
@@ -1292,6 +1343,8 @@ function mergeSharedMemorySyncResults(
     backoffWorthyFailures: (a.backoffWorthyFailures ?? 0) + (b.backoffWorthyFailures ?? 0),
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
     snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
+    metadataContinuationYields:
+      (a.metadataContinuationYields ?? 0) + (b.metadataContinuationYields ?? 0),
     continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
     ...mergeSharedMemoryFreshnessDiagnostics(a, b),
     // The two halves of `bytesReceived`, kept apart so replay cost stays
@@ -5702,6 +5755,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Exact VM recovery filter. Kept in the checkpoint, coalescing, wire, and
     // responder-session identities so offsets can never cross asset batches.
     assetUals?: string[],
+    // Internal requester namespace for state whose retained prefix is not
+    // available to ordinary coalesced callers.
+    requesterScope?: SyncCheckpointScope,
+    maxAcceptedQuads?: number,
+    maxAcceptedHeapBytesEstimate?: number,
   ): Promise<SyncPageResult> {
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
@@ -5722,6 +5780,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         recovery,
         forceFreshSession,
         assetUals,
+        requesterScope,
+        maxAcceptedQuads,
+        maxAcceptedHeapBytesEstimate,
       });
     const inFlight = inFlightSyncPageFetchesFor(this);
     // Read once, here: this fetch runs inside the admitted operation, so the
@@ -5769,8 +5830,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      requesterScope,
       maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
-      maxAcceptedQuads: exactAccumulationLimits?.maxQuads,
+      maxAcceptedQuads: exactAccumulationLimits?.maxQuads === undefined
+        ? maxAcceptedQuads
+        : maxAcceptedQuads === undefined
+          ? exactAccumulationLimits.maxQuads
+          : Math.min(exactAccumulationLimits.maxQuads, maxAcceptedQuads),
+      maxAcceptedHeapBytesEstimate,
       deadline,
       recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
@@ -6092,6 +6159,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.config.syncContextGraphPriorities,
     );
     const stopOnBackoffWorthyFailure = options?.stopOnBackoffWorthyFailure;
+    const selectedSwmEnabled = Boolean(
+      options?.selectedSwmPriority && publicContextGraphIds.length > 0,
+    );
+    const selectedMetaContinuations = selectedSwmEnabled
+      ? new Map<string, SharedMemoryMetaContinuationState>()
+      : undefined;
+    // This scope is unique even when two selected calls overlap on the same
+    // peer/CG through different top-level single-flight keys. Their in-memory
+    // prefixes must never share a responder cursor or pooled fetch session.
+    const selectedMetaRequesterScope = selectedSwmEnabled
+      ? nextSelectedSwmMetaRequesterScope()
+      : undefined;
+    const selectedMetaRetentionBudget = selectedSwmEnabled
+      ? (() => {
+        const budget = resolveSyncResponderSnapshotPolicy(
+          this.config.syncResponderSnapshotLimits,
+          process.env,
+        ).budget;
+        return selectedSwmMetaRetentionBudgetFor(this, {
+          maxRows: budget.maxRows,
+          maxBytesEstimate: budget.maxBytesEstimate,
+          maxPrefixRows: budget.maxSnapshotRows,
+          maxPrefixBytesEstimate: budget.maxSnapshotBytesEstimate,
+        });
+      })()
+      : undefined;
     const singleFlightKey = sharedMemorySyncSingleFlightKey({
       remotePeerId,
       contextGraphIds,
@@ -6116,6 +6209,32 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId: string,
         remainingContextGraphs: number,
       ): Promise<SharedMemorySyncResult> => {
+        if (selectedMetaContinuations && !selectedMetaContinuations.has(contextGraphId)) {
+          const checkpointKey = getSyncCheckpointKey(
+            remotePeerId,
+            contextGraphId,
+            true,
+            'meta',
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            selectedMetaRequesterScope,
+          );
+          // The prefix is invocation-local. A checkpoint left by a crashed
+          // process cannot be resumed after that prefix disappeared.
+          this.syncCheckpoints.delete(checkpointKey);
+          selectedMetaContinuations.set(contextGraphId, {
+            quads: [],
+            bytesEstimate: 0,
+            nextOffset: 0,
+            checkpointKey,
+            requesterScope: selectedMetaRequesterScope!,
+            generation: 0,
+            completed: false,
+            retentionLease: selectedMetaRetentionBudget!.lease(),
+          });
+        }
         const result = await runSharedMemorySync({
           ctx,
           remotePeerId,
@@ -6123,7 +6242,36 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           createContextGraphSyncDeadline: () => createContextGraphSyncDeadline({
             remainingContextGraphs,
           }),
-          fetchSyncPages: this.fetchSyncPages.bind(this),
+          fetchSyncPages: (
+            ctx2,
+            peerId,
+            cgId,
+            includeSharedMemory,
+            phase,
+            graphUri,
+            deadline,
+            snapshotRef,
+            requesterScope,
+            maxAcceptedQuads,
+            maxAcceptedHeapBytesEstimate,
+          ) => this.fetchSyncPages(
+            ctx2,
+            peerId,
+            cgId,
+            includeSharedMemory,
+            phase,
+            graphUri,
+            deadline,
+            snapshotRef,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            requesterScope,
+            maxAcceptedQuads,
+            maxAcceptedHeapBytesEstimate,
+          ),
           processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
               wsDataQuads,
@@ -6135,6 +6283,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
           getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
           stopOnBackoffWorthyFailure,
+          metaContinuationByContextGraph: selectedMetaContinuations,
           ensureContextGraph: async (contextGraphId) => {
             const graphManager = new GraphManager(this.store);
             await graphManager.ensureContextGraph(contextGraphId);
@@ -6174,7 +6323,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             this.contextGraphMetaProjection.markDirtyFromQuads(inserted);
           },
           publicSnapshotStore: this.publicSnapshotStore,
-          deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
+          deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
           setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
           ensureOwnedMap: (contextGraphId) => {
             if (!this.workspaceOwnedEntities.has(contextGraphId)) {
@@ -6191,9 +6340,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       const publicSet = new Set(publicContextGraphIds);
       const privateRecoverySet = new Set(privateRecoverFromCurator);
-      const selectedSwmEnabled = Boolean(
-        options?.selectedSwmPriority && publicContextGraphIds.length > 0,
-      );
       const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
       const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = [];
       for (const contextGraphId of plan.eligibleContextGraphIds) {
@@ -6282,7 +6428,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             && item.lane === 'shared_memory'
             && publicSet.has(item.contextGraphId)
           ) {
-            selectedContinuationUnits.push({ work: item, initialResult: result });
+            selectedContinuationUnits.push({
+              work: item,
+              initialResult: result,
+              metadataContinuationProgress: () => (
+                selectedMetaContinuations?.get(item.contextGraphId)?.nextOffset
+              ),
+              metadataContinuationGeneration: () => (
+                selectedMetaContinuations?.get(item.contextGraphId)?.generation
+              ),
+            });
           }
         },
         markDeferred: (summary) => ({
@@ -6366,7 +6521,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.log.info(
             ctx,
             `Continued selected RFC-64 SWM for "${progress.contextGraphId}" from ${remotePeerId.slice(-8)}: `
-            + `snapshot coverage ${progress.coverageBefore} -> ${progress.coverageAfter}`,
+            + `continuation progress ${progress.progressBefore} -> ${progress.progressAfter}`,
           );
         },
         onExpiredAfterAdmission: (contextGraphId) => {
@@ -6393,6 +6548,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return runSyncSingleFlight(this, singleFlightKey, runSync, {
       scope: 'shared-memory',
       source: options?.source,
+    }).finally(() => {
+      // Never leave a non-zero persisted cursor after its in-memory prefix has
+      // gone out of scope. A later invocation must start at offset zero.
+      for (const state of selectedMetaContinuations?.values() ?? []) {
+        deleteSyncPageCheckpoint(this.syncCheckpoints, state.checkpointKey);
+        state.retentionLease.release();
+      }
+      selectedMetaContinuations?.clear();
     });
   }
 
