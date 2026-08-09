@@ -11,7 +11,7 @@ import type {
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import { linkStoreChainV1 } from './store-chain-capability.js';
-import { SystemRecordLaneForwarderV1 } from './system-record-lane-forwarder-v1.js';
+import { SystemRecordLaneForwarderV1 } from './system-record-lane-forwarder-v1-internal.js';
 import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,

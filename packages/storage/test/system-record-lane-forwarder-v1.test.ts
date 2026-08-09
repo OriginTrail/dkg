@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { SystemRecordLaneForwarderV1 } from '../src/system-record-lane-forwarder-v1.js';
+import { SystemRecordLaneForwarderV1 } from '../src/system-record-lane-forwarder-v1-internal.js';
 import type {
   SystemRecordApplyOutcomeV1,
   SystemRecordLaneActivationV1,
