@@ -104,6 +104,21 @@ export function copyBoundedSystemRecordBytesV1(
   return copy;
 }
 
+export function systemRecordHexToBytesV1(value: string): Uint8Array {
+  return Uint8Array.from(Buffer.from(value.slice(2), 'hex'));
+}
+
+export function concatSystemRecordBytesV1(...values: readonly Uint8Array[]): Uint8Array {
+  const length = values.reduce((sum, value) => sum + value.byteLength, 0);
+  const result = new Uint8Array(length);
+  let offset = 0;
+  for (const value of values) {
+    result.set(value, offset);
+    offset += value.byteLength;
+  }
+  return result;
+}
+
 function systemRecordByteLengthV1(value: unknown, label: string): number {
   if (!(value instanceof Uint8Array) || TYPED_ARRAY_BYTE_LENGTH === undefined) {
     failSystemRecordObjectV1('system-record-scalar', `${label} must be Uint8Array bytes`);
