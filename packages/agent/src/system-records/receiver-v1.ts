@@ -2,6 +2,7 @@
 
 import {
   decodeOpaqueKaBundleV1,
+  tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import {
   buildAgentProfileVerificationClosureV1,
@@ -38,6 +39,7 @@ import {
   type SystemRecordArtifactRepositoryV1,
   type SystemRecordArtifactV1,
 } from './artifact-v1.js';
+import { parseNQuads } from '../dkg-agent-utils.js';
 
 export interface AgentProfileReceiverVerifiedBundleV1 {
   /** Exact canonical projection bytes parsed and authenticated from the supplied bundle. */
@@ -58,6 +60,18 @@ export interface AgentProfileReceiverCandidateV1 {
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
   readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
+}
+
+/** Expiry admission that the lifecycle-owned materializer must bind to storage. */
+export interface AgentProfileReceiverApplyAdmissionV1 {
+  /** Absolute signed-head deadline to use as the storage admitted deadline. */
+  readonly validUntilMs: number;
+  /**
+   * Re-read the receiver clock and reject an expired head. The lifecycle bridge
+   * must call this after its waits, immediately before proof issuance/apply
+   * admission, so the storage operation cannot admit an already-expired head.
+   */
+  readonly assertFreshAtApply: () => void;
 }
 
 export interface CreateAgentProfileReceiverOptionsV1 {
@@ -83,10 +97,14 @@ export interface CreateAgentProfileReceiverOptionsV1 {
   /**
    * Lifecycle-owned bridge into the storage runtime. It mints and consumes the
    * private replacement proof inside one structured call; no proof escapes.
+   * It must bind admission.validUntilMs to the storage admitted deadline and,
+   * after any internal await, call admission.assertFreshAtApply immediately
+   * before proof issuance/apply admission.
    */
   readonly consumeCandidate: (
     input: AgentProfileReceiverCandidateV1,
     signal: AbortSignal,
+    admission: AgentProfileReceiverApplyAdmissionV1,
   ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
   readonly nowMs?: () => number;
 }
@@ -146,11 +164,16 @@ export function createAgentProfileReceiverV1(
         verifyCurrentBundle,
       });
       signal.throwIfAborted();
-      assertActiveHeadFreshV1(
-        candidate.head,
-        receiverNowMs(nowMs?.() ?? Date.now()),
-      );
-      const outcome = await consumeCandidate(candidate, signal);
+      const validUntilMs = Date.parse(candidate.head.validUntil);
+      const admission: AgentProfileReceiverApplyAdmissionV1 = Object.freeze({
+        validUntilMs,
+        assertFreshAtApply: () => assertActiveDeadlineFreshV1(
+          validUntilMs,
+          receiverNowMs(nowMs?.() ?? Date.now()),
+        ),
+      });
+      admission.assertFreshAtApply();
+      const outcome = await consumeCandidate(candidate, signal, admission);
       // Atomic apply is the point of no return. A cancellation that arrives
       // after the storage closure returns must not hide a committed outcome and
       // make the caller retry it as if nothing happened.
@@ -446,12 +469,16 @@ function snapshotVerifiedBundle(
     || suppliedProjectionBytes.some((byte, index) => byte !== expectedProjectionBytes[index])) {
     throw new Error('bundle verifier projection does not bind the supplied bundle');
   }
-  const projectionQuads = value.projectionQuads.map((quad) => Object.freeze({
+  const suppliedProjectionQuads = value.projectionQuads.map((quad) => Object.freeze({
     subject: quad.subject,
     predicate: quad.predicate,
     object: quad.object,
     graph: quad.graph,
   }));
+  const projectionQuads = deriveCanonicalProjectionQuadsV1(expectedProjectionBytes);
+  if (!equalQuadMultisetsV1(suppliedProjectionQuads, projectionQuads)) {
+    throw new Error('bundle verifier projection quads do not bind the supplied bundle');
+  }
   return Object.freeze({
     canonicalProjectionBytes: Uint8Array.from(expectedProjectionBytes),
     projectionQuads: Object.freeze(projectionQuads),
@@ -459,9 +486,74 @@ function snapshotVerifiedBundle(
 }
 
 function assertActiveHeadFreshV1(head: AgentProfileActiveHeadObjectV1, nowMs: number): void {
-  if (Date.parse(head.validUntil) <= nowMs) {
+  assertActiveDeadlineFreshV1(Date.parse(head.validUntil), nowMs);
+}
+
+function assertActiveDeadlineFreshV1(validUntilMs: number, nowMs: number): void {
+  if (validUntilMs <= nowMs) {
     throw new Error('active profile receiver resolved an expired agent-profile head');
   }
+}
+
+function deriveCanonicalProjectionQuadsV1(
+  canonicalProjectionBytes: Uint8Array,
+): Readonly<Quad>[] {
+  let projectionText: string;
+  try {
+    projectionText = new TextDecoder('utf-8', { fatal: true }).decode(canonicalProjectionBytes);
+  } catch {
+    throw new Error('bundle verifier projection bytes are not valid UTF-8');
+  }
+  const quads = parseNQuads(projectionText).map((quad) => Object.freeze({
+    subject: quad.subject,
+    predicate: quad.predicate,
+    object: quad.object,
+    graph: quad.graph,
+  }));
+  const reconstructed = new Uint8Array(
+    quads.reduce((total, quad) => total + tripleContentV10(
+      quad.subject,
+      quad.predicate,
+      quad.object,
+    ).byteLength + 1, 0),
+  );
+  let offset = 0;
+  for (const quad of quads) {
+    if (quad.graph !== '') {
+      throw new Error('bundle verifier projection must be graphless');
+    }
+    const line = tripleContentV10(quad.subject, quad.predicate, quad.object);
+    reconstructed.set(line, offset);
+    offset += line.byteLength;
+    reconstructed[offset] = 0x0a;
+    offset += 1;
+  }
+  if (reconstructed.byteLength !== canonicalProjectionBytes.byteLength
+    || reconstructed.some((byte, index) => byte !== canonicalProjectionBytes[index])) {
+    throw new Error('bundle verifier projection bytes do not encode exact canonical quads');
+  }
+  return quads;
+}
+
+function equalQuadMultisetsV1(
+  left: readonly Readonly<Quad>[],
+  right: readonly Readonly<Quad>[],
+): boolean {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort(compareQuadsV1);
+  const sortedRight = [...right].sort(compareQuadsV1);
+  return sortedLeft.every((quad, index) => compareQuadsV1(quad, sortedRight[index]!) === 0);
+}
+
+function compareQuadsV1(left: Readonly<Quad>, right: Readonly<Quad>): number {
+  return compareStringsV1(left.subject, right.subject)
+    || compareStringsV1(left.predicate, right.predicate)
+    || compareStringsV1(left.object, right.object)
+    || compareStringsV1(left.graph, right.graph);
+}
+
+function compareStringsV1(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function receiverNowMs(value: number): number {
