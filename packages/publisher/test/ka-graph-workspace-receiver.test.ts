@@ -10,6 +10,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
@@ -262,21 +263,22 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       graph: '',
     }], []);
     const visibleMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const trustedControlAnchor = [{
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/assertionVersion',
+      object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      graph: visibleMetaGraph,
+    }, {
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/merkleRoot',
+      object: `"${Buffer.from(merkleRoot).toString('hex')}"`,
+      graph: visibleMetaGraph,
+    }];
     const trustedControls = await readLocallyTrustedKnowledgeAssetControls(
       store,
       visibleMetaGraph,
       UAL,
-      [{
-        subject: UAL,
-        predicate: 'http://dkg.io/ontology/assertionVersion',
-        object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
-        graph: visibleMetaGraph,
-      }, {
-        subject: UAL,
-        predicate: 'http://dkg.io/ontology/merkleRoot',
-        object: `"${Buffer.from(merkleRoot).toString('hex')}"`,
-        graph: visibleMetaGraph,
-      }],
+      trustedControlAnchor,
     );
     expect(trustedControls).toEqual(expect.arrayContaining([
       expect.objectContaining({
@@ -293,11 +295,45 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       }),
     ]));
 
+    // Preserve the durable SWM graph/head but remove only the local sidecar to
+    // simulate a crash between the two commits. The exact replay below must
+    // recreate the missing controls rather than succeeding on stale evidence.
+    await store.deleteByPattern({ graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH });
+    expect(await readLocallyTrustedKnowledgeAssetControls(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    )).toEqual([]);
+
     const restarted = new SharedMemoryHandler(store, new TypedEventBus());
     expect((await restarted.handle(v2Request({
       accessPolicy: 'allowList',
       allowedPeers: ['peer-a', 'peer-b'],
     }), PEER_ID)).applied).toBe(true);
+    expect(await readLocallyTrustedKnowledgeAssetControls(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    )).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: '"allowList"',
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/publisherPeerId',
+        object: `"${PEER_ID}"`,
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/allowedPeer',
+        object: '"peer-a"',
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/allowedPeer',
+        object: '"peer-b"',
+      }),
+    ]));
 
     const drift = await restarted.handle(v2Request({
       accessPolicy: 'ownerOnly',

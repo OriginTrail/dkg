@@ -2,13 +2,12 @@ import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-co
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  readLocallyTrustedKnowledgeAssetControls,
+  readLocallyTrustedKnowledgeAssetControlEnvelope,
   type KnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
   VerifiedGraphScopedFinalizationEvidenceCodec,
-  type GraphScopedAccessPolicy,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
 
@@ -41,36 +40,6 @@ function stripRdfLiteral(value: string | undefined): string | undefined {
   } catch {
     return undefined;
   }
-}
-
-function uniqueControlValue(rows: readonly Quad[], predicate: string): string | undefined {
-  const values = [...new Set(rows
-    .filter((quad) => quad.predicate === predicate)
-    .map((quad) => stripRdfLiteral(quad.object))
-    .filter((value): value is string => value !== undefined && value.length > 0))];
-  return values.length === 1 ? values[0] : undefined;
-}
-
-function trustedAccessEnvelope(rows: readonly Quad[]): {
-  accessPolicy: GraphScopedAccessPolicy;
-  allowedPeers: string[];
-  publisherPeerId: string;
-} | undefined {
-  const accessPolicy = uniqueControlValue(rows, `${DKG_NS}accessPolicy`);
-  const publisherPeerId = uniqueControlValue(rows, `${DKG_NS}publisherPeerId`);
-  if (
-    (accessPolicy !== 'public' && accessPolicy !== 'ownerOnly' && accessPolicy !== 'allowList')
-    || !publisherPeerId
-  ) return undefined;
-  const allowedPeers = [...new Set(rows
-    .filter((quad) => quad.predicate === `${DKG_NS}allowedPeer`)
-    .map((quad) => stripRdfLiteral(quad.object))
-    .filter((value): value is string => value !== undefined && value.length > 0))];
-  if (
-    (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
-  ) return undefined;
-  return { accessPolicy, allowedPeers, publisherPeerId };
 }
 
 function anchorQuads(input: RecoverReceiptBackedGraphScopedEvidenceInput): Quad[] {
@@ -145,10 +114,10 @@ export async function recoverReceiptBackedGraphScopedEvidence(
   ) return { status: 'unavailable', reason: 'stored receipt claim is invalid' };
 
   try {
-    const [resolution, rootCount, trustedRows] = await Promise.all([
+    const [resolution, rootCount, trustedControls] = await Promise.all([
       resolver.call(input.chain, transactionHash),
       rootCountReader.call(input.chain, input.kaId),
-      readLocallyTrustedKnowledgeAssetControls(
+      readLocallyTrustedKnowledgeAssetControlEnvelope(
         input.store,
         metaGraph,
         input.scope.ual,
@@ -159,7 +128,7 @@ export async function recoverReceiptBackedGraphScopedEvidence(
     if (resolution.status !== 'confirmed' || rootCount !== 1n) {
       return { status: 'unavailable', reason: 'canonical receipt or unique root is unavailable' };
     }
-    let controls = trustedAccessEnvelope(trustedRows);
+    let controls = trustedControls;
     if (!controls) {
       const getAccessPolicy = input.chain.getContextGraphAccessPolicy;
       if (!getAccessPolicy) {

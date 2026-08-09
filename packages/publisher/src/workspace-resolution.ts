@@ -14,11 +14,16 @@ import type { LiftPublishSnapshotRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import {
   agentDid,
+  generateGraphKnowledgeAssetMetadata,
   generateKnowledgeAssetShareMetadata,
   generateShareMetadata,
+  replaceLocallyTrustedKnowledgeAssetControls,
   toHex,
 } from './metadata.js';
-import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
+import {
+  computeFlatKCRootV10,
+  computePrivateRootV10 as computePrivateRoot,
+} from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -95,6 +100,60 @@ export interface KnowledgeAssetWorkspaceHead {
 
 export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWorkspaceHead {
   readonly publishedAt: TimestampMsV1;
+}
+
+export interface PersistLocallyTrustedKnowledgeAssetControlsParams {
+  readonly store: TripleStore;
+  readonly contextGraphId: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly assertionGraph: string;
+  readonly publicQuads: readonly Quad[];
+  readonly publicTripleCount: number;
+  readonly privateMerkleRoot?: Uint8Array;
+  readonly privateTripleCount: number;
+  readonly publisherPeerId: string;
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  readonly allowedPeers: readonly string[];
+  readonly timestamp: Date;
+  readonly subGraphName?: string;
+}
+
+/**
+ * Construct and persist the receiver-authenticated, local-only access-control
+ * sidecar for one exact SWM assertion. Keeping root derivation and sidecar
+ * shape here prevents the transport handler and recovery consumers from
+ * becoming additional owners of the persistence contract.
+ */
+export async function persistLocallyTrustedKnowledgeAssetControls(
+  params: PersistLocallyTrustedKnowledgeAssetControlsParams,
+): Promise<void> {
+  const merkleRoot = computeFlatKCRootV10(
+    params.publicQuads.map((quad) => ({ ...quad, graph: '' })),
+    params.privateMerkleRoot?.length ? [params.privateMerkleRoot] : [],
+  );
+  const metadata = generateGraphKnowledgeAssetMetadata({
+    ual: params.kaUal,
+    contextGraphId: params.contextGraphId,
+    merkleRoot,
+    publisherPeerId: params.publisherPeerId,
+    accessPolicy: params.accessPolicy,
+    allowedPeers: [...params.allowedPeers],
+    timestamp: params.timestamp,
+    assertionVersion: params.assertionVersion,
+    publicTripleCount: params.publicTripleCount,
+    privateTripleCount: params.privateTripleCount,
+    ...(params.privateMerkleRoot?.length
+      ? { privateMerkleRoot: params.privateMerkleRoot }
+      : {}),
+    assertionGraph: params.assertionGraph,
+    ...(params.subGraphName ? { subGraphName: params.subGraphName } : {}),
+  }, { status: 'tentative' });
+  await replaceLocallyTrustedKnowledgeAssetControls(
+    params.store,
+    params.kaUal,
+    metadata,
+  );
 }
 
 export interface ResolveKnowledgeAssetWorkspaceHeadParams {

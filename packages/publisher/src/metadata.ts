@@ -739,6 +739,61 @@ export async function readLocallyTrustedKnowledgeAssetControls(
     .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
 }
 
+export interface LocallyTrustedKnowledgeAssetControlEnvelope {
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+  publisherPeerId: string;
+}
+
+/**
+ * Read the local-only control sidecar through the publisher-owned RDF contract.
+ * Consumers receive a typed envelope instead of duplicating predicate and
+ * literal parsing rules outside this module.
+ */
+export async function readLocallyTrustedKnowledgeAssetControlEnvelope(
+  store: TripleStore,
+  metaGraph: string,
+  ual: string,
+  incomingMetadataQuads: readonly Quad[],
+  options: QueryOptions = {},
+): Promise<LocallyTrustedKnowledgeAssetControlEnvelope | undefined> {
+  const rows = await readLocallyTrustedKnowledgeAssetControls(
+    store,
+    metaGraph,
+    ual,
+    incomingMetadataQuads,
+    options,
+  );
+  if (rows.length === 0) return undefined;
+
+  const lexicalValues = (predicate: string): string[] => [...new Set(
+    rows
+      .filter((quad) => quad.predicate === predicate)
+      .map((quad) => rdfLiteralLexicalValue(quad.object))
+      .filter((value): value is string => value !== undefined),
+  )];
+  const policies = lexicalValues(`${DKG}accessPolicy`);
+  const publishers = lexicalValues(`${DKG}publisherPeerId`);
+  const allowedPeers = lexicalValues(`${DKG}allowedPeer`).sort();
+  const accessPolicy = policies[0];
+  if (
+    policies.length !== 1
+    || publishers.length !== 1
+    || (
+      accessPolicy !== 'public'
+      && accessPolicy !== 'ownerOnly'
+      && accessPolicy !== 'allowList'
+    )
+  ) {
+    throw new Error('Locally trusted KA controls could not be decoded');
+  }
+  return {
+    accessPolicy,
+    allowedPeers,
+    publisherPeerId: publishers[0]!,
+  };
+}
+
 function validateLocallyTrustedControlRows(rows: readonly Quad[]): void {
   const values = (predicate: string) => [...new Set(
     rows.filter((quad) => quad.predicate === predicate).map((quad) => quad.object),

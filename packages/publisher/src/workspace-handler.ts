@@ -32,13 +32,11 @@ import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
-  generateGraphKnowledgeAssetMetadata,
   generateSubGraphRegistration,
-  replaceLocallyTrustedKnowledgeAssetControls,
 } from './metadata.js';
-import { computeFlatKCRootV10 } from './merkle.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
+  persistLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -1406,10 +1404,6 @@ export class SharedMemoryHandler {
         const publicDigest = workspacePublicQuadsDigest(
           normalized.map((quad) => ({ ...quad, graph: '' })),
         );
-        const computedMerkleRoot = computeFlatKCRootV10(
-          normalized.map((quad) => ({ ...quad, graph: '' })),
-          privateMerkleRoot?.length ? [privateMerkleRoot] : [],
-        );
         const operationTimestamp = new Date(Number(timestampMs));
         if (Number.isNaN(operationTimestamp.getTime())) {
           validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
@@ -1418,26 +1412,22 @@ export class SharedMemoryHandler {
           return false;
         }
         const persistLocallyTrustedControls = async (): Promise<void> => {
-          const metadata = generateGraphKnowledgeAssetMetadata({
-            ual: contentScope.ual,
+          await persistLocallyTrustedKnowledgeAssetControls({
+            store: this.store,
             contextGraphId,
-            merkleRoot: computedMerkleRoot,
+            kaUal: contentScope.ual,
+            assertionVersion: contentScope.assertionVersion,
+            assertionGraph: swmGraph,
+            publicQuads: normalized,
+            publicTripleCount: publicTripleCount ?? 0,
+            privateMerkleRoot,
+            privateTripleCount: privateTripleCount ?? 0,
             publisherPeerId,
             accessPolicy: graphAccessPolicy,
             allowedPeers: graphAllowedPeers,
             timestamp: operationTimestamp,
-            assertionVersion: contentScope.assertionVersion,
-            publicTripleCount: publicTripleCount ?? 0,
-            privateTripleCount: privateTripleCount ?? 0,
-            ...(privateMerkleRoot?.length ? { privateMerkleRoot } : {}),
-            assertionGraph: swmGraph,
-            ...(subGraphName ? { subGraphName } : {}),
-          }, { status: 'tentative' });
-          await replaceLocallyTrustedKnowledgeAssetControls(
-            this.store,
-            contentScope.ual,
-            metadata,
-          );
+            subGraphName,
+          });
         };
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
