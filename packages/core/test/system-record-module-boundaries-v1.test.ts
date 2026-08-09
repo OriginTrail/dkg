@@ -213,6 +213,19 @@ describe('System Record V1 module ownership', () => {
     );
   });
 
+  it('keeps closure and cache internals below durable code-health boundaries', () => {
+    expect(source('system-record-verification-closure-v1-internal.ts').split('\n').length)
+      .toBeLessThan(850);
+    expect(source('system-record-cache-accounting-v1-internal.ts').split('\n').length)
+      .toBeLessThan(650);
+    for (const unit of [
+      'system-record-verification-closure-v1-internal.ts',
+      'system-record-cache-accounting-v1-internal.ts',
+    ]) {
+      expect(source(unit)).not.toMatch(/export\s+\*/u);
+    }
+  });
+
   it('keeps wire and applied-state codecs off authority and closure implementations', () => {
     for (const unit of ['system-record-wire-v1.ts', 'system-record-applied-state-v1.ts']) {
       expectNoDependencyPath(unit, [
