@@ -138,32 +138,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
     expect(Object.isFrozen(scanner)).toBe(true);
     expect(Object.isFrozen(inventory)).toBe(true);
     expect(Object.isFrozen(inventory.rows)).toBe(true);
-    const enrichedRoundTrip = snapshotFinalizedVmChainInventoryV1(structuredClone(inventory));
-    expect(enrichedRoundTrip).toEqual(inventory);
-    expect(enrichedRoundTrip.rows.every((row) => (
-      Object.hasOwn(row, 'onChainByteSize')
-      && Object.hasOwn(row, 'merkleLeafCount')
-    ))).toBe(true);
-    const legacyInventory = structuredClone(inventory) as unknown as {
-      rows: Array<Record<string, unknown>>;
-    };
-    for (const row of legacyInventory.rows) {
-      delete row.onChainByteSize;
-      delete row.merkleLeafCount;
-    }
-    const legacyRoundTrip = snapshotFinalizedVmChainInventoryV1(legacyInventory);
-    expect(legacyRoundTrip.rows.every((row) => (
-      !Object.hasOwn(row, 'onChainByteSize')
-      && !Object.hasOwn(row, 'merkleLeafCount')
-    ))).toBe(true);
-    for (const missingField of ['onChainByteSize', 'merkleLeafCount'] as const) {
-      const partial = structuredClone(inventory) as unknown as {
-        rows: Array<Record<string, unknown>>;
-      };
-      delete partial.rows[0]![missingField];
-      expect(() => snapshotFinalizedVmChainInventoryV1(partial))
-        .toThrow(FinalizedVmChainInventoryValidationErrorV1);
-    }
+    expect(snapshotFinalizedVmChainInventoryV1(structuredClone(inventory))).toEqual(inventory);
     expect(snapshotFinalizedVmChainInventoryV1(
       structuredClone(inventory),
       { maxRows: 2 },
@@ -182,23 +157,7 @@ describe('RFC-64 finalized VM chain scanner', () => {
       ...structuredClone(inventory),
       unexpected: true,
     })).toThrow(/not canonical/);
-    for (const onChainByteSize of ['01', '-1', 1]) {
-      const malformed = structuredClone(inventory) as unknown as {
-        rows: Array<Record<string, unknown>>;
-      };
-      malformed.rows[0]!.onChainByteSize = onChainByteSize;
-      expect(() => snapshotFinalizedVmChainInventoryV1(malformed))
-        .toThrow(FinalizedVmChainInventoryValidationErrorV1);
-    }
-    for (const merkleLeafCount of [-1, 1.5, 0x1_0000_0000, '3']) {
-      const malformed = structuredClone(inventory) as unknown as {
-        rows: Array<Record<string, unknown>>;
-      };
-      malformed.rows[0]!.merkleLeafCount = merkleLeafCount;
-      expect(() => snapshotFinalizedVmChainInventoryV1(malformed))
-        .toThrow(FinalizedVmChainInventoryValidationErrorV1);
-    }
-    expect(inventory).toEqual({
+    const expectedInventory = {
       networkId: NETWORK_ID,
       contextGraphId: CG_ID,
       chainId: CHAIN_ID,
@@ -220,8 +179,6 @@ describe('RFC-64 finalized VM chain scanner', () => {
           publisherAddress: PUBLISHER_A,
           assertionVersion: '2',
           assertionRoot: ROOT_A,
-          onChainByteSize: '100',
-          merkleLeafCount: 3,
           finalizedBlockNumber: BLOCK_NUMBER,
           finalizedBlockHash: BLOCK_HASH,
         },
@@ -237,13 +194,34 @@ describe('RFC-64 finalized VM chain scanner', () => {
           publisherAddress: PUBLISHER_B,
           assertionVersion: '3',
           assertionRoot: ROOT_B,
-          onChainByteSize: '250',
-          merkleLeafCount: 7,
           finalizedBlockNumber: BLOCK_NUMBER,
           finalizedBlockHash: BLOCK_HASH,
         },
       ],
-    });
+    };
+    expect(inventory).toEqual(expectedInventory);
+    expect(JSON.stringify(inventory)).toBe(JSON.stringify(expectedInventory));
+    expect(Object.keys(inventory.rows[0]!)).toEqual([
+      'chainId',
+      'contractAddress',
+      'knowledgeAssetStorageAddress',
+      'ordinal',
+      'kaId',
+      'ual',
+      'authorAddress',
+      'attestedAuthorAddress',
+      'publisherAddress',
+      'assertionVersion',
+      'assertionRoot',
+      'finalizedBlockNumber',
+      'finalizedBlockHash',
+    ]);
+    const versionBreakingRow = structuredClone(inventory) as unknown as {
+      rows: Array<Record<string, unknown>>;
+    };
+    versionBreakingRow.rows[0]!.onChainByteSize = '100';
+    expect(() => snapshotFinalizedVmChainInventoryV1(versionBreakingRow))
+      .toThrow(FinalizedVmChainInventoryValidationErrorV1);
     expect(calls.map((batch) => batch.length)).toEqual([2, 2, 4, 4]);
     expect(calls[0]![0]!.to).toBe(CG_STORAGE);
     expect(calls[1]!.every(({ to }) => to === CG_STORAGE)).toBe(true);
@@ -531,32 +509,20 @@ describe('RFC-64 finalized VM chain scanner', () => {
       signal: new AbortController().signal,
     });
 
-    expect(inventory.rows.map(({
+    expect(inventory.rows.map(({ ual, assertionVersion, assertionRoot }) => ({
       ual,
       assertionVersion,
       assertionRoot,
-      onChainByteSize,
-      merkleLeafCount,
-    }) => ({
-      ual,
-      assertionVersion,
-      assertionRoot,
-      onChainByteSize,
-      merkleLeafCount,
     }))).toEqual([
       {
         ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/7`,
         assertionVersion: '2',
         assertionRoot: ROOT_A,
-        onChainByteSize: '100',
-        merkleLeafCount: 3,
       },
       {
         ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`,
         assertionVersion: '3',
         assertionRoot: ROOT_B,
-        onChainByteSize: '250',
-        merkleLeafCount: 7,
       },
     ]);
     const ethCalls = rpc.calls.filter(({ method }) => method === 'eth_call');
