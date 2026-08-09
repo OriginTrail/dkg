@@ -5,12 +5,14 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   buildAgentProfileVerificationClosureV1,
+  copyBoundedSystemRecordBytesV1,
   computeOwnedSubjectTableDigestV1,
   computeSystemRecordStableKeyHashV1,
   decodeSystemRecordInventoryRowV1,
   encodeSystemRecordInventoryRowV1,
   parseCanonicalOwnedSubjectTableObjectV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
+  SYSTEM_RECORD_OBJECT_CAPS_V1,
   verifySignedSystemRecordEnvelopeV1,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileAuthorityTransitionV1,
@@ -33,8 +35,8 @@ import type {
 } from '@origintrail-official/dkg-storage';
 
 import {
-  cloneSystemRecordArtifactV1,
   type SystemRecordArtifactRepositoryV1,
+  type SystemRecordArtifactV1,
 } from './artifact-v1.js';
 
 export interface AgentProfileReceiverVerifiedBundleV1 {
@@ -145,10 +147,12 @@ export function createAgentProfileReceiverV1(
           }, signal);
           signal.throwIfAborted();
           if (artifact === null) return undefined;
-          const owned = cloneSystemRecordArtifactV1(artifact);
-          if (owned.objectKind !== reference.objectKind || owned.objectDigest !== reference.digest) {
-            throw new Error('system-record repository returned a different closure artifact');
-          }
+          const owned = snapshotExpectedArtifactV1(
+            artifact,
+            reference.objectKind,
+            reference.digest,
+            'closure artifact',
+          );
           return Object.freeze({
             objectKind: owned.objectKind,
             digest: owned.objectDigest,
@@ -203,11 +207,12 @@ export function createAgentProfileReceiverV1(
       if (resolvedSubjectTableArtifact === null) {
         throw new Error('active profile receiver is missing its exact owned-subject table');
       }
-      const subjectTableArtifact = cloneSystemRecordArtifactV1(resolvedSubjectTableArtifact);
-      if (subjectTableArtifact.objectKind !== 'owned-subject-table'
-        || subjectTableArtifact.objectDigest !== head.ownedSubjectTableDigest) {
-        throw new Error('active profile receiver is missing its exact owned-subject table');
-      }
+      const subjectTableArtifact = snapshotExpectedArtifactV1(
+        resolvedSubjectTableArtifact,
+        'owned-subject-table',
+        head.ownedSubjectTableDigest,
+        'owned-subject table',
+      );
       const ownedSubjectTable = parseCanonicalOwnedSubjectTableObjectV1(
         head.rootSubject,
         subjectTableArtifact.canonicalBytes,
@@ -274,6 +279,28 @@ function requiredArtifact(
     throw new Error(`verification closure did not retain ${objectKind}:${objectDigest}`);
   }
   return artifact;
+}
+
+function snapshotExpectedArtifactV1(
+  input: SystemRecordArtifactV1,
+  expectedKind: SystemRecordObjectKindV1,
+  expectedDigest: Digest32V1,
+  label: string,
+): SystemRecordArtifactV1 {
+  const objectKind = input.objectKind;
+  const objectDigest = input.objectDigest;
+  if (objectKind !== expectedKind || objectDigest !== expectedDigest) {
+    throw new Error(`system-record repository returned a different ${label}`);
+  }
+  return Object.freeze({
+    objectKind,
+    objectDigest,
+    canonicalBytes: copyBoundedSystemRecordBytesV1(
+      input.canonicalBytes,
+      SYSTEM_RECORD_OBJECT_CAPS_V1[expectedKind],
+      label,
+    ),
+  });
 }
 
 function snapshotVerifiedBundle(value: AgentProfileReceiverVerifiedBundleV1): AgentProfileReceiverVerifiedBundleV1 {

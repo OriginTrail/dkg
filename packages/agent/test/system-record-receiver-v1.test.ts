@@ -4,6 +4,7 @@ import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 
 import {
   computeSystemRecordStableKeyHashV1,
+  SYSTEM_RECORD_OBJECT_CAPS_V1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
@@ -216,6 +217,41 @@ describe('agent-profile system-record active receiver', () => {
       fixture.row,
       new AbortController().signal,
     )).rejects.toThrow(/authority verification failed/);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized artifact before invoking typed-array copy hooks', async () => {
+    const fixture = await publishedFixture();
+    const consumeCandidate = vi.fn();
+    class CopyTrapBytes extends Uint8Array {
+      override *[Symbol.iterator](): ArrayIterator<number> {
+        throw new Error('unbounded artifact copy ran before the cap');
+      }
+    }
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: {
+        resolve: async (lookup, signal) => {
+          const artifact = await fixture.store.resolve(lookup, signal);
+          if (artifact === null || lookup.type !== 'object'
+            || lookup.objectKind !== 'agent-profile-head') return artifact;
+          return Object.freeze({
+            ...artifact,
+            canonicalBytes: new CopyTrapBytes(
+              SYSTEM_RECORD_OBJECT_CAPS_V1['agent-profile-head'] + 1,
+            ),
+          });
+        },
+      },
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: verifyFixtureBundle,
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(
+      fixture.row,
+      new AbortController().signal,
+    )).rejects.toThrow(/closure artifact exceeds/);
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
