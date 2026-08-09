@@ -170,6 +170,15 @@ describe('EVMChainAdapter KA scalar update context', () => {
     await expect(adapter.getKnowledgeAssetUpdateContext(404n))
       .rejects.toThrow('Missing merkleLeafCount in update context for KA 404');
   });
+
+  it('fails closed with a field-specific error for an invalid numeric scalar', async () => {
+    const { adapter } = adapterWithUpdateContext([
+      1n, 1n, { malformed: true }, 10n, 1n, false, 8n,
+    ]);
+
+    await expect(adapter.getKnowledgeAssetUpdateContext(405n))
+      .rejects.toThrow('Invalid byteSize in update context for KA 405');
+  });
 });
 
 describe('MockChainAdapter KA scalar update context', () => {
