@@ -1990,7 +1990,10 @@ export class JoinRequestMethods extends DKGAgentBase {
 
     // Refuse to cross the membership boundary on a custom adapter that cannot
     // atomically replace the moderation predicates after the invite commits.
-    if (!supportsTripleStoreCapability(this.store, 'structuredMutation')) {
+    if (
+      !supportsTripleStoreCapability(this.store, 'structuredMutation')
+      && !supportsTripleStoreCapability(this.store, 'update')
+    ) {
       throw new Error(
         'Join approval requires atomic subject-predicate replacement support from the configured triple store.',
       );

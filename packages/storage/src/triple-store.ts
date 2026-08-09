@@ -24,6 +24,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
+import { buildReplaceSubjectPredicatesUpdate } from './bounded-structured-mutation.js';
 
 export interface Quad {
   subject: string;
@@ -480,7 +481,23 @@ export async function tryReplaceSubjectPredicatesAtomically(
   input: ReplaceSubjectPredicatesInput,
   options: QueryOptions = {},
 ): Promise<boolean> {
-  return tryStructuredMutation(store, { kind: 'replace-subject-predicates', input }, options);
+  if (await tryStructuredMutation(
+    store,
+    { kind: 'replace-subject-predicates', input },
+    options,
+  )) {
+    return true;
+  }
+
+  // Third-party stores cannot hold the daemon ownership lease and may still
+  // implement only the pre-capability atomic SPARQL Update contract. Keep that
+  // compatibility path inside storage so feature callers never author SPARQL.
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildReplaceSubjectPredicatesUpdate(input),
+    [input.graphUri],
+    options,
+  );
 }
 
 export async function tryReplaceProjectionFromGraphAtomically(

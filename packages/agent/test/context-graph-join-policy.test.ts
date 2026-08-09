@@ -288,9 +288,15 @@ describe('context graph open enrollment policy', () => {
     const store = (agent as any).store;
     const insertSpy = vi.spyOn(store, 'insert');
     const deleteSpy = vi.spyOn(store, 'deleteByPattern');
+    const structuredMutationSpy = vi.spyOn(store, 'structuredMutation');
     insertSpy.mockClear();
     deleteSpy.mockClear();
-    const mutationCounts = () => [insertSpy.mock.calls.length, deleteSpy.mock.calls.length];
+    structuredMutationSpy.mockClear();
+    const mutationCounts = () => [
+      insertSpy.mock.calls.length,
+      deleteSpy.mock.calls.length,
+      structuredMutationSpy.mock.calls.length,
+    ];
     const expectRejectedBeforeMutation = async (operation: () => Promise<unknown>) => {
       const before = mutationCounts();
       await expect(operation()).rejects.toThrow(/live admission-lock token/i);
@@ -718,6 +724,63 @@ describe('context graph open enrollment policy', () => {
     }
   }, 30_000);
 
+  it('preserves approval through an update-only store wrapped by a decorator', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-decorated-update-only';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('decorated-update-only-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const rejectedJoiner = await agent.registerAgent(
+      'decorated-update-only-rejected-joiner',
+      { framework: 'test' },
+    );
+    const rejectedDelegation = await agent.signJoinRequest(
+      contextGraphId,
+      rejectedJoiner.agentAddress,
+    );
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending' });
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      rejectedDelegation,
+      rejectedJoiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending' });
+
+    const originalStore = (agent as any).store as TripleStore;
+    const updateOnlyStore = new Proxy(originalStore, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') return undefined;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    (agent as any).store = new GraphSetIndexStore(updateOnlyStore, { enabled: false });
+
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    )).resolves.toBeUndefined();
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .toContain(joiner.agentAddress.toLowerCase());
+
+    await expect(agent.rejectJoinRequest(
+      contextGraphId,
+      rejectedJoiner.agentAddress,
+      owner.agentAddress,
+    )).resolves.toBeUndefined();
+    expect(await agent.getJoinRequestStatus(contextGraphId, rejectedJoiner.agentAddress))
+      .toBe('rejected');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .not.toContain(rejectedJoiner.agentAddress.toLowerCase());
+  }, 30_000);
+
   it('refuses approval before membership commit when a decorator wraps an incapable store', async () => {
     const { agent, owner } = await boot();
     const contextGraphId = 'private-policy-decorated-missing-structured-mutation';
@@ -734,7 +797,7 @@ describe('context graph open enrollment policy', () => {
     const originalStore = (agent as any).store as TripleStore;
     const legacyStore = new Proxy(originalStore, {
       get(target, property, receiver) {
-        if (property === 'structuredMutation') return undefined;
+        if (property === 'structuredMutation' || property === 'update') return undefined;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === 'function' ? value.bind(target) : value;
       },
