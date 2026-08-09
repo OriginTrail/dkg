@@ -119,15 +119,20 @@ export function decodeCanonicalGraphlessProjectionV1(
   limits: CgSharedProjectionVerificationLimitsV1 =
     DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
 ): readonly Readonly<CanonicalGraphlessProjectionTripleV1>[] {
-  const triples = decodeCanonicalProjectionTriplesV1(
+  const triples: Readonly<CanonicalGraphlessProjectionTripleV1>[] = [];
+  walkCanonicalProjectionLinesV1(
     projectionBytes,
     normalizeVerificationLimits(limits),
+    undefined,
+    ({ subject, predicate, object }) => {
+      triples.push(Object.freeze({
+        subject,
+        predicate,
+        object: object.startsWith('<') ? object.slice(1, -1) : object,
+      }));
+    },
   );
-  return Object.freeze(triples.map(({ subject, predicate, object }) => Object.freeze({
-    subject,
-    predicate,
-    object: object.startsWith('<') ? object.slice(1, -1) : object,
-  })));
+  return Object.freeze(triples);
 }
 
 /**
@@ -203,7 +208,6 @@ interface CanonicalProjectionTripleV1 {
   readonly subject: string;
   readonly predicate: string;
   readonly object: string;
-  readonly leaf: Uint8Array;
 }
 
 interface VerifiedCgSharedProjectionStateV1 {
@@ -437,46 +441,52 @@ function verifyCanonicalProjectionBytes(
   const leaves: Uint8Array[] = [];
   let anchor: CanonicalProjectionTripleV1 | undefined;
   let privateHash: CanonicalProjectionTripleV1 | undefined;
-  const triples = decodeCanonicalProjectionTriplesV1(projectionBytes, limits);
   const signedPublicTripleCount = BigInt(seal.publicTripleCount);
-  if (BigInt(triples.length) !== signedPublicTripleCount) {
+  const reservedCommitmentSubject =
+    `${seal.kaUal}${CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1}`;
+  const lineCount = walkCanonicalProjectionLinesV1(
+    projectionBytes,
+    limits,
+    signedPublicTripleCount,
+    (triple, lineNumber) => {
+      if (
+        triple.subject === reservedCommitmentSubject
+        && triple.predicate !== CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1
+        && triple.predicate !== CG_SHARED_PRIVATE_HASH_PREDICATE_V1
+      ) {
+        fail(
+          'projection-private-subject',
+          `projection line ${lineNumber} reuses the reserved commitment subject`,
+        );
+      }
+      if (triple.predicate === CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1) {
+        if (anchor !== undefined) {
+          fail('projection-private-cardinality', 'projection contains duplicate private anchors');
+        }
+        anchor = triple;
+      } else if (triple.predicate === CG_SHARED_PRIVATE_HASH_PREDICATE_V1) {
+        if (privateHash !== undefined) {
+          fail('projection-private-cardinality', 'projection contains duplicate private hashes');
+        }
+        privateHash = triple;
+      } else if (triple.predicate.startsWith(PRIVATE_COMMITMENT_PREDICATE_PREFIX)) {
+        fail(
+          'projection-private-predicate',
+          `projection line ${lineNumber} uses an unknown reserved private-data predicate`,
+        );
+      }
+      leaves.push(hashTripleV10(
+        triple.subject,
+        triple.predicate,
+        triple.object,
+      ));
+    },
+  );
+  if (BigInt(lineCount) !== signedPublicTripleCount) {
     fail(
       'projection-public-count',
       'canonical projection line count differs from seal publicTripleCount',
     );
-  }
-  const reservedCommitmentSubject =
-    `${seal.kaUal}${CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1}`;
-  for (let index = 0; index < triples.length; index += 1) {
-    const triple = triples[index];
-    const lineNumber = index + 1;
-    if (
-      triple.subject === reservedCommitmentSubject
-      && triple.predicate !== CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1
-      && triple.predicate !== CG_SHARED_PRIVATE_HASH_PREDICATE_V1
-    ) {
-      fail(
-        'projection-private-subject',
-        `projection line ${lineNumber} reuses the reserved commitment subject`,
-      );
-    }
-    if (triple.predicate === CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1) {
-      if (anchor !== undefined) {
-        fail('projection-private-cardinality', 'projection contains duplicate private anchors');
-      }
-      anchor = triple;
-    } else if (triple.predicate === CG_SHARED_PRIVATE_HASH_PREDICATE_V1) {
-      if (privateHash !== undefined) {
-        fail('projection-private-cardinality', 'projection contains duplicate private hashes');
-      }
-      privateHash = triple;
-    } else if (triple.predicate.startsWith(PRIVATE_COMMITMENT_PREDICATE_PREFIX)) {
-      fail(
-        'projection-private-predicate',
-        `projection line ${lineNumber} uses an unknown reserved private-data predicate`,
-      );
-    }
-    leaves.push(triple.leaf);
   }
   assertPrivateCommitment(anchor, privateHash, seal);
 
@@ -496,10 +506,12 @@ function verifyCanonicalProjectionBytes(
   return Object.freeze({ publicRoot, privateDataHash, assertionMerkleRoot });
 }
 
-function decodeCanonicalProjectionTriplesV1(
+function walkCanonicalProjectionLinesV1(
   projectionBytes: Uint8Array,
   limits: Readonly<CgSharedProjectionVerificationLimitsV1>,
-): readonly CanonicalProjectionTripleV1[] {
+  expectedTripleCount: bigint | undefined,
+  visit: (triple: CanonicalProjectionTripleV1, lineNumber: number) => void,
+): number {
   if (!(projectionBytes instanceof Uint8Array)) {
     fail('projection-input', 'canonical projection bytes must be a Uint8Array');
   }
@@ -521,7 +533,7 @@ function decodeCanonicalProjectionTriplesV1(
     fail('projection-line-ending', 'canonical projection must end with one LF');
   }
 
-  const triples: CanonicalProjectionTripleV1[] = [];
+  let lineCount = 0;
   let previousLine: Uint8Array | undefined;
   let lineStart = 0;
   for (let cursor = 0; cursor < projectionBytes.byteLength; cursor += 1) {
@@ -531,9 +543,15 @@ function decodeCanonicalProjectionTriplesV1(
     }
     if (byte !== 0x0a) continue;
     const line = projectionBytes.subarray(lineStart, cursor);
-    const lineNumber = triples.length + 1;
+    const lineNumber = lineCount + 1;
     if (lineNumber > limits.maxPublicTriples) {
       fail('projection-resource-refused', 'projection exceeds the local in-memory triple limit');
+    }
+    if (expectedTripleCount !== undefined && BigInt(lineNumber) > expectedTripleCount) {
+      fail(
+        'projection-public-count',
+        'projection contains more lines than the signed publicTripleCount',
+      );
     }
     if (line.byteLength === 0) {
       fail('projection-line', `projection line ${lineNumber} is empty`);
@@ -553,14 +571,15 @@ function decodeCanonicalProjectionTriplesV1(
         fail('projection-order', `projection line ${lineNumber} is not in raw UTF-8 order`);
       }
     }
-    triples.push(parseCanonicalProjectionLine(line, lineNumber));
+    visit(parseCanonicalProjectionLine(line, lineNumber), lineNumber);
+    lineCount = lineNumber;
     previousLine = line;
     lineStart = cursor + 1;
   }
   if (lineStart !== projectionBytes.byteLength) {
     fail('projection-line-ending', 'projection contains bytes after its final complete line');
   }
-  return Object.freeze(triples);
+  return lineCount;
 }
 
 function assertPrivateCommitment(
@@ -661,7 +680,6 @@ function parseCanonicalProjectionLine(
     subject: subject.value,
     predicate: predicate.value,
     object,
-    leaf: hashTripleV10(subject.value, predicate.value, object),
   });
 }
 

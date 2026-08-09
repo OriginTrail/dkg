@@ -126,6 +126,15 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
     );
   });
 
+  it('rejects the first line beyond the signed count before parsing it', () => {
+    const firstLine = PUBLIC.split('\n')[0] + '\n';
+    const fixture = makeFixtureBytes(
+      new Uint8Array([...UTF8.encode(firstLine), 0xff, 0x0a]),
+      sealForProjection(firstLine, '0', null),
+    );
+    expectFailure(() => verifyProjection(fixture), 'projection-public-count');
+  });
+
   it.each([
     {
       name: 'public',
