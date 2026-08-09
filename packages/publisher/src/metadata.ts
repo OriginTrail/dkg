@@ -429,6 +429,17 @@ export type ConfirmedGraphKnowledgeAssetMetadataRead =
   | { state: 'invalid' }
   | { state: 'confirmed'; envelope: ConfirmedGraphKnowledgeAssetMetadataEnvelope };
 
+export interface LocallyTrustedKnowledgeAssetControlAnchor {
+  readonly assertionVersion: string;
+  readonly merkleRoot: Uint8Array;
+}
+
+export interface LocallyTrustedKnowledgeAssetControlEnvelope {
+  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
+  allowedPeers: string[];
+  publisherPeerId: string;
+}
+
 function rdfLiteralLexicalValue(value: string): string | undefined {
   const match = /^("(?:\\.|[^"\\])*")/.exec(value);
   if (!match) return undefined;
@@ -665,6 +676,33 @@ export async function replaceLocallyTrustedKnowledgeAssetControls(
   ]);
 }
 
+/**
+ * Replace one receiver-authenticated local control envelope directly. The
+ * caller supplies only the assertion anchor and controls; visible KA metadata
+ * is deliberately not part of this local-only persistence contract.
+ */
+export async function replaceLocallyTrustedKnowledgeAssetControlEnvelope(
+  store: TripleStore,
+  ual: string,
+  anchor: LocallyTrustedKnowledgeAssetControlAnchor,
+  controls: LocallyTrustedKnowledgeAssetControlEnvelope,
+): Promise<void> {
+  const scope = createGraphKnowledgeAssetScope(ual, anchor.assertionVersion);
+  if (anchor.merkleRoot.length !== 32) {
+    throw new Error('Locally trusted KA controls require one 32-byte merkleRoot');
+  }
+  const graph = LOCAL_TRUSTED_KA_CONTROLS_GRAPH;
+  await replaceLocallyTrustedKnowledgeAssetControls(store, scope.ual, [
+    mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), graph),
+    mq(scope.ual, `${DKG}merkleRoot`, lit(toHex(anchor.merkleRoot)), graph),
+    mq(scope.ual, `${DKG}accessPolicy`, lit(controls.accessPolicy), graph),
+    mq(scope.ual, `${DKG}publisherPeerId`, lit(controls.publisherPeerId), graph),
+    ...[...new Set(controls.allowedPeers)].sort().map((peerId) => (
+      mq(scope.ual, `${DKG}allowedPeer`, lit(peerId), graph)
+    )),
+  ]);
+}
+
 /** Read trusted local controls and remap them into the visible metadata commit. */
 export async function readLocallyTrustedKnowledgeAssetControls(
   store: TripleStore,
@@ -737,12 +775,6 @@ export async function readLocallyTrustedKnowledgeAssetControls(
   return highest[0]!.rows
     .filter((quad) => LOCAL_TRUSTED_KA_CONTROL_PREDICATES.has(quad.predicate))
     .map((quad) => ({ ...quad, subject: ual, graph: metaGraph }));
-}
-
-export interface LocallyTrustedKnowledgeAssetControlEnvelope {
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  allowedPeers: string[];
-  publisherPeerId: string;
 }
 
 /**

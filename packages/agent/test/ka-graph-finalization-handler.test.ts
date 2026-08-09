@@ -2902,7 +2902,14 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
-  it.each(['publisher', 'merkle-root', 'ka-id'] as const)(
+  it.each([
+    'publisher',
+    'merkle-root',
+    'ka-id',
+    'batch-id',
+    'range-start',
+    'range-end',
+  ] as const)(
     'does not repair peer-materialized VM metadata when the receipt mismatches %s',
     async (mismatch) => {
       const { message } = await stageGraph({ accessPolicy: 'ownerOnly' });
@@ -2921,8 +2928,14 @@ describe('graph-scoped finalization handler', () => {
         mismatched.receipt.publisherAddress = '0x3333333333333333333333333333333333333333';
       } else if (mismatch === 'merkle-root') {
         mismatched.receipt.merkleRoot = Uint8Array.from({ length: 32 }, () => 0x44);
-      } else {
+      } else if (mismatch === 'ka-id') {
         mismatched.receipt.kaId = PACKED_KA_ID + 1n;
+      } else if (mismatch === 'batch-id') {
+        mismatched.receipt.batchId = PACKED_KA_ID + 1n;
+      } else if (mismatch === 'range-start') {
+        mismatched.receipt.startKAId = PACKED_KA_ID + 1n;
+      } else {
+        mismatched.receipt.endKAId = PACKED_KA_ID + 1n;
       }
       const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
         getMerkleRootCount: async () => 1n,

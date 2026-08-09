@@ -17,6 +17,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
+  readLocallyTrustedKnowledgeAssetControlEnvelope,
   readLocallyTrustedKnowledgeAssetControls,
 } from '../src/index.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
@@ -294,6 +295,16 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
         object: '"peer-a"',
       }),
     ]));
+    await expect(readLocallyTrustedKnowledgeAssetControlEnvelope(
+      store,
+      visibleMetaGraph,
+      UAL,
+      trustedControlAnchor,
+    )).resolves.toEqual({
+      accessPolicy: 'allowList',
+      allowedPeers: ['peer-a', 'peer-b'],
+      publisherPeerId: PEER_ID,
+    });
 
     // Preserve the durable SWM graph/head but remove only the local sidecar to
     // simulate a crash between the two commits. The exact replay below must

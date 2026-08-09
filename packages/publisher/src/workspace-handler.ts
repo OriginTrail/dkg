@@ -44,6 +44,7 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
+import { computeFlatKCRootV10 } from './merkle.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -1412,21 +1413,18 @@ export class SharedMemoryHandler {
           return false;
         }
         const persistLocallyTrustedControls = async (): Promise<void> => {
+          const merkleRoot = computeFlatKCRootV10(
+            normalized.map((quad) => ({ ...quad, graph: '' })),
+            privateMerkleRoot?.length ? [privateMerkleRoot] : [],
+          );
           await persistLocallyTrustedKnowledgeAssetControls({
             store: this.store,
-            contextGraphId,
             kaUal: contentScope.ual,
             assertionVersion: contentScope.assertionVersion,
-            assertionGraph: swmGraph,
-            publicQuads: normalized,
-            publicTripleCount: publicTripleCount ?? 0,
-            privateMerkleRoot,
-            privateTripleCount: privateTripleCount ?? 0,
+            merkleRoot,
             publisherPeerId,
             accessPolicy: graphAccessPolicy,
             allowedPeers: graphAllowedPeers,
-            timestamp: operationTimestamp,
-            subGraphName,
           });
         };
         const incomingPrivateRootHex = privateMerkleRoot?.length

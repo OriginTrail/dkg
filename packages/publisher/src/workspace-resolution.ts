@@ -14,14 +14,12 @@ import type { LiftPublishSnapshotRequest } from './lift-job.js';
 import type { LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import {
   agentDid,
-  generateGraphKnowledgeAssetMetadata,
   generateKnowledgeAssetShareMetadata,
   generateShareMetadata,
-  replaceLocallyTrustedKnowledgeAssetControls,
+  replaceLocallyTrustedKnowledgeAssetControlEnvelope,
   toHex,
 } from './metadata.js';
 import {
-  computeFlatKCRootV10,
   computePrivateRootV10 as computePrivateRoot,
 } from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
@@ -104,55 +102,33 @@ export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWork
 
 export interface PersistLocallyTrustedKnowledgeAssetControlsParams {
   readonly store: TripleStore;
-  readonly contextGraphId: string;
   readonly kaUal: string;
   readonly assertionVersion: string;
-  readonly assertionGraph: string;
-  readonly publicQuads: readonly Quad[];
-  readonly publicTripleCount: number;
-  readonly privateMerkleRoot?: Uint8Array;
-  readonly privateTripleCount: number;
+  readonly merkleRoot: Uint8Array;
   readonly publisherPeerId: string;
   readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
   readonly allowedPeers: readonly string[];
-  readonly timestamp: Date;
-  readonly subGraphName?: string;
 }
 
 /**
- * Construct and persist the receiver-authenticated, local-only access-control
- * sidecar for one exact SWM assertion. Keeping root derivation and sidecar
- * shape here prevents the transport handler and recovery consumers from
- * becoming additional owners of the persistence contract.
+ * Persist the receiver-authenticated, local-only access-control sidecar for
+ * one exact SWM assertion through the publisher-owned typed envelope boundary.
  */
 export async function persistLocallyTrustedKnowledgeAssetControls(
   params: PersistLocallyTrustedKnowledgeAssetControlsParams,
 ): Promise<void> {
-  const merkleRoot = computeFlatKCRootV10(
-    params.publicQuads.map((quad) => ({ ...quad, graph: '' })),
-    params.privateMerkleRoot?.length ? [params.privateMerkleRoot] : [],
-  );
-  const metadata = generateGraphKnowledgeAssetMetadata({
-    ual: params.kaUal,
-    contextGraphId: params.contextGraphId,
-    merkleRoot,
-    publisherPeerId: params.publisherPeerId,
-    accessPolicy: params.accessPolicy,
-    allowedPeers: [...params.allowedPeers],
-    timestamp: params.timestamp,
-    assertionVersion: params.assertionVersion,
-    publicTripleCount: params.publicTripleCount,
-    privateTripleCount: params.privateTripleCount,
-    ...(params.privateMerkleRoot?.length
-      ? { privateMerkleRoot: params.privateMerkleRoot }
-      : {}),
-    assertionGraph: params.assertionGraph,
-    ...(params.subGraphName ? { subGraphName: params.subGraphName } : {}),
-  }, { status: 'tentative' });
-  await replaceLocallyTrustedKnowledgeAssetControls(
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(
     params.store,
     params.kaUal,
-    metadata,
+    {
+      assertionVersion: params.assertionVersion,
+      merkleRoot: params.merkleRoot,
+    },
+    {
+      publisherPeerId: params.publisherPeerId,
+      accessPolicy: params.accessPolicy,
+      allowedPeers: [...params.allowedPeers],
+    },
   );
 }
 
