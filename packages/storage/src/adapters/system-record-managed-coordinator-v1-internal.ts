@@ -7,6 +7,7 @@ import {
   createSystemRecordLaneControllerTypedV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
+  type SystemRecordLaneControllerTypedDepsV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneExecutionBindingV1,
   type SystemRecordLaneTypedBarrierV1,
@@ -27,13 +28,8 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
     childGeneration: string,
   ) => Promise<SystemRecordApplyOutcomeV1>;
   /**
-   * The ONLY barrier the managed path accepts. There is deliberately no
-   * string-barrier member on these options: the purpose-string contract is
-   * retired for first-party composition (#2179), and its absence here is
-   * structural — a future edit cannot fall back onto it without changing
-   * this interface, which is the loudest possible place for that change.
-   * External composers with string barriers use the public
-   * `createSystemRecordLaneControllerV1` compatibility adapter instead.
+   * The ONLY barrier the managed path accepts — no string member exists here
+   * by design; rationale on {@link SystemRecordLaneControllerTypedDepsV1}.
    */
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;

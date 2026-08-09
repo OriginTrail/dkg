@@ -239,11 +239,28 @@ export type SystemRecordLaneTypedBarrierV1 = <K extends SystemRecordLaneBarrierK
   transition: () => Promise<SystemRecordLaneBarrierResultsV1[K]>,
 ) => Promise<SystemRecordLaneBarrierResultsV1[K]>;
 
-export interface SystemRecordLaneControllerDepsV1 {
+/**
+ * Dependencies shared by every controller composition route. The legacy and
+ * typed entry points differ ONLY in how the barrier is supplied; everything
+ * else lives here exactly once, so a future shared dependency (a tracing
+ * hook, a lifecycle signal) is added in one place and reaches both routes or
+ * neither.
+ */
+export interface SystemRecordLaneControllerSharedDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
   readonly lease: ManagedOxigraphOwnershipLeaseV1;
   readonly handoff: SystemRecordChildHandoffV1;
   readonly executor: SystemRecordTransactionExecutorV1;
+  /**
+   * Adapter-owned admission latch, driven by the lifecycle's physical state.
+   * `true` is published synchronously before enable can enqueue its barrier;
+   * `false` is published only after disable physically commits or the lane is
+   * terminally unavailable. Merely constructing the controller never calls it.
+   */
+  readonly setAdmissionActive?: (active: boolean) => void;
+}
+
+export interface SystemRecordLaneControllerDepsV1 extends SystemRecordLaneControllerSharedDepsV1 {
   /**
    * Required, not optional. An optional barrier is one that gets forgotten:
    * this capability shipped once with a barrier implemented, exported and
@@ -271,19 +288,9 @@ export interface SystemRecordLaneControllerDepsV1 {
    * typed keys.
    */
   readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
-  /**
-   * Adapter-owned admission latch, driven by the lifecycle's physical state.
-   * `true` is published synchronously before enable can enqueue its barrier;
-   * `false` is published only after disable physically commits or the lane is
-   * terminally unavailable. Merely constructing the controller never calls it.
-   */
-  readonly setAdmissionActive?: (active: boolean) => void;
 }
 
-type SystemRecordLaneSessionDepsV1 = Pick<
-  SystemRecordLaneControllerDepsV1,
-  'lease' | 'handoff' | 'executor' | 'setAdmissionActive'
-> & {
+type SystemRecordLaneSessionDepsV1 = SystemRecordLaneControllerSharedDepsV1 & {
   readonly runEnableBarrier: (
     transition: () => Promise<SystemRecordLaneBarrierResultsV1['enable']>,
   ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
@@ -444,19 +451,25 @@ export async function releaseSystemRecordLaneControllerV1(
 }
 
 /**
- * Typed-only controller deps: the managed path's shape. There is NO string
- * `barrier` member — not deprecated, not optional, structurally absent — so
- * first-party composition cannot regress onto the purpose-string contract by
- * any edit short of changing this interface. The compile-time can't-forget
- * guard that `SystemRecordLaneControllerDepsV1.barrier` provides for external
- * composers is provided here by `typedBarrier` being required.
+ * Typed-only controller deps: the managed path's shape, and the CANONICAL
+ * home of the typed-barrier rationale (call sites carry one-line pointers
+ * here, not copies).
+ *
+ * There is NO string `barrier` member — not deprecated, not optional,
+ * structurally absent — so first-party composition cannot regress onto the
+ * purpose-string contract by any edit short of changing this interface,
+ * which is the loudest possible place for that change. The string contract
+ * is unsound for coalescing (a runtime purpose string cannot bind the result
+ * type shared by coalesced callers) and survives only on the public
+ * compatibility entry point until its breaking-version removal. The
+ * compile-time can't-forget guard that `SystemRecordLaneControllerDepsV1.
+ * barrier` provides for external composers is provided here by `typedBarrier`
+ * being required. A type-contract pin fails the typecheck lane if a string
+ * member is ever re-added to a typed-only shape.
  */
-export interface SystemRecordLaneControllerTypedDepsV1 {
-  readonly lease: ManagedOxigraphOwnershipLeaseV1;
-  readonly handoff: SystemRecordChildHandoffV1;
-  readonly executor: SystemRecordTransactionExecutorV1;
+export interface SystemRecordLaneControllerTypedDepsV1
+  extends SystemRecordLaneControllerSharedDepsV1 {
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
-  readonly setAdmissionActive?: (active: boolean) => void;
 }
 
 /**

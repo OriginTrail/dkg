@@ -13,8 +13,12 @@ vi.mock('../src/system-record-atomic-apply-executor-v1-internal.js', () => ({
   createSystemRecordAtomicApplyExecutorV1: probes.atomicFactory,
 }));
 
+// The coordinator builds on the TYPED-ONLY factory (#2179). Mocking only that
+// export is deliberate: if the coordinator ever reaches for the legacy
+// createSystemRecordLaneControllerV1 again, its import resolves to undefined
+// here and this test fails at the call, not silently.
 vi.mock('../src/system-record-materializer-v1.js', () => ({
-  createSystemRecordLaneControllerV1: probes.laneFactory,
+  createSystemRecordLaneControllerTypedV1: probes.laneFactory,
 }));
 
 vi.mock('../src/system-record-runtime-v1-internal.js', () => ({
@@ -37,7 +41,6 @@ describe('managed system-record coordinator composition', () => {
     const storeId = Object.freeze({ store: true });
     const resolveClient = vi.fn();
     const applyLegacy = vi.fn().mockResolvedValue({ outcome: 'stale' });
-    const barrier = vi.fn();
     const typedBarrier = vi.fn();
     const setAdmissionActive = vi.fn();
     const controller = createManagedSystemRecordCoordinatorV1({
@@ -48,7 +51,6 @@ describe('managed system-record coordinator composition', () => {
       updateEndpoint: 'http://127.0.0.1:1/update',
       resolveClient,
       applyLegacy,
-      barrier,
       typedBarrier,
       setAdmissionActive,
     } as never);
@@ -66,7 +68,6 @@ describe('managed system-record coordinator composition', () => {
     const laneDeps = probes.laneFactory.mock.calls[0][0] as {
       lease: unknown;
       handoff: unknown;
-      barrier: unknown;
       typedBarrier: unknown;
       setAdmissionActive: unknown;
       executor: {
@@ -82,10 +83,13 @@ describe('managed system-record coordinator composition', () => {
     expect(laneDeps).toMatchObject({
       lease,
       handoff,
-      barrier,
       typedBarrier,
       setAdmissionActive,
     });
+    // The typed factory receives NO string barrier — not undefined-valued,
+    // structurally absent. This is the managed path's #2179 invariant at the
+    // composition boundary, asserted on the deps object production passes.
+    expect('barrier' in laneDeps).toBe(false);
 
     const proof = Object.freeze({ proof: true });
     const binding = Object.freeze({ binding: true });

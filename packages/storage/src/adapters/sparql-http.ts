@@ -783,13 +783,8 @@ export class SparqlHttpStore implements TripleStore {
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
           //
-          // Typed-only, structurally (#2179): the managed coordinator's
-          // options carry NO string-barrier member, so first-party
-          // composition cannot fall back onto the deprecated purpose-string
-          // contract by any edit short of changing that internal interface —
-          // the loudest possible place for such a change. External composers
-          // with string barriers use the public
-          // `createSystemRecordLaneControllerV1` compatibility adapter.
+          // The only barrier managed composition has (#2179) — rationale on
+          // SystemRecordLaneControllerTypedDepsV1.
           typedBarrier: (kind, transition) =>
             runTypedBarrier(SYSTEM_RECORD_BARRIER_KEYS_V1[kind], transition),
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
