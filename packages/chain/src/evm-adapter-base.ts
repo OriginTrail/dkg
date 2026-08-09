@@ -38,9 +38,19 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
-import type { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
+import {
+  EvmContextGraphNameHashResolver,
+  type ContextGraphNameHashProviderHighWaters,
+} from './evm-context-graph-name-hash-resolver.js';
+import type {
+  ContextGraphNameHashSlot,
+  ContextGraphNameHashSlotIndexAnchor,
+  ContextGraphNameHashSlotIndexScope,
+} from './context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
+
+export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -53,6 +63,34 @@ type ContractWriteSender = (
 
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
+};
+
+/**
+ * Runtime methods supplied by the Context Graph holder through applyMixins().
+ * The base-owned lazy resolver closure calls these seams dynamically so focused
+ * tests can replace them while the closure itself stays off the public
+ * prototype audited by mock-adapter parity.
+ */
+type ContextGraphNameHashResolverBridge = {
+  getContextGraphNameHash(contextGraphId: bigint): Promise<string | null>;
+  loadContextGraphIdByNameHashFromChain(nameHash: string): Promise<bigint | null>;
+  loadCurrentContextGraphNameHashProviderHighWaters(): Promise<ContextGraphNameHashProviderHighWaters>;
+  captureContextGraphNameHashIndexScope(): Promise<ContextGraphNameHashSlotIndexScope>;
+  captureContextGraphNameHashIndexAnchor(): Promise<ContextGraphNameHashSlotIndexAnchor>;
+  loadContextGraphNameHashIndexAnchorHash(blockNumber: number): Promise<string | null>;
+  loadCurrentContextGraphNameHashSlots(
+    firstId: bigint,
+    lastId: bigint,
+    providerHighWaters: ReadonlyMap<JsonRpcProvider, bigint>,
+  ): Promise<readonly ContextGraphNameHashSlot[]>;
+  getContextGraphNameHashRetryingNull(
+    contextGraphId: bigint,
+    signal?: AbortSignal,
+    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
+  ): Promise<string | null>;
+  loadContextGraphIdByNameHashFromHistoricalEvents(
+    nameHash: string,
+  ): Promise<bigint | null>;
 };
 
 /**
@@ -269,21 +307,6 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
-
-const CG_REGISTRY_DEFAULT_PAGE_SIZE = 2_000;
-
-const CG_REGISTRY_LEGACY_PAGE_SIZE = 9_000;
-const CG_REGISTRY_LEGACY_MAX_SCAN_PAGES = 1_500;
-
-/**
- * Preserve the old default registry scan span while using smaller RPC-safe
- * pages. Larger configured page windows extend the block span at the same call
- * budget.
- */
-export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
-  (CG_REGISTRY_LEGACY_PAGE_SIZE * CG_REGISTRY_LEGACY_MAX_SCAN_PAGES) /
-  CG_REGISTRY_DEFAULT_PAGE_SIZE,
-);
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 
@@ -915,8 +938,87 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
-  /** Lazily constructed by the context-graph mixin; state must live on base. */
+  /** Lazily constructed by the base-owned instance accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
+
+  /**
+   * Instance-owned lazy accessor. This must remain a class field rather than a
+   * prototype method: the latter would leak adapter-internal resolver plumbing
+   * into the runtime public-method surface audited against MockChainAdapter.
+   */
+  protected readonly getContextGraphNameHashResolver =
+    (): EvmContextGraphNameHashResolver => {
+      const adapter = this as unknown as EVMChainAdapterBase
+        & ContextGraphNameHashResolverBridge;
+      this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
+        initialize: () => this.init(),
+        requireContextGraphStorage: () => this.requireContextGraphStorage(),
+        providers: () => this.providers,
+        rpcUrls: () => this.rpcUrls,
+        scanPageSize: () => this.cgRegistryScanPageSize,
+        ensureConfiguredStaticChainIdValidated: (provider) =>
+          this.ensureConfiguredStaticChainIdValidated(provider),
+        rebindContract: (contract, provider) => this.rebindContract(contract, provider),
+        readLatestBlock: () => this.readTipProvider(
+          'resolveContextGraphIdByNameHash current-slot anchor',
+          (provider) => provider.getBlock('latest'),
+        ),
+        readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
+          'resolveContextGraphIdByNameHash validate current-slot anchor',
+          async (provider) => {
+            const block = await provider.getBlock(blockNumber);
+            return block?.hash?.toLowerCase() ?? null;
+          },
+          { skipPreferred: true },
+        ),
+        resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+          this.resolveContractDeployBlock(address, operationLabel, contractLabel),
+        queryEventLogsPage: (
+          baseContract,
+          filter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          label,
+          preferred,
+        ) => this.queryEventLogsPage(
+          baseContract,
+          filter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          label,
+          preferred,
+        ),
+        getContextGraphNameHash: (contextGraphId) =>
+          adapter.getContextGraphNameHash(contextGraphId),
+        loadFromChain: (nameHash) =>
+          adapter.loadContextGraphIdByNameHashFromChain(nameHash),
+        loadProviderHighWaters: () =>
+          adapter.loadCurrentContextGraphNameHashProviderHighWaters(),
+        captureScope: () => adapter.captureContextGraphNameHashIndexScope(),
+        captureAnchor: () => adapter.captureContextGraphNameHashIndexAnchor(),
+        loadAnchorHash: (blockNumber) =>
+          adapter.loadContextGraphNameHashIndexAnchorHash(blockNumber),
+        loadSlots: (firstId, lastId, providerHighWaters) =>
+          adapter.loadCurrentContextGraphNameHashSlots(
+            firstId,
+            lastId,
+            providerHighWaters,
+          ),
+        getNameHashRetryingNull: (contextGraphId, signal, providerHighWaters) =>
+          adapter.getContextGraphNameHashRetryingNull(
+            contextGraphId,
+            signal,
+            providerHighWaters,
+          ),
+        loadHistorical: (nameHash) =>
+          adapter.loadContextGraphIdByNameHashFromHistoricalEvents(nameHash),
+      });
+      return this.contextGraphNameHashResolver;
+    };
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 

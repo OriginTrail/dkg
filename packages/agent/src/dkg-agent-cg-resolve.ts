@@ -1859,7 +1859,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (authoritativeId) {
       return { onChainId: authoritativeId, provenance: 'authoritative' };
     }
-    const cachedReverse = this.contextGraphReverseNameHashBindings.get(target.localId);
+    const currentBinding = this.contextGraphBindingState.currentBindingFor(
+      target.localId,
+      target.subscription.onChainId,
+    );
+    const cachedReverse = currentBinding?.bindingKind === 'reverse-name-hash'
+      ? currentBinding
+      : undefined;
     if (!target.nameHash) {
       if (cachedReverse) {
         throw new Error(

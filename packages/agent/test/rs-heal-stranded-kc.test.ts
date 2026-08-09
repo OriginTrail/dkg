@@ -55,6 +55,7 @@ import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling
 import { writeMaterializedVersion, readMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -107,6 +108,7 @@ async function seedOntology(store: OxigraphStore, localCgId: string, onChainId: 
 function makeAgentLike(store: OxigraphStore): unknown {
   return {
     store,
+    contextGraphBindingState: new ContextGraphBindingState(),
     rsHealCursorByCg: new Map<string, string>(),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },
   };
@@ -377,6 +379,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const cursorMap = new Map<string, string>([[cursorKey, 'did:dkg:hardhat:31337/0xbefore/1']]);
     const agentLike = {
       store: fakeStore,
+      contextGraphBindingState: new ContextGraphBindingState(),
       rsHealCursorByCg: cursorMap,
       log: { info: () => undefined, warn: () => undefined, error: () => undefined },
     };
@@ -437,6 +440,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const heal = SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       {
         store: fakeStore,
+        contextGraphBindingState: new ContextGraphBindingState(),
         rsHealCursorByCg: cursorMap,
         log: { info: () => undefined, warn: () => undefined, error: () => undefined },
       } as never,
@@ -466,7 +470,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       TEST_CG,
       { subscribed: true, synced: true, onChainId: TEST_ONCHAIN, lastReconciledOrdinal: 0 },
     ]]);
-    agentLike.contextGraphBindingGenerations = new Map();
+    agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileEnabled = () => true;
@@ -514,7 +518,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
         lastReconciledOrdinal: 0,
       },
     ]]);
-    agentLike.contextGraphBindingGenerations = new Map();
+    agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileDispatcher = {

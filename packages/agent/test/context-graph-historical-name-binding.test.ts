@@ -5,6 +5,7 @@ import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const LOCAL_ID = 'selected-public-cg';
 const NAME_HASH = `0x${'ab'.repeat(32)}`;
@@ -39,10 +40,10 @@ function selectedFixture(resolved: bigint | null = 42n) {
     contextGraphNameCommitment: (id: string) => id === LOCAL_ID ? NAME_HASH : id.toLowerCase(),
     localCgIdForWireId: (id: string) => id.toLowerCase() === NAME_HASH ? LOCAL_ID : id,
     invalidateListContextGraphsCache: vi.fn(),
-    contextGraphBindingGenerations: new Map<string, number>(),
-    contextGraphReverseNameHashBindings: new Map(),
+    contextGraphBindingState: new ContextGraphBindingState(),
     reconcileCursors: new Map(),
     persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
+    emitReplication: vi.fn(),
     forceClearVmReconcileStateForContextGraph: vi.fn((localId: string) => {
       agent.reconcileCursors.delete(localId);
     }),
@@ -144,7 +145,7 @@ describe('cold current-state Context Graph name binding', () => {
       { signal },
     );
     expect(fixture.subscription.onChainId).toBeUndefined();
-    expect(fixture.agent.contextGraphReverseNameHashBindings.size).toBe(0);
+    expect(fixture.agent.contextGraphBindingState.size).toBe(0);
     expect(fixture.query).not.toHaveBeenCalled();
   });
 
@@ -233,11 +234,12 @@ describe('cold current-state Context Graph name binding', () => {
 
   it('keeps reverse-derived identity and progress outside durable subscription state', () => {
     const fixture = selectedFixture();
-    fixture.agent.contextGraphReverseNameHashBindings.set(LOCAL_ID, {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    });
+    fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
 
     const projection = projectContextGraphSubscriptionPersistence({
       contextGraphId: LOCAL_ID,
@@ -248,6 +250,73 @@ describe('cold current-state Context Graph name binding', () => {
     if (projection.action !== 'save') throw new Error('expected durable member projection');
     expect(projection.record.onChainId).toBeUndefined();
     expect(projection.record.lastReconciledOrdinal).toBeUndefined();
+  });
+
+  it('keeps reverse VM watermarks process-local while authoritative targets persist', async () => {
+    const reverseFixture = selectedFixture();
+    reverseFixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
+    const reverseCursor = { watermark: 0, ahead: new Map(), scanOrdinal: 0 };
+    reverseFixture.agent.reconcileCursors.set(LOCAL_ID, reverseCursor);
+    const reverseTarget = {
+      sub: reverseFixture.subscription,
+      bindingKind: 'reverse-name-hash' as const,
+      onChainId: '42',
+      nameHash: NAME_HASH,
+      onChainCgId: 42n,
+      cursor: reverseCursor,
+      bindingGeneration: reverseFixture.agent.contextGraphBindingState.capture(LOCAL_ID),
+      watermarkBefore: 0,
+    };
+
+    await SwmHostModeMethods.prototype.persistVmReconcileWatermark.call(
+      reverseFixture.agent,
+      LOCAL_ID,
+      5,
+      reverseTarget,
+    );
+
+    expect(reverseFixture.agent.persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
+    expect(reverseFixture.subscription.lastReconciledOrdinal).toBeUndefined();
+    expect(reverseFixture.agent.emitReplication).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'cursor-advance',
+      fromWatermark: 0,
+      toWatermark: 5,
+    }));
+
+    const authoritativeFixture = selectedFixture();
+    authoritativeFixture.subscription.onChainId = '42';
+    authoritativeFixture.subscription.lastReconciledOrdinal = 0;
+    const authoritativeCursor = { watermark: 0, ahead: new Map(), scanOrdinal: 0 };
+    authoritativeFixture.agent.reconcileCursors.set(LOCAL_ID, authoritativeCursor);
+    const authoritativeTarget = {
+      sub: authoritativeFixture.subscription,
+      bindingKind: 'authoritative' as const,
+      onChainId: '42',
+      onChainCgId: 42n,
+      cursor: authoritativeCursor,
+      bindingGeneration: authoritativeFixture.agent.contextGraphBindingState.capture(LOCAL_ID),
+      watermarkBefore: 0,
+    };
+
+    await SwmHostModeMethods.prototype.persistVmReconcileWatermark.call(
+      authoritativeFixture.agent,
+      LOCAL_ID,
+      5,
+      authoritativeTarget,
+    );
+
+    expect(authoritativeFixture.agent.persistContextGraphSubscriptionStrict).toHaveBeenCalledWith(
+      LOCAL_ID,
+      expect.objectContaining({ onChainId: '42', lastReconciledOrdinal: 5 }),
+      undefined,
+      expect.any(Function),
+    );
+    expect(authoritativeFixture.subscription.lastReconciledOrdinal).toBe(5);
   });
 
   it('self-primes a reverse binding only in memory and revalidates before VM use', async () => {
@@ -262,8 +331,11 @@ describe('cold current-state Context Graph name binding', () => {
 
     expect(fixture.agent.persistContextGraphSubscriptionStrict).not.toHaveBeenCalled();
     expect(fixture.subscription.onChainId).toBeUndefined();
-    expect(fixture.agent.contextGraphReverseNameHashBindings.get(LOCAL_ID)).toEqual({
-      kind: 'reverse-name-hash',
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(
+      LOCAL_ID,
+      fixture.subscription.onChainId,
+    )).toEqual({
+      bindingKind: 'reverse-name-hash',
       onChainId: '42',
       nameHash: NAME_HASH,
     });
@@ -292,7 +364,7 @@ describe('cold current-state Context Graph name binding', () => {
       '42',
       NAME_HASH,
     );
-    const generation = fixture.agent.contextGraphBindingGenerations.get(LOCAL_ID);
+    const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
     fixture.subscription.lastReconciledOrdinal = 17;
     const cursor = { watermark: 17, ahead: new Map(), scanOrdinal: 18 };
     fixture.agent.reconcileCursors.set(LOCAL_ID, cursor);
@@ -303,7 +375,7 @@ describe('cold current-state Context Graph name binding', () => {
       '42',
       NAME_HASH,
     );
-    expect(fixture.agent.contextGraphBindingGenerations.get(LOCAL_ID)).toBe(generation);
+    expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation);
     expect(fixture.subscription.lastReconciledOrdinal).toBe(17);
     expect(fixture.agent.reconcileCursors.get(LOCAL_ID)).toBe(cursor);
     expect(fixture.agent.forceClearVmReconcileStateForContextGraph).not.toHaveBeenCalled();
@@ -315,12 +387,12 @@ describe('cold current-state Context Graph name binding', () => {
       '43',
       nextHash,
     );
-    expect(fixture.agent.contextGraphReverseNameHashBindings.get(LOCAL_ID)).toEqual({
-      kind: 'reverse-name-hash',
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID)).toEqual({
+      bindingKind: 'reverse-name-hash',
       onChainId: '43',
       nameHash: nextHash,
     });
-    expect(fixture.agent.contextGraphBindingGenerations.get(LOCAL_ID)).toBe((generation ?? 0) + 1);
+    expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
     expect(fixture.subscription.lastReconciledOrdinal).toBe(0);
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
     expect(fixture.agent.forceClearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
@@ -339,7 +411,7 @@ describe('cold current-state Context Graph name binding', () => {
       ahead: new Map(),
       scanOrdinal: 4,
     });
-    const generation = fixture.agent.contextGraphBindingGenerations.get(LOCAL_ID) ?? 0;
+    const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
     const nextHash = `0x${'ef'.repeat(32)}`;
 
     LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
@@ -349,18 +421,19 @@ describe('cold current-state Context Graph name binding', () => {
       { persist: false },
     );
 
-    expect(fixture.agent.contextGraphReverseNameHashBindings.has(LOCAL_ID)).toBe(false);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID)).toBeUndefined();
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
-    expect(fixture.agent.contextGraphBindingGenerations.get(LOCAL_ID)).toBe(generation + 1);
+    expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
   });
 
   it('uses a reverse candidate only to schedule a live KACG nudge, then revalidates the VM target', async () => {
     const fixture = selectedFixture();
-    fixture.agent.contextGraphReverseNameHashBindings.set(LOCAL_ID, {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    });
+    fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
     fixture.agent.vmReconcileEnabled = () => true;
     fixture.agent.vmReconcileLifecycleGeneration = 1;
     fixture.agent.vmReconcileRotationClosed = false;
@@ -394,11 +467,12 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.chain.getContextGraphParticipantAgents = getParticipants;
     fixture.agent.onChainParticipantAgentsCache = new Map();
     fixture.agent.log = { warn: vi.fn() };
-    fixture.agent.contextGraphReverseNameHashBindings.set(LOCAL_ID, {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    });
+    fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
 
     await expect(ContextGraphResolveMethods.prototype.resolveOnChainParticipantAgents.call(
       fixture.agent,
@@ -423,12 +497,13 @@ describe('cold current-state Context Graph name binding', () => {
     const numericLocalId = '42';
     fixture.agent.subscribedContextGraphs = new Map([[numericLocalId, fixture.subscription]]);
     fixture.agent.contextGraphNameCommitment = () => NAME_HASH;
-    fixture.agent.contextGraphReverseNameHashBindings.delete(LOCAL_ID);
-    fixture.agent.contextGraphReverseNameHashBindings.set(numericLocalId, {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    });
+    fixture.agent.contextGraphBindingState.delete(LOCAL_ID);
+    fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      numericLocalId,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
     fixture.resolveContextGraphIdByNameHash.mockRejectedValueOnce(
       new Error('ambiguous name hash: getNameHash commits it to 2 numeric ids'),
     );
@@ -446,11 +521,12 @@ describe('cold current-state Context Graph name binding', () => {
 
   it('promotes an authoritative event binding without erasing same-id VM progress', () => {
     const fixture = selectedFixture();
-    fixture.agent.contextGraphReverseNameHashBindings.set(LOCAL_ID, {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    });
+    fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
     fixture.subscription.lastReconciledOrdinal = 17;
 
     SwmHostModeMethods.prototype.bindSubscriptionOnChainId.call(
@@ -461,20 +537,26 @@ describe('cold current-state Context Graph name binding', () => {
     );
 
     expect(fixture.subscription.onChainId).toBe('42');
-    expect(fixture.agent.contextGraphReverseNameHashBindings.has(LOCAL_ID)).toBe(false);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(
+      LOCAL_ID,
+      fixture.subscription.onChainId,
+    )).toEqual({
+      bindingKind: 'authoritative',
+      onChainId: '42',
+    });
     expect(fixture.subscription.lastReconciledOrdinal).toBe(17);
     expect(fixture.agent.forceClearVmReconcileStateForContextGraph).not.toHaveBeenCalled();
-    expect(fixture.agent.contextGraphBindingGenerations.get(LOCAL_ID)).toBe(1);
+    expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(2);
   });
 
   it('keeps a process-local reverse candidate outside an ensured subscription', async () => {
     const fixture = selectedFixture();
-    const candidate = {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    } as const;
-    fixture.agent.contextGraphReverseNameHashBindings.set(LOCAL_ID, candidate);
+    const candidate = fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    ).current;
     fixture.agent.contextGraphExists = vi.fn(async () => true);
     fixture.agent.subscribeToContextGraph = vi.fn();
     fixture.agent.setContextGraphSubscription = vi.fn();
@@ -488,17 +570,18 @@ describe('cold current-state Context Graph name binding', () => {
       LOCAL_ID,
       expect.objectContaining({ syncMode: 'always-on' }),
     );
-    expect(fixture.agent.contextGraphReverseNameHashBindings.get(LOCAL_ID)).toBe(candidate);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID)).toBe(candidate);
   });
 
   it('omits a reverse-binding VM watermark from the strict join snapshot', async () => {
     const fixture = selectedFixture();
     const savedSubscriptions: unknown[] = [];
-    fixture.agent.contextGraphReverseNameHashBindings.set(LOCAL_ID, {
-      kind: 'reverse-name-hash',
-      onChainId: '42',
-      nameHash: NAME_HASH,
-    });
+    fixture.agent.contextGraphBindingState.bindReverseCandidate(
+      LOCAL_ID,
+      undefined,
+      '42',
+      NAME_HASH,
+    );
     fixture.agent.config = {
       contextGraphMembershipStore: {
         loadAll: vi.fn(async () => []),

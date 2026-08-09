@@ -123,7 +123,8 @@ function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
 
 function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = [[42n]]) {
   const base = fixture([]);
-  base.setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);
+  const scannedRegistryHighWater = CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n;
+  base.setLatestId(scannedRegistryHighWater);
   let headHash = `0x${'33'.repeat(32)}`;
   const provider = {
     getBlock: vi.fn(async (blockNumber: number) => ({ number: blockNumber, hash: headHash })),
@@ -140,6 +141,12 @@ function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = [[42n]]
     interface: { parseLog },
   };
   base.adapter.contracts = { contextGraphStorage: storage };
+  base.adapter.rebindContract = vi.fn(() => ({
+    getLatestContextGraphId: vi.fn(async (options: { blockTag?: number }) => {
+      expect(options.blockTag).toBeDefined();
+      return scannedRegistryHighWater;
+    }),
+  }));
   base.resolveContractDeployBlock.mockResolvedValue({
     fromBlock: 100,
     head: 100 + pages.length * 2 - 1,
@@ -266,6 +273,31 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     await expect(adapter.getContextGraphNameHashRetryingNull(1n)).rejects.toThrow(
       /RPC backends disagree on current slot 1/i,
     );
+  });
+
+  it('fails closed when any covering RPC cannot read the current slot', async () => {
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = vi.fn(async () => {});
+    const failing = { id: 'failing' };
+    const responding = { id: 'responding' };
+    const storage = { getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6') };
+    adapter.contracts = { contextGraphStorage: storage };
+    adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
+      getNameHash: vi.fn(async () => {
+        if (provider === failing) throw new Error('slot read timed out');
+        return ethers.ZeroHash;
+      }),
+    }));
+    adapter.loadCurrentContextGraphNameHashProviderHighWaters = vi.fn(async () => ({
+      latestId: 2n,
+      providerHighWaters: new Map([[failing, 2n], [responding, 2n]]),
+    }));
+
+    await expect(adapter.getContextGraphNameHashRetryingNull(2n)).rejects.toThrow(
+      /1 of 2 covering RPC backends failed to read current slot 2/i,
+    );
+    expect(adapter.rebindContract).toHaveBeenCalledTimes(2);
   });
 
   it('aborts an in-flight provider slot read instead of waiting for its stall timeout', async () => {
@@ -400,6 +432,29 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     expect(scenario.provider.getBlock).toHaveBeenCalledWith(101);
   });
 
+  it('fails closed when same-height RPCs disagree on the historical anchor hash', async () => {
+    const scenario = historicalFixture([[42n]]);
+    const forkedProvider = {
+      getBlock: vi.fn(async (blockNumber: number) => ({
+        number: blockNumber,
+        hash: `0x${'44'.repeat(32)}`,
+      })),
+    };
+    scenario.resolveContractDeployBlock.mockResolvedValue({
+      fromBlock: 100,
+      head: 101,
+      scanProviders: [
+        { provider: scenario.provider, backendHead: 101 },
+        { provider: forkedProvider, backendHead: 101 },
+      ],
+    });
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /RPC backends disagree on canonical block hash at historical head 101/i,
+    );
+    expect(scenario.queryEventLogsPage).not.toHaveBeenCalled();
+  });
+
   it('keeps the historical fallback fail-closed on duplicate numeric slots', async () => {
     const { adapter } = historicalFixture([[42n, 43n]]);
 
@@ -465,6 +520,38 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       /canonical chain anchor changed during historical scan/i,
     );
     expect(fixture.adapter.getContextGraphNameHash).not.toHaveBeenCalled();
+  });
+
+  it('discards a historical result when a new CG advances the registry after the scanned head', async () => {
+    const scenario = historicalFixture([[42n]]);
+    scenario.queryEventLogsPage.mockImplementationOnce(async () => {
+      scenario.setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 2n);
+      return {
+        logs: [{ topics: [], data: '42' }],
+        provider: scenario.provider,
+      };
+    });
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /registry high-water changed from 1025 to 1026 during historical scan/i,
+    );
+    expect(scenario.adapter.getContextGraphNameHash).toHaveBeenCalledWith(42n);
+  });
+
+  it('does not negative-cache a historical miss when the registry advances during the scan', async () => {
+    const scenario = historicalFixture([[]]);
+    scenario.queryEventLogsPage.mockImplementationOnce(async () => {
+      scenario.setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 2n);
+      return { logs: [], provider: scenario.provider };
+    });
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /registry high-water changed from 1025 to 1026 during historical scan/i,
+    );
+
+    scenario.setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBeNull();
+    expect(scenario.queryEventLogsPage).toHaveBeenCalledTimes(2);
   });
 
   it('never exceeds four concurrent getNameHash reads and still scans the full range', async () => {

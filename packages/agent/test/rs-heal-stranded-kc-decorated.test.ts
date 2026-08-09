@@ -30,6 +30,7 @@ import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling
 import { writeMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -137,7 +138,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   async function runHeal(localCgId: string, onChainId: string): Promise<void> {
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       localCgId,
       authoritativeTarget(onChainId) as never,
     );
@@ -354,6 +359,7 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       {
         store: capturing,
+        contextGraphBindingState: new ContextGraphBindingState(),
         rsHealCursorByCg: new Map<string, string>(),
         log: { info: () => undefined, warn: () => undefined, error: () => undefined },
       } as never,
@@ -401,6 +407,7 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       {
         store: capturing,
+        contextGraphBindingState: new ContextGraphBindingState(),
         log: { info: () => undefined, warn: () => undefined, error: () => undefined },
       } as never,
       TEST_CG,

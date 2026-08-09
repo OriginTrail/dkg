@@ -11,8 +11,10 @@
  */
 
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
-import { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-base.js';
-import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
+import {
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  RPC_READ_STALL_TIMEOUT_MS,
+} from './evm-adapter-constants.js';
 import { withTimeout } from './evm-adapter-rpc.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 import {
@@ -343,8 +345,11 @@ export class EvmContextGraphNameHashResolver {
       ?? (await this.dependencies.loadProviderHighWaters()).providerHighWaters;
     const observed = new Set<string | null>();
     let firstFailure: unknown;
+    let coveringProviders = 0;
+    let failedCoveringProviders = 0;
     for (const [provider, highWater] of highWaters) {
       if (highWater < contextGraphId) continue;
+      coveringProviders += 1;
       signal?.throwIfAborted();
       try {
         const startRead = () => Promise.resolve(
@@ -362,7 +367,16 @@ export class EvmContextGraphNameHashResolver {
       } catch (cause) {
         if (signal?.aborted) signal.throwIfAborted();
         firstFailure ??= cause;
+        failedCoveringProviders += 1;
       }
+    }
+    if (failedCoveringProviders > 0) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ${failedCoveringProviders} of ` +
+        `${coveringProviders} covering RPC backends failed to read current slot ` +
+        `${contextGraphId.toString()}`,
+        { cause: firstFailure },
+      );
     }
     if (observed.size === 0) {
       throw firstFailure ?? new Error(
@@ -377,6 +391,51 @@ export class EvmContextGraphNameHashResolver {
       );
     }
     return observed.values().next().value ?? null;
+  }
+
+  /** Pin the registry counter to the same canonical block as the log scan. */
+  private async loadHistoricalRegistryHighWaterAtHead(
+    contextGraphStorage: Contract,
+    scanProviders: ReadonlyArray<ContextGraphNameHashScanProvider>,
+    head: number,
+  ): Promise<bigint> {
+    let agreedHighWater: bigint | undefined;
+    for (const { provider } of scanProviders) {
+      await withTimeout(
+        this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'resolveContextGraphIdByNameHash historical high-water chainId validation',
+      );
+      const raw = await withTimeout(
+        this.dependencies.rebindContract(
+          contextGraphStorage,
+          provider,
+        ).getLatestContextGraphId({ blockTag: head }),
+        RPC_READ_STALL_TIMEOUT_MS,
+        'resolveContextGraphIdByNameHash historical high-water read',
+      );
+      const highWater = BigInt(raw);
+      if (highWater < 0n) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: getLatestContextGraphId returned ` +
+          `invalid negative id ${highWater.toString()} at historical head ${head}`,
+        );
+      }
+      if (agreedHighWater !== undefined && agreedHighWater !== highWater) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: RPC backends disagree on registry ` +
+          `high-water at historical head ${head}`,
+        );
+      }
+      agreedHighWater = highWater;
+    }
+    if (agreedHighWater === undefined) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: no RPC backend could read registry ` +
+        `high-water at historical head ${head}`,
+      );
+    }
+    return agreedHighWater;
   }
 
   /** Bounded deploy-anchored exact-topic fallback for large registries. */
@@ -407,6 +466,7 @@ export class EvmContextGraphNameHashResolver {
 
     const headProviders = reachableProviders.filter(({ backendHead }) => backendHead >= head);
     let headHash: string | null = null;
+    const observedHeadHashes = new Set<string>();
     const scanProviders: ContextGraphNameHashScanProvider[] = [];
     for (const candidate of headProviders) {
       try {
@@ -417,6 +477,7 @@ export class EvmContextGraphNameHashResolver {
         );
         const candidateHash = block?.hash?.toLowerCase() ?? null;
         if (candidateHash === null) continue;
+        observedHeadHashes.add(candidateHash);
         if (headHash === null) headHash = candidateHash;
         if (candidateHash === headHash) scanProviders.push(candidate);
       } catch {
@@ -428,6 +489,27 @@ export class EvmContextGraphNameHashResolver {
         'resolveContextGraphIdByNameHash: no RPC backend could anchor the historical scan head',
       );
     }
+    if (observedHeadHashes.size !== 1) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: RPC backends disagree on canonical ` +
+        `block hash at historical head ${head}`,
+      );
+    }
+    const scannedRegistryHighWater = await this.loadHistoricalRegistryHighWaterAtHead(
+      cgs,
+      scanProviders,
+      head,
+    );
+    const assertHistoricalRegistryCurrent = async (): Promise<void> => {
+      const currentBoundary = await this.dependencies.loadProviderHighWaters();
+      if (currentBoundary.latestId !== scannedRegistryHighWater) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: registry high-water changed from ` +
+          `${scannedRegistryHighWater.toString()} to ` +
+          `${currentBoundary.latestId.toString()} during historical scan`,
+        );
+      }
+    };
 
     const usedProviders = new Set<JsonRpcProvider>([scanProviders[0]!.provider]);
     const assertScanCurrent = async (): Promise<void> => {
@@ -457,6 +539,8 @@ export class EvmContextGraphNameHashResolver {
     };
 
     if (fromBlock > head) {
+      await assertScanCurrent();
+      await assertHistoricalRegistryCurrent();
       await assertScanCurrent();
       return null;
     }
@@ -494,7 +578,11 @@ export class EvmContextGraphNameHashResolver {
     }
 
     await assertScanCurrent();
-    if (ids.size === 0) return null;
+    if (ids.size === 0) {
+      await assertHistoricalRegistryCurrent();
+      await assertScanCurrent();
+      return null;
+    }
     if (ids.size !== 1) {
       throw new Error(
         `resolveContextGraphIdByNameHash: ambiguous ${normalizedNameHash}; ` +
@@ -510,6 +598,8 @@ export class EvmContextGraphNameHashResolver {
         `${currentHash ?? ethers.ZeroHash}, expected ${normalizedNameHash}`,
       );
     }
+    await assertScanCurrent();
+    await assertHistoricalRegistryCurrent();
     await assertScanCurrent();
     return id;
   }

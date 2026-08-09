@@ -25,9 +25,8 @@ import {
   type ContextGraphNameHashSlotIndexAnchor,
   type ContextGraphNameHashSlotIndexScope,
 } from './context-graph-name-hash-resolver.js';
-import {
-  EvmContextGraphNameHashResolver,
-  type ContextGraphNameHashProviderHighWaters,
+import type {
+  ContextGraphNameHashProviderHighWaters,
 } from './evm-context-graph-name-hash-resolver.js';
 
 type ContextGraphRegistryScanPlan =
@@ -877,78 +876,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
-  }
-
-  /** Lazily bind the EVM reverse resolver to this adapter's live RPC seams. */
-  private getContextGraphNameHashResolver(): EvmContextGraphNameHashResolver {
-    this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
-      initialize: () => this.init(),
-      requireContextGraphStorage: () => this.requireContextGraphStorage(),
-      providers: () => this.providers,
-      rpcUrls: () => this.rpcUrls,
-      scanPageSize: () => this.cgRegistryScanPageSize,
-      ensureConfiguredStaticChainIdValidated: (provider) =>
-        this.ensureConfiguredStaticChainIdValidated(provider),
-      rebindContract: (contract, provider) => this.rebindContract(contract, provider),
-      readLatestBlock: () => this.readTipProvider(
-        'resolveContextGraphIdByNameHash current-slot anchor',
-        (provider) => provider.getBlock('latest'),
-      ),
-      readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
-        'resolveContextGraphIdByNameHash validate current-slot anchor',
-        async (provider) => {
-          const block = await provider.getBlock(blockNumber);
-          return block?.hash?.toLowerCase() ?? null;
-        },
-        { skipPreferred: true },
-      ),
-      resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
-        this.resolveContractDeployBlock(address, operationLabel, contractLabel),
-      queryEventLogsPage: (
-        baseContract,
-        filter,
-        lo,
-        hi,
-        scanProviders,
-        connected,
-        label,
-        preferred,
-      ) => this.queryEventLogsPage(
-        baseContract,
-        filter,
-        lo,
-        hi,
-        scanProviders,
-        connected,
-        label,
-        preferred,
-      ),
-      getContextGraphNameHash: (contextGraphId) =>
-        this.getContextGraphNameHash(contextGraphId),
-      loadFromChain: (nameHash) =>
-        this.loadContextGraphIdByNameHashFromChain(nameHash),
-      loadProviderHighWaters: () =>
-        this.loadCurrentContextGraphNameHashProviderHighWaters(),
-      captureScope: () => this.captureContextGraphNameHashIndexScope(),
-      captureAnchor: () => this.captureContextGraphNameHashIndexAnchor(),
-      loadAnchorHash: (blockNumber) =>
-        this.loadContextGraphNameHashIndexAnchorHash(blockNumber),
-      loadSlots: (firstId, lastId, providerHighWaters) =>
-        this.loadCurrentContextGraphNameHashSlots(
-          firstId,
-          lastId,
-          providerHighWaters,
-        ),
-      getNameHashRetryingNull: (contextGraphId, signal, providerHighWaters) =>
-        this.getContextGraphNameHashRetryingNull(
-          contextGraphId,
-          signal,
-          providerHighWaters,
-        ),
-      loadHistorical: (nameHash) =>
-        this.loadContextGraphIdByNameHashFromHistoricalEvents(nameHash),
-    });
-    return this.contextGraphNameHashResolver;
   }
 
   private loadContextGraphIdByNameHashFromChain(

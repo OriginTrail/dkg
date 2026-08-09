@@ -25,6 +25,7 @@ import { V10MerkleTree, contextGraphDataUri, contextGraphMetaUri, contextGraphLa
 import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling';
 import { writeMaterializedVersion } from '@origintrail-official/dkg-publisher';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { startOxigraphSparqlEndpoint, type OxigraphSparqlEndpoint } from '../../storage/test/helpers/oxigraph-sparql-endpoint.js';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -129,7 +130,11 @@ describe('healStrandedScopedKCs — content-binding gate over SPARQL-HTTP', () =
 
   async function runHeal(localCgId: string, onChainId: string): Promise<void> {
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
+      {
+        store,
+        contextGraphBindingState: new ContextGraphBindingState(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       localCgId,
       authoritativeTarget(onChainId) as never,
     );

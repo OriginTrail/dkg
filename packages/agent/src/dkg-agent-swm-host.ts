@@ -477,11 +477,9 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  bumpContextGraphBindingGeneration as bumpBindingGeneration,
-  captureContextGraphBindingGeneration as captureBindingGeneration,
-  isContextGraphBindingGenerationCurrent as isBindingGenerationCurrent,
-} from './context-graph-binding-generation.js';
+import type {
+  ContextGraphBindingTarget,
+} from './context-graph-binding-state.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
@@ -490,13 +488,9 @@ type VmReconcileTargetBase = {
   sub: ContextGraphSub;
   onChainCgId: bigint;
   cursor: CursorState;
-  bindingGeneration: number;
   watermarkBefore: number;
 };
-type VmReconcileTarget = VmReconcileTargetBase & (
-  | { bindingKind: 'authoritative'; onChainId: string }
-  | { bindingKind: 'reverse-name-hash'; onChainId: string; nameHash: string }
-);
+type VmReconcileTarget = VmReconcileTargetBase & ContextGraphBindingTarget;
 
 type VmReconcileExecution = {
   identityCursor: CursorState;
@@ -527,20 +521,6 @@ const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
   return Math.max(1, Math.floor(value));
-}
-
-function vmReconcileTargetBindingMatches(
-  sub: ContextGraphSub | undefined,
-  reverse: { onChainId: string; nameHash: string } | undefined,
-  target: Pick<VmReconcileTarget, 'bindingKind' | 'onChainId'> & { nameHash?: string },
-): boolean {
-  if (!sub) return false;
-  if (target.bindingKind === 'authoritative') {
-    return sub.onChainId === target.onChainId;
-  }
-  return sub.onChainId === undefined
-    && reverse?.onChainId === target.onChainId
-    && reverse.nameHash === target.nameHash;
 }
 
 /**
@@ -2403,11 +2383,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   bumpContextGraphBindingGeneration(this: DKGAgent, localCgId: string): number {
-    return bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
+    return this.contextGraphBindingState.bump(localCgId);
   }
 
   captureContextGraphBindingGeneration(this: DKGAgent, localCgId: string): number {
-    return captureBindingGeneration(this.contextGraphBindingGenerations, localCgId);
+    return this.contextGraphBindingState.capture(localCgId);
   }
 
   isContextGraphBindingGenerationCurrent(
@@ -2415,11 +2395,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     generation: number,
   ): boolean {
-    return isBindingGenerationCurrent(
-      this.contextGraphBindingGenerations,
-      localCgId,
-      generation,
-    );
+    return this.contextGraphBindingState.isGenerationCurrent(localCgId, generation);
   }
 
   /** Invalidate an untrusted reverse candidate and every VM cursor tied to it. */
@@ -2427,8 +2403,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this: DKGAgent,
     localCgId: string,
   ): boolean {
-    if (!this.contextGraphReverseNameHashBindings.delete(localCgId)) return false;
-    bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
+    if (!this.contextGraphBindingState.clear(localCgId)) return false;
     this.forceClearVmReconcileStateForContextGraph(localCgId);
     return true;
   }
@@ -2451,13 +2426,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     sub: ContextGraphSub,
     newOnChainId: string,
   ): void {
-    const reverse = this.contextGraphReverseNameHashBindings.get(localCgId);
-    const prev = sub.onChainId ?? reverse?.onChainId;
-    this.contextGraphReverseNameHashBindings.delete(localCgId);
-    if (sub.onChainId === newOnChainId) return;
-    bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
+    const transition = this.contextGraphBindingState.bindAuthoritative(
+      localCgId,
+      sub.onChainId,
+      newOnChainId,
+    );
+    if (!transition.changed) return;
     sub.onChainId = newOnChainId;
-    if (!prev || prev === newOnChainId) return;
+    if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be
     // dropped, otherwise the sweep resumes at the wrong ordinal and skips
@@ -2473,7 +2449,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (hadProgress) {
       this.log.info(
         createOperationContext('system'),
-        `VM reconcile: on-chain id for "${localCgId}" changed ${prev}->${newOnChainId}; reset reconcile watermark + cursor to 0`,
+        `VM reconcile: on-chain id for "${localCgId}" changed ` +
+        `${transition.previous?.onChainId}->${newOnChainId}; reset reconcile watermark + cursor to 0`,
       );
     }
   }
@@ -2490,18 +2467,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     newOnChainId: string,
     nameHash: string,
   ): void {
-    if (sub.onChainId) {
-      this.contextGraphReverseNameHashBindings.delete(localCgId);
-      return;
-    }
-    const prev = this.contextGraphReverseNameHashBindings.get(localCgId);
-    if (prev?.onChainId === newOnChainId && prev.nameHash === nameHash) return;
-    bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
-    this.contextGraphReverseNameHashBindings.set(localCgId, {
-      kind: 'reverse-name-hash',
-      onChainId: newOnChainId,
+    const transition = this.contextGraphBindingState.bindReverseCandidate(
+      localCgId,
+      sub.onChainId,
+      newOnChainId,
       nameHash,
-    });
+    );
+    if (!transition.changed) return;
     const hadProgress =
       (sub.lastReconciledOrdinal ?? 0) > 0 || this.reconcileCursors.has(localCgId);
     if (hadProgress) {
@@ -2512,7 +2484,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.info(
         createOperationContext('system'),
         `VM reconcile: reverse-derived on-chain id for "${localCgId}" changed ` +
-        `${prev?.onChainId ?? 'unbound'}->${newOnChainId}; reset reconcile watermark + cursor to 0`,
+        `${transition.previous?.onChainId ?? 'unbound'}->${newOnChainId}; ` +
+        'reset reconcile watermark + cursor to 0',
       );
     }
   }
@@ -2794,8 +2767,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
-        const hasVmBindingCandidate = sub.onChainId !== undefined
-          || this.contextGraphReverseNameHashBindings.has(localCgId);
+        const hasVmBindingCandidate = this.contextGraphBindingState.currentBindingFor(
+          localCgId,
+          sub.onChainId,
+        ) !== undefined;
         if (sub.subscribed && !hasVmBindingCandidate) {
           await this.selfPrimeSubscriptionOnChainId(
             localCgId,
@@ -2809,10 +2784,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Member subscriptions AND Phase D core-hosted public CGs get swept.
         if (
           (!sub.subscribed && !sub.coreHosted)
-          || (
-            sub.onChainId === undefined
-            && !this.contextGraphReverseNameHashBindings.has(localCgId)
-          )
+          || this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId) === undefined
         ) continue;
         eligible.push(localCgId);
       }
@@ -2865,20 +2837,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<string | null> {
-    const bindingGeneration = captureBindingGeneration(
-      this.contextGraphBindingGenerations,
-      localCgId,
-    );
+    const bindingGeneration = this.contextGraphBindingState.capture(localCgId);
     const isSubscriptionCurrent = () => isCurrent()
       && this.subscribedContextGraphs.get(localCgId) === sub
       && sub.subscribed
-      && sub.onChainId === undefined
-      && !this.contextGraphReverseNameHashBindings.has(localCgId)
-      && isBindingGenerationCurrent(
-        this.contextGraphBindingGenerations,
-        localCgId,
-        bindingGeneration,
-      );
+      && this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId) === undefined
+      && this.contextGraphBindingState.isGenerationCurrent(localCgId, bindingGeneration);
     if (!isSubscriptionCurrent()) return null;
     let resolved: (
       | { onChainId: string; provenance: 'authoritative' | 'ontology' }
@@ -2971,11 +2935,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (targetOnChain !== null) {
         for (const [lcg, sub] of this.subscribedContextGraphs) {
           if (!isLifecycleCurrent()) return null;
-          const reverseCandidate = this.contextGraphReverseNameHashBindings.get(lcg);
+          const binding = this.contextGraphBindingState.currentBindingFor(lcg, sub.onChainId);
           if (
             sub.subscribed
-            && reverseCandidate
-            && reverseCandidate.onChainId === targetOnChain.toString()
+            && binding?.bindingKind === 'reverse-name-hash'
+            && binding.onChainId === targetOnChain.toString()
           ) {
             // Candidate equality is only a scheduling hint. The dispatched VM
             // target resolver re-enumerates the name hash before any chain/store
@@ -3082,17 +3046,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       const isTargetCurrent = () => isLifecycleCurrent()
         && this.subscribedContextGraphs.get(localCgId) === target.sub
-        && vmReconcileTargetBindingMatches(
-          target.sub,
-          target.bindingKind === 'reverse-name-hash'
-            ? this.contextGraphReverseNameHashBindings.get(localCgId)
-            : undefined,
-          target,
-        )
-        && isBindingGenerationCurrent(
-          this.contextGraphBindingGenerations,
+        && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          target.bindingGeneration,
+          target.sub.onChainId,
+          target,
         )
         && this.reconcileCursors.get(localCgId) === target.cursor;
       if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
@@ -3191,8 +3148,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new ContextGraphNotFoundError(localCgId);
     }
     if (
-      sub.onChainId === undefined
-      && !this.contextGraphReverseNameHashBindings.has(localCgId)
+      this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId) === undefined
       && sub.subscribed
     ) {
       await this.selfPrimeSubscriptionOnChainId(
@@ -3207,14 +3163,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!sub) {
       throw new ContextGraphOnChainIdUnresolvedError(localCgId);
     }
-    let binding:
-      | { bindingKind: 'authoritative'; onChainId: string }
-      | { bindingKind: 'reverse-name-hash'; onChainId: string; nameHash: string };
-    if (sub.onChainId !== undefined) {
-      binding = { bindingKind: 'authoritative', onChainId: sub.onChainId };
-    } else {
-      const cached = this.contextGraphReverseNameHashBindings.get(localCgId);
-      if (!cached) throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+    let binding = this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId);
+    if (!binding) throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+    if (binding.bindingKind === 'reverse-name-hash') {
       // This is the sole boundary that converts an untrusted process-local
       // reverse candidate into a VM target. Re-enumerate before every use; a
       // duplicate, changed commitment, or RPC failure rejects the target.
@@ -3223,22 +3174,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       if (!isCurrent()) throw new VmReconcileQueueClosedError();
       sub = this.subscribedContextGraphs.get(localCgId);
-      const current = this.contextGraphReverseNameHashBindings.get(localCgId);
+      const current = sub
+        ? this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId)
+        : undefined;
       if (
         !sub
-        || sub.onChainId !== undefined
-        || !current
+        || current?.bindingKind !== 'reverse-name-hash'
         || revalidated?.provenance !== 'reverse-name-hash'
         || revalidated.onChainId !== current.onChainId
         || revalidated.nameHash !== current.nameHash
       ) {
         throw new ContextGraphOnChainIdUnresolvedError(localCgId);
       }
-      binding = {
-        bindingKind: 'reverse-name-hash',
-        onChainId: current.onChainId,
-        nameHash: current.nameHash,
-      };
+      binding = current;
     }
     if (!this.vmReconcileEnabled()) {
       throw new VmReconcileUnavailableError();
@@ -3258,10 +3206,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ...binding,
       onChainCgId: BigInt(binding.onChainId),
       cursor,
-      bindingGeneration: captureBindingGeneration(
-        this.contextGraphBindingGenerations,
-        localCgId,
-      ),
+      bindingGeneration: this.contextGraphBindingState.capture(localCgId),
       watermarkBefore: cursor.watermark,
     };
   }
@@ -3275,7 +3220,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     execution?: VmReconcileExecution,
   ): ChainReconcilerDeps {
     const capturedSub = target.sub;
-    const capturedBindingGeneration = target.bindingGeneration;
     const capturedCursor = execution?.identityCursor
       ?? target.cursor
       ?? this.reconcileCursors.get(localCgId);
@@ -3284,17 +3228,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return !this.vmReconcileRotationClosed
         && this.vmReconcileLifecycleGeneration === lifecycleGeneration
         && current === capturedSub
-        && vmReconcileTargetBindingMatches(
-          current,
-          target.bindingKind === 'reverse-name-hash'
-            ? this.contextGraphReverseNameHashBindings.get(localCgId)
-            : undefined,
-          target,
-        )
-        && isBindingGenerationCurrent(
-          this.contextGraphBindingGenerations,
+        && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          capturedBindingGeneration,
+          current?.onChainId,
+          target,
         )
         && this.reconcileCursors.get(localCgId) === capturedCursor;
     };
@@ -3355,17 +3292,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const sub = this.subscribedContextGraphs.get(localCgId);
     const isTargetCurrent = () => this.subscribedContextGraphs.get(localCgId) === sub
       && sub === target.sub
-      && vmReconcileTargetBindingMatches(
-        sub,
-        target.bindingKind === 'reverse-name-hash'
-          ? this.contextGraphReverseNameHashBindings.get(localCgId)
-          : undefined,
-        target,
-      )
-      && isBindingGenerationCurrent(
-        this.contextGraphBindingGenerations,
+      && this.contextGraphBindingState.targetStillCurrent(
         localCgId,
-        target.bindingGeneration,
+        sub?.onChainId,
+        target,
       )
       && this.reconcileCursors.get(localCgId) === target.cursor;
     if (!sub || !isTargetCurrent()) return Promise.resolve();
@@ -3503,11 +3433,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const canApply = () => isCurrent()
         && (!(this.subscribedContextGraphs instanceof Map)
           || this.subscribedContextGraphs.get(localCgId) === target.sub)
-        && vmReconcileTargetBindingMatches(
-          target.sub,
-          target.bindingKind === 'reverse-name-hash'
-            ? this.contextGraphReverseNameHashBindings.get(localCgId)
-            : undefined,
+        && this.contextGraphBindingState.targetStillCurrent(
+          localCgId,
+          target.sub.onChainId,
           target,
         );
       if (!canApply()) {

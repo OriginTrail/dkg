@@ -365,6 +365,19 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(missing).toEqual([]);
   });
 
+  it('keeps the reverse name-hash resolver accessor off the public prototype', () => {
+    const evm = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      privateKey: '0x' + '1'.repeat(64),
+      allowNoAdminSigner: true,
+    });
+
+    expect(EVM_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
+    expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(true);
+    expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
+  });
+
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {
     // Arity isn't a perfect check (optional args, rest params) but an
     // off-by-two drift almost always indicates a renamed/refactored
