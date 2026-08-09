@@ -113,6 +113,7 @@ export default defineConfig({
       "test/chain-cursor-wiring.test.ts",
       "test/chain-reconciler.test.ts",
       "test/core-fills-gap.test.ts",
+      "test/vm-recovery-microbatch-adversarial.test.ts",
       "test/finalization-reconcile-negative-memo.test.ts",
       "test/startup-jitter.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
