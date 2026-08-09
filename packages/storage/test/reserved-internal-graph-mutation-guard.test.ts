@@ -300,6 +300,10 @@ describe('reserved internal graph mutation guard', () => {
         ['BASE-prefixed update', 'BASE <urn:test:> CLEAR ALL'],
         ['multi-operation update', 'DELETE WHERE { ?s <urn:p> ?o }; INSERT DATA { <urn:s> <urn:p> "o" }'],
         ['read-then-update text', 'SELECT ?s WHERE { GRAPH <urn:test:g> { ?s ?p ?o } }; DROP ALL'],
+        [
+          'escaped hash before update text',
+          'PREFIX ex: <urn:test:> SELECT ?s WHERE { ?s ex:foo\\# ?o }; DROP ALL',
+        ],
       ])('refuses %s through query() before I/O', async (_name, sparql) => {
         const fetchSpy = stubFetch();
         await expect(newLeasedStore().query(sparql)).rejects.toMatchObject({

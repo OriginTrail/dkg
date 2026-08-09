@@ -98,7 +98,7 @@ export function stripSparqlLiteralsAndComments(sparql: string): string {
       }
     }
 
-    if (ch === '#') {
+    if (ch === '#' && !isEscapedPnLocalCharAt(sparql, i)) {
       const start = i;
       while (i < n && sparql[i] !== '\n') i++;
       for (let j = start; j < i; j++) out[j] = ' ';
