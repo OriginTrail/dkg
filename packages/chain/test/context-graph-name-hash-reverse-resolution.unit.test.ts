@@ -5,6 +5,10 @@ import {
   CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
 } from '../src/context-graph-name-hash-resolver.js';
+import type { EvmContextGraphNameHashFence } from '../src/evm-context-graph-name-hash-fence.js';
+import type {
+  EvmContextGraphNameHashHistoricalLogResolver,
+} from '../src/evm-context-graph-name-hash-historical-log-resolver.js';
 import { CG_REGISTRY_MAX_SCAN_PAGES } from '../src/evm-adapter-base.js';
 
 const PRIVATE_KEY =
@@ -31,6 +35,16 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
+}
+
+function resolverInternals(adapter: any) {
+  const resolver = adapter.getContextGraphNameHashResolver();
+  return {
+    resolver,
+    fence: resolver.fence as EvmContextGraphNameHashFence,
+    historicalLogResolver:
+      resolver.historicalLogResolver as EvmContextGraphNameHashHistoricalLogResolver,
+  };
 }
 
 function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
@@ -97,11 +111,13 @@ function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
   });
   adapter.resolveContractDeployBlock = resolveContractDeployBlock;
   adapter.queryEventLogsPage = queryEventLogsPage;
-  const resolver = adapter.getContextGraphNameHashResolver();
+  const { resolver, fence, historicalLogResolver } = resolverInternals(adapter);
 
   return {
     adapter,
     resolver,
+    fence,
+    historicalLogResolver,
     hashes,
     readContractWithOptions,
     resolveContractDeployBlock,
@@ -192,7 +208,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   it('enumerates every current slot and returns the one exact match', async () => {
     const {
       adapter,
-      resolver,
+      fence,
       readContractWithOptions,
       resolveContractDeployBlock,
       queryEventLogsPage,
@@ -203,7 +219,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       null,
       OTHER_HASH,
     ]);
-    const slotReader = vi.spyOn(resolver, 'getNameHashRetryingNull');
+    const slotReader = vi.spyOn(fence, 'readCurrentNameHash');
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(3n);
 
@@ -255,9 +271,9 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
       getNameHash: vi.fn(async () => provider === primary ? ethers.ZeroHash : NAME_HASH),
     }));
-    const resolver = adapter.getContextGraphNameHashResolver();
+    const { fence } = resolverInternals(adapter);
 
-    await expect(resolver.getNameHashRetryingNull(
+    await expect(fence.readCurrentNameHash(
       1n,
       undefined,
       new Map([[primary, 0n], [backup, 1n]]),
@@ -276,9 +292,9 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
       getNameHash: vi.fn(async () => provider === primary ? ethers.ZeroHash : NAME_HASH),
     }));
-    const resolver = adapter.getContextGraphNameHashResolver();
+    const { fence } = resolverInternals(adapter);
 
-    await expect(resolver.getNameHashRetryingNull(
+    await expect(fence.readCurrentNameHash(
       1n,
       undefined,
       new Map([[primary, 1n], [backup, 1n]]),
@@ -301,9 +317,9 @@ describe('current ContextGraph name-hash reverse resolution', () => {
         return ethers.ZeroHash;
       }),
     }));
-    const resolver = adapter.getContextGraphNameHashResolver();
+    const { fence } = resolverInternals(adapter);
 
-    await expect(resolver.getNameHashRetryingNull(
+    await expect(fence.readCurrentNameHash(
       2n,
       undefined,
       new Map([[failing, 2n], [responding, 2n]]),
@@ -327,9 +343,9 @@ describe('current ContextGraph name-hash reverse resolution', () => {
         return new Promise<string>(() => {});
       }),
     }));
-    const resolver = adapter.getContextGraphNameHashResolver();
+    const { fence } = resolverInternals(adapter);
     const controller = new AbortController();
-    const read = resolver.getNameHashRetryingNull(
+    const read = fence.readCurrentNameHash(
       1n,
       controller.signal,
       new Map([[provider, 1n]]),
@@ -370,14 +386,14 @@ describe('current ContextGraph name-hash reverse resolution', () => {
         return ethers.ZeroHash;
       },
     }));
-    const resolver = adapter.getContextGraphNameHashResolver();
+    const { fence } = resolverInternals(adapter);
 
-    const highWaters = resolver.loadProviderHighWaters();
+    const highWaters = fence.loadProviderHighWaters();
     await vi.waitFor(() => expect(activeHighWaters).toBe(2));
     highWaterRelease.resolve(undefined);
     const snapshot = await highWaters;
 
-    const slot = resolver.getNameHashRetryingNull(1n, undefined, snapshot.providerHighWaters);
+    const slot = fence.readCurrentNameHash(1n, undefined, snapshot.providerHighWaters);
     await vi.waitFor(() => expect(activeSlots).toBe(2));
     slotRelease.resolve(undefined);
     await expect(slot).resolves.toBeNull();
@@ -422,12 +438,12 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       getNameHash: (id: bigint) => getNameHash(provider, id),
     }));
     const anchorHash = `0x${'11'.repeat(32)}`;
-    const resolver = adapter.getContextGraphNameHashResolver();
-    vi.spyOn(resolver, 'captureAnchor').mockResolvedValue({
+    const { fence } = resolverInternals(adapter);
+    vi.spyOn(fence, 'captureAnchor').mockResolvedValue({
       blockNumber: 100,
       blockHash: anchorHash,
     });
-    vi.spyOn(resolver, 'loadAnchorHash').mockResolvedValue(anchorHash);
+    vi.spyOn(fence, 'loadAnchorHash').mockResolvedValue(anchorHash);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /ambiguous.*2 numeric ids/i,
@@ -439,9 +455,14 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('switches above the fast cap before issuing any getNameHash read', async () => {
-    const { adapter, resolver, readContractWithOptions, setLatestId } = fixture([]);
+    const {
+      adapter,
+      historicalLogResolver,
+      readContractWithOptions,
+      setLatestId,
+    } = fixture([]);
     setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);
-    const historical = vi.spyOn(resolver, 'loadHistorical').mockResolvedValue(77n);
+    const historical = vi.spyOn(historicalLogResolver, 'resolve').mockResolvedValue(77n);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(77n);
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(1);
@@ -643,9 +664,9 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('fails closed on any slot read error and aborts sibling failover reads', async () => {
-    const { adapter, resolver, readContractWithOptions } = fixture([null, null, NAME_HASH, null]);
+    const { adapter, fence, readContractWithOptions } = fixture([null, null, NAME_HASH, null]);
     const failure = new Error('all RPC endpoints failed getNameHash(2)');
-    const slotReader = vi.spyOn(resolver, 'getNameHashRetryingNull');
+    const slotReader = vi.spyOn(fence, 'readCurrentNameHash');
     readContractWithOptions.mockImplementation(async (
       _contract: unknown,
       _label: string,
@@ -918,7 +939,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
 
   it('discards a same-count storage rotation after index resolve but before exact verification', async () => {
     const scenario = fixture([NAME_HASH, OTHER_HASH]);
-    const loadHighWaters = vi.spyOn(scenario.resolver, 'loadProviderHighWaters');
+    const loadHighWaters = vi.spyOn(scenario.fence, 'loadProviderHighWaters');
     let calls = 0;
     loadHighWaters.mockImplementation(async () => {
       calls += 1;

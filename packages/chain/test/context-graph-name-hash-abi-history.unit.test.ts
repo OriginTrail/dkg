@@ -124,7 +124,7 @@ describe('Context Graph name-hash historical ABI path', () => {
       },
     });
 
-    await expect(resolver.loadHistorical(NAME_HASH)).resolves.toBe(77n);
+    await expect(resolver.resolve(NAME_HASH)).resolves.toBe(77n);
 
     // The ABI filter is ContextGraphCreated(any id, any owner, NAME_HASH).
     // OTHER_HASH logs share topic0 but are excluded by indexed topic[3].
@@ -143,7 +143,9 @@ describe('Context Graph name-hash historical ABI path', () => {
     expect(providerHighWaterReads.filter((options) => options !== undefined)).toEqual([
       { blockTag: 103 },
     ]);
-    expect(providerHighWaterReads.filter((options) => options === undefined)).toHaveLength(2);
+    // One current high-water chooses the historical lane; the historical
+    // candidate verification and final registry fence add two more.
+    expect(providerHighWaterReads.filter((options) => options === undefined)).toHaveLength(3);
     expect(currentSlotReads).toEqual([77n]);
     expect(getBlock).toHaveBeenCalledWith(103);
   });

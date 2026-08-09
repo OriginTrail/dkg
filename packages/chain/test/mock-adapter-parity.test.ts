@@ -68,6 +68,13 @@ const EVM_METHODS = collectMethodNames(EVMChainAdapter);
 const MOCK_METHODS = collectMethodNames(MockChainAdapter);
 const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 
+// Normal protected prototype methods that are deliberately outside the
+// ChainAdapter API. Keeping this boundary explicit prevents production method
+// shape from being chosen merely to evade the runtime parity audit.
+const EVM_INTERNAL_METHODS = new Set<string>([
+  'getContextGraphNameHashResolver',
+]);
+
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
 // These are not parity violations. Additions here require a code-review
 // because each one is a silent divergence from the production adapter.
@@ -343,6 +350,7 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     const missing: string[] = [];
     for (const name of EVM_METHODS) {
       if (name.startsWith('_')) continue;
+      if (EVM_INTERNAL_METHODS.has(name)) continue;
       if (MOCK_EXEMPT_FROM_EVM.has(name)) continue;
       if (!MOCK_METHODS.has(name)) missing.push(name);
     }
@@ -352,7 +360,7 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     expect(missing).toEqual([]);
   });
 
-  it('keeps the reverse name-hash resolver accessor off the public prototype', () => {
+  it('classifies the reverse name-hash resolver accessor as adapter-internal', () => {
     const evm = new EVMChainAdapter({
       rpcUrl: 'http://127.0.0.1:1',
       hubAddress: '0x0000000000000000000000000000000000000001',
@@ -360,8 +368,10 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       allowNoAdminSigner: true,
     });
 
-    expect(EVM_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
-    expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(true);
+    expect(EVM_METHODS.has('getContextGraphNameHashResolver')).toBe(true);
+    expect(EVM_INTERNAL_METHODS.has('getContextGraphNameHashResolver')).toBe(true);
+    expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
+    expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
     expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
   });
 

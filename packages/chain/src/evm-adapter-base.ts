@@ -902,61 +902,60 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
-  /** Lazily constructed by the base-owned instance accessor below. */
+  /** Lazily constructed by the base-owned internal accessor below. */
   protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
 
   /**
-   * Instance-owned lazy accessor. This must remain a class field rather than a
-   * prototype method: the latter would leak adapter-internal resolver plumbing
-   * into the runtime public-method surface audited against MockChainAdapter.
+   * Adapter-internal lazy accessor. It is an ordinary protected prototype
+   * method and is explicitly classified as internal by the runtime API-parity
+   * audit; production shape does not depend on how that test discovers APIs.
    */
-  protected readonly getContextGraphNameHashResolver =
-    (): EvmContextGraphNameHashResolver => {
-      this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
-        initialize: () => this.init(),
-        requireContextGraphStorage: () => this.requireContextGraphStorage(),
-        providers: () => this.providers,
-        rpcUrls: () => this.rpcUrls,
-        scanPageSize: () => this.cgRegistryScanPageSize,
-        ensureConfiguredStaticChainIdValidated: (provider) =>
-          this.ensureConfiguredStaticChainIdValidated(provider),
-        rebindContract: (contract, provider) => this.rebindContract(contract, provider),
-        readLatestBlock: () => this.readTipProvider(
-          'resolveContextGraphIdByNameHash current-slot anchor',
-          (provider) => provider.getBlock('latest'),
-        ),
-        readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
-          'resolveContextGraphIdByNameHash validate current-slot anchor',
-          async (provider) => {
-            const block = await provider.getBlock(blockNumber);
-            return block?.hash?.toLowerCase() ?? null;
-          },
-          { skipPreferred: true },
-        ),
-        resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
-          this.resolveContractDeployBlock(address, operationLabel, contractLabel),
-        queryEventLogsPage: (
-          baseContract,
-          filter,
-          lo,
-          hi,
-          scanProviders,
-          connected,
-          label,
-          preferred,
-        ) => this.queryEventLogsPage(
-          baseContract,
-          filter,
-          lo,
-          hi,
-          scanProviders,
-          connected,
-          label,
-          preferred,
-        ),
-      });
-      return this.contextGraphNameHashResolver;
-    };
+  protected getContextGraphNameHashResolver(): EvmContextGraphNameHashResolver {
+    this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
+      initialize: () => this.init(),
+      requireContextGraphStorage: () => this.requireContextGraphStorage(),
+      providers: () => this.providers,
+      rpcUrls: () => this.rpcUrls,
+      scanPageSize: () => this.cgRegistryScanPageSize,
+      ensureConfiguredStaticChainIdValidated: (provider) =>
+        this.ensureConfiguredStaticChainIdValidated(provider),
+      rebindContract: (contract, provider) => this.rebindContract(contract, provider),
+      readLatestBlock: () => this.readTipProvider(
+        'resolveContextGraphIdByNameHash current-slot anchor',
+        (provider) => provider.getBlock('latest'),
+      ),
+      readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
+        'resolveContextGraphIdByNameHash validate current-slot anchor',
+        async (provider) => {
+          const block = await provider.getBlock(blockNumber);
+          return block?.hash?.toLowerCase() ?? null;
+        },
+        { skipPreferred: true },
+      ),
+      resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+        this.resolveContractDeployBlock(address, operationLabel, contractLabel),
+      queryEventLogsPage: (
+        baseContract,
+        filter,
+        lo,
+        hi,
+        scanProviders,
+        connected,
+        label,
+        preferred,
+      ) => this.queryEventLogsPage(
+        baseContract,
+        filter,
+        lo,
+        hi,
+        scanProviders,
+        connected,
+        label,
+        preferred,
+      ),
+    });
+    return this.contextGraphNameHashResolver;
+  }
 
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
