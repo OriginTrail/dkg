@@ -14,9 +14,23 @@ describe('canonical standalone SPARQL word scanner', () => {
       end: 8,
     });
 
-    for (const source of ['?DELETE', 'ex:DELETE', 'foo\\-DELETE', 'DELETE:value']) {
+    for (const source of [
+      '?DELETE',
+      'ex:DELETE',
+      'foo\\-DELETE',
+      'DELETE:value',
+      'ex:foo.DELETE',
+    ]) {
       expect(readStandaloneSparqlWord(source, source.indexOf('DELETE'))).toBeNull();
     }
+
+    const dotSeparated = '?s ?p ?o.GRAPH <urn:outside> {}';
+    const graphStart = dotSeparated.indexOf('GRAPH');
+    expect(readStandaloneSparqlWord(dotSeparated, graphStart)).toEqual({
+      word: 'GRAPH',
+      start: graphStart,
+      end: graphStart + 'GRAPH'.length,
+    });
 
     expect(readStandaloneSparqlWord('GRAPH?g{}', 0)).toEqual({
       word: 'GRAPH',

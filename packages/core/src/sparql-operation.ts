@@ -148,7 +148,7 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
 function isSparqlNameCharacter(ch: string | undefined): boolean {
   return ch !== undefined && (
     isSparqlWordContinuation(ch)
-    || /[\p{L}\p{N}\p{M}:@.-]/u.test(ch)
+    || /[\p{L}\p{N}\p{M}:@-]/u.test(ch)
   );
 }
 
@@ -162,11 +162,28 @@ function isEscapedPnLocalCharAt(src: string, index: number): boolean {
     && PN_LOCAL_ESC_CHAR.test(src[index] ?? '');
 }
 
+/** A dot joins PN_LOCAL text only when the same uninterrupted token has a prefix colon. */
+function isPrefixedNameDotBefore(src: string, index: number): boolean {
+  if (src[index - 1] !== '.') return false;
+  for (let cursor = index - 2; cursor >= 0; cursor--) {
+    const ch = src[cursor];
+    if (ch === ':') return true;
+    if (ch === '.' || isSparqlNameCharacter(ch)) continue;
+    if (isEscapedPnLocalCharAt(src, cursor)) {
+      cursor--;
+      continue;
+    }
+    return false;
+  }
+  return false;
+}
+
 function isSparqlNameAdjacentBefore(src: string, index: number): boolean {
   const previous = src[index - 1];
   return isSparqlNameCharacter(previous)
     || previous === '?'
     || previous === '$'
+    || isPrefixedNameDotBefore(src, index)
     || isEscapedPnLocalCharAt(src, index - 1);
 }
 

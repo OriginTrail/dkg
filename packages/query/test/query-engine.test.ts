@@ -1391,6 +1391,16 @@ describe('DKGQueryEngine', () => {
     ).rejects.toThrow(/Scoped query violation: GRAPH <did:dkg:context-graph:other-agent-registry> is outside the allowed graph set/i);
   });
 
+  it('rejects a disallowed explicit GRAPH immediately after a dot separator', async () => {
+    const otherGraph = 'did:dkg:context-graph:other-agent-registry';
+    await expect(
+      engine.query(
+        `SELECT ?name WHERE { ?s ?p ?o.GRAPH <${otherGraph}> { ?x ?y ?name } }`,
+        { contextGraphId: CONTEXT_GRAPH },
+      ),
+    ).rejects.toThrow(/Scoped query violation: GRAPH <did:dkg:context-graph:other-agent-registry> is outside the allowed graph set/i);
+  });
+
   it('allows explicit GRAPH IRI against the same CG\'s _meta graph', async () => {
     // Regression guard for #774 finding #4 (mis-attributed as a
     // `createContextGraph` regression in the issue body; root cause is
