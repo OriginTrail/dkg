@@ -25,8 +25,6 @@ import {
   parseCanonicalOwnedSubjectTableObjectV1,
 } from './system-record-owned-subject-codecs-v1-internal.js';
 import {
-  isAgentProfileHeadBoundToAcceptedTransitionV1,
-  isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
 } from './system-record-authority-verification-v1-internal.js';
 import {
@@ -47,7 +45,6 @@ export interface ClosureVisitReferenceV1 {
   readonly digest: Digest32V1;
   readonly purpose: ClosureVisitPurposeV1;
   readonly rootSubject?: string;
-  readonly referencedByHeadDigest?: Digest32V1;
 }
 
 export interface ClosureVisitEffectsV1 {
@@ -65,7 +62,7 @@ export interface ClosureVisitContextV1 extends ClosureVisitReferenceV1 {}
 
 export interface ClosureVisitFactsV1 {
   readonly currentHeadDigest: Digest32V1;
-  readonly parsedHeads: ReadonlyMap<Digest32V1, AgentProfileHeadObjectV1>;
+  readonly currentHead?: AgentProfileHeadObjectV1;
 }
 
 export interface ClosureVisitExecutionV1 {
@@ -92,9 +89,9 @@ export async function interpretClosureObjectV1(
     case 'agent-profile-head':
       return visitClosureHeadV1(facts, context, canonicalBytes, execution);
     case 'authority-transition':
-      return visitClosureTransitionV1(facts, context, canonicalBytes, execution);
+      return visitClosureTransitionV1(context, canonicalBytes, execution);
     case 'fork-resolution':
-      return visitClosureResolutionV1(facts, context, canonicalBytes, execution);
+      return visitClosureResolutionV1(context, canonicalBytes, execution);
     case 'profile-bundle':
       return visitClosureBundleV1(facts, context, canonicalBytes, execution);
     case 'owned-subject-table':
@@ -127,12 +124,12 @@ async function visitClosureHeadV1(
   const references: ClosureVisitReferenceV1[] = [];
   if (head.acceptedTransitionDigest !== undefined) {
     references.push(closureReference(
-      'authority-transition', head.acceptedTransitionDigest, 'history', undefined, context.digest,
+      'authority-transition', head.acceptedTransitionDigest, 'history',
     ));
   }
   if (context.digest === facts.currentHeadDigest && head.forkResolutionDigest !== undefined) {
     references.push(closureReference(
-      'fork-resolution', head.forkResolutionDigest, 'history', undefined, context.digest,
+      'fork-resolution', head.forkResolutionDigest, 'history',
     ));
   }
   if (context.purpose === 'current' && head.state === 'active') {
@@ -166,7 +163,6 @@ async function visitClosureHeadV1(
 }
 
 async function visitClosureTransitionV1(
-  facts: ClosureVisitFactsV1,
   context: ClosureVisitContextV1,
   canonicalBytes: Uint8Array,
   execution: ClosureVisitExecutionV1,
@@ -178,15 +174,6 @@ async function visitClosureTransitionV1(
   ) {
     fail('system-record-closure', 'authority-transition verification failed');
   }
-  if (context.referencedByHeadDigest !== undefined) {
-    const referencingHead = facts.parsedHeads.get(context.referencedByHeadDigest);
-    if (
-      referencingHead === undefined ||
-      !isAgentProfileHeadBoundToAcceptedTransitionV1(referencingHead, envelope.object)
-    ) {
-      fail('system-record-closure', 'head does not bind its accepted authority transition');
-    }
-  }
   return Object.freeze({
     references: Object.freeze([
       closureReference('agent-profile-head', envelope.object.priorHeadDigest, 'history'),
@@ -197,7 +184,6 @@ async function visitClosureTransitionV1(
 }
 
 async function visitClosureResolutionV1(
-  facts: ClosureVisitFactsV1,
   context: ClosureVisitContextV1,
   canonicalBytes: Uint8Array,
   execution: ClosureVisitExecutionV1,
@@ -211,18 +197,6 @@ async function visitClosureResolutionV1(
   }
   if (isIssuedTooFarInFuture(envelope.object.issuedAt, execution.nowMs)) {
     fail('system-record-closure', 'fork resolution issuedAt exceeds the future clock-skew bound');
-  }
-  if (context.referencedByHeadDigest !== undefined) {
-    const referencingHead = facts.parsedHeads.get(context.referencedByHeadDigest);
-    if (
-      referencingHead === undefined ||
-      !isDirectResolvingSuccessorV1(referencingHead, envelope.object)
-    ) {
-      fail(
-        'system-record-closure',
-        'current head is not the direct successor of its fork resolution',
-      );
-    }
   }
   const references = envelope.object.evidenceHeadDigests.map((headDigest) =>
     closureReference('agent-profile-head', headDigest, 'fork-evidence'));
@@ -244,7 +218,7 @@ async function visitClosureBundleV1(
   canonicalBytes: Uint8Array,
   execution: ClosureVisitExecutionV1,
 ): Promise<ClosureVisitEffectsV1> {
-  const current = facts.parsedHeads.get(facts.currentHeadDigest);
+  const current = facts.currentHead;
   if (
     current?.state !== 'active' ||
     digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, canonicalBytes) !==
@@ -275,7 +249,6 @@ function closureReference(
   objectDigest: Digest32V1,
   purpose: ClosureVisitPurposeV1,
   rootSubject?: string,
-  referencedByHeadDigest?: Digest32V1,
 ): ClosureVisitReferenceV1 {
   digest(objectDigest, 'closure reference digest');
   return Object.freeze({
@@ -283,7 +256,6 @@ function closureReference(
     digest: objectDigest,
     purpose,
     ...(rootSubject === undefined ? {} : { rootSubject }),
-    ...(referencedByHeadDigest === undefined ? {} : { referencedByHeadDigest }),
   });
 }
 

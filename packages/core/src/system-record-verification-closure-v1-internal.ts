@@ -168,7 +168,6 @@ interface ClosurePendingReferenceV1 {
   readonly digest: Digest32V1;
   readonly purpose: ClosurePurposeV1;
   readonly rootSubject?: string;
-  readonly referencedByHeadDigest?: Digest32V1;
 }
 
 interface ClosureTraversalStateV1 {
@@ -233,7 +232,6 @@ function enqueueClosureReferenceV1(
   objectDigest: Digest32V1,
   purpose: ClosurePurposeV1,
   rootSubject?: string,
-  referencedByHeadDigest?: Digest32V1,
 ): void {
   digest(objectDigest, 'closure reference digest');
   const seenKind = state.seen.get(objectDigest);
@@ -259,7 +257,6 @@ function enqueueClosureReferenceV1(
       digest: objectDigest,
       purpose,
       ...(rootSubject === undefined ? {} : { rootSubject }),
-      ...(referencedByHeadDigest === undefined ? {} : { referencedByHeadDigest }),
     });
   }
 }
@@ -276,10 +273,11 @@ async function visitClosureObjectV1(
   references: ClosureReferenceV1[],
   execution: ClosureExecutionV1,
 ): Promise<void> {
+  const currentHead = state.parsedHeads.get(state.currentHeadDigest);
   const effects: ClosureVisitEffectsV1 = await interpretClosureObjectV1(
     Object.freeze({
       currentHeadDigest: state.currentHeadDigest,
-      parsedHeads: state.parsedHeads,
+      ...(currentHead === undefined ? {} : { currentHead }),
     }),
     context,
     canonicalBytes,
@@ -292,7 +290,6 @@ async function visitClosureObjectV1(
       reference.digest,
       reference.purpose,
       reference.rootSubject,
-      reference.referencedByHeadDigest,
     );
     references.push(Object.freeze({
       objectKind: reference.objectKind,
@@ -473,7 +470,10 @@ function validateCollectedClosureAuthorityV1(
         transition === undefined ||
         !isAgentProfileHeadBoundToAcceptedTransitionV1(head, transition)
       ) {
-        fail('system-record-closure', `head ${headDigest} does not bind its accepted transition`);
+        fail(
+          'system-record-closure',
+          `head ${headDigest} does not bind its accepted authority transition`,
+        );
       }
     }
     if (
