@@ -3,8 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 
 import {
+  canonicalizeOwnedSubjectTableObjectV1,
   computeSystemRecordStableKeyHashV1,
+  deriveAgentProfileOwnedSubjectV1,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
+  type OwnedSubjectTableObjectV1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
@@ -51,6 +54,7 @@ async function publishedFixture() {
 function verifyFixtureBundle(_head: unknown, bundleBytes: Uint8Array) {
   const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
   return Object.freeze({
+    canonicalProjectionBytes: Uint8Array.from(projectionBytes),
     projectionQuads: Object.freeze(parseNQuads(new TextDecoder().decode(projectionBytes))),
   });
 }
@@ -81,7 +85,15 @@ describe('agent-profile system-record active receiver', () => {
     expect([...candidate.projectionQuads].sort(compareQuad))
       .toEqual([...fixture.prepared.projectionQuads].sort(compareQuad));
     expect(candidate.ownedSubjectTable).toContain(fixture.prepared.rootEntity);
-    expect(candidate.canonicalProjectionBytes.byteLength).toBeGreaterThan(0);
+    const bundleArtifact = await fixture.store.resolve({
+      type: 'object',
+      objectKind: 'profile-bundle',
+      objectDigest: fixture.envelope.object.bundleDigest,
+    }, signal);
+    if (bundleArtifact === null) throw new Error('fixture bundle was not retained');
+    expect(candidate.canonicalProjectionBytes).toEqual(
+      decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes).projectionBytes,
+    );
     expect(candidate).not.toHaveProperty('signal');
     expect(consumeCandidate.mock.calls[0]![1]).toBe(signal);
   });
@@ -104,6 +116,59 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
       .rejects.toThrow(/owned-subject table/);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when the owned-subject table bytes do not bind the verified head', async () => {
+    const fixture = await publishedFixture();
+    const consumeCandidate = vi.fn();
+    const alteredTable = Object.freeze([
+      fixture.envelope.object.rootSubject,
+      deriveAgentProfileOwnedSubjectV1(fixture.envelope.object.rootSubject, 'capability', 1),
+    ].sort()) as OwnedSubjectTableObjectV1;
+    const alteredBytes = canonicalizeOwnedSubjectTableObjectV1(
+      fixture.envelope.object.rootSubject,
+      alteredTable,
+    );
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: Object.freeze({
+        resolve: async (lookup, signal) => {
+          const artifact = await fixture.store.resolve(lookup, signal);
+          if (artifact === null || lookup.type !== 'object'
+            || lookup.objectKind !== 'owned-subject-table') return artifact;
+          return Object.freeze({ ...artifact, canonicalBytes: alteredBytes });
+        },
+      }),
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: verifyFixtureBundle,
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .rejects.toThrow(/does not bind the verified head/);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when verified projection bytes do not bind the supplied bundle', async () => {
+    const fixture = await publishedFixture();
+    const consumeCandidate = vi.fn();
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: (head, bundleBytes) => {
+        const verified = verifyFixtureBundle(head, bundleBytes);
+        return Object.freeze({
+          ...verified,
+          canonicalProjectionBytes: Uint8Array.from([0]),
+        });
+      },
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .rejects.toThrow(/projection does not bind the supplied bundle/);
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 

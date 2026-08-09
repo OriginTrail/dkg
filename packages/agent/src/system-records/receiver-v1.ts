@@ -39,7 +39,9 @@ import {
 } from './artifact-v1.js';
 
 export interface AgentProfileReceiverVerifiedBundleV1 {
-  /** Exact graphless quads parsed and authenticated from the supplied bundle. */
+  /** Exact canonical projection bytes parsed and authenticated from the supplied bundle. */
+  readonly canonicalProjectionBytes: Uint8Array;
+  /** Exact graphless quads parsed from canonicalProjectionBytes. */
   readonly projectionQuads: readonly Readonly<Quad>[];
 }
 
@@ -67,10 +69,7 @@ export interface CreateAgentProfileReceiverOptionsV1 {
       | SignedAgentProfileForkResolutionEnvelopeV1,
     signal: AbortSignal,
   ) => boolean | Promise<boolean>;
-  /**
-   * Final graph-scoped publication/seal verification. Returning projection
-   * quads asserts that they were parsed from this exact canonical bundle.
-   */
+  /** Final graph-scoped publication/seal verification of one coherent projection. */
   readonly verifyCurrentBundle: (
     head: AgentProfileActiveHeadObjectV1,
     canonicalBundleBytes: Uint8Array,
@@ -224,8 +223,7 @@ async function verifyActiveProfileClosureForRowV1(
     verifyCurrentBundle,
   } = options;
   let verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'] | undefined;
-  let currentEnvelope: SignedAgentProfileHeadEnvelopeV1 | undefined;
-  const { authoritySummary: verifiedAuthoritySummary } =
+  const closure =
     await buildAgentProfileVerificationClosureV1(row.headDigest, {
       nowMs,
       resolve: async (reference) => {
@@ -245,9 +243,11 @@ async function verifyActiveProfileClosureForRowV1(
         );
         if (reference.objectKind === 'agent-profile-head'
           && reference.digest === row.headDigest) {
-          const parsed = parseCanonicalSignedAgentProfileHeadEnvelopeV1(owned.canonicalBytes);
-          assertRowBindsHead(networkId, row, parsed);
-          currentEnvelope = parsed;
+          assertRowBindsHead(
+            networkId,
+            row,
+            parseCanonicalSignedAgentProfileHeadEnvelopeV1(owned.canonicalBytes),
+          );
         }
         return Object.freeze({
           objectKind: owned.objectKind,
@@ -270,24 +270,26 @@ async function verifyActiveProfileClosureForRowV1(
         );
         signal.throwIfAborted();
         const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
-        verifiedBundle = Object.freeze({
-          ...snapshotVerifiedBundle(result),
-          canonicalProjectionBytes: Uint8Array.from(decoded.projectionBytes),
-        });
+        verifiedBundle = snapshotVerifiedBundle(result, decoded.projectionBytes);
         return true;
       },
     });
-  const envelope = currentEnvelope;
-  if (envelope === undefined) {
+  const currentHeadArtifact = closure.objects.find((artifact) =>
+    artifact.objectKind === 'agent-profile-head' && artifact.digest === row.headDigest,
+  );
+  if (currentHeadArtifact === undefined)
     throw new Error('verification closure did not retain its current agent-profile head');
-  }
+  const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
+    currentHeadArtifact.canonicalBytes,
+  );
+  assertRowBindsHead(networkId, row, envelope);
   if (envelope.object.state !== 'active' || verifiedBundle === undefined) {
     throw new Error('active profile receiver resolved a non-active verification closure');
   }
   return Object.freeze({
     envelope: envelope as VerifiedActiveProfileClosureV1['envelope'],
     verifiedBundle,
-    verifiedAuthoritySummary,
+    verifiedAuthoritySummary: closure.authoritySummary,
   });
 }
 
@@ -340,9 +342,19 @@ function snapshotExpectedArtifactV1(
   });
 }
 
-function snapshotVerifiedBundle(value: AgentProfileReceiverVerifiedBundleV1): AgentProfileReceiverVerifiedBundleV1 {
-  if (value === null || typeof value !== 'object' || !Array.isArray(value.projectionQuads)) {
+function snapshotVerifiedBundle(
+  value: AgentProfileReceiverVerifiedBundleV1,
+  expectedProjectionBytes: Uint8Array,
+): AgentProfileReceiverVerifiedBundleV1 {
+  if (value === null || typeof value !== 'object'
+    || !(value.canonicalProjectionBytes instanceof Uint8Array)
+    || !Array.isArray(value.projectionQuads)) {
     throw new Error('bundle verifier returned an invalid projection');
+  }
+  const suppliedProjectionBytes = value.canonicalProjectionBytes;
+  if (suppliedProjectionBytes.byteLength !== expectedProjectionBytes.byteLength
+    || suppliedProjectionBytes.some((byte, index) => byte !== expectedProjectionBytes[index])) {
+    throw new Error('bundle verifier projection does not bind the supplied bundle');
   }
   const projectionQuads = value.projectionQuads.map((quad) => Object.freeze({
     subject: quad.subject,
@@ -350,7 +362,10 @@ function snapshotVerifiedBundle(value: AgentProfileReceiverVerifiedBundleV1): Ag
     object: quad.object,
     graph: quad.graph,
   }));
-  return Object.freeze({ projectionQuads: Object.freeze(projectionQuads) });
+  return Object.freeze({
+    canonicalProjectionBytes: Uint8Array.from(expectedProjectionBytes),
+    projectionQuads: Object.freeze(projectionQuads),
+  });
 }
 
 function receiverNowMs(value: number): number {
