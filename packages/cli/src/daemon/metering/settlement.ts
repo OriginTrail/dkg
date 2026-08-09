@@ -22,7 +22,7 @@
 //      balance arithmetic.
 import { createHash } from "node:crypto";
 import {
-  canonicalize, providerPublicPem, providerSign, readJournal, appendJournal, settleTab,
+  canonicalize, providerPublicPem, providerSign, readJournal, appendJournal, settleTab, tabEpoch,
 } from "./ledger.js";
 import { createPublicKey, verify as edVerify } from "node:crypto";
 
@@ -218,6 +218,7 @@ export interface WithdrawalState {
   accountNonce?: number;
   txHash?: string;
   confirmedTxHash?: string;      // may differ from txHash: a fee-bumped replacement
+  epoch?: number;
 }
 
 /** Reconstruct every withdrawal's phase from the journal alone. Never from a
@@ -241,6 +242,7 @@ export function replayWithdrawals(home: string): Map<string, WithdrawalState> {
       accountNonce: rec.accountNonce !== undefined ? Number(rec.accountNonce) : prev?.accountNonce,
       txHash: (rec.txHash as string) ?? prev?.txHash,
       confirmedTxHash: (rec.confirmedTxHash as string) ?? prev?.confirmedTxHash,
+      epoch: rec.epoch !== undefined ? Number(rec.epoch) : prev?.epoch,
     };
     // Phase only advances. A late 'prepared' record can never demote a
     // 'confirmed' withdrawal — replay ordering must not lose a settlement.
@@ -254,19 +256,30 @@ export function replayWithdrawals(home: string): Map<string, WithdrawalState> {
 /** CAS-guarded prepare: refuses to open a second withdrawal for the same id. */
 export function prepareWithdrawal(home: string, args: {
   withdrawalId: string; statementDigest: string; amountMicroTrac: number;
-  destination: string; chainId: number; tabPrincipal?: string;
+  destination: string; chainId: number; tabPrincipal?: string; epoch?: number;
 }): { ok: boolean; code?: string; state?: WithdrawalState } {
-  const existing = replayWithdrawals(home).get(args.withdrawalId);
+  const all = replayWithdrawals(home);
+  const existing = all.get(args.withdrawalId);
   if (existing) {
     // Idempotent: preparing an already-known withdrawal returns its state
     // rather than creating a duplicate. Keyed by withdrawalId, NOT the nonce.
     return { ok: true, code: "E_WD_ALREADY_EXISTS", state: existing };
   }
+  const principal = args.tabPrincipal ?? args.destination;
+  const epoch = args.epoch ?? tabEpoch(home, principal);
+  // At most ONE active (non-confirmed) withdrawal per (principal, epoch) (Bo #1).
+  // Two open withdrawals for the same epoch is how a stale one later settles a
+  // fresh tab; refuse the second at prepare rather than rely on confirm-time CAS.
+  for (const w of all.values()) {
+    if (w.phase !== "confirmed" && (w.tabPrincipal ?? "").toLowerCase() === principal.toLowerCase() && w.epoch === epoch) {
+      return { ok: false, code: "E_WD_EPOCH_HAS_ACTIVE" };
+    }
+  }
   appendJournal(home, {
     kind: "withdrawal", phase: "prepared",
     withdrawalId: args.withdrawalId, statementDigest: args.statementDigest,
     amountMicroTrac: args.amountMicroTrac, destination: args.destination,
-    tabPrincipal: args.tabPrincipal ?? args.destination, chainId: args.chainId,
+    tabPrincipal: principal, chainId: args.chainId, epoch,
     at: new Date().toISOString(),
   });
   return { ok: true, state: replayWithdrawals(home).get(args.withdrawalId) };
@@ -314,6 +327,14 @@ export function confirmWithdrawal(home: string, args: {
   // Reconcile the tab: a confirmed payout settles the tab so it shows no
   // residual claim and can never be double-refunded (buyer-found, Bo).
   const principal = st.tabPrincipal ?? st.destination;
-  if (principal) settleTab(home, principal, { withdrawalId: args.withdrawalId, txHash: r.txHash, netPaidMicroTrac: st.amountMicroTrac });
+  if (principal) {
+    // Expected-epoch CAS (Bo #1): settle ONLY the epoch this withdrawal was
+    // prepared against. A withdrawal from a prior epoch fails closed here and
+    // cannot zero or settle the current tab. The confirmed-withdrawal record is
+    // already journalled (idempotent), but the tab is only reconciled on a
+    // matching epoch.
+    const sr = settleTab(home, principal, { withdrawalId: args.withdrawalId, txHash: r.txHash, netPaidMicroTrac: st.amountMicroTrac, expectedEpoch: st.epoch });
+    if (!sr.ok) return { ok: false, code: sr.code ?? "E_WD_EPOCH_STALE" };
+  }
   return { ok: true, code: "OK" };
 }

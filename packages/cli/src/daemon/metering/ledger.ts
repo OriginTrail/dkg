@@ -79,7 +79,15 @@ export const providerKeyId = (home: string) => "ed25519:" + sha256(providerKeys(
 
 // ── journal ─────────────────────────────────────────────────────────────────
 type Settlement = { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string };
-interface TabState { balance: number; sequence: number; lastHash: string; seen: Set<string>; settled?: Settlement; epoch: number; settlementHistory: Settlement[]; }
+type Refunded = { amountMicroTrac: number; refundAddress: string; termsDigest: string; at: string };
+interface TabState {
+  balance: number; sequence: number; lastHash: string; seen: Set<string>;
+  settled?: Settlement;            // terminal for the CURRENT epoch
+  refunded?: Refunded;             // terminal for the CURRENT epoch (Bo #3)
+  epoch: number;                   // current tab lifecycle
+  settlementHistory: Settlement[]; // prior epochs' settlements (immutable)
+  creditedDeposits: Set<string>;   // canonical deposit ids already applied (Bo #2)
+}
 
 // State is keyed BY DKG_HOME. A module-global map leaks balances between
 // homes — which is not a hypothetical: the isolated Stage-1 node and the
@@ -97,7 +105,7 @@ function homeTabs(home: string): Map<string, TabState> {
 
 function entry(home: string, principal: string): TabState {
   const m = homeTabs(home);
-  if (!m.has(principal)) m.set(principal, { balance: 0, sequence: 0, lastHash: "genesis", seen: new Set(), epoch: 0, settlementHistory: [] });
+  if (!m.has(principal)) m.set(principal, { balance: 0, sequence: 0, lastHash: "genesis", seen: new Set(), epoch: 0, settlementHistory: [], creditedDeposits: new Set() });
   return m.get(principal)!;
 }
 
@@ -113,10 +121,29 @@ function entry(home: string, principal: string): TabState {
 // alreadySettled) nor refunded (refundOnExpiry refuses settled), stranding the
 // principal's balance. Applied identically here in credit() and in replay() so
 // the in-memory and journal-derived state can never diverge.
-function applyCredit(t: TabState, amount: number) {
-  if (t.settled) {
-    t.settlementHistory.push(t.settled);
+/** Canonical, replay-stable identity of an on-chain deposit: chain:token:tx:log.
+ *  A duplicate credit for the same deposit is a no-op, so a replayed or
+ *  double-submitted credit cannot inflate a balance (Bo #2). */
+export function canonicalDepositId(ev: Record<string, unknown> | undefined): string | null {
+  if (!ev) return null;
+  const tx = ev.txHash ?? ev.tx;
+  if (!tx) return null;                 // non-deposit credits (mock top-ups) opt out
+  const chain = ev.chainId ?? ev.chain ?? "";
+  const token = ev.token ?? "";
+  const log = ev.logIndex ?? ev.log ?? "0";
+  return `${chain}:${token}:${String(tx).toLowerCase()}:${log}`;
+}
+
+/** Returns true if the credit was APPLIED, false if it was a duplicate no-op. */
+function applyCredit(t: TabState, amount: number, depositId: string | null): boolean {
+  if (depositId !== null && t.creditedDeposits.has(depositId)) return false;   // idempotent
+  // A credit on a TERMINAL epoch (settled OR refunded) opens a fresh epoch.
+  // Both are terminal now (Bo #3): a refunded tab must not let a later credit
+  // inherit its refund marker.
+  if (t.settled || t.refunded) {
+    if (t.settled) t.settlementHistory.push(t.settled);
     t.settled = undefined;
+    t.refunded = undefined;
     t.epoch += 1;
     t.balance = amount;        // a new tab, not a top-up
     t.sequence = 0;
@@ -124,6 +151,8 @@ function applyCredit(t: TabState, amount: number) {
   } else {
     t.balance += amount;
   }
+  if (depositId !== null) t.creditedDeposits.add(depositId);
+  return true;
 }
 
 function replay(home: string) {
@@ -136,7 +165,7 @@ function replay(home: string) {
     let rec: any;
     try { rec = JSON.parse(line); } catch { continue; }
     const t = entry(home, rec.principal);
-    if (rec.kind === "credit") { applyCredit(t, rec.amountMicroTrac); continue; }
+    if (rec.kind === "credit") { applyCredit(t, rec.amountMicroTrac, canonicalDepositId(rec.evidence)); continue; }
     // Buyer-found (Hermes/Bo, 2026-08-06), by insisting the post-restart balance
     // be verified through the API rather than read from the journal: replay
     // handled credits and debits but IGNORED refunds, so a refunded balance
@@ -144,7 +173,13 @@ function replay(home: string) {
     // journal said the money was returned while the live ledger said the buyer
     // still had it to spend, and in enforce mode they could have spent it twice.
     // Subtraction rather than zeroing, so a future partial refund replays right.
-    if (rec.kind === "refund") { t.balance = Math.max(0, t.balance - rec.amountMicroTrac); continue; }
+    if (rec.kind === "refund") {
+      t.balance = Math.max(0, t.balance - rec.amountMicroTrac);
+      // A refund is TERMINAL for the current epoch (Bo #3): mark it so the next
+      // credit rolls a fresh epoch and a repeated refund cannot resurrect it.
+      if (rec.terminal !== false) t.refunded = { amountMicroTrac: Number(rec.amountMicroTrac), refundAddress: String(rec.refundAddress ?? ""), termsDigest: String(rec.termsDigest ?? ""), at: String(rec.at ?? "") };
+      continue;
+    }
     // Buyer-found (Hermes/Bo) at settlement close-out: a confirmed withdrawal
     // must reconcile the TAB, not just the withdrawal journal. Without this the
     // buyer-visible tab still shows a claimable balance after on-chain payout —
@@ -173,15 +208,21 @@ function durableAppend(home: string, obj: unknown) {
 export function credit(home: string, principal: string, amountMicroTrac: number, evidence: Record<string, unknown>) {
   replay(home);
   if (!Number.isSafeInteger(amountMicroTrac) || amountMicroTrac <= 0) throw new Error("E_BAD_CREDIT");
+  const depositId = canonicalDepositId(evidence);
+  // Dedup BEFORE append: a duplicate deposit must not even reach the journal, so
+  // it is idempotent across restarts (Bo #2).
+  if (depositId !== null && entry(home, principal).creditedDeposits.has(depositId)) {
+    return { ...balance(home, principal), duplicate: true, depositId };
+  }
   durableAppend(home, { kind: "credit", principal, amountMicroTrac, evidence, at: new Date().toISOString() });
-  applyCredit(entry(home, principal), amountMicroTrac);
+  applyCredit(entry(home, principal), amountMicroTrac, depositId);
   return balance(home, principal);
 }
 
 export function balance(home: string, principal: string) {
   replay(home);
   const t = entry(home, principal);
-  return { balance: t.balance, sequence: t.sequence, lastHash: t.lastHash };
+  return { balance: t.balance, sequence: t.sequence, lastHash: t.lastHash, epoch: t.epoch };
 }
 
 /**
@@ -247,6 +288,7 @@ export function recordReadLeg(home: string, args: {
     legType: "read" as const,
     schemaVersion: "receipt-v0.3",
     domain: LEG_DOMAIN,
+    tabEpoch: t.epoch,
     legId: sha256(`${args.principal}:${t.sequence + 1}:${sha256(args.sparql)}:${Date.now()}`).slice(0, 32),
     sequence: t.sequence + 1,
     previousLegHash: t.lastHash,
@@ -279,7 +321,7 @@ export function recordReadLeg(home: string, args: {
   const signed = { ...leg, providerSignature };
   const hash = sha256(canonicalize(signed));
 
-  durableAppend(home, { kind: "debit", principal: args.principal, hash, leg: signed });
+  durableAppend(home, { kind: "debit", principal: args.principal, epoch: t.epoch, hash, leg: signed });
   t.balance = after; t.sequence = leg.sequence; t.lastHash = hash; t.seen.add(leg.legId);
   return signed;
 }
@@ -321,6 +363,7 @@ export function recordInferenceLeg(home: string, args: {
     // Derived from the evidence rather than restated, so the leg's schema stamp
     // can never drift from the contract the evidence was actually built under.
     schemaVersion: (args.evidence?.schemaVersion as string) ?? "receipt-v0.5",
+    tabEpoch: t.epoch,
     domain: LEG_DOMAIN,
     legId: sha256(`${args.principal}:${t.sequence + 1}:${evDigest}:${Date.now()}`).slice(0, 32),
     sequence: t.sequence + 1,
@@ -346,7 +389,7 @@ export function recordInferenceLeg(home: string, args: {
   const signed = { ...leg, providerSignature };
   const hash = sha256(canonicalize(signed));
 
-  durableAppend(home, { kind: "debit", principal: args.principal, hash, leg: signed });
+  durableAppend(home, { kind: "debit", principal: args.principal, epoch: t.epoch, hash, leg: signed });
   t.balance = after; t.sequence = leg.sequence; t.lastHash = hash; t.seen.add(leg.legId);
   return signed;
 }
@@ -391,31 +434,27 @@ export function loadMeterConfig(home: string): MeterConfig {
  */
 export function refundOnExpiry(home: string, principal: string, refundAddress: string, termsDigest: string) {
   replay(home);
-  // A tab settled on-chain must never be refunded — that would pay twice
-  // (buyer-found, Bo). Settlement is terminal.
-  if (entry(home, principal).settled) {
-    return { alreadyRefunded: true, refundedMicroTrac: 0, at: entry(home, principal).settled!.at, settled: true };
-  }
-  const p = journalPath(home);
-  if (existsSync(p)) {
-    for (const line of readFileSync(p, "utf8").split("\n")) {
-      if (!line.trim()) continue;
-      try {
-        const rec = JSON.parse(line);
-        if (rec.kind === "refund" && rec.principal === principal && rec.termsDigest === termsDigest) {
-          return { alreadyRefunded: true, refundedMicroTrac: rec.amountMicroTrac, at: rec.at };
-        }
-      } catch { /* skip */ }
-    }
-  }
   const t = entry(home, principal);
+  // A tab settled on-chain must never be refunded — that would pay twice.
+  if (t.settled) {
+    return { alreadyRefunded: true, refundedMicroTrac: 0, at: t.settled.at, settled: true };
+  }
+  // Idempotency is scoped to the CURRENT EPOCH, not to (principal, termsDigest)
+  // (Bo #3): reusing a terms digest on a later epoch must not inherit an old
+  // refund marker. The current epoch already carries its terminal `refunded`
+  // state if it was refunded, so this is a durable per-epoch check.
+  if (t.refunded) {
+    return { alreadyRefunded: true, refundedMicroTrac: t.refunded.amountMicroTrac, at: t.refunded.at, epoch: t.epoch };
+  }
   const amount = Math.max(0, t.balance);
+  const at = new Date().toISOString();
   durableAppend(home, {
-    kind: "refund", principal, amountMicroTrac: amount, refundAddress, termsDigest,
-    reason: "tab-expiry", at: new Date().toISOString(),
+    kind: "refund", principal, epoch: t.epoch, amountMicroTrac: amount, refundAddress, termsDigest,
+    reason: "tab-expiry", terminal: true, at,
   });
   t.balance = 0;
-  return { alreadyRefunded: false, refundedMicroTrac: amount, at: new Date().toISOString() };
+  t.refunded = { amountMicroTrac: amount, refundAddress, termsDigest, at };   // terminal for this epoch
+  return { alreadyRefunded: false, refundedMicroTrac: amount, epoch: t.epoch, at };
 }
 
 /**
@@ -514,9 +553,15 @@ export function appendJournal(home: string, record: Record<string, unknown>): vo
  * as closed with no residual claim, and so expiry can never double-refund it.
  * Idempotent by withdrawalId: replaying or re-confirming appends nothing new.
  */
-export function settleTab(home: string, principal: string, info: { withdrawalId: string; txHash: string; netPaidMicroTrac: number }): { ok: boolean; alreadySettled: boolean } {
+export function settleTab(home: string, principal: string, info: { withdrawalId: string; txHash: string; netPaidMicroTrac: number; expectedEpoch?: number }): { ok: boolean; alreadySettled: boolean; code?: string } {
   replay(home);
   const t = entry(home, principal);
+  // Expected-epoch CAS (Bo #1): a withdrawal prepared against a PRIOR epoch must
+  // never settle the CURRENT one. A stale/conflicting epoch fails closed with no
+  // state change — it cannot zero or erase a fresh tab.
+  if (info.expectedEpoch !== undefined && info.expectedEpoch !== t.epoch) {
+    return { ok: false, alreadySettled: false, code: "E_SETTLE_EPOCH_MISMATCH" };
+  }
   if (t.settled) return { ok: true, alreadySettled: true };
   // ONE timestamp: the journal record and the in-memory state must carry the
   // identical `at`, or the buyer-visible settlement receipt changes across a
@@ -534,7 +579,8 @@ export function settleTab(home: string, principal: string, info: { withdrawalId:
 /** The confirmed settlement for a principal, or null. Buyer-visible receipt. */
 export function settlementOf(home: string, principal: string): { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string } | null {
   replay(home);
-  return entry(home, principal).settled ?? null;
+  const st = entry(home, principal).settled;
+  return st ? { ...st } : null;      // deep-enough copy: caller cannot mutate module state (Bo #4)
 }
 
 /** Which tab lifecycle this principal is on. 0 = first tab. Incremented each
@@ -549,5 +595,5 @@ export function tabEpoch(home: string, principal: string): number {
  *  overwritten by opening a new tab. */
 export function settlementHistoryOf(home: string, principal: string): Settlement[] {
   replay(home);
-  return [...entry(home, principal).settlementHistory];
+  return entry(home, principal).settlementHistory.map((x) => ({ ...x }));   // immutable snapshots (Bo #4)
 }

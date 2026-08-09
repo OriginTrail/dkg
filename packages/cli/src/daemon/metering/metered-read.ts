@@ -16,7 +16,7 @@
 // against a key anchored to that address, never the caller's transport identity.
 import { createHash } from "node:crypto";
 import { computeUnits, costMicroTrac, isExempt, SCHEDULE_VERSION, type MeterConfig } from "./read-meter.js";
-import { balance, recordReadLeg, recordShadowObservation, readJournal, appendJournal } from "./ledger.js";
+import { balance, recordReadLeg, recordShadowObservation, readJournal, appendJournal, tabEpoch } from "./ledger.js";
 import { verifyCapability, admissibleForSettlement, type SignedDelegation, type CapabilityState } from "./capability.js";
 import { anchorWalletKey } from "./buyer-registry.js";
 import { activeOpening } from "./deposit-rail.js";
@@ -39,8 +39,15 @@ const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
  */
 export function outstandingLegs(home: string, principal: string): number {
   const p = principal.toLowerCase();
+  // Gradual release is scoped to the CURRENT epoch (Bo #4): a prior epoch's
+  // debits and countersignatures must not affect the fresh tab's obligation
+  // count, or an old unsigned leg would block a new tab (or a new leg inherit
+  // an old signature). Debit and countersign records both carry `epoch`.
+  const epoch = tabEpoch(home, principal);
   let debits = 0, signed = 0;
   for (const rec of readJournal(home)) {
+    const recEpoch = Number((rec as any).epoch ?? (rec as any).leg?.tabEpoch ?? 0);
+    if (recEpoch !== epoch) continue;
     if (rec.kind === "debit" && String((rec.leg as any)?.requester?.principal ?? "").toLowerCase() === p) debits++;
     if (rec.kind === "leg-countersigned" && String(rec.principal ?? "").toLowerCase() === p) signed++;
   }
@@ -311,8 +318,11 @@ export function countersignLeg(args: {
       (rec) => rec.kind === "leg-countersigned" && rec.legId === legId,
     );
     if (principal && legId && !already) {
+      // Stamp the leg's epoch so gradual release and close completeness can scope
+      // to the current epoch (Bo #4). The leg carries tabEpoch.
+      const legEpoch = Number((args.leg as any)?.tabEpoch ?? 0);
       appendJournal(args.home, {
-        kind: "leg-countersigned", principal, legId,
+        kind: "leg-countersigned", principal, legId, epoch: legEpoch,
         countersignature: args.countersignature, at: new Date().toISOString(),
       });
     }

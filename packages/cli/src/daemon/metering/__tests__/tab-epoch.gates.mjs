@@ -125,7 +125,7 @@ console.log("\ncross-epoch isolation — a second principal is untouched:");
   L.credit(home, Q, 7_000, { txHash: "0xQ" });
   ok("a different principal stays at epoch 0", L.tabEpoch(home, Q) === 0);
   ok("its balance is independent", L.balance(home, Q).balance === 7_000);
-  ok("P's epoch is unaffected by Q's activity", L.tabEpoch(home, P) === 2);
+  ok("P's epoch is unaffected by Q's activity", L.tabEpoch(home, P) === 3);  // refund E2 rolled → E3 credit → epoch 3
 }
 
 console.log("\nbackward compatibility — a first-time principal behaves exactly as before:");
