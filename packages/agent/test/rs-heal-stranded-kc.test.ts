@@ -112,11 +112,24 @@ function makeAgentLike(store: OxigraphStore): unknown {
   };
 }
 
+function authoritativeTarget(onChainId: string): unknown {
+  const sub = { subscribed: true, synced: true, onChainId };
+  return {
+    sub,
+    bindingKind: 'authoritative',
+    onChainId,
+    onChainCgId: BigInt(onChainId),
+    cursor: { watermark: 0, ahead: new Map(), scanOrdinal: 1 },
+    bindingGeneration: 0,
+    watermarkBefore: 0,
+  };
+}
+
 async function runHeal(store: OxigraphStore, localCgId: string, onChainId: string): Promise<void> {
   await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
     makeAgentLike(store) as never,
     localCgId,
-    { subscribed: true, synced: true, onChainId } as never,
+    authoritativeTarget(onChainId) as never,
   );
 }
 
@@ -252,7 +265,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const run = () => SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       agentLike as never,
       cg,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
     const healedCount = async (): Promise<number> => {
       const result = await store.query(
@@ -307,7 +320,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const run = () => SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       agentLike,
       cg,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
     const laterMaterialized = async (): Promise<boolean> => {
       const result = await store.query(
@@ -371,7 +384,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       agentLike as never,
       'busy-cg',
-      { subscribed: true, synced: true, onChainId: '29' } as never,
+      authoritativeTarget('29') as never,
     )).resolves.toEqual({ status: 'deferred', reason: 'store-busy' });
 
     expect(queryCalls).toBe(3);
@@ -428,7 +441,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
         log: { info: () => undefined, warn: () => undefined, error: () => undefined },
       } as never,
       'abort-cg',
-      { subscribed: true, synced: true, onChainId: '30' } as never,
+      authoritativeTarget('30') as never,
       () => !controller.signal.aborted,
       controller.signal,
     );

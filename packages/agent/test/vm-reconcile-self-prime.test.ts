@@ -39,6 +39,13 @@ interface AgentInternals {
     isCurrent?: () => boolean,
     signal?: AbortSignal,
   ): Promise<string | null>;
+  resolveContextGraphOnChainIdBinding(
+    localCgId: string,
+    options?: { signal?: AbortSignal; source?: string },
+  ): Promise<{
+    onChainId: string;
+    provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
+  } | null>;
   handleKARegisteredNudge(onChainId: string, kaId: bigint, ctx: unknown): Promise<string | null>;
   subscribedContextGraphs: Map<string, { subscribed: boolean; coreHosted?: boolean; onChainId?: string }>;
   vmReconcileDispatcher: {
@@ -157,12 +164,15 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
 
     const lookup = deferred<string | null>();
     let receivedSignal: AbortSignal | undefined;
-    (internals as any).getContextGraphOnChainId = async (
+    internals.resolveContextGraphOnChainIdBinding = async (
       _id: string,
-      options: { signal?: AbortSignal },
+      options: { signal?: AbortSignal } = {},
     ) => {
       receivedSignal = options.signal;
-      return lookup.promise;
+      const onChainId = await lookup.promise;
+      return onChainId === null
+        ? null
+        : { onChainId, provenance: 'ontology' };
     };
     const persist = vi.fn();
     (internals as any).persistContextGraphSubscription = persist;
@@ -199,7 +209,12 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     internals.subscribedContextGraphs.set(localCgId, original);
 
     const lookup = deferred<string | null>();
-    (internals as any).getContextGraphOnChainId = async () => lookup.promise;
+    internals.resolveContextGraphOnChainIdBinding = async () => {
+      const onChainId = await lookup.promise;
+      return onChainId === null
+        ? null
+        : { onChainId, provenance: 'ontology' };
+    };
     const persist = vi.fn();
     (internals as any).persistContextGraphSubscription = persist;
 
@@ -221,7 +236,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const localCgId = 'gh1098-strict-ordering';
     const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
     internals.subscribedContextGraphs.set(localCgId, original);
-    (internals as any).getContextGraphOnChainId = async () => '9010';
+    internals.resolveContextGraphOnChainIdBinding = async () => ({
+      onChainId: '9010',
+      provenance: 'ontology',
+    });
     const persistStrict = vi.fn(async (
       _id: string,
       candidate: { onChainId?: string },
@@ -246,7 +264,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const localCgId = 'gh1098-strict-failure';
     const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
     internals.subscribedContextGraphs.set(localCgId, original);
-    (internals as any).getContextGraphOnChainId = async () => '9011';
+    internals.resolveContextGraphOnChainIdBinding = async () => ({
+      onChainId: '9011',
+      provenance: 'ontology',
+    });
     (internals as any).persistContextGraphSubscriptionStrict = async () => {
       throw new Error('subscription store unavailable');
     };
@@ -264,7 +285,10 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const localCgId = 'gh1098-strict-generation';
     const original: { subscribed: boolean; onChainId?: string } = { subscribed: true };
     internals.subscribedContextGraphs.set(localCgId, original);
-    (internals as any).getContextGraphOnChainId = async () => '9012';
+    internals.resolveContextGraphOnChainIdBinding = async () => ({
+      onChainId: '9012',
+      provenance: 'ontology',
+    });
     const persisted = deferred<void>();
     let markPersistStarted!: () => void;
     const persistStarted = new Promise<void>((resolve) => { markPersistStarted = resolve; });
@@ -291,7 +315,9 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const localCgId = 'gh1098-abort-race';
     const original = { subscribed: true };
     internals.subscribedContextGraphs.set(localCgId, original);
-    (internals as any).getContextGraphOnChainId = async () => new Promise<string | null>(() => undefined);
+    internals.resolveContextGraphOnChainIdBinding = async () => (
+      new Promise<never>(() => undefined)
+    );
     const persist = vi.fn();
     (internals as any).persistContextGraphSubscription = persist;
     const controller = new AbortController();

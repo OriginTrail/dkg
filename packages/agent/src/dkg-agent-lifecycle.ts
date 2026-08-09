@@ -7445,6 +7445,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    const reverseBinding = this.contextGraphReverseNameHashBindings.get(contextGraphId);
+    if (
+      previous === undefined
+      || canonicalNext.onChainId !== undefined
+      || (!canonicalNext.subscribed && !canonicalNext.coreHosted)
+      || reverseBinding?.nameHash !== nextWireId
+    ) {
+      this.clearSubscriptionReverseNameHashBinding(contextGraphId);
+    }
     if (
       previousWireId !== nextWireId
       && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
@@ -7682,6 +7691,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
     this.invalidateListContextGraphsCache();
     this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    this.contextGraphReverseNameHashBindings.delete(contextGraphId);
     const deleted = this.subscribedContextGraphs.delete(contextGraphId);
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
@@ -7883,13 +7893,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           metaSynced: subscription.metaSynced,
           onChainId: subscription.onChainId,
           onChainHash: subscription.onChainHash,
-          // Reverse-name-hash candidates are process-local because the chain
-          // does not enforce commitment uniqueness. Their VM watermark is
-          // binding-specific and must not survive this strict join snapshot
-          // either (the common writer enforces the same projection rule).
-          lastReconciledOrdinal: subscription.reverseNameHashOnChainId
-            ? undefined
-            : subscription.lastReconciledOrdinal,
+          lastReconciledOrdinal: subscription.lastReconciledOrdinal,
           coreHosted: subscription.coreHosted,
           syncScoped: true,
         };

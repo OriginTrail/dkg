@@ -427,10 +427,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
     options: { signal?: AbortSignal; source?: string } = {},
-  ): Promise<{
-    onChainId: string;
-    provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
-  } | null> {
+  ): Promise<(
+    | { onChainId: string; provenance: 'authoritative' | 'ontology' }
+    | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
+  ) | null> {
     const currentBinding = await this.resolveCurrentNameHashContextGraphBinding(
       contextGraphId,
       { signal: options.signal },

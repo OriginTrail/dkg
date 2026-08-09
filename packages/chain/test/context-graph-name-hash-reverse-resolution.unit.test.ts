@@ -309,21 +309,43 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('uses the maximum reachable high-water so a lagging primary cannot hide an appended duplicate', async () => {
-    const scenario = fixture([NAME_HASH]);
-    scenario.hashes.set(2n, NAME_HASH);
-    scenario.adapter.loadCurrentContextGraphNameHashProviderHighWaters.mockResolvedValue({
-      latestId: 2n,
-      providerHighWaters: new Map([[{}, 1n], [{}, 2n]]),
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = vi.fn(async () => {});
+    const lagging = { id: 'lagging' };
+    const current = { id: 'current' };
+    adapter.providers = [lagging, current];
+    adapter.rpcUrls = ['http://lagging.invalid', 'http://current.invalid'];
+    adapter.ensureConfiguredStaticChainIdValidated = vi.fn(async () => 31337n);
+    adapter.contracts = {
+      contextGraphStorage: {
+        getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),
+      },
+    };
+    const getLatestContextGraphId = vi.fn(async (provider: unknown) =>
+      provider === lagging ? 1n : 2n);
+    const getNameHash = vi.fn(async (provider: unknown, id: bigint) => {
+      if (id === 1n) return NAME_HASH;
+      return provider === current && id === 2n ? NAME_HASH : ethers.ZeroHash;
     });
+    adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
+      getLatestContextGraphId: () => getLatestContextGraphId(provider),
+      getNameHash: (id: bigint) => getNameHash(provider, id),
+    }));
+    const anchorHash = `0x${'11'.repeat(32)}`;
+    adapter.captureContextGraphNameHashIndexAnchor = vi.fn(async () => ({
+      blockNumber: 100,
+      blockHash: anchorHash,
+    }));
+    adapter.loadContextGraphNameHashIndexAnchorHash = vi.fn(async () => anchorHash);
 
-    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /ambiguous.*2 numeric ids/i,
     );
-    expect(scenario.adapter.getContextGraphNameHashRetryingNull).toHaveBeenCalledWith(
-      2n,
-      expect.any(AbortSignal),
-      expect.any(Map),
-    );
+    expect(getLatestContextGraphId).toHaveBeenCalledTimes(2);
+    expect(getNameHash).toHaveBeenCalledWith(current, 2n);
+    expect(adapter.ensureConfiguredStaticChainIdValidated).toHaveBeenCalledWith(lagging);
+    expect(adapter.ensureConfiguredStaticChainIdValidated).toHaveBeenCalledWith(current);
   });
 
   it('switches above the fast cap before issuing any getNameHash read', async () => {

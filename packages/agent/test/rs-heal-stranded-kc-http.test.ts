@@ -33,6 +33,19 @@ const RDF = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#';
 const ONTOLOGY_GRAPH = 'did:dkg:context-graph:ontology';
 const CONTEXT_GRAPH_ON_CHAIN_ID = 'https://dkg.network/ontology#ContextGraphOnChainId';
 
+function authoritativeTarget(onChainId: string): unknown {
+  const sub = { subscribed: true, synced: true, onChainId };
+  return {
+    sub,
+    bindingKind: 'authoritative',
+    onChainId,
+    onChainCgId: BigInt(onChainId),
+    cursor: { watermark: 0, ahead: new Map(), scanOrdinal: 1 },
+    bindingGeneration: 0,
+    watermarkBefore: 0,
+  };
+}
+
 // Escape-bearing value: a raw backslash AND a raw newline. .length === 13.
 const ESCAPE_BEARING_VALUE = 'line1\nline2\\x';
 const ROOT = 'urn:entity:strand-root';
@@ -118,7 +131,7 @@ describe('healStrandedScopedKCs — content-binding gate over SPARQL-HTTP', () =
     await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       { store, log: { info: () => undefined, warn: () => undefined, error: () => undefined } } as never,
       localCgId,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
   }
 

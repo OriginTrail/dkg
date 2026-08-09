@@ -1123,6 +1123,17 @@ export class DKGAgentBase {
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  /**
+   * Untrusted reverse-name-hash VM candidates. Kept outside the shared
+   * subscription model so policy and persistence code cannot consume them by
+   * accident. Only the VM target resolver may promote one into a typed,
+   * freshly-revalidated reconcile target.
+   */
+  protected readonly contextGraphReverseNameHashBindings = new Map<string, {
+    kind: 'reverse-name-hash';
+    onChainId: string;
+    nameHash: string;
+  }>();
   /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
   protected readonly contextGraphBindingGenerations = new Map<string, number>();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
