@@ -1074,6 +1074,14 @@ export interface SwmSnapshotCoverage {
    */
   manifestComplete: boolean;
   /**
+   * Whether graph-scoped snapshot descriptors were parsed authoritatively for
+   * this round. False means an empty descriptor set may be a parse failure,
+   * not proof that a manifest ref has nothing to materialize. Absent values are
+   * treated as unknown by freshness accounting for compatibility with older
+   * diagnostic producers.
+   */
+  descriptorsAuthoritative?: boolean;
+  /**
    * Refs NOT materialized: `snapshotsTotal - snapshotsResolved`, by
    * construction, so `resolved + missing === total` always holds.
    *
@@ -1151,8 +1159,8 @@ export interface SharedMemorySyncDiagnostics {
    * complete selected-provider continuation in this same invocation.
    *
    * The raw failure and incomplete counters remain intact for telemetry. An
-   * on-connect caller may subtract only this bounded count when deciding final
-   * peer freshness; transport, timeout, denial and backpressure signals remain
+   * The canonical shared-memory freshness classifier may supersede only this
+   * bounded count; transport, timeout, denial and backpressure signals remain
    * independent vetoes. Producers must maintain
    * `0 <= resolved <= snapshotPlaneIncomplete <= failedPhases`.
    */

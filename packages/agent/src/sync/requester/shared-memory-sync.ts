@@ -354,6 +354,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   const recordSnapshotCoverage = (
     walk: PublicSnapshotWalkProgress,
     manifestComplete: boolean,
+    descriptorsAuthoritative: boolean,
     materializationFailures: number,
     materializedRefCount: number,
     unwrittenRefSample: readonly string[],
@@ -385,6 +386,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       snapshotsResolved,
       snapshotsTotal: walk.totalSnapshots,
       manifestComplete,
+      descriptorsAuthoritative,
       missingCount: walk.totalSnapshots - snapshotsResolved,
       // Never-retrieved refs first, then retrieved-but-unwritten ones. Deduped
       // across BOTH sources so the sample can never exceed `missingCount`, which
@@ -405,6 +407,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     // must reach the coverage record, not be lost with the stack.
     let materializedFailuresForCg = 0;
     let materializedRefsForCg = 0;
+    let descriptorsAuthoritativeForCg = true;
     const unresolvedRefSampleForCg: string[] = [];
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
@@ -500,7 +503,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // descriptors never parsed is a third state, distinct both from a
       // truncated meta phase and from a genuine entity-share manifest that has
       // no head rows to describe.
-      let descriptorsAuthoritative = true;
       if (snapshotMaterializer && publicSnapshotStore && wsMetaResult.completed) {
         try {
           const descriptors = parseGraphScopedSwmRecoveryDescriptors({
@@ -535,7 +537,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           // materialized while zero assertion graphs were written — and because
           // the parser builds its whole array before returning, ONE malformed
           // head discards the descriptors of every valid KA alongside it.
-          descriptorsAuthoritative = false;
+          descriptorsAuthoritativeForCg = false;
         }
       }
       let materializedGraphs = 0;
@@ -640,7 +642,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           // treating that as vacuity reports full coverage on a round that wrote
           // nothing — wrong in the flattering direction, which is the direction
           // no downstream reader can detect.
-          if (manifestComplete && descriptorsAuthoritative) {
+          if (manifestComplete && descriptorsAuthoritativeForCg) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
           }
@@ -865,7 +867,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
       // only bites the on-connect fan-out, where this field is a diagnostic
       // rather than a decision input.
-      recordSnapshotCoverage(snapshotSync, wsMetaResult.completed, materializationFailures, materializedRefs.size, unresolvedRefSample, pid);
+      recordSnapshotCoverage(
+        snapshotSync,
+        wsMetaResult.completed,
+        descriptorsAuthoritativeForCg,
+        materializationFailures,
+        materializedRefs.size,
+        unresolvedRefSample,
+        pid,
+      );
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -904,12 +914,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // exactly that.
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
-        && (descriptorsAuthoritative || snapshotSync.totalSnapshots === 0);
+        && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0);
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
           + `not materialized — holding the phase incomplete so metadata cannot certify them`);
       }
-      if (!descriptorsAuthoritative) {
+      if (!descriptorsAuthoritativeForCg) {
         logWarn(ctx, `SWM sync for "${pid}": snapshot descriptors could not be parsed — holding `
           + `the phase incomplete so metadata cannot certify Knowledge Assets that were never written`);
       }
@@ -998,7 +1008,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (thrownProgress) {
         // Same builder as the success path — the counts arrive as one coherent
         // group attached by the walk, never reassembled here.
-        recordSnapshotCoverage(thrownProgress, manifestComplete, materializedFailuresForCg, materializedRefsForCg, unresolvedRefSampleForCg, pid);
+        recordSnapshotCoverage(
+          thrownProgress,
+          manifestComplete,
+          descriptorsAuthoritativeForCg,
+          materializedFailuresForCg,
+          materializedRefsForCg,
+          unresolvedRefSampleForCg,
+          pid,
+        );
       }
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
       if (isSyncPermanentRejection(err)) {

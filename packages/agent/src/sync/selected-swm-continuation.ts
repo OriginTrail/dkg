@@ -9,6 +9,10 @@ import {
   type CatchupPassDecisionReason,
 } from './catchup-pass-policy.js';
 import { classifyDurableProgress } from './durable-progress.js';
+import {
+  classifySelectedSwmRoundFreshness,
+  type SelectedSwmFreshnessResolution,
+} from './shared-memory-freshness.js';
 import type { SyncContextGraphPriorityConfig } from './policy.js';
 import {
   runOrderedContextGraphSyncs,
@@ -34,7 +38,7 @@ export interface SelectedSwmContinuationProgress {
 
 export interface SelectedSwmContinuationExecution {
   readonly summary: SharedMemorySyncResult;
-  readonly resolvedSnapshotPlaneIncomplete: number;
+  readonly freshnessResolution: SelectedSwmFreshnessResolution;
 }
 
 export interface RunSelectedSwmContinuationsOptions {
@@ -79,39 +83,6 @@ function withoutContinuationPasses(
   return { ...result, continuationPasses: 0 };
 }
 
-function recoverableSnapshotIncompleteCount(result: SharedMemorySyncResult): number {
-  const incomplete = Math.min(
-    result.snapshotPlaneIncomplete ?? 0,
-    result.failedPhases ?? 0,
-  );
-  if (incomplete === 0) return 0;
-  if (
-    result.failedPeers > 0
-    || result.timedOutPhases > 0
-    || result.deniedPhases > 0
-    || (result.backoffWorthyFailures ?? 0) > 0
-    || (result.deferredBackpressure ?? 0) > 0
-    || (result.failedPhases ?? 0) !== incomplete
-  ) return 0;
-  const coverage = result.swmCoverage;
-  return coverage?.manifestComplete === true
-    && coverage.snapshotsResolved < coverage.snapshotsTotal
-      ? incomplete
-      : 0;
-}
-
-function cleanlyCompletesSnapshotPlane(
-  contextGraphId: string,
-  result: SharedMemorySyncResult,
-): boolean {
-  const coverage = result.swmCoverage;
-  return coverage?.contextGraphId === contextGraphId
-    && coverage.manifestComplete
-    && coverage.materializationFailures === 0
-    && coverage.snapshotsResolved === coverage.snapshotsTotal
-    && classifyDurableProgress(result).completedWithoutFailure;
-}
-
 /**
  * Run only the continuation portion of selected RFC-64 public-SWM sync.
  *
@@ -140,13 +111,17 @@ export async function runSelectedSwmContinuations(
       unit.initialResult.swmCoverage,
       progress.completedWithoutFailure,
     );
+    const freshness = classifySelectedSwmRoundFreshness(
+      contextGraphId,
+      unit.initialResult,
+    );
     stateByContextGraph.set(contextGraphId, {
       unit,
       tracker,
       planeProven:
         unit.initialResult.insertedDataTriples > 0 && progress.completedWithoutFailure,
-      recoverableIncomplete: recoverableSnapshotIncompleteCount(unit.initialResult),
-      completed: cleanlyCompletesSnapshotPlane(contextGraphId, unit.initialResult),
+      recoverableIncomplete: freshness.recoverableSnapshotYieldFailures,
+      completed: freshness.snapshotPlaneComplete,
     });
   }
 
@@ -178,8 +153,12 @@ export async function runSelectedSwmContinuations(
                 result.swmCoverage,
                 progress.completedWithoutFailure,
               );
-              state.recoverableIncomplete += recoverableSnapshotIncompleteCount(result);
-              state.completed = cleanlyCompletesSnapshotPlane(item.contextGraphId, result);
+              const freshness = classifySelectedSwmRoundFreshness(
+                item.contextGraphId,
+                result,
+              );
+              state.recoverableIncomplete += freshness.recoverableSnapshotYieldFailures;
+              state.completed = freshness.snapshotPlaneComplete;
               state.planeProven = state.planeProven || (
                 result.insertedDataTriples > 0 && progress.completedWithoutFailure
               );
@@ -229,7 +208,7 @@ export async function runSelectedSwmContinuations(
   });
 
   if (execution.stoppedAfterPass) options.onBackpressure?.();
-  const resolvedSnapshotPlaneIncomplete = [...stateByContextGraph.values()].reduce(
+  const recoverableSnapshotYieldFailures = [...stateByContextGraph.values()].reduce(
     (total, state) => total + (state.completed ? state.recoverableIncomplete : 0),
     0,
   );
@@ -238,6 +217,6 @@ export async function runSelectedSwmContinuations(
       ...summary,
       continuationPasses: execution.continuationPasses,
     },
-    resolvedSnapshotPlaneIncomplete,
+    freshnessResolution: { recoverableSnapshotYieldFailures },
   };
 }

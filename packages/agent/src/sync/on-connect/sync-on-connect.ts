@@ -1,13 +1,14 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   classifyDurableProgress,
-  type DurableProgressSummary,
 } from '../durable-progress.js';
+import {
+  classifySharedMemoryFreshness,
+  type SharedMemoryFreshnessSummary,
+} from '../shared-memory-freshness.js';
 
-type SyncProgressSummary = DurableProgressSummary & {
+type SyncProgressSummary = SharedMemoryFreshnessSummary & {
   insertedTriples: number;
-  snapshotPlaneIncomplete?: number;
-  resolvedSnapshotPlaneIncomplete?: number;
 };
 
 type SyncFromPeerResult = number | SyncProgressSummary;
@@ -114,27 +115,9 @@ function classifySyncResult(
     };
   }
 
-  let progressResult = result;
-  if (phase === 'shared') {
-    const resolved = result.resolvedSnapshotPlaneIncomplete ?? 0;
-    const incomplete = result.snapshotPlaneIncomplete ?? 0;
-    const failed = result.failedPhases ?? 0;
-    // Fail closed on malformed producer metadata. Only a bounded, integral
-    // count can supersede the matching historical voluntary-yield failures;
-    // every other diagnostic remains untouched and authoritative.
-    if (
-      Number.isSafeInteger(resolved)
-      && resolved > 0
-      && resolved <= incomplete
-      && incomplete <= failed
-    ) {
-      progressResult = {
-        ...result,
-        failedPhases: failed - resolved,
-      };
-    }
-  }
-  const progress = classifyDurableProgress(progressResult, { complete });
+  const progress = phase === 'shared'
+    ? classifySharedMemoryFreshness(result, { complete })
+    : classifyDurableProgress(result, { complete });
   // `failedPeers` is folded across every Context Graph in this lane. It says
   // at least one round never got a response; it does not mean the peer failed
   // to answer every round. Preserve any response evidence from sibling CGs so

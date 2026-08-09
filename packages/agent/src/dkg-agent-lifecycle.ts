@@ -313,6 +313,10 @@ import {
   type SelectedSwmContinuationUnit,
 } from './sync/selected-swm-continuation.js';
 import {
+  applySelectedSwmFreshnessResolution,
+  mergeSharedMemoryFreshnessDiagnostics,
+} from './sync/shared-memory-freshness.js';
+import {
   classifyDurableProgress,
   createDurableSyncAccumulator,
   createFailedPeerDurableSyncResult,
@@ -1289,9 +1293,7 @@ function mergeSharedMemorySyncResults(
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
     snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
     continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
-    resolvedSnapshotPlaneIncomplete:
-      (a.resolvedSnapshotPlaneIncomplete ?? 0)
-      + (b.resolvedSnapshotPlaneIncomplete ?? 0),
+    ...mergeSharedMemoryFreshnessDiagnostics(a, b),
     // The two halves of `bytesReceived`, kept apart so replay cost stays
     // measurable once passes repeat.
     replayPhaseBytesReceived: (a.replayPhaseBytesReceived ?? 0) + (b.replayPhaseBytesReceived ?? 0),
@@ -6379,18 +6381,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         initialSummary,
         continuationSummary,
       );
-      const resolvedSnapshotPlaneIncomplete = Math.min(
-        continuationExecution.resolvedSnapshotPlaneIncomplete,
-        finalSummary.snapshotPlaneIncomplete ?? 0,
-        finalSummary.failedPhases,
-      );
       // Preserve the raw historical yield/failure counters for diagnostics;
-      // this bounded supersession count lets final on-connect accounting see
-      // that the same selected-provider invocation later completed them.
-      return {
-        ...finalSummary,
-        resolvedSnapshotPlaneIncomplete,
-      };
+      // the canonical freshness helper bounds the selected continuation's
+      // resolution before final on-connect classification consumes it.
+      return applySelectedSwmFreshnessResolution(
+        finalSummary,
+        continuationExecution.freshnessResolution,
+      );
     };
 
     return runSyncSingleFlight(this, singleFlightKey, runSync, {
