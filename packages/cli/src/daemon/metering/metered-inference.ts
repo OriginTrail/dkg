@@ -37,6 +37,101 @@ export type InferenceOutcome =
       settlement: { admissible: false; reason: string };
     };
 
+/** What a request may ask for. Anything outside this is refused BEFORE serving. */
+export interface InferenceRequestShape {
+  messages?: unknown;
+  tools?: unknown;
+  stream?: unknown;
+  maxTokens?: unknown;
+  sampler?: unknown;
+}
+
+export type PreflightOutcome =
+  | { ok: false; status: number; code: string; detail?: string }
+  | { ok: true; principal: string; bindingMode?: string };
+
+/**
+ * PRE-SERVE gate: authorise, then validate the request against the supported
+ * feature set and the policy bounds — all WITHOUT touching the model.
+ *
+ * Buyer-found (Bo, event 7ee42566): the route previously served first and
+ * authorised after, so an unauthorised delegation could consume a full
+ * generation before being refused. Zero tab mutation was true and beside the
+ * point — the compute was already spent. Authorisation and cap validation must
+ * happen before a single token is generated.
+ *
+ * The auth here is side-effect free (it reads capability state, never mutates
+ * it), so meterInference re-running it after serving is defence in depth rather
+ * than double-counting.
+ */
+export function preflightInference(args: {
+  home: string;
+  chainId: number;
+  cfg: MeterConfig;
+  request: {
+    delegation: MeteredReadRequest["delegation"];
+    bindingProof?: MeteredReadRequest["bindingProof"];
+    revocationCheckpoint?: MeteredReadRequest["revocationCheckpoint"];
+  };
+  payload: InferenceRequestShape;
+  state: Parameters<typeof authoriseMeteredRead>[0]["state"];
+  scheduleDigest: string;
+  priceVectorDigest: string;
+  nodeClass: string;
+  settlementId: string;
+  now?: number;
+}): PreflightOutcome {
+  // 1. Authorisation FIRST — a stranger gets no compute.
+  const auth = authoriseMeteredRead({
+    home: args.home, chainId: args.chainId, cfg: args.cfg,
+    request: {
+      delegation: args.request.delegation,
+      bindingProof: args.request.bindingProof,
+      sparql: "inference",
+      revocationCheckpoint: args.request.revocationCheckpoint,
+    },
+    state: args.state,
+    route: "POST /api/metering/infer",
+    nodeClass: args.nodeClass,
+    settlementId: args.settlementId,
+    scheduleDigest: args.scheduleDigest,
+    priceVectorDigest: args.priceVectorDigest,
+    now: args.now,
+  });
+  if (!auth.ok) return { ok: false, status: auth.status, code: auth.code, detail: auth.detail };
+
+  // 2. Unsupported features are refused, not silently served. Streaming and
+  //    tool calls are declared untested under this contract and are therefore
+  //    unbillable — so they must also be unservable on the metered route,
+  //    otherwise "unbillable" would mean "free".
+  const p = args.payload ?? {};
+  if (p.stream === true || p.stream === "true") {
+    return { ok: false, status: 400, code: "E_STREAMING_UNSUPPORTED", detail: "streaming responses are not metered under this contract" };
+  }
+  if (p.tools !== undefined && p.tools !== null && !(Array.isArray(p.tools) && p.tools.length === 0)) {
+    return { ok: false, status: 400, code: "E_TOOLS_UNSUPPORTED", detail: "tool calls are not metered under this contract" };
+  }
+
+  // 3. Bounds are REFUSED, never clamped — a clamp silently serves something
+  //    other than what was asked for, and hides the disagreement.
+  const lim = INFERENCE_POLICY_CANONICAL.limits;
+  if (p.maxTokens !== undefined) {
+    const n = Number(p.maxTokens);
+    if (!Number.isInteger(n) || n <= 0) {
+      return { ok: false, status: 400, code: "E_BAD_MAX_TOKENS", detail: "maxTokens must be a positive integer" };
+    }
+    if (n > lim.maxOutputTokens) {
+      return { ok: false, status: 413, code: "E_OVER_POLICY_LIMIT", detail: `maxTokens ${n} > policy maxOutputTokens ${lim.maxOutputTokens}` };
+    }
+  }
+  const requestBytes = Buffer.byteLength(JSON.stringify(p.messages ?? []), "utf8");
+  if (requestBytes > lim.maxEvidenceBytes) {
+    return { ok: false, status: 413, code: "E_OVER_POLICY_LIMIT", detail: `request ${requestBytes}B > ${lim.maxEvidenceBytes}B` };
+  }
+
+  return { ok: true, principal: auth.principal, bindingMode: (auth as { bindingMode?: string }).bindingMode };
+}
+
 /**
  * Authorise, meter, and record a metered inference. Separated from the model
  * call so a failure here is never mistaken for a serving failure, and so the
