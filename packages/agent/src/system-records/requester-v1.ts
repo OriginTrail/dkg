@@ -7,17 +7,12 @@ import {
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
   SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS,
-  decodeSystemRecordResponseFrameV1,
-  encodeSystemRecordRequestFrameV1,
-  verifySystemRecordResponsePayloadV1,
   type SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type { SystemRecordArtifactV1 } from './artifact-v1.js';
 import type {
   CreateSystemRecordRequesterOptionsV1,
   SystemRecordExactArtifactLookupV1,
-  SystemRecordExactFetchLeaseV1,
   SystemRecordExactFetchResultV1,
   SystemRecordRequesterByteReservationV1,
   SystemRecordRequesterExchangeV1,
@@ -27,37 +22,34 @@ import type {
   SystemRecordRequesterV1,
 } from './requester-api-v1.js';
 import {
+  InvalidSystemRecordResponseError,
+  SystemRecordRequesterTransferError,
+  exchangeSystemRecordResponseV1,
+  retainVerifiedSystemRecordResponseV1,
+  type SystemRecordRetainedSourceV1,
+  type SystemRecordRetainTransferResultV1,
+} from './requester-transfer-v1-internal.js';
+import {
   createSystemRecordExactRequestV1,
   systemRecordExactRequestKeyV1,
-  systemRecordExactResponseOutcomeV1,
 } from './requester-wire-v1-internal.js';
+import { raceSystemRecordAbortV1 } from './transport-v1.js';
 
-interface RetainedFetchV1 {
-  readonly artifact: SystemRecordArtifactV1;
-  readonly reservation: SystemRecordRequesterByteReservationV1;
-  readonly decodePermit: SystemRecordRequesterPermitV1;
-  readonly wireBytes: number;
-}
-
-type SharedFetchOutcomeV1 =
-  | Readonly<{ outcome: 'ok'; retained: RetainedFetchV1 }>
-  | Exclude<SystemRecordExactFetchResultV1, Readonly<{ outcome: 'ok'; lease: SystemRecordExactFetchLeaseV1 }>>;
-
-interface FetchSubscriberV1 {
+interface FetchWaiterV1 {
   readonly signal: AbortSignal;
   readonly resolve: (result: SystemRecordExactFetchResultV1) => void;
   readonly reject: (reason?: unknown) => void;
   readonly onAbort: () => void;
-  state: 'waiting' | 'leased' | 'done';
 }
 
 interface FetchEntryV1 {
   readonly key: string;
   readonly controller: AbortController;
-  readonly subscribers: Set<FetchSubscriberV1>;
+  readonly waiters: Set<FetchWaiterV1>;
+  leaseCount: number;
   abortReason?: SystemRecordRequesterResetReasonV1;
   settled: boolean;
-  retained?: RetainedFetchV1;
+  retained?: SystemRecordRetainedSourceV1;
 }
 
 /**
@@ -107,8 +99,8 @@ export function createSystemRecordRequesterV1(
     const key = systemRecordExactRequestKeyV1(request);
     let entry = entries.get(key);
     if (entry !== undefined) {
-      // The first subscriber owns the transfer; the frozen limit counts followers.
-      if (entry.subscribers.size >= maxWaitersPerDigest + 1) {
+      // The first observer owns the transfer; the frozen limit counts followers.
+      if (entry.waiters.size + entry.leaseCount >= maxWaitersPerDigest + 1) {
         return Object.freeze({ outcome: 'waiter-limit', wireBytes: 0 });
       }
       joined += 1;
@@ -127,7 +119,8 @@ export function createSystemRecordRequesterV1(
     entry = {
       key,
       controller: new AbortController(),
-      subscribers: new Set(),
+      waiters: new Set(),
+      leaseCount: 0,
       settled: false,
     };
     entries.set(key, entry);
@@ -143,28 +136,25 @@ export function createSystemRecordRequesterV1(
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1> {
     return new Promise<SystemRecordExactFetchResultV1>((resolve, reject) => {
-      const subscriber: FetchSubscriberV1 = {
+      const waiter: FetchWaiterV1 = {
         signal,
         resolve,
         reject,
-        state: 'waiting',
         onAbort: () => {
-          if (subscriber.state !== 'waiting') return;
-          subscriber.state = 'done';
-          entry.subscribers.delete(subscriber);
+          if (!entry.waiters.delete(waiter)) return;
           waitingCallers -= 1;
           reject(signal.reason);
           abortIfUnobserved(entry);
         },
       };
-      entry.subscribers.add(subscriber);
+      entry.waiters.add(waiter);
       waitingCallers += 1;
-      signal.addEventListener('abort', subscriber.onAbort, { once: true });
+      signal.addEventListener('abort', waiter.onAbort, { once: true });
       if (signal.aborted) {
-        subscriber.onAbort();
+        waiter.onAbort();
         return;
       }
-      if (entry.settled && entry.retained !== undefined) deliverLease(entry, subscriber);
+      if (entry.settled && entry.retained !== undefined) deliverLease(entry, waiter);
     });
   }
 
@@ -186,72 +176,33 @@ export function createSystemRecordRequesterV1(
       timeoutMs,
     );
     timeout.unref?.();
-    let shared: SharedFetchOutcomeV1;
+    let shared: SystemRecordRetainTransferResultV1;
     try {
-      const requestFrame = encodeSystemRecordRequestFrameV1(request);
-      exchange = await raceAbort(openExchange(entry.controller.signal), entry.controller.signal);
-      await raceAbort(
-        exchange.writeRequestFrame(requestFrame, entry.controller.signal),
+      exchange = await raceSystemRecordAbortV1(
+        openExchange(entry.controller.signal),
         entry.controller.signal,
       );
-      wireBytes += requestFrame.byteLength;
-      const responseFrame = await raceAbort(
-        exchange.readResponseFrame(SYSTEM_RECORD_MAX_FRAME_BYTES, entry.controller.signal),
-        entry.controller.signal,
-      );
-      if (responseFrame instanceof Uint8Array) wireBytes += responseFrame.byteLength;
-      if (!(responseFrame instanceof Uint8Array)
-        || responseFrame.byteLength < 1
-        || responseFrame.byteLength > SYSTEM_RECORD_MAX_FRAME_BYTES) {
-        throw new InvalidSystemRecordResponseError();
-      }
-      frameReservation.shrinkTo(responseFrame.byteLength);
-      let decoded: ReturnType<typeof decodeSystemRecordResponseFrameV1>;
-      try {
-        decoded = decodeSystemRecordResponseFrameV1(responseFrame);
-        verifySystemRecordResponsePayloadV1(request, decoded.header, decoded.payload);
-      } catch {
-        throw new InvalidSystemRecordResponseError();
-      }
-      if (decoded.header.status !== 'ok') {
-        shared = Object.freeze({
-          outcome: systemRecordExactResponseOutcomeV1(decoded.header.status),
-          wireBytes,
-        });
-      } else {
-        const decodePermit = options.decodeAdmission.tryAcquire();
-        if (decodePermit === null) {
-          shared = Object.freeze({ outcome: 'busy', wireBytes });
-        } else {
-          const payloadReservation = options.byteAdmission.tryReserve(decoded.payload.byteLength);
-          if (payloadReservation === null) {
-            decodePermit.release();
-            shared = Object.freeze({ outcome: 'capacity', wireBytes });
-          } else {
-            try {
-              const canonicalBytes = Uint8Array.from(decoded.payload);
-              const retained: RetainedFetchV1 = Object.freeze({
-                artifact: Object.freeze({
-                  objectKind: decoded.header.objectKind,
-                  objectDigest: decoded.header.objectDigest,
-                  canonicalBytes,
-                }),
-                reservation: payloadReservation,
-                decodePermit,
-                wireBytes,
-              });
-              entry.retained = retained;
-              retainedPayloadBytes += canonicalBytes.byteLength;
-              shared = Object.freeze({ outcome: 'ok', retained });
-            } catch (error) {
-              payloadReservation.release();
-              decodePermit.release();
-              throw error;
-            }
-          }
-        }
+      const transfer = await exchangeSystemRecordResponseV1({
+        request,
+        exchange,
+        frameReservation,
+        signal: entry.controller.signal,
+      });
+      wireBytes = transfer.wireBytes;
+      shared = retainVerifiedSystemRecordResponseV1({
+        request,
+        transfer,
+        decodeAdmission: options.decodeAdmission,
+        byteAdmission: options.byteAdmission,
+      });
+      if (shared.outcome === 'ok') {
+        entry.retained = shared.retained;
+        retainedPayloadBytes += shared.retained.artifact.canonicalBytes.byteLength;
       }
     } catch (error) {
+      if (error instanceof SystemRecordRequesterTransferError) {
+        wireBytes = error.wireBytes;
+      }
       const outcome = error instanceof InvalidSystemRecordResponseError
         ? 'invalid-response'
         : entry.controller.signal.aborted
@@ -281,43 +232,63 @@ export function createSystemRecordRequesterV1(
     settle(entry, shared);
   }
 
-  function settle(entry: FetchEntryV1, shared: SharedFetchOutcomeV1): void {
+  function settle(entry: FetchEntryV1, shared: SystemRecordRetainTransferResultV1): void {
     entry.settled = true;
     if (shared.outcome === 'ok') {
-      for (const subscriber of [...entry.subscribers]) deliverLease(entry, subscriber);
+      for (const waiter of [...entry.waiters]) deliverLease(entry, waiter);
       abortIfUnobserved(entry);
       return;
     }
     entries.delete(entry.key);
-    for (const subscriber of [...entry.subscribers]) {
-      if (subscriber.state !== 'waiting') continue;
-      subscriber.signal.removeEventListener('abort', subscriber.onAbort);
-      subscriber.state = 'done';
+    for (const waiter of [...entry.waiters]) {
+      if (!entry.waiters.delete(waiter)) continue;
+      waiter.signal.removeEventListener('abort', waiter.onAbort);
       waitingCallers -= 1;
-      entry.subscribers.delete(subscriber);
-      subscriber.resolve(shared);
+      waiter.resolve(shared);
     }
   }
 
-  function deliverLease(entry: FetchEntryV1, subscriber: FetchSubscriberV1): void {
-    if (subscriber.state !== 'waiting' || entry.retained === undefined) return;
-    subscriber.signal.removeEventListener('abort', subscriber.onAbort);
-    subscriber.state = 'leased';
-    waitingCallers -= 1;
-    activeLeases += 1;
-    let released = false;
+  function deliverLease(entry: FetchEntryV1, waiter: FetchWaiterV1): void {
     const retained = entry.retained;
-    subscriber.resolve(Object.freeze({
+    if (retained === undefined || !entry.waiters.delete(waiter)) return;
+    waiter.signal.removeEventListener('abort', waiter.onAbort);
+    waitingCallers -= 1;
+    const payloadBytes = retained.artifact.canonicalBytes.byteLength;
+    const reservation = options.byteAdmission.tryReserve(payloadBytes);
+    if (reservation === null) {
+      waiter.resolve(Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes }));
+      releaseRetainedIfUnobserved(entry);
+      return;
+    }
+    let canonicalBytes: Uint8Array;
+    try {
+      canonicalBytes = Uint8Array.from(retained.artifact.canonicalBytes);
+    } catch {
+      reservation.release();
+      waiter.resolve(Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes }));
+      releaseRetainedIfUnobserved(entry);
+      return;
+    }
+    entry.leaseCount += 1;
+    activeLeases += 1;
+    retainedPayloadBytes += payloadBytes;
+    let released = false;
+    waiter.resolve(Object.freeze({
       outcome: 'ok',
       lease: Object.freeze({
-        artifact: retained.artifact,
+        artifact: Object.freeze({
+          objectKind: retained.artifact.objectKind,
+          objectDigest: retained.artifact.objectDigest,
+          canonicalBytes,
+        }),
         wireBytes: retained.wireBytes,
         release(): void {
           if (released) return;
           released = true;
-          subscriber.state = 'done';
-          entry.subscribers.delete(subscriber);
+          entry.leaseCount -= 1;
           activeLeases -= 1;
+          retainedPayloadBytes -= payloadBytes;
+          reservation.release();
           releaseRetainedIfUnobserved(entry);
         },
       }),
@@ -325,7 +296,7 @@ export function createSystemRecordRequesterV1(
   }
 
   function abortIfUnobserved(entry: FetchEntryV1): void {
-    if (entry.subscribers.size !== 0) return;
+    if (entry.waiters.size !== 0 || entry.leaseCount !== 0) return;
     if (!entry.settled) {
       abortEntry(entry, 'cancelled', new Error('system-record requester has no callers'));
     }
@@ -333,7 +304,7 @@ export function createSystemRecordRequesterV1(
   }
 
   function releaseRetainedIfUnobserved(entry: FetchEntryV1): void {
-    if (entry.subscribers.size !== 0 || entry.retained === undefined) return;
+    if (entry.waiters.size !== 0 || entry.leaseCount !== 0 || entry.retained === undefined) return;
     entries.delete(entry.key);
     retainedPayloadBytes -= entry.retained.artifact.canonicalBytes.byteLength;
     entry.retained.reservation.release();
@@ -384,14 +355,3 @@ function boundedPositive(value: number, maximum: number, label: string): number 
   }
   return value;
 }
-
-function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
-}
-
-class InvalidSystemRecordResponseError extends Error {}

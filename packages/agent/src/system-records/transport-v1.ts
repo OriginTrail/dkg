@@ -163,6 +163,19 @@ export interface SystemRecordProviderFrameAdmissionV1 {
   tryReserve(bytes: number): SystemRecordProviderFrameReservationV1 | null;
 }
 
+/** Shared abort race for bounded System Record requester/provider exchanges. */
+export function raceSystemRecordAbortV1<T>(
+  work: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new TypeError(`${label} must be a positive safe integer`);

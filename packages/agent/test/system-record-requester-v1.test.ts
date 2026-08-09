@@ -33,7 +33,7 @@ const LOOKUP = Object.freeze({
 });
 
 describe('system-record requester V1', () => {
-  it('coalesces one exact transfer and retains one accounted payload until all leases release', async () => {
+  it('coalesces one exact transfer and accounts isolated caller leases', async () => {
     const bytes = byteAdmission();
     const stream = permitAdmission();
     const decode = permitAdmission();
@@ -63,7 +63,10 @@ describe('system-record requester V1', () => {
     expect(firstResult.outcome).toBe('ok');
     expect(secondResult.outcome).toBe('ok');
     if (firstResult.outcome !== 'ok' || secondResult.outcome !== 'ok') return;
-    expect(firstResult.lease.artifact).toBe(secondResult.lease.artifact);
+    expect(firstResult.lease.artifact).not.toBe(secondResult.lease.artifact);
+    expect(firstResult.lease.artifact.canonicalBytes).not.toBe(
+      secondResult.lease.artifact.canonicalBytes,
+    );
     expect(firstResult.lease.artifact).toMatchObject({
       objectKind: 'profile-bundle',
       objectDigest: DIGEST,
@@ -78,23 +81,69 @@ describe('system-record requester V1', () => {
     expect(bytes.reservations.map(({ requested }) => requested)).toEqual([
       SYSTEM_RECORD_MAX_FRAME_BYTES,
       PAYLOAD.byteLength,
+      PAYLOAD.byteLength,
+      PAYLOAD.byteLength,
     ]);
     expect(bytes.reservations[0]?.released).toBe(true);
     expect(bytes.reservations[1]?.released).toBe(false);
+    expect(bytes.reservations[2]?.released).toBe(false);
+    expect(bytes.reservations[3]?.released).toBe(false);
     expect(requester.stats()).toMatchObject({
       completed: 1,
       pendingDigests: 1,
       activeLeases: 2,
-      retainedPayloadBytes: PAYLOAD.byteLength,
+      retainedPayloadBytes: PAYLOAD.byteLength * 3,
       activeStream: 0,
     });
     expect(decode.active()).toBe(true);
     firstResult.lease.release();
     expect(bytes.reservations[1]?.released).toBe(false);
+    expect(bytes.reservations[2]?.released).toBe(true);
+    expect(bytes.reservations[3]?.released).toBe(false);
     expect(decode.active()).toBe(true);
     secondResult.lease.release();
     expect(bytes.reservations[1]?.released).toBe(true);
+    expect(bytes.reservations[3]?.released).toBe(true);
     expect(decode.active()).toBe(false);
+    expect(requester.stats()).toMatchObject({
+      pendingDigests: 0,
+      activeLeases: 0,
+      retainedPayloadBytes: 0,
+    });
+  });
+
+  it('serves a late subscriber from retained bytes without sharing mutable storage', async () => {
+    const bytes = byteAdmission();
+    const requester = createRequester({ bytes });
+    const exchange = fixtureExchange();
+    const first = await requester.fetch(
+      LOOKUP,
+      async () => exchange.value,
+      new AbortController().signal,
+    );
+    expect(first.outcome).toBe('ok');
+    if (first.outcome !== 'ok') return;
+
+    const unopened = vi.fn(async () => fixtureExchange().value);
+    const second = await requester.fetch(LOOKUP, unopened, new AbortController().signal);
+    expect(second.outcome).toBe('ok');
+    if (second.outcome !== 'ok') return;
+    expect(unopened).not.toHaveBeenCalled();
+    expect(second.lease.artifact.canonicalBytes).toEqual(PAYLOAD);
+
+    first.lease.artifact.canonicalBytes[0] = 99;
+    expect(second.lease.artifact.canonicalBytes).toEqual(PAYLOAD);
+    expect(requester.stats()).toMatchObject({
+      started: 1,
+      joined: 1,
+      pendingDigests: 1,
+      activeLeases: 2,
+      retainedPayloadBytes: PAYLOAD.byteLength * 3,
+    });
+
+    second.lease.release();
+    first.lease.release();
+    expect(bytes.reservations.every(({ released }) => released)).toBe(true);
     expect(requester.stats()).toMatchObject({
       pendingDigests: 0,
       activeLeases: 0,
@@ -254,6 +303,14 @@ describe('system-record requester V1', () => {
     expect(invalidResult.wireBytes).toBeGreaterThan(0);
     expect(invalid.reset).toHaveBeenCalledWith('invalid-response');
     expect(requester.stats()).toMatchObject({ pendingDigests: 0, activeStream: 0 });
+
+    const malformed = fixtureExchange(async () => Uint8Array.of(1));
+    await expect(requester.fetch(
+      LOOKUP,
+      async () => malformed.value,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'invalid-response', wireBytes: expect.any(Number) });
+    expect(malformed.reset).toHaveBeenCalledWith('invalid-response');
   });
 
   it('reserves before network work and releases permits on capacity, deadline, and close', async () => {
@@ -318,6 +375,52 @@ describe('system-record requester V1', () => {
     held?.release();
   });
 
+  it('acquires decoder admission before verifying a successful payload', async () => {
+    const decode = permitAdmission();
+    const held = decode.value.tryAcquire();
+    expect(held).not.toBeNull();
+    const invalid = fixtureExchange(async (request) => (
+      successResponse(request, Uint8Array.of(9, 9, 9), DIGEST)
+    ));
+    const requester = createRequester({ decode });
+
+    await expect(requester.fetch(
+      LOOKUP,
+      async () => invalid.value,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'busy', wireBytes: expect.any(Number) });
+    expect(invalid.reset).not.toHaveBeenCalled();
+    held?.release();
+  });
+
+  it('fails closed when an isolated lease copy cannot be reserved', async () => {
+    const base = byteAdmission();
+    let reservationAttempt = 0;
+    const bytes: SystemRecordRequesterByteAdmissionV1 = {
+      tryReserve(requested) {
+        reservationAttempt += 1;
+        if (reservationAttempt === 3) return null;
+        return base.tryReserve(requested);
+      },
+    };
+    const decode = permitAdmission();
+    const requester = createRequester({ bytes, decode });
+
+    await expect(requester.fetch(
+      LOOKUP,
+      async () => fixtureExchange().value,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'capacity', wireBytes: expect.any(Number) });
+    expect(base.reservations).toHaveLength(2);
+    expect(base.reservations.every(({ released }) => released)).toBe(true);
+    expect(decode.active()).toBe(false);
+    expect(requester.stats()).toMatchObject({
+      pendingDigests: 0,
+      activeLeases: 0,
+      retainedPayloadBytes: 0,
+    });
+  });
+
   it('accepts the maximum legal bundle under encoded and decoded reservations', async () => {
     const payload = new Uint8Array(SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES);
     const digest = digestSystemRecordBytesV1(
@@ -335,6 +438,7 @@ describe('system-record requester V1', () => {
     expect(result.outcome).toBe('ok');
     expect(bytes.reservations.map(({ requested }) => requested)).toEqual([
       SYSTEM_RECORD_MAX_FRAME_BYTES,
+      SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
       SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
     ]);
     expect(bytes.reservations[0]?.shrunk).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_FRAME_BYTES);
@@ -362,13 +466,15 @@ describe('system-record requester V1', () => {
     expect(requester.stats()).toMatchObject({
       closed: true,
       activeLeases: 1,
-      retainedPayloadBytes: PAYLOAD.byteLength,
+      retainedPayloadBytes: PAYLOAD.byteLength * 2,
     });
     expect(bytes.reservations[1]?.released).toBe(false);
+    expect(bytes.reservations[2]?.released).toBe(false);
     expect(decode.active()).toBe(true);
     if (result.outcome === 'ok') result.lease.release();
     expect(requester.stats()).toMatchObject({ activeLeases: 0, retainedPayloadBytes: 0 });
     expect(bytes.reservations[1]?.released).toBe(true);
+    expect(bytes.reservations[2]?.released).toBe(true);
     expect(decode.active()).toBe(false);
   });
 });

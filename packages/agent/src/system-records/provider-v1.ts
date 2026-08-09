@@ -27,6 +27,7 @@ import type {
 import {
   createSystemRecordProviderPermitGateV1,
   createSystemRecordProviderTokenBucketV1,
+  raceSystemRecordAbortV1,
   type SystemRecordProviderFrameAdmissionV1,
   type SystemRecordProviderFrameReservationV1,
   type SystemRecordProviderPermitGateV1,
@@ -135,7 +136,7 @@ export function createSystemRecordProviderV1(
       try {
         let request: SystemRecordRequestHeaderV1;
         try {
-          const requestFrame = await raceAbort(
+          const requestFrame = await raceSystemRecordAbortV1(
             exchange.readRequestFrame(controller.signal),
             controller.signal,
           );
@@ -166,7 +167,7 @@ export function createSystemRecordProviderV1(
         try {
           let artifact: SystemRecordArtifactV1 | null;
           try {
-            artifact = await raceAbort(
+            artifact = await raceSystemRecordAbortV1(
               options.repository.resolve(repositoryLookupV1(request), controller.signal),
               controller.signal,
             );
@@ -227,7 +228,7 @@ export function createSystemRecordProviderV1(
             responseTokens = bucket.tryReserveResponse(response.byteLength);
             if (responseTokens === null) return reset(exchange, 'response-rate');
             try {
-              await raceAbort(
+              await raceSystemRecordAbortV1(
                 exchange.writeResponseFrame(response, controller.signal),
                 controller.signal,
               );
@@ -326,13 +327,4 @@ function positiveTimeout(value: number): number {
     );
   }
   return value;
-}
-
-function raceAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
-  });
 }
