@@ -106,6 +106,7 @@ export default defineConfig({
       "test/system-context-graph-policy.test.ts",
       "test/system-record-requester-v1.test.ts",
       "test/system-record-requester-wire-v1.test.ts",
+      "test/system-record-reconcile-transport-v1.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-fanout-peer-selection.test.ts",
