@@ -2393,11 +2393,14 @@ describe('validateReadOnlySparql', () => {
   });
 
   it('gives read-then-update text no recognized read-only form', () => {
-    const analysis = analyzeSparqlOperation(
-      'SELECT ?s WHERE { GRAPH <urn:g> { ?s ?p ?o } }; DROP ALL',
-    );
+    const sparql = 'SELECT ?s WHERE { GRAPH <urn:g> { ?s ?p ?o } }; DROP ALL';
+    const analysis = analyzeSparqlOperation(sparql);
 
     expect(recognizedReadOnlySparqlForm(analysis)).toBeNull();
+    expect(validateReadOnlySparql(sparql)).toMatchObject({
+      safe: false,
+      reason: expect.stringContaining('mutating keyword "DROP"'),
+    });
   });
 
   it('allows BASE declaration before SELECT', () => {
