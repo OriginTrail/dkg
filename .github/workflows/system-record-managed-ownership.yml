@@ -214,7 +214,8 @@ jobs:
       - name: CLI supervisor conformance
         run: |
           pnpm --filter @origintrail-official/dkg exec vitest run \
-            test/oxigraph-server.test.ts
+            test/oxigraph-server.test.ts \
+            test/oxigraph-server-module-boundary.test.ts
           pnpm --filter @origintrail-official/dkg exec vitest run \
             test/oxigraph-managed.test.ts
 
