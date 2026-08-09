@@ -20,7 +20,7 @@ import {
 } from './system-record-rdf-schema-v1-internal.js';
 import type {
   SystemRecordMaterializationEpochRotationV1,
-} from './system-record-materialization-epoch-contract-v1-internal.js';
+} from './system-record-materialization-epoch-contract-v1.js';
 
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const MAX_EPOCH_QUERY_BYTES = 4 * 1024;

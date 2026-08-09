@@ -18,9 +18,11 @@ import {
   snapshotSystemRecordExactDataRecordV1,
 } from './system-record-input-guards-v1-internal.js';
 import {
-  snapshotSystemRecordMaterializationEpochRotationV1,
   type SystemRecordMaterializationEpochRotationV1,
-} from './system-record-materialization-epoch-contract-v1-internal.js';
+} from './system-record-materialization-epoch-contract-v1.js';
+import {
+  snapshotSystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-guard-v1-internal.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).

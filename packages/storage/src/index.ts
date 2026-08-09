@@ -82,7 +82,7 @@ export {
 } from './system-record-materializer-v1.js';
 export type {
   SystemRecordMaterializationEpochRotationV1,
-} from './system-record-materialization-epoch-contract-v1-internal.js';
+} from './system-record-materialization-epoch-contract-v1.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,

@@ -1,10 +1,7 @@
 import { snapshotSystemRecordDataRecordV1 } from './system-record-input-guards-v1-internal.js';
-
-/** Typed result returned by the child-handoff epoch rotation boundary. */
-export interface SystemRecordMaterializationEpochRotationV1 {
-  readonly epoch: string;
-  readonly childGeneration: string;
-}
+import type {
+  SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-contract-v1.js';
 
 /**
  * Snapshot an untrusted epoch rotation result through the canonical plain-data
