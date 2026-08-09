@@ -2066,6 +2066,90 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     }
   });
 
+  async function createExactVmRecoveryHarness(options: {
+    name: string;
+    localCgId: string;
+    peers: string[];
+    targetCount: number;
+    found: (peerId: string, ordinal: number) => boolean;
+  }) {
+    const created = await DKGAgent.create({
+      name: options.name,
+      chainAdapter: new MockChainAdapter(),
+    });
+    const internals = created as unknown as AgentInternals;
+    const connected = options.peers.map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: `12D3KooW${options.name}Local`,
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: options.peers,
+      curatorIsLocal: false,
+      legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (
+      peers: Array<{ toString(): string }>,
+    ) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+
+    const fetches: Array<{ peerId: string; ordinal: number }> = [];
+    const recovered = new Set<number>();
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cg: string,
+      uals: string[],
+    ) => {
+      activeFetches += 1;
+      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+      const ordinal = Number(uals[0]!.split('/').at(-1));
+      fetches.push({ peerId, ordinal });
+      const wasFound = options.found(peerId, ordinal);
+      if (wasFound) recovered.add(ordinal);
+      activeFetches -= 1;
+      return {
+        result: {
+          fetchedDataTriples: wasFound ? 1 : 0,
+          fetchedMetaTriples: wasFound ? 8 : 0,
+          insertedTriples: wasFound ? 9 : 0,
+          failedPeers: 0,
+          failedPhases: 0,
+          deferredBackpressure: 0,
+        },
+        disposition: wasFound ? 'found' as const : 'clean-absent' as const,
+      };
+    };
+    const targets = Array.from({ length: options.targetCount }, (_, ordinal) =>
+      vmRecoveryTarget(options.localCgId, ordinal, String(ordinal)));
+    (internals as any).reconcileChainOrdinal = async (
+      _localCgId: string,
+      _onChainCgId: bigint,
+      ordinal: number,
+    ) => recovered.has(ordinal)
+      ? { status: 'reconciled', blockNumber: 100 }
+      : { status: 'pending', recovery: targets[ordinal] };
+
+    return {
+      agent: created,
+      internals,
+      targets,
+      fetches,
+      recovered,
+      maxActiveFetches: () => maxActiveFetches,
+      run: () => internals.recoverVmReconcileBatch(
+        options.localCgId,
+        1n,
+        targets,
+        100,
+        () => true,
+      ),
+    };
+  }
+
   it('sweep triggers a reconcile for a core-hosted CG with NO member subscription', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillSweep', chainAdapter: chain });
@@ -2724,127 +2808,49 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
   });
 
   it('reuses a proven holder sequentially across the bounded recovery slice', async () => {
-    const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'ExactVmProvenHolderBurst', chainAdapter: chain });
-    const internals = agent as unknown as AgentInternals;
     const holder = '12D3KooWExactProvenAHolder';
     const fallback = '12D3KooWExactProvenZFallback';
     const localCgId = '0x0000000000000000000000000000000000000001/proven-holder';
-    const connected = [holder, fallback].map((peerId) => ({ toString: () => peerId }));
-    (internals as any).node = {
-      peerId: '12D3KooWExactProvenLocal',
-      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
-    };
-    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
-      peerIds: [holder, fallback], curatorIsLocal: false, legacyTripleResolved: false,
+    const harness = await createExactVmRecoveryHarness({
+      name: 'ExactVmProvenHolderBurst',
+      localCgId,
+      peers: [holder, fallback],
+      targetCount: 4,
+      found: (peerId) => peerId === holder,
     });
-    (internals as any).ensurePeerConnected = async () => undefined;
-    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
-    (internals as any).waitForSyncProtocol = async () => true;
-    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
-    const fetches: Array<{ peerId: string; ordinal: number }> = [];
-    const recovered = new Set<number>();
-    let activeFetches = 0;
-    let maxActiveFetches = 0;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
-      peerId: string,
-      _cg: string,
-      uals: string[],
-    ) => {
-      activeFetches += 1;
-      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
-      const ordinal = Number(uals[0]!.split('/').at(-1));
-      fetches.push({ peerId, ordinal });
-      if (peerId === holder) recovered.add(ordinal);
-      activeFetches -= 1;
-      return {
-        result: {
-          fetchedDataTriples: peerId === holder ? 1 : 0,
-          fetchedMetaTriples: peerId === holder ? 8 : 0,
-          insertedTriples: peerId === holder ? 9 : 0,
-          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
-        },
-        disposition: peerId === holder ? 'found' as const : 'clean-absent' as const,
-      };
-    };
-    const targets = Array.from({ length: 4 }, (_, ordinal) =>
-      vmRecoveryTarget(localCgId, ordinal, String(ordinal)));
-    (internals as any).reconcileChainOrdinal = async (
-      _lcg: string, _ocg: bigint, ordinal: number,
-    ) => recovered.has(ordinal)
-      ? { status: 'reconciled', blockNumber: 100 }
-      : { status: 'pending', recovery: targets[ordinal] };
+    agent = harness.agent;
+    const result = await harness.run();
 
-    const result = await internals.recoverVmReconcileBatch(
-      localCgId, 1n, targets, 100, () => true,
-    );
-
-    expect(fetches).toEqual(targets.map((target) => ({
+    expect(harness.fetches).toEqual(harness.targets.map((target) => ({
       peerId: holder,
       ordinal: target.ordinal,
     })));
-    expect(maxActiveFetches).toBe(1);
-    expect(result.attemptedOrdinals).toEqual(targets.map((target) => target.ordinal));
+    expect(harness.maxActiveFetches()).toBe(1);
+    expect(result.attemptedOrdinals).toEqual(
+      harness.targets.map((target) => target.ordinal),
+    );
     expect([...result.outcomes.values()]).toEqual(
-      targets.map(() => ({ status: 'reconciled', blockNumber: 100 })),
+      harness.targets.map(() => ({ status: 'reconciled', blockNumber: 100 })),
     );
     expect(result.continuationOrdinal).toBeUndefined();
   });
 
   it('stops reusing a proven holder after a clean absence', async () => {
-    const chain = new MockChainAdapter();
-    agent = await DKGAgent.create({ name: 'ExactVmProvenHolderRevocation', chainAdapter: chain });
-    const internals = agent as unknown as AgentInternals;
     const holder = '12D3KooWExactRevocationAHolder';
     const fallback = '12D3KooWExactRevocationZFallback';
     const localCgId = '0x0000000000000000000000000000000000000001/revoke-holder';
-    const connected = [holder, fallback].map((peerId) => ({ toString: () => peerId }));
-    (internals as any).node = {
-      peerId: '12D3KooWExactRevocationLocal',
-      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
-    };
-    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
-      peerIds: [holder, fallback], curatorIsLocal: false, legacyTripleResolved: false,
+    const harness = await createExactVmRecoveryHarness({
+      name: 'ExactVmProvenHolderRevocation',
+      localCgId,
+      peers: [holder, fallback],
+      targetCount: 3,
+      found: (peerId, ordinal) => (peerId === holder && ordinal === 0)
+        || (peerId === fallback && ordinal === 2),
     });
-    (internals as any).ensurePeerConnected = async () => undefined;
-    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
-    (internals as any).waitForSyncProtocol = async () => true;
-    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
-    const fetches: Array<{ peerId: string; ordinal: number }> = [];
-    const recovered = new Set<number>();
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
-      peerId: string,
-      _cg: string,
-      uals: string[],
-    ) => {
-      const ordinal = Number(uals[0]!.split('/').at(-1));
-      fetches.push({ peerId, ordinal });
-      const found = (peerId === holder && ordinal === 0)
-        || (peerId === fallback && ordinal === 2);
-      if (found) recovered.add(ordinal);
-      return {
-        result: {
-          fetchedDataTriples: found ? 1 : 0,
-          fetchedMetaTriples: found ? 8 : 0,
-          insertedTriples: found ? 9 : 0,
-          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
-        },
-        disposition: found ? 'found' as const : 'clean-absent' as const,
-      };
-    };
-    const targets = Array.from({ length: 3 }, (_, ordinal) =>
-      vmRecoveryTarget(localCgId, ordinal, String(ordinal)));
-    (internals as any).reconcileChainOrdinal = async (
-      _lcg: string, _ocg: bigint, ordinal: number,
-    ) => recovered.has(ordinal)
-      ? { status: 'reconciled', blockNumber: 100 }
-      : { status: 'pending', recovery: targets[ordinal] };
+    agent = harness.agent;
+    const result = await harness.run();
 
-    const result = await internals.recoverVmReconcileBatch(
-      localCgId, 1n, targets, 100, () => true,
-    );
-
-    expect(fetches).toEqual([
+    expect(harness.fetches).toEqual([
       { peerId: holder, ordinal: 0 },
       { peerId: holder, ordinal: 1 },
       { peerId: fallback, ordinal: 2 },
