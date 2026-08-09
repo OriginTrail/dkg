@@ -59,6 +59,24 @@ describe('system-record exact requester wire mapping V1', () => {
       objectDigest: DIGEST_B,
     });
   });
+
+  it('snapshots and freezes mutable inventory paths before asynchronous transfer', () => {
+    const path = [1, 7];
+    const request = createSystemRecordExactRequestV1(NETWORK, {
+      type: 'inventory-object',
+      rootDescriptorDigest: DIGEST_A,
+      path,
+      objectKind: 'inventory-leaf',
+      objectDigest: DIGEST_B,
+    }, REQUEST_ID);
+    path[0] = 0;
+
+    expect(request.operation).toBe('get-inventory-object');
+    if (request.operation !== 'get-inventory-object') return;
+    expect(request.path).toEqual([1, 7]);
+    expect(Object.isFrozen(request.path)).toBe(true);
+    expect(Object.isFrozen(request)).toBe(true);
+  });
 });
 
 function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {

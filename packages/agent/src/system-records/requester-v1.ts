@@ -52,6 +52,10 @@ interface FetchEntryV1 {
   retained?: SystemRecordRetainedSourceV1;
 }
 
+type SystemRecordRequesterSettlementV1 =
+  | SystemRecordRetainTransferResultV1
+  | Exclude<SystemRecordExactFetchResultV1, Readonly<{ outcome: 'ok' }>>;
+
 /**
  * One default-unused exact requester. Same-coordinate calls share one transfer,
  * while unrelated digests never wait behind the single process-wide stream.
@@ -176,7 +180,7 @@ export function createSystemRecordRequesterV1(
       timeoutMs,
     );
     timeout.unref?.();
-    let shared: SystemRecordRetainTransferResultV1;
+    let shared: SystemRecordRequesterSettlementV1;
     try {
       exchange = await raceSystemRecordAbortV1(
         openExchange(entry.controller.signal),
@@ -232,7 +236,7 @@ export function createSystemRecordRequesterV1(
     settle(entry, shared);
   }
 
-  function settle(entry: FetchEntryV1, shared: SystemRecordRetainTransferResultV1): void {
+  function settle(entry: FetchEntryV1, shared: SystemRecordRequesterSettlementV1): void {
     entry.settled = true;
     if (shared.outcome === 'ok') {
       for (const waiter of [...entry.waiters]) deliverLease(entry, waiter);

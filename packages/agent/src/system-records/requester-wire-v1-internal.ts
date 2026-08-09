@@ -3,17 +3,18 @@
 import {
   SYSTEM_RECORD_KIND_V1,
   SYSTEM_RECORD_WIRE_VERSION_V1,
-  decodeSystemRecordRequestFrameV1,
-  encodeSystemRecordRequestFrameV1,
   type NetworkIdV1,
   type SystemRecordRequestHeaderV1,
   type SystemRecordResponseStatusV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type {
-  SystemRecordExactArtifactLookupV1,
-  SystemRecordExactFetchResultV1,
-} from './requester-api-v1.js';
+import type { SystemRecordExactArtifactLookupV1 } from './requester-api-v1.js';
+
+export type SystemRecordRemoteFetchOutcomeV1 =
+  | 'not-found'
+  | 'unsupported'
+  | 'remote-busy'
+  | 'remote-error';
 
 export function createSystemRecordExactRequestV1(
   networkId: NetworkIdV1,
@@ -27,29 +28,28 @@ export function createSystemRecordExactRequestV1(
     networkId,
     payloadBytes: '0' as const,
   };
-  const request: SystemRecordRequestHeaderV1 = lookup.type === 'inventory-object'
-    ? {
+  return lookup.type === 'inventory-object'
+    ? Object.freeze({
       ...common,
       operation: 'get-inventory-object',
       rootDescriptorDigest: lookup.rootDescriptorDigest,
-      path: lookup.path,
+      path: Object.freeze([...lookup.path]),
       objectKind: lookup.objectKind,
       objectDigest: lookup.objectDigest,
-    }
+    })
     : lookup.objectKind === 'profile-bundle'
-      ? {
+      ? Object.freeze({
         ...common,
         operation: 'get-bundle',
         objectKind: lookup.objectKind,
         objectDigest: lookup.objectDigest,
-      }
-      : {
+      })
+      : Object.freeze({
         ...common,
         operation: 'get-control-object',
         objectKind: lookup.objectKind,
         objectDigest: lookup.objectDigest,
-      };
-  return decodeSystemRecordRequestFrameV1(encodeSystemRecordRequestFrameV1(request));
+      });
 }
 
 export function systemRecordExactRequestKeyV1(request: SystemRecordRequestHeaderV1): string {
@@ -70,7 +70,7 @@ export function systemRecordExactRequestKeyV1(request: SystemRecordRequestHeader
 
 export function systemRecordExactResponseOutcomeV1(
   status: Exclude<SystemRecordResponseStatusV1, 'ok'>,
-): Exclude<SystemRecordExactFetchResultV1, Readonly<{ outcome: 'ok' }>>['outcome'] {
+): SystemRecordRemoteFetchOutcomeV1 {
   switch (status) {
     case 'not-found': return 'not-found';
     case 'unsupported': return 'unsupported';

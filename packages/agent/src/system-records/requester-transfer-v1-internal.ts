@@ -11,15 +11,16 @@ import {
 
 import type { SystemRecordArtifactV1 } from './artifact-v1.js';
 import type {
-  SystemRecordExactFetchLeaseV1,
-  SystemRecordExactFetchResultV1,
   SystemRecordRequesterAdmissionV1,
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterByteReservationV1,
   SystemRecordRequesterExchangeV1,
   SystemRecordRequesterPermitV1,
 } from './requester-api-v1.js';
-import { systemRecordExactResponseOutcomeV1 } from './requester-wire-v1-internal.js';
+import {
+  systemRecordExactResponseOutcomeV1,
+  type SystemRecordRemoteFetchOutcomeV1,
+} from './requester-wire-v1-internal.js';
 import { raceSystemRecordAbortV1 } from './transport-v1.js';
 
 export interface SystemRecordDecodedTransferV1 {
@@ -36,10 +37,10 @@ export interface SystemRecordRetainedSourceV1 {
 
 export type SystemRecordRetainTransferResultV1 =
   | Readonly<{ outcome: 'ok'; retained: SystemRecordRetainedSourceV1 }>
-  | Exclude<
-    SystemRecordExactFetchResultV1,
-    Readonly<{ outcome: 'ok'; lease: SystemRecordExactFetchLeaseV1 }>
-  >;
+  | Readonly<{
+    outcome: SystemRecordRemoteFetchOutcomeV1 | 'busy' | 'capacity';
+    wireBytes: number;
+  }>;
 
 export async function exchangeSystemRecordResponseV1(input: {
   readonly request: SystemRecordRequestHeaderV1;
