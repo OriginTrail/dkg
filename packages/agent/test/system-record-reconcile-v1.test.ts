@@ -281,8 +281,7 @@ async function publishedFixture() {
       signal: AbortSignal,
     ) => {
       const stored = inventory.objects.get(request.objectDigest);
-      const objectKind = request.expectedKind ?? stored?.objectKind;
-      if (objectKind === undefined) return undefined;
+      const objectKind = request.expectedKind;
       const artifact = await fixture.store.resolve({
         type: 'inventory-object',
         rootDescriptorDigest: request.rootDescriptorDigest,
@@ -291,7 +290,11 @@ async function publishedFixture() {
         objectDigest: request.objectDigest,
       }, signal);
       return artifact === null
-        ? undefined
+        ? {
+            outcome: 'rejected' as const,
+            wireBytes: 6,
+            rejection: 'not-found' as const,
+          }
         : {
           outcome: 'ok' as const,
           objectKind,

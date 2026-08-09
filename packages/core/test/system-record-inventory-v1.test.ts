@@ -179,11 +179,25 @@ describe('system-record immutable B+tree objects', () => {
     let discoveredLeaves = 0;
     const requestedPaths: number[][] = [];
     const discoveredRows: SystemRecordInventoryRowV1[] = [];
+    const digestByPath = new Map<string, typeof snapshot.descriptor.treeRootDigest>();
+    const indexPaths = (
+      digest: typeof snapshot.descriptor.treeRootDigest,
+      path: readonly number[],
+    ): void => {
+      digestByPath.set(JSON.stringify(path), digest);
+      const stored = snapshot.objects.get(digest)!;
+      if (stored.objectKind !== 'inventory-internal') return;
+      const internal = stored.object as SystemRecordInventoryInternalObjectV1;
+      internal.entries.forEach((entry, index) => indexPaths(entry.childDigest, [...path, index]));
+    };
+    indexPaths(snapshot.descriptor.treeRootDigest, []);
     while (true) {
       const result = await traversal.advance(async (digest, _expectedKind, _signal, path) => {
         expect(Object.isFrozen(path)).toBe(true);
         requestedPaths.push([...path]);
-        const stored = snapshot.objects.get(digest)!;
+        expect(digestByPath.get(JSON.stringify(path))).toBe(digest);
+        const pathDigest = digestByPath.get(JSON.stringify(path))!;
+        const stored = snapshot.objects.get(pathDigest)!;
         if (stored.objectKind === 'inventory-leaf') discoveredLeaves += 1;
         return loadedInventoryObject(stored);
       }, {

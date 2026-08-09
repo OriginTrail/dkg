@@ -4,6 +4,8 @@ import {
   SYSTEM_RECORD_MAX_INVENTORY_LEAVES,
   SYSTEM_RECORD_MAX_INVENTORY_OBJECTS,
   SYSTEM_RECORD_MAX_INVENTORY_RECORDS,
+  SYSTEM_RECORD_LEAF_MAX_ROWS,
+  SYSTEM_RECORD_LEAF_MIN_ROWS,
   SYSTEM_RECORD_MAX_SLICE_REQUESTS,
   SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
   SYSTEM_RECORD_MAX_TREE_HEIGHT,
@@ -71,7 +73,7 @@ export interface SystemRecordInventoryTraversalV1 {
   advance(
     load: (
       digest: Digest32V1,
-      expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined,
+      expectedKind: 'inventory-internal' | 'inventory-leaf',
       signal: AbortSignal | undefined,
       path: readonly number[],
     ) => Promise<
@@ -84,7 +86,7 @@ export interface SystemRecordInventoryTraversalV1 {
 interface SystemRecordInventoryTraversalWorkV1 {
   readonly digest: Digest32V1;
   readonly depth: number;
-  readonly expectedKind?: 'inventory-internal' | 'inventory-leaf';
+  readonly expectedKinds: readonly ('inventory-internal' | 'inventory-leaf')[];
   readonly expectedFirst?: Digest32V1;
   readonly upperExclusive?: Digest32V1;
   readonly expectedLast?: Digest32V1;
@@ -102,6 +104,7 @@ export function createSystemRecordInventoryTraversalV1(
     {
       digest: pinned.treeRootDigest,
       depth: 1,
+      expectedKinds: rootExpectedKinds(expectedRows),
       path: Object.freeze([]),
     },
   ];
@@ -124,7 +127,7 @@ export function createSystemRecordInventoryTraversalV1(
   async function advance(
     load: (
       digest: Digest32V1,
-      expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined,
+      expectedKind: 'inventory-internal' | 'inventory-leaf',
       signal: AbortSignal | undefined,
       path: readonly number[],
     ) => Promise<
@@ -183,8 +186,9 @@ export function createSystemRecordInventoryTraversalV1(
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) break;
         const work = pending[pending.length - 1];
+        const expectedKind = work.expectedKinds[0]!;
         const maximumNextBytes = framedObjectMaximum(
-          work.expectedKind === 'inventory-internal' ? 'inventory-internal' : 'inventory-leaf',
+          expectedKind,
         );
         if (requests >= maxRequests || wireBytes + maximumNextBytes > maxWireBytes) break;
         if (work.depth > SYSTEM_RECORD_MAX_TREE_HEIGHT)
@@ -199,7 +203,7 @@ export function createSystemRecordInventoryTraversalV1(
         const loaded = await loadInventoryObjectWithinDeadlineV1(
           (loadSignal) => load(
             work.digest,
-            work.expectedKind,
+            expectedKind,
             loadSignal,
             Object.freeze([...work.path]),
           ),
@@ -236,6 +240,20 @@ export function createSystemRecordInventoryTraversalV1(
             rejected.rejection !== 'transport'
           ) {
             throw new Error('inventory loader returned an invalid rejection');
+          }
+          if (rejected.rejection === 'not-found' && work.expectedKinds.length > 1) {
+            pending[pending.length - 1] = Object.freeze({
+              ...work,
+              expectedKinds: Object.freeze(work.expectedKinds.slice(1)),
+            });
+            return Object.freeze({
+              status: 'paused',
+              requests,
+              wireBytes,
+              validatedRows: rows,
+              validatedLeaves: leaves,
+              rows: Object.freeze([...sliceRows]),
+            });
           }
           return Object.freeze({
             status: 'rejected',
@@ -276,7 +294,7 @@ export function createSystemRecordInventoryTraversalV1(
         if ((artifact.wireBytes as number) < 6 + canonicalBytes.byteLength) {
           throw new Error('inventory loader returned an over-cap object');
         }
-        if (work.expectedKind !== undefined && artifact.objectKind !== work.expectedKind) {
+        if (artifact.objectKind !== expectedKind) {
           throw new Error('inventory child kind mismatch');
         }
         const root = work.depth === 1;
@@ -345,7 +363,7 @@ export function createSystemRecordInventoryTraversalV1(
             pending.push({
               digest: entry.childDigest,
               depth: work.depth + 1,
-              expectedKind: entry.childKind,
+              expectedKinds: Object.freeze([entry.childKind]),
               expectedFirst: entry.separatorKeyHash,
               ...(index === internal.entries.length - 1
                 ? {}
@@ -402,6 +420,18 @@ export function createSystemRecordInventoryTraversalV1(
       objectDigests: new Set(completed.objectDigests),
     });
   }
+}
+
+function rootExpectedKinds(
+  expectedRows: number,
+): readonly ('inventory-internal' | 'inventory-leaf')[] {
+  if (expectedRows < 2 * SYSTEM_RECORD_LEAF_MIN_ROWS) {
+    return Object.freeze(['inventory-leaf']);
+  }
+  if (expectedRows > SYSTEM_RECORD_LEAF_MAX_ROWS) {
+    return Object.freeze(['inventory-internal']);
+  }
+  return Object.freeze(['inventory-leaf', 'inventory-internal']);
 }
 
 function framedObjectMaximum(objectKind: 'inventory-internal' | 'inventory-leaf'): number {

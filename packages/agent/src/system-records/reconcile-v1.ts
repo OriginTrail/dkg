@@ -7,7 +7,6 @@ import {
   SYSTEM_RECORD_MAX_CONTINUATION_ADVANCES,
   SYSTEM_RECORD_MAX_CONTINUATION_SLICES,
   SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES,
-  SYSTEM_RECORD_LEAF_MIN_ROWS,
   SYSTEM_RECORD_MAX_SLICE_ADVANCES,
   SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
@@ -26,6 +25,7 @@ import {
 import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
 import type { AgentProfileReceiverV1 } from './receiver-v1.js';
+import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
 
 export interface AgentProfileReconcilePermitV1 {
   release(): void;
@@ -45,8 +45,7 @@ export interface AgentProfileInventoryLoadRequestV1 {
 
 export type AgentProfileInventoryLoadResultV1 =
   | SystemRecordInventoryLoadedObjectV1
-  | SystemRecordInventoryRejectedLoadV1
-  | undefined;
+  | SystemRecordInventoryRejectedLoadV1;
 
 export interface CreateAgentProfileReconcilerOptionsV1 {
   readonly networkId: NetworkIdV1;
@@ -137,10 +136,6 @@ export async function createAgentProfileReconcilerV1(
   }
 
   const traversal = createSystemRecordInventoryTraversalV1(rootEnvelope.object);
-  const rootKindIsAmbiguous = BigInt(rootEnvelope.object.totalRows)
-    >= BigInt(2 * SYSTEM_RECORD_LEAF_MIN_ROWS);
-  let rootProbeKind: 'inventory-internal' | 'inventory-leaf' = 'inventory-leaf';
-  const rootKindsNotFound = new Set<'inventory-internal' | 'inventory-leaf'>();
   let pendingRows: SystemRecordInventoryRowV1[] = [];
   let inventoryComplete = false;
   let completed = false;
@@ -190,23 +185,18 @@ export async function createAgentProfileReconcilerV1(
       }
 
       advances += 1;
-      let attemptedAmbiguousRootKind: 'inventory-internal' | 'inventory-leaf' | undefined;
       const slice = await traversal.advance(
         async (objectDigest, expectedKind, loadSignal, path) => {
-          const requestedKind = expectedKind ?? rootProbeKind;
-          if (expectedKind === undefined && rootKindIsAmbiguous) {
-            attemptedAmbiguousRootKind = requestedKind;
-          }
           const loaded = await loadInventoryObject(
             Object.freeze({
               rootDescriptorDigest: rootEnvelope.objectDigest,
               objectDigest,
-              expectedKind: requestedKind,
+              expectedKind,
               path,
             }),
             loadSignal ?? controller.signal,
           );
-          if (loaded?.outcome === 'ok' && loaded.objectKind !== requestedKind) {
+          if (loaded.outcome === 'ok' && loaded.objectKind !== expectedKind) {
             return Object.freeze({
               outcome: 'rejected' as const,
               wireBytes: loaded.wireBytes,
@@ -225,20 +215,6 @@ export async function createAgentProfileReconcilerV1(
       );
       inventoryRequests += slice.requests;
       inventoryWireBytes += slice.wireBytes;
-      if (
-        slice.status === 'rejected'
-        && slice.rejection === 'not-found'
-        && attemptedAmbiguousRootKind !== undefined
-      ) {
-        rootKindsNotFound.add(attemptedAmbiguousRootKind);
-        rootProbeKind = attemptedAmbiguousRootKind === 'inventory-leaf'
-          ? 'inventory-internal'
-          : 'inventory-leaf';
-        if (rootKindsNotFound.size < 2) {
-          return result('paused', 'inventory', slice.requests, slice.wireBytes, []);
-        }
-        rootKindsNotFound.clear();
-      }
       if (slice.validatedLeaves > SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES) {
         return result(
           'blocked',
@@ -249,6 +225,9 @@ export async function createAgentProfileReconcilerV1(
           'activation-leaf-limit',
         );
       }
+      // Inventory authenticates availability only. Each row carries independent signed
+      // authority, so apply a validated leaf before fetching its siblings and retain no
+      // more than one decoded leaf; only full traversal can mark the continuation complete.
       pendingRows = [...slice.rows];
       if (slice.status === 'rejected') {
         return result(
@@ -286,7 +265,7 @@ export async function createAgentProfileReconcilerV1(
         return result('blocked', 'records', 0, 0, outcomes, 'continuation-limit');
       }
       const row = pendingRows[0]!;
-      if (row.tombstone || row.quarantined || row.conflictEvidenceDigest !== undefined) {
+      if (!isOrdinaryActiveInventoryRowV1(row)) {
         return result('blocked', 'records', 0, 0, outcomes, 'unsupported-row-state');
       }
       advances += 1;

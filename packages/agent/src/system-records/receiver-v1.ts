@@ -41,6 +41,7 @@ import {
   type SystemRecordArtifactRepositoryV1,
   type SystemRecordArtifactV1,
 } from './artifact-v1.js';
+import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
 
 export type SignedAgentProfileActiveHeadEnvelopeV1 = SignedAgentProfileHeadEnvelopeV1 & {
   readonly object: AgentProfileActiveHeadObjectV1;
@@ -145,7 +146,7 @@ export function createAgentProfileReceiverV1(
     ): Promise<SystemRecordApplyOutcomeV1> {
       signal.throwIfAborted();
       const row = canonicalInventoryRow(networkId, inputRow);
-      if (row.tombstone || row.quarantined || row.conflictEvidenceDigest !== undefined) {
+      if (!isOrdinaryActiveInventoryRowV1(row)) {
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
 
