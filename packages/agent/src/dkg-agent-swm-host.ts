@@ -481,7 +481,7 @@ import type { DKGAgent } from './dkg-agent.js';
 import type {
   ContextGraphBindingTarget,
 } from './context-graph-binding-state.js';
-import { resolveBooleanSwitch } from './sync/backpressure.js';
+import { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE = 32;
 
@@ -2757,11 +2757,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   vmReconcileEnabled(this: DKGAgent): boolean {
     return (
-      resolveBooleanSwitch(
-        this.config.syncReconcilerEnabled,
-        'DKG_SYNC_RECONCILER_ENABLED',
-        true,
-      )
+      resolveSyncReconcilerEnabled(this.config.syncReconcilerEnabled)
       &&
       this.chain.chainId !== 'none' &&
       typeof this.chain.getContextGraphKCCount === 'function' &&

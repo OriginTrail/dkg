@@ -195,6 +195,42 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
   });
 });
 
+describe('/api/status effective sync lifecycle switches', () => {
+  it('surfaces the configured reconciler switch', async () => {
+    const response = await requestStatusWithAgent(
+      {},
+      { syncReconcilerEnabled: false },
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.syncLifecycle).toEqual({
+      syncReconcilerEnabled: false,
+    });
+  });
+
+  it('surfaces the environment override that runtime actually honors', async () => {
+    const previous = process.env.DKG_SYNC_RECONCILER_ENABLED;
+    process.env.DKG_SYNC_RECONCILER_ENABLED = 'true';
+    try {
+      const response = await requestStatusWithAgent(
+        {},
+        { syncReconcilerEnabled: false },
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.body.syncLifecycle).toEqual({
+        syncReconcilerEnabled: true,
+      });
+    } finally {
+      if (previous === undefined) {
+        delete process.env.DKG_SYNC_RECONCILER_ENABLED;
+      } else {
+        process.env.DKG_SYNC_RECONCILER_ENABLED = previous;
+      }
+    }
+  });
+});
+
 describe('/api/info chain sanitization', () => {
   it('never serializes configured RPC endpoint credentials when API auth is disabled', async () => {
     const credentialSentinel = 'UNIT_TEST_RPC_CREDENTIAL_MUST_NOT_LEAK';

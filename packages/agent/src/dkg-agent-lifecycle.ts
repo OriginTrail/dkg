@@ -325,8 +325,9 @@ import {
 import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
-  resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
+  resolveBooleanSwitch,
+  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
@@ -1213,7 +1214,7 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncReconcilerEnabled, 'DKG_SYNC_RECONCILER_ENABLED', true);
+  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
 }
 
 function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
