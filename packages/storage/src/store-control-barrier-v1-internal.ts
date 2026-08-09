@@ -189,13 +189,13 @@ export class StoreControlBarrierCoordinator {
    * idempotent control transition; do not use one purpose for two different
    * transitions.
    */
-  enqueue<T>(
+  enqueue(
     storeId: object,
     purpose: string,
-    transition: () => Promise<T>,
+    transition: () => Promise<unknown>,
     generation?: string,
     timeoutMs?: number,
-  ): Promise<T> {
+  ): Promise<unknown> {
     const existing = this.barriers.find(
       (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
     );
@@ -203,10 +203,10 @@ export class StoreControlBarrierCoordinator {
       existing.coalesced += 1;
       this.coalescedTotal += 1;
       this.host.observeDepths();
-      // The one cast, and it lives here because the coalescing invariant does:
-      // callers of the same (storeId, purpose) share a transition by design, so
-      // the coordinator is what knows the shared promise carries T.
-      return existing.promise as Promise<T>;
+      // The result is intentionally unknown: purpose is a runtime string, so a
+      // later same-key caller cannot soundly choose a new static result type for
+      // the first caller's already-shared promise.
+      return existing.promise;
     }
     let resolve!: (value: unknown) => void;
     let reject!: (reason?: unknown) => void;
@@ -245,7 +245,7 @@ export class StoreControlBarrierCoordinator {
     this.barriers.push(barrier);
     this.host.observeDepths();
     this.pump();
-    return promise as Promise<T>;
+    return promise;
   }
 
   /**

@@ -18,6 +18,17 @@ import {
   snapshotSystemRecordExactDataRecordV1,
 } from './system-record-input-guards-v1-internal.js';
 
+function isMaterializationEpochBindingV1(
+  value: unknown,
+): value is { readonly epoch: string; readonly childGeneration: string } {
+  return typeof value === 'object'
+    && value !== null
+    && 'epoch' in value
+    && typeof value.epoch === 'string'
+    && 'childGeneration' in value
+    && typeof value.childGeneration === 'string';
+}
+
 /**
  * System-record V1 lane controller (#2052 Stack B2).
  *
@@ -213,10 +224,10 @@ export interface SystemRecordLaneExecutionBindingV1 {
  * handoff steps are limited to supervisor calls, owned-client drains and
  * synchronous cache invalidation.
  */
-export type SystemRecordLaneBarrierV1 = <T>(
+export type SystemRecordLaneBarrierV1 = (
   purpose: string,
-  transition: () => Promise<T>,
-) => Promise<T>;
+  transition: () => Promise<unknown>,
+) => Promise<unknown>;
 
 export interface SystemRecordLaneControllerDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
@@ -746,7 +757,7 @@ class SystemRecordLaneSession {
   ): Promise<void> {
     this.assertLeaseLive();
     this.commitState('enabling');
-    let rotated: void | { readonly epoch: string; readonly childGeneration: string };
+    let rotated: unknown;
     try {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
@@ -765,12 +776,10 @@ class SystemRecordLaneSession {
       this.clearActiveBinding();
       throw error;
     }
+    const rotation = isMaterializationEpochBindingV1(rotated) ? rotated : undefined;
     if (
-      (!rotated && this.deps.executor.applyVerifiedSettlementBound) ||
-      (rotated && (
-        typeof rotated.epoch !== 'string' ||
-        typeof rotated.childGeneration !== 'string'
-      ))
+      (rotated === undefined && this.deps.executor.applyVerifiedSettlementBound) ||
+      (rotated !== undefined && rotation === undefined)
     ) {
       this.failManagedMutationsClosed(
         'enable transition did not return a materialization epoch binding',
@@ -788,7 +797,7 @@ class SystemRecordLaneSession {
     // handoff that resolved without binding a ready generation produced an
     // "enabled" lane over a child that was not the proven listener.
     const bound = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
-    const activationBinding = rotated ?? (bound && !bound.terminal && bound.ready
+    const activationBinding = rotation ?? (bound && !bound.terminal && bound.ready
       ? Object.freeze({
           epoch: INTERNAL_B2_MATERIALIZATION_EPOCH_SENTINEL_V1,
           childGeneration: bound.childGeneration,
