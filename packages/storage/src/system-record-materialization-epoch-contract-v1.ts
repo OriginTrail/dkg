@@ -22,12 +22,3 @@ export interface SystemRecordMaterializationEpochRotationV1 {
   readonly epoch: string;
   readonly childGeneration: string;
 }
-
-/** Canonical runtime result at the injected child-handoff boundary. */
-export type SystemRecordMaterializationEpochRotationSnapshotV1 =
-  | Readonly<{ kind: 'absent' }>
-  | Readonly<{ kind: 'malformed' }>
-  | Readonly<{
-      kind: 'rotation';
-      value: SystemRecordMaterializationEpochRotationV1;
-    }>;

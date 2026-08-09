@@ -19,10 +19,10 @@ import {
 } from './system-record-input-guards-v1-internal.js';
 import {
   type SystemRecordMaterializationEpochRotationV1,
-  type SystemRecordMaterializationEpochRotationSnapshotV1,
 } from './system-record-materialization-epoch-contract-v1.js';
 import {
   snapshotSystemRecordMaterializationEpochRotationV1,
+  type SystemRecordMaterializationEpochRotationSnapshotV1,
 } from './system-record-materialization-epoch-guard-v1-internal.js';
 
 /**
@@ -225,7 +225,7 @@ export type SystemRecordLaneBarrierV1 = <T>(
 ) => Promise<T>;
 
 export interface SystemRecordLaneBarrierResultsV1 {
-  readonly enable: SystemRecordMaterializationEpochRotationSnapshotV1;
+  readonly enable: void | SystemRecordMaterializationEpochRotationV1;
   readonly disable: void;
   readonly shutdown: void;
   readonly recovery: void;
@@ -249,6 +249,9 @@ export interface SystemRecordLaneControllerDepsV1 {
    * this capability shipped once with a barrier implemented, exported and
    * tested but with zero production callers, so the enable path stopped the
    * child while ordinary requests were still in flight.
+   *
+   * @deprecated Managed composition uses `typedBarrier`. Retained so existing
+   * external controller integrations keep their purpose-string contract.
    */
   readonly barrier: SystemRecordLaneBarrierV1;
   /** Optional typed path; the string callback above remains the compatibility contract. */
@@ -266,11 +269,18 @@ type SystemRecordLaneSessionDepsV1 = Pick<
   SystemRecordLaneControllerDepsV1,
   'lease' | 'handoff' | 'executor' | 'setAdmissionActive'
 > & {
-  readonly runBarrier: SystemRecordLaneTypedBarrierV1;
-  readonly rotateMaterializationEpoch: (
-    networkId?: string,
-  ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
+  readonly runBarrier: SystemRecordLaneSessionBarrierV1;
 };
+
+interface SystemRecordLaneSessionBarrierResultsV1
+  extends Omit<SystemRecordLaneBarrierResultsV1, 'enable'> {
+  readonly enable: SystemRecordMaterializationEpochRotationSnapshotV1;
+}
+
+type SystemRecordLaneSessionBarrierV1 = <K extends SystemRecordLaneBarrierKindV1>(
+  kind: K,
+  transition: () => Promise<SystemRecordLaneBarrierResultsV1[K]>,
+) => Promise<SystemRecordLaneSessionBarrierResultsV1[K]>;
 
 /** Raised when an incompatible activation descriptor is offered to a live session. */
 export class SystemRecordLaneActivationConflictError extends Error {
@@ -427,20 +437,20 @@ export function createSystemRecordLaneControllerV1(
 ): SystemRecordLaneControllerV1 {
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
-  const runBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
+  const publicBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
     ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
+  const runBarrier: SystemRecordLaneSessionBarrierV1 = async (kind, transition) => {
+    const result = await publicBarrier(kind, transition);
+    return (kind === 'enable'
+      ? snapshotSystemRecordMaterializationEpochRotationV1(result)
+      : result) as SystemRecordLaneSessionBarrierResultsV1[typeof kind];
+  };
   const session = new SystemRecordLaneSession({
     lease: deps.lease,
     handoff: deps.handoff,
     executor: deps.executor,
     setAdmissionActive: deps.setAdmissionActive,
     runBarrier,
-    // Normalize once at the injected handoff boundary. The lifecycle below
-    // consumes only domain states and never reparses the typed dependency.
-    rotateMaterializationEpoch: async (networkId) =>
-      snapshotSystemRecordMaterializationEpochRotationV1(
-        await deps.handoff.rotateMaterializationEpoch(networkId),
-      ),
   });
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
@@ -803,7 +813,7 @@ class SystemRecordLaneSession {
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
         await this.deps.handoff.startAndProveCleanGeneration();
-        return this.deps.rotateMaterializationEpoch(activation.networkId);
+        return this.deps.handoff.rotateMaterializationEpoch(activation.networkId);
       });
     } catch (error) {
       this.failManagedMutationsClosed('enable transition did not physically settle');

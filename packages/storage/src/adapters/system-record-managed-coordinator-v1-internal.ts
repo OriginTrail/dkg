@@ -28,7 +28,7 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
     childGeneration: string,
   ) => Promise<SystemRecordApplyOutcomeV1>;
   readonly barrier: SystemRecordLaneBarrierV1;
-  readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
+  readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;
 }
 

@@ -38,6 +38,7 @@ describe('managed system-record coordinator composition', () => {
     const resolveClient = vi.fn();
     const applyLegacy = vi.fn().mockResolvedValue({ outcome: 'stale' });
     const barrier = vi.fn();
+    const typedBarrier = vi.fn();
     const setAdmissionActive = vi.fn();
     const controller = createManagedSystemRecordCoordinatorV1({
       lease,
@@ -48,6 +49,7 @@ describe('managed system-record coordinator composition', () => {
       resolveClient,
       applyLegacy,
       barrier,
+      typedBarrier,
       setAdmissionActive,
     } as never);
 
@@ -65,6 +67,7 @@ describe('managed system-record coordinator composition', () => {
       lease: unknown;
       handoff: unknown;
       barrier: unknown;
+      typedBarrier: unknown;
       setAdmissionActive: unknown;
       executor: {
         applyVerified(proof: unknown, childGeneration: string): Promise<unknown>;
@@ -76,7 +79,13 @@ describe('managed system-record coordinator composition', () => {
         ): Promise<unknown>;
       };
     };
-    expect(laneDeps).toMatchObject({ lease, handoff, barrier, setAdmissionActive });
+    expect(laneDeps).toMatchObject({
+      lease,
+      handoff,
+      barrier,
+      typedBarrier,
+      setAdmissionActive,
+    });
 
     const proof = Object.freeze({ proof: true });
     const binding = Object.freeze({ binding: true });
