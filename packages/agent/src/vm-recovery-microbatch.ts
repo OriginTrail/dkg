@@ -50,6 +50,32 @@ export interface VmRecoveryFootprintBridgeOptions {
   signal?: AbortSignal;
   /** Captured subscription/binding lifecycle guard. */
   isCurrent: () => boolean;
+  /**
+   * Optional host trust anchor for bounded, live-gated access-policy reads.
+   * Production supplies DKGAgent.readLiveOnChainAccessPolicy; direct helper
+   * tests and non-agent consumers may exercise the equivalent reader surface.
+   */
+  resolveLiveAccessPolicy?: (contextGraphId: bigint) => Promise<0 | 1 | null>;
+}
+
+const VM_RECOVERY_BRIDGE_ABORTED = Symbol('vm-recovery-bridge-aborted');
+
+async function raceVmRecoveryBridgeAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal | undefined,
+): Promise<T | typeof VM_RECOVERY_BRIDGE_ABORTED> {
+  if (!signal) return promise;
+  if (signal.aborted) return VM_RECOVERY_BRIDGE_ABORTED;
+  let abortListener: (() => void) | undefined;
+  const aborted = new Promise<typeof VM_RECOVERY_BRIDGE_ABORTED>((resolve) => {
+    abortListener = () => resolve(VM_RECOVERY_BRIDGE_ABORTED);
+    signal.addEventListener('abort', abortListener, { once: true });
+  });
+  try {
+    return await Promise.race([promise, aborted]);
+  } finally {
+    if (abortListener) signal.removeEventListener('abort', abortListener);
+  }
 }
 
 /**
@@ -78,28 +104,50 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
     || targets.length === 0
     || options.signal?.aborted
     || !options.isCurrent()
-    || typeof reader.isContextGraphActiveOnChain !== 'function'
-    || typeof reader.getContextGraphAccessPolicy !== 'function'
     || typeof reader.getKnowledgeAssetUpdateContext !== 'function'
   ) return original;
 
-  let active: boolean;
-  try {
-    active = await reader.isContextGraphActiveOnChain(onChainCgId);
-  } catch {
-    return original;
-  }
-  if (
-    active !== true
-    || options.signal?.aborted
-    || !options.isCurrent()
-  ) return original;
-
-  let accessPolicy: number;
-  try {
-    accessPolicy = await reader.getContextGraphAccessPolicy(onChainCgId);
-  } catch {
-    return original;
+  let accessPolicy: number | null;
+  if (options.resolveLiveAccessPolicy) {
+    try {
+      const resolved = await raceVmRecoveryBridgeAbort(
+        options.resolveLiveAccessPolicy(onChainCgId),
+        options.signal,
+      );
+      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return original;
+      accessPolicy = resolved;
+    } catch {
+      return original;
+    }
+  } else {
+    if (
+      typeof reader.isContextGraphActiveOnChain !== 'function'
+      || typeof reader.getContextGraphAccessPolicy !== 'function'
+    ) return original;
+    let active: boolean | typeof VM_RECOVERY_BRIDGE_ABORTED;
+    try {
+      active = await raceVmRecoveryBridgeAbort(
+        reader.isContextGraphActiveOnChain(onChainCgId),
+        options.signal,
+      );
+    } catch {
+      return original;
+    }
+    if (
+      active !== true
+      || options.signal?.aborted
+      || !options.isCurrent()
+    ) return original;
+    try {
+      const resolved = await raceVmRecoveryBridgeAbort(
+        reader.getContextGraphAccessPolicy(onChainCgId),
+        options.signal,
+      );
+      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return original;
+      accessPolicy = resolved;
+    } catch {
+      return original;
+    }
   }
   if (accessPolicy !== 0 || options.signal?.aborted || !options.isCurrent()) {
     return original;
@@ -115,10 +163,15 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   const observed = await Promise.all(unknownEntries.map(async ({ target, index }) => {
     if (options.signal?.aborted || !options.isCurrent()) return { index };
     try {
-      const context = await reader.getKnowledgeAssetUpdateContext!(
-        BigInt(target.kaId),
-        options.signal ? { signal: options.signal } : undefined,
+      const observedContext = await raceVmRecoveryBridgeAbort(
+        reader.getKnowledgeAssetUpdateContext!(
+          BigInt(target.kaId),
+          options.signal ? { signal: options.signal } : undefined,
+        ),
+        options.signal,
       );
+      if (observedContext === VM_RECOVERY_BRIDGE_ABORTED) return { index };
+      const context = observedContext;
       if (
         options.signal?.aborted
         || !options.isCurrent()
