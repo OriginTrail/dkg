@@ -3,6 +3,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import * as ts from 'typescript';
 
 import { describe, expect, it } from 'vitest';
+import { SYSTEM_RECORD_OBJECT_CAPS_V1 } from '../src/system-record-limits-v1.js';
+import {
+  SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1,
+} from '../src/system-record-object-identity-descriptors-v1-internal.js';
 
 const source = (name: string): string =>
   readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8');
@@ -84,7 +88,9 @@ describe('System Record V1 module ownership', () => {
       'system-record-authority-v1-internal.ts',
       'system-record-verification-closure-v1-internal.ts',
       'system-record-cache-accounting-v1-internal.ts',
+      'system-record-object-identity-descriptors-v1-internal.ts',
       'system-record-inventory-codecs-v1-internal.ts',
+      'system-record-inventory-signatures-v1-internal.ts',
       'system-record-inventory-traversal-v1-internal.ts',
       'system-record-inventory-cow-build-v1-internal.ts',
       'system-record-inventory-cow-context-v1-internal.ts',
@@ -111,6 +117,28 @@ describe('System Record V1 module ownership', () => {
         'system-record-cache-accounting-v1-internal.ts',
       ]);
     }
+  });
+
+  it('keeps inventory data codecs below provider signature verification', () => {
+    expectNoDependencyPath('system-record-inventory-codecs-v1-internal.ts', [
+      'system-record-inventory-signatures-v1-internal.ts',
+    ]);
+    expect(directDependencies('system-record-inventory-signatures-v1-internal.ts')).toContain(
+      'system-record-inventory-codecs-v1-internal.ts',
+    );
+    expect(source('system-record-inventory-codecs-v1-internal.ts'))
+      .not.toMatch(/@libp2p\/|@noble\/ed25519/u);
+  });
+
+  it('owns one exhaustive internal identity descriptor for every object kind', () => {
+    expect(Object.keys(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1).sort())
+      .toEqual(Object.keys(SYSTEM_RECORD_OBJECT_CAPS_V1).sort());
+    expect(Object.isFrozen(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1)).toBe(true);
+    for (const descriptor of Object.values(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1)) {
+      expect(Object.isFrozen(descriptor)).toBe(true);
+    }
+    expect(source('system-record-inventory-v1.ts'))
+      .not.toContain('system-record-object-identity-descriptors-v1-internal');
   });
 
   it('keeps COW implementation units acyclic and below the file-health boundary', () => {
