@@ -302,6 +302,9 @@ describe('reserved internal graph mutation guard', () => {
         ['ASK', '# read\nBASE <urn:test:>\nASK { ?s <predicate> ?o }'],
         ['CONSTRUCT', 'PREFIX ex: <urn:test:>\nCONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }'],
         ['DESCRIBE', 'BASE <urn:test:>\nDESCRIBE <subject>'],
+        ['update-word variable', 'SELECT ?delete WHERE { ?s ?p ?delete }'],
+        ['update-word prefix label', 'PREFIX insert: <urn:test:> SELECT ?s WHERE { ?s insert:p ?o }'],
+        ['update-word prefixed local name', 'PREFIX ex: <urn:test:> SELECT ?s WHERE { ?s ex:drop ?o }'],
       ])('keeps recognized %s reads available on a leased store', async (_name, sparql) => {
         const fetchSpy = stubQueryFetch();
         await expect(newLeasedStore().query(sparql)).resolves.toBeDefined();

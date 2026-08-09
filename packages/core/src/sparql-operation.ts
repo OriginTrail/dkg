@@ -30,9 +30,9 @@ const OPERATION_AT_START = new RegExp(
   `\\s*(${[...SPARQL_READ_ONLY_OPERATIONS, ...SPARQL_UPDATE_OPERATIONS].join('|')})\\b`,
   'iy',
 );
-const MUTATING_PATTERN = new RegExp(
+const MUTATING_TOKEN_PATTERN = new RegExp(
   `\\b(${SPARQL_MUTATING_KEYWORDS.join('|')})\\b`,
-  'i',
+  'ig',
 );
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
 const READ_ONLY_OPERATION_SET = new Set<string>(SPARQL_READ_ONLY_OPERATIONS);
@@ -152,13 +152,39 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
   return { kind: 'unknown' };
 }
 
+function isSparqlNameAdjacent(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{L}\p{N}\p{M}_?$:@.-]/u.test(ch);
+}
+
+/**
+ * Find an executable update keyword without mistaking it for a legal SPARQL
+ * name such as `?delete`, `insert:p`, `ex:drop`, or `"x"@add`.
+ * Literals, comments, and IRI references have already been blanked by the
+ * caller. The remaining adjacency check distinguishes standalone grammar
+ * tokens from variable, prefixed-name, language-tag, and identifier text.
+ */
+function findMutatingKeyword(stripped: string): string | null {
+  MUTATING_TOKEN_PATTERN.lastIndex = 0;
+  for (;;) {
+    const match = MUTATING_TOKEN_PATTERN.exec(stripped);
+    if (!match) return null;
+    const start = match.index;
+    const end = start + match[0].length;
+    if (
+      !isSparqlNameAdjacent(stripped[start - 1])
+      && !isSparqlNameAdjacent(stripped[end])
+    ) {
+      return match[1] ?? null;
+    }
+  }
+}
+
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
   const stripped = stripSparqlLiteralsAndComments(sparql);
   const form = detectSparqlOperationFormFromStripped(stripped);
-  const match = MUTATING_PATTERN.exec(stripped);
   return {
     operation: classifySparqlOperationForm(form),
-    mutatingKeyword: match?.[1] ?? null,
+    mutatingKeyword: findMutatingKeyword(stripped),
   };
 }
 

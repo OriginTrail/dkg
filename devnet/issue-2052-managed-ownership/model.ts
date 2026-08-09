@@ -36,6 +36,14 @@ export interface PinnedPredecessorV1 {
  * `hasGraph`, undeletable by generic mutation including an unscoped
  * `deleteByPattern`, and the seed must be intact afterwards.
  */
+export interface RawChannelConformanceV1 {
+  readonly updateRefusalCode: string | null;
+  readonly queryMutationRefusalCode: string | null;
+  readonly queryUnknownRefusalCode: string | null;
+  readonly mutationQuadCount: number;
+  readonly recognizedReadServed: boolean;
+}
+
 export interface CurrentBinaryConformanceV1 {
   readonly enumeratedReservedGraphs: readonly string[];
   readonly servedReservedGraphs: readonly string[];
@@ -43,13 +51,7 @@ export interface CurrentBinaryConformanceV1 {
   readonly seededQuadCount: number;
   readonly expectedQuadCount: number;
   /** Live proof that an authentic ownership lease closes both raw write routes. */
-  readonly rawChannels: {
-    readonly updateRefusalCode: string | null;
-    readonly queryMutationRefusalCode: string | null;
-    readonly queryUnknownRefusalCode: string | null;
-    readonly mutationQuadCount: number;
-    readonly recognizedReadServed: boolean;
-  };
+  readonly rawChannels: RawChannelConformanceV1;
   readonly failures: readonly string[];
 }
 

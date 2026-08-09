@@ -2353,6 +2353,15 @@ describe('validateReadOnlySparql', () => {
     expect(result.safe).toBe(true);
   });
 
+  it.each([
+    ['variable', 'SELECT ?delete WHERE { ?s ?p ?delete }'],
+    ['prefix label', 'PREFIX insert: <urn:x:> SELECT ?s WHERE { ?s insert:p ?o }'],
+    ['prefixed local name', 'PREFIX ex: <urn:x:> SELECT ?s WHERE { ?s ex:drop ?o }'],
+    ['language tag', 'SELECT ?s WHERE { ?s <urn:p> "value"@add }'],
+  ])('allows update words used as a legal %s', (_name, sparql) => {
+    expect(validateReadOnlySparql(sparql).safe).toBe(true);
+  });
+
   it('allows BASE declaration before SELECT', () => {
     const result = validateReadOnlySparql(`
       BASE <http://example.org/>

@@ -154,6 +154,10 @@ interface ManagedMutationBindingV1 {
   readonly generation: string;
 }
 
+type RawSparqlChannelV1 =
+  | { readonly kind: 'update' }
+  | { readonly kind: 'query'; readonly analysis: ReturnType<typeof analyzeSparqlOperation> };
+
 export class ManagedOxigraphMutationUnavailableError extends Error {
   readonly code = 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE' as const;
 
@@ -391,6 +395,25 @@ export class SparqlHttpStore implements TripleStore {
         'mutation was queued before system-record admission became active',
       );
     }
+  }
+
+  /**
+   * Canonical raw-SPARQL boundary for ownership-leased daemon stores.
+   * Structured adapter methods bypass this helper and reach postUpdate()
+   * directly; unleased operator endpoints retain their legacy raw channels.
+   */
+  private assertRawSparqlChannelAvailable(channel: RawSparqlChannelV1): void {
+    if (this.ownershipLease === null) return;
+    if (
+      channel.kind === 'query'
+      && channel.analysis.operation.kind === 'read'
+      && channel.analysis.mutatingKeyword === null
+    ) return;
+
+    const reason = channel.kind === 'update'
+      ? 'raw SPARQL update() is unavailable on an ownership-leased store'
+      : 'query() accepts only recognized read operations on an ownership-leased store';
+    throw new ManagedOxigraphMutationUnavailableError(reason);
   }
 
   /**
@@ -1120,11 +1143,7 @@ export class SparqlHttpStore implements TripleStore {
     // policy, or preserve system-record invariants, so close this channel for
     // the full lifetime of every leased store. Do this before scheduler
     // admission or I/O; private structured operations still use postUpdate().
-    if (this.ownershipLease !== null) {
-      throw new ManagedOxigraphMutationUnavailableError(
-        'raw SPARQL update() is unavailable on an ownership-leased store',
-      );
-    }
+    this.assertRawSparqlChannelAvailable({ kind: 'update' });
     await this.postUpdate(sparql, {
       ...options,
       source: options?.source ?? 'sparql-http.update',
@@ -1293,14 +1312,7 @@ export class SparqlHttpStore implements TripleStore {
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
     const analysis = analyzeSparqlOperation(sparql);
     const operation = analysis.operation;
-    if (
-      this.ownershipLease !== null
-      && (operation.kind !== 'read' || analysis.mutatingKeyword !== null)
-    ) {
-      throw new ManagedOxigraphMutationUnavailableError(
-        'query() accepts only recognized read operations on an ownership-leased store',
-      );
-    }
+    this.assertRawSparqlChannelAvailable({ kind: 'query', analysis });
 
     return this.runStoreWork('query', options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {

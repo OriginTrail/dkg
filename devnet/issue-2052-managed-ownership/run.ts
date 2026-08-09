@@ -44,6 +44,7 @@ import {
   type LiveHandoffMeasurementV1,
   type ManagedOwnershipRawResultV1,
   type CurrentBinaryConformanceV1,
+  type RawChannelConformanceV1,
 } from './model.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -146,6 +147,86 @@ async function countQuadsInGraph(endpoint: string, graph: string): Promise<numbe
   });
   const json = (await res.json()) as { results?: { bindings?: { c?: { value?: string } }[] } };
   return Number(json.results?.bindings?.[0]?.c?.value ?? '0');
+}
+
+async function captureErrorCode(work: () => Promise<unknown>): Promise<string | null> {
+  try {
+    await work();
+    return null;
+  } catch (error) {
+    return typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code: unknown }).code)
+      : null;
+  }
+}
+
+async function probeLeasedRawChannels(
+  store: TripleStore,
+  queryEndpoint: string,
+): Promise<{ rawChannels: RawChannelConformanceV1; failures: string[] }> {
+  const rawChannelGraph = 'urn:dkg:gate:leased-raw-channel';
+  const refusalProbes = [
+    {
+      field: 'updateRefusalCode',
+      label: 'leased update()',
+      run: () => store.update
+        ? store.update(
+            `INSERT DATA { GRAPH <${rawChannelGraph}> { <urn:update> <urn:p> "escaped" } }`,
+          )
+        : Promise.resolve(),
+    },
+    {
+      field: 'queryMutationRefusalCode',
+      label: 'leased query() mutation',
+      run: () => store.query(
+        `SELECT ?s WHERE { GRAPH <urn:dkg:gate:read-scope> { ?s ?p ?o } }; ` +
+        `INSERT DATA { GRAPH <${rawChannelGraph}> { <urn:query> <urn:p> "escaped" } }`,
+      ),
+    },
+    {
+      field: 'queryUnknownRefusalCode',
+      label: 'leased query() unknown',
+      run: () => store.query('VALUES ?s { <urn:unknown> }'),
+    },
+  ] as const;
+
+  const refusalCodes = new Map<string, string | null>();
+  for (const probe of refusalProbes) {
+    refusalCodes.set(probe.field, await captureErrorCode(probe.run));
+  }
+
+  let recognizedReadServed = false;
+  try {
+    const read = await store.query(
+      'PREFIX dkg: <urn:dkg:gate:>\nASK { dkg:missing dkg:p ?o }',
+    );
+    recognizedReadServed = read.type === 'boolean' && read.value === false;
+  } catch {
+    recognizedReadServed = false;
+  }
+
+  const rawChannels: RawChannelConformanceV1 = {
+    updateRefusalCode: refusalCodes.get('updateRefusalCode') ?? null,
+    queryMutationRefusalCode: refusalCodes.get('queryMutationRefusalCode') ?? null,
+    queryUnknownRefusalCode: refusalCodes.get('queryUnknownRefusalCode') ?? null,
+    mutationQuadCount: await countQuadsInGraph(queryEndpoint, rawChannelGraph),
+    recognizedReadServed,
+  };
+  const failures: string[] = [];
+  const expectedRefusal = 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE';
+  for (const probe of refusalProbes) {
+    const actual = rawChannels[probe.field];
+    if (actual !== expectedRefusal) {
+      failures.push(`${probe.label} refusal code was ${String(actual)}`);
+    }
+  }
+  if (rawChannels.mutationQuadCount !== 0) {
+    failures.push(`raw channels wrote ${rawChannels.mutationQuadCount} live quad(s)`);
+  }
+  if (!rawChannels.recognizedReadServed) {
+    failures.push('recognized prefixed ASK did not survive raw-channel contraction');
+  }
+  return { rawChannels, failures };
 }
 
 const pidAlive = (pid: number): boolean => {
@@ -704,65 +785,8 @@ async function main(): Promise<void> {
     // carries no pass/fail field to be misread.
     {
       const failures: string[] = [];
-      const errorCode = (error: unknown): string | null =>
-        typeof error === 'object' && error !== null && 'code' in error
-          ? String((error as { code: unknown }).code)
-          : null;
-
-      const rawChannelGraph = 'urn:dkg:gate:leased-raw-channel';
-      let updateRefusalCode: string | null = null;
-      try {
-        await full.update?.(
-          `INSERT DATA { GRAPH <${rawChannelGraph}> { <urn:update> <urn:p> "escaped" } }`,
-        );
-      } catch (error) {
-        updateRefusalCode = errorCode(error);
-      }
-
-      let queryMutationRefusalCode: string | null = null;
-      try {
-        await full.query(
-          `SELECT ?s WHERE { GRAPH <urn:dkg:gate:read-scope> { ?s ?p ?o } }; ` +
-          `INSERT DATA { GRAPH <${rawChannelGraph}> { <urn:query> <urn:p> "escaped" } }`,
-        );
-      } catch (error) {
-        queryMutationRefusalCode = errorCode(error);
-      }
-
-      let queryUnknownRefusalCode: string | null = null;
-      try {
-        await full.query('VALUES ?s { <urn:unknown> }');
-      } catch (error) {
-        queryUnknownRefusalCode = errorCode(error);
-      }
-
-      let recognizedReadServed = false;
-      try {
-        const read = await full.query(
-          'PREFIX dkg: <urn:dkg:gate:>\nASK { dkg:missing dkg:p ?o }',
-        );
-        recognizedReadServed = read.type === 'boolean' && read.value === false;
-      } catch {
-        recognizedReadServed = false;
-      }
-
-      const mutationQuadCount = await countQuadsInGraph(server.queryEndpoint, rawChannelGraph);
-      const expectedRefusal = 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE';
-      if (updateRefusalCode !== expectedRefusal) {
-        failures.push(`leased update() refusal code was ${String(updateRefusalCode)}`);
-      }
-      if (queryMutationRefusalCode !== expectedRefusal) {
-        failures.push(`leased query() mutation refusal code was ${String(queryMutationRefusalCode)}`);
-      }
-      if (queryUnknownRefusalCode !== expectedRefusal) {
-        failures.push(`leased query() unknown refusal code was ${String(queryUnknownRefusalCode)}`);
-      }
-      if (mutationQuadCount !== 0) {
-        failures.push(`raw channels wrote ${mutationQuadCount} live quad(s)`);
-      }
-      if (!recognizedReadServed) {
-        failures.push('recognized prefixed ASK did not survive raw-channel contraction');
-      }
+      const rawProbe = await probeLeasedRawChannels(full, server.queryEndpoint);
+      failures.push(...rawProbe.failures);
 
       // The deletion probe below is destructive, so seed immediately before it.
       // This is also why the old per-entry loop could not work: the first row's
@@ -890,13 +914,7 @@ async function main(): Promise<void> {
         deletedReservedGraphsOnCleanup: deleted,
         seededQuadCount,
         expectedQuadCount: fixture.expectedQuadCount,
-        rawChannels: {
-          updateRefusalCode,
-          queryMutationRefusalCode,
-          queryUnknownRefusalCode,
-          mutationQuadCount,
-          recognizedReadServed,
-        },
+        rawChannels: rawProbe.rawChannels,
         failures,
       };
     }

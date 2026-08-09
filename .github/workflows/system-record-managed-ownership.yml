@@ -43,6 +43,7 @@ on:
       - 'packages/core/**'
       - 'packages/rdf-utils/**'
       - 'packages/storage/**'
+      - 'scripts/check-managed-store-raw-channels.mjs'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
@@ -57,6 +58,7 @@ on:
       - 'packages/core/**'
       - 'packages/rdf-utils/**'
       - 'packages/storage/**'
+      - 'scripts/check-managed-store-raw-channels.mjs'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
@@ -138,6 +140,9 @@ jobs:
       - name: Typecheck the ownership gate harness
         run: pnpm typecheck:live:system-record-managed-ownership
 
+      - name: First-party managed-store raw-channel architecture
+        run: pnpm check:managed-store-raw-channels
+
       - name: Storage unit conformance
         run: |
           pnpm --filter @origintrail-official/dkg-storage exec vitest run \
@@ -163,7 +168,6 @@ jobs:
             test/managed-terminal-read-through-index-v1.test.ts \
             test/managed-warm-read-composition-v1.test.ts \
             test/managed-read-gate-decorator-coverage-v1.test.ts \
-            test/managed-store-raw-channel-source-v1.test.ts \
             test/store-chain-participation-source-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \
             test/system-record-capability-probe-errors-v1.test.ts \
