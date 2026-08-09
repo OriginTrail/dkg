@@ -1171,8 +1171,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * total drifts from what it summarises.
    */
   private adjustTaggedInflight(state: StoreAdmissionState, delta: 1 | -1): void {
-    state.taggedInflight += delta;
-    this.taggedInflightTotal += delta;
+    const storeInflight = state.taggedInflight + delta;
+    const totalInflight = this.taggedInflightTotal + delta;
+    if (storeInflight < 0 || totalInflight < 0) {
+      throw new Error('store scheduler tagged-inflight accounting underflow');
+    }
+    state.taggedInflight = storeInflight;
+    this.taggedInflightTotal = totalInflight;
   }
 
   private countTaggedInflight(): number {
