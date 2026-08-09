@@ -1,32 +1,50 @@
-import { snapshotSystemRecordDataRecordV1 } from './system-record-input-guards-v1-internal.js';
+import { types as utilTypes } from 'node:util';
 import type {
   SystemRecordMaterializationEpochRotationV1,
 } from './system-record-materialization-epoch-contract-v1.js';
 
+export type SystemRecordMaterializationEpochRotationSnapshotV1 =
+  | Readonly<{ kind: 'absent' }>
+  | Readonly<{ kind: 'malformed' }>
+  | Readonly<{
+      kind: 'rotation';
+      value: SystemRecordMaterializationEpochRotationV1;
+    }>;
+
+const ABSENT = Object.freeze({ kind: 'absent' } as const);
+const MALFORMED = Object.freeze({ kind: 'malformed' } as const);
+
 /**
- * Snapshot an untrusted epoch rotation result through the canonical plain-data
- * guard. Extra data fields are permitted by the structural handoff interface
- * and discarded here. `undefined` means no valid binding; callers distinguish
- * the legacy absent case from a malformed non-undefined value and fail the
- * latter closed.
+ * Snapshot the structural handoff result without invoking caller code.
+ *
+ * The public contract permits class instances and extra metadata, so this reads
+ * only the two required own data descriptors. Proxies and accessors are
+ * rejected. Absence and malformed input remain distinct modeled states.
  */
 export function snapshotSystemRecordMaterializationEpochRotationV1(
   value: unknown,
-): SystemRecordMaterializationEpochRotationV1 | undefined {
-  let record: Readonly<Record<string, unknown>>;
-  try {
-    record = snapshotSystemRecordDataRecordV1(
-      value,
-      'system-record materialization epoch rotation',
-    );
-  } catch {
-    return undefined;
+): SystemRecordMaterializationEpochRotationSnapshotV1 {
+  if (value === undefined) return ABSENT;
+  if (value === null || typeof value !== 'object' || utilTypes.isProxy(value)) {
+    return MALFORMED;
   }
-  if (typeof record.epoch !== 'string' || typeof record.childGeneration !== 'string') {
-    return undefined;
+  const epoch = Object.getOwnPropertyDescriptor(value, 'epoch');
+  const childGeneration = Object.getOwnPropertyDescriptor(value, 'childGeneration');
+  if (
+    !epoch ||
+    !childGeneration ||
+    !Object.prototype.hasOwnProperty.call(epoch, 'value') ||
+    !Object.prototype.hasOwnProperty.call(childGeneration, 'value') ||
+    typeof epoch.value !== 'string' ||
+    typeof childGeneration.value !== 'string'
+  ) {
+    return MALFORMED;
   }
   return Object.freeze({
-    epoch: record.epoch,
-    childGeneration: record.childGeneration,
+    kind: 'rotation',
+    value: Object.freeze({
+      epoch: epoch.value,
+      childGeneration: childGeneration.value,
+    }),
   });
 }

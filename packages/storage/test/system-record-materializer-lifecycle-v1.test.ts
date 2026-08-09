@@ -825,6 +825,20 @@ describe('system-record lane session lifecycle V1', () => {
       expect(session.state).toBe('enabled');
     });
 
+    it('accepts a structural class-instance epoch binding without invoking accessors', async () => {
+      class RotationBinding {
+        constructor(
+          readonly epoch: string,
+          readonly childGeneration: string,
+        ) {}
+      }
+      handoff.rotateMaterializationEpoch = (async () =>
+        new RotationBinding('7', '1')) as RecordingHandoff['rotateMaterializationEpoch'];
+
+      const session = await build().open(ACTIVATION);
+      expect(session.state).toBe('enabled');
+    });
+
     it('refuses to enable on terminal ownership', async () => {
       ownership.invalidate('port-release-unproven');
       await expect(build().open(ACTIVATION)).rejects.toThrow(/terminal/);

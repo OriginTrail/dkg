@@ -770,10 +770,10 @@ class SystemRecordLaneSession {
       this.clearActiveBinding();
       throw error;
     }
-    const rotation = snapshotSystemRecordMaterializationEpochRotationV1(rotated);
+    const rotationSnapshot = snapshotSystemRecordMaterializationEpochRotationV1(rotated);
     if (
-      (rotated === undefined && this.deps.executor.applyVerifiedSettlementBound) ||
-      (rotated !== undefined && rotation === undefined)
+      rotationSnapshot.kind === 'malformed' ||
+      (rotationSnapshot.kind === 'absent' && this.deps.executor.applyVerifiedSettlementBound)
     ) {
       this.failManagedMutationsClosed(
         'enable transition did not return a materialization epoch binding',
@@ -785,6 +785,9 @@ class SystemRecordLaneSession {
         'system-record lane enable did not return a materialization epoch binding',
       );
     }
+    const rotation = rotationSnapshot.kind === 'rotation'
+      ? rotationSnapshot.value
+      : undefined;
     // POST-CONDITION: the handoff claims to have started and proved a clean
     // generation, so verify that rather than assume it. Without this,
     // `runEnable` moved to `enabled` purely because no step threw, and a
