@@ -181,8 +181,9 @@ describe('managed Oxigraph mutation admission V1', () => {
     expect(fetchCalls).toBe(1);
   });
 
-  it('refuses opaque updates before dispatch while admission is active', async () => {
+  it('refuses raw updates before admission or dispatch while admission is active', async () => {
     await activate();
+    const before = externalStorePriorityScheduler.snapshot;
 
     await expect(store.update(
       'INSERT DATA { <urn:test:u> <urn:test:p> "x" }',
@@ -190,6 +191,26 @@ describe('managed Oxigraph mutation admission V1', () => {
     )).rejects.toMatchObject({
       code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
     });
+    const after = externalStorePriorityScheduler.snapshot;
+    expect(after.admissionEvaluations).toBe(before.admissionEvaluations);
+    expect(after.admissionTaggedQueued).toBe(before.admissionTaggedQueued);
+    expect(after.admissionTaggedInflight).toBe(before.admissionTaggedInflight);
+    expect(fetchCalls).toBe(0);
+  });
+
+  it('refuses mutating query() programs before scheduler admission or dispatch', async () => {
+    const before = externalStorePriorityScheduler.snapshot;
+
+    await expect(store.query(
+      'SELECT ?s WHERE { GRAPH <urn:test:g> { ?s ?p ?o } }; DROP ALL',
+    )).rejects.toMatchObject({
+      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+    });
+    const after = externalStorePriorityScheduler.snapshot;
+
+    expect(after.admissionEvaluations).toBe(before.admissionEvaluations);
+    expect(after.admissionTaggedQueued).toBe(before.admissionTaggedQueued);
+    expect(after.admissionTaggedInflight).toBe(before.admissionTaggedInflight);
     expect(fetchCalls).toBe(0);
   });
 
@@ -212,25 +233,24 @@ describe('managed Oxigraph mutation admission V1', () => {
     expect(fetchCalls).toBe(0);
   });
 
-  it('refuses an opaque update queued before activation when it reaches dispatch', async () => {
+  it('refuses a raw update synchronously even while scheduler capacity is saturated', async () => {
     const capacity = holdSchedulerCapacity();
     await capacity.entered;
+    const before = externalStorePriorityScheduler.snapshot;
 
-    const write = store.update(
+    await expect(store.update(
       'INSERT DATA { <urn:test:u> <urn:test:p> "x" }',
       { touchedGraphs: [UNRELATED_GRAPH] },
-    );
-    await drainTurns();
-    const activation = activate();
-    await drainTurns();
+    )).rejects.toMatchObject({
+      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+    });
+    const after = externalStorePriorityScheduler.snapshot;
 
     capacity.release();
     await capacity.work;
-    await activation;
-
-    await expect(write).rejects.toMatchObject({
-      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
-    });
+    expect(after.admissionEvaluations).toBe(before.admissionEvaluations);
+    expect(after.admissionTaggedQueued).toBe(before.admissionTaggedQueued);
+    expect(after.admissionTaggedInflight).toBe(before.admissionTaggedInflight);
     expect(fetchCalls).toBe(0);
   });
 
@@ -292,12 +312,14 @@ describe('managed Oxigraph mutation admission V1', () => {
     expect(fetchCalls).toBe(1);
   });
 
-  it('keeps default-off opaque updates on the legacy dispatch path', async () => {
+  it('refuses default-off raw updates before scheduler admission or dispatch', async () => {
     const before = externalStorePriorityScheduler.snapshot;
     await expect(store.update(
       'INSERT DATA { <urn:test:u> <urn:test:p> "x" }',
       { touchedGraphs: [UNRELATED_GRAPH] },
-    )).resolves.toBeUndefined();
+    )).rejects.toMatchObject({
+      code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+    });
     const after = externalStorePriorityScheduler.snapshot;
 
     expect(after.admissionEvaluations).toBe(before.admissionEvaluations);
@@ -305,7 +327,7 @@ describe('managed Oxigraph mutation admission V1', () => {
     expect(after.admissionTaggedQueued).toBe(before.admissionTaggedQueued);
     expect(after.admissionTaggedInflight).toBe(before.admissionTaggedInflight);
     expect(after.admissionHeldRuns).toBe(before.admissionHeldRuns);
-    expect(fetchCalls).toBe(1);
+    expect(fetchCalls).toBe(0);
   });
 
   it('does not evaluate managed admission state for an unowned endpoint', async () => {

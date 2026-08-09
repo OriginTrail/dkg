@@ -16,6 +16,8 @@ name: System-record managed ownership evidence
 #   3. Reserved internal state is invisible to enumeration, unserved by
 #      `hasGraph`, and undeletable by generic mutation including an unscoped
 #      `deleteByPattern`.
+#   4. A live ownership-leased store refuses raw update() and mutating/unknown
+#      query() programs without changing data, while recognized reads survive.
 #
 # What it does NOT prove:
 #   - `pinnedPredecessors` is an INVENTORY, not a set of verdicts. No predecessor
@@ -161,6 +163,7 @@ jobs:
             test/managed-terminal-read-through-index-v1.test.ts \
             test/managed-warm-read-composition-v1.test.ts \
             test/managed-read-gate-decorator-coverage-v1.test.ts \
+            test/managed-store-raw-channel-source-v1.test.ts \
             test/store-chain-participation-source-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \
             test/system-record-capability-probe-errors-v1.test.ts \

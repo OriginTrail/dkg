@@ -94,6 +94,7 @@ import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability
 import { readResponseTextBounded } from '../http-response-limit.js';
 import {
   assertQuadLiteralsMutf8Safe,
+  analyzeSparqlOperation,
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
@@ -1114,12 +1115,14 @@ export class SparqlHttpStore implements TripleStore {
    * so terms stay byte-identical (no JS round-trip). See {@link TripleStore.update}.
    */
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
-    // `touchedGraphs` is only a cache hint and cannot prove the scope of an
-    // arbitrary SPARQL program. Until opaque writes rotate the materialization
-    // epoch, accepting one here could silently invalidate signed projections.
-    if (this.systemRecordAdmissionActive) {
+    // An ownership lease is the authentic daemon-managed boundary. Raw SPARQL
+    // cannot prove its graph scope, participate in the structured mutation
+    // policy, or preserve system-record invariants, so close this channel for
+    // the full lifetime of every leased store. Do this before scheduler
+    // admission or I/O; private structured operations still use postUpdate().
+    if (this.ownershipLease !== null) {
       throw new ManagedOxigraphMutationUnavailableError(
-        'opaque SPARQL updates are unavailable while system-record admission is active',
+        'raw SPARQL update() is unavailable on an ownership-leased store',
       );
     }
     await this.postUpdate(sparql, {
@@ -1288,6 +1291,17 @@ export class SparqlHttpStore implements TripleStore {
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
+    const analysis = analyzeSparqlOperation(sparql);
+    const operation = analysis.operation;
+    if (
+      this.ownershipLease !== null
+      && (operation.kind !== 'read' || analysis.mutatingKeyword !== null)
+    ) {
+      throw new ManagedOxigraphMutationUnavailableError(
+        'query() accepts only recognized read operations on an ownership-leased store',
+      );
+    }
+
     return this.runStoreWork('query', options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
         ...options,
@@ -1297,8 +1311,12 @@ export class SparqlHttpStore implements TripleStore {
       throwIfAborted(lifecycleSignal);
       const trimmed = sparql.trim();
       const upper = trimmed.toUpperCase();
-      const isAsk = upper.startsWith('ASK');
-      const isConstruct = upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
+      const isAsk = operation.kind === 'read'
+        ? operation.form === 'ASK'
+        : upper.startsWith('ASK');
+      const isConstruct = operation.kind === 'read'
+        ? operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE'
+        : upper.startsWith('CONSTRUCT') || upper.startsWith('DESCRIBE');
 
       try {
         if (isConstruct) {

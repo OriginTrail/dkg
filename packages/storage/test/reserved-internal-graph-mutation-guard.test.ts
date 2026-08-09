@@ -8,6 +8,10 @@ import {
   SYSTEM_RECORD_V1_STATE_GRAPH,
 } from '../src/internal-graph-policy.js';
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
+import {
+  attachManagedOxigraphLeaseV1,
+  createManagedOxigraphOwnershipControllerV1,
+} from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { createTripleStore, type Quad, type TripleStore } from '../src/triple-store.js';
 
 /**
@@ -25,6 +29,8 @@ import { createTripleStore, type Quad, type TripleStore } from '../src/triple-st
  * merely that some unrelated error was thrown.
  */
 const UNREACHABLE = 'http://127.0.0.1:1/query';
+const MANAGED_QUERY_ENDPOINT = 'http://127.0.0.1:7909/query';
+const MANAGED_UPDATE_ENDPOINT = 'http://127.0.0.1:7909/update';
 
 /** Stub `fetch` so a permitted mutation is observable without a real socket. */
 const stubFetch = () =>
@@ -32,12 +38,46 @@ const stubFetch = () =>
     new Response('', { status: 200, headers: { 'Content-Type': 'text/plain' } }),
   );
 
+const stubQueryFetch = () =>
+  vi.spyOn(globalThis, 'fetch').mockImplementation(async (_input, init) => {
+    const body = String(init?.body ?? '');
+    if (/\b(?:CONSTRUCT|DESCRIBE)\b/iu.test(body)) {
+      return new Response('', {
+        status: 200,
+        headers: { 'Content-Type': 'application/n-quads' },
+      });
+    }
+    const payload = /\bASK\b/iu.test(body)
+      ? { boolean: false }
+      : { head: { vars: [] }, results: { bindings: [] } };
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'Content-Type': 'application/sparql-results+json' },
+    });
+  });
+
 afterEach(() => {
   vi.restoreAllMocks();
 });
 
 const newStore = (): SparqlHttpStore =>
   new SparqlHttpStore({ queryEndpoint: UNREACHABLE, atomicUpdates: true });
+
+const newLeasedStore = (): SparqlHttpStore => {
+  const ownership = createManagedOxigraphOwnershipControllerV1(
+    MANAGED_QUERY_ENDPOINT,
+    MANAGED_UPDATE_ENDPOINT,
+  );
+  ownership.bindReadyGeneration();
+  return new SparqlHttpStore(attachManagedOxigraphLeaseV1(
+    {
+      queryEndpoint: MANAGED_QUERY_ENDPOINT,
+      updateEndpoint: MANAGED_UPDATE_ENDPOINT,
+      atomicUpdates: true,
+    },
+    ownership.lease,
+  ));
+};
 
 const quad = (graph: string): Quad => ({
   subject: 'urn:s',
@@ -190,25 +230,7 @@ describe('reserved internal graph mutation guard', () => {
       });
     }
 
-    describe('the opaque update() channel is a KNOWN-OPEN route, closed in Stack C', () => {
-      /**
-       * These assert the gap, not a guard, and they are here so Stack C
-       * inherits a failing expectation instead of a forgotten one.
-       *
-       * A revision of this stack shipped a substring scan
-       * (`sparql.includes(SYSTEM_RECORD_V1_INTERNAL_PREFIX)`) and a
-       * `ReservedInternalGraphWriteError` on this path. It was reverted: the
-       * split-prefix case below is valid SPARQL that names the reserved graph
-       * without the reserved string ever appearing in the text, and it was
-       * demonstrated deleting a seeded reserved graph against a real Oxigraph.
-       * The scan also over-refused updates that merely mentioned the prefix. A
-       * check that looks like a boundary and is not is worse than a documented
-       * gap, so the gap is documented — and pinned.
-       *
-       * This is safe to defer only because reserved state is INERT in B2: the
-       * lane defers every apply and no production path here writes these graphs.
-       * Stack C activates the materializer, and must close this first.
-       */
+    describe('ownership-leased raw SPARQL channels', () => {
       const routes: ReadonlyArray<{ name: string; sparql: string }> = [
         {
           name: 'the literal IRI form',
@@ -223,11 +245,12 @@ describe('reserved internal graph mutation guard', () => {
       ];
 
       for (const route of routes) {
-        it(`does not refuse ${route.name} — Stack C must`, async () => {
+        it(`refuses update() ${route.name} before I/O`, async () => {
           const fetchSpy = stubFetch();
-          await expect(newStore().update(route.sparql)).resolves.toBeUndefined();
-          // Dispatched, not merely un-thrown: the request really does leave.
-          expect(fetchSpy).toHaveBeenCalledTimes(1);
+          await expect(newLeasedStore().update(route.sparql)).rejects.toMatchObject({
+            code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+          });
+          expect(fetchSpy).not.toHaveBeenCalled();
         });
       }
 
@@ -237,6 +260,69 @@ describe('reserved internal graph mutation guard', () => {
         const { sparql } = routes[1]!;
         expect(sparql).not.toContain(SYSTEM_RECORD_V1_STATE_GRAPH);
         expect(sparql).not.toContain('system-record-v1:state>');
+      });
+
+      it.each([
+        ['BASE-prefixed update', 'BASE <urn:test:> DROP ALL'],
+        ['VALUES-first text', 'VALUES ?operation { ("INSERT") }'],
+        ['WITH update', 'WITH <urn:test:g> DELETE { ?s <urn:p> ?o } WHERE { ?s <urn:p> ?o }'],
+        ['USING-first text', 'USING <urn:test:g> DELETE { ?s <urn:p> ?o } WHERE { ?s <urn:p> ?o }'],
+        ['CLEAR ALL', 'CLEAR ALL'],
+        ['DROP ALL', 'DROP ALL'],
+        ['COPY', 'COPY <urn:a> TO <urn:b>'],
+        ['MOVE', 'MOVE <urn:a> TO <urn:b>'],
+        ['ADD', 'ADD <urn:a> TO <urn:b>'],
+        ['LOAD', 'LOAD <https://example.test/data>'],
+        ['multi-operation update', 'INSERT DATA { <urn:s> <urn:p> "o" }; CLEAR ALL'],
+        ['ordinary-graph update', 'INSERT DATA { GRAPH <urn:ordinary> { <urn:s> <urn:p> "o" } }'],
+      ])('refuses %s through update() before I/O', async (_name, sparql) => {
+        const fetchSpy = stubFetch();
+        await expect(newLeasedStore().update(sparql)).rejects.toMatchObject({
+          code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+        });
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['update syntax', 'INSERT DATA { <urn:s> <urn:p> "o" }'],
+        ['unknown syntax', 'VALUES ?s { <urn:s> }'],
+        ['BASE-prefixed update', 'BASE <urn:test:> CLEAR ALL'],
+        ['multi-operation update', 'DELETE WHERE { ?s <urn:p> ?o }; INSERT DATA { <urn:s> <urn:p> "o" }'],
+        ['read-then-update text', 'SELECT ?s WHERE { GRAPH <urn:test:g> { ?s ?p ?o } }; DROP ALL'],
+      ])('refuses %s through query() before I/O', async (_name, sparql) => {
+        const fetchSpy = stubFetch();
+        await expect(newLeasedStore().query(sparql)).rejects.toMatchObject({
+          code: 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+        });
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        ['SELECT', 'PREFIX ex: <urn:test:>\nSELECT ?s WHERE { ?s ex:p ?o }'],
+        ['ASK', '# read\nBASE <urn:test:>\nASK { ?s <predicate> ?o }'],
+        ['CONSTRUCT', 'PREFIX ex: <urn:test:>\nCONSTRUCT { ?s ex:p ?o } WHERE { ?s ex:p ?o }'],
+        ['DESCRIBE', 'BASE <urn:test:>\nDESCRIBE <subject>'],
+      ])('keeps recognized %s reads available on a leased store', async (_name, sparql) => {
+        const fetchSpy = stubQueryFetch();
+        await expect(newLeasedStore().query(sparql)).resolves.toBeDefined();
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
+      });
+
+      it('does not treat forgeable option booleans as an ownership lease', async () => {
+        const fetchSpy = stubQueryFetch();
+        const forged = new SparqlHttpStore({
+          queryEndpoint: UNREACHABLE,
+          managedByDkg: true,
+          atomicUpdates: true,
+        });
+
+        await expect(forged.update(
+          'INSERT DATA { GRAPH <urn:ordinary> { <urn:s> <urn:p> "o" } }',
+        )).resolves.toBeUndefined();
+        await expect(forged.query(
+          'INSERT DATA { GRAPH <urn:ordinary> { <urn:s> <urn:p> "o" } }',
+        )).resolves.toBeDefined();
+        expect(fetchSpy).toHaveBeenCalledTimes(2);
       });
     });
 
