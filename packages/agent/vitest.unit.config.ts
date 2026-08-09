@@ -106,6 +106,7 @@ export default defineConfig({
       "test/system-context-graph-policy.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
+      "test/swm-curator-recovery-plan.test.ts",
       "test/swm-fanout-peer-selection.test.ts",
       "test/publish-literal-size.test.ts",
       "test/verify-batch.test.ts",

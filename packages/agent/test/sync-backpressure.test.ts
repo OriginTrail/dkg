@@ -1431,4 +1431,77 @@ describe('sync global backpressure', () => {
       await running;
     }
   });
+
+  it('reserves one selected-provider slot from every automatic background source', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 4,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{ completeSwmProviders: ['12D3KooWCompleteSwmProvider'] }],
+      },
+    });
+    const events: string[] = [];
+    let releaseRoutine!: () => void;
+    let releaseShared!: () => void;
+
+    const changelogA = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      label: 'changelog:core-a',
+      lane: 'changelog',
+      source: 'on-connect',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('changelog-a-start');
+      releaseRoutine = resolve;
+    }));
+    await tick();
+    const vmRecovery = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      label: 'durable:vm-recovery',
+      lane: 'durable',
+      priority: 1_000,
+      source: 'vm-recovery',
+    }, async () => {
+      events.push('vm-recovery-start');
+    });
+    await tick();
+    const ordinaryShared = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      label: 'shared-memory:ordinary-provider',
+      lane: 'shared_memory',
+      source: 'on-connect',
+    }, async () => {
+      events.push('ordinary-shared-start');
+    });
+    await tick();
+    const shared = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      label: 'shared-memory:selected-provider',
+      lane: 'shared_memory',
+      priority: 2_000,
+      source: 'on-connect',
+      selectedSwmPriority: true,
+    }, async () => new Promise<void>((resolve) => {
+      events.push('shared-start');
+      releaseShared = resolve;
+    }));
+    await tick();
+
+    expect(events).toEqual(['changelog-a-start', 'shared-start']);
+    releaseShared();
+    await shared;
+    expect(events).toEqual(['changelog-a-start', 'shared-start']);
+    releaseRoutine();
+    await Promise.all([changelogA, vmRecovery, ordinaryShared]);
+    expect(events).toEqual([
+      'changelog-a-start',
+      'shared-start',
+      'vm-recovery-start',
+      'ordinary-shared-start',
+    ]);
+  });
 });

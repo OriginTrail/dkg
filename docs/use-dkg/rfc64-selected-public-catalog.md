@@ -63,6 +63,7 @@ Add the following shape to `~/.dkg/config.json`:
             "signatureEvidence": { "kind": "none" },
             "signatureSuite": "eip191-personal-sign-digest-v1"
           },
+          "completeSwmProviders": ["12D3Koo...complete-swm-provider"],
           "targets": [
             {
               "authorAddress": "0x...catalog-author",
@@ -83,11 +84,19 @@ network transport starts and rejects non-public policies, duplicate selections,
 unknown fields, non-canonical identifiers, oversized manifests, and any policy
 whose `networkId` differs from the daemon's effective `chain.chainId`.
 
-`autoPublish` is optional. Configure it on a publisher that should advance its
-catalog after a confirmed public KA mint. A receiver can omit `autoPublish` and
-keep only the bootstrap targets. Catalog work after a confirmed mint is
-fail-open: a catalog error is logged but does not rewrite the already-confirmed
-KA result into a publication failure.
+`completeSwmProviders` is optional and stronger than a target's `providers`.
+Each listed peer is an operator assertion that the peer serves the complete
+public SWM snapshot for this exact accepted policy generation. Catch-up then
+contacts that peer for SWM first and may stop the SWM fan-out after verified
+coverage, while VM remains chain/curator driven. Omit this field unless that
+graph-wide property has been established; ordinary per-author catalog providers
+do not imply it.
+
+`autoPublish` is optional. Configure it on a publisher that should maintain the
+selected public graph's SWM inventory after durable public sharing. A receiver
+can omit `autoPublish` and keep only the bootstrap controls. Inventory work is
+fail-open: an RFC-64 error is logged but does not rewrite an already-committed
+user operation into a failure.
 
 `deploymentProfile` is also optional on a normal chain-connected node. When it
 is omitted, the agent resolves the chain ID and Knowledge Assets Lifecycle

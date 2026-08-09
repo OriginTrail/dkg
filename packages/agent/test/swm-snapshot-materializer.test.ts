@@ -241,7 +241,7 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
   });
 
   describe('end-to-end catch-up with the real materializer', () => {
-    function realHarness(store: TripleStore, served: typeof v1) {
+    function realHarness(store: TripleStore, served: typeof v1, servedMeta: Quad[] = served.meta) {
       const snapshotStore = new MemorySnapshotStore();
       const { materializer } = materializerFor(store);
       let replaceCalls = 0;
@@ -253,10 +253,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
           contextGraphIds: [CG],
           createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
           fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
-            quads: phase === 'meta' ? [...served.meta] : [],
+            quads: phase === 'meta' ? [...servedMeta] : [],
             bytesReceived: 0,
             resumedFromOffset: 0,
-            nextOffset: phase === 'meta' ? served.meta.length : 0,
+            nextOffset: phase === 'meta' ? servedMeta.length : 0,
             checkpointKey: 'k',
             completed: true,
             timedOut: false,
@@ -349,6 +349,56 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       const again = await h.run();
       expect(again.failedPhases).toBe(0);
       expect(h.replaceCalls()).toBe(1);
+    });
+
+    it('recovers equivalent originator and storage-ACK heads and stores one current pointer', async () => {
+      // A later StorageACK can persist the exact same assertion under its own
+      // deterministic operation id while an older originator head is replayed
+      // by durable metadata sync. This is the production residue observed in
+      // the 400/400 canary run: two operation pointers, identical content and
+      // policy, different timestamps. It is recoverable, not corrupt.
+      const storageAck = share(1, 'storage-ack-equivalent', 'version-one');
+      const storageAckMeta = storageAck.meta.map((row) =>
+        row.subject === storageAck.operationSubject && row.predicate === `${DKG}publishedAt`
+          ? { ...row, object: '"1970-01-01T00:00:01.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' }
+          : row);
+      const servedMeta = [
+        ...v1.meta,
+        ...storageAckMeta.filter((row) => row.subject === storageAck.operationSubject),
+        ...storageAckMeta.filter((row) =>
+          row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+
+      const parsed = parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: servedMeta,
+      });
+      expect(parsed).toHaveLength(1);
+      expect(parsed[0]?.shareOperationId).toBe('storage-ack-equivalent');
+      expect(parsed[0]?.metadataQuads.filter((row) =>
+        row.subject === storageAck.headSubject && row.predicate === `${DKG}shareOperationId`))
+        .toEqual([expect.objectContaining({ object: '"storage-ack-equivalent"' })]);
+
+      const store = new OxigraphStore();
+      const h = realHarness(store, storageAck, servedMeta);
+      const summary = await h.run();
+      expect(summary.failedPhases).toBe(0);
+      expect(await distinctObjects(store, WS_META, storageAck.headSubject, `${DKG}shareOperationId`))
+        .toEqual(['"storage-ack-equivalent"']);
+    });
+
+    it('still fails closed when two head operations disagree on content', () => {
+      const conflicting = share(1, 'op-conflicting', 'different-content');
+      const poisonedMeta = [
+        ...v1.meta,
+        ...conflicting.meta.filter((row) => row.subject === conflicting.operationSubject),
+        ...conflicting.meta.filter((row) =>
+          row.subject === conflicting.headSubject && row.predicate === `${DKG}shareOperationId`),
+      ];
+      expect(() => parseGraphScopedSwmRecoveryDescriptors({
+        contextGraphId: CG,
+        metaQuads: poisonedMeta,
+      })).toThrow(/ambiguous shareOperationId/);
     });
   });
 });

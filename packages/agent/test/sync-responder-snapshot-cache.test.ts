@@ -385,6 +385,31 @@ describe('sync responder snapshot cache and budget', () => {
     expect(loads).toBe(1);
   });
 
+  it('rebuilds an expired snapshot when the same session safely retries offset zero', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const memo = createResponderSyncRowListMemo(10);
+    let loads = 0;
+    const loadRows = async () => [{
+      s: 'urn:memo:row',
+      p: `${DKG_NS}label`,
+      o: `"snapshot-${++loads}"`,
+      g: 'urn:memo:graph',
+    }];
+
+    await expect(memo.get('durable', loadRows, {
+      refreshGeneration: 'same-session',
+    })).resolves.toMatchObject([{ o: '"snapshot-1"' }]);
+
+    vi.setSystemTime(11);
+    await expect(memo.get('durable', loadRows, {
+      refreshGeneration: 'same-session',
+      refreshExpired: true,
+    })).resolves.toMatchObject([{ o: '"snapshot-2"' }]);
+    expect(loads).toBe(2);
+  });
+
   it('does not retain empty durable row snapshots against the active cap', async () => {
     const memo = createResponderSyncRowListMemo(10_000, 1);
     let emptyLoads = 0;

@@ -867,30 +867,90 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
     const providers = ['12D3KooPrimary'];
+    const completeSwmProviders = ['12D3KooCompleteSwm'];
     const callerOwned: Rfc64PublicCatalogBootstrapConfigV1 = {
       acceptedPublicPolicies: [{
         policyEnvelope,
         targets: [{ authorAddress: AUTHOR, providers }],
+        completeSwmProviders,
       }],
       retryIntervalMs: 1_000,
     };
     const snapshot = snapshotRfc64PublicCatalogBootstrapConfigV1(callerOwned)!;
     providers.push('12D3KooLateMutation');
+    completeSwmProviders.push('12D3KooLateSwmMutation');
 
     expect(snapshot.acceptedPublicPolicies[0]?.targets[0]?.providers)
       .toEqual(['12D3KooPrimary']);
+    expect(snapshot.acceptedPublicPolicies[0]?.completeSwmProviders)
+      .toEqual(['12D3KooCompleteSwm']);
     expect(snapshot.acceptedPublicPolicies[0]?.policyEnvelope.payload).toEqual(policy);
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.targets)).toBe(true);
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.targets[0]?.providers)).toBe(true);
+    expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.completeSwmProviders)).toBe(true);
     expect(Object.isFrozen(snapshot.acceptedPublicPolicies[0]?.policyEnvelope.payload.source))
       .toBe(true);
+    const providerResolver = DKGAgent.prototype.resolveRfc64CompleteSwmProviderPeerIdsV1;
+    const resolverAgent = {
+      config: { rfc64PublicCatalogBootstrap: snapshot },
+    } as unknown as DKGAgent;
+    expect(providerResolver.call(resolverAgent, CONTEXT_GRAPH_ID))
+      .toEqual(['12D3KooCompleteSwm']);
+    expect(providerResolver.call(
+      resolverAgent,
+      '0x2222222222222222222222222222222222222222/other' as ContextGraphIdV1,
+    )).toEqual([]);
     expect(() => snapshotRfc64PublicCatalogBootstrapConfigV1({
       acceptedPublicPolicies: [{
         ...callerOwned.acceptedPublicPolicies[0]!,
         policyDigest: `0x${'11'.repeat(32)}`,
       }],
     } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
+  });
+
+  it('dials and schedules every graph-complete SWM provider during bootstrap', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-complete-provider-bootstrap-'));
+    tempDirs.push(dataDir);
+    const receiver = await DKGAgent.create({
+      name: 'complete-provider-bootstrap-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: true,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+      rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+          completeSwmProviders: ['12D3KooWCompleteSwmProvider'],
+        }],
+      },
+    });
+    agents.push(receiver);
+    const connect = vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+
+    await receiver.start();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(connect).toHaveBeenCalledWith('12D3KooWCompleteSwmProvider', {
+      timeoutMs: 10_000,
+    });
+    expect(queue).toHaveBeenCalledWith(
+      '12D3KooWCompleteSwmProvider',
+      expect.any(Function),
+      0,
+    );
   });
 
   it('rejects bootstrap without persistence before node startup', async () => {

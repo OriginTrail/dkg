@@ -180,7 +180,7 @@ export function snapshotRfc64PublicCatalogBootstrapConfigV1(
     assertPlainExactObject(
       entry,
       `rfc64PublicCatalogBootstrap.acceptedPublicPolicies[${index}]`,
-      ['policyEnvelope', 'targets'],
+      ['completeSwmProviders', 'policyEnvelope', 'targets'],
       ['policyEnvelope', 'targets'],
     );
     const candidate = entry as unknown as {
@@ -188,6 +188,7 @@ export function snapshotRfc64PublicCatalogBootstrapConfigV1(
         'acceptedPublicPolicies'
       ][number]['policyEnvelope'];
       readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+      readonly completeSwmProviders?: readonly string[];
     };
     const policyEnvelope = parseCanonicalUnsignedContextGraphPolicyEnvelopeV1(
       canonicalizeUnsignedContextGraphPolicyEnvelopeBytesV1(candidate.policyEnvelope),
@@ -225,7 +226,10 @@ export function snapshotRfc64PublicCatalogBootstrapConfigV1(
       if (targetCandidate.authorAddress === `0x${'0'.repeat(40)}`) {
         throw new TypeError('rfc64PublicCatalogBootstrap authorAddress must be nonzero');
       }
-      const providers = snapshotBootstrapProviders(targetCandidate.providers, targetIndex);
+      const providers = snapshotBootstrapProviders(
+        targetCandidate.providers,
+        `targets[${targetIndex}].providers`,
+      );
       const targetKey = `${key}\n${targetCandidate.authorAddress}\n${policy.era}`;
       if (targetKeys.has(targetKey)) {
         throw new TypeError('rfc64PublicCatalogBootstrap targets must be unique by author scope');
@@ -233,9 +237,16 @@ export function snapshotRfc64PublicCatalogBootstrapConfigV1(
       targetKeys.add(targetKey);
       return Object.freeze({ authorAddress: targetCandidate.authorAddress, providers });
     });
+    const completeSwmProviders = candidate.completeSwmProviders === undefined
+      ? undefined
+      : snapshotBootstrapProviders(
+        candidate.completeSwmProviders,
+        `acceptedPublicPolicies[${index}].completeSwmProviders`,
+      );
     return Object.freeze({
       policyEnvelope: deepFreezePlain(policyEnvelope),
       targets: Object.freeze(targets),
+      ...(completeSwmProviders === undefined ? {} : { completeSwmProviders }),
     });
   });
 
@@ -267,14 +278,14 @@ function snapshotTimestamp(value: unknown, label: string): TimestampMsV1 {
   return value as TimestampMsV1;
 }
 
-function snapshotBootstrapProviders(input: readonly string[], targetIndex: number): readonly string[] {
+function snapshotBootstrapProviders(input: readonly string[], label: string): readonly string[] {
   const providers = snapshotRfc64PublicCatalogAnnouncementPeersV1(input);
   if (
     providers.length === 0
     || providers.length > MAX_RFC64_BOOTSTRAP_PROVIDERS_V1
   ) {
     throw new TypeError(
-      `rfc64PublicCatalogBootstrap.targets[${targetIndex}].providers must contain 1..`
+      `rfc64PublicCatalogBootstrap.${label} must contain 1..`
       + `${MAX_RFC64_BOOTSTRAP_PROVIDERS_V1} peers`,
     );
   }

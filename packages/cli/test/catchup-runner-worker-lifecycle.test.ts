@@ -314,6 +314,59 @@ describe('WorkerCatchupRunner agent bridge', () => {
     expect(posted.result.connectedPeers).toBe(3);
   });
 
+  it('ranks an RFC-64 complete-SWM provider ahead of fallback peers', async () => {
+    const ensured: string[] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-swm'],
+      ensurePeerConnected: async (peerId: string) => { ensured.push(peerId); },
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-curator', 'peer-swm'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-rfc64-swm', true]);
+
+    expect(ensured).toEqual(['peer-curator', 'peer-swm']);
+    expect(posted.result.authoritativePeerId).toBe('peer-curator');
+    expect(posted.result.authoritativeSharedMemoryPeerIds).toEqual(['peer-swm']);
+    expect(posted.result.peerIds).toEqual(['peer-swm', 'peer-curator', 'peer-a']);
+  });
+
+  it('does not prioritize an RFC-64 SWM provider for a VM-only catch-up', async () => {
+    const ensured: string[] = [];
+    const { agent } = bridgeAgent({
+      resolveSyncPeerWithProvenance: async () => ({
+        peerId: 'peer-curator',
+        provenance: 'metadata',
+      }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => ['peer-swm'],
+      ensurePeerConnected: async (peerId: string) => { ensured.push(peerId); },
+      node: {
+        libp2p: {
+          getConnections: () => ['peer-a', 'peer-curator', 'peer-swm'].map(
+            (id) => ({ remotePeer: { toString: () => id } }),
+          ),
+        },
+      },
+      selectCatchupPeers: (peers: Array<{ toString(): string }>) => peers,
+    });
+
+    const posted = await invokeThroughBridge(agent, 'prepareCatchup', ['cg-rfc64-swm', false]);
+
+    expect(ensured).toEqual(['peer-curator']);
+    expect(posted.result.authoritativeSharedMemoryPeerIds).toEqual([]);
+    expect(posted.result.peerIds).toEqual(['peer-curator', 'peer-a', 'peer-swm']);
+  });
+
   it('forwards the admission source into both detailed sync calls', async () => {
     const { agent, calls } = bridgeAgent();
 

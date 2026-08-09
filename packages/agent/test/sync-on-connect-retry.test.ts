@@ -98,6 +98,43 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 }
 
 describe('runSyncOnConnect callbacks', () => {
+  it('runs selected-provider shared memory before unrelated durable and ordinary SWM history', async () => {
+    const remotePeer = freshPeerIdString();
+    const order: string[] = [];
+
+    const outcome = await runSyncOnConnect({
+      remotePeer,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => ['selected', 'ordinary'],
+      getDurableSyncContextGraphs: () => ['ordinary'],
+      getPrioritySharedMemorySyncContextGraphs: async () => ['selected'],
+      getSharedMemorySyncContextGraphs: async () => ['selected', 'ordinary'],
+      syncFromPeer: async (_peerId, contextGraphIds) => {
+        order.push(`durable:${contextGraphIds?.join(',') ?? 'all'}`);
+        return 0;
+      },
+      refreshMetaSyncedFlags: async () => {},
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds, options) => {
+        order.push(
+          `shared:${contextGraphIds.join(',')}:`
+            + (options?.selectedPriority === true ? 'selected' : 'ordinary'),
+        );
+        return 0;
+      },
+      logInfo: noopLog,
+    });
+
+    expect(outcome).toBe('synced');
+    expect(order).toEqual([
+      'shared:selected:selected',
+      'durable:ordinary',
+      'shared:ordinary:ordinary',
+    ]);
+  });
+
   it('returns deferred-backpressure without marking a zero-progress peer successful', async () => {
     const remotePeer = freshPeerIdString();
     const synced: SyncOnConnectPeerOutcome[] = [];
