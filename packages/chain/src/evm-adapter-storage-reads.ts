@@ -12,30 +12,10 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers } from 'ethers';
 import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
-
-type RawKnowledgeAssetUpdateContext = {
-  merkleRootsCount?: unknown;
-  minted?: unknown;
-  byteSize?: unknown;
-  endEpoch?: unknown;
-  tokenAmount?: unknown;
-  isImmutable?: unknown;
-  merkleLeafCount?: unknown;
-} & readonly unknown[];
-
-function requireTupleField(
-  context: RawKnowledgeAssetUpdateContext,
-  name: 'merkleRootsCount' | 'minted' | 'byteSize' | 'endEpoch'
-    | 'tokenAmount' | 'isImmutable' | 'merkleLeafCount',
-  index: number,
-  kaId: bigint,
-): unknown {
-  const value = context[name] ?? context[index];
-  if (value === undefined) {
-    throw new Error(`Missing ${name} in update context for KA ${kaId}`);
-  }
-  return value;
-}
+import {
+  decodeKnowledgeAssetMerkleRootCount,
+  decodeKnowledgeAssetUpdateContext,
+} from './evm-knowledge-asset-update-context.js';
 
 export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -78,38 +58,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       'getKnowledgeAssetUpdateContext',
       [kaId],
       { signal: options.signal },
-    ) as RawKnowledgeAssetUpdateContext;
-
-    const merkleLeafCount = Number(BigInt(requireTupleField(
-      context, 'merkleLeafCount', 6, kaId,
-    ) as string | number | bigint | boolean));
-    if (!Number.isSafeInteger(merkleLeafCount) || merkleLeafCount < 0) {
-      throw new Error(`Invalid merkleLeafCount in update context for KA ${kaId}`);
-    }
-    const isImmutable = requireTupleField(context, 'isImmutable', 5, kaId);
-    if (typeof isImmutable !== 'boolean') {
-      throw new Error(`Invalid isImmutable in update context for KA ${kaId}`);
-    }
-
-    return {
-      merkleRootsCount: BigInt(requireTupleField(
-        context, 'merkleRootsCount', 0, kaId,
-      ) as string | number | bigint | boolean),
-      minted: BigInt(requireTupleField(
-        context, 'minted', 1, kaId,
-      ) as string | number | bigint | boolean),
-      byteSize: BigInt(requireTupleField(
-        context, 'byteSize', 2, kaId,
-      ) as string | number | bigint | boolean),
-      endEpoch: BigInt(requireTupleField(
-        context, 'endEpoch', 3, kaId,
-      ) as string | number | bigint | boolean),
-      tokenAmount: BigInt(requireTupleField(
-        context, 'tokenAmount', 4, kaId,
-      ) as string | number | bigint | boolean),
-      isImmutable,
-      merkleLeafCount,
-    };
+    );
+    return decodeKnowledgeAssetUpdateContext(context, kaId);
   }
 
   async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
@@ -121,12 +71,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       'getKnowledgeAssetUpdateContext',
       [kaId],
       { signal: options.signal },
-    ) as { merkleRootsCount?: bigint } & readonly unknown[];
-    const rawCount = context.merkleRootsCount ?? context[0];
-    if (rawCount === undefined) {
-      throw new Error(`Missing Merkle-root count for KA ${kaId}`);
-    }
-    return BigInt(rawCount as string | number | bigint | boolean);
+    );
+    return decodeKnowledgeAssetMerkleRootCount(context, kaId);
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
