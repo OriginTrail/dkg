@@ -45,6 +45,8 @@ import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
   readNextSparqlCodeToken,
   readStandaloneSparqlWord,
+  readSparqlPrefixName,
+  type SparqlPrefixName,
   readSparqlVariable,
   skipSparqlStringLiteral as scanSparqlStringLiteral,
   skipSparqlIriRef,
@@ -54,9 +56,7 @@ import {
 import {
   callerGraphValuesAreAuthorized,
   collectPrefixDeclarations,
-  readSparqlPrefixName,
   resolveSparqlPrefixedName,
-  type SparqlPrefixName,
 } from './sparql-graph-scope.js';
 
 /**
@@ -1649,23 +1649,20 @@ function hasTopLevelDefaultGraphPattern(sparql: string, braceStart: number): boo
   for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
     token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
     i = token.end;
-    if (token.kind === 'punctuation' && token.value === '{') {
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
       continue;
     }
-    if (token.kind === 'punctuation' && token.value === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth = Math.max(0, depth - 1);
       continue;
     }
     if (depth !== 0) continue;
-    if (token.kind === 'iri') return true;
-    if (token.kind === 'punctuation') {
-      // The shared scanner intentionally exposes only structural token kinds.
-      // A prefixed name therefore begins at a punctuation token; at this point
-      // GRAPH targets, VALUES blocks, and opaque expressions have already been
-      // skipped, so a valid prefixed name is a top-level default-graph term.
-      if (readSparqlPrefixName(sparql, token.start) !== null) return true;
-      if (token.value === '?' || token.value === '$' || token.value === '[') return true;
+    if (token.kind === 'iri' || token.kind === 'prefixedName' || token.kind === 'variable') {
+      return true;
+    }
+    if (token.kind === 'char') {
+      if (token.value === '[') return true;
       continue;
     }
     if (token.kind === 'word') {
@@ -1718,11 +1715,11 @@ function assertGraphVariablesAreTopLevel(sparql: string, braceStart: number): vo
   for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
     token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
     i = token.end;
-    if (token.kind === 'punctuation' && token.value === '{') {
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
       continue;
     }
-    if (token.kind === 'punctuation' && token.value === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth = Math.max(0, depth - 1);
       continue;
     }
@@ -1747,11 +1744,11 @@ function hasNestedSelectWithGraphVariable(sparql: string): boolean {
   for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
     token = readNextSparqlCodeToken(sparql, i)) {
     i = token.end;
-    if (token.kind === 'punctuation' && token.value === '{') {
+    if (token.kind === 'char' && token.value === '{') {
       braceDepth++;
       continue;
     }
-    if (token.kind === 'punctuation' && token.value === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       braceDepth = Math.max(0, braceDepth - 1);
       continue;
     }
@@ -1778,11 +1775,11 @@ function findNestedSelectEnd(sparql: string, start: number, startingDepth: numbe
   for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
     token = readNextSparqlCodeToken(sparql, i)) {
     i = token.end;
-    if (token.kind === 'punctuation' && token.value === '{') {
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
       continue;
     }
-    if (token.kind === 'punctuation' && token.value === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth--;
       if (depth < startingDepth) return token.start;
       if (depth < 0) return -1;
@@ -1882,7 +1879,7 @@ function skipBalancedParentheses(sparql: string, start: number, limit = sparql.l
   for (let token = readNextSparqlCodeToken(sparql, i, limit); token !== null;
     token = readNextSparqlCodeToken(sparql, i, limit)) {
     i = token.end;
-    if (token.kind !== 'punctuation') continue;
+    if (token.kind !== 'char') continue;
     if (token.value === '(') depth++;
     else if (token.value === ')') {
       depth--;
@@ -1898,7 +1895,7 @@ function skipValuesClause(sparql: string, start: number, limit: number): number 
   for (let token = readNextSparqlCodeToken(sparql, i, limit); token !== null;
     token = readNextSparqlCodeToken(sparql, i, limit)) {
     i = token.end;
-    if (token.kind !== 'punctuation') continue;
+    if (token.kind !== 'char') continue;
     if (token.value === '{') {
       const end = findMatchingCloseBrace(sparql, token.start);
       return end === -1 || end > limit ? token.start : end + 1;
@@ -1975,11 +1972,11 @@ function findExplicitWhereTokenIdx(sparql: string): number {
   for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
     token = readNextSparqlCodeToken(sparql, i)) {
     i = token.end;
-    if (token.kind === 'punctuation' && token.value === '{') {
+    if (token.kind === 'char' && token.value === '{') {
       braceDepth++;
       continue;
     }
-    if (token.kind === 'punctuation' && token.value === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       braceDepth = Math.max(0, braceDepth - 1);
       continue;
     }
@@ -2108,7 +2105,7 @@ function findWhereBraceStart(sparql: string): number {
   for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
     token = readNextSparqlCodeToken(sparql, i)) {
     i = token.end;
-    if (token.kind !== 'punctuation') continue;
+    if (token.kind !== 'char') continue;
     if (token.value === '{') {
       if (depth === 0) opens.push(token.start);
       depth++;
@@ -2346,7 +2343,7 @@ function isDedupSafeBasicGraphPattern(inner: string): boolean {
   for (let token = readNextSparqlCodeToken(inner, i); token !== null;
     token = readNextSparqlCodeToken(inner, i)) {
     i = token.end;
-    if (token.kind === 'punctuation' && (token.value === '{' || token.value === '}')) {
+    if (token.kind === 'char' && (token.value === '{' || token.value === '}')) {
       return false;
     }
     if (token.kind === 'word' && forbidden.includes(token.word)) return false;
@@ -2369,15 +2366,10 @@ function collectQueryVariables(sparql: string): string[] {
   for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
     token = readNextSparqlCodeToken(sparql, i)) {
     i = token.end;
-    if (token.kind === 'punctuation' && (token.value === '?' || token.value === '$')) {
-      const variable = readSparqlVariable(sparql, token.start);
-      if (variable) {
-        if (!seen.has(variable)) {
-          seen.add(variable);
-          variables.push(variable);
-        }
-        i = token.start + variable.length;
-        continue;
+    if (token.kind === 'variable') {
+      if (!seen.has(token.variable)) {
+        seen.add(token.variable);
+        variables.push(token.variable);
       }
     }
   }

@@ -1,16 +1,12 @@
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
   readNextSparqlCodeToken,
+  readSparqlPrefixName,
+  type SparqlPrefixName,
   readSparqlVariable,
   skipSparqlIriRef,
   skipSparqlSpaceAndLineComments,
 } from './sparql-utils.js';
-
-export interface SparqlPrefixName {
-  prefix: string;
-  local: string;
-  length: number;
-}
 
 export function collectPrefixDeclarations(sparql: string): Map<string, string> {
   const prefixes = new Map<string, string>();
@@ -42,24 +38,6 @@ export function collectPrefixDeclarations(sparql: string): Map<string, string> {
   }
 
   return prefixes;
-}
-
-export function readSparqlPrefixName(
-  sparql: string,
-  start: number,
-): SparqlPrefixName | null {
-  let colon = start;
-  while (colon < sparql.length && isSparqlPrefixLabelChar(sparql[colon])) colon++;
-  if (sparql[colon] !== ':') return null;
-
-  let end = colon + 1;
-  while (end < sparql.length && isSparqlPrefixedLocalChar(sparql[end])) end++;
-
-  return {
-    prefix: sparql.slice(start, colon),
-    local: sparql.slice(colon + 1, end),
-    length: end - start,
-  };
 }
 
 export function resolveSparqlPrefixedName(
@@ -100,11 +78,11 @@ function readTopLevelStaticGraphValues(
   for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
     token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
     i = token.end;
-    if (token.kind === 'punctuation' && token.value === '{') {
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
       continue;
     }
-    if (token.kind === 'punctuation' && token.value === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth = Math.max(0, depth - 1);
       continue;
     }
@@ -160,25 +138,4 @@ function parseStaticGraphValues(
     i += prefixedName.length;
   }
   return values;
-}
-
-function isSparqlPrefixLabelChar(ch: string | undefined): ch is string {
-  return !!ch && (
-    (ch >= 'A' && ch <= 'Z') ||
-    (ch >= 'a' && ch <= 'z') ||
-    (ch >= '0' && ch <= '9') ||
-    ch === '_' ||
-    ch === '-'
-  );
-}
-
-function isSparqlPrefixedLocalChar(ch: string | undefined): ch is string {
-  return !!ch &&
-    !/\s/.test(ch) &&
-    ch !== '{' &&
-    ch !== '}' &&
-    ch !== '(' &&
-    ch !== ')' &&
-    ch !== ';' &&
-    ch !== ',';
 }

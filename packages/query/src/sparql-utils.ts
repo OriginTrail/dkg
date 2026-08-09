@@ -99,6 +99,51 @@ export function readSparqlVariable(sparql: string, start: number): string | null
   return sparql.slice(start, end);
 }
 
+export interface SparqlPrefixName {
+  readonly prefix: string;
+  readonly local: string;
+  readonly length: number;
+}
+
+export function readSparqlPrefixName(
+  sparql: string,
+  start: number,
+): SparqlPrefixName | null {
+  let colon = start;
+  while (colon < sparql.length && isSparqlPrefixLabelChar(sparql[colon])) colon++;
+  if (sparql[colon] !== ':') return null;
+
+  let end = colon + 1;
+  while (end < sparql.length && isSparqlPrefixedLocalChar(sparql[end])) end++;
+
+  return {
+    prefix: sparql.slice(start, colon),
+    local: sparql.slice(colon + 1, end),
+    length: end - start,
+  };
+}
+
+function isSparqlPrefixLabelChar(ch: string | undefined): ch is string {
+  return !!ch && (
+    (ch >= 'A' && ch <= 'Z') ||
+    (ch >= 'a' && ch <= 'z') ||
+    (ch >= '0' && ch <= '9') ||
+    ch === '_' ||
+    ch === '-'
+  );
+}
+
+function isSparqlPrefixedLocalChar(ch: string | undefined): ch is string {
+  return !!ch &&
+    !/\s/.test(ch) &&
+    ch !== '{' &&
+    ch !== '}' &&
+    ch !== '(' &&
+    ch !== ')' &&
+    ch !== ';' &&
+    ch !== ',';
+}
+
 function readCodePoint(src: string, index: number): { codePoint: number; width: number } | null {
   if (index >= src.length) return null;
   const codePoint = src.codePointAt(index);
@@ -170,7 +215,9 @@ export function skipSparqlSpaceAndLineComments(sparql: string, start: number): n
 export type SparqlCodeToken =
   | { readonly kind: 'word'; readonly word: string; readonly start: number; readonly end: number }
   | { readonly kind: 'iri'; readonly iri: string; readonly start: number; readonly end: number }
-  | { readonly kind: 'punctuation'; readonly value: string; readonly start: number; readonly end: number };
+  | { readonly kind: 'variable'; readonly variable: string; readonly start: number; readonly end: number }
+  | { readonly kind: 'prefixedName'; readonly prefixedName: SparqlPrefixName; readonly start: number; readonly end: number }
+  | { readonly kind: 'char'; readonly value: string; readonly start: number; readonly end: number };
 
 /**
  * Read the next significant SPARQL token while centrally skipping whitespace,
@@ -209,12 +256,30 @@ export function readNextSparqlCodeToken(
         };
       }
     }
+    const variable = readSparqlVariable(sparql, cursor);
+    if (variable !== null && cursor + variable.length <= end) {
+      return {
+        kind: 'variable',
+        variable,
+        start: cursor,
+        end: cursor + variable.length,
+      };
+    }
+    const prefixedName = readSparqlPrefixName(sparql, cursor);
+    if (prefixedName !== null && cursor + prefixedName.length <= end) {
+      return {
+        kind: 'prefixedName',
+        prefixedName,
+        start: cursor,
+        end: cursor + prefixedName.length,
+      };
+    }
     const word = readStandaloneSparqlWord(sparql, cursor);
     if (word !== null && word.end <= end) {
       return { kind: 'word', ...word };
     }
     return {
-      kind: 'punctuation',
+      kind: 'char',
       value: ch,
       start: cursor,
       end: cursor + 1,
@@ -231,7 +296,7 @@ export function findMatchingSparqlCloseBrace(sparql: string, openIdx: number): n
   for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
     token = readNextSparqlCodeToken(sparql, i)) {
     i = token.end;
-    if (token.kind !== 'punctuation') continue;
+    if (token.kind !== 'char') continue;
     if (token.value === '{') depth++;
     else if (token.value === '}') {
       depth--;
