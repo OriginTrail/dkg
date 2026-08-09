@@ -220,11 +220,40 @@ describe('/api/info chain sanitization', () => {
       configured: true,
       rpcEndpointCount: 2,
       hubConfigured: true,
+      rpcUrl: null,
+      rpcUrls: [],
+      hubAddress: `0x${'11'.repeat(20)}`,
+      rpcEndpointsRedacted: true,
     });
-    expect(response.body.chain).not.toHaveProperty('rpcUrl');
-    expect(response.body.chain).not.toHaveProperty('rpcUrls');
     expect(JSON.stringify(response.body)).not.toContain(credentialSentinel);
     expect(JSON.stringify(response.body.chain)).not.toContain('://');
+  });
+
+  it('retains the legacy chain keys while making endpoint redaction explicit', async () => {
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        auth: { enabled: true },
+        chain: {
+          type: 'evm',
+          rpcUrl: 'https://primary.invalid/operator-secret',
+          rpcUrls: ['https://backup.invalid/operator-secret'],
+          hubAddress: `0x${'22'.repeat(20)}`,
+          chainId: 'base:84532',
+        },
+      },
+      '/api/info',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.chain).toMatchObject({
+      rpcUrl: null,
+      rpcUrls: [],
+      hubAddress: `0x${'22'.repeat(20)}`,
+      rpcEndpointsRedacted: true,
+      rpcEndpointCount: 2,
+    });
+    expect(JSON.stringify(response.body)).not.toContain('operator-secret');
   });
 });
 

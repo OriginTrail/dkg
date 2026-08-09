@@ -395,6 +395,18 @@ interface PublicChainSummary {
   hubConfigured: boolean;
 }
 
+interface PublicInfoChainSummary extends PublicChainSummary {
+  /**
+   * Compatibility fields retained from the original `/api/info` contract.
+   * RPC endpoint values are deliberately unavailable on every response: the
+   * configured URLs may carry userinfo, provider keys, or path/query tokens.
+   */
+  rpcUrl: null;
+  rpcUrls: [];
+  hubAddress: string | null;
+  rpcEndpointsRedacted: true;
+}
+
 /**
  * Project effective chain configuration onto the non-secret HTTP status shape.
  * Keeping this boundary shared prevents either status route from accidentally
@@ -411,6 +423,26 @@ function buildPublicChainSummary(
       ? resolveRpcUrls(chainConf.rpcUrl, chainConf.rpcUrls).length
       : 0,
     hubConfigured: Boolean(chainConf.hubAddress),
+  };
+}
+
+/**
+ * Keep the established `/api/info.chain` keys without returning credentials.
+ * The Hub contract address is public chain metadata, so it remains usable;
+ * endpoint fields fail closed and the additive marker makes that intentional
+ * contract visible to clients instead of silently changing the object shape.
+ */
+function buildPublicInfoChainSummary(
+  chainConf: ResolvedChainConfig | undefined,
+): PublicInfoChainSummary | null {
+  const summary = buildPublicChainSummary(chainConf);
+  if (!summary || !chainConf) return null;
+  return {
+    ...summary,
+    rpcUrl: null,
+    rpcUrls: [],
+    hubAddress: chainConf.hubAddress ?? null,
+    rpcEndpointsRedacted: true,
   };
 }
 
@@ -893,7 +925,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       startedAt: new Date(startedAt).toISOString(),
       uptimeSeconds: Math.floor((now - startedAt) / 1000),
       timestamp: new Date(now).toISOString(),
-      chain: buildPublicChainSummary(chainConf),
+      chain: buildPublicInfoChainSummary(chainConf),
       peers: uniquePeers.size,
       contextGraphs: resolveContextGraphs(config).length,
       telemetry: config.telemetry?.enabled ?? false,
