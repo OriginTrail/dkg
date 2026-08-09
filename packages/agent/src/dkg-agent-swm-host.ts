@@ -3331,7 +3331,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const persisted = await this.config.contextGraphSubscriptionStore
           ?.loadSelectedVmReconcileCursor?.(localCgId, onChainId);
         if (
-          persisted?.nameHash === nameHash
+          persisted?.contextGraphId === localCgId
+          && persisted.onChainContextGraphId === onChainId
+          && persisted.nameHash === nameHash
           && Number.isSafeInteger(persisted.watermark)
           && persisted.watermark >= 0
         ) watermark = persisted.watermark;
