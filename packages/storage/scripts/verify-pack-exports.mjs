@@ -133,10 +133,17 @@ function stageFixtures(scratch) {
   }));
 }
 
+const barrelValueExports = JSON.parse(
+  readFileSync(join(fixtureDir, 'barrel-value-exports.json'), 'utf8'),
+);
+
 function runProbe(scratch) {
   return run(process.execPath, [join(scratch, 'probe.mjs')], {
     cwd: scratch,
-    env: { ...process.env, PACK_GATE_CONFIG: JSON.stringify(GATE) },
+    env: {
+      ...process.env,
+      PACK_GATE_CONFIG: JSON.stringify({ ...GATE, barrelValueExports }),
+    },
   });
 }
 
@@ -209,6 +216,12 @@ try {
     pkgdir, scratch, 'index.js',
     `export { ${GATE.ownershipMint} as createStorageOwner } from '${authorityJs}';`,
     'ALIASED mint re-export fails the runtime probe (identity, not name)', runProbe,
+  );
+  withBarrelMutant(
+    pkgdir, scratch, 'index.js',
+    `import { ${GATE.ownershipMint} as packGateWrapped } from '${authorityJs}';
+export const createStorageOwner = (...args) => packGateWrapped(...args);`,
+    'WRAPPER around the mint under a fresh name fails the surface snapshot', runProbe,
   );
   withBarrelMutant(
     pkgdir, scratch, 'index.d.ts',

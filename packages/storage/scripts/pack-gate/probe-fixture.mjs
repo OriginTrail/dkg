@@ -31,7 +31,20 @@ for (const [name, value] of Object.entries(internal)) {
   }
 }
 
+// The barrel's VALUE-EXPORT NAME SET is pinned exactly. Identity detection
+// (above) catches re-exports; this catches NEW surface — including a wrapper
+// function around the authority, which is not identity-equal and whose
+// behavior no mechanical check can decide. Any addition or removal is a
+// visible diff to scripts/pack-gate/barrel-value-exports.json in the same PR,
+// never a silent change.
+const actualNames = Object.keys(barrel).filter((n) => n !== 'default').sort();
+const expectedNames = [...(cfg.barrelValueExports ?? [])].sort();
+const added = actualNames.filter((n) => !expectedNames.includes(n));
+const removed = expectedNames.filter((n) => !actualNames.includes(n));
+
 const verdicts = [
+  [added.length === 0 && removed.length === 0,
+    `barrel value-export set matches the pinned snapshot (added: ${added.join(',') || '-'}; removed: ${removed.join(',') || '-'}) — intentional changes update pack-gate/barrel-value-exports.json in the same PR`],
   [typeof barrel[cfg.publicError] === 'function', 'barrel exports the public unowned-backend error'],
   [leaks.length === 0, `barrel exports no authority value under any name (leaked: ${leaks.join('; ')})`],
   [typeof internal[cfg.ownershipMint] === 'function', 'internal entry exports the ownership mint'],
