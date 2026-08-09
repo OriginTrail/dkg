@@ -2723,6 +2723,139 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.continuationOrdinal).toBe(2);
   });
 
+  it('reuses a proven holder sequentially across the bounded recovery slice', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmProvenHolderBurst', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const holder = '12D3KooWExactProvenAHolder';
+    const fallback = '12D3KooWExactProvenZFallback';
+    const localCgId = '0x0000000000000000000000000000000000000001/proven-holder';
+    const connected = [holder, fallback].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactProvenLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [holder, fallback], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: Array<{ peerId: string; ordinal: number }> = [];
+    const recovered = new Set<number>();
+    let activeFetches = 0;
+    let maxActiveFetches = 0;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cg: string,
+      uals: string[],
+    ) => {
+      activeFetches += 1;
+      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
+      const ordinal = Number(uals[0]!.split('/').at(-1));
+      fetches.push({ peerId, ordinal });
+      if (peerId === holder) recovered.add(ordinal);
+      activeFetches -= 1;
+      return {
+        result: {
+          fetchedDataTriples: peerId === holder ? 1 : 0,
+          fetchedMetaTriples: peerId === holder ? 8 : 0,
+          insertedTriples: peerId === holder ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: peerId === holder ? 'found' as const : 'clean-absent' as const,
+      };
+    };
+    const targets = Array.from({ length: 4 }, (_, ordinal) =>
+      vmRecoveryTarget(localCgId, ordinal, String(ordinal)));
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string, _ocg: bigint, ordinal: number,
+    ) => recovered.has(ordinal)
+      ? { status: 'reconciled', blockNumber: 100 }
+      : { status: 'pending', recovery: targets[ordinal] };
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+
+    expect(fetches).toEqual(targets.map((target) => ({
+      peerId: holder,
+      ordinal: target.ordinal,
+    })));
+    expect(maxActiveFetches).toBe(1);
+    expect(result.attemptedOrdinals).toEqual(targets.map((target) => target.ordinal));
+    expect([...result.outcomes.values()]).toEqual(
+      targets.map(() => ({ status: 'reconciled', blockNumber: 100 })),
+    );
+    expect(result.continuationOrdinal).toBeUndefined();
+  });
+
+  it('stops reusing a proven holder after a clean absence', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmProvenHolderRevocation', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const holder = '12D3KooWExactRevocationAHolder';
+    const fallback = '12D3KooWExactRevocationZFallback';
+    const localCgId = '0x0000000000000000000000000000000000000001/revoke-holder';
+    const connected = [holder, fallback].map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWExactRevocationLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [holder, fallback], curatorIsLocal: false, legacyTripleResolved: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const fetches: Array<{ peerId: string; ordinal: number }> = [];
+    const recovered = new Set<number>();
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
+      peerId: string,
+      _cg: string,
+      uals: string[],
+    ) => {
+      const ordinal = Number(uals[0]!.split('/').at(-1));
+      fetches.push({ peerId, ordinal });
+      const found = (peerId === holder && ordinal === 0)
+        || (peerId === fallback && ordinal === 2);
+      if (found) recovered.add(ordinal);
+      return {
+        result: {
+          fetchedDataTriples: found ? 1 : 0,
+          fetchedMetaTriples: found ? 8 : 0,
+          insertedTriples: found ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: found ? 'found' as const : 'clean-absent' as const,
+      };
+    };
+    const targets = Array.from({ length: 3 }, (_, ordinal) =>
+      vmRecoveryTarget(localCgId, ordinal, String(ordinal)));
+    (internals as any).reconcileChainOrdinal = async (
+      _lcg: string, _ocg: bigint, ordinal: number,
+    ) => recovered.has(ordinal)
+      ? { status: 'reconciled', blockNumber: 100 }
+      : { status: 'pending', recovery: targets[ordinal] };
+
+    const result = await internals.recoverVmReconcileBatch(
+      localCgId, 1n, targets, 100, () => true,
+    );
+
+    expect(fetches).toEqual([
+      { peerId: holder, ordinal: 0 },
+      { peerId: holder, ordinal: 1 },
+      { peerId: fallback, ordinal: 2 },
+    ]);
+    expect(result.attemptedOrdinals).toEqual([0, 1, 2]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.outcomes.get(1)?.status).toBe('pending');
+    expect(result.outcomes.get(2)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.continuationOrdinal).toBeUndefined();
+  });
+
   it('spreads unavailable-peer probes across targets within the global peer budget', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmUnavailableFairness', chainAdapter: chain });

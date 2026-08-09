@@ -5403,6 +5403,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const outcomes = new Map<number, OrdinalOutcome>();
     const attemptedOrdinals = new Set<number>();
     const usedPeerIds = new Set<string>();
+    // A clean exact hit proves only that this peer held the requested asset,
+    // not the whole CG. It is nevertheless the best bounded candidate for the
+    // next untouched target in this same slice. Reuse it sequentially while it
+    // keeps returning exact hits; one clean absence or incomplete response
+    // removes the hint immediately. This preserves the one-frame-per-request
+    // memory bound and peer-roster proof semantics while avoiding the former
+    // one-asset-per-provider-per-sweep throughput ceiling.
+    const provenHolderPeerIds = new Set<string>();
     const consideredPeerIds = new Set<string>();
     const unavailablePeerIds = new Set<string>();
     let recoveryWorkRan = false;
@@ -5425,11 +5433,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // uncredited, but consume this target's turn so another missing KA gets
       // the next physical peer slot in the same bounded pass.
       let peerId: string | undefined;
-      const candidateOrder = installedRecord
+      const uncreditedCandidateOrder = installedRecord
         ? this.vmReconcileUncreditedCandidateOrder(installedRecord)
         : orderedPeerIds;
+      const candidateOrder = [
+        ...uncreditedCandidateOrder.filter((candidatePeerId) =>
+          provenHolderPeerIds.has(candidatePeerId)),
+        ...uncreditedCandidateOrder.filter((candidatePeerId) =>
+          !provenHolderPeerIds.has(candidatePeerId)),
+      ];
       for (const candidatePeerId of candidateOrder) {
-        if (usedPeerIds.has(candidatePeerId) || unavailablePeerIds.has(candidatePeerId)) continue;
+        if (
+          (usedPeerIds.has(candidatePeerId) && !provenHolderPeerIds.has(candidatePeerId))
+          || unavailablePeerIds.has(candidatePeerId)
+        ) continue;
         if (
           !consideredPeerIds.has(candidatePeerId)
           && consideredPeerIds.size >= DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX
@@ -5544,6 +5561,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
+      if (disposition === 'found') provenHolderPeerIds.add(peerId);
+      else provenHolderPeerIds.delete(peerId);
 
       // The exact request may have completed after unsubscribe, rebind, or
       // shutdown. Its authenticated materialization is already fail-closed,
