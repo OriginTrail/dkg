@@ -18,6 +18,134 @@ import {
 } from '../src/index.js';
 
 describe('Context Graph discovery/subscription boundary', () => {
+  it.each([
+    ['default', undefined],
+    ['explicitly enabled', true],
+  ] as const)('keeps persisted subscription rehydration %s', async (_label, enabled) => {
+    const id = `rehydration-${_label.replace(/\s+/g, '-')}`;
+    const record: ContextGraphSubscriptionRecord = {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    };
+    const persisted = new Map([[id, { ...record }]]);
+    const agent = await DKGAgent.create({
+      name: `Rehydration${_label}`,
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      ...(enabled === undefined
+        ? {}
+        : { contextGraphSubscriptionRehydrationEnabled: enabled }),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (next) => { persisted.set(next.id, { ...next }); },
+        delete: async (contextGraphId) => { persisted.delete(contextGraphId); },
+      },
+    });
+
+    try {
+      await agent.start();
+      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
+        subscribed: true,
+        synced: true,
+      });
+      expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
+      expect((agent as any).gossipRegistered.has(id)).toBe(true);
+      expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+        rehydrationEnabled: true,
+        persistedTotal: 1,
+        activated: 1,
+        dormant: 0,
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('leaves durable subscriptions dormant and stored content queryable when rehydration is disabled', async () => {
+    const subscribedId = 'rehydration-disabled-subscriber';
+    const hostedId = 'rehydration-disabled-host';
+    const graph = contextGraphDataGraphUri(subscribedId);
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>([
+      [subscribedId, {
+        id: subscribedId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+      }],
+      [hostedId, {
+        id: hostedId,
+        subscribed: false,
+        synced: true,
+        coreHosted: true,
+        syncScoped: true,
+      }],
+    ]);
+    const durableBefore = new Map(
+      [...persisted.entries()].map(([id, record]) => [id, { ...record }]),
+    );
+    const deleted: string[] = [];
+    const agent = await DKGAgent.create({
+      name: 'RehydrationDisabled',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionRehydrationEnabled: false,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (contextGraphId) => {
+          deleted.push(contextGraphId);
+          persisted.delete(contextGraphId);
+        },
+      },
+    });
+
+    await agent.store.insert([{
+      subject: 'urn:dkg:retained-subject',
+      predicate: 'urn:dkg:retained-predicate',
+      object: '"retained"',
+      graph,
+    }]);
+
+    try {
+      await agent.start();
+      for (const id of [subscribedId, hostedId]) {
+        expect(agent.getSubscribedContextGraphs().has(id)).toBe(false);
+        expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
+        expect((agent as any).gossipRegistered.has(id)).toBe(false);
+        expect(persisted.get(id)).toEqual(durableBefore.get(id));
+      }
+      expect(deleted).not.toContain(subscribedId);
+      expect(deleted).not.toContain(hostedId);
+      expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+        rehydrationEnabled: false,
+        persistedTotal: 2,
+        hostedActivated: 0,
+        activated: 0,
+        dormant: 2,
+        dormantIds: [hostedId, subscribedId],
+      });
+      expect(await agent.query(`
+        ASK WHERE {
+          GRAPH <${graph}> {
+            <urn:dkg:retained-subject> <urn:dkg:retained-predicate> "retained" .
+          }
+        }
+      `, { contextGraphId: subscribedId })).toEqual({
+        bindings: [{ result: 'true' }],
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
   it('keeps discovery passive, activates explicit intent, and rehydrates only the explicit subscription', async () => {
     expect([...Object.values(SYSTEM_CONTEXT_GRAPHS)].sort()).toEqual(['agents', 'ontology']);
     expect(AGENT_REGISTRY_CONTEXT_GRAPH).toBe(SYSTEM_CONTEXT_GRAPHS.AGENTS);

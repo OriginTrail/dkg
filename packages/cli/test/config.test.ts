@@ -32,6 +32,7 @@ import {
   resolveNetworkConfigName,
   resolveAutoUpdateConfig,
   resolveAutoUpdateSource,
+  resolveContextGraphSubscriptionRehydrationEnabled,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
@@ -40,6 +41,35 @@ import {
   resolveStorageAckTiming,
 } from '../src/config.js';
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('resolveContextGraphSubscriptionRehydrationEnabled', () => {
+  it('defaults to enabled and preserves explicit config values', () => {
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(undefined, undefined)).toBe(true);
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(true, undefined)).toBe(true);
+    expect(resolveContextGraphSubscriptionRehydrationEnabled(false, undefined)).toBe(false);
+  });
+
+  it('lets the strict environment override win', () => {
+    for (const value of ['1', 'true', ' TRUE ']) {
+      expect(resolveContextGraphSubscriptionRehydrationEnabled(false, value)).toBe(true);
+    }
+    for (const value of ['0', 'false', ' FALSE ']) {
+      expect(resolveContextGraphSubscriptionRehydrationEnabled(true, value)).toBe(false);
+    }
+  });
+
+  it('rejects invalid environment and persisted config values', () => {
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled(true, 'yes')).toThrow(
+      'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED must be one of 1, 0, true, or false',
+    );
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled(true, '')).toThrow(
+      'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED',
+    );
+    expect(() => resolveContextGraphSubscriptionRehydrationEnabled('false', undefined)).toThrow(
+      'contextGraphSubscriptionRehydrationEnabled must be a boolean',
+    );
+  });
+});
 
 describe('resolveRfc64PublicCatalogActivation', () => {
   const chainIdentity = resolveRfc64PublicCatalogActivationChainIdentityV1('otp:20430');

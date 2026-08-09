@@ -127,6 +127,7 @@ import {
   type LocalAgentIntegrationStatus,
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
+  resolveContextGraphSubscriptionRehydrationEnabled,
   resolveNetworkDefaultContextGraphs,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -1150,6 +1151,11 @@ export async function runDaemonInner(
   startedAt: number,
 ): Promise<void> {
   configureKaPublishLifecycleDebugLogging(config);
+  const contextGraphSubscriptionRehydrationEnabled =
+    resolveContextGraphSubscriptionRehydrationEnabled(
+      config.contextGraphSubscriptionRehydrationEnabled,
+      process.env.DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED,
+    );
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1763,6 +1769,7 @@ export async function runDaemonInner(
         ? config.rfc64PublicCatalog
         : { enabled: false },
     maxRehydratedContextGraphSubscriptions: config.maxRehydratedContextGraphSubscriptions,
+    contextGraphSubscriptionRehydrationEnabled,
     // OT-RFC-38 LU-6 / OT-RFC-49 WS-A — plumb the host-mode block (eviction
     // tiers, discovery rate limits, and the `stripCiphertext` private-ciphertext
     // strip kill-switch) from config.json. Without this forward the whole

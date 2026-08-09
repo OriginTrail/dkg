@@ -748,6 +748,13 @@ export class DKGAgent extends DKGAgentBase {
     | undefined;
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
+    const contextGraphSubscriptionRehydrationEnabled =
+      inputConfig.contextGraphSubscriptionRehydrationEnabled ?? true;
+    if (typeof contextGraphSubscriptionRehydrationEnabled !== 'boolean') {
+      throw new Error(
+        'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
+      );
+    }
     validateSyncResponderSnapshotLimitsConfig(inputConfig.syncResponderSnapshotLimits);
     const normalizedConfig = normalizeStorageAckConfig({
       ...inputConfig,
@@ -870,6 +877,7 @@ export class DKGAgent extends DKGAgentBase {
     delete configWithoutRfc64CatalogControls.rfc64CatalogDeploymentProfile;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogAutoPublish;
     delete configWithoutRfc64CatalogControls.rfc64PublicCatalogBootstrap;
+    delete configWithoutRfc64CatalogControls.contextGraphSubscriptionRehydrationEnabled;
     const resolvedConfig: ResolvedDKGAgentConfig = {
       ...configWithoutRfc64CatalogControls,
       genesisId,
@@ -878,6 +886,7 @@ export class DKGAgent extends DKGAgentBase {
       rfc64CatalogDeploymentProfile,
       rfc64PublicCatalogAutoPublishPolicy,
       rfc64PublicCatalogBootstrap,
+      contextGraphSubscriptionRehydrationEnabled,
     };
 
     const port = config.listenPort ?? 0;

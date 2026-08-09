@@ -828,6 +828,8 @@ export interface VmReconcileRotationRecord {
 }
 
 export interface ContextGraphSubscriptionRehydrationStatus {
+  /** Whether persisted subscription activation was enabled for this boot. */
+  rehydrationEnabled: boolean;
   /** Non-system persisted rows governed by the rehydration cap. */
   persistedTotal: number;
   /** Persisted system rows seen during rehydration; excluded from cap math. */
@@ -1699,6 +1701,14 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /**
+   * Whether durable context-graph subscription rows become live subscriptions
+   * during startup. Defaults to `true`. When `false`, startup still opens the
+   * same durable stores and leaves every row and RDF graph intact, but it does
+   * not restore those rows into gossip handlers or automatic sync scope.
+   * Explicit subscriptions made after boot continue to work normally.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
   /** OT-RFC-59 durable per-(peer,CG) changelog cursor store. Defaults to in-memory. */
@@ -1769,7 +1779,9 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
     | 'rfc64CatalogDeploymentProfile'
+    | 'contextGraphSubscriptionRehydrationEnabled'
   > & {
+    contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;
