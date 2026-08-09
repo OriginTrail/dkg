@@ -27,7 +27,10 @@ const RESOLUTION_EXPECTATIONS = Object.freeze([
   [`${PKG}/dist/internal/managed-oxigraph-ownership-v1.js`, false],
   [`${PKG}/dist/store-priority-scheduler.js`, false],
   [`${PKG}/dist/managed-oxigraph-ownership-v1-internal`, false],
-  [`${PKG}/package.json`, false],
+  // The manifest is a STABLE metadata subpath, per ecosystem convention:
+  // tooling reads package metadata through Node resolution, and refusing it
+  // broke consumers for a reason unrelated to hiding the authority.
+  [`${PKG}/package.json`, true],
 ]);
 
 const failures = [];

@@ -12,7 +12,8 @@
     "./internal/managed-oxigraph-ownership-v1": {
       "types": "./dist/internal/managed-oxigraph-ownership-v1.d.ts",
       "default": "./dist/internal/managed-oxigraph-ownership-v1.js"
-    }
+    },
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
