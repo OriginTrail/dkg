@@ -706,12 +706,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // Routed FIRST: a control transition must not be rejectable by an
     // already-aborted caller signal any more than by queue capacity.
     if (admission !== undefined && !isStoreQueuedAdmissionV1(admission)) {
-      return await this.barrierCoordinator.enqueue(
+      // Legacy compatibility boundary: runtime purpose strings cannot bind T.
+      return (await this.barrierCoordinator.enqueue(
         admission.storeId,
         operation,
         work,
         admission.generation,
-      );
+      )) as T;
     }
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -1093,24 +1094,25 @@ export class StorePriorityScheduler extends ObservableScheduler {
     generation?: string,
     timeoutMs?: number,
   ): Promise<T> {
+    // Legacy compatibility boundary: runtime purpose strings cannot bind T.
     return this.barrierCoordinator.enqueue(
       storeId,
       purpose,
       transition,
       generation,
       timeoutMs,
-    );
+    ) as Promise<T>;
   }
 
   /** Result-free control barrier for coalescible lifecycle transitions. */
-  runControlBarrierEffect(
+  async runControlBarrierEffect(
     storeId: object,
     purpose: string,
     transition: () => Promise<void>,
     generation?: string,
     timeoutMs?: number,
   ): Promise<void> {
-    return this.barrierCoordinator.enqueue(
+    await this.barrierCoordinator.enqueue(
       storeId,
       purpose,
       transition,

@@ -135,23 +135,20 @@ export class StoreControlBarrierCoordinator {
    * idempotent control transition; do not use one purpose for two different
    * transitions.
    */
-  enqueue<T>(
+  enqueue(
     storeId: object,
     purpose: string,
-    transition: () => Promise<T>,
+    transition: () => Promise<unknown>,
     generation?: string,
     timeoutMs?: number,
-  ): Promise<T> {
+  ): Promise<unknown> {
     const existing = this.barriers.find(
       (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
     );
     if (existing !== undefined) {
       this.coalescedTotal += 1;
       this.host.observeDepths();
-      // Compatibility boundary: this API predates the result-free barrier path.
-      // New coalescible transitions use `runControlBarrierEffect`; typed callers
-      // retain the historical result contract until a versioned API can remove it.
-      return existing.promise as Promise<T>;
+      return existing.promise;
     }
     let resolve!: (value: unknown) => void;
     let reject!: (reason?: unknown) => void;
@@ -189,7 +186,7 @@ export class StoreControlBarrierCoordinator {
     this.barriers.push(barrier);
     this.host.observeDepths();
     this.pump();
-    return promise as Promise<T>;
+    return promise;
   }
 
   /**
