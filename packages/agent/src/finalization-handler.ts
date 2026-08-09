@@ -94,6 +94,7 @@ import {
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
+import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
@@ -1634,7 +1635,9 @@ export class FinalizationHandler {
         }
       }
       if (!trustedAssertionEvidence) {
-        const recoveredEvidence = await this.recoverReceiptBackedGraphScopedEvidence({
+        const recovery = await recoverReceiptBackedGraphScopedEvidence({
+          store: this.store,
+          chain: this.chain,
           contextGraphId,
           scope,
           head: workspaceHead!,
@@ -1642,17 +1645,29 @@ export class FinalizationHandler {
           publisherAddress,
           kaId,
           subGraphName,
-        }, ctx);
-        if (recoveredEvidence) {
-          return this.reconcileGraphScopedKC({
-            ...input,
-            trustedAssertionEvidence: recoveredEvidence,
-          }, ctx);
+        });
+        if (recovery.status === 'recovered') {
+          this.log.info(
+            ctx,
+            `Chain-reconcile: recovered canonical transaction provenance and authenticated `
+              + `local controls for ${scope.ual}`,
+          );
+          return this.repairExactGraphScopedVmMetadata({
+            contextGraphId,
+            scope,
+            verifiedQuads: vmVerification.quads,
+            computedMerkleRoot: vmVerification.merkleRoot,
+            evidence: recovery.evidence,
+            privateMerkleRoot,
+            batchId: kaId,
+            preserveNewerWorkspaceLifecycle: false,
+            ctx,
+          });
         }
         this.log.info(
           ctx,
           `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
-            + 'transaction provenance; deferring',
+            + `trusted receipt provenance (${recovery.reason}); deferring`,
         );
         return 'verified-vm-metadata-pending';
       }
@@ -1660,36 +1675,17 @@ export class FinalizationHandler {
       // graph-scoped metadata survived a crash. Reapply only the metadata tail:
       // SWM writers use a different lock, so this recovery path must not delete
       // a potentially newer staged assertion.
-      const outcome = await this.applyVerifiedGraphScopedFinalization({
+      return this.repairExactGraphScopedVmMetadata({
         contextGraphId,
         scope,
         verifiedQuads: vmVerification.quads,
-        head,
-        privateMerkleRoot,
         computedMerkleRoot: vmVerification.merkleRoot,
-        publisherAddress: evidencePublisherAddress,
-        txHash: trustedAssertionEvidence.transactionHash,
-        blockNumber: evidenceBlockNumber,
+        evidence: trustedAssertionEvidence,
+        privateMerkleRoot,
         batchId: kaId,
-        authorAddress: evidenceAuthorAddress,
-        materializedVersion,
-        accessPolicy: trustedAssertionEvidence?.accessPolicy,
-        allowedPeers: trustedAssertionEvidence?.allowedPeers,
-        subGraphName,
-        source: 'chain-reconcile',
-        contentAlreadyMaterialized: true,
+        preserveNewerWorkspaceLifecycle,
         ctx,
       });
-      if (outcome === 'stale') return 'stale-target';
-      if (outcome === 'preserved-metadata') {
-        this.log.info(
-          ctx,
-          `Chain-reconcile: retained confirmed metadata for an older same-root assertion ${ual}`,
-        );
-        return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
-      }
-      this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
-      return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
 
     const swmVerification = await this.verifyExactGraphScopedLayer({
@@ -1774,122 +1770,62 @@ export class FinalizationHandler {
     return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'promoted';
   }
 
-  /**
-   * Durable sync accepts only structural peer metadata and independently
-   * verifies its receipt claim. Consequently an exact VM fetch can leave the
-   * graph present with a chain-valid transaction hash while intentionally
-   * omitting peer-controlled ACL, publisher-peer, status, and attribution
-   * fields. Re-verify that stored receipt against canonical chain state, then
-   * combine it with the local durable SWM head so the normal trusted-evidence
-   * materializer can reconstruct those fields without trusting the peer.
-   *
-   * This bounded recovery currently applies only to assertion version 1. An
-   * update receipt requires the separate update-verification contract and must
-   * continue to fail closed until that evidence is threaded explicitly.
-   */
-  private async recoverReceiptBackedGraphScopedEvidence(input: {
+  private async repairExactGraphScopedVmMetadata(input: {
     contextGraphId: string;
     scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    head: KnowledgeAssetWorkspaceHead;
-    merkleRoot: Uint8Array;
-    publisherAddress: string;
-    kaId: bigint;
-    subGraphName?: string;
-  }, ctx: OperationContext): Promise<TrustedGraphScopedAssertionEvidence | undefined> {
-    const resolver = this.chain?.resolveCanonicalFinalizationReceipt;
-    const rootCountReader = this.chain?.getMerkleRootCount;
-    if (
-      !this.chain
-      || this.chain.chainId === 'none'
-      || !resolver
-      || !rootCountReader
-      || input.scope.assertionVersion !== '1'
-    ) return undefined;
-
-    let metaGraph: string;
-    let safeUal: string;
-    try {
-      metaGraph = assertSafeIri(contextGraphMetaUri(input.contextGraphId));
-      safeUal = assertSafeIri(input.scope.ual);
-    } catch {
-      return undefined;
+    verifiedQuads: Quad[];
+    computedMerkleRoot: Uint8Array;
+    evidence: TrustedGraphScopedAssertionEvidence;
+    privateMerkleRoot?: Uint8Array;
+    batchId: bigint;
+    preserveNewerWorkspaceLifecycle: boolean;
+    ctx: OperationContext;
+  }): Promise<'already-confirmed' | 'stale-target'> {
+    const { evidence } = input;
+    const head: GraphScopedMaterializationEnvelope = {
+      publicTripleCount: evidence.publicTripleCount,
+      ...(evidence.privateMerkleRoot
+        ? { privateMerkleRoot: evidence.privateMerkleRoot }
+        : {}),
+      privateTripleCount: evidence.privateTripleCount,
+      publisherPeerId: evidence.publisherPeerId,
+      accessPolicy: evidence.accessPolicy,
+      allowedPeers: [...evidence.allowedPeers],
+    };
+    const outcome = await this.applyVerifiedGraphScopedFinalization({
+      contextGraphId: input.contextGraphId,
+      scope: input.scope,
+      verifiedQuads: input.verifiedQuads,
+      head,
+      privateMerkleRoot: input.privateMerkleRoot,
+      computedMerkleRoot: input.computedMerkleRoot,
+      publisherAddress: evidence.publisherAddress,
+      txHash: evidence.transactionHash,
+      blockNumber: evidence.blockNumber,
+      batchId: input.batchId,
+      authorAddress: evidence.authorAddress,
+      materializedVersion: { blockNumber: evidence.blockNumber, txIndex: evidence.txIndex },
+      accessPolicy: evidence.accessPolicy,
+      allowedPeers: evidence.allowedPeers,
+      subGraphName: evidence.subGraphName,
+      source: 'chain-reconcile',
+      contentAlreadyMaterialized: true,
+      ctx: input.ctx,
+    });
+    if (outcome === 'stale') return 'stale-target';
+    if (outcome === 'preserved-metadata') {
+      this.log.info(
+        input.ctx,
+        `Chain-reconcile: retained confirmed metadata for an older same-root assertion `
+          + evidence.transactionHash,
+      );
+      return input.preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
-    const candidate = await this.store.query(
-      `SELECT ?tx ?kind WHERE {
-        GRAPH <${metaGraph}> {
-          <${safeUal}> <${DKG_NS}transactionHash> ?tx ;
-            <${DKG_NS}confirmationKind> ?kind .
-        }
-      } LIMIT 2`,
-      { source: 'agent.finalization.recoverReceiptBackedEvidence' },
+    this.log.info(
+      input.ctx,
+      `Chain-reconcile: exact VM graph already matches ${input.scope.ual}; repaired metadata`,
     );
-    if (candidate.type !== 'bindings' || candidate.bindings.length !== 1) return undefined;
-    const transactionHash = stripOptionalLiteral(candidate.bindings[0]?.['tx']);
-    const confirmationKind = stripOptionalLiteral(candidate.bindings[0]?.['kind']);
-    if (
-      confirmationKind !== 'transaction'
-      || !transactionHash
-      || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)
-    ) return undefined;
-
-    try {
-      const [resolution, rootCount] = await Promise.all([
-        resolver.call(this.chain, transactionHash),
-        rootCountReader.call(this.chain, input.kaId),
-      ]);
-      if (resolution.status !== 'confirmed' || rootCount !== 1n) return undefined;
-      const { receipt } = resolution;
-      if (
-        receipt.txHash.toLowerCase() !== transactionHash.toLowerCase()
-        || receipt.kaId !== input.kaId
-        || receipt.batchId !== input.kaId
-        || receipt.startKAId !== input.kaId
-        || receipt.endKAId !== input.kaId
-        || !equalBytes(receipt.merkleRoot, input.merkleRoot)
-        || !ethers.isAddress(input.publisherAddress)
-        || !ethers.isAddress(receipt.publisherAddress)
-        || ethers.getAddress(receipt.publisherAddress) !== ethers.getAddress(input.publisherAddress)
-        || !Number.isSafeInteger(receipt.blockNumber)
-        || receipt.blockNumber < 0
-        || !Number.isSafeInteger(receipt.txIndex)
-        || receipt.txIndex < 0
-        || !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash)
-      ) return undefined;
-
-      const access = resolveGraphScopedAccessEnvelope(input.head);
-      this.log.info(
-        ctx,
-        `Chain-reconcile: recovered canonical transaction provenance for ${input.scope.ual}`,
-      );
-      return {
-        assertionVersion: input.scope.assertionVersion,
-        ...(input.head.publicQuadsDigest
-          ? { publicQuadsDigest: input.head.publicQuadsDigest }
-          : {}),
-        publicTripleCount: input.head.publicTripleCount,
-        ...(input.head.privateMerkleRoot
-          ? { privateMerkleRoot: input.head.privateMerkleRoot }
-          : {}),
-        privateTripleCount: input.head.privateTripleCount,
-        publisherPeerId: input.head.publisherPeerId,
-        publisherAddress: receipt.publisherAddress,
-        transactionHash: receipt.txHash,
-        blockNumber: receipt.blockNumber,
-        blockHash: receipt.blockHash,
-        txIndex: receipt.txIndex,
-        ...(receipt.authorAddress ? { authorAddress: receipt.authorAddress } : {}),
-        accessPolicy: access.accessPolicy,
-        allowedPeers: access.allowedPeers,
-        ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
-      };
-    } catch (error) {
-      this.log.info(
-        ctx,
-        `Chain-reconcile: canonical transaction provenance is not yet available for `
-          + `${input.scope.ual}: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return undefined;
-    }
+    return input.preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
   }
 
   /**

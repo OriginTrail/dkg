@@ -21,6 +21,8 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10,
   computePrivateRootV10,
+  generateGraphKnowledgeAssetMetadata,
+  replaceLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -315,6 +317,38 @@ describe('graph-scoped finalization handler', () => {
       kaUal: newerScope.ual,
       assertionVersion: newerScope.assertionVersion,
     });
+  }
+
+  async function seedAuthenticatedLocalControls(
+    message: FinalizationMessageMsg,
+    accessPolicy: 'public' | 'ownerOnly' | 'allowList' = 'ownerOnly',
+    allowedPeers: string[] = [],
+    publisherPeerId = '12D3KooWPublisher',
+  ): Promise<void> {
+    const scope = createGraphKnowledgeAssetScope(UAL, message.assertionVersion ?? VERSION);
+    const metadata = generateGraphKnowledgeAssetMetadata({
+      ual: scope.ual,
+      contextGraphId: CG,
+      merkleRoot: message.kcMerkleRoot,
+      publisherPeerId,
+      accessPolicy,
+      allowedPeers,
+      timestamp: new Date(),
+      assertionVersion: scope.assertionVersion,
+      publicTripleCount: Number(message.publicTripleCount),
+      privateTripleCount: Number(message.privateTripleCount),
+      ...(message.privateMerkleRoot?.length
+        ? { privateMerkleRoot: message.privateMerkleRoot }
+        : {}),
+      assertionGraph: knowledgeAssetLayerGraphUri(
+        CG,
+        MemoryLayer.SharedWorkingMemory,
+        scope,
+        message.subGraphName || undefined,
+      ),
+      ...(message.subGraphName ? { subGraphName: message.subGraphName } : {}),
+    }, { status: 'tentative' });
+    await replaceLocallyTrustedKnowledgeAssetControls(store, scope.ual, metadata);
   }
 
   function trustedRecoveryEvidence(
@@ -2257,6 +2291,7 @@ describe('graph-scoped finalization handler', () => {
 
   it('repairs peer-materialized VM metadata by revalidating its receipt claim', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    await seedAuthenticatedLocalControls(message);
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
@@ -2307,8 +2342,50 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('does not trust peer-recovered workspace controls without an authenticated local sidecar', async () => {
+    const { message, vmGraph } = await stageGraph({
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWAttacker'],
+    });
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    for (const predicate of [
+      'http://dkg.io/ontology/accessPolicy',
+      'http://dkg.io/ontology/allowedPeer',
+      'http://dkg.io/ontology/publisherPeerId',
+    ]) {
+      await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
+    }
+    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      getMerkleRootCount: async () => 1n,
+      resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+    }));
+    (repairHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    }).verifyChainCgBinding = async () => true;
+
+    await expect(repairHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 200,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWAttacker" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
   it('does not repair peer-materialized VM metadata from a non-unique on-chain root', async () => {
     const { message, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    await seedAuthenticatedLocalControls(message);
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
 
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
@@ -2345,6 +2422,53 @@ describe('graph-scoped finalization handler', () => {
       } }`,
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
+
+  it.each(['publisher', 'merkle-root', 'ka-id'] as const)(
+    'does not repair peer-materialized VM metadata when the receipt mismatches %s',
+    async (mismatch) => {
+      const { message } = await stageGraph({ accessPolicy: 'ownerOnly' });
+      await seedAuthenticatedLocalControls(message);
+      await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+      const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+      await store.deleteByPattern({
+        graph: metaGraph,
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+      });
+
+      const mismatched = canonicalReceipt(message);
+      if (mismatched.status !== 'confirmed') throw new Error('expected confirmed receipt');
+      if (mismatch === 'publisher') {
+        mismatched.receipt.publisherAddress = '0x3333333333333333333333333333333333333333';
+      } else if (mismatch === 'merkle-root') {
+        mismatched.receipt.merkleRoot = Uint8Array.from({ length: 32 }, () => 0x44);
+      } else {
+        mismatched.receipt.kaId = PACKED_KA_ID + 1n;
+      }
+      const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+        getMerkleRootCount: async () => 1n,
+        resolveCanonicalFinalizationReceipt: async () => mismatched,
+      }));
+      (repairHandler as unknown as {
+        verifyChainCgBinding: () => Promise<boolean>;
+      }).verifyChainCgBinding = async () => true;
+
+      await expect(repairHandler.handleChainReconciledKC({
+        contextGraphId: CG,
+        onChainCgId: '42',
+        ual: UAL,
+        merkleRoot: message.kcMerkleRoot,
+        publisherAddress: PUBLISHER,
+        kaId: PACKED_KA_ID,
+        versionBlock: 200,
+        authorAddress: AUTHOR,
+      }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+      await expect(store.query(
+        `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+          + '<http://dkg.io/ontology/accessPolicy> ?policy } }',
+      )).resolves.toMatchObject({ type: 'boolean', value: false });
+    },
+  );
 
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();

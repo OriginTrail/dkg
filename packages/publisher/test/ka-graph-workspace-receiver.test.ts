@@ -14,6 +14,10 @@ import {
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
+import {
+  computeFlatKCRootV10,
+  readLocallyTrustedKnowledgeAssetControls,
+} from '../src/index.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -250,6 +254,44 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       { policy: '"allowList"', peer: '"peer-a"' },
       { policy: '"allowList"', peer: '"peer-b"' },
     ]);
+
+    const merkleRoot = computeFlatKCRootV10([{
+      subject: 'urn:entity:1',
+      predicate: 'urn:predicate:value',
+      object: '"one"',
+      graph: '',
+    }], []);
+    const visibleMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const trustedControls = await readLocallyTrustedKnowledgeAssetControls(
+      store,
+      visibleMetaGraph,
+      UAL,
+      [{
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: visibleMetaGraph,
+      }, {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/merkleRoot',
+        object: `"${Buffer.from(merkleRoot).toString('hex')}"`,
+        graph: visibleMetaGraph,
+      }],
+    );
+    expect(trustedControls).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/accessPolicy',
+        object: '"allowList"',
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/publisherPeerId',
+        object: `"${PEER_ID}"`,
+      }),
+      expect.objectContaining({
+        predicate: 'http://dkg.io/ontology/allowedPeer',
+        object: '"peer-a"',
+      }),
+    ]));
 
     const restarted = new SharedMemoryHandler(store, new TypedEventBus());
     expect((await restarted.handle(v2Request({
