@@ -119,4 +119,48 @@ describe('SystemRecordLaneForwarderV1', () => {
       consoleError.mockRestore();
     }
   });
+
+  it('routes a bookkeeping failure to the wrapper so a stale cache can self-heal', async () => {
+    // Returning the outcome settles the caller's question, but it repairs
+    // nothing: the wrapper's cache now believes it recorded a commit it did not.
+    // A log line does not fix that, so the error reaches the only component that
+    // knows what its own staleness implies.
+    const policyError = new Error('cache refresh failed');
+    const seen: unknown[] = [];
+    const inner = controllerFixture('generation-a');
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const forwarder = new SystemRecordLaneForwarderV1(() => inner.controller, {
+      onOutcome: () => {
+        throw policyError;
+      },
+      onOutcomeError: (error, outcome) => {
+        seen.push({ error, outcome });
+      },
+    });
+
+    const session = await forwarder.forward()!.open(ACTIVATION);
+    await expect(session.applyVerified({})).resolves.toEqual(APPLIED);
+
+    expect(seen).toEqual([{ error: policyError, outcome: APPLIED }]);
+    consoleError.mockRestore();
+  });
+
+  it('a throwing recovery hook still cannot mask the outcome', async () => {
+    // The hook is best-effort too: a wrapper whose self-heal fails must not
+    // reintroduce the very bug the hook exists beside.
+    const inner = controllerFixture('generation-a');
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const forwarder = new SystemRecordLaneForwarderV1(() => inner.controller, {
+      onOutcome: () => {
+        throw new Error('bookkeeping failed');
+      },
+      onOutcomeError: () => {
+        throw new Error('recovery failed too');
+      },
+    });
+
+    const session = await forwarder.forward()!.open(ACTIVATION);
+    await expect(session.applyVerified({})).resolves.toEqual(APPLIED);
+    consoleError.mockRestore();
+  });
 });

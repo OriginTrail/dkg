@@ -267,6 +267,12 @@ export class GraphSetIndexStore implements TripleStore {
           this.scheduleFullRefresh('system-record.indeterminate');
         }
       },
+      onOutcomeError: () => {
+        // Could not record an apply that already committed, so this index's
+        // membership set is of unknown accuracy. Rebuild rather than serve
+        // it — an extra full scan is the cheap failure here.
+        this.scheduleFullRefresh('system-record.indeterminate');
+      },
     },
   );
   private readonly enabled: boolean;

@@ -456,6 +456,12 @@ export function createListContextGraphsCacheInvalidatingStore(
           markProjectionDirty?.();
         }
       },
+      onOutcomeError: () => {
+        // Could not record an apply that already committed. Serving a reader
+        // from a cache that missed a commit is worse than recomputing.
+        invalidate();
+        markProjectionDirty?.();
+      },
     },
   );
   const wrapper: TripleStore & { readonly innerStore: TripleStore } = {

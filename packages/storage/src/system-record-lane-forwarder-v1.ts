@@ -45,6 +45,16 @@ import type {
  */
 export interface SystemRecordLaneOutcomePolicyV1 {
   onOutcome(outcome: SystemRecordApplyOutcomeV1): void;
+
+  /**
+   * Bookkeeping threw after the lane committed.
+   *
+   * The outcome is returned regardless — that is settled above — but a log
+   * line does not repair anything: the wrapper's cache now believes it is
+   * fresh while having missed a commit. Only the wrapper knows what that
+   * implies, so it is told, and should respond conservatively.
+   */
+  onOutcomeError?(error: unknown, outcome: SystemRecordApplyOutcomeV1): void;
 }
 
 /**
@@ -109,6 +119,13 @@ export class SystemRecordLaneForwarderV1 {
             );
           } catch {
             // Diagnostics are also best-effort after the authoritative result.
+          }
+          // Beyond diagnostics: let the wrapper self-heal. Without this the
+          // cache keeps serving as if it recorded the apply.
+          try {
+            policy.onOutcomeError?.(error, outcome);
+          } catch {
+            // A failing recovery hook must not resurrect the masking bug.
           }
         }
         return outcome;
