@@ -8,6 +8,7 @@ import type {
   DeleteSubjectsInput,
   PruneLinkedRecordClosuresInput,
   PruneRankedSubjectsInput,
+  Quad,
   ReplaceProjectionFromGraphInput,
   ReplaceSubjectPredicatesInput,
   StructuredMutation,
@@ -611,6 +612,35 @@ export function normalizeStructuredMutation(mutation: StructuredMutation): Struc
       return { kind: mutation.kind, input: normalizeReplaceProjectionFromGraphInput(mutation.input) };
     case 'copy-subject-projection':
       return { kind: mutation.kind, input: normalizeCopySubjectProjectionInput(mutation.input) };
+    default:
+      return unsupportedMutation(mutation);
+  }
+}
+
+/**
+ * Rewrite every caller-provided quad payload, then enforce the canonical
+ * mutation budget on the rewritten representation. The exhaustive switch keeps
+ * storage decorators from maintaining their own mutation-kind allowlists.
+ */
+export async function rewriteStructuredMutationQuads(
+  mutation: StructuredMutation,
+  rewriteQuad: (quad: Quad) => Quad | Promise<Quad>,
+): Promise<StructuredMutation> {
+  switch (mutation.kind) {
+    case 'replace-subject-predicates': {
+      const scoped = normalizeReplaceSubjectPredicatesInputForObjectRewrite(mutation.input);
+      const replacementQuads = await Promise.all(scoped.replacementQuads.map(rewriteQuad));
+      return normalizeStructuredMutation({
+        kind: mutation.kind,
+        input: { ...scoped, replacementQuads },
+      });
+    }
+    case 'delete-subjects':
+    case 'prune-ranked-subjects':
+    case 'prune-linked-record-closures':
+    case 'replace-projection-from-graph':
+    case 'copy-subject-projection':
+      return normalizeStructuredMutation(mutation);
     default:
       return unsupportedMutation(mutation);
   }

@@ -21,8 +21,7 @@ import {
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 import {
-  normalizeReplaceSubjectPredicatesInputForObjectRewrite,
-  normalizeStructuredMutation,
+  rewriteStructuredMutationQuads,
 } from './bounded-structured-mutation.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
@@ -203,26 +202,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    if (mutation.kind !== 'replace-subject-predicates') {
-      await this.inner.structuredMutation(normalizeStructuredMutation(mutation), options);
-      return;
-    }
-
-    // Validate graph/subject/predicate scope and RDF syntax before writing any
-    // blob. The canonical operand budget is intentionally enforced only after
-    // large literals have been replaced by their content-addressed references.
-    const scoped = normalizeReplaceSubjectPredicatesInputForObjectRewrite(mutation.input);
-    const replacementQuads = await Promise.all(
-      scoped.replacementQuads.map((quad) => this.externalizeInsertQuad(quad)),
+    const rewritten = await rewriteStructuredMutationQuads(
+      mutation,
+      (quad) => this.externalizeInsertQuad(quad),
     );
-    const normalized = normalizeStructuredMutation({
-      kind: mutation.kind,
-      input: { ...scoped, replacementQuads },
-    });
-    await this.inner.structuredMutation(
-      normalized,
-      options,
-    );
+    await this.inner.structuredMutation(rewritten, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {
