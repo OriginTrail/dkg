@@ -320,8 +320,8 @@ function collectCacheAccountingRowV1(
   const rowClosureBytes = accountCacheReferencesV1(
     accumulator,
     closure,
-    accumulator.closurePhysical,
     'closure',
+    accumulator.closurePhysical,
   );
   if (rowClosureBytes > SYSTEM_RECORD_MAX_CLOSURE_BYTES) {
     fail('system-record-closure', 'row closure exceeds its byte bound');
@@ -347,8 +347,8 @@ function collectCacheAccountingRowV1(
     const rowSidecarBytes = accountCacheReferencesV1(
       accumulator,
       sidecar,
-      accumulator.sidecarPhysical,
       'sidecar',
+      accumulator.sidecarPhysical,
     );
     if (
       sidecar.filter((reference) => reference.objectKind === 'conflict-evidence').length !== 1 ||
@@ -387,8 +387,8 @@ function collectCacheAccountingRowV1(
 function accountCacheReferencesV1(
   accumulator: CacheAccountingAccumulatorV1,
   references: readonly SystemRecordCacheReferenceV1[],
-  category: Map<Digest32V1, SystemRecordCacheReferenceFactsV1>,
   label: string,
+  category?: Map<Digest32V1, SystemRecordCacheReferenceFactsV1>,
 ): number {
   let total = 0;
   const logical = new Set<string>();
@@ -401,24 +401,32 @@ function accountCacheReferencesV1(
       fail('system-record-closure', `${label} contains a duplicate semantic reference`);
     }
     logical.add(logicalKey);
-    const prior = accumulator.physical.get(reference.cacheDigest);
-    if (
-      prior !== undefined &&
-      (prior.reference.objectKind !== reference.objectKind ||
-        prior.reference.digest !== reference.digest ||
-        prior.facts.byteLength !== facts.byteLength ||
-        prior.facts.fingerprint !== facts.fingerprint)
-    ) {
-      fail('system-record-closure', 'one cache digest was reported with conflicting canonical bytes');
-    }
-    accumulator.physical.set(reference.cacheDigest, { reference, facts });
-    category.set(reference.cacheDigest, facts);
+    accountCachePhysicalReferenceV1(accumulator, reference, facts);
+    category?.set(reference.cacheDigest, facts);
     total += facts.byteLength;
     if (!Number.isSafeInteger(total)) {
       fail('system-record-closure', `${label} byte accounting overflow`);
     }
   }
   return total;
+}
+
+function accountCachePhysicalReferenceV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  reference: SystemRecordCacheReferenceV1,
+  facts: SystemRecordCacheReferenceFactsV1,
+): void {
+  const prior = accumulator.physical.get(reference.cacheDigest);
+  if (
+    prior !== undefined &&
+    (prior.reference.objectKind !== reference.objectKind ||
+      prior.reference.digest !== reference.digest ||
+      prior.facts.byteLength !== facts.byteLength ||
+      prior.facts.fingerprint !== facts.fingerprint)
+  ) {
+    fail('system-record-closure', 'one cache digest was reported with conflicting canonical bytes');
+  }
+  accumulator.physical.set(reference.cacheDigest, { reference, facts });
 }
 
 function assertIncrementalCacheAccountingBoundsV1(
@@ -525,7 +533,6 @@ export function preflightSystemRecordCacheAccountingV1(
   accountCacheReferencesV1(
     accumulator,
     normalized.inventoryLeaves,
-    new Map(),
     'activation inventory',
   );
   if (
