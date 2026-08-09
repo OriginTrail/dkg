@@ -2262,9 +2262,31 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
-  it('defers SWM-only chain reconciliation without transaction provenance', async () => {
+  it('promotes exact public SWM from chain inventory without inventing transaction provenance', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
-    const internals = handler as unknown as {
+    const publicHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      isContextGraphActiveOnChain: async (contextGraphId) => {
+        expect(contextGraphId).toBe(42n);
+        return true;
+      },
+      getContextGraphAccessPolicy: async (contextGraphId) => {
+        expect(contextGraphId).toBe(42n);
+        return 0;
+      },
+      getMerkleRootCount: async (kaId) => {
+        expect(kaId).toBe(PACKED_KA_ID);
+        return 1n;
+      },
+      getLatestMerkleRoot: async (kaId) => {
+        expect(kaId).toBe(PACKED_KA_ID);
+        return message.kcMerkleRoot;
+      },
+      getLatestMerkleRootAuthor: async (kaId) => {
+        expect(kaId).toBe(PACKED_KA_ID);
+        return AUTHOR;
+      },
+    }));
+    const internals = publicHandler as unknown as {
       verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
       findSwmSnapshotForMerkleRoot: () => Promise<never>;
     };
@@ -2273,7 +2295,7 @@ describe('graph-scoped finalization handler', () => {
       throw new Error('legacy root scan must not run for graph-scoped SWM');
     };
 
-    const outcome = await handler.handleChainReconciledKC({
+    const reconcileInput = {
       contextGraphId: CG,
       onChainCgId: '42',
       ual: UAL,
@@ -2282,9 +2304,92 @@ describe('graph-scoped finalization handler', () => {
       kaId: PACKED_KA_ID,
       versionBlock: 123,
       authorAddress: AUTHOR,
-    }, createOperationContext('system'));
+    };
+    const outcome = await publicHandler.handleChainReconciledKC(
+      reconcileInput,
+      createOperationContext('system'),
+    );
 
-    expect(outcome).toBe('verified-vm-metadata-pending');
+    expect(outcome).toBe('promoted');
+    await expect(publicHandler.handleChainReconciledKC(
+      reconcileInput,
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/status> "confirmed" ;
+          <http://dkg.io/ontology/accessPolicy> "public" ;
+          <http://dkg.io/ontology/publisherPeerId> "chain-finalized-reconcile-v1" ;
+          <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
+          <http://dkg.io/ontology/materializedVersion> "123:0" ;
+          <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
+        FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('keeps exact private SWM fail-closed without transaction provenance', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    const privateHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      isContextGraphActiveOnChain: async () => true,
+      getContextGraphAccessPolicy: async () => 1,
+      getMerkleRootCount: async () => 1n,
+      getLatestMerkleRoot: async () => message.kcMerkleRoot,
+    }));
+    const internals = privateHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    await expect(privateHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
+    expect(await store.countQuads(vmGraph)).toBe(1);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+  });
+
+  it.each([
+    { label: 'inactive context graph', active: false, rootCount: 1n },
+    { label: 'assertion-version mismatch', active: true, rootCount: 2n },
+  ])('keeps exact public SWM fail-closed for $label', async ({ active, rootCount }) => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    const guardedHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      isContextGraphActiveOnChain: async () => active,
+      getContextGraphAccessPolicy: async () => 0,
+      getMerkleRootCount: async () => rootCount,
+      getLatestMerkleRoot: async () => message.kcMerkleRoot,
+    }));
+    const internals = guardedHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(guardedHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
     expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
   });

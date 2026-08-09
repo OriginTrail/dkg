@@ -54,6 +54,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 const PROV_NS = 'http://www.w3.org/ns/prov#';
+const CHAIN_FINALIZED_RECONCILE_PEER_ID = 'chain-finalized-reconcile-v1';
 
 // Slow-query / canary tags for the finalization SWM slice (#1549). A healthy fleet
 // sees `.fallbackUnbounded` at ~0 relative to `.bounded`; a spike means the bound is
@@ -1599,6 +1600,7 @@ export class FinalizationHandler {
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
         accessPolicy: access.accessPolicy,
         allowedPeers: access.allowedPeers,
+        confirmationKind: 'transaction',
         authorAddress: evidenceAuthorAddress,
         subGraphName,
       });
@@ -1620,6 +1622,7 @@ export class FinalizationHandler {
           batchId: kaId,
           accessPolicy: 'ownerOnly',
           allowedPeers: [],
+          confirmationKind: 'transaction',
           authorAddress,
           subGraphName,
         });
@@ -1680,6 +1683,74 @@ export class FinalizationHandler {
             ctx,
           });
         }
+        const publicAuthority = await this.resolvePublicFinalizedMaterializationAuthority({
+          onChainCgId,
+          scope,
+          kaId,
+          merkleRoot,
+          ctx,
+        });
+        if (publicAuthority) {
+          const finalizedHead: GraphScopedMaterializationEnvelope = {
+            ...head,
+            publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
+            accessPolicy: 'public',
+            allowedPeers: [],
+          };
+          const finalizedVersion = { blockNumber: versionBlock, txIndex: 0 };
+          const finalizedMetadataState = await this.graphScopedMetadataState({
+            contextGraphId,
+            scope,
+            head: finalizedHead,
+            merkleRoot,
+            batchId: kaId,
+            materializedVersion: finalizedVersion,
+            accessPolicy: 'public',
+            allowedPeers: [],
+            confirmationKind: 'finalized-materialization',
+            authorAddress: publicAuthority.authorAddress,
+            subGraphName,
+          });
+          if (finalizedMetadataState === 'matching') {
+            await this.advanceExactGraphScopedVersion({
+              contextGraphId,
+              scope,
+              materializedVersion: finalizedVersion,
+            });
+            this.log.info(
+              ctx,
+              `Chain-reconcile: ${ual} already has exact receiptless public VM state`,
+            );
+            return 'already-confirmed';
+          }
+          const finalizedOutcome = await this.applyVerifiedGraphScopedFinalization({
+            contextGraphId,
+            scope,
+            verifiedQuads: vmVerification.quads,
+            head: finalizedHead,
+            privateMerkleRoot,
+            computedMerkleRoot: vmVerification.merkleRoot,
+            publisherAddress,
+            blockNumber: versionBlock,
+            batchId: kaId,
+            authorAddress: publicAuthority.authorAddress,
+            materializedVersion: finalizedVersion,
+            accessPolicy: 'public',
+            allowedPeers: [],
+            subGraphName,
+            source: 'chain-reconcile',
+            confirmationKind: 'finalized-materialization',
+            contentAlreadyMaterialized: true,
+            ctx,
+          });
+          if (finalizedOutcome === 'stale') return 'stale-target';
+          this.log.info(
+            ctx,
+            `Chain-reconcile: exact public VM graph already matches ${ual}; `
+              + 'repaired receiptless chain metadata',
+          );
+          return 'already-confirmed';
+        }
         this.log.info(
           ctx,
           `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
@@ -1739,17 +1810,61 @@ export class FinalizationHandler {
       return 'no-swm';
     }
 
-    // A generic sweep can prove content and the current chain root, but it has
-    // no assertion-specific transaction provenance. Never synthesize confirmed
-    // metadata with an empty transaction hash; named recovery or an exact VM
-    // snapshot can complete the provenance-bearing transition.
+    // Public VM inventory is the chain itself. Once the current chain binding,
+    // liveness, public policy, root count and exact local SWM projection all
+    // agree, materialize through the explicit receiptless confirmation lane.
+    // This does not invent transaction provenance: metadata records
+    // `finalized-materialization` and deliberately omits transactionHash.
+    // Private/unknown CGs still require assertion-specific receipt evidence.
     if (!trustedAssertionEvidence) {
+      const publicAuthority = await this.resolvePublicFinalizedMaterializationAuthority({
+        onChainCgId,
+        scope,
+        kaId,
+        merkleRoot,
+        ctx,
+      });
+      if (!publicAuthority) {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: exact SWM content for ${ual} is verified but neither `
+            + 'transaction provenance nor public chain authority is available; deferring VM promotion',
+        );
+        return 'verified-vm-metadata-pending';
+      }
+      const finalizedHead: GraphScopedMaterializationEnvelope = {
+        ...head,
+        publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
+        accessPolicy: 'public',
+        allowedPeers: [],
+      };
+      const outcome = await this.applyVerifiedGraphScopedFinalization({
+        contextGraphId,
+        scope,
+        verifiedQuads: swmVerification.quads,
+        head: finalizedHead,
+        privateMerkleRoot,
+        computedMerkleRoot: swmVerification.merkleRoot,
+        publisherAddress,
+        blockNumber: versionBlock,
+        batchId: kaId,
+        authorAddress: publicAuthority.authorAddress,
+        materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+        accessPolicy: 'public',
+        allowedPeers: [],
+        subGraphName,
+        source: 'chain-reconcile',
+        confirmationKind: 'finalized-materialization',
+        ctx,
+      });
+      if (outcome === 'stale') return 'stale-target';
+      if (outcome === 'preserved-metadata') return 'already-confirmed';
       this.log.info(
         ctx,
-        `Chain-reconcile: exact SWM content for ${ual} is verified but transaction `
-          + 'provenance is unavailable; deferring VM promotion',
+        `Chain-reconcile: promoted exact public SWM assertion to VM from chain inventory `
+          + `for ${ual} (ka=${kaId})`,
       );
-      return 'verified-vm-metadata-pending';
+      return 'promoted';
     }
 
     const outcome = await this.applyVerifiedGraphScopedFinalization({
@@ -1860,7 +1975,7 @@ export class FinalizationHandler {
     privateMerkleRoot?: Uint8Array;
     computedMerkleRoot: Uint8Array;
     publisherAddress: string;
-    txHash: string;
+    txHash?: string;
     blockNumber: number;
     batchId: bigint;
     authorAddress?: string;
@@ -1869,6 +1984,7 @@ export class FinalizationHandler {
     allowedPeers?: string[];
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
+    confirmationKind?: 'transaction' | 'finalized-materialization';
     contentAlreadyMaterialized?: boolean;
     ctx: OperationContext;
   }): Promise<'applied' | 'stale' | 'preserved-metadata'> {
@@ -1889,9 +2005,13 @@ export class FinalizationHandler {
       allowedPeers: requestedAllowedPeers = [],
       subGraphName,
       source,
+      confirmationKind = 'transaction',
       contentAlreadyMaterialized = false,
       ctx,
     } = input;
+    if (confirmationKind === 'transaction' && !txHash) {
+      throw new Error('Receipt-backed graph-scoped finalization requires a transaction hash');
+    }
     const publicTripleCount = head.publicTripleCount;
     const privateTripleCount = head.privateTripleCount;
     const vmGraph = knowledgeAssetLayerGraphUri(
@@ -1968,22 +2088,37 @@ export class FinalizationHandler {
         return 'preserved-metadata' as const;
       }
 
-      let blockTimestamp = Math.floor(Date.now() / 1000);
-      if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
-        try {
-          blockTimestamp = await (this.chain as any).getBlockTimestamp(blockNumber);
-        } catch {
-          this.log.info(ctx, `Could not fetch block timestamp for block ${blockNumber}, using local time`);
+      let confirmation: Parameters<typeof generateGraphKnowledgeAssetMetadata>[1];
+      if (confirmationKind === 'transaction') {
+        let blockTimestamp = Math.floor(Date.now() / 1000);
+        if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
+          try {
+            blockTimestamp = await (this.chain as any).getBlockTimestamp(blockNumber);
+          } catch {
+            this.log.info(ctx, `Could not fetch block timestamp for block ${blockNumber}, using local time`);
+          }
         }
+        const provenance: OnChainProvenance = {
+          txHash: txHash!,
+          blockNumber,
+          blockTimestamp,
+          publisherAddress,
+          batchId,
+          chainId: this.chain?.chainId ?? 'unknown',
+        };
+        confirmation = {
+          status: 'confirmed',
+          confirmation: { kind: 'transaction', provenance },
+        };
+      } else {
+        confirmation = {
+          status: 'confirmed',
+          confirmation: {
+            kind: 'finalized-materialization',
+            provenance: { batchId, materializedVersion },
+          },
+        };
       }
-      const provenance: OnChainProvenance = {
-        txHash,
-        blockNumber,
-        blockTimestamp,
-        publisherAddress,
-        batchId,
-        chainId: this.chain?.chainId ?? 'unknown',
-      };
       const metadata = generateGraphKnowledgeAssetMetadata(
         {
           ual: scope.ual,
@@ -2003,10 +2138,7 @@ export class FinalizationHandler {
           privateTripleCount,
           assertionGraph: vmGraph,
         },
-        {
-          status: 'confirmed',
-          confirmation: { kind: 'transaction', provenance },
-        },
+        confirmation,
       );
       const effectiveVersion = incomingVersionIsStale
         ? currentMaterializedVersion
@@ -2040,6 +2172,81 @@ export class FinalizationHandler {
       counts: { roots: 0, triples: publicTripleCount },
     });
     return 'applied';
+  }
+
+  /**
+   * Prove that a receiptless materialization is safe for the current public
+   * chain state. Access-policy alone is insufficient because an unknown CG id
+   * reads as Solidity's default public value, so liveness is mandatory. Root
+   * count pins the workspace assertion version and prevents a same-root update
+   * from inheriting the wrong version-specific metadata.
+   */
+  private async resolvePublicFinalizedMaterializationAuthority(input: {
+    onChainCgId?: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    kaId: bigint;
+    merkleRoot: Uint8Array;
+    ctx: OperationContext;
+  }): Promise<{ authorAddress?: string } | undefined> {
+    const chain = this.chain;
+    if (
+      !chain
+      || chain.chainId === 'none'
+      || !chain.isContextGraphActiveOnChain
+      || !chain.getContextGraphAccessPolicy
+      || !chain.getMerkleRootCount
+      || !chain.getLatestMerkleRoot
+      || !input.onChainCgId
+    ) return undefined;
+
+    let onChainCgId: bigint;
+    let assertionVersion: bigint;
+    try {
+      onChainCgId = BigInt(input.onChainCgId);
+      assertionVersion = BigInt(input.scope.assertionVersion);
+      if (onChainCgId <= 0n || assertionVersion <= 0n) return undefined;
+    } catch {
+      return undefined;
+    }
+
+    try {
+      const [active, accessPolicy, rootCount, latestRoot] = await Promise.all([
+        chain.isContextGraphActiveOnChain(onChainCgId),
+        chain.getContextGraphAccessPolicy(onChainCgId),
+        chain.getMerkleRootCount(input.kaId),
+        chain.getLatestMerkleRoot(input.kaId),
+      ]);
+      if (
+        !active
+        || accessPolicy !== 0
+        || rootCount !== assertionVersion
+        || !equalBytes(latestRoot, input.merkleRoot)
+      ) return undefined;
+
+      let authorAddress: string | undefined;
+      if (chain.getLatestMerkleRootAuthor) {
+        try {
+          const candidate = await chain.getLatestMerkleRootAuthor(input.kaId);
+          if (ethers.isAddress(candidate) && candidate !== ethers.ZeroAddress) {
+            authorAddress = ethers.getAddress(candidate);
+          }
+        } catch (err) {
+          this.log.info(
+            input.ctx,
+            `Chain-reconcile: latest-root author is unavailable for ${input.scope.ual}: `
+              + `${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return authorAddress ? { authorAddress } : {};
+    } catch (err) {
+      this.log.info(
+        input.ctx,
+        `Chain-reconcile: public finalized authority is unavailable for ${input.scope.ual}: `
+          + `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return undefined;
+    }
   }
 
   /**
@@ -2109,6 +2316,7 @@ export class FinalizationHandler {
     materializedVersion?: MaterializedVersion;
     accessPolicy: GraphScopedAccessPolicy;
     allowedPeers: string[];
+    confirmationKind?: 'transaction' | 'finalized-materialization';
     authorAddress?: string;
     subGraphName?: string;
   }): Promise<'matching' | 'different' | 'absent'> {
@@ -2122,6 +2330,7 @@ export class FinalizationHandler {
       materializedVersion,
       accessPolicy,
       allowedPeers,
+      confirmationKind = 'transaction',
       authorAddress,
       subGraphName,
     } = input;
@@ -2182,6 +2391,7 @@ export class FinalizationHandler {
       const actualAllowedPeers = [...new Set(storedAllowedPeers)].sort();
       const storedMaterializedVersion = oneLiteral(`${DKG_NS}materializedVersion`);
       const storedTransactionHash = oneLiteral(`${DKG_NS}transactionHash`);
+      const storedConfirmationKind = oneLiteral(`${DKG_NS}confirmationKind`) ?? 'transaction';
       const parsedMaterializedVersion = /^(\d+):(\d+)$/.exec(storedMaterializedVersion ?? '');
       const expectedMaterializedVersion = materializedVersion
         ? `${materializedVersion.blockNumber}:${materializedVersion.txIndex}`
@@ -2205,9 +2415,12 @@ export class FinalizationHandler {
           !== normalizedHex(ethers.hexlify(merkleRoot))
         || oneLiteral(`${DKG_NS}status`) !== 'confirmed'
         || BigInt(oneLiteral(`${DKG_NS}batchId`) ?? '-1') !== batchId
-        || storedTransactionHash === undefined
-        || (expectedTxHash !== undefined
-          && normalizedHex(storedTransactionHash) !== normalizedHex(expectedTxHash))
+        || storedConfirmationKind !== confirmationKind
+        || (confirmationKind === 'transaction'
+          ? storedTransactionHash === undefined
+            || (expectedTxHash !== undefined
+              && normalizedHex(storedTransactionHash) !== normalizedHex(expectedTxHash))
+          : storedTransactionHash !== undefined)
         || !parsedMaterializedVersion
         || !Number.isSafeInteger(Number(parsedMaterializedVersion[1]))
         || !Number.isSafeInteger(Number(parsedMaterializedVersion[2]))
