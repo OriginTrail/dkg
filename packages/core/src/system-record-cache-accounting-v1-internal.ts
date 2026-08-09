@@ -57,6 +57,8 @@ const SYSTEM_RECORD_CACHE_REFERENCE_FACTS_V1 = new WeakMap<
 >();
 
 class SystemRecordCacheReferenceValueV1 {
+  declare private readonly __opaqueSystemRecordCacheReferenceV1: void;
+
   constructor(
     token: typeof MINT_SYSTEM_RECORD_CACHE_REFERENCE_V1,
     /** Semantic object identity used by authority, closure edges, and inventory rows. */
@@ -136,6 +138,8 @@ const MINT_SYSTEM_RECORD_CACHE_METADATA_V1 = Symbol('mint-system-record-cache-me
 const SYSTEM_RECORD_CACHE_METADATA_BYTES_V1 = new WeakMap<object, number>();
 
 class SystemRecordCacheMetadataValueV1 {
+  declare private readonly __opaqueSystemRecordCacheMetadataV1: void;
+
   constructor(token: typeof MINT_SYSTEM_RECORD_CACHE_METADATA_V1, byteLength: number) {
     if (token !== MINT_SYSTEM_RECORD_CACHE_METADATA_V1) {
       fail('system-record-closure', 'cache metadata is factory-only');

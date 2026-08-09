@@ -5,6 +5,7 @@ import type {
   AgentProfileAuthorityTransitionV1,
   AgentProfileClosureVerifierV1,
   AgentProfileConflictEvidenceV1,
+  AgentProfileExactLinkedSubjectKindV1,
   AgentProfileForkConflictEntryV1,
   AgentProfileForkResolutionV1,
   AgentProfileHeadAdvanceEvidenceV1,
@@ -13,6 +14,8 @@ import type {
   AgentProfileIdentityFactV1,
   AgentProfileIdentityFactsInputV1,
   AgentProfileIdentityFactsV1,
+  AgentProfileIndexedSubjectKindV1,
+  AgentProfileLinkedSubjectKindV1,
   AgentProfileOwnedSubjectKindV1,
   AgentProfileProjectionQuadV1,
   AgentProfileTombstoneHeadObjectV1,
@@ -89,4 +92,21 @@ import type {
 
 // Importing the complete type-only surface is the contract. Keep the file
 // compile-only so none of these names become runtime package requirements.
+declare const digest: Digest32V1;
+
+const structuralCacheReference = {
+  digest,
+  cacheDigest: digest,
+  objectKind: 'profile-bundle' as const,
+};
+
+// @ts-expect-error Cache references are nominal factory-only capabilities.
+const forgedCacheReference: SystemRecordCacheReferenceV1 = structuralCacheReference;
+
+// @ts-expect-error Cache metadata is a nominal factory-only capability.
+const forgedCacheMetadata: SystemRecordCacheMetadataV1 = {};
+
+void forgedCacheReference;
+void forgedCacheMetadata;
+
 export {};
