@@ -47,6 +47,14 @@ describe('canonical standalone SPARQL word scanner', () => {
 
     const mixed = `${read}; DELETE WHERE { ?s ?p ?o }`;
     expect(recognizedReadOnlySparqlForm(analyzeSparqlOperation(mixed))).toBeNull();
+
+    const dotSeparatedMutation = 'SELECT * WHERE { ?s ?p ?o.DELETE WHERE { ?x ?y ?z } }';
+    expect(analyzeSparqlOperation(dotSeparatedMutation).mutatingKeyword).toBe('DELETE');
+    expect(recognizedReadOnlySparqlForm(analyzeSparqlOperation(dotSeparatedMutation))).toBeNull();
+
+    const prefixedName = 'SELECT * WHERE { BIND(ex:foo.DELETE AS ?value) }';
+    expect(analyzeSparqlOperation(prefixedName).mutatingKeyword).toBeNull();
+    expect(recognizedReadOnlySparqlForm(analyzeSparqlOperation(prefixedName))).toBe('SELECT');
   });
 
   it('has no shared regex or cursor state across interleaved calls', () => {

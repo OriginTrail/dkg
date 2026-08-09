@@ -303,18 +303,46 @@ function reviewedDynamicQueryInventory(records) {
       const occurrence = (occurrences.get(identity) ?? 0) + 1;
       occurrences.set(identity, occurrence);
       const compact = Object.freeze({ ...record, occurrence });
-      expressionsByRecord.set(JSON.stringify(compact), expression);
+      expressionsByRecord.set(dynamicQueryRecordKey(compact), expression);
       return compact;
     });
   return { inventory, expressionsByRecord };
+}
+
+function dynamicQueryRecordKey(record) {
+  const fields = ['expressionSha256', 'occurrence', 'package', 'path', 'symbol'];
+  const actualFields = Object.keys(record).sort();
+  if (
+    actualFields.length !== fields.length
+    || actualFields.some((field, index) => field !== fields[index])
+    || typeof record.package !== 'string'
+    || typeof record.path !== 'string'
+    || typeof record.symbol !== 'string'
+    || typeof record.expressionSha256 !== 'string'
+    || !Number.isSafeInteger(record.occurrence)
+    || record.occurrence < 1
+  ) {
+    throw new Error('dynamic query inventory record has an invalid shape');
+  }
+  return [
+    record.package,
+    record.path,
+    record.symbol,
+    record.expressionSha256,
+    record.occurrence,
+  ].join('\0');
 }
 
 function diffDynamicQueryInventory(expected, observed) {
   const counts = (records) => {
     const result = new Map();
     for (const record of records) {
-      const key = JSON.stringify(record);
-      result.set(key, (result.get(key) ?? 0) + 1);
+      const key = dynamicQueryRecordKey(record);
+      const current = result.get(key);
+      result.set(key, {
+        count: (current?.count ?? 0) + 1,
+        record,
+      });
     }
     return result;
   };
@@ -322,14 +350,16 @@ function diffDynamicQueryInventory(expected, observed) {
   const observedCounts = counts(observed);
   const missing = [];
   const added = [];
-  for (const [key, count] of expectedCounts) {
-    for (let index = observedCounts.get(key) ?? 0; index < count; index++) {
-      missing.push(JSON.parse(key));
+  for (const [key, expectedEntry] of expectedCounts) {
+    const observedCount = observedCounts.get(key)?.count ?? 0;
+    for (let index = observedCount; index < expectedEntry.count; index++) {
+      missing.push(expectedEntry.record);
     }
   }
-  for (const [key, count] of observedCounts) {
-    for (let index = expectedCounts.get(key) ?? 0; index < count; index++) {
-      added.push(JSON.parse(key));
+  for (const [key, observedEntry] of observedCounts) {
+    const expectedCount = expectedCounts.get(key)?.count ?? 0;
+    for (let index = expectedCount; index < observedEntry.count; index++) {
+      added.push(observedEntry.record);
     }
   }
   return { missing, added };
@@ -480,6 +510,17 @@ function selfTestDynamicQueryInventoryDiff() {
   const unchanged = diffDynamicQueryInventory([base], [base]);
   if (unchanged.missing.length !== 0 || unchanged.added.length !== 0) {
     throw new Error('dynamic query inventory self-test rejected an unchanged record');
+  }
+  const reordered = {
+    occurrence: base.occurrence,
+    expressionSha256: base.expressionSha256,
+    symbol: base.symbol,
+    path: base.path,
+    package: base.package,
+  };
+  const reorderedDiff = diffDynamicQueryInventory([base], [reordered]);
+  if (reorderedDiff.missing.length !== 0 || reorderedDiff.added.length !== 0) {
+    throw new Error('dynamic query inventory self-test treated property order as identity');
   }
   for (const candidate of [changed, moved]) {
     const diff = diffDynamicQueryInventory([base], [candidate]);
@@ -640,7 +681,7 @@ if (WRITE_INVENTORY) {
     violations.push(
       `dynamic query review required: ${dynamicQueryInventoryLabel(
         record,
-        observed.expressionsByRecord.get(JSON.stringify(record)),
+        observed.expressionsByRecord.get(dynamicQueryRecordKey(record)),
       )}`,
     );
   }

@@ -1,10 +1,9 @@
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
-  readStandaloneSparqlWord,
+  readNextSparqlCodeToken,
   readSparqlVariable,
   skipSparqlIriRef,
   skipSparqlSpaceAndLineComments,
-  skipSparqlStringLiteral,
 } from './sparql-utils.js';
 
 export interface SparqlPrefixName {
@@ -15,26 +14,12 @@ export interface SparqlPrefixName {
 
 export function collectPrefixDeclarations(sparql: string): Map<string, string> {
   const prefixes = new Map<string, string>();
-  const n = sparql.length;
   let i = 0;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    const token = readStandaloneSparqlWord(sparql, i);
-    if (token) {
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'word') {
       if (token.word === 'PREFIX') {
         const prefixStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const prefix = readSparqlPrefixName(sparql, prefixStart);
@@ -53,10 +38,7 @@ export function collectPrefixDeclarations(sparql: string): Map<string, string> {
           continue;
         }
       }
-      i = token.end;
-      continue;
     }
-    i++;
   }
 
   return prefixes;
@@ -115,45 +97,26 @@ function readTopLevelStaticGraphValues(
   let depth = 0;
   let i = braceStart + 1;
 
-  while (i < braceEnd) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < braceEnd && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      i = skipSparqlIriRef(sparql, i) ?? i + 1;
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
+    i = token.end;
+    if (token.kind === 'punctuation' && token.value === '{') {
       depth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'punctuation' && token.value === '}') {
       depth = Math.max(0, depth - 1);
-      i++;
       continue;
     }
-    const token = depth === 0 ? readStandaloneSparqlWord(sparql, i) : null;
-    if (!token) {
-      i++;
-      continue;
-    }
+    if (depth !== 0 || token.kind !== 'word') continue;
 
     if (token.word !== 'VALUES') {
-      i = token.end;
       continue;
     }
 
     const variableStart = skipSparqlSpaceAndLineComments(sparql, token.end);
     const candidate = readSparqlVariable(sparql, variableStart);
     if (candidate !== variable) {
-      i = token.end;
       continue;
     }
     const valuesStart = skipSparqlSpaceAndLineComments(

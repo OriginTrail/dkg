@@ -1,7 +1,9 @@
-export {
+import {
   readStandaloneSparqlWord,
   stripSparqlLiteralsAndComments as stripLiteralsAndComments,
 } from '@origintrail-official/dkg-core';
+
+export { readStandaloneSparqlWord, stripLiteralsAndComments };
 
 /**
  * Skip one SPARQL short or triple-quoted literal, treating unterminated input
@@ -165,37 +167,77 @@ export function skipSparqlSpaceAndLineComments(sparql: string, start: number): n
   return i;
 }
 
+export type SparqlCodeToken =
+  | { readonly kind: 'word'; readonly word: string; readonly start: number; readonly end: number }
+  | { readonly kind: 'iri'; readonly iri: string; readonly start: number; readonly end: number }
+  | { readonly kind: 'punctuation'; readonly value: string; readonly start: number; readonly end: number };
+
+/**
+ * Read the next significant SPARQL token while centrally skipping whitespace,
+ * comments, and string literals. Structural callers retain their own grammar
+ * decisions but no longer duplicate opaque-region traversal.
+ */
+export function readNextSparqlCodeToken(
+  sparql: string,
+  start: number,
+  limit = sparql.length,
+): SparqlCodeToken | null {
+  let cursor = start;
+  const end = Math.min(limit, sparql.length);
+  while (cursor < end) {
+    const ch = sparql[cursor];
+    if (/\s/.test(ch)) {
+      cursor++;
+      continue;
+    }
+    if (ch === '#') {
+      while (cursor < end && sparql[cursor] !== '\n') cursor++;
+      continue;
+    }
+    if (ch === '"' || ch === "'") {
+      cursor = Math.min(skipSparqlStringLiteral(sparql, cursor), end);
+      continue;
+    }
+    if (ch === '<') {
+      const iriEnd = skipSparqlIriRef(sparql, cursor);
+      if (iriEnd !== null && iriEnd <= end) {
+        return {
+          kind: 'iri',
+          iri: sparql.slice(cursor + 1, iriEnd - 1),
+          start: cursor,
+          end: iriEnd,
+        };
+      }
+    }
+    const word = readStandaloneSparqlWord(sparql, cursor);
+    if (word !== null && word.end <= end) {
+      return { kind: 'word', ...word };
+    }
+    return {
+      kind: 'punctuation',
+      value: ch,
+      start: cursor,
+      end: cursor + 1,
+    };
+  }
+  return null;
+}
+
 /** Find the closing brace while treating strings, comments, and IRIREFs as opaque. */
 export function findMatchingSparqlCloseBrace(sparql: string, openIdx: number): number {
   if (sparql[openIdx] !== '{') return -1;
   let depth = 0;
   let i = openIdx;
-  while (i < sparql.length) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < sparql.length && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      if (iriEnd) {
-        i = iriEnd;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (ch === '{') depth++;
-    else if (ch === '}') {
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind !== 'punctuation') continue;
+    if (token.value === '{') depth++;
+    else if (token.value === '}') {
       depth--;
-      if (depth === 0) return i;
+      if (depth === 0) return token.start;
       if (depth < 0) return -1;
     }
-    i++;
   }
   return -1;
 }
