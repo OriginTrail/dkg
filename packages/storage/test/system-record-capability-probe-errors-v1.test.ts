@@ -23,9 +23,16 @@ vi.mock('../src/system-record-materializer-v1.js', async (importOriginal) => {
   >();
   return {
     ...actual,
-    createSystemRecordLaneControllerV1: (deps: never) => {
+    // The managed path builds on the TYPED-ONLY entry point (#2179): the
+    // coordinator imports createSystemRecordLaneControllerTypedV1 directly,
+    // so the injection must sit there to reach production composition. Note
+    // the scope honestly: the public compatibility adapter reaches the typed
+    // builder through a module-internal call, which a module mock cannot
+    // intercept — this injection covers the coordinator's imported route,
+    // which is the route production takes.
+    createSystemRecordLaneControllerTypedV1: (deps: never) => {
       if (injected.error) throw injected.error;
-      return actual.createSystemRecordLaneControllerV1(deps);
+      return actual.createSystemRecordLaneControllerTypedV1(deps);
     },
   };
 });

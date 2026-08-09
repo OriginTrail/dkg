@@ -4,10 +4,9 @@ import {
   type SystemRecordAtomicApplyHttpClientV1,
 } from '../system-record-atomic-apply-executor-v1-internal.js';
 import {
-  createSystemRecordLaneControllerV1,
+  createSystemRecordLaneControllerTypedV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
-  type SystemRecordLaneBarrierV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneExecutionBindingV1,
   type SystemRecordLaneTypedBarrierV1,
@@ -27,7 +26,15 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
     proof: unknown,
     childGeneration: string,
   ) => Promise<SystemRecordApplyOutcomeV1>;
-  readonly barrier: SystemRecordLaneBarrierV1;
+  /**
+   * The ONLY barrier the managed path accepts. There is deliberately no
+   * string-barrier member on these options: the purpose-string contract is
+   * retired for first-party composition (#2179), and its absence here is
+   * structural — a future edit cannot fall back onto it without changing
+   * this interface, which is the loudest possible place for that change.
+   * External composers with string barriers use the public
+   * `createSystemRecordLaneControllerV1` compatibility adapter instead.
+   */
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;
 }
@@ -44,7 +51,7 @@ export function createManagedSystemRecordCoordinatorV1(
     updateEndpoint: options.updateEndpoint,
     resolveClient: options.resolveClient,
   });
-  return createSystemRecordLaneControllerV1({
+  return createSystemRecordLaneControllerTypedV1({
     lease: options.lease,
     handoff: options.handoff,
     executor: {
@@ -53,7 +60,6 @@ export function createManagedSystemRecordCoordinatorV1(
       applyVerifiedSettlementBound: (proof, binding, registerRecovery) =>
         atomicExecutor.execute(proof, binding, registerRecovery),
     },
-    barrier: options.barrier,
     typedBarrier: options.typedBarrier,
     setAdmissionActive: options.setAdmissionActive,
   });

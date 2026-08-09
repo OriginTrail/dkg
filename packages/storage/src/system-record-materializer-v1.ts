@@ -257,18 +257,18 @@ export interface SystemRecordLaneControllerDepsV1 {
    * `T`, so a later same-purpose caller receives the first promise under its
    * own `T`. Supply {@link typedBarrier}; migrate string barriers to
    * `runTypedControlBarrier` with keys from `createStoreControlBarrierKeyV1`.
-   * Managed composition already supplies a POISONED callback here (throws on
-   * use) so the retired path cannot silently re-animate. Removal of this
-   * member — and the required/optional flip that makes `typedBarrier` the
-   * mandatory one — happens together at the next allowed breaking version
-   * boundary, not before: both are source-incompatible for external
-   * composers.
+   * First-party composition no longer passes through this interface at all —
+   * the managed coordinator builds on the typed-only
+   * `createSystemRecordLaneControllerTypedV1`, whose deps have no string
+   * member to fall back to. This member is removed at the next allowed
+   * breaking version boundary, not before: the removal is
+   * source-incompatible for external composers.
    */
   readonly barrier: SystemRecordLaneBarrierV1;
   /**
-   * The production lifecycle path. When supplied it is ALWAYS used and the
-   * string callback above is never invoked; the fallback exists only for
-   * external composers that predate typed keys.
+   * When supplied it is ALWAYS used and the string callback above is never
+   * invoked; the fallback exists only for external composers that predate
+   * typed keys.
    */
   readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
   /**
@@ -443,13 +443,32 @@ export async function releaseSystemRecordLaneControllerV1(
   CONTROLLER_SESSIONS.delete(controller);
 }
 
-export function createSystemRecordLaneControllerV1(
-  deps: SystemRecordLaneControllerDepsV1,
+/**
+ * Typed-only controller deps: the managed path's shape. There is NO string
+ * `barrier` member — not deprecated, not optional, structurally absent — so
+ * first-party composition cannot regress onto the purpose-string contract by
+ * any edit short of changing this interface. The compile-time can't-forget
+ * guard that `SystemRecordLaneControllerDepsV1.barrier` provides for external
+ * composers is provided here by `typedBarrier` being required.
+ */
+export interface SystemRecordLaneControllerTypedDepsV1 {
+  readonly lease: ManagedOxigraphOwnershipLeaseV1;
+  readonly handoff: SystemRecordChildHandoffV1;
+  readonly executor: SystemRecordTransactionExecutorV1;
+  readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
+  readonly setAdmissionActive?: (active: boolean) => void;
+}
+
+/**
+ * The typed-only core builder. Managed composition calls this directly;
+ * {@link createSystemRecordLaneControllerV1} is the compatibility adapter
+ * that normalizes the public legacy-capable deps down to this shape.
+ */
+export function createSystemRecordLaneControllerTypedV1(
+  deps: SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneControllerV1 {
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
-  const publicBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
-    ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
   const session = new SystemRecordLaneSession({
     lease: deps.lease,
     handoff: deps.handoff,
@@ -457,9 +476,9 @@ export function createSystemRecordLaneControllerV1(
     setAdmissionActive: deps.setAdmissionActive,
     runEnableBarrier: async (transition) =>
       snapshotSystemRecordMaterializationEpochRotationV1(
-        await publicBarrier('enable', transition),
+        await deps.typedBarrier('enable', transition),
       ),
-    runVoidBarrier: (kind, transition) => publicBarrier(kind, transition),
+    runVoidBarrier: (kind, transition) => deps.typedBarrier(kind, transition),
   });
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
@@ -468,6 +487,26 @@ export function createSystemRecordLaneControllerV1(
   CONTROLLER_SESSIONS.set(controller, session);
   registeredController = controller;
   return controller;
+}
+
+/**
+ * Public compatibility entry point. Normalizes the legacy-capable deps to the
+ * typed core: a supplied `typedBarrier` is used as-is; otherwise the string
+ * `barrier` is wrapped, preserving the purpose-string contract for external
+ * composers until its removal at a breaking version boundary.
+ */
+export function createSystemRecordLaneControllerV1(
+  deps: SystemRecordLaneControllerDepsV1,
+): SystemRecordLaneControllerV1 {
+  const typedBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
+    ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
+  return createSystemRecordLaneControllerTypedV1({
+    lease: deps.lease,
+    handoff: deps.handoff,
+    executor: deps.executor,
+    typedBarrier,
+    setAdmissionActive: deps.setAdmissionActive,
+  });
 }
 
 /* ------------------------------------------------------------------ *

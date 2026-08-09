@@ -2916,33 +2916,29 @@ describe('system-record lane session lifecycle V1', () => {
     });
   });
 
-  describe('poisoned string barrier under the legacy fallback (#2179)', () => {
-    // Managed composition routes every lifecycle call through `typedBarrier`
-    // and supplies a string barrier that THROWS. The controller's fallback
-    // reaches that string barrier only when `typedBarrier` is absent — i.e.
-    // only if a future edit removes it from the production deps. This pins
-    // what such an edit produces: an immediate, NAMED failure, instead of the
-    // silent alternative where transitions keep working while quietly moving
-    // onto the deprecated purpose-string contract and its unsound result cast.
-    it('a lane composed with only a poisoned barrier fails enable loudly, named, and closed', async () => {
+  describe('compatibility adapter with a failing string barrier (#2179)', () => {
+    // First-party composition is typed-only and structurally cannot reach the
+    // string path (the managed coordinator's deps have no string member).
+    // External composers still enter through this public adapter with string
+    // barriers, so the compat path's failure shape is pinned here: a barrier
+    // that throws at the boundary must fail CLOSED, not leave a half-enabled
+    // lane over a child nobody stopped.
+    it('a string barrier that throws at the boundary fails enable loudly and closed', async () => {
       const controller = createSystemRecordLaneControllerV1({
         lease: ownership.lease,
         handoff,
         executor,
-        // The same shape sparql-http supplies in managed composition.
         barrier: () => {
-          throw new Error(
-            'system-record managed composition retired the purpose-string barrier (#2179)',
-          );
+          throw new Error('external barrier infrastructure refused the transition');
         },
       });
 
-      await expect(controller.open(ACTIVATION)).rejects.toThrow(/#2179/);
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/refused the transition/);
 
       // Closed, not just loud, in one assertion: the ONLY handoff interaction
-      // is the fail-closed order. The poison threw at the barrier boundary, so
-      // no physical step ran — the child was never stopped, destroyed, or
-      // replaced under an enable that could not settle.
+      // is the fail-closed order. The barrier threw before the transition ran,
+      // so no physical step happened — the child was never stopped, destroyed,
+      // or replaced under an enable that could not settle.
       expect(handoff.calls).toEqual([
         'failManagedMutationsClosed:enable transition did not physically settle',
       ]);

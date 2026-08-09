@@ -4,7 +4,11 @@ import {
   StorePriorityScheduler,
   type StoreQueuedAdmissionV1,
 } from '../src/store-priority-scheduler.js';
-import { createStoreControlBarrierKeyV1 } from '../src/store-control-barrier-key-v1.js';
+import {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from '../src/store-control-barrier-key-v1.js';
+import type { ManagedSystemRecordCoordinatorOptionsV1 } from '../src/adapters/system-record-managed-coordinator-v1-internal.js';
 
 /**
  * The scheduler/coordinator boundary, asserted through the PUBLIC scheduler.
@@ -288,6 +292,17 @@ describe('typed barrier keys close the generic result channel (#2179)', () => {
     expectTypeOf(effect).toEqualTypeOf<Promise<void>>();
     await effect;
 
+  });
+
+  // Compile-time-only negatives, in a function that is DELIBERATELY never
+  // invoked: the typecheck lane compiles the body (each @ts-expect-error is
+  // verified live — fixing the suppressed error away yields TS2578), while
+  // the vitest run never executes an intentionally-invalid call, so no
+  // real barrier is enqueued and no promise floats.
+  const negativeTypeContracts = (
+    scheduler: StorePriorityScheduler,
+    epochKey: StoreControlBarrierKeyV1<{ epoch: string }>,
+  ) => {
     // A transition cannot smuggle a different result type past its key.
     // @ts-expect-error — the epoch key demands { epoch: string }, not number
     void scheduler.runTypedControlBarrier({}, epochKey, async () => 7);
@@ -296,7 +311,33 @@ describe('typed barrier keys close the generic result channel (#2179)', () => {
     // a required member no caller outside the factory can produce.
     // @ts-expect-error — structural literal lacks the private brand
     void scheduler.runTypedControlBarrier({}, { purpose: 'forged' }, async () => 7);
-  });
+
+    // The managed coordinator is typed-only STRUCTURALLY: its options carry no
+    // string-barrier member, so first-party composition cannot regress onto
+    // the purpose-string contract without editing that interface. The literal
+    // below is COMPLETE apart from `barrier`, deliberately: with every
+    // required member present, the excess `barrier` property is the ONLY
+    // error, so re-adding the member to the interface turns this suppression
+    // into an unused @ts-expect-error and fails the typecheck lane. (An
+    // incomplete literal could not discriminate — missing-member errors would
+    // keep the suppression alive either way.)
+    const typedOnly = (options: ManagedSystemRecordCoordinatorOptionsV1) => options;
+    void typedOnly({
+      lease: null as never,
+      handoff: null as never,
+      storeId: {},
+      queryEndpoint: '',
+      updateEndpoint: '',
+      resolveClient: () => null,
+      applyLegacy: null as never,
+      typedBarrier: null as never,
+      setAdmissionActive: () => {},
+      // @ts-expect-error — a string `barrier` member does not exist on the
+      // managed coordinator's options
+      barrier: null as never,
+    });
+  };
+  void negativeTypeContracts;
 
   it('rejects an empty purpose at key creation', () => {
     expect(() => createStoreControlBarrierKeyV1('')).toThrow(/must not be empty/);
