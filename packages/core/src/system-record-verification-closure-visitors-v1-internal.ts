@@ -47,16 +47,30 @@ export interface ClosureVisitReferenceV1 {
   readonly rootSubject?: string;
 }
 
-export interface ClosureVisitEffectsV1 {
+interface ClosureVisitBaseEffectsV1 {
   readonly references: readonly ClosureVisitReferenceV1[];
-  readonly head?: Readonly<{ digest: Digest32V1; object: AgentProfileHeadObjectV1 }>;
-  readonly transition?: Readonly<{
-    digest: Digest32V1;
-    object: AgentProfileAuthorityTransitionV1;
-  }>;
-  readonly resolution?: AgentProfileForkResolutionV1;
   readonly rootClaims: readonly string[];
 }
+
+export type ClosureVisitEffectsV1 =
+  | Readonly<ClosureVisitBaseEffectsV1 & {
+    objectKind: 'agent-profile-head';
+    head: Readonly<{ digest: Digest32V1; object: AgentProfileHeadObjectV1 }>;
+  }>
+  | Readonly<ClosureVisitBaseEffectsV1 & {
+    objectKind: 'authority-transition';
+    transition: Readonly<{
+      digest: Digest32V1;
+      object: AgentProfileAuthorityTransitionV1;
+    }>;
+  }>
+  | Readonly<ClosureVisitBaseEffectsV1 & {
+    objectKind: 'fork-resolution';
+    resolution: AgentProfileForkResolutionV1;
+  }>
+  | Readonly<ClosureVisitBaseEffectsV1 & {
+    objectKind: 'profile-bundle' | 'owned-subject-table';
+  }>;
 
 export interface ClosureVisitContextV1 extends ClosureVisitReferenceV1 {}
 
@@ -156,6 +170,7 @@ async function visitClosureHeadV1(
     }
   }
   return Object.freeze({
+    objectKind: 'agent-profile-head',
     references: Object.freeze(references),
     head: Object.freeze({ digest: context.digest, object: head }),
     rootClaims: Object.freeze([head.rootSubject]),
@@ -175,6 +190,7 @@ async function visitClosureTransitionV1(
     fail('system-record-closure', 'authority-transition verification failed');
   }
   return Object.freeze({
+    objectKind: 'authority-transition',
     references: Object.freeze([
       closureReference('agent-profile-head', envelope.object.priorHeadDigest, 'history'),
     ]),
@@ -206,6 +222,7 @@ async function visitClosureResolutionV1(
     ));
   }
   return Object.freeze({
+    objectKind: 'fork-resolution',
     references: Object.freeze(references),
     resolution: envelope.object,
     rootClaims: Object.freeze([]),
@@ -227,7 +244,7 @@ async function visitClosureBundleV1(
   ) {
     fail('system-record-closure', 'current profile bundle verification failed');
   }
-  return emptyClosureVisitEffectsV1();
+  return emptyClosureVisitEffectsV1('profile-bundle');
 }
 
 function visitClosureSubjectTableV1(
@@ -241,7 +258,7 @@ function visitClosureSubjectTableV1(
   if (computeOwnedSubjectTableDigestV1(context.rootSubject, table) !== context.digest) {
     fail('system-record-closure', 'owned-subject table digest mismatch');
   }
-  return emptyClosureVisitEffectsV1();
+  return emptyClosureVisitEffectsV1('owned-subject-table');
 }
 
 function closureReference(
@@ -259,6 +276,12 @@ function closureReference(
   });
 }
 
-function emptyClosureVisitEffectsV1(): ClosureVisitEffectsV1 {
-  return Object.freeze({ references: Object.freeze([]), rootClaims: Object.freeze([]) });
+function emptyClosureVisitEffectsV1(
+  objectKind: 'profile-bundle' | 'owned-subject-table',
+): ClosureVisitEffectsV1 {
+  return Object.freeze({
+    objectKind,
+    references: Object.freeze([]),
+    rootClaims: Object.freeze([]),
+  });
 }

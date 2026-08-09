@@ -296,14 +296,23 @@ async function visitClosureObjectV1(
       digest: reference.digest,
     }));
   }
-  if (effects.head !== undefined) {
-    state.parsedHeads.set(effects.head.digest, effects.head.object);
-  }
-  if (effects.transition !== undefined) {
-    state.parsedTransitions.set(effects.transition.digest, effects.transition.object);
-  }
-  if (effects.resolution !== undefined) {
-    state.parsedResolutions.push(effects.resolution);
+  switch (effects.objectKind) {
+    case 'agent-profile-head':
+      state.parsedHeads.set(effects.head.digest, effects.head.object);
+      break;
+    case 'authority-transition':
+      state.parsedTransitions.set(effects.transition.digest, effects.transition.object);
+      break;
+    case 'fork-resolution':
+      state.parsedResolutions.push(effects.resolution);
+      break;
+    case 'profile-bundle':
+    case 'owned-subject-table':
+      break;
+    default: {
+      const unreachable: never = effects;
+      fail('system-record-closure', `unsupported closure effect ${String(unreachable)}`);
+    }
   }
   for (const rootClaim of effects.rootClaims) state.rootClaims.add(rootClaim);
 }
