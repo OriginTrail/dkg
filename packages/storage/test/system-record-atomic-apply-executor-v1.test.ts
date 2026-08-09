@@ -241,6 +241,22 @@ describe('bounded system-record atomic apply executor V1', () => {
     expect(fixture.client.updateCalls).toBe(0);
   });
 
+  it('classifies an observed foreign root claim as a zero-write collision', async () => {
+    const fixture = makeObservedRootCollisionFixture();
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toEqual({
+      settlement: 'no-mutation',
+      outcome: { outcome: 'root-collision' },
+    });
+    expect(fixture.client.updateCalls).toBe(0);
+    expect(fixture.client.calls).toHaveLength(2);
+    expect(fixture.issueAgain()).toBeDefined();
+  });
+
   it.each([
     ['transport failure', { updateFailure: new Error('timeout') }],
     ['non-2xx response', { updateStatus: 500 }],
@@ -679,6 +695,7 @@ function makeFixture(options: Readonly<{
   priorProjection?: (
     projection: readonly Readonly<Quad>[],
   ) => readonly Readonly<Quad>[];
+  observedRootState?: 'foreign-collision';
 }> = {}) {
   const verified = options.verified ?? VERIFIED;
   const order = options.order ?? [];
@@ -721,7 +738,12 @@ function makeFixture(options: Readonly<{
   const initialReserved = localNext
     ? ready.plan.next.reservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
     : [EPOCH];
-  const initialRoots = localNext ? ready.plan.next.rootClaimQuads : [];
+  const initialRoots = options.observedRootState === 'foreign-collision'
+    ? ready.plan.next.rootClaimQuads.map((quad) =>
+      quad.predicate === SYSTEM_RECORD_V1_PREDICATES.claimedBy
+        ? { ...quad, object: 'urn:test:foreign-record' }
+        : quad)
+    : (localNext ? ready.plan.next.rootClaimQuads : []);
   const faithfulInitialProjection = localNext
     ? ready.plan.next.projectionQuads.map((quad) => ({ ...quad, graph: ready.plan.projectionGraph }))
     : [];
@@ -825,6 +847,10 @@ function makeFixture(options: Readonly<{
     releaseFacts: (facts: unknown) => registry.consumer.release(facts),
     issueAgain: () => registry.issuer.issueActive(issue(binding, admittedDeadlineMs, verified)),
   };
+}
+
+function makeObservedRootCollisionFixture(): ReturnType<typeof makeFixture> {
+  return makeFixture({ observedRootState: 'foreign-collision' });
 }
 
 function issue(

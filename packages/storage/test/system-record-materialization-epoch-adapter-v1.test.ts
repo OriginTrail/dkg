@@ -87,12 +87,20 @@ describe('sparql-http managed epoch handoff', () => {
     const controller = store.getSystemRecordLaneControllerV1();
     expect(controller).toBeDefined();
 
-    const first = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    const first = await controller!.open({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
     expect(resultBarrier).toHaveBeenCalled();
     expect(epoch).toBe('1');
     await first.close('disable');
     expect(epoch).toBe('2');
-    const second = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    const second = await controller!.open({
+      networkId: 'testnet',
+      kinds: ['agents'],
+      mode: 'shadow',
+    });
     expect(epoch).toBe('3');
     expect(requests.map((request) => request.path)).toEqual([
       '/query', '/update', '/query',
