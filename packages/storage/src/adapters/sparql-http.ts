@@ -753,20 +753,19 @@ export class SparqlHttpStore implements TripleStore {
           // the lane outlives any single child: sealing the generation observed
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
-          barrier: async (purpose, transition) => {
-            let result: Awaited<ReturnType<typeof transition>> | undefined;
-            await externalStorePriorityScheduler.runControlBarrierEffect(
+          //
+          // This domain barrier returns typed lifecycle data. Use the scheduler's
+          // result-preserving path so a coalesced caller receives the first
+          // transition's result rather than an unassigned local capture.
+          barrier: (purpose, transition) =>
+            externalStorePriorityScheduler.runControlBarrier(
               this,
               purpose,
-              async () => {
-                result = await transition();
-              },
+              transition,
               this.ownershipLease
                 ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
                 : undefined,
-            );
-            return result as Awaited<ReturnType<typeof transition>>;
-          },
+            ),
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
         });
         this.systemRecordLane = owner;
