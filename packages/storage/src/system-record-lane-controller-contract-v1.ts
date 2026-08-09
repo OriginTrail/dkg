@@ -5,7 +5,7 @@
  * without navigating lane-session mechanics; the materializer re-exports
  * everything here, so its public surface is unchanged.
  */
-import type { ManagedOxigraphOwnershipLeaseV1 } from './managed-oxigraph-ownership-v1-internal.js';
+import type { ManagedOxigraphOwnershipLeaseV1 } from './internal/managed-oxigraph-ownership-v1.js';
 import type { SystemRecordMaterializationEpochRotationV1 } from './system-record-materialization-epoch-contract-v1.js';
 // Type-only, deliberately: the value-import graph stays acyclic (the
 // materializer imports the normalizer VALUE from this module; this module
@@ -130,4 +130,3 @@ export function normalizeControllerBarrierV1(
   return deps.typedBarrier ??
     ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
 }
-
