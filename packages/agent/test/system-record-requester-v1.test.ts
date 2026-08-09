@@ -55,7 +55,7 @@ describe('system-record requester V1', () => {
     expect(requester.stats()).toMatchObject({
       started: 1,
       joined: 1,
-      pendingDigests: 1,
+      trackedDigests: 1,
       waitingCallers: 2,
       activeStream: 1,
       queuedStreams: 0,
@@ -93,7 +93,7 @@ describe('system-record requester V1', () => {
     expect(bytes.reservations[3]?.released).toBe(false);
     expect(requester.stats()).toMatchObject({
       completed: 1,
-      pendingDigests: 1,
+      trackedDigests: 1,
       activeLeases: 2,
       retainedPayloadBytes: PAYLOAD.byteLength * 3,
       activeStream: 0,
@@ -109,7 +109,7 @@ describe('system-record requester V1', () => {
     expect(bytes.reservations[3]?.released).toBe(true);
     expect(decode.active()).toBe(false);
     expect(requester.stats()).toMatchObject({
-      pendingDigests: 0,
+      trackedDigests: 0,
       activeLeases: 0,
       retainedPayloadBytes: 0,
     });
@@ -138,7 +138,7 @@ describe('system-record requester V1', () => {
     expect(requester.stats()).toMatchObject({
       started: 1,
       joined: 1,
-      pendingDigests: 1,
+      trackedDigests: 1,
       activeLeases: 2,
       retainedPayloadBytes: PAYLOAD.byteLength * 3,
     });
@@ -147,7 +147,7 @@ describe('system-record requester V1', () => {
     first.lease.release();
     expect(bytes.reservations.every(({ released }) => released)).toBe(true);
     expect(requester.stats()).toMatchObject({
-      pendingDigests: 0,
+      trackedDigests: 0,
       activeLeases: 0,
       retainedPayloadBytes: 0,
     });
@@ -251,10 +251,10 @@ describe('system-record requester V1', () => {
     expect(openExchange).toHaveBeenCalledTimes(1);
   });
 
-  it('counts retained successful entries against the global digest cap', async () => {
+  it('counts retained successful entries against the tracked digest cap', async () => {
     const firstExchange = fixtureExchange();
     const openExchange = vi.fn(async () => firstExchange.value);
-    const requester = createRequester({ maxPendingDigests: 1, openExchange });
+    const requester = createRequester({ maxTrackedDigests: 1, openExchange });
     const first = await requester.fetch(
       LOOKUP,
       new AbortController().signal,
@@ -274,7 +274,7 @@ describe('system-record requester V1', () => {
     });
     expect(openExchange).toHaveBeenCalledTimes(1);
     if (first.outcome === 'ok') first.lease.release();
-    expect(requester.stats().pendingDigests).toBe(0);
+    expect(requester.stats().trackedDigests).toBe(0);
   });
 
   it('keeps a coalesced transfer alive when only one caller aborts', async () => {
@@ -310,7 +310,7 @@ describe('system-record requester V1', () => {
     await vi.waitFor(() => {
       expect(requester.stats()).toMatchObject({
         completed: 1,
-        pendingDigests: 0,
+        trackedDigests: 0,
         waitingCallers: 0,
         activeStream: 0,
       });
@@ -337,7 +337,7 @@ describe('system-record requester V1', () => {
     await expect(result).rejects.toThrow('caller left during open');
     await vi.waitFor(() => expect(requester.stats()).toMatchObject({
       completed: 1,
-      pendingDigests: 0,
+      trackedDigests: 0,
       waitingCallers: 0,
       activeStream: 0,
     }));
@@ -350,6 +350,7 @@ describe('system-record requester V1', () => {
     const bytes = byteAdmission();
     const stream = permitAdmission();
     const controller = new AbortController();
+    const removeListener = vi.spyOn(controller.signal, 'removeEventListener');
     const openExchange = vi.fn(async () => {
       controller.abort(new Error('cancelled during open'));
       return new Promise<SystemRecordRequesterExchangeV1>(() => {});
@@ -360,13 +361,14 @@ describe('system-record requester V1', () => {
     await expect(result).rejects.toThrow('cancelled during open');
     await vi.waitFor(() => expect(requester.stats()).toMatchObject({
       completed: 1,
-      pendingDigests: 0,
+      trackedDigests: 0,
       waitingCallers: 0,
       activeStream: 0,
     }));
     expect(stream.active()).toBe(false);
     expect(bytes.reservations).toHaveLength(1);
     expect(bytes.reservations[0]?.released).toBe(true);
+    expect(removeListener).toHaveBeenCalledWith('abort', expect.any(Function));
   });
 
   it('does not attach an immediate retry to a cancelled single-flight', async () => {
@@ -383,7 +385,7 @@ describe('system-record requester V1', () => {
     await expect(retry).resolves.toEqual({ outcome: 'busy', wireBytes: 0 });
     expect(openExchange).toHaveBeenCalledTimes(1);
     await firstRejection;
-    await vi.waitFor(() => expect(requester.stats().pendingDigests).toBe(0));
+    await vi.waitFor(() => expect(requester.stats().trackedDigests).toBe(0));
   });
 
   it('maps every remote status and rejects invalid payload identity fail closed', async () => {
@@ -419,7 +421,7 @@ describe('system-record requester V1', () => {
     }));
     expect(invalidResult.wireBytes).toBeGreaterThan(0);
     expect(invalid.reset).toHaveBeenCalledWith('invalid-response');
-    expect(requester.stats()).toMatchObject({ pendingDigests: 0, activeStream: 0 });
+    expect(requester.stats()).toMatchObject({ trackedDigests: 0, activeStream: 0 });
 
     const malformed = fixtureExchange(async () => Uint8Array.of(1));
     active = malformed;
@@ -452,7 +454,7 @@ describe('system-record requester V1', () => {
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'deadline', wireBytes: expect.any(Number) });
     expect(slow.reset).toHaveBeenCalledWith('deadline');
-    expect(timed.stats()).toMatchObject({ pendingDigests: 0, activeStream: 0 });
+    expect(timed.stats()).toMatchObject({ trackedDigests: 0, activeStream: 0 });
 
     const blocked = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
     const closing = createRequester({ openExchange: async () => blocked.value });
@@ -464,7 +466,7 @@ describe('system-record requester V1', () => {
     closing.close();
     await expect(result).resolves.toMatchObject({ outcome: 'closed', wireBytes: expect.any(Number) });
     expect(blocked.reset).toHaveBeenCalledWith('closed');
-    expect(closing.stats()).toMatchObject({ closed: true, pendingDigests: 0, activeStream: 0 });
+    expect(closing.stats()).toMatchObject({ closed: true, trackedDigests: 0, activeStream: 0 });
     await expect(closing.fetch(
       LOOKUP,
       new AbortController().signal,
@@ -486,6 +488,29 @@ describe('system-record requester V1', () => {
     expect(openStream.active()).toBe(false);
     expect(openBytes.reservations).toHaveLength(1);
     expect(openBytes.reservations[0]?.released).toBe(true);
+
+    const writeBytes = byteAdmission();
+    const writeStream = permitAdmission();
+    const writeFailure = fixtureExchange();
+    writeFailure.writeRequestFrame.mockRejectedValueOnce(new Error('write failed'));
+    const writeRequester = createRequester({
+      bytes: writeBytes,
+      stream: writeStream,
+      openExchange: async () => writeFailure.value,
+    });
+    await expect(writeRequester.fetch(
+      LOOKUP,
+      new AbortController().signal,
+    )).resolves.toEqual({ outcome: 'transport', wireBytes: 0 });
+    expect(writeFailure.reset).toHaveBeenCalledWith('transport');
+    expect(writeFailure.readResponseFrame).not.toHaveBeenCalled();
+    expect(writeStream.active()).toBe(false);
+    expect(writeBytes.reservations).toHaveLength(1);
+    expect(writeBytes.reservations[0]?.released).toBe(true);
+    expect(writeRequester.stats()).toMatchObject({
+      trackedDigests: 0,
+      activeStream: 0,
+    });
 
     const readBytes = byteAdmission();
     const readStream = permitAdmission();
@@ -585,7 +610,7 @@ describe('system-record requester V1', () => {
     expect(base.reservations.every(({ released }) => released)).toBe(true);
     expect(decode.active()).toBe(false);
     expect(requester.stats()).toMatchObject({
-      pendingDigests: 0,
+      trackedDigests: 0,
       activeLeases: 0,
       retainedPayloadBytes: 0,
     });
@@ -616,7 +641,7 @@ describe('system-record requester V1', () => {
     expect(base.reservations[0]?.released).toBe(true);
     expect(decode.active()).toBe(false);
     expect(requester.stats()).toMatchObject({
-      pendingDigests: 0,
+      trackedDigests: 0,
       activeLeases: 0,
       retainedPayloadBytes: 0,
     });
@@ -690,7 +715,7 @@ function createRequester(overrides: {
   openExchange?: CreateSystemRecordRequesterOptionsV1['openExchange'];
   timeoutMs?: number;
   maxWaitersPerDigest?: number;
-  maxPendingDigests?: number;
+  maxTrackedDigests?: number;
 } = {}) {
   const stream = overrides.stream ?? permitAdmission();
   const decode = overrides.decode ?? permitAdmission();
@@ -705,9 +730,9 @@ function createRequester(overrides: {
     ...(overrides.maxWaitersPerDigest === undefined
       ? {}
       : { maxWaitersPerDigest: overrides.maxWaitersPerDigest }),
-    ...(overrides.maxPendingDigests === undefined
+    ...(overrides.maxTrackedDigests === undefined
       ? {}
-      : { maxPendingDigests: overrides.maxPendingDigests }),
+      : { maxTrackedDigests: overrides.maxTrackedDigests }),
   });
 }
 

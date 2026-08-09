@@ -23,8 +23,10 @@ const options: CreateSystemRecordRequesterOptionsV1 = {
   byteAdmission,
   streamAdmission,
   decodeAdmission,
+  maxTrackedDigests: 1,
 };
 const requester: SystemRecordRequesterV1 = createSystemRecordRequesterV1(options);
+const trackedDigests: number = requester.stats().trackedDigests;
 const result: Promise<SystemRecordExactFetchResultV1> = requester.fetch({
   type: 'object',
   objectKind: 'profile-bundle',
@@ -32,3 +34,4 @@ const result: Promise<SystemRecordExactFetchResultV1> = requester.fetch({
 }, signal);
 
 void result;
+void trackedDigests;

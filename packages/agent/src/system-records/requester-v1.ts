@@ -80,12 +80,9 @@ type FetchPhaseV1 = PendingFetchPhaseV1 | RetainedFetchPhaseV1 | SettledFetchPha
 
 interface FetchEntryV1 {
   readonly key: string;
-  readonly pendingSignal: AbortSignal;
   readonly participantCount: number;
   readonly pendingAborted: boolean;
   subscribe(signal: AbortSignal): Promise<SystemRecordExactFetchResultV1>;
-  completeRetained(source: SystemRecordRetainedSourceV1): SystemRecordRequesterSettlementV1;
-  completeFailure(result: SystemRecordRequesterFailureV1): SystemRecordRequesterSettlementV1;
   abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void;
   resetReason(): SystemRecordRequesterResetReasonV1;
   close(): void;
@@ -113,8 +110,14 @@ class ExactFetchRegistryV1 {
     return this.#entries.get(key);
   }
 
-  create(key: string, pending: PendingFetchPhaseV1): FetchEntryV1 {
-    const entry = new ExactFetchEntryV1(key, pending, this.#byteAdmission, this);
+  create(
+    key: string,
+    start: (
+      entry: FetchEntryV1,
+      signal: AbortSignal,
+    ) => Promise<SystemRecordRequesterSettlementV1>,
+  ): FetchEntryV1 {
+    const entry = new ExactFetchEntryV1(key, this.#byteAdmission, this, start);
     this.#entries.set(key, entry);
     this.#tracked.add(entry);
     return entry;
@@ -163,20 +166,21 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
 
   constructor(
     key: string,
-    pending: PendingFetchPhaseV1,
     byteAdmission: SystemRecordRequesterByteAdmissionV1,
     registry: ExactFetchRegistryV1,
+    start: (
+      entry: FetchEntryV1,
+      signal: AbortSignal,
+    ) => Promise<SystemRecordRequesterSettlementV1>,
   ) {
     this.key = key;
-    this.#phase = pending;
     this.#byteAdmission = byteAdmission;
     this.#registry = registry;
-  }
-
-  get pendingSignal(): AbortSignal {
-    const phase = this.#phase;
-    if (phase.state !== 'pending') throw new Error('System Record entry is not pending');
-    return phase.controller.signal;
+    const controller = new AbortController();
+    const transfer = Promise.resolve()
+      .then(() => start(this, controller.signal))
+      .then((settlement) => this.#settle(settlement));
+    this.#phase = { state: 'pending', controller, transfer };
   }
 
   get participantCount(): number {
@@ -188,6 +192,7 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
   }
 
   async subscribe(signal: AbortSignal): Promise<SystemRecordExactFetchResultV1> {
+    signal.throwIfAborted();
     this.#observerCount += 1;
     let observing = true;
     const releaseObserver = () => {
@@ -197,11 +202,8 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
       this.#disposeIfIdle();
     };
     signal.addEventListener('abort', releaseObserver, { once: true });
-    if (signal.aborted) {
-      releaseObserver();
-      signal.throwIfAborted();
-    }
     try {
+      signal.throwIfAborted();
       const phase = this.#phase;
       if (phase.state === 'retained') return this.#deliverLease(phase.source);
       if (phase.state !== 'pending') {
@@ -215,26 +217,6 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
       signal.removeEventListener('abort', releaseObserver);
       releaseObserver();
     }
-  }
-
-  completeRetained(source: SystemRecordRetainedSourceV1): SystemRecordRequesterSettlementV1 {
-    if (this.#phase.state !== 'pending') {
-      source.release();
-      throw new Error('System Record source retained outside the pending phase');
-    }
-    this.#phase = Object.freeze({ state: 'retained', source });
-    this.#retainedPayloadBytes += source.artifact.canonicalBytes.byteLength;
-    return Object.freeze({ state: 'retained', source });
-  }
-
-  completeFailure(result: SystemRecordRequesterFailureV1): SystemRecordRequesterSettlementV1 {
-    if (this.#phase.state !== 'pending') {
-      throw new Error('System Record failure completed outside the pending phase');
-    }
-    this.#phase = Object.freeze({ state: 'failed' });
-    this.#registry.unpublish(this);
-    this.#disposeIfIdle();
-    return Object.freeze({ state: 'failed', result });
   }
 
   abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void {
@@ -263,6 +245,22 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
       activeLeases: this.#leaseCount,
       retainedPayloadBytes: this.#retainedPayloadBytes,
     });
+  }
+
+  #settle(settlement: SystemRecordRequesterSettlementV1): SystemRecordRequesterSettlementV1 {
+    if (this.#phase.state !== 'pending') {
+      if (settlement.state === 'retained') settlement.source.release();
+      throw new Error('System Record task settled outside the pending phase');
+    }
+    if (settlement.state === 'retained') {
+      this.#phase = Object.freeze({ state: 'retained', source: settlement.source });
+      this.#retainedPayloadBytes += settlement.source.artifact.canonicalBytes.byteLength;
+      return settlement;
+    }
+    this.#phase = Object.freeze({ state: 'failed' });
+    this.#registry.unpublish(this);
+    this.#disposeIfIdle();
+    return settlement;
   }
 
   #deliverLease(source: SystemRecordRetainedSourceV1): SystemRecordExactFetchResultV1 {
@@ -332,10 +330,10 @@ export function createSystemRecordRequesterV1(
     SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS,
     'requester timeoutMs',
   );
-  const maxPendingDigests = boundedPositive(
-    options.maxPendingDigests ?? SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
+  const maxTrackedDigests = boundedPositive(
+    options.maxTrackedDigests ?? SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
     SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
-    'maxPendingDigests',
+    'maxTrackedDigests',
   );
   const maxWaitersPerDigest = boundedPositive(
     options.maxWaitersPerDigest ?? SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
@@ -372,7 +370,7 @@ export function createSystemRecordRequesterV1(
       joined += 1;
       return entry.subscribe(signal);
     }
-    if (registry.size >= maxPendingDigests) {
+    if (registry.size >= maxTrackedDigests) {
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
     const streamPermit = options.streamAdmission.tryAcquire();
@@ -382,37 +380,29 @@ export function createSystemRecordRequesterV1(
       streamPermit.release();
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
-    let resolveTransfer!: (result: SystemRecordRequesterSettlementV1) => void;
-    let rejectTransfer!: (reason?: unknown) => void;
-    const transfer = new Promise<SystemRecordRequesterSettlementV1>((resolve, reject) => {
-      resolveTransfer = resolve;
-      rejectTransfer = reject;
-    });
     entry = registry.create(
       key,
-      {
-        state: 'pending',
-        controller: new AbortController(),
-        transfer,
-      },
+      (createdEntry, pendingSignal) => run(
+        createdEntry,
+        request,
+        pendingSignal,
+        streamPermit,
+        frameReservation,
+      ),
     );
     started += 1;
     activeStream = 1;
     peakActiveStream = 1;
-    void run(entry, request, streamPermit, frameReservation).then(
-      resolveTransfer,
-      rejectTransfer,
-    );
     return entry.subscribe(signal);
   }
 
   async function run(
     entry: FetchEntryV1,
     request: SystemRecordRequestHeaderV1,
+    pendingSignal: AbortSignal,
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
   ): Promise<SystemRecordRequesterSettlementV1> {
-    const pendingSignal = entry.pendingSignal;
     let exchange: SystemRecordRequesterExchangeV1 | undefined;
     let wireBytes = 0;
     const timeout = setTimeout(
@@ -444,7 +434,7 @@ export function createSystemRecordRequesterV1(
         byteAdmission: options.byteAdmission,
       });
       if (retained.outcome === 'ok') {
-        settlement = entry.completeRetained(retained.retained);
+        settlement = Object.freeze({ state: 'retained', source: retained.retained });
       } else {
         settlement = Object.freeze({ state: 'failed', result: retained });
       }
@@ -481,9 +471,7 @@ export function createSystemRecordRequesterV1(
       activeStream = 0;
       completed += 1;
     }
-    return settlement.state === 'failed'
-      ? entry.completeFailure(settlement.result)
-      : settlement;
+    return settlement;
   }
 
   function stats(): SystemRecordRequesterStatsV1 {
@@ -492,7 +480,7 @@ export function createSystemRecordRequesterV1(
       started,
       joined,
       completed,
-      pendingDigests: registry.size,
+      trackedDigests: registry.size,
       waitingCallers: entryStats.waitingCallers,
       activeLeases: entryStats.activeLeases,
       activeStream,

@@ -10,23 +10,10 @@ import {
 
 import {
   createSystemRecordPermitGateV1,
-  raceSystemRecordAbortV1,
   type SystemRecordByteAdmissionV1,
   type SystemRecordByteReservationV1,
   type SystemRecordPermitGateV1,
   type SystemRecordPermitV1,
-} from './resource-admission-v1-internal.js';
-
-export {
-  createSystemRecordPermitGateV1,
-  raceSystemRecordAbortV1,
-};
-export type {
-  SystemRecordByteAdmissionV1,
-  SystemRecordByteReservationV1,
-  SystemRecordPermitAdmissionV1,
-  SystemRecordPermitGateV1,
-  SystemRecordPermitV1,
 } from './resource-admission-v1-internal.js';
 
 export interface SystemRecordProviderTokenBucketSnapshotV1 {

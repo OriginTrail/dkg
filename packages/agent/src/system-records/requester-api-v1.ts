@@ -79,7 +79,8 @@ export interface SystemRecordRequesterStatsV1 {
   readonly started: number;
   readonly joined: number;
   readonly completed: number;
-  readonly pendingDigests: number;
+  /** Exact coordinates with an in-flight transfer or a retained source lease. */
+  readonly trackedDigests: number;
   readonly waitingCallers: number;
   readonly activeLeases: number;
   readonly activeStream: 0 | 1;
@@ -107,7 +108,7 @@ export interface CreateSystemRecordRequesterOptionsV1 {
   readonly decodeAdmission: SystemRecordRequesterAdmissionV1;
   readonly requestId?: () => string;
   readonly timeoutMs?: number;
-  /** Test seams may lower, never raise, the frozen protocol limits. */
-  readonly maxPendingDigests?: number;
+  /** Test-only cap across in-flight and retained exact coordinates; may only lower the protocol limit. */
+  readonly maxTrackedDigests?: number;
   readonly maxWaitersPerDigest?: number;
 }

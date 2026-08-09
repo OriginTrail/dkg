@@ -16,9 +16,11 @@ export type SystemRecordRemoteFetchOutcomeV1 =
   | 'remote-busy'
   | 'remote-error';
 
-type SystemRecordExactRequestHeaderV1 = Exclude<
+type SystemRecordExactRequestHeaderV1 = Extract<
   SystemRecordRequestHeaderV1,
-  Readonly<{ operation: 'get-root' }>
+  Readonly<{
+    operation: 'get-bundle' | 'get-control-object' | 'get-inventory-object';
+  }>
 >;
 
 export interface SystemRecordExactRequestV1 {
