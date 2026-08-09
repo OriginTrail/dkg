@@ -2331,6 +2331,98 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('promotes a later exact public SWM assertion when the chain version advances', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph();
+    let rootCount = 1n;
+    let latestRoot = message.kcMerkleRoot;
+    const publicHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      isContextGraphActiveOnChain: async () => true,
+      getContextGraphAccessPolicy: async () => 0,
+      getMerkleRootCount: async () => rootCount,
+      getLatestMerkleRoot: async () => latestRoot,
+      getLatestMerkleRootAuthor: async () => AUTHOR,
+    }));
+    const internals = publicHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    internals.findSwmSnapshotForMerkleRoot = async () => {
+      throw new Error('legacy root scan must not run for graph-scoped SWM');
+    };
+
+    await expect(publicHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('promoted');
+
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+    const nextQuads: Quad[] = [{
+      subject: 'urn:asset:newer-unpublished',
+      predicate: 'urn:predicate:value',
+      object: '"newer"',
+      graph: '',
+    }, {
+      subject: 'urn:asset:newer-unpublished-two',
+      predicate: 'urn:predicate:value',
+      object: '"newer-two"',
+      graph: '',
+    }];
+    latestRoot = computeFlatKCRootV10(
+      nextQuads,
+      message.privateMerkleRoot?.length ? [message.privateMerkleRoot] : [],
+    );
+    rootCount = 2n;
+
+    const reconcileUpdate = {
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: latestRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 124,
+      authorAddress: AUTHOR,
+    };
+    await expect(publicHandler.handleChainReconciledKC(
+      reconcileUpdate,
+      createOperationContext('system'),
+    )).resolves.toBe('promoted');
+    await expect(publicHandler.handleChainReconciledKC(
+      reconcileUpdate,
+      createOperationContext('system'),
+    )).resolves.toBe('already-confirmed');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${vmGraph}> { <urn:asset:newer-unpublished> `
+        + '<urn:predicate:value> "newer" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <${vmGraph}> { <urn:asset:one> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> {
+        <${UAL}> <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+          <http://dkg.io/ontology/status> "confirmed" ;
+          <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
+          <http://dkg.io/ontology/materializedVersion> "124:0" .
+        FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
   it('repairs receiptless public metadata after exact VM content committed alone', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     const staged = await store.query(
