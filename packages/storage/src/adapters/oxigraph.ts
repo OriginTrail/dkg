@@ -414,7 +414,12 @@ export class OxigraphStore implements TripleStore {
     this.writeGen.recordGraphWrites([graphUri]);
   }
 
-  async structuredMutation(mutation: StructuredMutation): Promise<void> {
+  async structuredMutation(
+    mutation: StructuredMutation,
+    // Embedded mutations are synchronous and cannot be safely cancelled after
+    // dispatch; source/priority are advisory only for scheduled HTTP stores.
+    _options?: TripleStoreQueryOptions,
+  ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
     if (normalized.kind === 'replace-subject-predicates') {
       assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {

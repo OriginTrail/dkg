@@ -120,6 +120,7 @@ export {
   type SystemRecordLaneOutcomePolicyV1,
 } from './system-record-lane-forwarder-v1.js';
 export {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
   supportsTripleStoreCapability,
   isTripleStoreCapabilityRefusal,

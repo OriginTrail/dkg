@@ -156,6 +156,37 @@ describe('GraphSetIndexStore', () => {
     await inner.close();
   });
 
+  it('rebuilds a warm graph index after an indeterminate structured mutation failure', async () => {
+    const source = 'did:dkg:context-graph:indeterminate-source';
+    const target = 'did:dkg:context-graph:indeterminate-target';
+    const root = 'urn:indeterminate-root';
+    const inner = new OxigraphStore();
+    await inner.insert([q(source, root)]);
+    const uncertain = new (class extends CountingStore {
+      override async structuredMutation(
+        mutation: StructuredMutation,
+        options?: QueryOptions,
+      ): Promise<void> {
+        await super.structuredMutation(mutation, options);
+        throw new Error('lost structured mutation response');
+      }
+    })(inner);
+    const store = new GraphSetIndexStore(uncertain);
+
+    await expect(store.listGraphs()).resolves.toEqual([source]);
+    await expect(store.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: target,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } })).rejects.toThrow('lost structured mutation response');
+
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([source, target]));
+    expect(uncertain.listGraphsCalls).toBe(2);
+    await inner.close();
+  });
+
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {
     const inner = new OxigraphStore();
     await inner.insert([

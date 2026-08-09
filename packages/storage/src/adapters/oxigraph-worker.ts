@@ -691,7 +691,12 @@ export class OxigraphWorkerStore implements TripleStore {
     await this.call('replaceSubject', graphUri, subject, quads);
     this.writeGen.recordGraphWrites([graphUri]);
   }
-  async structuredMutation(mutation: StructuredMutation): Promise<void> {
+  async structuredMutation(
+    mutation: StructuredMutation,
+    // Mutations intentionally use the unbounded, non-cancellable worker lane:
+    // aborting the caller could report failure while the worker later commits.
+    _options?: TripleStoreQueryOptions,
+  ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
     await this.call('structuredMutation', normalized);
     if (structuredMutationMightMutate(normalized)) {

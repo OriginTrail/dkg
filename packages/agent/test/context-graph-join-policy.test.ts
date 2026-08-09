@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGEvent, PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
-import { GraphSetIndexStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphSetIndexStore,
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   DKGAgent,
   signAgentDelegation,
@@ -12,6 +16,7 @@ import {
 } from '../src/index.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
 import { ContextGraphJoinAdmissionLockManager } from '../src/context-graph-join-admission-lock.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { Messenger } from '../src/p2p/messenger.js';
 
 type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
@@ -754,12 +759,16 @@ describe('context graph open enrollment policy', () => {
     const originalStore = (agent as any).store as TripleStore;
     const updateOnlyStore = new Proxy(originalStore, {
       get(target, property, receiver) {
+        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) return undefined;
         if (property === 'structuredMutation') return undefined;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
-    (agent as any).store = new GraphSetIndexStore(updateOnlyStore, { enabled: false });
+    (agent as any).store = createListContextGraphsCacheInvalidatingStore(
+      new GraphSetIndexStore(updateOnlyStore, { enabled: false }),
+      () => undefined,
+    );
 
     await expect(agent.approveJoinRequest(
       contextGraphId,
@@ -797,12 +806,16 @@ describe('context graph open enrollment policy', () => {
     const originalStore = (agent as any).store as TripleStore;
     const legacyStore = new Proxy(originalStore, {
       get(target, property, receiver) {
+        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) return undefined;
         if (property === 'structuredMutation' || property === 'update') return undefined;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === 'function' ? value.bind(target) : value;
       },
     });
-    (agent as any).store = new GraphSetIndexStore(legacyStore, { enabled: false });
+    (agent as any).store = createListContextGraphsCacheInvalidatingStore(
+      new GraphSetIndexStore(legacyStore, { enabled: false }),
+      () => undefined,
+    );
 
     await expect(agent.approveJoinRequest(
       contextGraphId,

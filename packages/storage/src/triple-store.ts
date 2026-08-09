@@ -21,6 +21,7 @@ import {
   type ChangelogStoreOptions,
 } from './changelog-store.js';
 import {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
@@ -170,6 +171,11 @@ export type StructuredMutation =
   | { readonly kind: 'copy-subject-projection'; readonly input: CopySubjectProjectionInput };
 
 export interface TripleStore {
+  /**
+   * Truthful support probe for optional operations exposed by decorators.
+   * A wrapper whose method is always present must forward this to its backend.
+   */
+  [TRIPLE_STORE_CAPABILITY_SUPPORT]?(capability: TripleStoreCapability): boolean;
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
    * flight (`interruptible`) or can only observe cancellation before dispatch

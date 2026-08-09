@@ -22,7 +22,7 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
-import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import type { Quad, QueryOptions, QueryResult, StructuredMutation, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from '../src/unsupported-capability-error.js';
 
 const G1 = 'http://ex.org/g1';
@@ -251,6 +251,38 @@ describe('ChangelogStore — opaque update handling', () => {
       capability: 'structuredMutation',
     });
     expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('flags reconcile after an indeterminate structured mutation failure', async () => {
+    const source = 'http://ex.org/indeterminate-source';
+    const targetGraph = 'http://ex.org/indeterminate-target';
+    const root = 'http://ex.org/indeterminate-root';
+    const base = new OxigraphStore();
+    await base.insert([q(root, source)]);
+    const uncertain = new Proxy(base, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') {
+          return async (mutation: StructuredMutation, options?: QueryOptions) => {
+            await target.structuredMutation(mutation, options);
+            throw new Error('lost structured mutation response');
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const log = new ChangelogStore(uncertain);
+
+    await expect(log.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: targetGraph,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } })).rejects.toThrow('lost structured mutation response');
+    expect(log.needsReconcile).toBe(true);
+    expect(await base.hasGraph(targetGraph)).toBe(true);
     await base.close();
   });
 

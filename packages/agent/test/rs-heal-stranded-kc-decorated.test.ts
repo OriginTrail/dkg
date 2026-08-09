@@ -21,6 +21,7 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  supportsTripleStoreCapability,
   type QueryOptions,
   type Quad,
   type TripleStore,
@@ -132,6 +133,31 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
   it('exposes structured RS-heal capabilities at the top of the decorator stack', () => {
     expect(typeof store.structuredMutation).toBe('function');
+    expect(supportsTripleStoreCapability(store, 'structuredMutation')).toBe(true);
+  });
+
+  it('reports unsupported RS-heal capability through the full decorator stack', async () => {
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'structuredMutation') return undefined;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      new GraphSetIndexStore(adapter),
+      () => undefined,
+    );
+
+    expect(typeof wrapped.structuredMutation).toBe('function');
+    expect(supportsTripleStoreCapability(wrapped, 'structuredMutation')).toBe(false);
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      { store: wrapped } as never,
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+    )).resolves.toEqual({ status: 'skipped', reason: 'unsupported-store' });
+
+    await wrapped.close();
   });
 
   it('snapshots structured-mutation cache bookkeeping before async dispatch', async () => {
