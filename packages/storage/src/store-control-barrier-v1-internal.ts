@@ -40,7 +40,6 @@ interface BarrierEntry {
   resolve: (value: unknown) => void;
   reject: (reason?: unknown) => void;
   waitStartedAt: number;
-  coalesced: number;
   running: boolean;
   /** Guards the caller promise so a timeout and a late settle cannot both fire. */
   settled: boolean;
@@ -152,7 +151,6 @@ export class StoreControlBarrierCoordinator {
       (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
     );
     if (existing !== undefined) {
-      existing.coalesced += 1;
       this.coalescedTotal += 1;
       this.host.observeDepths();
       // The result is intentionally unknown: purpose is a runtime string, so a
@@ -174,7 +172,6 @@ export class StoreControlBarrierCoordinator {
       resolve,
       reject,
       waitStartedAt: this.host.now(),
-      coalesced: 0,
       running: false,
       settled: false,
       // Sealing here is what makes the wait below terminate: without it a busy

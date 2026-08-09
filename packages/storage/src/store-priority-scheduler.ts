@@ -1166,6 +1166,19 @@ export class StorePriorityScheduler extends ObservableScheduler {
     this.storeStates.delete(storeId);
   }
 
+  /**
+   * The ONLY place either tagged-inflight counter moves.
+   *
+   * The per-store count answers "is THIS store quiesced"; the total keeps
+   * that question O(1). They are two views of one fact, so they are written
+   * together — maintaining them at separate sites is precisely how a running
+   * total drifts from what it summarises.
+   */
+  private adjustTaggedInflight(state: StoreAdmissionState, delta: 1 | -1): void {
+    state.taggedInflight += delta;
+    this.taggedInflightTotal += delta;
+  }
+
   private countTaggedInflight(): number {
     return this.taggedInflightTotal;
   }
@@ -1233,8 +1246,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const admission = entry.admission;
     if (admission === undefined) return;
     const state = this.getOrCreateStoreState(admission.storeId);
-    state.taggedInflight += 1;
-    this.taggedInflightTotal += 1;
+    this.adjustTaggedInflight(state, 1);
     // The generation permit is held for EXECUTION only — see StoreAdmissionV1.
     state.runningPermits.set(
       admission.generation,
@@ -1270,8 +1282,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     if (admission === undefined) return;
     const state = this.storeStates.get(admission.storeId);
     if (state === undefined) return;
-    state.taggedInflight -= 1;
-    this.taggedInflightTotal -= 1;
+    this.adjustTaggedInflight(state, -1);
     const permits = (state.runningPermits.get(admission.generation) ?? 1) - 1;
     if (permits > 0) state.runningPermits.set(admission.generation, permits);
     else state.runningPermits.delete(admission.generation);
