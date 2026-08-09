@@ -305,6 +305,29 @@ describe('system-record requester V1', () => {
     expect(bytes.reservations[0]?.released).toBe(true);
   });
 
+  it('cleans up when the opener synchronously cancels the initiating caller', async () => {
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const controller = new AbortController();
+    const openExchange = vi.fn(async () => {
+      controller.abort(new Error('cancelled during open'));
+      return new Promise<SystemRecordRequesterExchangeV1>(() => {});
+    });
+    const requester = createRequester({ bytes, stream });
+    const result = requester.fetch(LOOKUP, openExchange, controller.signal);
+
+    await expect(result).rejects.toThrow('cancelled during open');
+    await vi.waitFor(() => expect(requester.stats()).toMatchObject({
+      completed: 1,
+      pendingDigests: 0,
+      waitingCallers: 0,
+      activeStream: 0,
+    }));
+    expect(stream.active()).toBe(false);
+    expect(bytes.reservations).toHaveLength(1);
+    expect(bytes.reservations[0]?.released).toBe(true);
+  });
+
   it('does not attach an immediate retry to a cancelled single-flight', async () => {
     const exchange = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
     const requester = createRequester();

@@ -144,7 +144,6 @@ export function createSystemRecordRequesterV1(
     entry: FetchEntryV1,
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1> {
-    signal.throwIfAborted();
     entry.observerCount += 1;
     waitingCallers += 1;
     let observing = true;
