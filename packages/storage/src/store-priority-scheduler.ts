@@ -1092,12 +1092,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * @deprecated Use {@link runTypedControlBarrier} with a key created by
    * `createStoreControlBarrierKeyV1` — one key per transition, created once at
    * module scope, binds every coalescing caller to that key's result type.
-   * First-party code no longer calls this method (managed composition poisons
-   * its string-barrier fallback so the path cannot silently re-animate); it is
-   * removed, together with the `'control-barrier'` `run()` admission mode, at
-   * the next allowed breaking version boundary. Until then behavior is
-   * unchanged: both entry points share the coordinator, so coalescing,
-   * timeout, sealing, quiescence and metrics are identical.
+   * First-party code no longer calls this method: managed composition
+   * structurally omits the string barrier (its deps shape has no such
+   * member). It is removed, together with the `'control-barrier'` `run()`
+   * admission mode, at the next allowed breaking version boundary. Until
+   * then behavior is unchanged: both entry points share the coordinator, so
+   * coalescing, timeout, sealing, quiescence and metrics are identical.
    * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(
