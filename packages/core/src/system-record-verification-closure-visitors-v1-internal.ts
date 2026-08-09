@@ -31,7 +31,7 @@ import {
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
-} from './system-record-signatures-v1-internal.js';
+} from './system-record-signed-envelope-codecs-v1-internal.js';
 
 export type ClosureVisitPurposeV1 =
   | 'current'

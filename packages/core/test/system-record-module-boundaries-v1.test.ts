@@ -214,8 +214,11 @@ describe('System Record V1 module ownership', () => {
     expect(directDependencies('system-record-verification-closure-v1-internal.ts')).toContain(
       'system-record-verification-closure-visitors-v1-internal.ts',
     );
+    expect(directDependencies('system-record-verification-closure-visitors-v1-internal.ts'))
+      .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
     expectNoDependencyPath('system-record-verification-closure-visitors-v1-internal.ts', [
       'system-record-verification-closure-v1-internal.ts',
+      'system-record-signatures-v1-internal.ts',
     ]);
   });
 
