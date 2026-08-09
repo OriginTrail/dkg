@@ -8,8 +8,18 @@ import { ManagedOxigraphBackendUnownedError } from '@origintrail-official/dkg-st
 import type { ManagedOxigraphSupervisorHandoffV1 } from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
 // @ts-expect-error — the ownership mint is not on the public barrel
 import { createManagedOxigraphOwnershipControllerV1 } from '@origintrail-official/dkg-storage';
-// @ts-expect-error — ownership types are not on the public barrel either
+// Every removed ownership type is pinned individually — runtime namespace
+// checks cannot see type-only exports, so the compiler is the only witness.
+// @ts-expect-error — ownership types are not on the public barrel
 import type { ManagedOxigraphOwnershipLeaseV1 } from '@origintrail-official/dkg-storage';
+// @ts-expect-error — ownership types are not on the public barrel
+import type { ManagedOxigraphOwnershipControllerV1 } from '@origintrail-official/dkg-storage';
+// @ts-expect-error — ownership types are not on the public barrel
+import type { ManagedOxigraphOwnershipSnapshotV1 } from '@origintrail-official/dkg-storage';
+// @ts-expect-error — ownership types are not on the public barrel
+import type { ManagedOxigraphOwnershipInvalidationV1 } from '@origintrail-official/dkg-storage';
+// @ts-expect-error — ownership types are not on the public barrel
+import type { ManagedOxigraphSupervisorHandoffV1 as ForbiddenHandoff } from '@origintrail-official/dkg-storage';
 
 const witness: [typeof ManagedOxigraphBackendUnownedError, ManagedOxigraphSupervisorHandoffV1 | null] = [
   ManagedOxigraphBackendUnownedError,
