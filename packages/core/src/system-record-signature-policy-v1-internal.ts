@@ -28,7 +28,6 @@ import {
   concatSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   failSystemRecordObjectV1 as fail,
-  systemRecordHexToBytesV1,
 } from './system-record-codec-primitives-v1.js';
 import {
   SYSTEM_RECORD_ED25519_SIGNATURE_BYTES,
@@ -105,6 +104,10 @@ export function validateSystemRecordSignatureEntryV1(
 }
 
 export function assertCanonicalEip191SignatureV1(value: unknown): asserts value is string {
+  decodeCanonicalEip191SignatureV1(value);
+}
+
+export function decodeCanonicalEip191SignatureV1(value: unknown): Uint8Array {
   try {
     assertCanonicalHexBytes(
       value,
@@ -115,7 +118,7 @@ export function assertCanonicalEip191SignatureV1(value: unknown): asserts value 
   } catch (cause) {
     fail('system-record-signature', 'EIP-191 signature bytes are invalid', cause);
   }
-  const bytes = systemRecordHexToBytesV1(value as string);
+  const bytes = Uint8Array.from(Buffer.from((value as string).slice(2), 'hex'));
   const s = bytesToBigInt(bytes.subarray(32, 64));
   if (s === 0n || s > SYSTEM_RECORD_EIP191_MAX_S) {
     fail('system-record-signature', 'EIP-191 signature must use canonical low-s form');
@@ -128,6 +131,7 @@ export function assertCanonicalEip191SignatureV1(value: unknown): asserts value 
   if (bytes[64] !== 27 && bytes[64] !== 28) {
     fail('system-record-signature', 'EIP-191 recovery byte must be 27 or 28');
   }
+  return bytes;
 }
 
 export function buildSystemRecordSignatureMessageV1(

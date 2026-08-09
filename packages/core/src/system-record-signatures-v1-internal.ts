@@ -14,7 +14,6 @@ import {
   copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   failSystemRecordObjectV1 as fail,
-  systemRecordHexToBytesV1,
 } from './system-record-codec-primitives-v1.js';
 import {
   SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
@@ -27,6 +26,7 @@ import {
 import {
   assertCanonicalEip191SignatureV1,
   buildSystemRecordSignatureMessageFromPolicyV1,
+  decodeCanonicalEip191SignatureV1,
 } from './system-record-signature-policy-v1-internal.js';
 
 export {
@@ -110,7 +110,7 @@ export function recoverEip191SignerV1(
   signature: string,
   personalHash: Uint8Array,
 ): string {
-  assertCanonicalEip191SignatureV1(signature);
+  const bytes = decodeCanonicalEip191SignatureV1(signature);
   const ownedPersonalHash = copyBoundedSystemRecordBytesV1(
     personalHash,
     32,
@@ -120,7 +120,6 @@ export function recoverEip191SignerV1(
     fail('system-record-signature', 'personal message hash must be 32 bytes');
   }
   try {
-    const bytes = systemRecordHexToBytesV1(signature);
     const compact = secp256k1.Signature
       .fromBytes(bytes.subarray(0, 64), 'compact')
       .addRecoveryBit(bytes[64] - 27);
