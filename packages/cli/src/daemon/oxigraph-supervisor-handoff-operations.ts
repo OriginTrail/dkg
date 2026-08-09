@@ -62,14 +62,11 @@ export class OxigraphSupervisorHandoffOperationsV1 {
   #armAbandonBackstop(): void {
     const { state, timers, bind, log, runExclusive } = this.#dependencies;
     timers.armHandoffAbandon(this.#abandonMs, () => {
-      if (state.handoffPhase() !== 'retired'
-        || state.terminating()
-        || state.lifecycle() === 'closed') return;
+      if (!state.tryResumeRetiredHandoff()) return;
       log(
         `[oxigraph] no clean generation was bound within ${this.#abandonMs}ms of retiring ` +
           `the child on ${bind}; resuming ordinary supervision.`,
       );
-      state.resumeRetiredHandoff();
       void runExclusive(() => this.#recovery.reviveLocked()).catch((error: unknown) => {
         log(`[oxigraph] abandoned-handoff recovery failed: ${(error as Error).message}`);
       });
@@ -79,11 +76,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
   async #retireOwnedChildLocked(absoluteDeadlineMs?: number): Promise<void> {
     boundedOxigraphPhaseDelayMsV1(1, absoluteDeadlineMs);
     const { state, ownership, timers, markStoreDown, child, bind, log } = this.#dependencies;
-    if (state.terminating() || state.lifecycle() === 'closed') {
-      throw new Error(
-        'Managed Oxigraph supervisor is shutting down; the owned child cannot be retired',
-      );
-    }
+    state.assertHandoffRetirementAllowed();
     const before = ownership.snapshot();
     if (before.terminal) {
       throw new Error(
@@ -130,11 +123,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
       bind,
       log,
     } = this.#dependencies;
-    if (state.terminating() || state.lifecycle() === 'closed') {
-      throw new Error(
-        'Managed Oxigraph supervisor is shutting down; no clean generation can be bound',
-      );
-    }
+    state.beginCleanGeneration();
     const before = ownership.snapshot();
     if (before.terminal) {
       throw new Error(
@@ -142,13 +131,6 @@ export class OxigraphSupervisorHandoffOperationsV1 {
           'no clean generation can be bound',
       );
     }
-    if (state.handoffPhase() !== 'retired') {
-      throw new Error(
-        'Managed Oxigraph clean-generation start requires a proven-dead predecessor; ' +
-          'stopAndProveOwnedChildDead() has not completed',
-      );
-    }
-    state.beginCleanGeneration();
     timers.clearHandoffAbandon();
     let generationId: string;
     try {

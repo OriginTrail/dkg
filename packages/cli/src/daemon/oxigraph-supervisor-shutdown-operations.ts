@@ -61,8 +61,7 @@ export class OxigraphSupervisorShutdownOperationsV1 {
 
   async stopLocked(): Promise<void> {
     const { state, ownership, markStoreDown, timers, child, log } = this.#dependencies;
-    if (state.lifecycle() === 'closed') return;
-    state.beginStopping();
+    if (!state.beginStopping()) return;
     ownership.invalidate('stop');
     markStoreDown();
     timers.clearRevive();

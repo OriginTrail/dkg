@@ -22,10 +22,22 @@ function imports(file: ts.SourceFile): string[] {
 
 function calledIdentifiers(file: ts.SourceFile): string[] {
   const names: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression)) {
-      names.push(node.expression.text);
+  const calleeNames = (expression: ts.Expression): string[] => {
+    if (ts.isIdentifier(expression)) return [expression.text];
+    if (ts.isPropertyAccessExpression(expression)) {
+      return [...calleeNames(expression.expression), expression.name.text];
     }
+    if (ts.isElementAccessExpression(expression)) {
+      const argument = expression.argumentExpression;
+      return [
+        ...calleeNames(expression.expression),
+        ...(ts.isStringLiteral(argument) ? [argument.text] : []),
+      ];
+    }
+    return [];
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isCallExpression(node)) names.push(...calleeNames(node.expression));
     ts.forEachChild(node, visit);
   };
   visit(file);
@@ -33,13 +45,29 @@ function calledIdentifiers(file: ts.SourceFile): string[] {
 }
 
 describe('managed Oxigraph supervisor module boundary', () => {
+  it('detects direct and member-expression calls in architecture rules', () => {
+    const fixture = ts.createSourceFile(
+      'forbidden-calls.ts',
+      'fetch(url); globalThis.fetch(url); childProcess.spawn(bin); timers["setTimeout"](fn);',
+      ts.ScriptTarget.Latest,
+      true,
+      ts.ScriptKind.TS,
+    );
+
+    expect(calledIdentifiers(fixture)).toEqual(expect.arrayContaining([
+      'fetch',
+      'spawn',
+      'setTimeout',
+    ]));
+  });
+
   it('keeps the public entrypoint as composition-only glue', () => {
     const facade = source('oxigraph-server.ts');
 
-    expect(imports(facade)).toEqual([
+    expect(imports(facade).sort()).toEqual([
       './oxigraph-server-supervisor.js',
       './oxigraph-server-contract.js',
-    ]);
+    ].sort());
     expect(calledIdentifiers(facade)).toContain('createOxigraphServerSupervisorV1');
     expect(calledIdentifiers(facade)).not.toContain('setTimeout');
     expect(calledIdentifiers(facade)).not.toContain('spawn');
@@ -77,6 +105,9 @@ describe('managed Oxigraph supervisor module boundary', () => {
       expect(imports(operation)).not.toContain('./oxigraph-supervisor-operation-context.js');
       expect(text).not.toMatch(/\.spawn\(|\.probeReady\(|\.current\(\)!/u);
       expect(text).not.toMatch(/\.transition\(|\.setHandoffPhase\(/u);
+      for (const rawStateReader of ['lifecycle', 'terminating', 'handoffPhase']) {
+        expect(calledIdentifiers(operation)).not.toContain(rawStateReader);
+      }
     }
 
     const generation = source('oxigraph-supervisor-generation.ts').getFullText();
@@ -95,7 +126,7 @@ describe('managed Oxigraph supervisor module boundary', () => {
     state.beginHandoffRetirement();
     state.markHandoffRetired();
     expect([state.lifecycle(), state.handoffPhase()]).toEqual(['recovering', 'retired']);
-    expect(() => state.beginRevive()).toThrow(/handoff phase is retired/);
+    expect(() => state.tryBeginRevive()).toThrow(/handoff phase is retired/);
 
     state.beginCleanGeneration();
     state.bindReadyGeneration();
@@ -103,8 +134,9 @@ describe('managed Oxigraph supervisor module boundary', () => {
 
     state.beginTermination();
     expect(() => state.beginRecovery()).toThrow(/after shutdown began/);
-    state.beginStopping();
+    expect(state.beginStopping()).toBe(true);
     state.markClosed();
+    expect(state.beginStopping()).toBe(false);
     expect([state.lifecycle(), state.handoffPhase(), state.terminating()])
       .toEqual(['closed', 'none', true]);
   });

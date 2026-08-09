@@ -20,26 +20,61 @@ export class OxigraphSupervisorStateV1 {
     this.#terminating = true;
   }
 
+  maySpawnChild(): boolean {
+    return this.#isOperational();
+  }
+
+  mayHandleChildExit(): boolean {
+    return this.#isOperational();
+  }
+
+  shouldReviveExitedChild(): boolean {
+    return this.#isOperational() && this.#lifecycle === 'ready';
+  }
+
+  mayContinueGenerationProbe(): boolean {
+    return !this.#terminating;
+  }
+
   handoffPhase(): OxigraphSupervisorHandoffPhaseV1 {
     return this.#handoffPhase;
   }
 
-  beginRevive(): void {
-    this.#assertOperational('revive');
+  tryBeginRevive(): boolean {
+    if (!this.#isOperational()) return false;
     this.#assertHandoffPhase('none', 'revive');
     this.#lifecycle = 'reviving';
+    return true;
+  }
+
+  mayRunRevive(): boolean {
+    return this.#isOperational()
+      && this.#handoffPhase === 'none'
+      && this.#lifecycle !== 'ready';
   }
 
   beginRecovery(): void {
-    this.#assertOperational('recover');
-    this.#assertHandoffPhase('none', 'recover');
+    this.assertRecoveryRequestAllowed();
     this.#lifecycle = 'recovering';
   }
 
+  assertRecoveryRequestAllowed(): void {
+    this.#assertOperational('recover');
+    this.#assertHandoffPhase('none', 'recover');
+  }
+
   beginHandoffRetirement(): void {
-    this.#assertOperational('retire the current generation');
-    this.#assertHandoffPhase('none', 'retire the current generation');
+    this.assertHandoffRetirementAllowed();
     this.#lifecycle = 'recovering';
+  }
+
+  assertHandoffRetirementAllowed(): void {
+    if (!this.#isOperational()) {
+      throw new Error(
+        'Managed Oxigraph supervisor is shutting down; the owned child cannot be retired',
+      );
+    }
+    this.#assertHandoffPhase('none', 'retire the current generation');
   }
 
   markHandoffRetired(): void {
@@ -52,16 +87,25 @@ export class OxigraphSupervisorStateV1 {
   }
 
   beginCleanGeneration(): void {
-    this.#assertOperational('start a clean generation');
-    this.#assertHandoffPhase('retired', 'start a clean generation');
+    if (!this.#isOperational()) {
+      throw new Error(
+        'Managed Oxigraph supervisor is shutting down; no clean generation can be bound',
+      );
+    }
+    if (this.#handoffPhase !== 'retired') {
+      throw new Error(
+        'Managed Oxigraph clean-generation start requires a proven-dead predecessor; ' +
+          'stopAndProveOwnedChildDead() has not completed',
+      );
+    }
     this.#lifecycle = 'recovering';
   }
 
-  resumeRetiredHandoff(): void {
-    this.#assertOperational('resume an abandoned handoff');
-    this.#assertHandoffPhase('retired', 'resume an abandoned handoff');
+  tryResumeRetiredHandoff(): boolean {
+    if (!this.#isOperational() || this.#handoffPhase !== 'retired') return false;
     this.#handoffPhase = 'none';
     this.#lifecycle = 'recovering';
+    return true;
   }
 
   cancelCleanGeneration(): void {
@@ -82,11 +126,12 @@ export class OxigraphSupervisorStateV1 {
     this.#lifecycle = 'ready';
   }
 
-  beginStopping(): void {
-    if (this.#lifecycle === 'closed') return;
+  beginStopping(): boolean {
+    if (this.#lifecycle === 'closed') return false;
     this.#terminating = true;
     this.#handoffPhase = 'none';
     this.#lifecycle = 'stopping';
+    return true;
   }
 
   markClosed(): void {
@@ -96,9 +141,13 @@ export class OxigraphSupervisorStateV1 {
   }
 
   #assertOperational(intent: string): void {
-    if (this.#terminating || this.#lifecycle === 'stopping' || this.#lifecycle === 'closed') {
+    if (!this.#isOperational()) {
       throw new Error(`Managed Oxigraph supervisor cannot ${intent} after shutdown began`);
     }
+  }
+
+  #isOperational(): boolean {
+    return !this.#terminating && this.#lifecycle !== 'stopping' && this.#lifecycle !== 'closed';
   }
 
   #assertHandoffPhase(expected: OxigraphSupervisorHandoffPhaseV1, intent: string): void {
