@@ -95,7 +95,6 @@ export interface SystemRecordRequesterStatsV1 {
 export interface SystemRecordRequesterV1 {
   fetch(
     lookup: SystemRecordExactArtifactLookupV1,
-    openExchange: (signal: AbortSignal) => Promise<SystemRecordRequesterExchangeV1>,
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1>;
   stats(): SystemRecordRequesterStatsV1;
@@ -104,6 +103,8 @@ export interface SystemRecordRequesterV1 {
 
 export interface CreateSystemRecordRequesterOptionsV1 {
   readonly networkId: NetworkIdV1;
+  /** Lifecycle-owned provider selection and transport opening for a leader transfer. */
+  readonly openExchange: (signal: AbortSignal) => Promise<SystemRecordRequesterExchangeV1>;
   readonly byteAdmission: SystemRecordRequesterByteAdmissionV1;
   readonly streamAdmission: SystemRecordRequesterAdmissionV1;
   readonly decodeAdmission: SystemRecordRequesterAdmissionV1;

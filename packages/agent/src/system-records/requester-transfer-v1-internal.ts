@@ -18,7 +18,6 @@ import type {
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterByteReservationV1,
   SystemRecordRequesterExchangeV1,
-  SystemRecordRequesterPermitV1,
 } from './requester-api-v1.js';
 import {
   systemRecordExactResponseOutcomeV1,
@@ -33,9 +32,8 @@ export interface SystemRecordDecodedTransferV1 {
 
 export interface SystemRecordRetainedSourceV1 {
   readonly artifact: SystemRecordArtifactV1;
-  readonly reservation: SystemRecordRequesterByteReservationV1;
-  readonly decodePermit: SystemRecordRequesterPermitV1;
   readonly wireBytes: number;
+  release(): void;
 }
 
 export type SystemRecordRetainTransferResultV1 =
@@ -127,13 +125,18 @@ export function retainVerifiedSystemRecordResponseV1(input: {
         objectDigest: decoded.header.objectDigest,
         canonicalBytes: decoded.payload,
       });
+      let released = false;
       return Object.freeze({
         outcome: 'ok',
         retained: Object.freeze({
           artifact,
-          reservation: payloadReservation,
-          decodePermit,
           wireBytes,
+          release(): void {
+            if (released) return;
+            released = true;
+            payloadReservation.release();
+            decodePermit.release();
+          },
         }),
       });
     } catch (error) {

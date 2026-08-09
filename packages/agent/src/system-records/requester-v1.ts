@@ -87,7 +87,6 @@ export function createSystemRecordRequesterV1(
 
   async function fetch(
     lookup: SystemRecordExactArtifactLookupV1,
-    openExchange: (signal: AbortSignal) => Promise<SystemRecordRequesterExchangeV1>,
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1> {
     signal.throwIfAborted();
@@ -133,7 +132,7 @@ export function createSystemRecordRequesterV1(
     started += 1;
     activeStream = 1;
     peakActiveStream = 1;
-    void run(entry, request, openExchange, streamPermit, frameReservation).then(
+    void run(entry, request, streamPermit, frameReservation).then(
       resolveTransfer,
       rejectTransfer,
     );
@@ -168,10 +167,27 @@ export function createSystemRecordRequesterV1(
     }
   }
 
+  async function openRequesterExchangeV1(
+    entry: FetchEntryV1,
+  ): Promise<SystemRecordRequesterExchangeV1> {
+    const opening = options.openExchange(entry.controller.signal);
+    let accepted = false;
+    void opening.then((lateExchange) => {
+      if (accepted || !entry.controller.signal.aborted) return;
+      try {
+        lateExchange.reset(entry.abortReason ?? 'cancelled');
+      } catch {
+        // A late transport owns no requester resources; reset remains best-effort.
+      }
+    }, () => undefined);
+    const exchange = await raceSystemRecordAbortV1(opening, entry.controller.signal);
+    accepted = true;
+    return exchange;
+  }
+
   async function run(
     entry: FetchEntryV1,
     request: SystemRecordRequestHeaderV1,
-    openExchange: (signal: AbortSignal) => Promise<SystemRecordRequesterExchangeV1>,
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
   ): Promise<SystemRecordRequesterSettlementV1> {
@@ -188,10 +204,7 @@ export function createSystemRecordRequesterV1(
     timeout.unref?.();
     let shared: SystemRecordRequesterSettlementV1;
     try {
-      exchange = await raceSystemRecordAbortV1(
-        openExchange(entry.controller.signal),
-        entry.controller.signal,
-      );
+      exchange = await openRequesterExchangeV1(entry);
       const transfer = await exchangeSystemRecordResponseV1({
         request,
         exchange,
@@ -294,8 +307,7 @@ export function createSystemRecordRequesterV1(
     if (entry.observerCount !== 0 || entry.leaseCount !== 0 || entry.retained === undefined) return;
     if (entries.get(entry.key) === entry) entries.delete(entry.key);
     retainedPayloadBytes -= entry.retained.artifact.canonicalBytes.byteLength;
-    entry.retained.reservation.release();
-    entry.retained.decodePermit.release();
+    entry.retained.release();
     entry.retained = undefined;
   }
 

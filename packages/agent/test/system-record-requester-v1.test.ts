@@ -12,6 +12,7 @@ import {
 import { describe, expect, it, vi } from 'vitest';
 
 import type {
+  CreateSystemRecordRequesterOptionsV1,
   SystemRecordRequesterAdmissionV1,
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterExchangeV1,
@@ -43,12 +44,12 @@ describe('system-record requester V1', () => {
       return successResponse(request, PAYLOAD, DIGEST);
     });
     const openExchange = vi.fn(async () => exchange.value);
-    const requester = createRequester({ bytes, stream, decode });
+    const requester = createRequester({ bytes, stream, decode, openExchange });
     const signal = new AbortController().signal;
 
-    const first = requester.fetch(LOOKUP, openExchange, signal);
+    const first = requester.fetch(LOOKUP, signal);
     await exchange.requestWritten.promise;
-    const second = requester.fetch(LOOKUP, openExchange, signal);
+    const second = requester.fetch(LOOKUP, signal);
     expect(requester.stats()).toMatchObject({
       started: 1,
       joined: 1,
@@ -114,21 +115,20 @@ describe('system-record requester V1', () => {
 
   it('serves a late subscriber from retained bytes without sharing mutable storage', async () => {
     const bytes = byteAdmission();
-    const requester = createRequester({ bytes });
     const exchange = fixtureExchange();
+    const openExchange = vi.fn(async () => exchange.value);
+    const requester = createRequester({ bytes, openExchange });
     const first = await requester.fetch(
       LOOKUP,
-      async () => exchange.value,
       new AbortController().signal,
     );
     expect(first.outcome).toBe('ok');
     if (first.outcome !== 'ok') return;
 
-    const unopened = vi.fn(async () => fixtureExchange().value);
-    const second = await requester.fetch(LOOKUP, unopened, new AbortController().signal);
+    const second = await requester.fetch(LOOKUP, new AbortController().signal);
     expect(second.outcome).toBe('ok');
     if (second.outcome !== 'ok') return;
-    expect(unopened).not.toHaveBeenCalled();
+    expect(openExchange).toHaveBeenCalledTimes(1);
     expect(second.lease.artifact.canonicalBytes).toEqual(PAYLOAD);
 
     first.lease.artifact.canonicalBytes[0] = 99;
@@ -157,10 +157,10 @@ describe('system-record requester V1', () => {
       await gate.promise;
       return successResponse(request, PAYLOAD, DIGEST);
     });
-    const requester = createRequester();
+    const openExchange = vi.fn(async () => firstExchange.value);
+    const requester = createRequester({ openExchange });
     const first = requester.fetch(
       LOOKUP,
-      async () => firstExchange.value,
       new AbortController().signal,
     );
     await firstExchange.requestWritten.promise;
@@ -169,15 +169,14 @@ describe('system-record requester V1', () => {
       SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
       otherPayload,
     );
-    const unopened = vi.fn(async () => fixtureExchange().value);
     await expect(requester.fetch({
       ...LOOKUP,
       objectDigest: otherDigest,
-    }, unopened, new AbortController().signal)).resolves.toEqual({
+    }, new AbortController().signal)).resolves.toEqual({
       outcome: 'busy',
       wireBytes: 0,
     });
-    expect(unopened).not.toHaveBeenCalled();
+    expect(openExchange).toHaveBeenCalledTimes(1);
     expect(requester.stats().queuedStreams).toBe(0);
     gate.resolve();
     const result = await first;
@@ -192,12 +191,12 @@ describe('system-record requester V1', () => {
       return successResponse(request, PAYLOAD, DIGEST);
     });
     const openExchange = vi.fn(async () => exchange.value);
-    const requester = createRequester({ maxWaitersPerDigest: 1 });
+    const requester = createRequester({ maxWaitersPerDigest: 1, openExchange });
     const signal = new AbortController().signal;
-    const leader = requester.fetch(LOOKUP, openExchange, signal);
+    const leader = requester.fetch(LOOKUP, signal);
     await exchange.requestWritten.promise;
-    const follower = requester.fetch(LOOKUP, openExchange, signal);
-    await expect(requester.fetch(LOOKUP, openExchange, signal)).resolves.toEqual({
+    const follower = requester.fetch(LOOKUP, signal);
+    await expect(requester.fetch(LOOKUP, signal)).resolves.toEqual({
       outcome: 'waiter-limit',
       wireBytes: 0,
     });
@@ -211,10 +210,10 @@ describe('system-record requester V1', () => {
 
   it('counts retained successful entries against the global digest cap', async () => {
     const firstExchange = fixtureExchange();
-    const requester = createRequester({ maxPendingDigests: 1 });
+    const openExchange = vi.fn(async () => firstExchange.value);
+    const requester = createRequester({ maxPendingDigests: 1, openExchange });
     const first = await requester.fetch(
       LOOKUP,
-      async () => firstExchange.value,
       new AbortController().signal,
     );
     expect(first.outcome).toBe('ok');
@@ -223,15 +222,14 @@ describe('system-record requester V1', () => {
       SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
       otherPayload,
     );
-    const unopened = vi.fn(async () => fixtureExchange().value);
     await expect(requester.fetch({
       ...LOOKUP,
       objectDigest: otherDigest,
-    }, unopened, new AbortController().signal)).resolves.toEqual({
+    }, new AbortController().signal)).resolves.toEqual({
       outcome: 'capacity',
       wireBytes: 0,
     });
-    expect(unopened).not.toHaveBeenCalled();
+    expect(openExchange).toHaveBeenCalledTimes(1);
     if (first.outcome === 'ok') first.lease.release();
     expect(requester.stats().pendingDigests).toBe(0);
   });
@@ -242,12 +240,12 @@ describe('system-record requester V1', () => {
       await gate.promise;
       return successResponse(request, PAYLOAD, DIGEST);
     });
-    const requester = createRequester();
+    const requester = createRequester({ openExchange: async () => exchange.value });
     const leaderController = new AbortController();
     const followerController = new AbortController();
-    const leader = requester.fetch(LOOKUP, async () => exchange.value, leaderController.signal);
+    const leader = requester.fetch(LOOKUP, leaderController.signal);
     await exchange.requestWritten.promise;
-    const follower = requester.fetch(LOOKUP, async () => exchange.value, followerController.signal);
+    const follower = requester.fetch(LOOKUP, followerController.signal);
     leaderController.abort(new Error('leader cancelled'));
     await expect(leader).rejects.toThrow('leader cancelled');
     gate.resolve();
@@ -260,9 +258,9 @@ describe('system-record requester V1', () => {
   it('aborts and releases the shared transfer after its final caller leaves', async () => {
     const bytes = byteAdmission();
     const exchange = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
-    const requester = createRequester({ bytes });
+    const requester = createRequester({ bytes, openExchange: async () => exchange.value });
     const controller = new AbortController();
-    const result = requester.fetch(LOOKUP, async () => exchange.value, controller.signal);
+    const result = requester.fetch(LOOKUP, controller.signal);
     await exchange.requestWritten.promise;
     controller.abort(new Error('caller left'));
     await expect(result).rejects.toThrow('caller left');
@@ -287,9 +285,9 @@ describe('system-record requester V1', () => {
       opening.resolve();
       return new Promise<SystemRecordRequesterExchangeV1>(() => {});
     });
-    const requester = createRequester({ bytes, stream });
+    const requester = createRequester({ bytes, stream, openExchange });
     const controller = new AbortController();
-    const result = requester.fetch(LOOKUP, openExchange, controller.signal);
+    const result = requester.fetch(LOOKUP, controller.signal);
     await opening.promise;
     controller.abort(new Error('caller left during open'));
 
@@ -313,8 +311,8 @@ describe('system-record requester V1', () => {
       controller.abort(new Error('cancelled during open'));
       return new Promise<SystemRecordRequesterExchangeV1>(() => {});
     });
-    const requester = createRequester({ bytes, stream });
-    const result = requester.fetch(LOOKUP, openExchange, controller.signal);
+    const requester = createRequester({ bytes, stream, openExchange });
+    const result = requester.fetch(LOOKUP, controller.signal);
 
     await expect(result).rejects.toThrow('cancelled during open');
     await vi.waitFor(() => expect(requester.stats()).toMatchObject({
@@ -330,23 +328,24 @@ describe('system-record requester V1', () => {
 
   it('does not attach an immediate retry to a cancelled single-flight', async () => {
     const exchange = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
-    const requester = createRequester();
+    const openExchange = vi.fn(async () => exchange.value);
+    const requester = createRequester({ openExchange });
     const controller = new AbortController();
-    const first = requester.fetch(LOOKUP, async () => exchange.value, controller.signal);
+    const first = requester.fetch(LOOKUP, controller.signal);
     await exchange.requestWritten.promise;
     const firstRejection = expect(first).rejects.toThrow('caller left');
     controller.abort(new Error('caller left'));
 
-    const unopened = vi.fn(async () => fixtureExchange().value);
-    const retry = requester.fetch(LOOKUP, unopened, new AbortController().signal);
+    const retry = requester.fetch(LOOKUP, new AbortController().signal);
     await expect(retry).resolves.toEqual({ outcome: 'busy', wireBytes: 0 });
-    expect(unopened).not.toHaveBeenCalled();
+    expect(openExchange).toHaveBeenCalledTimes(1);
     await firstRejection;
     await vi.waitFor(() => expect(requester.stats().pendingDigests).toBe(0));
   });
 
   it('maps every remote status and rejects invalid payload identity fail closed', async () => {
-    const requester = createRequester();
+    let active = fixtureExchange();
+    const requester = createRequester({ openExchange: async () => active.value });
     const statuses = [
       ['not-found', 'not-found'],
       ['unsupported', 'unsupported'],
@@ -356,9 +355,9 @@ describe('system-record requester V1', () => {
     ] as const;
     for (const [remote, local] of statuses) {
       const response = fixtureExchange(async (request) => errorResponse(request, remote));
+      active = response;
       await expect(requester.fetch(
         LOOKUP,
-        async () => response.value,
         new AbortController().signal,
       )).resolves.toMatchObject({ outcome: local, wireBytes: expect.any(Number) });
       expect(response.reset).not.toHaveBeenCalled();
@@ -366,9 +365,9 @@ describe('system-record requester V1', () => {
 
     const wrongPayload = Uint8Array.of(9, 9, 9);
     const invalid = fixtureExchange(async (request) => successResponse(request, wrongPayload, DIGEST));
+    active = invalid;
     const invalidResult = await requester.fetch(
       LOOKUP,
-      async () => invalid.value,
       new AbortController().signal,
     );
     expect(invalidResult).toEqual(expect.objectContaining({
@@ -380,9 +379,9 @@ describe('system-record requester V1', () => {
     expect(requester.stats()).toMatchObject({ pendingDigests: 0, activeStream: 0 });
 
     const malformed = fixtureExchange(async () => Uint8Array.of(1));
+    active = malformed;
     await expect(requester.fetch(
       LOOKUP,
-      async () => malformed.value,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'invalid-response', wireBytes: expect.any(Number) });
     expect(malformed.reset).toHaveBeenCalledWith('invalid-response');
@@ -390,34 +389,32 @@ describe('system-record requester V1', () => {
 
   it('reserves before network work and releases permits on capacity, deadline, and close', async () => {
     const stream = permitAdmission();
+    const unopened = vi.fn(async () => fixtureExchange().value);
     const exhausted = createRequester({
       bytes: { tryReserve: vi.fn(() => null) },
       stream,
+      openExchange: unopened,
     });
-    const unopened = vi.fn(async () => fixtureExchange().value);
     await expect(exhausted.fetch(
       LOOKUP,
-      unopened,
       new AbortController().signal,
     )).resolves.toEqual({ outcome: 'capacity', wireBytes: 0 });
     expect(unopened).not.toHaveBeenCalled();
     expect(stream.active()).toBe(false);
 
     const slow = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
-    const timed = createRequester({ timeoutMs: 5 });
+    const timed = createRequester({ timeoutMs: 5, openExchange: async () => slow.value });
     await expect(timed.fetch(
       LOOKUP,
-      async () => slow.value,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'deadline', wireBytes: expect.any(Number) });
     expect(slow.reset).toHaveBeenCalledWith('deadline');
     expect(timed.stats()).toMatchObject({ pendingDigests: 0, activeStream: 0 });
 
     const blocked = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
-    const closing = createRequester();
+    const closing = createRequester({ openExchange: async () => blocked.value });
     const result = closing.fetch(
       LOOKUP,
-      async () => blocked.value,
       new AbortController().signal,
     );
     await blocked.requestWritten.promise;
@@ -427,9 +424,58 @@ describe('system-record requester V1', () => {
     expect(closing.stats()).toMatchObject({ closed: true, pendingDigests: 0, activeStream: 0 });
     await expect(closing.fetch(
       LOOKUP,
-      unopened,
       new AbortController().signal,
     )).resolves.toEqual({ outcome: 'closed', wireBytes: 0 });
+  });
+
+  it('maps ordinary open and read failures to transport with complete cleanup', async () => {
+    const openBytes = byteAdmission();
+    const openStream = permitAdmission();
+    const openFailure = createRequester({
+      bytes: openBytes,
+      stream: openStream,
+      openExchange: async () => { throw new Error('dial failed'); },
+    });
+    await expect(openFailure.fetch(
+      LOOKUP,
+      new AbortController().signal,
+    )).resolves.toEqual({ outcome: 'transport', wireBytes: 0 });
+    expect(openStream.active()).toBe(false);
+    expect(openBytes.reservations).toHaveLength(1);
+    expect(openBytes.reservations[0]?.released).toBe(true);
+
+    const readBytes = byteAdmission();
+    const readStream = permitAdmission();
+    const readFailure = fixtureExchange(async () => { throw new Error('read failed'); });
+    const readRequester = createRequester({
+      bytes: readBytes,
+      stream: readStream,
+      openExchange: async () => readFailure.value,
+    });
+    const result = await readRequester.fetch(LOOKUP, new AbortController().signal);
+    expect(result).toMatchObject({ outcome: 'transport', wireBytes: expect.any(Number) });
+    expect(result.wireBytes).toBeGreaterThan(0);
+    expect(readFailure.reset).toHaveBeenCalledWith('transport');
+    expect(readStream.active()).toBe(false);
+    expect(readBytes.reservations).toHaveLength(1);
+    expect(readBytes.reservations[0]?.released).toBe(true);
+  });
+
+  it('resets an exchange that opens after the requester deadline', async () => {
+    const opening = Promise.withResolvers<SystemRecordRequesterExchangeV1>();
+    const requester = createRequester({
+      timeoutMs: 5,
+      openExchange: async () => opening.promise,
+    });
+    await expect(requester.fetch(
+      LOOKUP,
+      new AbortController().signal,
+    )).resolves.toEqual({ outcome: 'deadline', wireBytes: 0 });
+
+    const late = fixtureExchange();
+    opening.resolve(late.value);
+    await vi.waitFor(() => expect(late.reset).toHaveBeenCalledWith('deadline'));
+    expect(late.writeRequestFrame).not.toHaveBeenCalled();
   });
 
   it('returns busy when the shared decoder is occupied and retains no payload', async () => {
@@ -438,10 +484,13 @@ describe('system-record requester V1', () => {
     expect(held).not.toBeNull();
     const bytes = byteAdmission();
     const exchange = fixtureExchange(async (request) => successResponse(request, PAYLOAD, DIGEST));
-    const requester = createRequester({ bytes, decode });
+    const requester = createRequester({
+      bytes,
+      decode,
+      openExchange: async () => exchange.value,
+    });
     await expect(requester.fetch(
       LOOKUP,
-      async () => exchange.value,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'busy', wireBytes: expect.any(Number) });
     expect(bytes.reservations).toHaveLength(1);
@@ -457,11 +506,10 @@ describe('system-record requester V1', () => {
     const invalid = fixtureExchange(async (request) => (
       successResponse(request, Uint8Array.of(9, 9, 9), DIGEST)
     ));
-    const requester = createRequester({ decode });
+    const requester = createRequester({ decode, openExchange: async () => invalid.value });
 
     await expect(requester.fetch(
       LOOKUP,
-      async () => invalid.value,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'busy', wireBytes: expect.any(Number) });
     expect(invalid.reset).not.toHaveBeenCalled();
@@ -479,15 +527,50 @@ describe('system-record requester V1', () => {
       },
     };
     const decode = permitAdmission();
-    const requester = createRequester({ bytes, decode });
+    const capacityExchange = fixtureExchange();
+    const requester = createRequester({
+      bytes,
+      decode,
+      openExchange: async () => capacityExchange.value,
+    });
 
     await expect(requester.fetch(
       LOOKUP,
-      async () => fixtureExchange().value,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'capacity', wireBytes: expect.any(Number) });
     expect(base.reservations).toHaveLength(2);
     expect(base.reservations.every(({ released }) => released)).toBe(true);
+    expect(decode.active()).toBe(false);
+    expect(requester.stats()).toMatchObject({
+      pendingDigests: 0,
+      activeLeases: 0,
+      retainedPayloadBytes: 0,
+    });
+  });
+
+  it('releases decoder and frame ownership when verified payload retention is full', async () => {
+    const base = byteAdmission();
+    let reservationAttempt = 0;
+    const bytes: SystemRecordRequesterByteAdmissionV1 = {
+      tryReserve(requested) {
+        reservationAttempt += 1;
+        if (reservationAttempt === 2) return null;
+        return base.tryReserve(requested);
+      },
+    };
+    const decode = permitAdmission();
+    const exchange = fixtureExchange();
+    const requester = createRequester({
+      bytes,
+      decode,
+      openExchange: async () => exchange.value,
+    });
+
+    const result = await requester.fetch(LOOKUP, new AbortController().signal);
+    expect(result).toMatchObject({ outcome: 'capacity', wireBytes: expect.any(Number) });
+    expect(result.wireBytes).toBeGreaterThan(0);
+    expect(base.reservations).toHaveLength(1);
+    expect(base.reservations[0]?.released).toBe(true);
     expect(decode.active()).toBe(false);
     expect(requester.stats()).toMatchObject({
       pendingDigests: 0,
@@ -504,11 +587,11 @@ describe('system-record requester V1', () => {
     );
     const bytes = byteAdmission();
     const exchange = fixtureExchange(async (request) => successResponse(request, payload, digest));
-    const requester = createRequester({ bytes });
+    const requester = createRequester({ bytes, openExchange: async () => exchange.value });
     const result = await requester.fetch({
       ...LOOKUP,
       objectDigest: digest,
-    }, async () => exchange.value, new AbortController().signal);
+    }, new AbortController().signal);
 
     expect(result.outcome).toBe('ok');
     expect(bytes.reservations.map(({ requested }) => requested)).toEqual([
@@ -530,10 +613,13 @@ describe('system-record requester V1', () => {
     const bytes = byteAdmission();
     const decode = permitAdmission();
     const exchange = fixtureExchange();
-    const requester = createRequester({ bytes, decode });
+    const requester = createRequester({
+      bytes,
+      decode,
+      openExchange: async () => exchange.value,
+    });
     const result = await requester.fetch(
       LOOKUP,
-      async () => exchange.value,
       new AbortController().signal,
     );
     expect(result.outcome).toBe('ok');
@@ -558,6 +644,7 @@ function createRequester(overrides: {
   bytes?: SystemRecordRequesterByteAdmissionV1;
   stream?: ReturnType<typeof permitAdmission>;
   decode?: ReturnType<typeof permitAdmission>;
+  openExchange?: CreateSystemRecordRequesterOptionsV1['openExchange'];
   timeoutMs?: number;
   maxWaitersPerDigest?: number;
   maxPendingDigests?: number;
@@ -566,6 +653,7 @@ function createRequester(overrides: {
   const decode = overrides.decode ?? permitAdmission();
   return createSystemRecordRequesterV1({
     networkId: NETWORK,
+    openExchange: overrides.openExchange ?? (async () => fixtureExchange().value),
     byteAdmission: overrides.bytes ?? byteAdmission(),
     streamAdmission: stream.value,
     decodeAdmission: decode.value,
