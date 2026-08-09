@@ -13,9 +13,8 @@ import type {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import {
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
-  structuredMutationMightMutate,
-  structuredMutationTouchedGraphs,
 } from '../bounded-structured-mutation.js';
 
 /**
@@ -698,10 +697,9 @@ export class OxigraphWorkerStore implements TripleStore {
     _options?: TripleStoreQueryOptions,
   ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
+    const effects = captureStructuredMutationEffects(normalized);
     await this.call('structuredMutation', normalized);
-    if (structuredMutationMightMutate(normalized)) {
-      this.writeGen.recordGraphWrites(structuredMutationTouchedGraphs(normalized));
-    }
+    if (effects) this.writeGen.recordGraphWrites(effects.touchedGraphs);
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);

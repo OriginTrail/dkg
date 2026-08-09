@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, chunkCopySubjectProjectionInput, createTripleStore, supportsCopySubjectProjection, supportsReplaceSubjectPredicatesAtomically, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -250,14 +250,11 @@ import {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
-
-function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
-  return {
-    priority: 'background',
-    source: `agent.swm.rsHeal.${operation}`,
-    ...(signal ? { signal } : {}),
-  };
-}
+import {
+  applyRsHealMaterialization,
+  supportsRsHealMaterialization,
+} from './rs-heal-materialization.js';
+import { rsHealStoreOptions } from './rs-heal-store-options.js';
 
 function isStoreSchedulerBusyError(err: unknown): boolean {
   return err instanceof StoreSchedulerBusyError || (
@@ -323,46 +320,6 @@ function advanceRsHealCursor(
     if (oldest === undefined) break;
     cursorMap.delete(oldest);
   }
-}
-
-type RsHealCopyInput = Parameters<typeof tryCopySubjectProjection>[1];
-type RsHealPredicateReplacement = Parameters<typeof tryReplaceSubjectPredicatesAtomically>[1];
-
-interface RsHealMaterializationPlan {
-  dataCopy: RsHealCopyInput;
-  metadataCopy: RsHealCopyInput;
-  completionReset: RsHealPredicateReplacement;
-  completionStamp: RsHealPredicateReplacement;
-}
-
-/** Apply one fail-closed RS-heal projection transition after candidate discovery. */
-async function applyRsHealMaterialization(
-  plan: RsHealMaterializationPlan,
-  operations: {
-    canApply: () => boolean;
-    copyProjection: (input: RsHealCopyInput) => Promise<void>;
-    replacePredicates: (input: RsHealPredicateReplacement) => Promise<void>;
-  },
-): Promise<void> {
-  // Preflight the complete plan before crossing the first write boundary. An
-  // individually unrepresentable root must not clear an otherwise valid
-  // completion marker before failing.
-  const dataCopyChunks = chunkCopySubjectProjectionInput(plan.dataCopy);
-
-  // Clear completion before the first data chunk. A crash between chunks then
-  // remains retryable instead of exposing a partial projection as complete.
-  if (!operations.canApply()) return;
-  await operations.replacePredicates(plan.completionReset);
-
-  for (const chunk of dataCopyChunks) {
-    if (!operations.canApply()) return;
-    await operations.copyProjection(chunk);
-  }
-
-  if (!operations.canApply()) return;
-  await operations.copyProjection(plan.metadataCopy);
-  if (!operations.canApply()) return;
-  await operations.replacePredicates(plan.completionStamp);
 }
 
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -3370,35 +3327,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!canApply() || !capturedOnChainId) {
         return { status: 'skipped', reason: 'not-current' };
       }
-      if (
-        !supportsCopySubjectProjection(this.store)
-        || !supportsReplaceSubjectPredicatesAtomically(this.store)
-      ) {
+      if (!supportsRsHealMaterialization(this.store)) {
         return { status: 'skipped', reason: 'unsupported-store' };
       }
-      // Server-side byte-safe copy is the ONLY safe relocation mechanism. The
-      // structured capabilities keep RDF terms inside the store while making
-      // source/target graph ownership and mutation scope explicit to decorators.
-      const copyProjection = async (
-        input: Parameters<typeof tryCopySubjectProjection>[1],
-      ): Promise<void> => {
-        const copied = await tryCopySubjectProjection(
-          this.store,
-          input,
-          rsHealStoreOptions('materialize.copy', signal),
-        );
-        if (!copied) throw new Error('RS heal requires server-side subject projection copy support');
-      };
-      const replacePredicates = async (
-        input: Parameters<typeof tryReplaceSubjectPredicatesAtomically>[1],
-      ): Promise<void> => {
-        const replaced = await tryReplaceSubjectPredicatesAtomically(
-          this.store,
-          input,
-          rsHealStoreOptions('materialize.marker', signal),
-        );
-        if (!replaced) throw new Error('RS heal requires atomic subject-predicate replacement support');
-      };
 
       const DKG = 'http://dkg.io/ontology/';
       const legacyMeta = contextGraphMetaUri(localCgId);
@@ -3569,43 +3500,17 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // bit-identical with the on-chain merkleLeafCount. Root order is
             // preserved while large multi-root KCs are split below both 4 MiB
             // structured-mutation limits.
-            await applyRsHealMaterialization({
-              dataCopy: {
-                sourceGraphUris: [rootData, vmGraph],
-                targetGraphUri: scopedData,
-                roots,
-                descendantSuffix: '/.well-known/genid/',
-                excludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
-              },
-              metadataCopy: {
-                sourceGraphUris: [legacyMeta],
-                targetGraphUri: scopedMeta,
-                roots: [ual],
-                descendantSuffix: '/',
-                excludedPredicates: [`${DKG}materializedVersion`],
-              },
-              completionReset: {
-                graphUri: scopedMeta,
-                subject: ual,
-                predicates: [`${DKG}materializedVersion`],
-                replacementQuads: [],
-              },
-              completionStamp: {
-                graphUri: scopedMeta,
-                subject: ual,
-                predicates: [`${DKG}materializedVersion`],
-                replacementQuads: [{
-                  subject: ual,
-                  predicate: `${DKG}materializedVersion`,
-                  object: `"${version.blockNumber}:${version.txIndex}"`,
-                  graph: scopedMeta,
-                }],
-              },
-            }, {
-              canApply,
-              copyProjection,
-              replacePredicates,
-            });
+            await applyRsHealMaterialization(this.store, {
+              sourceDataGraphUris: [rootData, vmGraph],
+              targetDataGraphUri: scopedData,
+              sourceMetadataGraphUri: legacyMeta,
+              targetMetadataGraphUri: scopedMeta,
+              ual,
+              roots,
+              version,
+              materializedVersionPredicate: `${DKG}materializedVersion`,
+              dataExcludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
+            }, canApply, signal);
 
             if (canApply()) {
               this.log.info(

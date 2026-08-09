@@ -16,6 +16,8 @@ name: System-record managed ownership evidence
 #   3. Reserved internal state is invisible to enumeration, unserved by
 #      `hasGraph`, and undeletable by generic mutation including an unscoped
 #      `deleteByPattern`.
+#   4. A live ownership-leased store refuses raw update() and mutating/unknown
+#      query() programs without changing data, while recognized reads survive.
 #
 # What it does NOT prove:
 #   - `pinnedPredecessors` is an INVENTORY, not a set of verdicts. No predecessor
@@ -39,8 +41,12 @@ on:
       - 'packages/agent/**'
       - 'packages/cli/**'
       - 'packages/core/**'
+      - 'packages/publisher/**'
+      - 'packages/query/**'
+      - 'packages/random-sampling/**'
       - 'packages/rdf-utils/**'
       - 'packages/storage/**'
+      - 'scripts/check-managed-store-raw-channels.mjs'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
@@ -53,8 +59,12 @@ on:
       - 'packages/agent/**'
       - 'packages/cli/**'
       - 'packages/core/**'
+      - 'packages/publisher/**'
+      - 'packages/query/**'
+      - 'packages/random-sampling/**'
       - 'packages/rdf-utils/**'
       - 'packages/storage/**'
+      - 'scripts/check-managed-store-raw-channels.mjs'
       - 'pnpm-lock.yaml'
       - 'pnpm-workspace.yaml'
       - 'tsconfig.base.json'
@@ -144,6 +154,9 @@ jobs:
         # under a compiler: the package tsconfig includes only src/ and vitest
         # does not typecheck, so without this lane they are decorative.
         run: pnpm --filter @origintrail-official/dkg-storage run typecheck:type-contracts
+
+      - name: First-party managed-store raw-channel architecture
+        run: pnpm check:managed-store-raw-channels
 
       - name: Storage unit conformance
         run: |

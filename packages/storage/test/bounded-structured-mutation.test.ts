@@ -8,12 +8,14 @@ import {
   OxigraphWorkerStore,
   TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
+  captureStructuredMutationEffects,
   supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
   tryCopySubjectProjection,
   tryDeleteSubjects,
   tryReplaceProjectionFromGraphAtomically,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '../src/index.js';
 import {
@@ -47,6 +49,71 @@ async function rows(store: TripleStore, graph: string): Promise<Array<Record<str
 }
 
 describe('bounded structured mutation capabilities', () => {
+  it('captures immutable graph effects before dispatch', () => {
+    const mutation = {
+      kind: 'copy-subject-projection' as const,
+      input: {
+        sourceGraphUris: [GRAPH],
+        targetGraphUri: OTHER_GRAPH,
+        roots: ['urn:test:a'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    };
+
+    const effects = captureStructuredMutationEffects(mutation);
+    mutation.input.targetGraphUri = 'urn:test:redirected';
+    expect(effects).toEqual({ touchedGraphs: [OTHER_GRAPH] });
+    expect(Object.isFrozen(effects)).toBe(true);
+    expect(Object.isFrozen(effects.touchedGraphs)).toBe(true);
+  });
+
+  it('classifies structural no-ops without store orchestration', () => {
+    expect(captureStructuredMutationEffects({
+      kind: 'delete-subjects',
+      input: { graphUri: GRAPH, subjects: [] },
+    })).toBeUndefined();
+    expect(captureStructuredMutationEffects({
+      kind: 'delete-subjects',
+      input: { graphUri: GRAPH, subjects: ['urn:test:a'] },
+    })).toEqual({ touchedGraphs: [GRAPH] });
+  });
+
+  it('reports the canonical target graph for every structured mutation kind', async () => {
+    const mutations: Array<readonly [StructuredMutation, string]> = [
+      [{ kind: 'delete-subjects', input: {
+        graphUri: GRAPH, subjects: ['urn:test:a'],
+      } }, GRAPH],
+      [{ kind: 'prune-ranked-subjects', input: {
+        graphUri: GRAPH, subjectPrefix: 'urn:test:req:', eligibilityPredicate: STATUS,
+        eligibleObjects: ['approved'], primaryRankPredicate: DECIDED_AT,
+        secondaryRankPredicate: REQUESTED_AT, retainNewest: 1, maxDelete: 1,
+      } }, GRAPH],
+      [{ kind: 'prune-linked-record-closures', input: {
+        graphUri: GRAPH, matchObjectIris: ['urn:test:agent'], linkPredicates: [P],
+        recordParentPredicate: STATUS, descendantSeparator: '/',
+      } }, GRAPH],
+      [{ kind: 'replace-subject-predicates', input: {
+        graphUri: GRAPH, subject: 'urn:test:a', predicates: [P],
+        replacementQuads: [quad('urn:test:a', P, '"replacement"')],
+      } }, GRAPH],
+      [{ kind: 'replace-projection-from-graph', input: {
+        targetGraphUri: GRAPH, stagingGraphUri: 'urn:test:staging',
+        targetSubject: 'urn:test:a', preservedTargetPredicates: [],
+        targetSubjectPrefixes: [],
+      } }, GRAPH],
+      [{ kind: 'copy-subject-projection', input: {
+        sourceGraphUris: [GRAPH], targetGraphUri: OTHER_GRAPH,
+        roots: ['urn:test:a'], descendantSuffix: '/', excludedPredicates: [],
+      } }, OTHER_GRAPH],
+    ];
+    for (const [mutation, expectedGraph] of mutations) {
+      expect(captureStructuredMutationEffects(mutation)).toEqual({
+        touchedGraphs: [expectedGraph],
+      });
+    }
+  });
+
   it('deletes one explicit subject set and preserves co-located rows', async () => {
     const store = new OxigraphStore();
     await store.insert([

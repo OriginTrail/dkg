@@ -23,9 +23,8 @@ import {
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
 import {
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
-  structuredMutationMightMutate,
-  structuredMutationTouchedGraphs,
 } from './bounded-structured-mutation.js';
 import {
   CACHED_READ_GATE_V1,
@@ -559,6 +558,7 @@ export class GraphSetIndexStore implements TripleStore {
 
   async structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
+    const effects = captureStructuredMutationEffects(normalized);
     const operation = this.inner.structuredMutation;
     if (!operation) {
       throw new UnsupportedTripleStoreCapabilityError('structuredMutation', 'GraphSetIndexStore');
@@ -571,10 +571,10 @@ export class GraphSetIndexStore implements TripleStore {
       }
       throw error;
     }
-    if (!this.enabled || !structuredMutationMightMutate(normalized)) return;
+    if (!this.enabled || !effects) return;
     this.bumpMutation();
     await this.maintainTouchedGraphs(
-      [...structuredMutationTouchedGraphs(normalized)],
+      [...effects.touchedGraphs],
       'structuredMutation',
       options,
     );
