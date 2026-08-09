@@ -7435,7 +7435,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
     const currentBinding = this.contextGraphBindingState.currentBindingFor(
       contextGraphId,
-      previous?.onChainId,
+      previous,
     );
     const reverseBinding = currentBinding?.bindingKind === 'reverse-name-hash'
       ? currentBinding

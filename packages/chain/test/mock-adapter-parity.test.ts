@@ -277,19 +277,6 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'resolveKaStorageDeployBlock',
   'resolveContractDeployBlock',
   'resolveLogScanHead',
-  // EVM-only reverse-binding internals. The public
-  // resolveContextGraphIdByNameHash contract is mirrored by MockChainAdapter;
-  // these helpers choose between bounded RPC enumeration and the exact-topic
-  // historical fallback, neither of which exists in the in-memory mock.
-  'loadContextGraphIdByNameHashFromChain',
-  'captureContextGraphNameHashIndexScope',
-  'sameContextGraphNameHashIndexScope',
-  'captureContextGraphNameHashIndexAnchor',
-  'loadContextGraphNameHashIndexAnchorHash',
-  'loadCurrentContextGraphNameHashProviderHighWaters',
-  'loadCurrentContextGraphNameHashSlots',
-  'getContextGraphNameHashRetryingNull',
-  'loadContextGraphIdByNameHashFromHistoricalEvents',
   // companion retry-wrapper for the deploy-block binary search's historical
   // eth_getCode probes — EVM-only, same rationale as resolveKaStorageDeployBlock.
   'getContractCodeAtBlock',

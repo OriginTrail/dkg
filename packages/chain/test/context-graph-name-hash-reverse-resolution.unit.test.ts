@@ -42,12 +42,18 @@ function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
     getAddress: vi.fn(async () => storageAddress),
   };
   adapter.contracts = { contextGraphStorage };
+  const currentProvider = {
+    getBlock: vi.fn(async (blockNumber: number | string) => ({
+      number: typeof blockNumber === 'number' ? blockNumber : 100,
+      hash: `0x${'11'.repeat(32)}`,
+    })),
+  };
+  adapter.providers = [currentProvider];
+  adapter.rpcUrls = ['http://127.0.0.1:59998'];
+  adapter.ensureConfiguredStaticChainIdValidated = vi.fn(async () => 31337n);
   let anchorHash = `0x${'11'.repeat(32)}`;
-  adapter.captureContextGraphNameHashIndexAnchor = vi.fn(async () => ({
-    blockNumber: 100,
-    blockHash: anchorHash,
-  }));
-  adapter.loadContextGraphNameHashIndexAnchorHash = vi.fn(async () => anchorHash);
+  adapter.readTipProvider = vi.fn(async () => ({ number: 100, hash: anchorHash }));
+  adapter.readProviderRetryingNull = vi.fn(async () => anchorHash);
 
   let latestId = BigInt(initialHashes.length);
   const hashes = new Map<bigint, string | null>(
@@ -67,33 +73,22 @@ function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
     throw new Error(`Unexpected contract read ${method}`);
   });
   adapter.readContractWithOptions = readContractWithOptions;
-  const currentProvider = {};
-  adapter.loadCurrentContextGraphNameHashProviderHighWaters = vi.fn(async () => {
-    const current = BigInt(await readContractWithOptions(
+  adapter.rebindContract = vi.fn(() => ({
+    getLatestContextGraphId: () => readContractWithOptions(
       contextGraphStorage,
       'cgStorage.getLatestContextGraphId',
       'getLatestContextGraphId',
       [],
       {},
-    ));
-    return {
-      latestId: current,
-      providerHighWaters: new Map([[currentProvider, current]]),
-    };
-  });
-  adapter.getContextGraphNameHashRetryingNull = vi.fn(async (
-    contextGraphId: bigint,
-    signal?: AbortSignal,
-  ) => {
-    const raw = await readContractWithOptions(
+    ),
+    getNameHash: (contextGraphId: bigint) => readContractWithOptions(
       contextGraphStorage,
       'cgStorage.getNameHash',
       'getNameHash',
       [contextGraphId],
-      { signal },
-    );
-    return !raw || raw === ethers.ZeroHash ? null : String(raw).toLowerCase();
-  });
+      {},
+    ),
+  }));
   const resolveContractDeployBlock = vi.fn(async () => {
     throw new Error('historical deploy lookup must not run on the fast path');
   });
@@ -102,9 +97,11 @@ function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH]) {
   });
   adapter.resolveContractDeployBlock = resolveContractDeployBlock;
   adapter.queryEventLogsPage = queryEventLogsPage;
+  const resolver = adapter.getContextGraphNameHashResolver();
 
   return {
     adapter,
+    resolver,
     hashes,
     readContractWithOptions,
     resolveContractDeployBlock,
@@ -141,11 +138,22 @@ function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = [[42n]]
     interface: { parseLog },
   };
   base.adapter.contracts = { contextGraphStorage: storage };
+  const getNameHash = vi.fn(async () => NAME_HASH);
   base.adapter.rebindContract = vi.fn(() => ({
-    getLatestContextGraphId: vi.fn(async (options: { blockTag?: number }) => {
-      expect(options.blockTag).toBeDefined();
-      return scannedRegistryHighWater;
+    getLatestContextGraphId: vi.fn(async (options?: { blockTag?: number }) => {
+      if (options !== undefined) {
+        expect(options.blockTag).toBeDefined();
+        return scannedRegistryHighWater;
+      }
+      return base.readContractWithOptions(
+        storage,
+        'cgStorage.getLatestContextGraphId',
+        'getLatestContextGraphId',
+        [],
+        {},
+      );
     }),
+    getNameHash,
   }));
   base.resolveContractDeployBlock.mockResolvedValue({
     fromBlock: 100,
@@ -163,12 +171,12 @@ function historicalFixture(pages: ReadonlyArray<ReadonlyArray<bigint>> = [[42n]]
       provider,
     };
   });
-  base.adapter.getContextGraphNameHash = vi.fn(async () => NAME_HASH);
   return {
     ...base,
     filter,
     filterFactory,
     provider,
+    getNameHash,
     setHeadHash(value: string) { headHash = value; },
   };
 }
@@ -184,6 +192,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   it('enumerates every current slot and returns the one exact match', async () => {
     const {
       adapter,
+      resolver,
       readContractWithOptions,
       resolveContractDeployBlock,
       queryEventLogsPage,
@@ -194,6 +203,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       null,
       OTHER_HASH,
     ]);
+    const slotReader = vi.spyOn(resolver, 'getNameHashRetryingNull');
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(3n);
 
@@ -203,28 +213,28 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     expect(slotCalls.map((call) => BigInt(call[3][0])).sort()).toEqual([
       1n, 2n, 3n, 3n, 4n, 5n,
     ]);
-    expect(slotCalls.filter((call) => call[4].signal instanceof AbortSignal)).toHaveLength(5);
-    expect(slotCalls.filter((call) => call[4].signal === undefined)).toHaveLength(1);
+    expect(slotReader.mock.calls.filter((call) => call[1] instanceof AbortSignal)).toHaveLength(5);
+    expect(slotReader.mock.calls.filter((call) => call[1] === undefined)).toHaveLength(1);
     expect(resolveContractDeployBlock).not.toHaveBeenCalled();
     expect(queryEventLogsPage).not.toHaveBeenCalled();
   });
 
   it('normalizes an uppercase bytes32 input before current-slot comparison', async () => {
-    const { adapter } = fixture([NAME_HASH]);
+    const { adapter, resolver } = fixture([NAME_HASH]);
     const upperCaseHash = `0x${'AB'.repeat(32)}`;
-    const load = vi.spyOn(adapter, 'loadContextGraphIdByNameHashFromChain');
+    const load = vi.spyOn(resolver, 'loadFromChain');
 
     await expect(adapter.resolveContextGraphIdByNameHash(upperCaseHash)).resolves.toBe(1n);
     expect(load).toHaveBeenCalledWith(NAME_HASH);
   });
 
   it('normalizes an uppercase bytes32 input before the historical exact-topic filter', async () => {
-    const { adapter, filterFactory } = historicalFixture([[42n]]);
+    const { adapter, filterFactory, getNameHash } = historicalFixture([[42n]]);
     const upperCaseHash = `0x${'AB'.repeat(32)}`;
 
     await expect(adapter.resolveContextGraphIdByNameHash(upperCaseHash)).resolves.toBe(42n);
     expect(filterFactory).toHaveBeenCalledWith(null, null, NAME_HASH);
-    expect(adapter.getContextGraphNameHash).toHaveBeenCalledWith(42n);
+    expect(getNameHash).toHaveBeenCalledWith(42n);
   });
 
   it('returns null only after every current slot misses', async () => {
@@ -245,12 +255,13 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
       getNameHash: vi.fn(async () => provider === primary ? ethers.ZeroHash : NAME_HASH),
     }));
-    adapter.loadCurrentContextGraphNameHashProviderHighWaters = vi.fn(async () => ({
-      latestId: 1n,
-      providerHighWaters: new Map([[primary, 0n], [backup, 1n]]),
-    }));
+    const resolver = adapter.getContextGraphNameHashResolver();
 
-    await expect(adapter.getContextGraphNameHashRetryingNull(1n)).resolves.toBe(NAME_HASH);
+    await expect(resolver.getNameHashRetryingNull(
+      1n,
+      undefined,
+      new Map([[primary, 0n], [backup, 1n]]),
+    )).resolves.toBe(NAME_HASH);
     expect(adapter.rebindContract).toHaveBeenCalledTimes(1);
   });
 
@@ -265,12 +276,13 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
       getNameHash: vi.fn(async () => provider === primary ? ethers.ZeroHash : NAME_HASH),
     }));
-    adapter.loadCurrentContextGraphNameHashProviderHighWaters = vi.fn(async () => ({
-      latestId: 1n,
-      providerHighWaters: new Map([[primary, 1n], [backup, 1n]]),
-    }));
+    const resolver = adapter.getContextGraphNameHashResolver();
 
-    await expect(adapter.getContextGraphNameHashRetryingNull(1n)).rejects.toThrow(
+    await expect(resolver.getNameHashRetryingNull(
+      1n,
+      undefined,
+      new Map([[primary, 1n], [backup, 1n]]),
+    )).rejects.toThrow(
       /RPC backends disagree on current slot 1/i,
     );
   });
@@ -289,12 +301,13 @@ describe('current ContextGraph name-hash reverse resolution', () => {
         return ethers.ZeroHash;
       }),
     }));
-    adapter.loadCurrentContextGraphNameHashProviderHighWaters = vi.fn(async () => ({
-      latestId: 2n,
-      providerHighWaters: new Map([[failing, 2n], [responding, 2n]]),
-    }));
+    const resolver = adapter.getContextGraphNameHashResolver();
 
-    await expect(adapter.getContextGraphNameHashRetryingNull(2n)).rejects.toThrow(
+    await expect(resolver.getNameHashRetryingNull(
+      2n,
+      undefined,
+      new Map([[failing, 2n], [responding, 2n]]),
+    )).rejects.toThrow(
       /1 of 2 covering RPC backends failed to read current slot 2/i,
     );
     expect(adapter.rebindContract).toHaveBeenCalledTimes(2);
@@ -314,16 +327,60 @@ describe('current ContextGraph name-hash reverse resolution', () => {
         return new Promise<string>(() => {});
       }),
     }));
-    adapter.loadCurrentContextGraphNameHashProviderHighWaters = vi.fn(async () => ({
-      latestId: 1n,
-      providerHighWaters: new Map([[provider, 1n]]),
-    }));
+    const resolver = adapter.getContextGraphNameHashResolver();
     const controller = new AbortController();
-    const read = adapter.getContextGraphNameHashRetryingNull(1n, controller.signal);
+    const read = resolver.getNameHashRetryingNull(
+      1n,
+      controller.signal,
+      new Map([[provider, 1n]]),
+    );
     await started.promise;
     controller.abort(new Error('sibling slot failed'));
 
     await expect(read).rejects.toThrow('sibling slot failed');
+  });
+
+  it('fans out provider high-water and covering-slot reads concurrently', async () => {
+    const adapter: any = new EVMChainAdapter(minimalConfig());
+    adapter.initialized = true;
+    adapter.init = vi.fn(async () => {});
+    const first = { id: 'first' };
+    const second = { id: 'second' };
+    adapter.providers = [first, second];
+    adapter.rpcUrls = ['http://first.invalid', 'http://second.invalid'];
+    adapter.ensureConfiguredStaticChainIdValidated = vi.fn(async () => 31337n);
+    adapter.contracts = {
+      contextGraphStorage: {
+        getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),
+      },
+    };
+    const highWaterRelease = deferred<void>();
+    const slotRelease = deferred<void>();
+    let activeHighWaters = 0;
+    let activeSlots = 0;
+    adapter.rebindContract = vi.fn(() => ({
+      getLatestContextGraphId: async () => {
+        activeHighWaters += 1;
+        await highWaterRelease.promise;
+        return 1n;
+      },
+      getNameHash: async () => {
+        activeSlots += 1;
+        await slotRelease.promise;
+        return ethers.ZeroHash;
+      },
+    }));
+    const resolver = adapter.getContextGraphNameHashResolver();
+
+    const highWaters = resolver.loadProviderHighWaters();
+    await vi.waitFor(() => expect(activeHighWaters).toBe(2));
+    highWaterRelease.resolve(undefined);
+    const snapshot = await highWaters;
+
+    const slot = resolver.getNameHashRetryingNull(1n, undefined, snapshot.providerHighWaters);
+    await vi.waitFor(() => expect(activeSlots).toBe(2));
+    slotRelease.resolve(undefined);
+    await expect(slot).resolves.toBeNull();
   });
 
   it('scans past the first match and fails closed on an ambiguous duplicate', async () => {
@@ -365,11 +422,12 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       getNameHash: (id: bigint) => getNameHash(provider, id),
     }));
     const anchorHash = `0x${'11'.repeat(32)}`;
-    adapter.captureContextGraphNameHashIndexAnchor = vi.fn(async () => ({
+    const resolver = adapter.getContextGraphNameHashResolver();
+    vi.spyOn(resolver, 'captureAnchor').mockResolvedValue({
       blockNumber: 100,
       blockHash: anchorHash,
-    }));
-    adapter.loadContextGraphNameHashIndexAnchorHash = vi.fn(async () => anchorHash);
+    });
+    vi.spyOn(resolver, 'loadAnchorHash').mockResolvedValue(anchorHash);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /ambiguous.*2 numeric ids/i,
@@ -381,12 +439,9 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('switches above the fast cap before issuing any getNameHash read', async () => {
-    const { adapter, readContractWithOptions, setLatestId } = fixture([]);
+    const { adapter, resolver, readContractWithOptions, setLatestId } = fixture([]);
     setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);
-    const historical = vi.spyOn(
-      adapter,
-      'loadContextGraphIdByNameHashFromHistoricalEvents',
-    ).mockResolvedValue(77n);
+    const historical = vi.spyOn(resolver, 'loadHistorical').mockResolvedValue(77n);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(77n);
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(1);
@@ -400,6 +455,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       filter,
       filterFactory,
       queryEventLogsPage,
+      getNameHash,
     } = historicalFixture([[], [42n], []]);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(42n);
@@ -410,7 +466,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       [filter, 102, 103],
       [filter, 104, 105],
     ]);
-    expect(adapter.getContextGraphNameHash).toHaveBeenCalledWith(42n);
+    expect(getNameHash).toHaveBeenCalledWith(42n);
   });
 
   it('keeps the historical scan live when one same-head RPC cannot load the anchor block', async () => {
@@ -456,12 +512,12 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('keeps the historical fallback fail-closed on duplicate numeric slots', async () => {
-    const { adapter } = historicalFixture([[42n, 43n]]);
+    const { adapter, getNameHash } = historicalFixture([[42n, 43n]]);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /ambiguous.*2 numeric ids/i,
     );
-    expect(adapter.getContextGraphNameHash).not.toHaveBeenCalled();
+    expect(getNameHash).not.toHaveBeenCalled();
   });
 
   it('rejects the historical fallback before logs when its page budget is exceeded', async () => {
@@ -482,8 +538,8 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('fails closed when the historical candidate no longer matches its live slot', async () => {
-    const { adapter } = historicalFixture([[42n]]);
-    adapter.getContextGraphNameHash.mockResolvedValue(OTHER_HASH);
+    const { adapter, getNameHash } = historicalFixture([[42n]]);
+    getNameHash.mockResolvedValue(OTHER_HASH);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /currently commits.*expected/i,
@@ -503,7 +559,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /binding changed during historical scan/i,
     );
-    expect(fixture.adapter.getContextGraphNameHash).not.toHaveBeenCalled();
+    expect(fixture.getNameHash).not.toHaveBeenCalled();
   });
 
   it('discards a historical result when its canonical head changes mid-scan', async () => {
@@ -519,7 +575,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     await expect(fixture.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /canonical chain anchor changed during historical scan/i,
     );
-    expect(fixture.adapter.getContextGraphNameHash).not.toHaveBeenCalled();
+    expect(fixture.getNameHash).not.toHaveBeenCalled();
   });
 
   it('discards a historical result when a new CG advances the registry after the scanned head', async () => {
@@ -535,7 +591,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
       /registry high-water changed from 1025 to 1026 during historical scan/i,
     );
-    expect(scenario.adapter.getContextGraphNameHash).toHaveBeenCalledWith(42n);
+    expect(scenario.getNameHash).toHaveBeenCalledWith(42n);
   });
 
   it('does not negative-cache a historical miss when the registry advances during the scan', async () => {
@@ -587,28 +643,28 @@ describe('current ContextGraph name-hash reverse resolution', () => {
   });
 
   it('fails closed on any slot read error and aborts sibling failover reads', async () => {
-    const { adapter, readContractWithOptions } = fixture([null, null, NAME_HASH, null]);
+    const { adapter, resolver, readContractWithOptions } = fixture([null, null, NAME_HASH, null]);
     const failure = new Error('all RPC endpoints failed getNameHash(2)');
-    const observedSignals: AbortSignal[] = [];
+    const slotReader = vi.spyOn(resolver, 'getNameHashRetryingNull');
     readContractWithOptions.mockImplementation(async (
       _contract: unknown,
       _label: string,
       method: string,
       args: readonly unknown[],
-      options: { signal?: AbortSignal },
+      _options: { signal?: AbortSignal },
     ) => {
       if (method === 'getLatestContextGraphId') return 4n;
-      if (options.signal) observedSignals.push(options.signal);
       if (BigInt(args[0] as bigint) === 2n) throw failure;
-      await new Promise<void>((resolve, reject) => {
-        const onAbort = () => reject(options.signal?.reason);
-        options.signal?.addEventListener('abort', onAbort, { once: true });
-        setTimeout(resolve, 100);
-      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 100));
       return BigInt(args[0] as bigint) === 3n ? NAME_HASH : ethers.ZeroHash;
     });
 
-    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toBe(failure);
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /1 of 1 covering RPC backends failed to read current slot 2/i,
+    );
+    const observedSignals = slotReader.mock.calls
+      .map((call) => call[1])
+      .filter((signal): signal is AbortSignal => signal instanceof AbortSignal);
     expect(observedSignals).not.toHaveLength(0);
     expect(observedSignals.every((signal) => signal.aborted)).toBe(true);
   });
@@ -794,7 +850,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
     });
 
     await expect(adapter.resolveContextGraphIdByNameHash(OTHER_HASH)).rejects.toThrow(
-      'delta RPC failed',
+      /1 of 1 covering RPC backends failed to read current slot 2/i,
     );
     failDelta = false;
     await expect(adapter.resolveContextGraphIdByNameHash(OTHER_HASH)).resolves.toBe(2n);
@@ -862,7 +918,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
 
   it('discards a same-count storage rotation after index resolve but before exact verification', async () => {
     const scenario = fixture([NAME_HASH, OTHER_HASH]);
-    const loadHighWaters = scenario.adapter.loadCurrentContextGraphNameHashProviderHighWaters;
+    const loadHighWaters = vi.spyOn(scenario.resolver, 'loadProviderHighWaters');
     let calls = 0;
     loadHighWaters.mockImplementation(async () => {
       calls += 1;
@@ -873,7 +929,7 @@ describe('current ContextGraph name-hash reverse resolution', () => {
       }
       return {
         latestId: 2n,
-        providerHighWaters: new Map([[{}, 2n]]),
+        providerHighWaters: new Map([[scenario.adapter.providers[0], 2n]]),
       };
     });
 

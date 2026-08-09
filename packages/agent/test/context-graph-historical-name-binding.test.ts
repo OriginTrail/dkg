@@ -232,11 +232,40 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
   });
 
+  it.each(['', '0', '00', '-1', '+1', ' 1', '1 '])(
+    'never treats a non-canonical durable id %j as an authoritative binding',
+    async (onChainId) => {
+      const fixture = selectedFixture();
+      fixture.subscription.onChainId = onChainId;
+
+      expect(fixture.agent.contextGraphBindingState.currentBindingFor(
+        LOCAL_ID,
+        fixture.subscription,
+      )).toBeUndefined();
+      await expect(getOnChainId(fixture, LOCAL_ID)).resolves.toBeNull();
+      expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['""', '"0"', '"01"', '"-1"', '"1 "'])(
+    'rejects malformed ontology-derived id %s before returning provenance',
+    async (storedValue) => {
+      const fixture = selectedFixture(null);
+      fixture.query.mockResolvedValueOnce({
+        type: 'bindings',
+        bindings: [{ id: storedValue }],
+      });
+
+      await expect(fixture.agent.resolveContextGraphOnChainIdBinding(LOCAL_ID))
+        .resolves.toBeNull();
+    },
+  );
+
   it('keeps reverse-derived identity and progress outside durable subscription state', () => {
     const fixture = selectedFixture();
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     );
@@ -256,7 +285,7 @@ describe('cold current-state Context Graph name binding', () => {
     const reverseFixture = selectedFixture();
     reverseFixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      reverseFixture.subscription,
       '42',
       NAME_HASH,
     );
@@ -333,7 +362,7 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.subscription.onChainId).toBeUndefined();
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(
       LOCAL_ID,
-      fixture.subscription.onChainId,
+      fixture.subscription,
     )).toEqual({
       bindingKind: 'reverse-name-hash',
       onChainId: '42',
@@ -387,7 +416,7 @@ describe('cold current-state Context Graph name binding', () => {
       '43',
       nextHash,
     );
-    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID)).toEqual({
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, fixture.subscription)).toEqual({
       bindingKind: 'reverse-name-hash',
       onChainId: '43',
       nameHash: nextHash,
@@ -421,7 +450,7 @@ describe('cold current-state Context Graph name binding', () => {
       { persist: false },
     );
 
-    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID)).toBeUndefined();
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, fixture.subscription)).toBeUndefined();
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
     expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
   });
@@ -430,7 +459,7 @@ describe('cold current-state Context Graph name binding', () => {
     const fixture = selectedFixture();
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     );
@@ -469,7 +498,7 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.log = { warn: vi.fn() };
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     );
@@ -500,7 +529,7 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.contextGraphBindingState.delete(LOCAL_ID);
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       numericLocalId,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     );
@@ -523,7 +552,7 @@ describe('cold current-state Context Graph name binding', () => {
     const fixture = selectedFixture();
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     );
@@ -539,7 +568,7 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.subscription.onChainId).toBe('42');
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(
       LOCAL_ID,
-      fixture.subscription.onChainId,
+      fixture.subscription,
     )).toEqual({
       bindingKind: 'authoritative',
       onChainId: '42',
@@ -553,7 +582,7 @@ describe('cold current-state Context Graph name binding', () => {
     const fixture = selectedFixture();
     const candidate = fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     ).current;
@@ -570,7 +599,7 @@ describe('cold current-state Context Graph name binding', () => {
       LOCAL_ID,
       expect.objectContaining({ syncMode: 'always-on' }),
     );
-    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID)).toBe(candidate);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, fixture.subscription)).toBe(candidate);
   });
 
   it('omits a reverse-binding VM watermark from the strict join snapshot', async () => {
@@ -578,7 +607,7 @@ describe('cold current-state Context Graph name binding', () => {
     const savedSubscriptions: unknown[] = [];
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
-      undefined,
+      fixture.subscription,
       '42',
       NAME_HASH,
     );

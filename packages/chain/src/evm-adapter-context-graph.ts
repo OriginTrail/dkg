@@ -20,14 +20,6 @@ import {
 import { ethers, Contract, type JsonRpcProvider } from 'ethers';
 import { ContextGraphChainScanPartialError, type ChainReadOptions, type CreateContextGraphParams, type TxResult, type ContextGraphOnChain, type ContextGraphChainScanOptions, type ContextGraphRegistryScanOptions, type ContextGraphRegistryScanPage, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type VerifyParams, type PublishToContextGraphParams, type OnChainPublishResult } from './chain-adapter.js';
 import { buildAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1 } from '@origintrail-official/dkg-core';
-import {
-  type ContextGraphNameHashSlot,
-  type ContextGraphNameHashSlotIndexAnchor,
-  type ContextGraphNameHashSlotIndexScope,
-} from './context-graph-name-hash-resolver.js';
-import type {
-  ContextGraphNameHashProviderHighWaters,
-} from './evm-context-graph-name-hash-resolver.js';
 
 type ContextGraphRegistryScanPlan =
   | {
@@ -876,63 +868,6 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     );
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
-  }
-
-  private loadContextGraphIdByNameHashFromChain(
-    normalizedNameHash: string,
-  ): Promise<bigint | null> {
-    return this.getContextGraphNameHashResolver().loadFromChain(normalizedNameHash);
-  }
-
-  private loadCurrentContextGraphNameHashProviderHighWaters(
-  ): Promise<ContextGraphNameHashProviderHighWaters> {
-    return this.getContextGraphNameHashResolver().loadProviderHighWaters();
-  }
-
-  private captureContextGraphNameHashIndexScope(
-  ): Promise<ContextGraphNameHashSlotIndexScope> {
-    return this.getContextGraphNameHashResolver().captureScope();
-  }
-
-  private captureContextGraphNameHashIndexAnchor(
-  ): Promise<ContextGraphNameHashSlotIndexAnchor> {
-    return this.getContextGraphNameHashResolver().captureAnchor();
-  }
-
-  private loadContextGraphNameHashIndexAnchorHash(
-    blockNumber: number,
-  ): Promise<string | null> {
-    return this.getContextGraphNameHashResolver().loadAnchorHash(blockNumber);
-  }
-
-  private loadCurrentContextGraphNameHashSlots(
-    firstId: bigint,
-    lastId: bigint,
-    providerHighWaters: ReadonlyMap<JsonRpcProvider, bigint>,
-  ): Promise<readonly ContextGraphNameHashSlot[]> {
-    return this.getContextGraphNameHashResolver().loadSlots(
-      firstId,
-      lastId,
-      providerHighWaters,
-    );
-  }
-
-  private getContextGraphNameHashRetryingNull(
-    contextGraphId: bigint,
-    signal?: AbortSignal,
-    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
-  ): Promise<string | null> {
-    return this.getContextGraphNameHashResolver().getNameHashRetryingNull(
-      contextGraphId,
-      signal,
-      providerHighWaters,
-    );
-  }
-
-  private loadContextGraphIdByNameHashFromHistoricalEvents(
-    normalizedNameHash: string,
-  ): Promise<bigint | null> {
-    return this.getContextGraphNameHashResolver().loadHistorical(normalizedNameHash);
   }
 
   /**

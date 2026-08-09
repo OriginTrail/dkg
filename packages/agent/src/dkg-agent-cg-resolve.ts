@@ -1855,14 +1855,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     const target = this.resolveContextGraphNameHashBindingTarget(requestedId);
     if (target === null) return undefined;
 
-    const authoritativeId = target.subscription.onChainId;
-    if (authoritativeId) {
-      return { onChainId: authoritativeId, provenance: 'authoritative' };
-    }
     const currentBinding = this.contextGraphBindingState.currentBindingFor(
       target.localId,
-      target.subscription.onChainId,
+      target.subscription,
     );
+    if (currentBinding?.bindingKind === 'authoritative') {
+      return { onChainId: currentBinding.onChainId, provenance: 'authoritative' };
+    }
+    // A present-but-invalid durable id must not be replaced by a process-local
+    // reverse candidate. Let the strict ontology fallback fail closed instead.
+    if (target.subscription.onChainId !== undefined) return undefined;
     const cachedReverse = currentBinding?.bindingKind === 'reverse-name-hash'
       ? currentBinding
       : undefined;

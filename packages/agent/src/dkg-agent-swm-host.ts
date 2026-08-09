@@ -2428,11 +2428,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): void {
     const transition = this.contextGraphBindingState.bindAuthoritative(
       localCgId,
-      sub.onChainId,
+      sub,
       newOnChainId,
     );
     if (!transition.changed) return;
-    sub.onChainId = newOnChainId;
     if (!transition.onChainIdChanged) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be
@@ -2469,7 +2468,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): void {
     const transition = this.contextGraphBindingState.bindReverseCandidate(
       localCgId,
-      sub.onChainId,
+      sub,
       newOnChainId,
       nameHash,
     );
@@ -2769,7 +2768,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // below would pass it over. Shared with the live KACG nudge.
         const hasVmBindingCandidate = this.contextGraphBindingState.currentBindingFor(
           localCgId,
-          sub.onChainId,
+          sub,
         ) !== undefined;
         if (sub.subscribed && !hasVmBindingCandidate) {
           await this.selfPrimeSubscriptionOnChainId(
@@ -2784,7 +2783,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Member subscriptions AND Phase D core-hosted public CGs get swept.
         if (
           (!sub.subscribed && !sub.coreHosted)
-          || this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId) === undefined
+          || this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
         ) continue;
         eligible.push(localCgId);
       }
@@ -2841,7 +2840,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const isSubscriptionCurrent = () => isCurrent()
       && this.subscribedContextGraphs.get(localCgId) === sub
       && sub.subscribed
-      && this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId) === undefined
+      && this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
       && this.contextGraphBindingState.isGenerationCurrent(localCgId, bindingGeneration);
     if (!isSubscriptionCurrent()) return null;
     let resolved: (
@@ -2935,7 +2934,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (targetOnChain !== null) {
         for (const [lcg, sub] of this.subscribedContextGraphs) {
           if (!isLifecycleCurrent()) return null;
-          const binding = this.contextGraphBindingState.currentBindingFor(lcg, sub.onChainId);
+          const binding = this.contextGraphBindingState.currentBindingFor(lcg, sub);
           if (
             sub.subscribed
             && binding?.bindingKind === 'reverse-name-hash'
@@ -3048,7 +3047,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && this.subscribedContextGraphs.get(localCgId) === target.sub
         && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          target.sub.onChainId,
+          target.sub,
           target,
         )
         && this.reconcileCursors.get(localCgId) === target.cursor;
@@ -3148,7 +3147,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw new ContextGraphNotFoundError(localCgId);
     }
     if (
-      this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId) === undefined
+      this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
       && sub.subscribed
     ) {
       await this.selfPrimeSubscriptionOnChainId(
@@ -3163,7 +3162,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!sub) {
       throw new ContextGraphOnChainIdUnresolvedError(localCgId);
     }
-    let binding = this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId);
+    let binding = this.contextGraphBindingState.currentBindingFor(localCgId, sub);
     if (!binding) throw new ContextGraphOnChainIdUnresolvedError(localCgId);
     if (binding.bindingKind === 'reverse-name-hash') {
       // This is the sole boundary that converts an untrusted process-local
@@ -3175,7 +3174,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!isCurrent()) throw new VmReconcileQueueClosedError();
       sub = this.subscribedContextGraphs.get(localCgId);
       const current = sub
-        ? this.contextGraphBindingState.currentBindingFor(localCgId, sub.onChainId)
+        ? this.contextGraphBindingState.currentBindingFor(localCgId, sub)
         : undefined;
       if (
         !sub
@@ -3230,7 +3229,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && current === capturedSub
         && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          current?.onChainId,
+          current,
           target,
         )
         && this.reconcileCursors.get(localCgId) === capturedCursor;
@@ -3294,7 +3293,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && sub === target.sub
       && this.contextGraphBindingState.targetStillCurrent(
         localCgId,
-        sub?.onChainId,
+        sub,
         target,
       )
       && this.reconcileCursors.get(localCgId) === target.cursor;
@@ -3435,7 +3434,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           || this.subscribedContextGraphs.get(localCgId) === target.sub)
         && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          target.sub.onChainId,
+          target.sub,
           target,
         );
       if (!canApply()) {

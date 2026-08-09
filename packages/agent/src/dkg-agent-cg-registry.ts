@@ -375,6 +375,7 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
+import { isCanonicalPositiveContextGraphId } from './context-graph-binding-state.js';
 
 export class ContextGraphRegistryMethods extends DKGAgentBase {
   /**
@@ -448,8 +449,10 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];
-    return typeof value === 'string'
-      ? { onChainId: value.replace(/^"|"$/g, ''), provenance: 'ontology' }
+    if (typeof value !== 'string') return null;
+    const onChainId = value.replace(/^"|"$/g, '');
+    return isCanonicalPositiveContextGraphId(onChainId)
+      ? { onChainId, provenance: 'ontology' }
       : null;
   }
 

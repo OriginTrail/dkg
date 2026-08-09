@@ -6,8 +6,9 @@
  * This class owns the complete reverse-lookup lifecycle: deployment-scoped
  * single-flight/negative caching, the bounded current-slot index, provider
  * high-water consensus, canonical-anchor fencing, and the bounded exact-topic
- * historical fallback. The adapter supplies only its low-level EVM primitives
- * plus thin compatibility seams used by the focused adapter tests.
+ * historical fallback. The adapter supplies only low-level EVM primitives;
+ * orchestration stays inside this object so there is one owner for its cache,
+ * fences, provider-consensus rules, and historical fallback.
  */
 
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
@@ -77,27 +78,6 @@ export interface EvmContextGraphNameHashResolverDependencies {
     readonly logs: ReadonlyArray<ethers.EventLog | ethers.Log>;
     readonly provider: JsonRpcProvider;
   }>;
-  readonly getContextGraphNameHash: (contextGraphId: bigint) => Promise<string | null>;
-
-  // Adapter compatibility seams. Keeping these indirections means existing
-  // focused tests can replace one boundary without coupling to this class's
-  // internal state or weakening production encapsulation.
-  readonly loadFromChain: (nameHash: string) => Promise<bigint | null>;
-  readonly loadProviderHighWaters: () => Promise<ContextGraphNameHashProviderHighWaters>;
-  readonly captureScope: () => Promise<ContextGraphNameHashSlotIndexScope>;
-  readonly captureAnchor: () => Promise<ContextGraphNameHashSlotIndexAnchor>;
-  readonly loadAnchorHash: (blockNumber: number) => Promise<string | null>;
-  readonly loadSlots: (
-    firstId: bigint,
-    lastId: bigint,
-    providerHighWaters: ReadonlyMap<JsonRpcProvider, bigint>,
-  ) => Promise<readonly ContextGraphNameHashSlot[]>;
-  readonly getNameHashRetryingNull: (
-    contextGraphId: bigint,
-    signal?: AbortSignal,
-    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
-  ) => Promise<string | null>;
-  readonly loadHistorical: (nameHash: string) => Promise<bigint | null>;
 }
 
 function waitForContextGraphSlotRead<T>(
@@ -128,7 +108,7 @@ export class EvmContextGraphNameHashResolver {
     private readonly dependencies: EvmContextGraphNameHashResolverDependencies,
   ) {
     this.resolutionCache = new ContextGraphNameHashResolver({
-      load: (nameHash) => this.dependencies.loadFromChain(nameHash),
+      load: (nameHash) => this.loadFromChain(nameHash),
     });
   }
 
@@ -146,9 +126,9 @@ export class EvmContextGraphNameHashResolver {
   async loadFromChain(normalizedNameHash: string): Promise<bigint | null> {
     await this.dependencies.initialize();
     const bindingEpoch = this.bindingEpoch;
-    const scopeBefore = await this.dependencies.captureScope();
+    const scopeBefore = await this.captureScope();
     const assertCurrentLaneBinding = async (): Promise<void> => {
-      const scopeAfter = await this.dependencies.captureScope();
+      const scopeAfter = await this.captureScope();
       if (
         this.bindingEpoch !== bindingEpoch
         || !this.sameScope(scopeBefore, scopeAfter)
@@ -163,11 +143,11 @@ export class EvmContextGraphNameHashResolver {
     const result = await this.slotIndex.resolve(
       normalizedNameHash,
       {
-        captureScope: () => this.dependencies.captureScope(),
-        captureAnchor: () => this.dependencies.captureAnchor(),
-        loadAnchorHash: (blockNumber) => this.dependencies.loadAnchorHash(blockNumber),
+        captureScope: () => this.captureScope(),
+        captureAnchor: () => this.captureAnchor(),
+        loadAnchorHash: (blockNumber) => this.loadAnchorHash(blockNumber),
         loadLatestId: async () => {
-          const snapshot = await this.dependencies.loadProviderHighWaters();
+          const snapshot = await this.loadProviderHighWaters();
           providerHighWaters = snapshot.providerHighWaters;
           return snapshot.latestId;
         },
@@ -177,16 +157,16 @@ export class EvmContextGraphNameHashResolver {
               'resolveContextGraphIdByNameHash: current provider high-water snapshot is missing',
             );
           }
-          return this.dependencies.loadSlots(firstId, lastId, providerHighWaters);
+          return this.loadSlots(firstId, lastId, providerHighWaters);
         },
         onCommit: () => this.resolutionCache.invalidateAll(),
       },
     );
     if (result.mode === 'historical') {
-      return this.dependencies.loadHistorical(normalizedNameHash);
+      return this.loadHistorical(normalizedNameHash);
     }
     if (result.id !== null) {
-      const verification = await this.dependencies.loadProviderHighWaters();
+      const verification = await this.loadProviderHighWaters();
       if (verification.latestId !== result.highWater) {
         throw new Error(
           `resolveContextGraphIdByNameHash: Context Graph registry advanced from ` +
@@ -194,7 +174,7 @@ export class EvmContextGraphNameHashResolver {
           'during current-slot resolution',
         );
       }
-      const currentHash = await this.dependencies.getNameHashRetryingNull(
+      const currentHash = await this.getNameHashRetryingNull(
         result.id,
         undefined,
         verification.providerHighWaters,
@@ -215,34 +195,18 @@ export class EvmContextGraphNameHashResolver {
   async loadProviderHighWaters(): Promise<ContextGraphNameHashProviderHighWaters> {
     await this.dependencies.initialize();
     const cgs = this.dependencies.requireContextGraphStorage();
-    const providerHighWaters = new Map<JsonRpcProvider, bigint>();
-    let firstFailure: unknown;
-    for (const provider of this.dependencies.providers()) {
-      try {
-        await withTimeout(
-          this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
-          RPC_READ_STALL_TIMEOUT_MS,
-          'resolveContextGraphIdByNameHash current high-water chainId validation',
-        );
-        const raw = await withTimeout(
-          this.dependencies.rebindContract(cgs, provider).getLatestContextGraphId(),
-          RPC_READ_STALL_TIMEOUT_MS,
-          'resolveContextGraphIdByNameHash current high-water read',
-        );
-        const latestId = BigInt(raw);
-        if (latestId < 0n) {
-          throw new Error(
-            `resolveContextGraphIdByNameHash: getLatestContextGraphId returned ` +
-            `invalid negative id ${latestId.toString()}`,
-          );
-        }
-        providerHighWaters.set(provider, latestId);
-      } catch (cause) {
-        firstFailure ??= cause;
-      }
-    }
+    const providers = [...this.dependencies.providers()];
+    const reads = await Promise.allSettled(providers.map((provider) =>
+      this.loadProviderHighWater(cgs, provider, 'current')));
+    const providerHighWaters = new Map(reads.flatMap((result, index) =>
+      result.status === 'fulfilled'
+        ? [[providers[index]!, result.value] as const]
+        : []));
+    const failures = reads.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
     if (providerHighWaters.size === 0) {
-      throw firstFailure ?? new Error(
+      throw failures[0]?.reason ?? new Error(
         'resolveContextGraphIdByNameHash: no RPC backend returned a current registry high-water',
       );
     }
@@ -251,6 +215,36 @@ export class EvmContextGraphNameHashResolver {
       0n,
     );
     return { latestId, providerHighWaters };
+  }
+
+  private async loadProviderHighWater(
+    contextGraphStorage: Contract,
+    provider: JsonRpcProvider,
+    lane: 'current' | 'historical',
+    blockTag?: number,
+  ): Promise<bigint> {
+    await withTimeout(
+      this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
+      RPC_READ_STALL_TIMEOUT_MS,
+      `resolveContextGraphIdByNameHash ${lane} high-water chainId validation`,
+    );
+    const connected = this.dependencies.rebindContract(contextGraphStorage, provider);
+    const raw = await withTimeout(
+      blockTag === undefined
+        ? connected.getLatestContextGraphId()
+        : connected.getLatestContextGraphId({ blockTag }),
+      RPC_READ_STALL_TIMEOUT_MS,
+      `resolveContextGraphIdByNameHash ${lane} high-water read`,
+    );
+    const highWater = BigInt(raw);
+    if (highWater < 0n) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: getLatestContextGraphId returned ` +
+        `invalid negative id ${highWater.toString()}` +
+        (blockTag === undefined ? '' : ` at historical head ${blockTag}`),
+      );
+    }
+    return highWater;
   }
 
   async captureScope(): Promise<ContextGraphNameHashSlotIndexScope> {
@@ -307,7 +301,7 @@ export class EvmContextGraphNameHashResolver {
         if (contextGraphId > lastId) return;
         nextId += 1n;
         try {
-          const currentHash = await this.dependencies.getNameHashRetryingNull(
+          const currentHash = await this.getNameHashRetryingNull(
             contextGraphId,
             scanController.signal,
             providerHighWaters,
@@ -342,44 +336,30 @@ export class EvmContextGraphNameHashResolver {
     await this.dependencies.initialize();
     const cgs = this.dependencies.requireContextGraphStorage();
     const highWaters = providerHighWaters
-      ?? (await this.dependencies.loadProviderHighWaters()).providerHighWaters;
-    const observed = new Set<string | null>();
-    let firstFailure: unknown;
-    let coveringProviders = 0;
-    let failedCoveringProviders = 0;
-    for (const [provider, highWater] of highWaters) {
-      if (highWater < contextGraphId) continue;
-      coveringProviders += 1;
-      signal?.throwIfAborted();
-      try {
-        const startRead = () => Promise.resolve(
-          this.dependencies.rebindContract(cgs, provider).getNameHash(contextGraphId) as Promise<string>,
-        );
-        const physicalRead = signal
-          ? withRpcRequestAbortSignal(signal, startRead)
-          : startRead();
-        const raw: string = await withTimeout(
-          waitForContextGraphSlotRead(physicalRead, signal),
-          RPC_READ_STALL_TIMEOUT_MS,
-          `resolveContextGraphIdByNameHash current-slot getNameHash(${contextGraphId.toString()})`,
-        );
-        observed.add(!raw || raw === ethers.ZeroHash ? null : raw.toLowerCase());
-      } catch (cause) {
-        if (signal?.aborted) signal.throwIfAborted();
-        firstFailure ??= cause;
-        failedCoveringProviders += 1;
-      }
-    }
-    if (failedCoveringProviders > 0) {
+      ?? (await this.loadProviderHighWaters()).providerHighWaters;
+    const coveringProviders = [...highWaters].filter(
+      ([, highWater]) => highWater >= contextGraphId,
+    );
+    signal?.throwIfAborted();
+    const reads = await Promise.allSettled(coveringProviders.map(([provider]) =>
+      this.loadProviderNameHash(cgs, provider, contextGraphId, signal)));
+    if (signal?.aborted) signal.throwIfAborted();
+
+    const observed = new Set(reads.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : []));
+    const failures = reads.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failures.length > 0) {
       throw new Error(
-        `resolveContextGraphIdByNameHash: ${failedCoveringProviders} of ` +
-        `${coveringProviders} covering RPC backends failed to read current slot ` +
+        `resolveContextGraphIdByNameHash: ${failures.length} of ` +
+        `${coveringProviders.length} covering RPC backends failed to read current slot ` +
         `${contextGraphId.toString()}`,
-        { cause: firstFailure },
+        { cause: failures[0]!.reason },
       );
     }
     if (observed.size === 0) {
-      throw firstFailure ?? new Error(
+      throw new Error(
         `resolveContextGraphIdByNameHash: no RPC backend could read slot ` +
         contextGraphId.toString(),
       );
@@ -393,56 +373,71 @@ export class EvmContextGraphNameHashResolver {
     return observed.values().next().value ?? null;
   }
 
+  private async loadProviderNameHash(
+    contextGraphStorage: Contract,
+    provider: JsonRpcProvider,
+    contextGraphId: bigint,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    signal?.throwIfAborted();
+    const startRead = () => Promise.resolve(
+      this.dependencies.rebindContract(
+        contextGraphStorage,
+        provider,
+      ).getNameHash(contextGraphId) as Promise<string>,
+    );
+    const physicalRead = signal
+      ? withRpcRequestAbortSignal(signal, startRead)
+      : startRead();
+    const raw: string = await withTimeout(
+      waitForContextGraphSlotRead(physicalRead, signal),
+      RPC_READ_STALL_TIMEOUT_MS,
+      `resolveContextGraphIdByNameHash current-slot getNameHash(${contextGraphId.toString()})`,
+    );
+    return !raw || raw === ethers.ZeroHash ? null : raw.toLowerCase();
+  }
+
   /** Pin the registry counter to the same canonical block as the log scan. */
   private async loadHistoricalRegistryHighWaterAtHead(
     contextGraphStorage: Contract,
     scanProviders: ReadonlyArray<ContextGraphNameHashScanProvider>,
     head: number,
   ): Promise<bigint> {
-    let agreedHighWater: bigint | undefined;
-    for (const { provider } of scanProviders) {
-      await withTimeout(
-        this.dependencies.ensureConfiguredStaticChainIdValidated(provider),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'resolveContextGraphIdByNameHash historical high-water chainId validation',
+    const reads = await Promise.allSettled(scanProviders.map(({ provider }) =>
+      this.loadProviderHighWater(contextGraphStorage, provider, 'historical', head)));
+    const observedHighWaters = new Set(reads.flatMap((result) =>
+      result.status === 'fulfilled' ? [result.value] : []));
+    const failures = reads.filter(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (failures.length > 0) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ${failures.length} of ` +
+        `${scanProviders.length} RPC backends failed to read registry high-water ` +
+        `at historical head ${head}`,
+        { cause: failures[0]!.reason },
       );
-      const raw = await withTimeout(
-        this.dependencies.rebindContract(
-          contextGraphStorage,
-          provider,
-        ).getLatestContextGraphId({ blockTag: head }),
-        RPC_READ_STALL_TIMEOUT_MS,
-        'resolveContextGraphIdByNameHash historical high-water read',
-      );
-      const highWater = BigInt(raw);
-      if (highWater < 0n) {
-        throw new Error(
-          `resolveContextGraphIdByNameHash: getLatestContextGraphId returned ` +
-          `invalid negative id ${highWater.toString()} at historical head ${head}`,
-        );
-      }
-      if (agreedHighWater !== undefined && agreedHighWater !== highWater) {
-        throw new Error(
-          `resolveContextGraphIdByNameHash: RPC backends disagree on registry ` +
-          `high-water at historical head ${head}`,
-        );
-      }
-      agreedHighWater = highWater;
     }
-    if (agreedHighWater === undefined) {
+    if (observedHighWaters.size === 0) {
       throw new Error(
         `resolveContextGraphIdByNameHash: no RPC backend could read registry ` +
         `high-water at historical head ${head}`,
       );
     }
-    return agreedHighWater;
+    if (observedHighWaters.size !== 1) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: RPC backends disagree on registry ` +
+        `high-water at historical head ${head}`,
+      );
+    }
+    return observedHighWaters.values().next().value as bigint;
   }
 
   /** Bounded deploy-anchored exact-topic fallback for large registries. */
   async loadHistorical(normalizedNameHash: string): Promise<bigint | null> {
     await this.dependencies.initialize();
     const bindingEpoch = this.bindingEpoch;
-    const scopeBefore = await this.dependencies.captureScope();
+    const scopeBefore = await this.captureScope();
     const cgs = this.dependencies.requireContextGraphStorage();
     const storageAddress = (await cgs.getAddress()).toLowerCase();
     const { fromBlock, head, scanProviders: reachableProviders } =
@@ -501,7 +496,7 @@ export class EvmContextGraphNameHashResolver {
       head,
     );
     const assertHistoricalRegistryCurrent = async (): Promise<void> => {
-      const currentBoundary = await this.dependencies.loadProviderHighWaters();
+      const currentBoundary = await this.loadProviderHighWaters();
       if (currentBoundary.latestId !== scannedRegistryHighWater) {
         throw new Error(
           `resolveContextGraphIdByNameHash: registry high-water changed from ` +
@@ -513,7 +508,7 @@ export class EvmContextGraphNameHashResolver {
 
     const usedProviders = new Set<JsonRpcProvider>([scanProviders[0]!.provider]);
     const assertScanCurrent = async (): Promise<void> => {
-      const scopeAfter = await this.dependencies.captureScope();
+      const scopeAfter = await this.captureScope();
       if (
         this.bindingEpoch !== bindingEpoch
         || !this.sameScope(scopeBefore, scopeAfter)
@@ -591,7 +586,7 @@ export class EvmContextGraphNameHashResolver {
     }
 
     const id = ids.values().next().value as bigint;
-    const currentHash = await this.dependencies.getContextGraphNameHash(id);
+    const currentHash = await this.getNameHashRetryingNull(id);
     if (currentHash !== normalizedNameHash) {
       throw new Error(
         `resolveContextGraphIdByNameHash: slot ${id.toString()} currently commits ` +

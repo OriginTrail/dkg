@@ -38,15 +38,7 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
-import {
-  EvmContextGraphNameHashResolver,
-  type ContextGraphNameHashProviderHighWaters,
-} from './evm-context-graph-name-hash-resolver.js';
-import type {
-  ContextGraphNameHashSlot,
-  ContextGraphNameHashSlotIndexAnchor,
-  ContextGraphNameHashSlotIndexScope,
-} from './context-graph-name-hash-resolver.js';
+import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
 
@@ -63,34 +55,6 @@ type ContractWriteSender = (
 
 type SerializedSignerWriteContext = {
   sendContractTransaction: ContractWriteSender;
-};
-
-/**
- * Runtime methods supplied by the Context Graph holder through applyMixins().
- * The base-owned lazy resolver closure calls these seams dynamically so focused
- * tests can replace them while the closure itself stays off the public
- * prototype audited by mock-adapter parity.
- */
-type ContextGraphNameHashResolverBridge = {
-  getContextGraphNameHash(contextGraphId: bigint): Promise<string | null>;
-  loadContextGraphIdByNameHashFromChain(nameHash: string): Promise<bigint | null>;
-  loadCurrentContextGraphNameHashProviderHighWaters(): Promise<ContextGraphNameHashProviderHighWaters>;
-  captureContextGraphNameHashIndexScope(): Promise<ContextGraphNameHashSlotIndexScope>;
-  captureContextGraphNameHashIndexAnchor(): Promise<ContextGraphNameHashSlotIndexAnchor>;
-  loadContextGraphNameHashIndexAnchorHash(blockNumber: number): Promise<string | null>;
-  loadCurrentContextGraphNameHashSlots(
-    firstId: bigint,
-    lastId: bigint,
-    providerHighWaters: ReadonlyMap<JsonRpcProvider, bigint>,
-  ): Promise<readonly ContextGraphNameHashSlot[]>;
-  getContextGraphNameHashRetryingNull(
-    contextGraphId: bigint,
-    signal?: AbortSignal,
-    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
-  ): Promise<string | null>;
-  loadContextGraphIdByNameHashFromHistoricalEvents(
-    nameHash: string,
-  ): Promise<bigint | null>;
 };
 
 /**
@@ -948,8 +912,6 @@ export class EVMChainAdapterBase {
    */
   protected readonly getContextGraphNameHashResolver =
     (): EvmContextGraphNameHashResolver => {
-      const adapter = this as unknown as EVMChainAdapterBase
-        & ContextGraphNameHashResolverBridge;
       this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
         initialize: () => this.init(),
         requireContextGraphStorage: () => this.requireContextGraphStorage(),
@@ -992,30 +954,6 @@ export class EVMChainAdapterBase {
           label,
           preferred,
         ),
-        getContextGraphNameHash: (contextGraphId) =>
-          adapter.getContextGraphNameHash(contextGraphId),
-        loadFromChain: (nameHash) =>
-          adapter.loadContextGraphIdByNameHashFromChain(nameHash),
-        loadProviderHighWaters: () =>
-          adapter.loadCurrentContextGraphNameHashProviderHighWaters(),
-        captureScope: () => adapter.captureContextGraphNameHashIndexScope(),
-        captureAnchor: () => adapter.captureContextGraphNameHashIndexAnchor(),
-        loadAnchorHash: (blockNumber) =>
-          adapter.loadContextGraphNameHashIndexAnchorHash(blockNumber),
-        loadSlots: (firstId, lastId, providerHighWaters) =>
-          adapter.loadCurrentContextGraphNameHashSlots(
-            firstId,
-            lastId,
-            providerHighWaters,
-          ),
-        getNameHashRetryingNull: (contextGraphId, signal, providerHighWaters) =>
-          adapter.getContextGraphNameHashRetryingNull(
-            contextGraphId,
-            signal,
-            providerHighWaters,
-          ),
-        loadHistorical: (nameHash) =>
-          adapter.loadContextGraphIdByNameHashFromHistoricalEvents(nameHash),
       });
       return this.contextGraphNameHashResolver;
     };

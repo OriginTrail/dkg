@@ -26,6 +26,23 @@ export type ContextGraphBindingTransition = {
   onChainIdChanged: boolean;
 };
 
+/** The durable portion of a subscription that owns an authoritative binding. */
+export type ContextGraphBindingSubscription = {
+  onChainId?: string;
+};
+
+/** Contract Context Graph ids are positive, canonically formatted decimals. */
+export function isCanonicalPositiveContextGraphId(value: unknown): value is string {
+  return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
+}
+
+function requireCanonicalPositiveContextGraphId(value: string): string {
+  if (!isCanonicalPositiveContextGraphId(value)) {
+    throw new TypeError(`Invalid Context Graph on-chain id: ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
 function bindingsEqual(
   left: ContextGraphBinding | undefined,
   right: ContextGraphBinding,
@@ -58,12 +75,13 @@ export class ContextGraphBindingState {
 
   currentBindingFor(
     localCgId: string,
-    authoritativeOnChainId?: string,
+    subscription: ContextGraphBindingSubscription | undefined,
   ): ContextGraphBinding | undefined {
-    if (authoritativeOnChainId !== undefined) {
+    if (subscription?.onChainId !== undefined) {
+      if (!isCanonicalPositiveContextGraphId(subscription.onChainId)) return undefined;
       return {
         bindingKind: 'authoritative',
-        onChainId: authoritativeOnChainId,
+        onChainId: subscription.onChainId,
       };
     }
     return this.reverseCandidates.get(localCgId);
@@ -71,33 +89,39 @@ export class ContextGraphBindingState {
 
   bindAuthoritative(
     localCgId: string,
-    authoritativeOnChainId: string | undefined,
+    subscription: ContextGraphBindingSubscription,
     newOnChainId: string,
   ): ContextGraphBindingTransition {
-    const previous = this.currentBindingFor(localCgId, authoritativeOnChainId);
+    const canonicalOnChainId = requireCanonicalPositiveContextGraphId(newOnChainId);
+    const previous = this.currentBindingFor(localCgId, subscription);
+    const previousOnChainId = subscription.onChainId ?? previous?.onChainId;
     const current: AuthoritativeContextGraphBinding = {
       bindingKind: 'authoritative',
-      onChainId: newOnChainId,
+      onChainId: canonicalOnChainId,
     };
     this.reverseCandidates.delete(localCgId);
     const changed = !bindingsEqual(previous, current);
     if (changed) this.bump(localCgId);
+    subscription.onChainId = canonicalOnChainId;
     return {
       previous,
       current,
       changed,
-      onChainIdChanged: previous !== undefined && previous.onChainId !== newOnChainId,
+      onChainIdChanged: previousOnChainId !== undefined
+        && previousOnChainId !== canonicalOnChainId,
     };
   }
 
   bindReverseCandidate(
     localCgId: string,
-    authoritativeOnChainId: string | undefined,
+    subscription: ContextGraphBindingSubscription,
     newOnChainId: string,
     nameHash: string,
   ): ContextGraphBindingTransition {
-    const previous = this.currentBindingFor(localCgId, authoritativeOnChainId);
-    if (authoritativeOnChainId !== undefined) {
+    const canonicalOnChainId = requireCanonicalPositiveContextGraphId(newOnChainId);
+    const previous = this.currentBindingFor(localCgId, subscription);
+    if (subscription.onChainId !== undefined) {
+      requireCanonicalPositiveContextGraphId(subscription.onChainId);
       this.reverseCandidates.delete(localCgId);
       return {
         previous,
@@ -108,7 +132,7 @@ export class ContextGraphBindingState {
     }
     const current: ReverseNameHashContextGraphBinding = {
       bindingKind: 'reverse-name-hash',
-      onChainId: newOnChainId,
+      onChainId: canonicalOnChainId,
       nameHash,
     };
     const changed = !bindingsEqual(previous, current);
@@ -120,7 +144,7 @@ export class ContextGraphBindingState {
       previous,
       current,
       changed,
-      onChainIdChanged: previous !== undefined && previous.onChainId !== newOnChainId,
+      onChainIdChanged: previous !== undefined && previous.onChainId !== canonicalOnChainId,
     };
   }
 
@@ -159,10 +183,10 @@ export class ContextGraphBindingState {
 
   targetStillCurrent(
     localCgId: string,
-    authoritativeOnChainId: string | undefined,
+    subscription: ContextGraphBindingSubscription | undefined,
     target: ContextGraphBindingTarget,
   ): boolean {
-    const current = this.currentBindingFor(localCgId, authoritativeOnChainId);
+    const current = this.currentBindingFor(localCgId, subscription);
     return bindingsEqual(current, target)
       && this.isGenerationCurrent(localCgId, target.bindingGeneration);
   }

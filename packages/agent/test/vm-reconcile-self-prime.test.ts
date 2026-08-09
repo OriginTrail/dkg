@@ -119,6 +119,45 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(triggered).toEqual([`periodic:${LOCAL}`]);
   });
 
+  it('does not self-prime or reconcile CG 0 from empty or malformed ontology ids', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'SelfPrimeRejectsInvalidIds', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+    const invalidBindings = [
+      ['gh1098-empty-id', ''],
+      ['gh1098-zero-id', '0'],
+      ['gh1098-leading-zero-id', '01'],
+      ['gh1098-negative-id', '-1'],
+    ] as const;
+
+    await internals.store.insert(invalidBindings.map(([localCgId, onChainId]) => ({
+      subject: `did:dkg:context-graph:${localCgId}`,
+      predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+      object: `"${onChainId}"`,
+      graph: ontologyGraph,
+    })));
+    for (const [localCgId] of invalidBindings) {
+      internals.subscribedContextGraphs.set(localCgId, { subscribed: true });
+    }
+
+    const dispatch = vi.fn(async () => true);
+    internals.vmReconcileDispatcher = {
+      dispatch,
+      triggerLive: vi.fn(),
+      triggerPeriodic: vi.fn(),
+      tryTriggerPeriodic: vi.fn(() => true),
+    };
+
+    await internals.runVmReconcileSweep();
+
+    expect(dispatch).not.toHaveBeenCalled();
+    for (const [localCgId] of invalidBindings) {
+      expect(internals.subscribedContextGraphs.get(localCgId)?.onChainId).toBeUndefined();
+    }
+  });
+
   it('KACG nudge targeting: binds ONLY the unbound CG whose on-chain id matches the event, not an unrelated one', async () => {
     // This exercises the SAME `selfPrimeSubscriptionOnChainId` helper the live
     // onKARegisteredToContextGraph nudge delegates to, with a `targetOnChainId`
