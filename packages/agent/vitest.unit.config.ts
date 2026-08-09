@@ -115,6 +115,7 @@ export default defineConfig({
       "test/core-fills-gap.test.ts",
       "test/vm-recovery-microbatch-adversarial.test.ts",
       "test/vm-recovery-footprint-bridge.test.ts",
+      "test/vm-recovery-footprint-bridge-adversarial.test.ts",
       "test/finalization-reconcile-negative-memo.test.ts",
       "test/startup-jitter.test.ts",
       "test/finalization-lifecycle-logger.test.ts",
