@@ -95,4 +95,28 @@ describe('SystemRecordLaneForwarderV1', () => {
     await session.close('shutdown');
     expect(inner.session.close).toHaveBeenCalledWith('shutdown');
   });
+
+  it('does not mask an authoritative apply outcome when local bookkeeping fails', async () => {
+    const policyError = new Error('cache refresh failed');
+    const policy = {
+      onOutcome: vi.fn(() => {
+        throw policyError;
+      }),
+    };
+    const inner = controllerFixture('generation-a');
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    const forwarder = new SystemRecordLaneForwarderV1(() => inner.controller, policy);
+
+    try {
+      const session = await forwarder.forward()!.open(ACTIVATION);
+      await expect(session.applyVerified({ proof: true })).resolves.toBe(APPLIED);
+      expect(policy.onOutcome).toHaveBeenCalledWith(APPLIED);
+      expect(consoleError).toHaveBeenCalledWith(
+        '[SystemRecordLaneForwarderV1] outcome policy failed after lane apply:',
+        policyError,
+      );
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 });

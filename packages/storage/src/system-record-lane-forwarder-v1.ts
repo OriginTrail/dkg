@@ -34,8 +34,8 @@ import type {
  * What a wrapper does with an apply outcome.
  *
  * Invoked after every `applyVerified`, with the outcome about to be returned to
- * the caller. Implementations do local bookkeeping only: the outcome itself is
- * passed through unchanged, so a policy cannot mask a failure.
+ * the caller. Implementations do local bookkeeping only. A bookkeeping error
+ * is reported separately and cannot replace the authoritative lane outcome.
  *
  * The two production policies deliberately disagree about `root-collision`,
  * and that disagreement is correct rather than drift: it can durably quarantine
@@ -97,7 +97,20 @@ export class SystemRecordLaneForwarderV1 {
       },
       async applyVerified(proof: unknown): Promise<SystemRecordApplyOutcomeV1> {
         const outcome = await session.applyVerified(proof);
-        policy.onOutcome(outcome);
+        try {
+          policy.onOutcome(outcome);
+        } catch (error) {
+          // The lane may already have committed. Turning bookkeeping failure
+          // into an apply rejection would hide that outcome and invite retries.
+          try {
+            console.error(
+              '[SystemRecordLaneForwarderV1] outcome policy failed after lane apply:',
+              error,
+            );
+          } catch {
+            // Diagnostics are also best-effort after the authoritative result.
+          }
+        }
         return outcome;
       },
       close: (mode: 'disable' | 'shutdown') => session.close(mode),
