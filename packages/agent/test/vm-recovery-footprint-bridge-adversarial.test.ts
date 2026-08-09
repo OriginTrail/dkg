@@ -251,6 +251,44 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     }
   });
 
+  it('rejects valid sizing data synchronously resolved by the deadline abort handler', async () => {
+    vi.useFakeTimers();
+    try {
+      let deadlineAborts = 0;
+      const targets = [target(8)];
+      const pending = enrichVmRecoveryFootprints(
+        targets,
+        222n,
+        {
+          isContextGraphActiveOnChain: async () => true,
+          getContextGraphAccessPolicy: async () => 0,
+          getKnowledgeAssetUpdateContext: async (_kaId, options) =>
+            new Promise((resolve) => {
+              options?.signal?.addEventListener('abort', () => {
+                deadlineAborts += 1;
+                resolve(publicContext(8n));
+              }, { once: true });
+            }),
+        },
+        {
+          maxContextReads: 10,
+          sizingReadTimeoutMs: 25,
+          isCurrent: () => true,
+        },
+      );
+
+      await vi.advanceTimersByTimeAsync(25);
+      const enriched = await pending;
+
+      expect(deadlineAborts).toBe(1);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(enriched).toEqual(targets);
+      expect(enriched[0]!.recoveryFootprint).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('labels classic observations latest-bounded without fabricating a finalized anchor', async () => {
     const reader: VmRecoveryFootprintBridgeReader = {
       isContextGraphActiveOnChain: async () => true,
