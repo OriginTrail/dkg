@@ -772,9 +772,20 @@ describe('system-record lane session lifecycle V1', () => {
         handoff.rotateMaterializationEpoch = (async () =>
           malformed) as unknown as RecordingHandoff['rotateMaterializationEpoch'];
 
-        await expect(build().open(ACTIVATION)).rejects.toThrow(
+        const controller = build();
+        await expect(controller.open(ACTIVATION)).rejects.toThrow(
           /materialization epoch binding/,
         );
+
+        // The throw alone does not prove FAIL-CLOSED, which is what the name
+        // claims: the lane must also disable managed mutations rather than
+        // leave them admissible behind a rejected enable.
+        expect(handoff.calls).toContain(
+          'failManagedMutationsClosed:enable transition did not return a materialization epoch binding',
+        );
+
+        // And it must not be reopenable as if nothing happened.
+        await expect(controller.open(ACTIVATION)).rejects.toThrow();
       });
     }
 
