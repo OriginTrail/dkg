@@ -19,16 +19,6 @@ function imports(file: ts.SourceFile): string[] {
     .map((node) => (node.moduleSpecifier as ts.StringLiteral).text);
 }
 
-function newExpressions(file: ts.SourceFile): string[] {
-  const names: string[] = [];
-  const visit = (node: ts.Node): void => {
-    if (ts.isNewExpression(node)) names.push(node.expression.getText(file));
-    ts.forEachChild(node, visit);
-  };
-  visit(file);
-  return names;
-}
-
 function calledIdentifiers(file: ts.SourceFile): string[] {
   const names: string[] = [];
   const visit = (node: ts.Node): void => {
@@ -55,29 +45,28 @@ describe('managed Oxigraph supervisor module boundary', () => {
     expect(calledIdentifiers(facade)).not.toContain('fetch');
   });
 
-  it('composes exactly one lifecycle, timer, child, and probe owner', () => {
+  it('keeps lifecycle phases in focused operation modules', () => {
     const supervisor = source('oxigraph-server-supervisor.ts');
-    const constructed = newExpressions(supervisor);
-
-    expect(
-      constructed.filter((name) => name === 'SerializedOxigraphLifecycleV1'),
-    ).toHaveLength(1);
-    expect(
-      constructed.filter((name) => name === 'OxigraphSupervisorTimersV1'),
-    ).toHaveLength(1);
-    expect(
-      constructed.filter((name) => name === 'OxigraphSupervisorChildV1'),
-    ).toHaveLength(1);
-    expect(
-      constructed.filter((name) => name === 'OxigraphSupervisorProbesV1'),
-    ).toHaveLength(1);
-    expect(
-      constructed.filter(
-        (name) => name === 'OxigraphSupervisorReviveBackoffV1',
-      ),
-    ).toHaveLength(1);
+    expect(imports(supervisor)).toEqual(expect.arrayContaining([
+      './oxigraph-supervisor-state.js',
+      './oxigraph-supervisor-recovery-operations.js',
+      './oxigraph-supervisor-shutdown-operations.js',
+      './oxigraph-supervisor-handoff-operations.js',
+      './oxigraph-supervisor-startup-operations.js',
+    ]));
     expect(calledIdentifiers(supervisor)).toContain('createOxigraphSupervisorOwnershipV1');
     expect(calledIdentifiers(supervisor)).not.toContain('setTimeout');
     expect(calledIdentifiers(supervisor)).not.toContain('clearTimeout');
+    expect(calledIdentifiers(supervisor)).not.toContain('spawn');
+    expect(calledIdentifiers(supervisor)).not.toContain('fetch');
+
+    for (const name of [
+      'oxigraph-supervisor-recovery-operations.ts',
+      'oxigraph-supervisor-shutdown-operations.ts',
+      'oxigraph-supervisor-handoff-operations.ts',
+      'oxigraph-supervisor-startup-operations.ts',
+    ]) {
+      expect(imports(source(name))).not.toContain('./oxigraph-server-contract.js');
+    }
   });
 });
