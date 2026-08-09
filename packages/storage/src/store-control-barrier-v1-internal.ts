@@ -28,13 +28,14 @@ import {
   type StoreControlBarrierBlockers,
   type StoreGenerationSeal,
 } from './store-barrier-contract.js';
+import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
 
 /** Label carried on a seal when the caller does not name a generation. */
 const BARRIER_ANY_GENERATION = '*';
 
 interface BarrierEntry {
   storeId: object;
-  coalescingIdentity: unknown;
+  coalescingKey: object;
   purpose: string;
   transition: () => Promise<unknown>;
   promise: Promise<unknown>;
@@ -50,7 +51,7 @@ interface BarrierEntry {
 
 interface StoreControlBarrierRequestV1<T> {
   readonly storeId: object;
-  readonly coalescingIdentity: unknown;
+  readonly key: StoreControlBarrierKeyV1<T>;
   readonly purpose: string;
   readonly transition: () => Promise<T>;
   readonly generation?: string;
@@ -140,7 +141,7 @@ export class StoreControlBarrierCoordinator {
   enqueue<T>(request: StoreControlBarrierRequestV1<T>): Promise<T> {
     const {
       storeId,
-      coalescingIdentity,
+      key,
       purpose,
       transition,
       generation,
@@ -149,13 +150,14 @@ export class StoreControlBarrierCoordinator {
     const existing = this.barriers.find(
       (barrier) =>
         barrier.storeId === storeId &&
-        barrier.coalescingIdentity === coalescingIdentity,
+        barrier.coalescingKey === key,
     );
     if (existing !== undefined) {
       this.coalescedTotal += 1;
       this.host.observeDepths();
-      // The scheduler binds `coalescingIdentity` to T for typed keys. Its
-      // deprecated string path owns the only compatibility cast.
+      // Equality proves both callers hold the same nominal result-typed key;
+      // TypeScript cannot carry that correlation through the heterogeneous
+      // pending array, so the cast remains inside this coordinator boundary.
       return existing.promise as Promise<T>;
     }
     let resolve!: (value: unknown) => void;
@@ -166,7 +168,7 @@ export class StoreControlBarrierCoordinator {
     });
     const barrier: BarrierEntry = {
       storeId,
-      coalescingIdentity,
+      coalescingKey: key,
       purpose,
       transition,
       promise,

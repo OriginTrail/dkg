@@ -11,7 +11,10 @@ import {
   StoreControlBarrierCoordinator,
   type StoreBarrierHostV1,
 } from './store-control-barrier-v1-internal.js';
-import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
+import {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from './store-control-barrier-key-v1.js';
 import {
   StoreControlBarrierTimeoutError,
   type StoreControlBarrierBlockers,
@@ -502,6 +505,11 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * for inflight. See `StoreBarrierHostV1`.
    */
   private readonly barrierCoordinator: StoreControlBarrierCoordinator;
+  /** Legacy keys exist only while one same-purpose compatibility barrier is live. */
+  private readonly legacyControlBarrierKeys = new Map<
+    string,
+    { readonly key: StoreControlBarrierKeyV1<unknown>; callers: number }
+  >();
   constructor(options?: StorePrioritySchedulerOptions);
   /** @deprecated Use the named options object. Retained for package compatibility. */
   constructor(
@@ -703,13 +711,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // already-aborted caller signal any more than by queue capacity.
     if (admission !== undefined && !isStoreQueuedAdmissionV1(admission)) {
       // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-      return (await this.barrierCoordinator.enqueue({
-        storeId: admission.storeId,
-        coalescingIdentity: operation,
-        purpose: operation,
-        transition: work,
-        generation: admission.generation,
-      })) as T;
+      return await this.enqueueLegacyControlBarrier(
+        admission.storeId,
+        operation,
+        work,
+        admission.generation,
+      );
     }
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -1098,15 +1105,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
     generation?: string,
     timeoutMs?: number,
   ): Promise<T> {
-    // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-    return this.barrierCoordinator.enqueue<unknown>({
+    return this.enqueueLegacyControlBarrier(
       storeId,
-      coalescingIdentity: purpose,
       purpose,
       transition,
       generation,
       timeoutMs,
-    }) as Promise<T>;
+    );
   }
 
   /** Type-safe control barrier for new lifecycle transitions. */
@@ -1121,12 +1126,47 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // runtime identity to the same T.
     return this.barrierCoordinator.enqueue({
       storeId,
-      coalescingIdentity: key,
+      key,
       purpose: key.purpose,
       transition,
       generation,
       timeoutMs,
     });
+  }
+
+  private enqueueLegacyControlBarrier<T>(
+    storeId: object,
+    purpose: string,
+    transition: () => Promise<T>,
+    generation?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
+    let entry = this.legacyControlBarrierKeys.get(purpose);
+    if (entry === undefined) {
+      entry = {
+        key: createStoreControlBarrierKeyV1<unknown>(purpose),
+        callers: 0,
+      };
+      this.legacyControlBarrierKeys.set(purpose, entry);
+    }
+    entry.callers += 1;
+    const result = this.barrierCoordinator.enqueue<unknown>({
+      storeId,
+      key: entry.key,
+      purpose,
+      transition,
+      generation,
+      timeoutMs,
+    });
+    // Keep compatibility-key storage bounded by concurrently live purposes.
+    void result.finally(() => {
+      entry.callers -= 1;
+      if (entry.callers === 0 && this.legacyControlBarrierKeys.get(purpose) === entry) {
+        this.legacyControlBarrierKeys.delete(purpose);
+      }
+    }).catch(() => undefined);
+    // Legacy compatibility boundary: runtime purpose strings cannot bind T.
+    return result as Promise<T>;
   }
 
   private isSealed(storeId: object): boolean {

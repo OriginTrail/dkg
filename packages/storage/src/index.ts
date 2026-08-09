@@ -89,6 +89,7 @@ export {
 } from './store-control-barrier-key-v1.js';
 export type {
   SystemRecordMaterializationEpochRotationV1,
+  SystemRecordMaterializationEpochRotationSnapshotV1,
 } from './system-record-materialization-epoch-contract-v1.js';
 export {
   SystemRecordLaneForwarderV1,

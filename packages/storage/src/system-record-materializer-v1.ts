@@ -19,6 +19,7 @@ import {
 } from './system-record-input-guards-v1-internal.js';
 import {
   type SystemRecordMaterializationEpochRotationV1,
+  type SystemRecordMaterializationEpochRotationSnapshotV1,
 } from './system-record-materialization-epoch-contract-v1.js';
 import {
   snapshotSystemRecordMaterializationEpochRotationV1,
@@ -224,7 +225,7 @@ export type SystemRecordLaneBarrierV1 = <T>(
 ) => Promise<T>;
 
 export interface SystemRecordLaneBarrierResultsV1 {
-  readonly enable: void | SystemRecordMaterializationEpochRotationV1;
+  readonly enable: SystemRecordMaterializationEpochRotationSnapshotV1;
   readonly disable: void;
   readonly shutdown: void;
   readonly recovery: void;
@@ -259,6 +260,12 @@ export interface SystemRecordLaneControllerDepsV1 {
    * terminally unavailable. Merely constructing the controller never calls it.
    */
   readonly setAdmissionActive?: (active: boolean) => void;
+}
+
+interface SystemRecordLaneSessionDepsV1 extends SystemRecordLaneControllerDepsV1 {
+  readonly rotateMaterializationEpoch: (
+    networkId?: string,
+  ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
 }
 
 /** Raised when an incompatible activation descriptor is offered to a live session. */
@@ -416,7 +423,15 @@ export function createSystemRecordLaneControllerV1(
 ): SystemRecordLaneControllerV1 {
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
-  const session = new SystemRecordLaneSession(deps);
+  const session = new SystemRecordLaneSession({
+    ...deps,
+    // Normalize once at the injected handoff boundary. The lifecycle below
+    // consumes only domain states and never reparses the typed dependency.
+    rotateMaterializationEpoch: async (networkId) =>
+      snapshotSystemRecordMaterializationEpochRotationV1(
+        await deps.handoff.rotateMaterializationEpoch(networkId),
+      ),
+  });
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
   });
@@ -676,7 +691,7 @@ class SystemRecordLaneSession {
    */
   owner: SystemRecordLaneControllerV1 | null = null;
 
-  constructor(private readonly deps: SystemRecordLaneControllerDepsV1) {}
+  constructor(private readonly deps: SystemRecordLaneSessionDepsV1) {}
 
   get state(): SystemRecordLaneStateV1 {
     return this.current;
@@ -776,17 +791,17 @@ class SystemRecordLaneSession {
   ): Promise<void> {
     this.assertLeaseLive();
     this.commitState('enabling');
-    let rotated: void | SystemRecordMaterializationEpochRotationV1;
+    let rotationSnapshot: SystemRecordMaterializationEpochRotationSnapshotV1;
     try {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      rotated = await this.runBarrier('enable', async () => {
+      rotationSnapshot = await this.runBarrier('enable', async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
         await this.deps.handoff.startAndProveCleanGeneration();
-        return this.deps.handoff.rotateMaterializationEpoch(activation.networkId);
+        return this.deps.rotateMaterializationEpoch(activation.networkId);
       });
     } catch (error) {
       this.failManagedMutationsClosed('enable transition did not physically settle');
@@ -795,7 +810,6 @@ class SystemRecordLaneSession {
       this.clearActiveBinding();
       throw error;
     }
-    const rotationSnapshot = snapshotSystemRecordMaterializationEpochRotationV1(rotated);
     if (
       rotationSnapshot.kind === 'malformed' ||
       (rotationSnapshot.kind === 'absent' && this.deps.executor.applyVerifiedSettlementBound)

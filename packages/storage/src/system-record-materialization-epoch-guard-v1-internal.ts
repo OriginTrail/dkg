@@ -1,15 +1,8 @@
 import { types as utilTypes } from 'node:util';
 import type {
   SystemRecordMaterializationEpochRotationV1,
+  SystemRecordMaterializationEpochRotationSnapshotV1,
 } from './system-record-materialization-epoch-contract-v1.js';
-
-export type SystemRecordMaterializationEpochRotationSnapshotV1 =
-  | Readonly<{ kind: 'absent' }>
-  | Readonly<{ kind: 'malformed' }>
-  | Readonly<{
-      kind: 'rotation';
-      value: SystemRecordMaterializationEpochRotationV1;
-    }>;
 
 const ABSENT = Object.freeze({ kind: 'absent' } as const);
 const MALFORMED = Object.freeze({ kind: 'malformed' } as const);
