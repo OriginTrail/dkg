@@ -1447,6 +1447,7 @@ export class FinalizationHandler {
    */
   private async reconcileGraphScopedKC(input: {
     contextGraphId: string;
+    onChainCgId?: string;
     ual: string;
     merkleRoot: Uint8Array;
     publisherAddress: string;
@@ -1465,6 +1466,7 @@ export class FinalizationHandler {
   > {
     const {
       contextGraphId,
+      onChainCgId,
       ual,
       merkleRoot,
       publisherAddress,
@@ -1635,6 +1637,19 @@ export class FinalizationHandler {
         }
       }
       if (!trustedAssertionEvidence) {
+        let onChainContextGraphId: bigint;
+        try {
+          if (!onChainCgId) throw new Error('missing on-chain context graph id');
+          onChainContextGraphId = BigInt(onChainCgId);
+          if (onChainContextGraphId < 0n) throw new Error('negative on-chain context graph id');
+        } catch {
+          this.log.info(
+            ctx,
+            `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
+              + 'a valid on-chain context graph id; deferring',
+          );
+          return 'verified-vm-metadata-pending';
+        }
         const recovery = await recoverReceiptBackedGraphScopedEvidence({
           store: this.store,
           chain: this.chain,
@@ -1644,13 +1659,14 @@ export class FinalizationHandler {
           merkleRoot,
           publisherAddress,
           kaId,
+          onChainContextGraphId,
           subGraphName,
         });
         if (recovery.status === 'recovered') {
           this.log.info(
             ctx,
-            `Chain-reconcile: recovered canonical transaction provenance and authenticated `
-              + `local controls for ${scope.ual}`,
+            `Chain-reconcile: recovered canonical transaction provenance and verified `
+              + `access controls for ${scope.ual}`,
           );
           return this.repairExactGraphScopedVmMetadata({
             contextGraphId,
@@ -2776,6 +2792,7 @@ export class FinalizationHandler {
     // enter the legacy root-operation scan below.
     const graphScopedOutcome = await this.reconcileGraphScopedKC({
       contextGraphId,
+      onChainCgId,
       ual,
       merkleRoot,
       publisherAddress,

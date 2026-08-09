@@ -27,6 +27,7 @@ export interface RecoverReceiptBackedGraphScopedEvidenceInput {
   merkleRoot: Uint8Array;
   publisherAddress: string;
   kaId: bigint;
+  onChainContextGraphId: bigint;
   subGraphName?: string;
 }
 
@@ -91,9 +92,11 @@ function anchorQuads(input: RecoverReceiptBackedGraphScopedEvidenceInput): Quad[
 }
 
 /**
- * Recover receipt provenance only when the mutable SWM controls were recorded
- * locally after authenticated envelope admission. The chain authenticates the
- * KA identity and root; the local sidecar authenticates policy and peer identity.
+ * Recover receipt provenance when the mutable SWM controls were recorded locally
+ * after authenticated envelope admission. For a chain-confirmed public CG, the
+ * on-chain access policy is also sufficient: public reads do not depend on a
+ * publisher peer identity or allow-list. Private CGs continue to require the
+ * authenticated local sidecar and fail closed when it is unavailable.
  */
 export async function recoverReceiptBackedGraphScopedEvidence(
   input: RecoverReceiptBackedGraphScopedEvidenceInput,
@@ -156,9 +159,32 @@ export async function recoverReceiptBackedGraphScopedEvidence(
     if (resolution.status !== 'confirmed' || rootCount !== 1n) {
       return { status: 'unavailable', reason: 'canonical receipt or unique root is unavailable' };
     }
-    const controls = trustedAccessEnvelope(trustedRows);
+    let controls = trustedAccessEnvelope(trustedRows);
     if (!controls) {
-      return { status: 'unavailable', reason: 'authenticated local SWM controls are unavailable' };
+      const getAccessPolicy = input.chain.getContextGraphAccessPolicy;
+      if (!getAccessPolicy) {
+        return {
+          status: 'unavailable',
+          reason: 'authenticated local SWM controls and on-chain access policy are unavailable',
+        };
+      }
+      const onChainAccessPolicy = Number(await getAccessPolicy.call(
+        input.chain,
+        input.onChainContextGraphId,
+      ));
+      if (onChainAccessPolicy !== 0) {
+        return {
+          status: 'unavailable',
+          reason: 'authenticated local SWM controls are required for a non-public context graph',
+        };
+      }
+      controls = {
+        accessPolicy: 'public',
+        allowedPeers: [],
+        // Public access does not authorize through this value. Preserve an
+        // explicit non-empty sentinel rather than trusting peer-supplied SWM.
+        publisherPeerId: 'unknown',
+      };
     }
     const { receipt } = resolution;
     if (

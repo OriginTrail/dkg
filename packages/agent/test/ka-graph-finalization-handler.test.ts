@@ -2357,9 +2357,15 @@ describe('graph-scoped finalization handler', () => {
     ]) {
       await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
     }
+    let accessPolicyReads = 0;
     const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
       getMerkleRootCount: async () => 1n,
       resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      getContextGraphAccessPolicy: async (contextGraphId) => {
+        accessPolicyReads += 1;
+        expect(contextGraphId).toBe(42n);
+        return 1;
+      },
     }));
     (repairHandler as unknown as {
       verifyChainCgBinding: () => Promise<boolean>;
@@ -2377,9 +2383,65 @@ describe('graph-scoped finalization handler', () => {
     }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(accessPolicyReads).toBe(1);
     await expect(store.query(
       `ASK { GRAPH <${metaGraph}> { <${UAL}> `
         + '<http://dkg.io/ontology/allowedPeer> "12D3KooWAttacker" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('repairs public VM metadata from chain truth without a local SWM control sidecar', async () => {
+    const { message, vmGraph } = await stageGraph({
+      accessPolicy: 'allowList',
+      allowedPeers: ['12D3KooWUntrustedWorkspacePeer'],
+    });
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    for (const predicate of [
+      'http://dkg.io/ontology/accessPolicy',
+      'http://dkg.io/ontology/allowedPeer',
+      'http://dkg.io/ontology/publisherPeerId',
+    ]) {
+      await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
+    }
+    let accessPolicyReads = 0;
+    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      getMerkleRootCount: async () => 1n,
+      resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      getContextGraphAccessPolicy: async (contextGraphId) => {
+        accessPolicyReads += 1;
+        expect(contextGraphId).toBe(42n);
+        return 0;
+      },
+    }));
+    (repairHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    }).verifyChainCgBinding = async () => true;
+
+    await expect(repairHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 200,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+    expect(accessPolicyReads).toBe(1);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/accessPolicy> "public" ;
+          <http://dkg.io/ontology/publisherPeerId> "unknown" ;
+          <http://dkg.io/ontology/transactionHash> "${message.txHash}" .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWUntrustedWorkspacePeer" } }',
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 
