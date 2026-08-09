@@ -9,7 +9,9 @@ import { describe, expect, it } from 'vitest';
 const REPOSITORY_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const FIRST_PARTY_STORE_USERS = [
   join(REPOSITORY_ROOT, 'packages/agent/src'),
+  join(REPOSITORY_ROOT, 'packages/cli/src'),
   join(REPOSITORY_ROOT, 'packages/publisher/src'),
+  join(REPOSITORY_ROOT, 'packages/query/src'),
 ] as const;
 
 function listTypeScriptSources(directory: string): string[] {
@@ -75,7 +77,7 @@ function findRawManagedChannelViolations(sourceText: string, fileName: string): 
 }
 
 describe('first-party managed store raw-channel source contract', () => {
-  it('keeps Agent and Publisher production paths off raw mutating SPARQL', () => {
+  it('keeps first-party production paths off raw mutating SPARQL', () => {
     const violations = FIRST_PARTY_STORE_USERS.flatMap((directory) =>
       listTypeScriptSources(directory).flatMap((path) =>
         findRawManagedChannelViolations(
