@@ -329,6 +329,47 @@ describe('UpdateHandler graph-scoped updates', () => {
     )).toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('keeps prior state replayable when atomic graph replacement is unsupported', async () => {
+    await seedPriorMetadata();
+    await store.insert([
+      { subject: 'urn:stale', predicate: 'urn:p:value', object: '"old"', graph: vmGraph },
+      { subject: 'urn:new', predicate: 'urn:p:value', object: '"new"', graph: swmGraph },
+    ]);
+    const update: Quad[] = [{
+      subject: 'urn:new', predicate: 'urn:p:value', object: '"new"', graph: '',
+    }];
+    const encoded = message(update);
+    const replacement = store.replaceGraphAndSubject.bind(store);
+    Object.defineProperty(store, 'replaceGraphAndSubject', {
+      configurable: true,
+      value: undefined,
+    });
+
+    await handler.handle(encoded, 'forwarding-peer');
+
+    expect(await store.query(
+      `ASK { GRAPH <${vmGraph}> { <urn:stale> <urn:p:value> "old" } }`,
+    )).toMatchObject({ type: 'boolean', value: true });
+    expect(await store.query(
+      `ASK { GRAPH <${META}> { <${UAL}> <${DKG}assertionVersion> "1"^^<${XSD}integer> } }`,
+    )).toMatchObject({ type: 'boolean', value: true });
+    expect(await store.countQuads(swmGraph)).toBe(1);
+
+    Object.defineProperty(store, 'replaceGraphAndSubject', {
+      configurable: true,
+      value: replacement,
+    });
+    await handler.handle(encoded, 'forwarding-peer');
+
+    expect(await store.query(
+      `ASK { GRAPH <${vmGraph}> { <urn:new> <urn:p:value> "new" } }`,
+    )).toMatchObject({ type: 'boolean', value: true });
+    expect(await store.query(
+      `ASK { GRAPH <${META}> { <${UAL}> <${DKG}assertionVersion> "2"^^<${XSD}integer> } }`,
+    )).toMatchObject({ type: 'boolean', value: true });
+    expect(await store.countQuads(swmGraph)).toBe(0);
+  });
+
   it('rejects non-canonical receiver RDF before materialization', async () => {
     await seedPriorMetadata();
     const update: Quad[] = [{
