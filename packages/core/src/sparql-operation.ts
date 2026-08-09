@@ -200,7 +200,7 @@ function isSparqlWordStart(ch: string | undefined): boolean {
   );
 }
 
-/** Compatibility helper for callers that advance across ASCII keyword text. */
+/** @deprecated Use readStandaloneSparqlWord so boundary and token length share one model. */
 export function isSparqlWordContinuation(ch: string | undefined): ch is string {
   return isSparqlWordStart(ch) || (!!ch && ch >= '0' && ch <= '9');
 }
@@ -223,12 +223,12 @@ export function readStandaloneSparqlWord(
   return Object.freeze({ word: src.slice(start, end).toUpperCase(), start, end });
 }
 
-/** Compatibility view over the canonical standalone-word scanner. */
+/** @deprecated Use readStandaloneSparqlWord and inspect the returned token. */
 export function isSparqlKeywordStart(src: string, start: number): boolean {
   return readStandaloneSparqlWord(src, start) !== null;
 }
 
-/** Compatibility view over the canonical standalone-word scanner. */
+/** @deprecated Use readStandaloneSparqlWord and inspect the returned token. */
 export function isSparqlKeyword(
   src: string,
   start: number,

@@ -1,8 +1,6 @@
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
-  isSparqlKeyword,
-  isSparqlKeywordStart as isKeywordStart,
-  isSparqlWordContinuation as isWordContinuation,
+  readStandaloneSparqlWord,
   readSparqlVariable,
   skipSparqlIriRef,
   skipSparqlSpaceAndLineComments,
@@ -35,14 +33,13 @@ export function collectPrefixDeclarations(sparql: string): Map<string, string> {
       i = end ?? i + 1;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'PREFIX')) {
-        const prefixStart = skipSparqlSpaceAndLineComments(sparql, j);
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'PREFIX') {
+        const prefixStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const prefix = readSparqlPrefixName(sparql, prefixStart);
         if (!prefix || prefix.local.length > 0) {
-          i = j;
+          i = token.end;
           continue;
         }
         const iriStart = skipSparqlSpaceAndLineComments(
@@ -56,7 +53,7 @@ export function collectPrefixDeclarations(sparql: string): Map<string, string> {
           continue;
         }
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -142,22 +139,21 @@ function readTopLevelStaticGraphValues(
       i++;
       continue;
     }
-    if (depth !== 0 || !isKeywordStart(sparql, i)) {
+    const token = depth === 0 ? readStandaloneSparqlWord(sparql, i) : null;
+    if (!token) {
       i++;
       continue;
     }
 
-    let keywordEnd = i + 1;
-    while (keywordEnd < braceEnd && isWordContinuation(sparql[keywordEnd])) keywordEnd++;
-    if (!isSparqlKeyword(sparql, i, keywordEnd, 'VALUES')) {
-      i = keywordEnd;
+    if (token.word !== 'VALUES') {
+      i = token.end;
       continue;
     }
 
-    const variableStart = skipSparqlSpaceAndLineComments(sparql, keywordEnd);
+    const variableStart = skipSparqlSpaceAndLineComments(sparql, token.end);
     const candidate = readSparqlVariable(sparql, variableStart);
     if (candidate !== variable) {
-      i = keywordEnd;
+      i = token.end;
       continue;
     }
     const valuesStart = skipSparqlSpaceAndLineComments(

@@ -1,7 +1,5 @@
 export {
-  isSparqlKeyword,
-  isSparqlKeywordStart,
-  isSparqlWordContinuation,
+  readStandaloneSparqlWord,
   stripSparqlLiteralsAndComments as stripLiteralsAndComments,
 } from '@origintrail-official/dkg-core';
 

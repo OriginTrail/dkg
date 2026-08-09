@@ -43,9 +43,7 @@ import {
 } from './sparql-guard.js';
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
-  isSparqlKeyword,
-  isSparqlKeywordStart as isKeywordStart,
-  isSparqlWordContinuation as isWordContinuation,
+  readStandaloneSparqlWord,
   readSparqlVariable,
   skipSparqlStringLiteral as scanSparqlStringLiteral,
   skipSparqlIriRef,
@@ -1536,13 +1534,12 @@ function hasCallerDatasetClause(sparql: string): boolean {
       i = end ?? i + 1;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'FROM')) {
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'FROM') {
         return true;
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -1697,35 +1694,34 @@ function hasTopLevelDefaultGraphPattern(sparql: string, braceStart: number): boo
     }
     if (ch === '<') return !!skipSparqlIriRef(sparql, i);
     if (ch === '?' || ch === '$' || ch === '[') return true;
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < braceEnd && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token && token.end <= braceEnd) {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const target = readGraphTarget(sparql, operandStart, prefixes);
-        i = target && target.end <= braceEnd ? target.end : j;
+        i = target && target.end <= braceEnd ? target.end : token.end;
         continue;
       }
-      if (isSparqlKeyword(sparql, i, j, 'FILTER') || isSparqlKeyword(sparql, i, j, 'BIND')) {
-        const exprStart = skipSparqlSpaceAndLineComments(sparql, j);
+      if (token.word === 'FILTER' || token.word === 'BIND') {
+        const exprStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         if (sparql[exprStart] === '(') {
           const exprEnd = skipBalancedParentheses(sparql, exprStart, braceEnd);
-          i = exprEnd ?? j;
+          i = exprEnd ?? token.end;
           continue;
         }
       }
-      if (isSparqlKeyword(sparql, i, j, 'VALUES')) {
-        i = skipValuesClause(sparql, j, braceEnd);
+      if (token.word === 'VALUES') {
+        i = skipValuesClause(sparql, token.end, braceEnd);
         continue;
       }
       if (
-        isSparqlKeyword(sparql, i, j, 'OPTIONAL') ||
-        isSparqlKeyword(sparql, i, j, 'MINUS') ||
-        isSparqlKeyword(sparql, i, j, 'SERVICE') ||
-        isSparqlKeyword(sparql, i, j, 'UNION') ||
-        isSparqlKeyword(sparql, i, j, 'SELECT')
+        token.word === 'OPTIONAL' ||
+        token.word === 'MINUS' ||
+        token.word === 'SERVICE' ||
+        token.word === 'UNION' ||
+        token.word === 'SELECT'
       ) {
-        i = j;
+        i = token.end;
         continue;
       }
       return true;
@@ -1772,18 +1768,17 @@ function assertGraphVariablesAreTopLevel(sparql: string, braceStart: number): vo
       i++;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < braceEnd && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token && token.end <= braceEnd) {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         if (operandStart < braceEnd && readSparqlVariable(sparql, operandStart) && depth !== 0) {
           throw new ScopedQueryViolationError(
             'GRAPH variables must appear at the top level of scoped local queries',
           );
         }
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -1820,19 +1815,17 @@ function hasNestedSelectWithGraphVariable(sparql: string): boolean {
       i++;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'SELECT') && braceDepth > 0) {
-        const end = findNestedSelectEnd(sparql, j, braceDepth);
-        if (rangeContainsGraphVariable(sparql, j, end === -1 ? n : end)) {
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'SELECT' && braceDepth > 0) {
+        const end = findNestedSelectEnd(sparql, token.end, braceDepth);
+        if (rangeContainsGraphVariable(sparql, token.end, end === -1 ? n : end)) {
           return true;
         }
-        i = end === -1 ? j : end + 1;
+        i = end === -1 ? token.end : end + 1;
         continue;
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -1898,17 +1891,15 @@ function rangeContainsGraphVariable(sparql: string, start: number, end: number):
       i = iriEnd && iriEnd <= n ? iriEnd : i + 1;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         if (operandStart < n && readSparqlVariable(sparql, operandStart)) {
           return true;
         }
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -1938,11 +1929,10 @@ function collectExplicitGraphIris(sparql: string): string[] {
       i = end ?? i + 1;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const target = readGraphTarget(sparql, operandStart, prefixes);
         if (!target) {
           throw new ScopedQueryViolationError(
@@ -1953,7 +1943,7 @@ function collectExplicitGraphIris(sparql: string): string[] {
         i = target.end;
         continue;
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -1981,13 +1971,12 @@ function hasGraphClause(sparql: string): boolean {
       i = end ?? i + 1;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'GRAPH') {
         return true;
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -2017,12 +2006,10 @@ function collectGraphVariables(sparql: string): string[] {
       i = end ?? i + 1;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    const token = readStandaloneSparqlWord(sparql, i);
+    if (token) {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const variable = readSparqlVariable(sparql, operandStart);
         if (variable && !seen.has(variable)) {
           seen.add(variable);
@@ -2031,7 +2018,7 @@ function collectGraphVariables(sparql: string): string[] {
         i = operandStart + (variable?.length ?? 0);
         continue;
       }
-      i = j;
+      i = token.end;
       continue;
     }
     i++;
@@ -2667,13 +2654,12 @@ function isDedupSafeBasicGraphPattern(inner: string): boolean {
       continue;
     }
     if (ch === '{' || ch === '}') return false;
-    if (isKeywordStart(inner, i)) {
-      let end = i + 1;
-      while (end < inner.length && isWordContinuation(inner[end])) end++;
-      if (forbidden.some((keyword) => isSparqlKeyword(inner, i, end, keyword))) {
+    const token = readStandaloneSparqlWord(inner, i);
+    if (token) {
+      if (forbidden.includes(token.word)) {
         return false;
       }
-      i = end;
+      i = token.end;
       continue;
     }
     i++;
