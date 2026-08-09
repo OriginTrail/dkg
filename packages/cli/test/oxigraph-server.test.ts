@@ -28,7 +28,7 @@ import {
   SparqlHttpStore,
   type SparqlHttpStoreOptions,
 } from '@origintrail-official/dkg-storage';
-import { attachManagedOxigraphLeaseV1 } from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
+import { attachManagedOxigraphLeaseV1 } from './support/managed-oxigraph-ownership-v1.js';
 import { startOxigraphServer } from '../src/daemon/oxigraph-server.js';
 import { createOxigraphLaunchStrategy } from '../src/daemon/oxigraph-launch-strategy.js';
 import { OXIGRAPH_WATCHDOG_OOM_MARKER } from '../src/daemon/oxigraph-parent-watchdog.js';

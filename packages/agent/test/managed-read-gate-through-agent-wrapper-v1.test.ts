@@ -2,16 +2,16 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import {
   GraphSetIndexStore,
+  ManagedOxigraphBackendUnownedError,
   createTripleStore,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import {
-  ManagedOxigraphBackendUnownedError,
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphSupervisorHandoffV1,
-} from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
+} from './support/managed-oxigraph-ownership-v1.js';
 
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 

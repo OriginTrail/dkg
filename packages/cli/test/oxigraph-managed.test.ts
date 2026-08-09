@@ -24,7 +24,7 @@ import {
 import {
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
-} from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
+} from './support/managed-oxigraph-ownership-v1.js';
 
 import {
   planManagedOxigraph,
