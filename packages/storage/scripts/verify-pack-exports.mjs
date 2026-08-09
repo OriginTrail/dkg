@@ -28,28 +28,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PKG = '@origintrail-official/dkg-storage';
-
-// The authority symbols that must be OFF the public barrel and ON the internal
-// entry. Value exports are asserted in dist/index.js; type-only exports can
-// only appear in dist/index.d.ts, which is asserted for both lists.
-const OWNERSHIP_VALUE_SYMBOLS = [
-  'MANAGED_OXIGRAPH_LEASE_OPTION_KEY',
-  'ManagedOxigraphBackendUnownedError',
-  'attachManagedOxigraphLeaseV1',
-  'createManagedOxigraphOwnershipControllerV1',
-  'extractManagedOxigraphHandoffV1',
-  'extractManagedOxigraphLeaseV1',
-  'isManagedOxigraphOwnershipLeaseV1',
-  'isManagedOxigraphOwnershipLiveV1',
-  'readManagedOxigraphOwnershipSnapshotV1',
-];
-const OWNERSHIP_TYPE_SYMBOLS = [
-  'ManagedOxigraphOwnershipControllerV1',
-  'ManagedOxigraphOwnershipInvalidationV1',
-  'ManagedOxigraphOwnershipLeaseV1',
-  'ManagedOxigraphOwnershipSnapshotV1',
-  'ManagedOxigraphSupervisorHandoffV1',
-];
+const OWNERSHIP_MINT = 'createManagedOxigraphOwnershipControllerV1';
+const INTERNAL_EXPORTS_MARKER = 'managed-ownership-exports:';
 
 const failures = [];
 const check = (ok, label) => {
@@ -108,9 +88,7 @@ for (const [specifier, shouldResolve] of expectations) {
 }
 if (process.argv[2] === 'with-internal-import') {
   const ns = await import('${PKG}/internal/managed-oxigraph-ownership-v1');
-  const expected = ${JSON.stringify(OWNERSHIP_VALUE_SYMBOLS)};
-  const missing = expected.filter((name) => !(name in ns));
-  if (missing.length > 0) { bad += 1; console.error('internal entry missing runtime exports: ' + missing.join(', ')); }
+  console.log('${INTERNAL_EXPORTS_MARKER}' + JSON.stringify(Object.keys(ns).sort()));
 }
 process.exit(bad === 0 ? 0 : 1);
 `;
@@ -118,7 +96,25 @@ process.exit(bad === 0 ? 0 : 1);
   const runProbe = (...args) => spawnSync(process.execPath, [join(scratch, 'probe.mjs'), ...args], { encoding: 'utf8' });
 
   const probe = runProbe('with-internal-import');
-  check(probe.status === 0, `resolution: exports map admits exactly the two entry points, and the internal entry serves every ownership value export${probe.status === 0 ? '' : `\n${probe.stderr}`}`);
+  const markerLine = probe.stdout
+    .split(/\r?\n/u)
+    .find((line) => line.startsWith(INTERNAL_EXPORTS_MARKER));
+  let ownershipValueSymbols = [];
+  try {
+    ownershipValueSymbols = JSON.parse(markerLine?.slice(INTERNAL_EXPORTS_MARKER.length) ?? '[]');
+  } catch {
+    // The checks below report both the failed probe and the empty surface.
+  }
+  check(
+    probe.status === 0,
+    `resolution: exports map admits exactly the two entry points and imports the internal entry${
+      probe.status === 0 ? '' : `\n${probe.stderr}`
+    }`,
+  );
+  check(
+    ownershipValueSymbols.includes(OWNERSHIP_MINT),
+    'surface: internal runtime entry exposes the ownership-controller mint',
+  );
 
   // --- surface check on the packed artifact ---------------------------------
   const barrelJs = readFileSync(join(pkgdir, 'dist', 'index.js'), 'utf8');
@@ -132,31 +128,48 @@ process.exit(bad === 0 ? 0 : 1);
   const stripComments = (source) => source
     .replace(/\/\*[\s\S]*?\*\//g, '')
     .replace(/^\s*\/\/.*$/gm, '');
-  const surfaceCheck = (js, dts, label) => {
+  const ownershipDeclarationSymbols = [
+    ...new Set(
+      [...stripComments(internalDts).matchAll(
+        /\bexport\s+(?:declare\s+)?(?:abstract\s+)?(?:class|const|enum|function|interface|let|type|var)\s+([A-Za-z_$][\w$]*)/gu,
+      )].map((match) => match[1]),
+    ),
+  ].sort();
+  check(
+    ownershipDeclarationSymbols.includes(OWNERSHIP_MINT) &&
+      ownershipValueSymbols.every((name) => ownershipDeclarationSymbols.includes(name)),
+    'surface: internal declarations are the source of truth for every runtime export',
+  );
+  const surfaceCheck = (js, dts, label, report = check) => {
     const code = stripComments(js);
     const decl = stripComments(dts);
-    const leakedValues = OWNERSHIP_VALUE_SYMBOLS.filter((s) => new RegExp(`\\b${s}\\b`).test(code));
-    const leakedTypes = [...OWNERSHIP_VALUE_SYMBOLS, ...OWNERSHIP_TYPE_SYMBOLS]
-      .filter((s) => new RegExp(`\\b${s}\\b`).test(decl));
-    check(leakedValues.length === 0, `surface: barrel js exports no ownership value${label}${leakedValues.length ? ` (leaked: ${leakedValues.join(', ')})` : ''}`);
-    check(leakedTypes.length === 0, `surface: barrel d.ts names no ownership symbol${label}${leakedTypes.length ? ` (leaked: ${leakedTypes.join(', ')})` : ''}`);
+    const leakedValues = ownershipValueSymbols.filter((symbol) =>
+      new RegExp(`\\b${symbol}\\b`).test(code));
+    const leakedDeclarations = ownershipDeclarationSymbols.filter((symbol) =>
+      new RegExp(`\\b${symbol}\\b`).test(decl));
+    const linksAuthorityModule = [code, decl].some((source) =>
+      /managed-oxigraph-ownership-v1(?:-internal)?/u.test(source));
+    report(
+      leakedValues.length === 0,
+      `surface: barrel js exports no ownership value${label}${
+        leakedValues.length ? ` (leaked: ${leakedValues.join(', ')})` : ''
+      }`,
+    );
+    report(
+      leakedDeclarations.length === 0,
+      `surface: barrel d.ts names no ownership symbol${label}${
+        leakedDeclarations.length ? ` (leaked: ${leakedDeclarations.join(', ')})` : ''
+      }`,
+    );
+    report(
+      !linksAuthorityModule,
+      `surface: barrel does not re-export the ownership module${label}`,
+    );
+    return leakedValues.length === 0 &&
+      leakedDeclarations.length === 0 &&
+      !linksAuthorityModule;
   };
   surfaceCheck(barrelJs, barrelDts, '');
-
-  // Runtime value exports are proven by the probe's real import above. Types
-  // do not exist at runtime, so they are asserted statically: the shim's d.ts
-  // must link to the authority module, and the linked module's d.ts must name
-  // every type. Both halves matter — the star re-export alone names nothing.
-  check(
-    internalDts.includes("managed-oxigraph-ownership-v1-internal"),
-    'surface: internal entry d.ts re-exports the authority module',
-  );
-  const targetDts = readFileSync(join(pkgdir, 'dist', 'managed-oxigraph-ownership-v1-internal.d.ts'), 'utf8');
-  const missingTypes = OWNERSHIP_TYPE_SYMBOLS.filter((s) => !new RegExp(`\\b${s}\\b`).test(targetDts));
-  check(
-    missingTypes.length === 0,
-    `surface: authority d.ts declares every ownership type${missingTypes.length ? ` (missing: ${missingTypes.join(', ')})` : ''}`,
-  );
 
   // --- mutant 1: delete the exports map → resolution gate must fail ---------
   const pkgJsonPath = join(pkgdir, 'package.json');
@@ -171,13 +184,16 @@ process.exit(bad === 0 ? 0 : 1);
   check(restoredProbe.status === 0, 'mutant: restoring the map restores the gate');
 
   // --- mutant 2: re-export the mint from the barrel → surface gate must fail
-  const mutantJs = `${barrelJs}\nexport { createManagedOxigraphOwnershipControllerV1 } from './managed-oxigraph-ownership-v1-internal.js';\n`;
-  const mutantDts = `${barrelDts}\nexport { createManagedOxigraphOwnershipControllerV1 } from './managed-oxigraph-ownership-v1-internal.js';\n`;
-  const mutantLeakedJs = OWNERSHIP_VALUE_SYMBOLS.filter((s) => new RegExp(`\\b${s}\\b`).test(mutantJs));
-  const mutantLeakedDts = OWNERSHIP_VALUE_SYMBOLS.filter((s) => new RegExp(`\\b${s}\\b`).test(mutantDts));
+  const mutantExport = `export { ${OWNERSHIP_MINT} } from './internal/managed-oxigraph-ownership-v1.js';`;
+  const mutantJs = `${barrelJs}\n${mutantExport}\n`;
+  const mutantDts = `${barrelDts}\n${mutantExport}\n`;
+  const mutantFailures = [];
+  const mutantClean = surfaceCheck(mutantJs, mutantDts, ' in the mint mutant', (ok, label) => {
+    if (!ok) mutantFailures.push(label);
+  });
   check(
-    mutantLeakedJs.length > 0 && mutantLeakedDts.length > 0,
-    'mutant: re-exporting the mint from the barrel fails the surface gate',
+    !mutantClean && mutantFailures.length === 3,
+    'mutant: re-exporting the mint fails every applicable real surface-gate check',
   );
 } finally {
   rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
