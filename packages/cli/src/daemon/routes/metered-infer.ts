@@ -16,6 +16,7 @@ import type { RequestContext } from "./context.js";
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from "../http-utils.js";
 import { handleInfer, setInferenceBackend, inferenceBackendConfigured } from "../metering/infer-http-core.js";
 import { makeOdysseusBackend } from "../metering/odysseus-backend.js";
+import { parseInferenceBackendConfig } from "./infer-wiring-config.js";
 import { chainIdOf } from "./metering.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -49,49 +50,31 @@ function tryWireBackendFromConfig(home: string): void {
   if (wiringAttempted) return;                               // parsed once; restart to re-read
   wiringAttempted = true;
   try {
-    const cfg = JSON.parse(readFileSync(f, "utf8"));
-    const baseUrl = String(cfg.baseUrl ?? "");
-    const modelId = String(cfg.modelId ?? "");
-    if (!/^http:\/\/(127\.0\.0\.1|localhost)(:\d+)?/.test(baseUrl)) {
-      throw new Error("baseUrl must be loopback (G4: the model sidecar is never exposed)");
-    }
-    if (!modelId) throw new Error("modelId required");
-    const specialTokenIds: number[] = [];
-    for (const r of cfg.specialTokenIdRanges ?? []) {
-      const [a, b] = [Number(r[0]), Number(r[1])];
-      if (!Number.isInteger(a) || !Number.isInteger(b) || b < a || b - a > 10_000) throw new Error("bad specialTokenIdRanges");
-      for (let id = a; id <= b; id++) specialTokenIds.push(id);
-    }
-    if (specialTokenIds.length === 0) throw new Error("specialTokenIdRanges required — an empty special set would bill control tokens");
-    const expected = cfg.expectedTokenizerBundleDigest;
-    if (typeof expected !== "string" || !expected.startsWith("sha256:")) {
-      throw new Error("expectedTokenizerBundleDigest required — without a pinned bundle the sidecar tokenizer is unaccountable");
-    }
+    // Validation lives in infer-wiring-config.ts — a PURE module Bo's clean-room
+    // verifier executes directly. His I0 block (fe9485f0) found four fail-open
+    // defects in the inline predecessor; the parser now rejects them all, and a
+    // rejection keeps the route unwired at 503, never "configured but degraded".
+    const parsed = parseInferenceBackendConfig(JSON.parse(readFileSync(f, "utf8")));
+    if (!parsed.ok) throw new Error(parsed.reason);
+    const { baseUrl, modelId, specialTokenIds, expectedTokenizerBundleDigest, timeoutMs, maxConcurrent } = parsed.cfg;
 
-    // ── transport hardening, required by the buyer for I0 (event 71f17798) ──
-    // The backend client takes an injectable fetch, so every defense lives HERE
-    // in the wiring — outside the audited pin. Three properties:
-    //   * loopback is re-checked on EVERY request, not just at config parse, and
-    //     redirects are hard errors — a compromised sidecar answering 302 to an
-    //     external host must not turn the node into an SSRF proxy;
-    //   * every sidecar call carries a hard timeout, so a hung model cannot
-    //     wedge the route;
-    //   * concurrency is capped: beyond maxConcurrent in-flight generations the
-    //     serve fails fast (E_BACKEND_BUSY → deterministic 502) instead of
-    //     queueing unboundedly. Refusal over backpressure collapse.
-    const timeoutMs = Math.min(Number(cfg.timeoutMs ?? 120_000), 600_000);
-    const maxConcurrent = Math.max(1, Math.min(Number(cfg.maxConcurrent ?? 2), 16));
+    // ── transport hardening (buyer's I0 list, event 71f17798) ──
+    //   * loopback re-checked on EVERY request against the LITERAL address, and
+    //     redirects are hard errors — a compromised sidecar answering 302 must
+    //     not turn the node into an SSRF proxy;
+    //   * every sidecar call carries a hard timeout;
+    //   * concurrency fails fast (E_BACKEND_BUSY → deterministic 502) instead
+    //     of queueing unboundedly. The parser guarantees both numbers are
+    //     finite integers in bounds, so the cap cannot be NaN-disabled.
     let inFlight = 0;
     const hardenedFetch = async (url: string, init: { method: string; headers: Record<string, string>; body?: string }) => {
       const u = new URL(url);
-      if (u.protocol !== "http:" || !["127.0.0.1", "localhost"].includes(u.hostname)) {
-        throw new Error("E_NON_LOOPBACK_FETCH");
-      }
+      if (u.protocol !== "http:" || u.hostname !== "127.0.0.1") throw new Error("E_NON_LOOPBACK_FETCH");
       return fetch(url, { ...init, redirect: "error", signal: AbortSignal.timeout(timeoutMs) }) as never;
     };
     const inner = makeOdysseusBackend({
       baseUrl, modelId, specialTokenIds,
-      expectedTokenizerBundleDigest: expected,
+      expectedTokenizerBundleDigest,
       fetchImpl: hardenedFetch as never,
     });
     setInferenceBackend({
@@ -101,7 +84,7 @@ function tryWireBackendFromConfig(home: string): void {
         try { return await inner.serve(request); } finally { inFlight--; }
       },
     });
-    console.log(`[metered-infer] backend wired: ${modelId} via ${baseUrl} (bundle ${expected.slice(0, 18)}…)`);
+    console.log(`[metered-infer] backend wired: ${modelId} via ${baseUrl} (bundle ${expectedTokenizerBundleDigest.slice(0, 18)}…, timeout ${timeoutMs}ms, cap ${maxConcurrent})`);
   } catch (e: unknown) {
     wiringError = String((e as Error)?.message ?? e);
     console.error(`[metered-infer] inference-backend.json REJECTED, route stays 503: ${wiringError}`);

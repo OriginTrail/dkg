@@ -37,7 +37,7 @@ L.setDebitGate((h, p, now) => D.debitAllowed(h, p, now));
 const VOCAB = ["", "the", "cat", "sat", "on", "mat", " "];
 const idOf = (w) => { const i = VOCAB.indexOf(w); return i >= 0 ? i : VOCAB.push(w) - 1; };
 const encode = (t) => [...t.matchAll(/ |[^ ]+/g)].map((m) => idOf(m[0]));
-const BUNDLE_DIGEST = "sha256:wiring-bundle-v1";
+const BUNDLE_DIGEST = "sha256:" + "ab".repeat(32);   // parser requires exactly 64 hex
 const manifest = { instanceId: "wire-1", weightsDigest: "sha256:w", tokenizerBundleDigest: BUNDLE_DIGEST, engineBuild: "stub", samplerConfig: { temperature: "0" }, chatTemplateDigest: "sha256:c" };
 const sidecar = createServer(async (req, res) => {
   let b = ""; for await (const c of req) b += c;
@@ -157,10 +157,10 @@ console.log("\nvalid config wires the backend and it BILLS end-to-end:");
 
 console.log("\nrejected config classes (each must stay 503):");
 const REJECTS = [
-  ["non-loopback baseUrl (G4)", { baseUrl: "http://10.0.0.5:9312", modelId: "m", specialTokenIdRanges: [[1, 2]], expectedTokenizerBundleDigest: "sha256:x" }],
+  ["non-loopback baseUrl (G4)", { baseUrl: "http://10.0.0.5:9312", modelId: "m", specialTokenIdRanges: [[1, 2]], expectedTokenizerBundleDigest: "sha256:" + "ef".repeat(32) }],
   ["missing tokenizer bundle pin", { baseUrl: sidecarUrl, modelId: "m", specialTokenIdRanges: [[1, 2]] }],
-  ["empty special-token ranges", { baseUrl: sidecarUrl, modelId: "m", specialTokenIdRanges: [], expectedTokenizerBundleDigest: "sha256:x" }],
-  ["missing modelId", { baseUrl: sidecarUrl, specialTokenIdRanges: [[1, 2]], expectedTokenizerBundleDigest: "sha256:x" }],
+  ["empty special-token ranges", { baseUrl: sidecarUrl, modelId: "m", specialTokenIdRanges: [], expectedTokenizerBundleDigest: "sha256:" + "ef".repeat(32) }],
+  ["missing modelId", { baseUrl: sidecarUrl, specialTokenIdRanges: [[1, 2]], expectedTokenizerBundleDigest: "sha256:" + "ef".repeat(32) }],
 ];
 for (const [name, cfg] of REJECTS) {
   // the backend global lives in the SHARED core — unwire it so the fresh
@@ -179,7 +179,7 @@ console.log("\na sidecar whose bundle drifts from the config pin cannot serve:")
 {
   R.setInferenceBackend(null);
   const R4 = await import(join(dist, "routes/metered-infer.js") + `?drift=${Date.now()}`);
-  writeFileSync(CONFIG_PATH, JSON.stringify({ baseUrl: sidecarUrl, modelId: "m", specialTokenIdRanges: [[1000, 1001]], expectedTokenizerBundleDigest: "sha256:some-other-bundle" }));
+  writeFileSync(CONFIG_PATH, JSON.stringify({ baseUrl: sidecarUrl, modelId: "m", specialTokenIdRanges: [[1000, 1001]], expectedTokenizerBundleDigest: "sha256:" + "cd".repeat(32) }));
   const req = Readable.from([Buffer.from(JSON.stringify(inferBody()))]); req.method = "POST";
   const captured = { status: 0, body: null };
   const res = { writableEnded: false, writeHead(s) { captured.status = s; return this; }, end(b) { this.writableEnded = true; try { captured.body = JSON.parse(b); } catch { captured.body = b; } }, setHeader() {} };
@@ -212,7 +212,7 @@ console.log("\ntransport hardening (Bo's I0 requirements, 71f17798):");
   await new Promise((r) => hang.listen(0, "127.0.0.1", r));
   R.setInferenceBackend(null);
   const R6 = await import(join(dist, "routes/metered-infer.js") + `?hang=${Date.now()}`);
-  writeFileSync(CONFIG_PATH, JSON.stringify({ baseUrl: `http://127.0.0.1:${hang.address().port}`, modelId: "m", specialTokenIdRanges: [[1000, 1001]], expectedTokenizerBundleDigest: BUNDLE_DIGEST, timeoutMs: 700 }));
+  writeFileSync(CONFIG_PATH, JSON.stringify({ baseUrl: `http://127.0.0.1:${hang.address().port}`, modelId: "m", specialTokenIdRanges: [[1000, 1001]], expectedTokenizerBundleDigest: BUNDLE_DIGEST, timeoutMs: 1000 }));
   const req = Readable.from([Buffer.from(JSON.stringify(inferBody()))]); req.method = "POST";
   const captured = { status: 0, body: null };
   const res = { writableEnded: false, writeHead(st) { captured.status = st; return this; }, end(b) { this.writableEnded = true; try { captured.body = JSON.parse(b); } catch { captured.body = b; } }, setHeader() {} };
