@@ -144,7 +144,10 @@ interface AgentProfileAdmittedSliceRuntimeV1 {
   readonly signal: AbortSignal;
   readonly deadlineMs: number;
   readonly nowMs: () => number;
-  readonly transportSlice?: AgentProfileReconcileTransportSliceV1;
+  readonly loadInventoryObject: (
+    request: AgentProfileInventoryLoadRequestV1,
+    signal: AbortSignal,
+  ) => Promise<AgentProfileInventoryLoadResultV1>;
   readonly preparer: AgentProfileActivePreparerV1;
   stop(
     phase: AgentProfileReconcileSliceResultV1['phase'],
@@ -152,6 +155,39 @@ interface AgentProfileAdmittedSliceRuntimeV1 {
     requests?: number,
     wireBytes?: number,
   ): AgentProfileReconcileSliceResultV1;
+}
+
+interface AgentProfileSliceSourceV1 {
+  readonly loadInventoryObject: AgentProfileAdmittedSliceRuntimeV1['loadInventoryObject'];
+  readonly preparer: AgentProfileActivePreparerV1;
+  release(): void;
+}
+
+function normalizeSliceSourceV1(
+  transportSlice: AgentProfileReconcileTransportSliceV1 | undefined,
+  legacyLoader: CreateAgentProfileReconcilerOptionsV1['loadInventoryObject'],
+  openPreparer: AgentProfileReceiverV1['openPreparer'],
+): AgentProfileSliceSourceV1 {
+  if (transportSlice !== undefined) {
+    try {
+      return Object.freeze({
+        loadInventoryObject: transportSlice.loadInventoryObject.bind(transportSlice),
+        preparer: openPreparer(transportSlice),
+        release: transportSlice.release.bind(transportSlice),
+      });
+    } catch (error) {
+      transportSlice.release();
+      throw error;
+    }
+  }
+  if (legacyLoader === undefined) {
+    throw new Error('agent-profile reconciler has no admitted slice source');
+  }
+  return Object.freeze({
+    loadInventoryObject: legacyLoader,
+    preparer: openPreparer(),
+    release: () => undefined,
+  });
 }
 
 /**
@@ -252,17 +288,6 @@ export async function createAgentProfileReconcilerV1(
         callerSignal.addEventListener('abort', onAbort, { once: true });
         listening = true;
       }
-      continuationStartedAtMs ??= initial.nowMs;
-      admittedSlices += 1;
-      if (remainingMs === 0) {
-        controller.abort(new Error('agent-profile reconcile slice deadline exceeded'));
-      } else {
-        timeout = setTimeout(
-          () => controller.abort(new Error('agent-profile reconcile slice deadline exceeded')),
-          remainingMs,
-        );
-        timeout.unref?.();
-      }
       const baseRuntime = {
         admittedContext,
         admittedAtMs: initial.nowMs,
@@ -279,7 +304,10 @@ export async function createAgentProfileReconcilerV1(
           callerSignal.throwIfAborted();
           return result('paused', phase, requests, wireBytes, outcomes);
         },
-      } satisfies Omit<AgentProfileAdmittedSliceRuntimeV1, 'transportSlice' | 'preparer'>;
+      } satisfies Omit<
+        AgentProfileAdmittedSliceRuntimeV1,
+        'loadInventoryObject' | 'preparer'
+      >;
       if (controller.signal.aborted) return baseRuntime.stop(currentPhase(), []);
       const transportSlice = transport?.openSlice(Object.freeze({
         signal: controller.signal,
@@ -289,17 +317,31 @@ export async function createAgentProfileReconcilerV1(
       if (transport !== undefined && transportSlice === null) {
         return result('deferred', currentPhase(), 0, 0, []);
       }
+      const source = normalizeSliceSourceV1(
+        transportSlice ?? undefined,
+        loadInventoryObject,
+        openPreparer,
+      );
       try {
+        continuationStartedAtMs ??= initial.nowMs;
+        admittedSlices += 1;
+        if (remainingMs === 0) {
+          controller.abort(new Error('agent-profile reconcile slice deadline exceeded'));
+        } else {
+          timeout = setTimeout(
+            () => controller.abort(new Error('agent-profile reconcile slice deadline exceeded')),
+            remainingMs,
+          );
+          timeout.unref?.();
+        }
         const runtime: AgentProfileAdmittedSliceRuntimeV1 = Object.freeze({
           ...baseRuntime,
-          preparer: openPreparer(transportSlice ?? undefined),
-          ...(transportSlice === undefined || transportSlice === null
-            ? {}
-            : { transportSlice }),
+          loadInventoryObject: source.loadInventoryObject,
+          preparer: source.preparer,
         });
         return await run(runtime);
       } finally {
-        transportSlice?.release();
+        source.release();
       }
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
@@ -318,8 +360,7 @@ export async function createAgentProfileReconcilerV1(
     advances += 1;
     const slice = await traversal.advance(
       async (objectDigest, expectedKind, loadSignal, path) => {
-        const loaded = await (runtime.transportSlice?.loadInventoryObject
-          ?? loadInventoryObject!)(
+        const loaded = await runtime.loadInventoryObject(
           Object.freeze({
             rootDescriptorDigest: rootEnvelope.objectDigest,
             objectDigest,

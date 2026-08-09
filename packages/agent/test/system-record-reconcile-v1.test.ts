@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
   SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS,
+  SYSTEM_RECORD_MAX_CONTINUATION_SLICES,
   buildSystemRecordInventoryTreeV1,
   buildSystemRecordProviderSignatureMessageV1,
   computeSystemRecordRootDescriptorDigestV1,
@@ -116,6 +117,51 @@ describe('agent-profile System Record reconciler V1', () => {
       requests: fetchExact.mock.calls.length,
       negativeMemoEntries: 0,
     });
+  });
+
+  it('accounts every failed and successful provider attempt in inventory continuation bytes', async () => {
+    const fixture = await publishedFixture();
+    const fetchExact = vi.fn(async (
+      providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (providerId === 'provider-a' && lookup.type === 'inventory-object') {
+        return Object.freeze({ outcome: 'not-found', wireBytes: 1_000 });
+      }
+      const artifact = await fixture.store.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 1 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({ artifact, wireBytes: 1, release: vi.fn() }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a', 'provider-b'],
+      fetchExact,
+      controlAdmission: { tryReserve: () => null },
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: receiver(fixture.store, vi.fn()),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      inventoryRequests: 1,
+      inventoryWireBytes: 1_001,
+    });
+    expect(reconciler.stats()).toMatchObject({
+      inventoryRequests: 1,
+      inventoryWireBytes: 1_001,
+    });
+    expect(fetchExact.mock.calls.map(([providerId]) => providerId))
+      .toEqual(['provider-a', 'provider-b']);
   });
 
   it('pins one provider root and completes one active row across bounded slices', async () => {
@@ -427,6 +473,73 @@ describe('agent-profile System Record reconciler V1', () => {
     });
     expect(loadInventoryObject).not.toHaveBeenCalled();
     expect(reconciler.stats()).toMatchObject({ admittedSlices: 0, active: 0, queued: 0 });
+  });
+
+  it('does not consume continuation slices while the shared transport is busy', async () => {
+    const fixture = await publishedFixture();
+    const now = Date.now();
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      const artifact = await fixture.store.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 1 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: { tryReserve: () => null },
+    });
+    const held = transport.openSlice(Object.freeze({
+      signal: new AbortController().signal,
+      deadlineMs: now + 3_000,
+      nowMs: () => now,
+    }));
+    if (held === null) throw new Error('test transport was not initially available');
+    const baseReceiver = receiver(fixture.store, vi.fn());
+    const openPreparer = vi.fn(baseReceiver.openPreparer.bind(baseReceiver));
+    const trackedReceiver: AgentProfileReceiverV1 = Object.freeze({
+      openPreparer,
+      receiveActive: baseReceiver.receiveActive.bind(baseReceiver),
+    });
+    const admission = admissionGate(false, () => now);
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      transport,
+      receiver: trackedReceiver,
+    });
+
+    for (let attempt = 0; attempt < SYSTEM_RECORD_MAX_CONTINUATION_SLICES + 2; attempt += 1) {
+      await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+        status: 'deferred',
+        phase: 'inventory',
+      });
+    }
+    expect(reconciler.stats()).toMatchObject({ admittedSlices: 0, active: 0, queued: 0 });
+    expect(openPreparer).not.toHaveBeenCalled();
+    expect(fetchExact).not.toHaveBeenCalled();
+    expect(admission.stats()).toMatchObject({ active: 0 });
+
+    held.release();
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+    });
+    expect(reconciler.stats()).toMatchObject({ admittedSlices: 1 });
+    expect(openPreparer).toHaveBeenCalledTimes(1);
+    expect(fetchExact).toHaveBeenCalledTimes(1);
   });
 
   it('never queues a concurrent slice and releases admission after close aborts I/O', async () => {
