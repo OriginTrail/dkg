@@ -28,12 +28,14 @@ import {
   type StoreControlBarrierBlockers,
   type StoreGenerationSeal,
 } from './store-barrier-contract.js';
+import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
 
 /** Label carried on a seal when the caller does not name a generation. */
 const BARRIER_ANY_GENERATION = '*';
 
 interface BarrierEntry {
   storeId: object;
+  coalescingKey: string | object;
   purpose: string;
   transition: () => Promise<unknown>;
   promise: Promise<unknown>;
@@ -135,15 +137,53 @@ export class StoreControlBarrierCoordinator {
    * idempotent control transition; do not use one purpose for two different
    * transitions.
    */
-  enqueue(
+  enqueueLegacy(
     storeId: object,
     purpose: string,
     transition: () => Promise<unknown>,
     generation?: string,
     timeoutMs?: number,
   ): Promise<unknown> {
+    return this.enqueueWithKey(
+      storeId,
+      purpose,
+      purpose,
+      transition,
+      generation,
+      timeoutMs,
+    );
+  }
+
+  enqueueTyped<T>(
+    storeId: object,
+    key: StoreControlBarrierKeyV1<T>,
+    transition: () => Promise<T>,
+    generation?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
+    // Sound at this boundary: coalescing uses this exact key object, whose
+    // phantom member binds every caller sharing it to the same T.
+    return this.enqueueWithKey(
+      storeId,
+      key,
+      key.purpose,
+      transition,
+      generation,
+      timeoutMs,
+    ) as Promise<T>;
+  }
+
+  private enqueueWithKey(
+    storeId: object,
+    coalescingKey: string | object,
+    purpose: string,
+    transition: () => Promise<unknown>,
+    generation?: string,
+    timeoutMs?: number,
+  ): Promise<unknown> {
     const existing = this.barriers.find(
-      (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
+      (barrier) =>
+        barrier.storeId === storeId && barrier.coalescingKey === coalescingKey,
     );
     if (existing !== undefined) {
       this.coalescedTotal += 1;
@@ -158,6 +198,7 @@ export class StoreControlBarrierCoordinator {
     });
     const barrier: BarrierEntry = {
       storeId,
+      coalescingKey,
       purpose,
       transition,
       promise,

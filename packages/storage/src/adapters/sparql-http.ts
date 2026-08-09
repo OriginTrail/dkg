@@ -757,10 +757,10 @@ export class SparqlHttpStore implements TripleStore {
           // This domain barrier returns typed lifecycle data. Use the scheduler's
           // result-preserving path so a coalesced caller receives the first
           // transition's result rather than an unassigned local capture.
-          barrier: (purpose, transition) =>
-            externalStorePriorityScheduler.runControlBarrier(
+          barrier: (key, transition) =>
+            externalStorePriorityScheduler.runTypedControlBarrier(
               this,
-              purpose,
+              key,
               transition,
               this.ownershipLease
                 ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration

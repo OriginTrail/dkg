@@ -72,7 +72,7 @@ describe('sparql-http managed epoch handoff', () => {
     // local capture. A result-free variant existed alongside it and this test
     // asserted it was never called — a public API pinned as unreachable, which
     // is why it is gone rather than merely unused.
-    const resultBarrier = vi.spyOn(externalStorePriorityScheduler, 'runControlBarrier');
+    const resultBarrier = vi.spyOn(externalStorePriorityScheduler, 'runTypedControlBarrier');
     const ownership = createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint);
     ownership.bindReadyGeneration();
     const options = attachManagedOxigraphLeaseV1(

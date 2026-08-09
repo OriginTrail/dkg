@@ -80,6 +80,10 @@ export {
   type SystemRecordLaneStateV1,
   type SystemRecordTransactionExecutorV1,
 } from './system-record-materializer-v1.js';
+export {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from './store-control-barrier-key-v1.js';
 export type {
   SystemRecordMaterializationEpochRotationV1,
 } from './system-record-materialization-epoch-contract-v1.js';

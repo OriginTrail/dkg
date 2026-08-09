@@ -17,6 +17,7 @@ import {
   type SystemRecordLaneExecutionBindingV1,
   type SystemRecordLaneSessionV1,
 } from '../src/system-record-materializer-v1.js';
+import type { StoreControlBarrierKeyV1 } from '../src/store-control-barrier-key-v1.js';
 import type {
   SystemRecordAtomicApplySettlementV1,
   SystemRecordAtomicRecoveryRegistrarV1,
@@ -89,8 +90,9 @@ class RecordingBarrier {
     this.active?.inside.push(step);
   }
 
-  run = async <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+  run = async <T>(key: StoreControlBarrierKeyV1<T>, transition: () => Promise<T>): Promise<T> => {
     if (this.failWith) throw this.failWith;
+    const purpose = key.purpose;
     const section = { purpose, inside: [] as string[] };
     this.sections.push(section);
     const previous = this.active;
@@ -435,13 +437,14 @@ class GateBarrier extends RecordingBarrier {
   constructor() {
     super();
     const recordAndRun = this.run;
-    this.run = async <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+    this.run = async <T>(key: StoreControlBarrierKeyV1<T>, transition: () => Promise<T>): Promise<T> => {
+      const purpose = key.purpose;
       const gate = this.gates.get(purpose);
       if (gate) {
         this.arrived.get(purpose)?.();
         await gate;
       }
-      return recordAndRun(purpose, transition);
+      return recordAndRun(key, transition);
     };
   }
 
@@ -474,8 +477,9 @@ class SettlementTailGateBarrier extends RecordingBarrier {
   constructor(private readonly gatedPurpose: string) {
     super();
     const recordAndRun = this.run;
-    this.run = async <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
-      const result = await recordAndRun(purpose, transition);
+    this.run = async <T>(key: StoreControlBarrierKeyV1<T>, transition: () => Promise<T>): Promise<T> => {
+      const result = await recordAndRun(key, transition);
+      const purpose = key.purpose;
       if (purpose === this.gatedPurpose) {
         this.reachedTail();
         await this.tail;
@@ -503,14 +507,15 @@ class TransitionTimeoutBarrier extends RecordingBarrier {
   constructor() {
     super();
     const recordAndRun = this.run;
-    this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+    this.run = <T>(key: StoreControlBarrierKeyV1<T>, transition: () => Promise<T>): Promise<T> => {
+      const purpose = key.purpose;
       if (
         purpose !== 'system-record.shutdown' &&
         purpose !== 'system-record.disable' &&
         purpose !== 'system-record.recovery'
-      ) return recordAndRun(purpose, transition);
+      ) return recordAndRun(key, transition);
 
-      const physical = recordAndRun(purpose, transition);
+      const physical = recordAndRun(key, transition);
       void physical.finally(() => { this.physicalSettled = true; }).catch(() => undefined);
       return new Promise<T>((resolve, reject) => {
         this.rejects.set(purpose, reject);
@@ -533,11 +538,12 @@ class WaitPhaseTimeoutBarrier extends RecordingBarrier {
   constructor(private readonly rejectedPurpose = 'system-record.shutdown') {
     super();
     const recordAndRun = this.run;
-    this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
+    this.run = <T>(key: StoreControlBarrierKeyV1<T>, transition: () => Promise<T>): Promise<T> => {
+      const purpose = key.purpose;
       if (purpose === this.rejectedPurpose) {
         return Promise.reject(new Error('STORE_CONTROL_BARRIER_WAIT_TIMEOUT'));
       }
-      return recordAndRun(purpose, transition);
+      return recordAndRun(key, transition);
     };
   }
 }
@@ -551,8 +557,8 @@ class ControlledWaitPhaseTimeoutBarrier extends RecordingBarrier {
   constructor(private readonly rejectedPurpose: string) {
     super();
     const recordAndRun = this.run;
-    this.run = <T>(purpose: string, transition: () => Promise<T>): Promise<T> => {
-      if (purpose !== this.rejectedPurpose) return recordAndRun(purpose, transition);
+    this.run = <T>(key: StoreControlBarrierKeyV1<T>, transition: () => Promise<T>): Promise<T> => {
+      if (key.purpose !== this.rejectedPurpose) return recordAndRun(key, transition);
       this.reachedWait();
       return new Promise<T>((_resolve, reject) => { this.rejectWait = reject; });
     };

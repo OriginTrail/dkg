@@ -5,6 +5,7 @@ import {
   STORE_ADMISSION_SHARED_BYPASS_LIMIT,
   StoreControlBarrierTimeoutError,
   StorePriorityScheduler,
+  getExternalStorePrioritySchedulerSnapshot,
   type StoreAdmissionV1,
   type StoreQueuedAdmissionV1,
 } from '../src/store-priority-scheduler.js';
@@ -59,6 +60,10 @@ describe('StorePriorityScheduler admission V1 — default-path invariance', () =
     };
 
     expect(admission.auditId).toBe('audit-1');
+  });
+
+  it('retains the deprecated occupied-slot metric on the public snapshot', () => {
+    expect(getExternalStorePrioritySchedulerSnapshot().barrierWaitOccupiedSlotMs).toBe(0);
   });
 
   it('does no admission work at all when nothing carries admission metadata', async () => {
@@ -116,6 +121,7 @@ describe('StorePriorityScheduler admission V1 — default-path invariance', () =
       admissionBoundHolds: 0,
       barrierPending: 0,
       barrierInflight: 0,
+      barrierWaitOccupiedSlotMs: 0,
     });
 
     await Promise.allSettled(settled);
@@ -764,6 +770,7 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     // field; it reported a hardcoded 0, so asserting it proved only that a
     // literal equals itself.
     expect(snapshot.barrierWaitMs).toBeGreaterThan(0);
+    expect(snapshot.barrierWaitOccupiedSlotMs).toBe(0);
     expect(snapshot).toMatchObject({ barrierPending: 0, barrierInflight: 0 });
 
     await Promise.all([writer, queueFiller]);

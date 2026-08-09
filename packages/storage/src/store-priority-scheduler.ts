@@ -69,6 +69,11 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   barrierTimeouts: number;
   /** Cumulative barrier wait. Proves a measured wait actually happened. */
   barrierWaitMs: number;
+  /**
+   * @deprecated Always `0` since barriers moved outside ordinary execution
+   * slots. Retained only for source and snapshot-shape compatibility.
+   */
+  barrierWaitOccupiedSlotMs: number;
 }
 
 /**
@@ -138,6 +143,7 @@ import {
   StoreControlBarrierCoordinator,
   type StoreBarrierHostV1,
 } from './store-control-barrier-v1-internal.js';
+import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
 import {
   StoreControlBarrierTimeoutError,
   type StoreControlBarrierBlockers,
@@ -675,6 +681,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       barrierCoalesced: barrier.coalesced,
       barrierTimeouts: barrier.timeouts,
       barrierWaitMs: barrier.waitMs,
+      barrierWaitOccupiedSlotMs: 0,
     };
   }
 
@@ -696,7 +703,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // already-aborted caller signal any more than by queue capacity.
     if (admission !== undefined && !isStoreQueuedAdmissionV1(admission)) {
       // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-      return (await this.barrierCoordinator.enqueue(
+      return (await this.barrierCoordinator.enqueueLegacy(
         admission.storeId,
         operation,
         work,
@@ -1075,13 +1082,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * value under their own `T`. Every caller today passes the same purpose from
    * a single call site, which is what makes it survivable rather than correct.
    *
-   * NOT marked `@deprecated`. It carried that tag pointing at a result-free
-   * wrapper, which cannot serve the only caller there is — the system-record
-   * lane barrier returns typed lifecycle data a coalesced caller must receive.
-   * Deprecating the sole working API in favour of one that cannot replace it
-   * reads as "migrate" while offering nowhere to migrate to. #2179 tracks the
-   * typed replacement; the warning belongs on the cast, which is above.
+   * New lifecycle code can use {@link runTypedControlBarrier}, whose key object
+   * binds coalescing identity to one result type. This method remains only for
+   * callers that already use the historical free-form string contract.
    *
+   * @deprecated Use {@link runTypedControlBarrier} with a key created by
+   * `createStoreControlBarrierKeyV1`.
    * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(
@@ -1092,13 +1098,30 @@ export class StorePriorityScheduler extends ObservableScheduler {
     timeoutMs?: number,
   ): Promise<T> {
     // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-    return this.barrierCoordinator.enqueue(
+    return this.barrierCoordinator.enqueueLegacy(
       storeId,
       purpose,
       transition,
       generation,
       timeoutMs,
     ) as Promise<T>;
+  }
+
+  /** Type-safe control barrier for new lifecycle transitions. */
+  runTypedControlBarrier<T>(
+    storeId: object,
+    key: StoreControlBarrierKeyV1<T>,
+    transition: () => Promise<T>,
+    generation?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
+    return this.barrierCoordinator.enqueueTyped(
+      storeId,
+      key,
+      transition,
+      generation,
+      timeoutMs,
+    );
   }
 
   private isSealed(storeId: object): boolean {

@@ -23,6 +23,10 @@ import {
 import {
   snapshotSystemRecordMaterializationEpochRotationV1,
 } from './system-record-materialization-epoch-guard-v1-internal.js';
+import {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from './store-control-barrier-key-v1.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).
@@ -219,9 +223,20 @@ export interface SystemRecordLaneExecutionBindingV1 {
  * synchronous cache invalidation.
  */
 export type SystemRecordLaneBarrierV1 = <T>(
-  purpose: string,
+  key: StoreControlBarrierKeyV1<T>,
   transition: () => Promise<T>,
 ) => Promise<T>;
+
+const SYSTEM_RECORD_ENABLE_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void | SystemRecordMaterializationEpochRotationV1>(
+    'system-record.enable',
+  );
+const SYSTEM_RECORD_DISABLE_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void>('system-record.disable');
+const SYSTEM_RECORD_SHUTDOWN_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void>('system-record.shutdown');
+const SYSTEM_RECORD_RECOVERY_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void>('system-record.recovery');
 
 export interface SystemRecordLaneControllerDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
@@ -756,7 +771,7 @@ class SystemRecordLaneSession {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      rotated = await this.deps.barrier('system-record.enable', async () => {
+      rotated = await this.deps.barrier(SYSTEM_RECORD_ENABLE_BARRIER_V1, async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
@@ -937,7 +952,7 @@ class SystemRecordLaneSession {
 
     const work = (async () => {
       try {
-        await this.deps.barrier('system-record.disable', () => {
+        await this.deps.barrier(SYSTEM_RECORD_DISABLE_BARRIER_V1, () => {
           // Keep the callback promise separately from the barrier's public
           // promise. A transition timeout reports to this caller while the
           // callback remains the exclusive physical owner.
@@ -1136,7 +1151,7 @@ class SystemRecordLaneSession {
         if (recoveryAlreadySettled) {
           entry.physicalSucceeded = true;
         } else {
-          await this.deps.barrier('system-record.shutdown', () => {
+          await this.deps.barrier(SYSTEM_RECORD_SHUTDOWN_BARRIER_V1, () => {
             // Keep the callback promise separately from the barrier's public
             // promise. The scheduler may reject the latter at its transition
             // timeout while deliberately leaving this callback and its seal
@@ -1436,7 +1451,7 @@ class SystemRecordLaneSession {
     entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }>,
   ): Promise<void> {
     try {
-      await this.deps.barrier('system-record.recovery', () => {
+      await this.deps.barrier(SYSTEM_RECORD_RECOVERY_BARRIER_V1, () => {
         const physicalWork = (async () => {
           try {
             const result = await this.recoverInsideBarrier(entry.recovery, 'resume');

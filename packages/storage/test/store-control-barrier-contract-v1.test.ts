@@ -4,6 +4,7 @@ import {
   StorePriorityScheduler,
   type StoreQueuedAdmissionV1,
 } from '../src/store-priority-scheduler.js';
+import { createStoreControlBarrierKeyV1 } from '../src/store-control-barrier-key-v1.js';
 
 /**
  * The scheduler/coordinator boundary, asserted through the PUBLIC scheduler.
@@ -16,7 +17,7 @@ import {
  * from further away.
  *
  * So these drive the scheduler exactly as production does — `run()` for
- * ordinary work, `runControlBarrier()` for a transition — and assert the
+ * ordinary work and the public barrier APIs for transitions — and assert the
  * properties the extraction could have broken. Nothing here reaches into the
  * coordinator: if the callback wiring is wrong, the observable behaviour is
  * wrong, which is the only thing worth pinning.
@@ -161,6 +162,32 @@ describe('control barrier contract survives the coordinator extraction', () => {
     expect(await first).toBe('once');
     expect(await second).toBe('once');
     expect(invocations).toBe(1);
+    expect(scheduler.snapshot.barrierCoalesced).toBe(1);
+  });
+
+  it('coalesces typed barriers only by key identity and preserves each result type', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 8 });
+    const storeId = {};
+    const resultKey = createStoreControlBarrierKeyV1<{ epoch: string }>('same.purpose');
+    const effectKey = createStoreControlBarrierKeyV1<void>('same.purpose');
+    const gate = deferred<{ epoch: string }>();
+    let effectStarted = false;
+
+    const first = scheduler.runTypedControlBarrier(storeId, resultKey, () => gate.promise);
+    const coalesced = scheduler.runTypedControlBarrier(storeId, resultKey, async () => ({
+      epoch: 'never',
+    }));
+    const distinct = scheduler.runTypedControlBarrier(storeId, effectKey, async () => {
+      effectStarted = true;
+    });
+
+    await settle();
+    expect(effectStarted).toBe(false);
+    gate.resolve({ epoch: '7' });
+    expect(await first).toEqual({ epoch: '7' });
+    expect(await coalesced).toEqual({ epoch: '7' });
+    await distinct;
+    expect(effectStarted).toBe(true);
     expect(scheduler.snapshot.barrierCoalesced).toBe(1);
   });
 
