@@ -1,5 +1,5 @@
 import type { TripleStore, Quad } from '@origintrail-official/dkg-storage';
-import { GraphManager } from '@origintrail-official/dkg-storage';
+import { GraphManager, tryReplaceGraphAndSubjectAtomically } from '@origintrail-official/dkg-storage';
 import type {
   EventBus,
   KAUpdateRequestMsg,
@@ -18,8 +18,6 @@ import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   knowledgeAssetLayerGraphUri,
   validateSubGraphName,
-  assertSafeIri,
-  assertSafeRdfTerm,
 } from '@origintrail-official/dkg-core';
 import { decodeKAUpdateRequest } from '@origintrail-official/dkg-core';
 import { parseSimpleNQuads } from './publish-handler.js';
@@ -735,7 +733,7 @@ export class UpdateHandler {
         if (!replaced) {
           throw Object.assign(
             new Error(
-              'Graph-scoped KA update requires atomic cross-graph TripleStore.update() support',
+              'Graph-scoped KA update requires TripleStore.replaceGraphAndSubject() support',
             ),
             { code: 'KA_MATERIALIZATION_ATOMIC_UPDATE_UNSUPPORTED' },
           );
@@ -787,36 +785,28 @@ export class UpdateHandler {
     metadata: readonly Quad[];
     version: MaterializedVersion;
   }): Promise<boolean> {
-    if (typeof this.store.update !== 'function') return false;
-    const vmGraph = assertSafeIri(input.vmGraph);
-    const metaGraph = assertSafeIri(input.metaGraph);
-    const ual = assertSafeIri(input.ual);
-    const vmTriples = input.publicQuads
-      .map((quad) => formatSparqlTriple({ ...quad, graph: vmGraph }))
-      .join('\n');
+    const vmGraphQuads = input.publicQuads.map((quad) => ({
+      ...quad,
+      graph: input.vmGraph,
+    }));
     const metaRows: Quad[] = [
-      ...input.metadata.map((quad) => ({ ...quad, graph: metaGraph })),
+      ...input.metadata.map((quad) => ({ ...quad, graph: input.metaGraph })),
       {
-        subject: ual,
+        subject: input.ual,
         predicate: `${DKG_NS}materializedVersion`,
         object: `"${input.version.blockNumber}:${input.version.txIndex}"`,
-        graph: metaGraph,
+        graph: input.metaGraph,
       },
     ];
-    const metaTriples = metaRows.map(formatSparqlTriple).join('\n');
-    const update = [
-      `DROP SILENT GRAPH <${vmGraph}>`,
-      vmTriples.length > 0
-        ? `INSERT DATA { GRAPH <${vmGraph}> {\n${vmTriples}\n} }`
-        : '',
-      `DELETE WHERE { GRAPH <${metaGraph}> { <${ual}> ?p ?o } }`,
-      `INSERT DATA { GRAPH <${metaGraph}> {\n${metaTriples}\n} }`,
-    ].filter(Boolean).join(';\n');
-    await this.store.update(update, {
-      touchedGraphs: [vmGraph, metaGraph],
-      source: 'publisher.updateHandler.graphScopedMaterialization',
-    });
-    return true;
+    return tryReplaceGraphAndSubjectAtomically(
+      this.store,
+      input.vmGraph,
+      vmGraphQuads,
+      input.metaGraph,
+      input.ual,
+      metaRows,
+      { source: 'publisher.updateHandler.graphScopedMaterialization' },
+    );
   }
 
   private async readGraphScopedMetadata(
@@ -955,21 +945,4 @@ function stripRdfLiteral(value: string | undefined): string {
   if (languageIndex > 0) return value.slice(1, languageIndex);
   const lastQuote = value.lastIndexOf('"');
   return value.slice(1, lastQuote > 0 ? lastQuote : undefined);
-}
-
-function formatSparqlTriple(quad: Quad): string {
-  const resource = (term: string): string => {
-    const unwrapped = term.startsWith('<') && term.endsWith('>')
-      ? term.slice(1, -1)
-      : term;
-    return `<${assertSafeIri(unwrapped)}>`;
-  };
-  let object: string;
-  if (quad.object.startsWith('"')) {
-    assertSafeRdfTerm(quad.object);
-    object = quad.object;
-  } else {
-    object = resource(quad.object);
-  }
-  return `${resource(quad.subject)} ${resource(quad.predicate)} ${object} .`;
 }

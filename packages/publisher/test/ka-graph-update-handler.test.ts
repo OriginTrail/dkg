@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -127,9 +127,13 @@ describe('UpdateHandler graph-scoped updates', () => {
     const privateQuads: Quad[] = [
       { subject: 'urn:secret', predicate: 'urn:p:value', object: '"hidden"', graph: '' },
     ];
+    const replaceGraphAndSubject = vi.spyOn(store, 'replaceGraphAndSubject');
+    const rawUpdate = vi.spyOn(store, 'update');
 
     await handler.handle(message(publicQuads, privateQuads), 'forwarding-peer');
 
+    expect(replaceGraphAndSubject).toHaveBeenCalledTimes(1);
+    expect(rawUpdate).not.toHaveBeenCalled();
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(0);
     const state = await store.query(
@@ -306,15 +310,9 @@ describe('UpdateHandler graph-scoped updates', () => {
       subject: 'urn:new', predicate: 'urn:p:value', object: '"new"', graph: '',
     }];
     const encoded = message(update);
-    const realUpdate = store.update.bind(store);
-    let fail = true;
-    store.update = async (...args) => {
-      if (fail) {
-        fail = false;
-        throw new Error('injected atomic materialization failure');
-      }
-      return realUpdate(...args);
-    };
+    vi.spyOn(store, 'replaceGraphAndSubject').mockRejectedValueOnce(
+      new Error('injected atomic materialization failure'),
+    );
 
     await handler.handle(encoded, 'forwarding-peer');
     expect(await store.countQuads(vmGraph)).toBe(1);
