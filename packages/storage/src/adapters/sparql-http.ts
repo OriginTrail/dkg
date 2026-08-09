@@ -40,7 +40,7 @@ import {
 } from './sparql-json-results.js';
 import {
   externalStorePriorityScheduler,
-  type StoreAdmissionV1,
+  type StoreQueuedAdmissionV1,
 } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -72,8 +72,13 @@ import {
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerV1,
+  type SystemRecordLaneBarrierResultsV1,
   type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
+import {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from '../store-control-barrier-key-v1.js';
 import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
@@ -91,6 +96,18 @@ import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
 } from '../abortable-store-work-lifecycle.js';
+
+const SYSTEM_RECORD_BARRIER_KEYS_V1: {
+  readonly [K in keyof SystemRecordLaneBarrierResultsV1]:
+    StoreControlBarrierKeyV1<SystemRecordLaneBarrierResultsV1[K]>;
+} = Object.freeze({
+  enable: createStoreControlBarrierKeyV1<SystemRecordLaneBarrierResultsV1['enable']>(
+    'system-record.enable',
+  ),
+  disable: createStoreControlBarrierKeyV1<void>('system-record.disable'),
+  shutdown: createStoreControlBarrierKeyV1<void>('system-record.shutdown'),
+  recovery: createStoreControlBarrierKeyV1<void>('system-record.recovery'),
+});
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -124,7 +141,7 @@ const SYSTEM_CONTEXT_GRAPH_IRIS = [
 ] as const;
 
 interface ManagedMutationBindingV1 {
-  readonly admission: StoreAdmissionV1;
+  readonly admission: StoreQueuedAdmissionV1;
   readonly generation: string;
 }
 
@@ -728,6 +745,18 @@ export class SparqlHttpStore implements TripleStore {
     // already carries the property.
     if (this.systemRecordLane === undefined) {
       try {
+        const barrierGeneration = () => this.ownershipLease
+          ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
+          : undefined;
+        const runTypedBarrier = <T>(
+          key: StoreControlBarrierKeyV1<T>,
+          transition: () => Promise<T>,
+        ) => externalStorePriorityScheduler.runTypedControlBarrier(
+          this,
+          key,
+          transition,
+          barrierGeneration(),
+        );
         const owner = createManagedSystemRecordCoordinatorV1({
           lease: this.ownershipLease,
           handoff: this.buildChildHandoff(this.supervisorHandoff),
@@ -753,15 +782,20 @@ export class SparqlHttpStore implements TripleStore {
           // the lane outlives any single child: sealing the generation observed
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
+          //
+          // Keep the published string callback intact for external/legacy
+          // coordinator composition. Production lifecycle calls use the
+          // domain-owned typed methods below, which translate to scheduler keys
+          // only at this adapter boundary.
           barrier: (purpose, transition) =>
             externalStorePriorityScheduler.runControlBarrier(
               this,
               purpose,
               transition,
-              this.ownershipLease
-                ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
-                : undefined,
+              barrierGeneration(),
             ),
+          typedBarrier: (kind, transition) =>
+            runTypedBarrier(SYSTEM_RECORD_BARRIER_KEYS_V1[kind], transition),
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
         });
         this.systemRecordLane = owner;

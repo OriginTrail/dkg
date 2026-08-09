@@ -755,6 +755,90 @@ describe('system-record lane session lifecycle V1', () => {
       expect(handoff.calls).toEqual([]);
     });
 
+    // The result is returned through the typed barrier, then snapshotted by the
+    // canonical epoch-rotation parser.
+    //
+    // Parameterized deliberately. The behaviour this change introduced is
+    // rejecting a non-`undefined` FALSEY result: the previous `!rotated` logic
+    // read `null` as "no binding" and fell through to enable. A truthy-but-wrong
+    // object was ALREADY rejected beforehand, so a case using only that shape
+    // pins the old behaviour and proves nothing about the new guard.
+    const accessorBinding = Object.defineProperties({}, {
+      epoch: {
+        enumerable: true,
+        get: () => {
+          throw new Error('getter invoked');
+        },
+      },
+      childGeneration: { enumerable: true, value: 'child-1' },
+    });
+    const trappedBinding = new Proxy(
+      { epoch: '1', childGeneration: 'child-1' },
+      {
+        ownKeys: () => {
+          throw new Error('ownKeys trap invoked');
+        },
+      },
+    );
+    for (const [label, malformed] of [
+      ['null', null],
+      ['a non-object', 0],
+      ['a truthy object with wrong field types', { epoch: 1, childGeneration: null }],
+      ['an accessor-bearing object', accessorBinding],
+      ['a trapped proxy object', trappedBinding],
+    ] as const) {
+      it(`fails managed mutations closed when the epoch binding is ${label}`, async () => {
+        handoff.rotateMaterializationEpoch = (async () =>
+          malformed) as unknown as RecordingHandoff['rotateMaterializationEpoch'];
+
+        const controller = build();
+        await expect(controller.open(ACTIVATION)).rejects.toThrow(
+          /materialization epoch binding/,
+        );
+
+        // The throw alone does not prove FAIL-CLOSED, which is what the name
+        // claims: the lane must also disable managed mutations rather than
+        // leave them admissible behind a rejected enable.
+        expect(handoff.calls).toContain(
+          'failManagedMutationsClosed:enable transition did not return a materialization epoch binding',
+        );
+
+        // And it must not be reopenable as if nothing happened.
+        await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+      });
+    }
+
+    it('ACCEPTS an epoch binding that carries extra metadata', async () => {
+      // `rotateMaterializationEpoch` is declared as `Promise<void | { epoch:
+      // string; childGeneration: string }>`, and TypeScript satisfies that with
+      // any object carrying those two fields. An implementation returning them
+      // alongside its own diagnostics is conforming, so rejecting it would fail
+      // the lane closed on a legitimate rotation — a stricter contract than the
+      // type publishes.
+      handoff.rotateMaterializationEpoch = (async () => ({
+        epoch: '7',
+        childGeneration: '1',
+        rotatedInMs: 12,
+      })) as unknown as RecordingHandoff['rotateMaterializationEpoch'];
+
+      const session = await build().open(ACTIVATION);
+      expect(session.state).toBe('enabled');
+    });
+
+    it('accepts a structural class-instance epoch binding without invoking accessors', async () => {
+      class RotationBinding {
+        constructor(
+          readonly epoch: string,
+          readonly childGeneration: string,
+        ) {}
+      }
+      handoff.rotateMaterializationEpoch = (async () =>
+        new RotationBinding('7', '1')) as RecordingHandoff['rotateMaterializationEpoch'];
+
+      const session = await build().open(ACTIVATION);
+      expect(session.state).toBe('enabled');
+    });
+
     it('refuses to enable on terminal ownership', async () => {
       ownership.invalidate('port-release-unproven');
       await expect(build().open(ACTIVATION)).rejects.toThrow(/terminal/);

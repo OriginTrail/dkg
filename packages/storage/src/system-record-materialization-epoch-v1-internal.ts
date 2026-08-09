@@ -18,16 +18,14 @@ import {
   SYSTEM_RECORD_V1_PREDICATES,
   systemRecordEpochSubjectV1,
 } from './system-record-rdf-schema-v1-internal.js';
+import type {
+  SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-contract-v1.js';
 
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const MAX_EPOCH_QUERY_BYTES = 4 * 1024;
 const MAX_EPOCH_UPDATE_BYTES = 4 * 1024;
 const MAX_EPOCH_RESPONSE_BYTES = 8 * 1024;
-
-export interface SystemRecordMaterializationEpochRotationV1 {
-  readonly epoch: string;
-  readonly childGeneration: string;
-}
 
 export interface SystemRecordMaterializationEpochRotationInputV1 {
   readonly networkId: string;

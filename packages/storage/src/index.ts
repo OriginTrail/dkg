@@ -78,8 +78,18 @@ export {
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneSessionV1,
   type SystemRecordLaneStateV1,
+  type SystemRecordLaneBarrierKindV1,
+  type SystemRecordLaneBarrierResultsV1,
+  type SystemRecordLaneTypedBarrierV1,
   type SystemRecordTransactionExecutorV1,
 } from './system-record-materializer-v1.js';
+export {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from './store-control-barrier-key-v1.js';
+export type {
+  SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-contract-v1.js';
 export {
   SystemRecordLaneForwarderV1,
   type SystemRecordLaneOutcomePolicyV1,

@@ -7,6 +7,17 @@ import {
   type SchedulerPressureTicket,
 } from '@origintrail-official/dkg-core';
 import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
+import {
+  StoreControlBarrierCoordinator,
+  type StoreBarrierHostV1,
+} from './store-control-barrier-v1-internal.js';
+import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
+import {
+  StoreControlBarrierTimeoutError,
+  type StoreControlBarrierBlockers,
+  type StoreControlBarrierPhase,
+  type StoreGenerationSeal,
+} from './store-barrier-contract.js';
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
@@ -70,11 +81,8 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   /** Cumulative barrier wait. Proves a measured wait actually happened. */
   barrierWaitMs: number;
   /**
-   * Execution-slot·milliseconds consumed by barriers while they were WAITING.
-   * Structurally 0: a waiting barrier increments no inflight counter. Kept as a
-   * live product of two measured quantities so that regressing the barrier into
-   * an ordinary queued entry (which would pin a slot for the whole drain) makes
-   * this non-zero instead of silently starving the lane it borrowed from.
+   * @deprecated Always `0` since barriers moved outside ordinary execution
+   * slots. Retained only for source and snapshot-shape compatibility.
    */
   barrierWaitOccupiedSlotMs: number;
 }
@@ -128,58 +136,28 @@ export interface StoreAdmissionV1 {
   readonly mode: StoreAdmissionMode;
 }
 
-export type StoreControlBarrierPhase = 'wait' | 'transition';
+export type StoreQueuedAdmissionV1 = StoreAdmissionV1 & {
+  readonly mode: Exclude<StoreAdmissionMode, 'control-barrier'>;
+};
 
-/** What a control barrier was still waiting on when it gave up. */
-export interface StoreControlBarrierBlockers {
-  /** Inflight work carrying no store identity, so it cannot be ruled out. */
-  untaggedInflight: number;
-  taggedInflightForStore: number;
-  generationsInflight: number;
-  heldRuns: number;
+export type StoreControlBarrierAdmissionV1 = StoreAdmissionV1 & {
+  readonly mode: 'control-barrier';
+};
+
+function isStoreQueuedAdmissionV1(
+  admission: StoreAdmissionV1,
+): admission is StoreQueuedAdmissionV1 {
+  return admission.mode !== 'control-barrier';
 }
 
-/**
- * A control transition that did not complete within its bound.
- *
- * The quiescence gate traded one failure mode for another: a transition that
- * issues store work through the scheduler no longer produces a burst of
- * transport errors, it produces a circular wait — the transition waits for work
- * to drain, and that work waits for the transition. Silent and indefinite is a
- * worse operational outcome than loud and wrong, so the wait is bounded and
- * reports exactly what it was blocked on.
- */
-export class StoreControlBarrierTimeoutError extends Error {
-  readonly code = 'STORE_CONTROL_BARRIER_TIMEOUT' as const;
-
-  constructor(
-    readonly phase: StoreControlBarrierPhase,
-    readonly purpose: string,
-    readonly elapsedMs: number,
-    readonly blockedBy: StoreControlBarrierBlockers,
-  ) {
-    super(
-      `Store control barrier "${purpose || 'unknown'}" timed out after ${elapsedMs} ms in the `
-      + `${phase} phase (untagged inflight ${blockedBy.untaggedInflight}, tagged inflight for this `
-      + `store ${blockedBy.taggedInflightForStore}, held runs ${blockedBy.heldRuns}). The usual `
-      + 'cause is a transition that issues store work through the scheduler: a barrier owns the '
-      + 'store exclusively, so work issued from inside one waits for the barrier waiting for it.',
-    );
-    this.name = 'StoreControlBarrierTimeoutError';
-  }
-}
-
-/** Handle returned by {@link StorePriorityScheduler.sealStoreGeneration}. */
-export interface StoreGenerationSeal {
-  readonly storeId: object;
-  readonly generation: string;
-  /**
-   * Commit the transition: release the seal, release every held `run()`, and
-   * wake selection. Idempotent — a control path that commits in a `finally`
-   * after an early `commit()` must not double-release.
-   */
-  commit(): void;
-}
+// Re-exported: these were declared here before the barrier subsystem moved out,
+// and they are part of the package's published surface.
+export {
+  StoreControlBarrierTimeoutError,
+  type StoreControlBarrierBlockers,
+  type StoreControlBarrierPhase,
+  type StoreGenerationSeal,
+};
 
 export type StoreSchedulerBusyReason = 'queue_full' | 'queue_wait_timeout';
 
@@ -226,7 +204,7 @@ interface QueueEntry<T> {
   onAbort?: () => void;
   waitTimer?: ReturnType<typeof setTimeout>;
   /** V1 admission metadata; `undefined` for legacy/untagged entries. */
-  admission?: StoreAdmissionV1;
+  admission?: StoreQueuedAdmissionV1;
   /**
    * Monotonic enqueue sequence, `0` when untagged. Used to answer "is this
    * shared entry LATER than the exclusive it would bypass?" exactly, including
@@ -274,22 +252,6 @@ interface StoreAdmissionState {
 
 interface HeldRun {
   release: () => void;
-}
-
-interface BarrierEntry {
-  storeId: object;
-  purpose: string;
-  transition: () => Promise<unknown>;
-  promise: Promise<unknown>;
-  resolve: (value: unknown) => void;
-  reject: (reason?: unknown) => void;
-  waitStartedAt: number;
-  coalesced: number;
-  running: boolean;
-  /** Guards the caller promise so a timeout and a late settle cannot both fire. */
-  settled: boolean;
-  timer?: ReturnType<typeof setTimeout>;
-  seal: StoreGenerationSeal;
 }
 
 interface NonAckLanePolicy {
@@ -352,9 +314,6 @@ export const STORE_ADMISSION_SHARED_BYPASS_LIMIT = 8;
  * re-read on each selection under exactly the load that makes it matter.
  */
 export const STORE_ADMISSION_EXCLUSIVE_WAIT_BOUND_MS = 250;
-
-/** Seal generation recorded for a barrier that drains ALL tagged work. */
-const BARRIER_ANY_GENERATION = '*';
 
 /**
  * Default bound on a whole control transition, wait plus execution.
@@ -506,6 +465,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * with nothing tagged queued there is nothing for it to block.
    */
   private taggedQueuedCount = 0;
+  /** Actual unattributable work the barrier must wait for, maintained at start/finish. */
+  private untaggedInflightCount = 0;
   /**
    * Held `run()` calls per lane. A held call has been ADMITTED — it is
    * admitted-but-not-running work exactly like a queued one — so it counts
@@ -526,23 +487,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private admissionEvaluations = 0;
   private admissionBypassesGranted = 0;
   private admissionBoundHolds = 0;
-  private readonly barriers: BarrierEntry[] = [];
-  private barrierRunning: BarrierEntry | undefined;
-  private barrierCoalescedTotal = 0;
-  private barrierTimeoutsTotal = 0;
-  private readonly barrierTimeoutMs: number;
-  private barrierWaitMsTotal = 0;
-  private barrierWaitOccupiedSlotMsTotal = 0;
   /**
-   * Ordinary execution slots currently held by control-barrier work. A barrier
-   * is routed away from the queues before any slot accounting, so this is 0 by
-   * construction — it exists as a tripwire: if the routing ever regresses and a
-   * barrier becomes an ordinary queued entry, it would pin a slot for the whole
-   * drain and `barrierWaitOccupiedSlotMs` turns non-zero instead of the lane
-   * silently losing capacity.
+   * Barrier lifecycle lives here, inflight accounting does not.
+   *
+   * The coordinator decides quiescence by asking THIS object for the counters
+   * it already maintains for admission, so there is exactly one source of truth
+   * for inflight. See `StoreBarrierHostV1`.
    */
-  private barrierOccupiedSlots = 0;
-
+  private readonly barrierCoordinator: StoreControlBarrierCoordinator;
   constructor(options?: StorePrioritySchedulerOptions);
   /** @deprecated Use the named options object. Retained for package compatibility. */
   constructor(
@@ -616,11 +568,15 @@ export class StorePriorityScheduler extends ObservableScheduler {
       requestedBackgroundFloor,
     );
     this.queueWaitTimeoutMs = resolvedQueueWaitTimeoutMs;
-    this.barrierTimeoutMs = parsePositiveIntegerEnv(
+    const barrierTimeoutMs = parsePositiveIntegerEnv(
       'DKG_STORE_BARRIER_TIMEOUT_MS',
       DEFAULT_STORE_CONTROL_BARRIER_TIMEOUT_MS,
     );
     this.now = resolvedNow;
+    this.barrierCoordinator = new StoreControlBarrierCoordinator(
+      this.createBarrierHost(),
+      barrierTimeoutMs,
+    );
     this.queueLimits = normalizeQueueLimits(options.queueLimits ?? resolveQueueLimitsFromEnv());
     const nonAckLimit = Math.max(1, this.maxConcurrent - this.ackReservedSlots);
     this.updatePressureCapacity({
@@ -647,7 +603,40 @@ export class StorePriorityScheduler extends ObservableScheduler {
     });
   }
 
+  /**
+   * The scheduler's half of the barrier boundary.
+   *
+   * Every member is a QUERY over state this class owns, or an instruction to
+   * it. There is deliberately no setter: the coordinator decides quiescence
+   * from these counters but cannot record inflight, so there is one source of
+   * truth for the invariant that must not drift.
+   */
+  private createBarrierHost(): StoreBarrierHostV1 {
+    return {
+      now: () => this.now(),
+      sealStoreGeneration: (storeId, generation) =>
+        this.sealStoreGeneration(storeId, generation),
+      quiescence: (storeId) => ({
+        untaggedInflight: this.untaggedInflight(),
+        taggedInflightForStore: this.storeStates.get(storeId)?.taggedInflight ?? 0,
+      }),
+      blockerDiagnostics: () => ({
+        generationsInflight: this.countGenerationsInflight(),
+        heldRuns: this.heldRunCount,
+      }),
+      observeDepths: () => this.observeDepths(),
+    };
+  }
+
+  /** Inflight work carrying no store identity, so unattributable to any store. */
+  private untaggedInflight(): number {
+    return this.untaggedInflightCount;
+  }
+
   get snapshot(): StorePrioritySchedulerSnapshot {
+    // Read once: the getter builds a fresh object, so six reads meant six
+    // allocations for one snapshot.
+    const barrier = this.barrierCoordinator.metrics;
     return {
       ackInflight: this.ackInflight,
       healthInflight: this.healthInflight,
@@ -676,12 +665,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
       admissionHeldRuns: this.heldRunCount,
       admissionSealedStores: this.sealedStoreCount,
       admissionGenerationsInflight: this.countGenerationsInflight(),
-      barrierPending: this.barriers.length,
-      barrierInflight: this.barrierRunning ? 1 : 0,
-      barrierCoalesced: this.barrierCoalescedTotal,
-      barrierTimeouts: this.barrierTimeoutsTotal,
-      barrierWaitMs: this.barrierWaitMsTotal,
-      barrierWaitOccupiedSlotMs: this.barrierWaitOccupiedSlotMsTotal,
+      barrierPending: barrier.pending,
+      barrierInflight: barrier.inflight,
+      barrierCoalesced: barrier.coalesced,
+      barrierTimeouts: barrier.timeouts,
+      barrierWaitMs: barrier.waitMs,
+      barrierWaitOccupiedSlotMs: 0,
     };
   }
 
@@ -701,13 +690,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const normalizedPriority = priority ?? 'normal';
     // Routed FIRST: a control transition must not be rejectable by an
     // already-aborted caller signal any more than by queue capacity.
-    if (admission !== undefined && admission.mode === 'control-barrier') {
-      return await (this.enqueueControlBarrier(
-        admission.storeId,
-        operation,
-        work,
-        admission.generation,
-      ) as Promise<T>);
+    if (admission !== undefined && !isStoreQueuedAdmissionV1(admission)) {
+      // Legacy compatibility boundary: runtime purpose strings cannot bind T.
+      return (await this.barrierCoordinator.enqueueLegacy({
+        storeId: admission.storeId,
+        purpose: operation,
+        transition: work,
+        generation: admission.generation,
+      })) as T;
     }
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -815,7 +805,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // winner — exactly the pre-#2052 selection, with no per-entry scan and no
     // allocation. The barrier term is what lets a transition stop untagged
     // traffic, which carries no store identity to gate on.
-    const admissionActive = this.taggedQueuedCount > 0 || this.barriers.length > 0;
+    const admissionActive =
+      this.taggedQueuedCount > 0 || this.barrierCoordinator.hasPendingBarriers();
     for (const priority of priorities) {
       const queue = this.queues[priority];
       if (queue.length === 0) continue;
@@ -859,6 +850,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private start(entry: QueueEntry<unknown>): void {
     this.cleanupQueuedEntry(entry);
     if (entry.admission !== undefined) this.acquireRunningAdmission(entry);
+    else this.untaggedInflightCount += 1;
     this.increment(entry.priority);
     const startedAt = this.now();
     this.pressureStart(entry.pressureTicket);
@@ -896,13 +888,16 @@ export class StorePriorityScheduler extends ObservableScheduler {
         // already gone when a waiting barrier and the blocked entries behind an
         // exclusive are re-evaluated in the same turn.
         if (entry.admission !== undefined) this.releaseRunningAdmission(entry);
+        else {
+          if (this.untaggedInflightCount <= 0) {
+            throw new Error('store scheduler untagged-inflight accounting underflow');
+          }
+          this.untaggedInflightCount -= 1;
+        }
         this.decrement(entry.priority);
-        // Evaluated only after BOTH counters are settled. Barrier readiness
-        // derives untagged inflight as `total - tagged`, so pumping between the
-        // two updates would make a finishing tagged entry look like a phantom
-        // untagged one and stall the transition. Untagged completions must pump
-        // too — the gate now waits on them.
-        this.pumpBarriers();
+        // Evaluated only after admission and inflight state are settled.
+        // Untagged completions must pump too — the gate waits on them directly.
+        this.barrierCoordinator.pump();
         this.observeDepths();
         this.drain();
       });
@@ -1074,6 +1069,18 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * forever, to diagnose a caller bug faster, is the wrong trade for a
    * process-global scheduler.
    *
+   * The `as Promise<T>` below is UNSOUND and deliberately so, pending #2179: a
+   * runtime purpose string cannot bind `T`, so two callers coalescing on one
+   * purpose with different result types both receive the FIRST transition's
+   * value under their own `T`. Every caller today passes the same purpose from
+   * a single call site, which is what makes it survivable rather than correct.
+   *
+   * New lifecycle code can use {@link runTypedControlBarrier}, whose key object
+   * binds coalescing identity to one result type. This method remains only for
+   * callers that already use the historical free-form string contract.
+   *
+   * @deprecated Use {@link runTypedControlBarrier} with a key created by
+   * `createStoreControlBarrierKeyV1`.
    * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(
@@ -1083,13 +1090,34 @@ export class StorePriorityScheduler extends ObservableScheduler {
     generation?: string,
     timeoutMs?: number,
   ): Promise<T> {
-    return this.enqueueControlBarrier(
+    // Legacy compatibility boundary: runtime purpose strings cannot bind T.
+    return this.barrierCoordinator.enqueueLegacy({
       storeId,
       purpose,
       transition,
       generation,
       timeoutMs,
-    ) as Promise<T>;
+    }) as Promise<T>;
+  }
+
+  /** Type-safe control barrier for new lifecycle transitions. */
+  runTypedControlBarrier<T>(
+    storeId: object,
+    key: StoreControlBarrierKeyV1<T>,
+    transition: () => Promise<T>,
+    generation?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
+    // Sound at this boundary: the nominal key binds every caller sharing this
+    // runtime identity to the same T.
+    return this.barrierCoordinator.enqueueTyped({
+      storeId,
+      key,
+      purpose: key.purpose,
+      transition,
+      generation,
+      timeoutMs,
+    });
   }
 
   private isSealed(storeId: object): boolean {
@@ -1136,7 +1164,22 @@ export class StorePriorityScheduler extends ObservableScheduler {
     if (state.taggedQueued > 0 || state.taggedInflight > 0) return;
     if (state.seals > 0 || state.heldRuns.length > 0) return;
     if (state.domains.size > 0 || state.runningPermits.size > 0) return;
+    // A seal can retain an old state object while releasing held work. That
+    // work may synchronously replace the map entry before the seal finishes;
+    // the stale owner must never delete the replacement by key.
+    if (this.storeStates.get(storeId) !== state) return;
     this.storeStates.delete(storeId);
+  }
+
+  /**
+   * The only place the canonical per-store tagged-inflight counter moves.
+   */
+  private adjustTaggedInflight(state: StoreAdmissionState, delta: 1 | -1): void {
+    const storeInflight = state.taggedInflight + delta;
+    if (storeInflight < 0) {
+      throw new Error('store scheduler tagged-inflight accounting underflow');
+    }
+    state.taggedInflight = storeInflight;
   }
 
   private countTaggedInflight(): number {
@@ -1208,18 +1251,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const admission = entry.admission;
     if (admission === undefined) return;
     const state = this.getOrCreateStoreState(admission.storeId);
-    state.taggedInflight += 1;
+    this.adjustTaggedInflight(state, 1);
     // The generation permit is held for EXECUTION only — see StoreAdmissionV1.
     state.runningPermits.set(
       admission.generation,
       (state.runningPermits.get(admission.generation) ?? 0) + 1,
     );
-    if (admission.mode === 'control-barrier') {
-      // Unreachable while `run()` routes barriers away from the queues; see the
-      // `barrierOccupiedSlots` tripwire comment on the field declaration.
-      this.barrierOccupiedSlots += 1;
-      return;
-    }
     if (admission.mode === 'store-wide-exclusive') {
       state.storeWideExclusiveInflight += 1;
       return;
@@ -1243,14 +1280,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const admission = entry.admission;
     if (admission === undefined) return;
     const state = this.storeStates.get(admission.storeId);
-    if (state === undefined) return;
-    state.taggedInflight -= 1;
+    if (state === undefined) {
+      throw new Error('store scheduler running admission lost its state row');
+    }
+    this.adjustTaggedInflight(state, -1);
     const permits = (state.runningPermits.get(admission.generation) ?? 1) - 1;
     if (permits > 0) state.runningPermits.set(admission.generation, permits);
     else state.runningPermits.delete(admission.generation);
-    if (admission.mode === 'control-barrier') {
-      this.barrierOccupiedSlots -= 1;
-    } else if (admission.mode === 'store-wide-exclusive') {
+    if (admission.mode === 'store-wide-exclusive') {
       state.storeWideExclusiveInflight -= 1;
     } else {
       const domain = state.domains.get(entry.domainKey);
@@ -1286,7 +1323,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       // unrelated lane. Holding them in the queue instead converts that into
       // ordinary backpressure — and the existing wait timer still bounds it,
       // with a typed retryable rejection rather than a transport failure.
-      return this.barriers.length === 0;
+      return !this.barrierCoordinator.hasPendingBarriers();
     }
     const state = this.storeStates.get(admission.storeId);
     if (state === undefined) return true;
@@ -1337,7 +1374,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     operation: string,
     work: () => Promise<T>,
     signal: AbortSignal | undefined,
-    admission: StoreAdmissionV1,
+    admission: StoreQueuedAdmissionV1,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const state = this.getOrCreateStoreState(admission.storeId);
@@ -1393,203 +1430,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
     for (const record of released) record.release();
   }
 
-  private enqueueControlBarrier(
-    storeId: object,
-    purpose: string,
-    transition: () => Promise<unknown>,
-    generation?: string,
-    timeoutMs?: number,
-  ): Promise<unknown> {
-    const existing = this.barriers.find(
-      (barrier) => barrier.storeId === storeId && barrier.purpose === purpose,
-    );
-    if (existing !== undefined) {
-      existing.coalesced += 1;
-      this.barrierCoalescedTotal += 1;
-      this.observeDepths();
-      return existing.promise;
-    }
-    let resolve!: (value: unknown) => void;
-    let reject!: (reason?: unknown) => void;
-    const promise = new Promise<unknown>((res, rej) => {
-      resolve = res;
-      reject = rej;
-    });
-    const barrier: BarrierEntry = {
-      storeId,
-      purpose,
-      transition,
-      promise,
-      resolve,
-      reject,
-      waitStartedAt: this.now(),
-      coalesced: 0,
-      running: false,
-      settled: false,
-      // Sealing here is what makes the wait below terminate: without it a busy
-      // store keeps admitting tagged work and never quiesces.
-      seal: this.sealStoreGeneration(storeId, generation ?? BARRIER_ANY_GENERATION),
-    };
-    barrier.timer = setTimeout(
-      () => this.failBarrier(barrier),
-      timeoutMs ?? this.barrierTimeoutMs,
-    );
-    // Unref'd on purpose: a safety timer that kept a daemon alive through its
-    // own shutdown would be worse than the deadlock it guards against.
-    //
-    // The consequence, which is NOT obvious and was found by an independent
-    // re-run rather than by reasoning: this bound can only fire while something
-    // else holds the event loop open. A daemon always qualifies — a listening
-    // server holds a ref'd handle — but a process that has quiesced down to
-    // nothing but the deadlock exits silently instead, which is the pre-bound
-    // behaviour in the one situation nobody is watching.
-    //
-    // Practical consequence for tests: a real-timer test of this bound must
-    // hold the loop open itself, or the process exits before the timer fires
-    // and the run is recorded as a failure with a thoroughly misleading cause
-    // (a bare non-zero exit and no output). The tests here use fake timers, so
-    // they are unaffected.
-    if (typeof barrier.timer.unref === 'function') barrier.timer.unref();
-    this.barriers.push(barrier);
-    this.observeDepths();
-    this.pumpBarriers();
-    return promise;
-  }
-
-  /**
-   * Bound expired. Recovery differs by phase, and the difference matters:
-   *
-   * - **wait** — the transition never started, so nothing has been disrupted.
-   *   The barrier is withdrawn completely and the store resumes. Fully
-   *   recoverable, and this is the phase a circular wait actually lands in.
-   * - **transition** — the transition is mid-flight and may be part-way through
-   *   stopping a child. Releasing the seal here would admit work into a store
-   *   that no longer exists, so the caller is told and the seal is left in
-   *   place. If the transition ever settles, its own `finally` still cleans up,
-   *   so this reports without permanently freezing the lane.
-   */
-  private failBarrier(barrier: BarrierEntry): void {
-    barrier.timer = undefined;
-    if (barrier.settled) return;
-    barrier.settled = true;
-    this.barrierTimeoutsTotal += 1;
-    barrier.reject(new StoreControlBarrierTimeoutError(
-      barrier.running ? 'transition' : 'wait',
-      barrier.purpose,
-      Math.max(0, this.now() - barrier.waitStartedAt),
-      this.describeBarrierBlockers(barrier),
-    ));
-    if (barrier.running) {
-      this.observeDepths();
-      return;
-    }
-    const index = this.barriers.indexOf(barrier);
-    if (index >= 0) this.barriers.splice(index, 1);
-    barrier.seal.commit();
-    this.observeDepths();
-    this.pumpBarriers();
-  }
-
-  private describeBarrierBlockers(barrier: BarrierEntry): StoreControlBarrierBlockers {
-    const totalInflight = this.ackInflight + this.healthInflight
-      + this.normalInflight + this.backgroundInflight;
-    const state = this.storeStates.get(barrier.storeId);
-    return {
-      untaggedInflight: Math.max(0, totalInflight - this.countTaggedInflight()),
-      taggedInflightForStore: state?.taggedInflight ?? 0,
-      generationsInflight: this.countGenerationsInflight(),
-      heldRuns: this.heldRunCount,
-    };
-  }
-
-  /**
-   * Starts at most one barrier: the reserved controller slot is single. Every
-   * pending barrier WAITS concurrently (at zero slots), so a barrier blocked on
-   * its own store cannot head-of-line block one that is already quiesced.
-   */
-  private pumpBarriers(): void {
-    // Called from every completion now, so the no-barrier case is one read.
-    if (this.barriers.length === 0) return;
-    if (this.barrierRunning !== undefined) return;
-    for (const barrier of this.barriers) {
-      if (barrier.running) continue;
-      if (!this.isBarrierReady(barrier)) continue;
-      this.startBarrier(barrier);
-      return;
-    }
-  }
-
-  /**
-   * Quiescence gate. A transition may start only once nothing is executing that
-   * could still be touching the store it is about to stop.
-   *
-   * Two populations, and they need different treatment:
-   *
-   * - **Untagged inflight** carries no store identity, so it can be neither
-   *   attributed to this store nor ruled out. It is waited on in full. Derived
-   *   from the counters that already exist rather than tracked separately, so
-   *   the untagged path pays nothing to be waitable.
-   * - **Tagged inflight for THIS store**, in every domain and every generation.
-   *   Deliberately not narrowed to the sealed generation: the transition is a
-   *   child-process restart, and the child it stops serves them all.
-   *
-   * Tagged work for OTHER stores is not waited on — it is attributable, and
-   * provably not this store's.
-   */
-  private isBarrierReady(barrier: BarrierEntry): boolean {
-    const totalInflight = this.ackInflight + this.healthInflight
-      + this.normalInflight + this.backgroundInflight;
-    if (totalInflight - this.countTaggedInflight() > 0) return false;
-    const state = this.storeStates.get(barrier.storeId);
-    if (state === undefined) return true;
-    return state.taggedInflight === 0;
-  }
-
-  private startBarrier(barrier: BarrierEntry): void {
-    barrier.running = true;
-    this.barrierRunning = barrier;
-    const waitMs = Math.max(0, this.now() - barrier.waitStartedAt);
-    this.barrierWaitMsTotal += waitMs;
-    // Product of two measured quantities, not a hardcoded zero: the slot count
-    // is whatever barrier work actually held while this barrier waited.
-    this.barrierWaitOccupiedSlotMsTotal += this.barrierOccupiedSlots * waitMs;
-    this.observeDepths();
-
-    let result: Promise<unknown>;
-    try {
-      result = barrier.transition();
-    } catch (err) {
-      result = Promise.reject(err);
-    }
-    result
-      .then(
-        (value) => {
-          if (barrier.settled) return;
-          barrier.settled = true;
-          barrier.resolve(value);
-        },
-        (err) => {
-          if (barrier.settled) return;
-          barrier.settled = true;
-          barrier.reject(err);
-        },
-      )
-      // Cleanup runs unconditionally, even for a transition already rejected by
-      // the bound — a late settle must still unfreeze the lane.
-      .finally(() => {
-        if (barrier.timer !== undefined) {
-          clearTimeout(barrier.timer);
-          barrier.timer = undefined;
-        }
-        this.barrierRunning = undefined;
-        const index = this.barriers.indexOf(barrier);
-        if (index >= 0) this.barriers.splice(index, 1);
-        // Commit releases the seal, the held `run()` calls, and wakes selection.
-        barrier.seal.commit();
-        this.observeDepths();
-        this.pumpBarriers();
-      });
-  }
 }
 
 export const externalStorePriorityScheduler = new StorePriorityScheduler();

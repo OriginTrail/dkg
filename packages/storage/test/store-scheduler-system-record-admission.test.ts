@@ -1,12 +1,18 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
   STORE_ADMISSION_DEFAULT_DOMAIN,
   STORE_ADMISSION_EXCLUSIVE_WAIT_BOUND_MS,
   STORE_ADMISSION_SHARED_BYPASS_LIMIT,
   StoreControlBarrierTimeoutError,
   StorePriorityScheduler,
+  getExternalStorePrioritySchedulerSnapshot,
   type StoreAdmissionV1,
+  type StoreQueuedAdmissionV1,
 } from '../src/store-priority-scheduler.js';
+
+interface AuditedAdmissionFixture extends StoreAdmissionV1 {
+  readonly auditId: string;
+}
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -26,10 +32,10 @@ function openScheduler(now?: () => number): StorePriorityScheduler {
 
 function admission(
   storeId: object,
-  mode: StoreAdmissionV1['mode'],
+  mode: StoreQueuedAdmissionV1['mode'],
   domain?: string,
   generation = 'gen-1',
-): StoreAdmissionV1 {
+): StoreQueuedAdmissionV1 {
   return domain === undefined
     ? { storeId, generation, mode }
     : { storeId, generation, domain, mode };
@@ -45,6 +51,21 @@ async function settle(predicate: () => boolean, label: string): Promise<void> {
 }
 
 describe('StorePriorityScheduler admission V1 — default-path invariance', () => {
+  it('preserves the public admission interface extension contract', () => {
+    const admission: AuditedAdmissionFixture = {
+      storeId: {},
+      generation: 'gen-1',
+      mode: 'shared',
+      auditId: 'audit-1',
+    };
+
+    expect(admission.auditId).toBe('audit-1');
+  });
+
+  it('retains the deprecated occupied-slot metric on the public snapshot', () => {
+    expect(getExternalStorePrioritySchedulerSnapshot().barrierWaitOccupiedSlotMs).toBe(0);
+  });
+
   it('does no admission work at all when nothing carries admission metadata', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 1,
@@ -709,7 +730,6 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       barrierPending: 1,
       barrierInflight: 0,
       normalInflight: 1,
-      barrierWaitOccupiedSlotMs: 0,
     });
 
     let secondTransitionRan = false;
@@ -717,6 +737,8 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       secondTransitionRan = true;
       return 'barrier-2';
     }, 'gen-1');
+    expectTypeOf(first).toEqualTypeOf<Promise<string>>();
+    expectTypeOf(second).toEqualTypeOf<Promise<string>>();
     expect(scheduler.snapshot).toMatchObject({ barrierPending: 1, barrierCoalesced: 1 });
 
     // An already-aborted caller signal cannot reject a control transition.
@@ -727,6 +749,7 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       generation: 'gen-1',
       mode: 'control-barrier',
     });
+    expectTypeOf(viaRun).toEqualTypeOf<Promise<string>>();
     expect(scheduler.snapshot.barrierCoalesced).toBe(2);
 
     expect(events).not.toContain('barrier:start');
@@ -741,8 +764,11 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     await expect(viaRun).resolves.toBe('barrier-1');
 
     const snapshot = scheduler.snapshot;
-    // The barrier genuinely waited (so the zero below is not vacuous) and held
-    // zero execution slots for the whole of that wait.
+    // The barrier genuinely waited, and it held no ordinary execution slot for
+    // the duration — proven above by `barrier:start` being absent until the
+    // writer released (749/753), not by a snapshot field. There was one such
+    // field; it reported a hardcoded 0, so asserting it proved only that a
+    // literal equals itself.
     expect(snapshot.barrierWaitMs).toBeGreaterThan(0);
     expect(snapshot.barrierWaitOccupiedSlotMs).toBe(0);
     expect(snapshot).toMatchObject({ barrierPending: 0, barrierInflight: 0 });
@@ -797,7 +823,6 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     expect(scheduler.snapshot).toMatchObject({
       barrierPending: 0,
       barrierInflight: 0,
-      barrierWaitOccupiedSlotMs: 0,
       admissionTrackedStores: 0,
     });
   });

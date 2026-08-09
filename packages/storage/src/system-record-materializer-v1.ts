@@ -17,6 +17,13 @@ import {
   snapshotSystemRecordDenseArrayV1,
   snapshotSystemRecordExactDataRecordV1,
 } from './system-record-input-guards-v1-internal.js';
+import {
+  type SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-contract-v1.js';
+import {
+  snapshotSystemRecordMaterializationEpochRotationV1,
+  type SystemRecordMaterializationEpochRotationSnapshotV1,
+} from './system-record-materialization-epoch-guard-v1-internal.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).
@@ -139,10 +146,9 @@ export interface SystemRecordChildHandoffV1 {
    * its lease and keeps the missing epoch behind an internal legacy marker.
    * A B3 activation still requires the concrete binding.
    */
-  rotateMaterializationEpoch(networkId?: string): Promise<void | {
-    readonly epoch: string;
-    readonly childGeneration: string;
-  }>;
+  rotateMaterializationEpoch(
+    networkId?: string,
+  ): Promise<void | SystemRecordMaterializationEpochRotationV1>;
   /**
    * Bind the exact-recovery read to the proven replacement generation.
    * Optional only while the B2 adapter migrates to the B3 atomic executor;
@@ -218,6 +224,21 @@ export type SystemRecordLaneBarrierV1 = <T>(
   transition: () => Promise<T>,
 ) => Promise<T>;
 
+export interface SystemRecordLaneBarrierResultsV1 {
+  readonly enable: void | SystemRecordMaterializationEpochRotationV1;
+  readonly disable: void;
+  readonly shutdown: void;
+  readonly recovery: void;
+}
+
+export type SystemRecordLaneBarrierKindV1 = keyof SystemRecordLaneBarrierResultsV1;
+
+/** Additive typed lifecycle path; adapters may translate kinds to scheduler keys. */
+export type SystemRecordLaneTypedBarrierV1 = <K extends SystemRecordLaneBarrierKindV1>(
+  kind: K,
+  transition: () => Promise<SystemRecordLaneBarrierResultsV1[K]>,
+) => Promise<SystemRecordLaneBarrierResultsV1[K]>;
+
 export interface SystemRecordLaneControllerDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
   readonly lease: ManagedOxigraphOwnershipLeaseV1;
@@ -228,8 +249,13 @@ export interface SystemRecordLaneControllerDepsV1 {
    * this capability shipped once with a barrier implemented, exported and
    * tested but with zero production callers, so the enable path stopped the
    * child while ordinary requests were still in flight.
+   *
+   * @deprecated Managed composition uses `typedBarrier`. Retained so existing
+   * external controller integrations keep their purpose-string contract.
    */
   readonly barrier: SystemRecordLaneBarrierV1;
+  /** Optional typed path; the string callback above remains the compatibility contract. */
+  readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
   /**
    * Adapter-owned admission latch, driven by the lifecycle's physical state.
    * `true` is published synchronously before enable can enqueue its barrier;
@@ -238,6 +264,19 @@ export interface SystemRecordLaneControllerDepsV1 {
    */
   readonly setAdmissionActive?: (active: boolean) => void;
 }
+
+type SystemRecordLaneSessionDepsV1 = Pick<
+  SystemRecordLaneControllerDepsV1,
+  'lease' | 'handoff' | 'executor' | 'setAdmissionActive'
+> & {
+  readonly runEnableBarrier: (
+    transition: () => Promise<SystemRecordLaneBarrierResultsV1['enable']>,
+  ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
+  readonly runVoidBarrier: <K extends Exclude<SystemRecordLaneBarrierKindV1, 'enable'>>(
+    kind: K,
+    transition: () => Promise<void>,
+  ) => Promise<void>;
+};
 
 /** Raised when an incompatible activation descriptor is offered to a live session. */
 export class SystemRecordLaneActivationConflictError extends Error {
@@ -394,7 +433,19 @@ export function createSystemRecordLaneControllerV1(
 ): SystemRecordLaneControllerV1 {
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
-  const session = new SystemRecordLaneSession(deps);
+  const publicBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
+    ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
+  const session = new SystemRecordLaneSession({
+    lease: deps.lease,
+    handoff: deps.handoff,
+    executor: deps.executor,
+    setAdmissionActive: deps.setAdmissionActive,
+    runEnableBarrier: async (transition) =>
+      snapshotSystemRecordMaterializationEpochRotationV1(
+        await publicBarrier('enable', transition),
+      ),
+    runVoidBarrier: (kind, transition) => publicBarrier(kind, transition),
+  });
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
   });
@@ -654,7 +705,7 @@ class SystemRecordLaneSession {
    */
   owner: SystemRecordLaneControllerV1 | null = null;
 
-  constructor(private readonly deps: SystemRecordLaneControllerDepsV1) {}
+  constructor(private readonly deps: SystemRecordLaneSessionDepsV1) {}
 
   get state(): SystemRecordLaneStateV1 {
     return this.current;
@@ -746,12 +797,12 @@ class SystemRecordLaneSession {
   ): Promise<void> {
     this.assertLeaseLive();
     this.commitState('enabling');
-    let rotated: void | { readonly epoch: string; readonly childGeneration: string };
+    let rotationSnapshot: SystemRecordMaterializationEpochRotationSnapshotV1;
     try {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      rotated = await this.deps.barrier('system-record.enable', async () => {
+      rotationSnapshot = await this.deps.runEnableBarrier(async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
@@ -766,11 +817,8 @@ class SystemRecordLaneSession {
       throw error;
     }
     if (
-      (!rotated && this.deps.executor.applyVerifiedSettlementBound) ||
-      (rotated && (
-        typeof rotated.epoch !== 'string' ||
-        typeof rotated.childGeneration !== 'string'
-      ))
+      rotationSnapshot.kind === 'malformed' ||
+      (rotationSnapshot.kind === 'absent' && this.deps.executor.applyVerifiedSettlementBound)
     ) {
       this.failManagedMutationsClosed(
         'enable transition did not return a materialization epoch binding',
@@ -782,13 +830,16 @@ class SystemRecordLaneSession {
         'system-record lane enable did not return a materialization epoch binding',
       );
     }
+    const rotation = rotationSnapshot.kind === 'rotation'
+      ? rotationSnapshot.value
+      : undefined;
     // POST-CONDITION: the handoff claims to have started and proved a clean
     // generation, so verify that rather than assume it. Without this,
     // `runEnable` moved to `enabled` purely because no step threw, and a
     // handoff that resolved without binding a ready generation produced an
     // "enabled" lane over a child that was not the proven listener.
     const bound = readManagedOxigraphOwnershipSnapshotV1(this.deps.lease);
-    const activationBinding = rotated ?? (bound && !bound.terminal && bound.ready
+    const activationBinding = rotation ?? (bound && !bound.terminal && bound.ready
       ? Object.freeze({
           epoch: INTERNAL_B2_MATERIALIZATION_EPOCH_SENTINEL_V1,
           childGeneration: bound.childGeneration,
@@ -931,7 +982,7 @@ class SystemRecordLaneSession {
 
     const work = (async () => {
       try {
-        await this.deps.barrier('system-record.disable', () => {
+        await this.deps.runVoidBarrier('disable', () => {
           // Keep the callback promise separately from the barrier's public
           // promise. A transition timeout reports to this caller while the
           // callback remains the exclusive physical owner.
@@ -1130,7 +1181,7 @@ class SystemRecordLaneSession {
         if (recoveryAlreadySettled) {
           entry.physicalSucceeded = true;
         } else {
-          await this.deps.barrier('system-record.shutdown', () => {
+          await this.deps.runVoidBarrier('shutdown', () => {
             // Keep the callback promise separately from the barrier's public
             // promise. The scheduler may reject the latter at its transition
             // timeout while deliberately leaving this callback and its seal
@@ -1430,7 +1481,7 @@ class SystemRecordLaneSession {
     entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }>,
   ): Promise<void> {
     try {
-      await this.deps.barrier('system-record.recovery', () => {
+      await this.deps.runVoidBarrier('recovery', () => {
         const physicalWork = (async () => {
           try {
             const result = await this.recoverInsideBarrier(entry.recovery, 'resume');

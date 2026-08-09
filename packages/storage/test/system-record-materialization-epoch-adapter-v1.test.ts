@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import {
@@ -7,6 +7,7 @@ import {
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
+import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
 
 let server: Server;
 let queryEndpoint: string;
@@ -60,11 +61,18 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.restoreAllMocks();
   __resetSystemRecordControllerRegistrationForTests();
 });
 
 describe('sparql-http managed epoch handoff', () => {
   it('rotates through the generation-owned client inside the control barrier', async () => {
+    // The lane MUST take the result-preserving path: a coalesced caller has to
+    // receive the first transition's typed lifecycle data, not an unassigned
+    // local capture. A result-free variant existed alongside it and this test
+    // asserted it was never called — a public API pinned as unreachable, which
+    // is why it is gone rather than merely unused.
+    const resultBarrier = vi.spyOn(externalStorePriorityScheduler, 'runTypedControlBarrier');
     const ownership = createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint);
     ownership.bindReadyGeneration();
     const options = attachManagedOxigraphLeaseV1(
@@ -80,6 +88,7 @@ describe('sparql-http managed epoch handoff', () => {
     expect(controller).toBeDefined();
 
     const first = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
+    expect(resultBarrier).toHaveBeenCalled();
     expect(epoch).toBe('1');
     await first.close('disable');
     expect(epoch).toBe('2');
@@ -106,6 +115,17 @@ describe('sparql-http managed epoch handoff', () => {
     expect(requests).toHaveLength(beforeForgedApply);
 
     await second.close('shutdown');
+    const barrierKeys = resultBarrier.mock.calls.map((call) => call[1]);
+    expect(barrierKeys.map((key) => key.purpose)).toEqual([
+      'system-record.enable',
+      'system-record.disable',
+      'system-record.enable',
+      'system-record.shutdown',
+    ]);
+    expect(barrierKeys[0]).toBe(barrierKeys[2]);
+    expect(barrierKeys[1]).not.toBe(barrierKeys[0]);
+    expect(barrierKeys[3]).not.toBe(barrierKeys[0]);
+    expect(barrierKeys[3]).not.toBe(barrierKeys[1]);
     await store.close();
   });
 });
