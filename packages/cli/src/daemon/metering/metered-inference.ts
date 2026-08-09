@@ -14,6 +14,7 @@ import {
   type ModelBinding, type RecountTokenizer, type StopBoundary,
 } from "./inference-meter.js";
 import { isExempt, type MeterConfig } from "./read-meter.js";
+import { runningBuildRef } from "./build-attestation.js";
 
 /** What a served model call returns — the artifacts the receipt binds. */
 export interface ModelResult {
@@ -196,6 +197,9 @@ export function meterInference(args: {
     model: args.model.model,
     finishReason: args.model.finishReason,
     stopBoundary: args.model.stopBoundary,
+    // Name the build that produced these bytes, so a countersignature is made
+    // against a specific deployment.
+    providerBuild: runningBuildRef({ home: args.home }),
   });
   const rc = verifyInferenceRecount({
     tokenizer: args.tokenizer,

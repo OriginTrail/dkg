@@ -17,6 +17,7 @@ import { COEFFICIENTS_CANONICAL } from "./read-meter.js";
 import { meterInference, preflightInference, type ModelResult } from "./metered-inference.js";
 import type { RecountTokenizer } from "./inference-meter.js";
 import type { CapabilityState } from "./capability.js";
+import { signedBuildAttestation } from "./build-attestation.js";
 
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
 
@@ -68,6 +69,14 @@ function capState(home: string, id: string): CapabilityState {
 
 /** Returns true when this request was a metered-inference route request. */
 export async function handleInfer(req: InferRequest, io: InferIo): Promise<boolean> {
+  // GET /api/metering/build — which code is actually serving. Unauthenticated
+  // on purpose: a buyer must be able to check the build BEFORE committing money
+  // to it, and provenance is not a secret. Read-only; touches no ledger state.
+  if (req.path === "/api/metering/build") {
+    if (req.method !== "GET") { io.json(405, { error: "E_METHOD" }); return true; }
+    io.json(200, signedBuildAttestation({ home: req.home }));
+    return true;
+  }
   if (req.path !== "/api/metering/infer") return false;
   if (req.method !== "POST") { io.json(405, { error: "E_METHOD" }); return true; }
 

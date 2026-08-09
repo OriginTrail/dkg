@@ -69,7 +69,7 @@ console.log("\nhonest recount:");
     Array.isArray(evidence.inputTokenIds) && Array.isArray(evidence.outputTokenIds) &&
     evidence.outputTokenIds.length === outIds.length && evidence.inputTokenIds.length === inIds.length);
   ok("the leg binds canonicalization version + digest", evidence.canonicalization.version === "inference-canon/v1" && evidence.canonicalization.digest === M.canonicalizationDigest());
-  ok("the leg binds route + schema version", evidence.route.path === "POST /api/metering/infer" && evidence.schemaVersion === "receipt-v0.5");
+  ok("the leg binds route + schema version", evidence.route.path === "POST /api/metering/infer" && evidence.schemaVersion === M.RECEIPT_SCHEMA_VERSION);
   ok("the leg binds finish reason + stop boundary", evidence.finishReason === "stop" && evidence.stopBoundary.kind === "eos");
   ok("the leg states explicit pricing arithmetic + currency", evidence.pricing.currency === "TRAC" && evidence.pricing.costMicroTrac === 2 * inIds.length + 6 * outIds.length && typeof evidence.pricing.arithmetic === "string");
 }

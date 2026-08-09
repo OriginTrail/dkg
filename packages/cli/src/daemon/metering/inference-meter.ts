@@ -32,7 +32,7 @@ import { canonicalize } from "./ledger.js";
 const sha256hex = (b: string | Buffer) => createHash("sha256").update(b).digest("hex");
 const sha256 = (b: string | Buffer) => "sha256:" + sha256hex(b);
 
-export const RECEIPT_SCHEMA_VERSION = "receipt-v0.5";
+export const RECEIPT_SCHEMA_VERSION = "receipt-v0.6";
 export const INFERENCE_ROUTE = "POST /api/metering/infer";
 export const INFERENCE_ROUTE_SCHEMA_VERSION = "infer-route/v1";
 
@@ -173,6 +173,11 @@ export interface InferenceEvidence {
   finishReason: string;
   stopBoundary: StopBoundary;
 
+  /** WHICH provider build produced this leg. Bound so a countersignature names
+   *  a specific deployment, and a later-proven divergence is evidence rather
+   *  than the buyer's word against the provider's (Bo, event 584ba19e). */
+  providerBuild?: { buildDigest: string; attestationDigest: string; sourceCommit?: string };
+
   model: ModelBinding;
   policyDigest: string;
   /** the pricing policy OBJECT, for the same self-containment reason. */
@@ -217,7 +222,8 @@ export type RecountCode =
   | "E_RECOUNT_PRICING"            // leg's stated cost ≠ policy arithmetic
   | "E_RECOUNT_MANIFEST"           // leg's model binding disagrees with the manifest
   | "E_RECOUNT_EMBEDDED_OBJECT"    // an embedded rules/policy/manifest ≠ its own digest
-  | "E_RECOUNT_LIMIT";             // token array or evidence size exceeds a policy bound
+  | "E_RECOUNT_LIMIT"              // token array or evidence size exceeds a policy bound
+  | "E_RECOUNT_BUILD";             // leg names a provider build the buyer did not audit
 
 const seqEq = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -241,6 +247,8 @@ export function verifyInferenceRecount(args: {
   expectedTokenizerBundleDigest?: string;
   /** the manifest the verifier believes served this call. */
   expectedBackendManifestDigest?: string;
+  /** the provider build the buyer audited; a leg from another build is refused. */
+  expectedProviderBuildDigest?: string;
 }): RecountVerdict {
   const e = args.evidence;
 
@@ -282,6 +290,10 @@ export function verifyInferenceRecount(args: {
   }
   if (e.model?.tokenizer?.bundleDigest === undefined || e.model?.backendManifestDigest === undefined) {
     return { ok: false, code: "E_RECOUNT_MANIFEST", detail: "leg omits tokenizer bundle or backend manifest binding" };
+  }
+
+  if (args.expectedProviderBuildDigest !== undefined && e.providerBuild?.buildDigest !== args.expectedProviderBuildDigest) {
+    return { ok: false, code: "E_RECOUNT_BUILD", detail: `leg names build ${e.providerBuild?.buildDigest ?? "(none)"}, buyer audited ${args.expectedProviderBuildDigest}` };
   }
 
   // ── input: rendered prompt bytes + re-encoded sequence ──
@@ -361,6 +373,7 @@ export function buildInferenceEvidence(args: {
   model: ModelBinding;
   finishReason: string;
   stopBoundary: StopBoundary;
+  providerBuild?: { buildDigest: string; attestationDigest: string; sourceCommit?: string };
 }): InferenceEvidence {
   const inputTokens = args.inputTokenIds.length;
   const outputTokens = args.outputTokenIds.length;
@@ -387,6 +400,7 @@ export function buildInferenceEvidence(args: {
 
     finishReason: args.finishReason,
     stopBoundary: args.stopBoundary,
+    ...(args.providerBuild ? { providerBuild: args.providerBuild } : {}),
 
     model: args.model,
     policyDigest: inferencePolicyDigest(),

@@ -19,7 +19,7 @@ export {
 
 export async function handleMeteredInferRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path } = ctx;
-  if (path !== "/api/metering/infer") return;
+  if (path !== "/api/metering/infer" && path !== "/api/metering/build") return;
 
   await handleInfer(
     { method: req.method ?? "GET", path, chainId: chainIdOf(ctx), home: meterHome() },
