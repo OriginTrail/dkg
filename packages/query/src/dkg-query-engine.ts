@@ -1660,6 +1660,11 @@ function hasTopLevelDefaultGraphPattern(sparql: string, braceStart: number): boo
     if (depth !== 0) continue;
     if (token.kind === 'iri') return true;
     if (token.kind === 'punctuation') {
+      // The shared scanner intentionally exposes only structural token kinds.
+      // A prefixed name therefore begins at a punctuation token; at this point
+      // GRAPH targets, VALUES blocks, and opaque expressions have already been
+      // skipped, so a valid prefixed name is a top-level default-graph term.
+      if (readSparqlPrefixName(sparql, token.start) !== null) return true;
       if (token.value === '?' || token.value === '$' || token.value === '[') return true;
       continue;
     }

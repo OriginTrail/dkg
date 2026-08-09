@@ -1832,6 +1832,21 @@ describe('DKGQueryEngine', () => {
     ).rejects.toThrow(/Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i);
   });
 
+  it('rejects prefixed-name default patterns mixed with a GRAPH variable', async () => {
+    await expect(
+      engine.query(
+        `PREFIX ex: <urn:guard:>
+         SELECT ?g ?o WHERE {
+           ex:subject ex:predicate ex:object .
+           GRAPH ?g { ?s ex:predicate ?o }
+         }`,
+        { contextGraphId: CONTEXT_GRAPH },
+      ),
+    ).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
+  });
+
   it('constrains GRAPH variables with non-ASCII names to the scoped context graph data graph', async () => {
     await store.insert([
       q('urn:other:entity', 'http://schema.org/name', '"OtherGraph"', 'did:dkg:context-graph:other-agent-registry'),
