@@ -8,9 +8,9 @@ import {
   OxigraphWorkerStore,
   TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
+  captureStructuredMutationEffects,
   supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
-  runStructuredMutationWithCommittedEffects,
   tryCopySubjectProjection,
   tryDeleteSubjects,
   tryReplaceProjectionFromGraphAtomically,
@@ -49,12 +49,7 @@ async function rows(store: TripleStore, graph: string): Promise<Array<Record<str
 }
 
 describe('bounded structured mutation capabilities', () => {
-  it('reports immutable graph effects only after a potentially mutating commit', async () => {
-    let release!: () => void;
-    const inFlight = new Promise<void>((resolve) => { release = resolve; });
-    const structuredMutation = vi.fn(async () => inFlight);
-    const store = { structuredMutation } as unknown as TripleStore;
-    const onCommitted = vi.fn();
+  it('captures immutable graph effects before dispatch', () => {
     const mutation = {
       kind: 'copy-subject-projection' as const,
       input: {
@@ -66,41 +61,22 @@ describe('bounded structured mutation capabilities', () => {
       },
     };
 
-    const pending = runStructuredMutationWithCommittedEffects(
-      store,
-      mutation,
-      undefined,
-      onCommitted,
-    );
+    const effects = captureStructuredMutationEffects(mutation);
     mutation.input.targetGraphUri = 'urn:test:redirected';
-    expect(onCommitted).not.toHaveBeenCalled();
-    release();
-    await pending;
-
-    expect(onCommitted).toHaveBeenCalledOnce();
-    const effects = onCommitted.mock.calls[0]![0];
-    expect(effects).toEqual({ touchedGraphs: [OTHER_GRAPH] });
+    expect(effects).toEqual({ mightMutate: true, touchedGraphs: [OTHER_GRAPH] });
     expect(Object.isFrozen(effects)).toBe(true);
     expect(Object.isFrozen(effects.touchedGraphs)).toBe(true);
   });
 
-  it('does not report effects for structural no-ops or failed mutations', async () => {
-    const onCommitted = vi.fn();
-    const successful = { structuredMutation: vi.fn(async () => undefined) } as unknown as TripleStore;
-    await runStructuredMutationWithCommittedEffects(successful, {
+  it('classifies structural no-ops without store orchestration', () => {
+    expect(captureStructuredMutationEffects({
       kind: 'delete-subjects',
       input: { graphUri: GRAPH, subjects: [] },
-    }, undefined, onCommitted);
-    expect(onCommitted).not.toHaveBeenCalled();
-
-    const failed = {
-      structuredMutation: vi.fn(async () => { throw new Error('commit failed'); }),
-    } as unknown as TripleStore;
-    await expect(runStructuredMutationWithCommittedEffects(failed, {
+    })).toEqual({ mightMutate: false, touchedGraphs: [GRAPH] });
+    expect(captureStructuredMutationEffects({
       kind: 'delete-subjects',
       input: { graphUri: GRAPH, subjects: ['urn:test:a'] },
-    }, undefined, onCommitted)).rejects.toThrow('commit failed');
-    expect(onCommitted).not.toHaveBeenCalled();
+    })).toEqual({ mightMutate: true, touchedGraphs: [GRAPH] });
   });
 
   it('reports the canonical target graph for every structured mutation kind', async () => {
@@ -131,12 +107,11 @@ describe('bounded structured mutation capabilities', () => {
         roots: ['urn:test:a'], descendantSuffix: '/', excludedPredicates: [],
       } }, OTHER_GRAPH],
     ];
-    const store = { structuredMutation: vi.fn(async () => undefined) } as unknown as TripleStore;
-
     for (const [mutation, expectedGraph] of mutations) {
-      const onCommitted = vi.fn();
-      await runStructuredMutationWithCommittedEffects(store, mutation, undefined, onCommitted);
-      expect(onCommitted).toHaveBeenCalledWith({ touchedGraphs: [expectedGraph] });
+      expect(captureStructuredMutationEffects(mutation)).toEqual({
+        mightMutate: true,
+        touchedGraphs: [expectedGraph],
+      });
     }
   });
 

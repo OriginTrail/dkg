@@ -154,9 +154,18 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
   it('invalidates structured mutation effects after success without decoding them in Agent', async () => {
     let release!: () => void;
     const inFlight = new Promise<void>((resolve) => { release = resolve; });
-    const inner = {
-      structuredMutation: vi.fn(async () => inFlight),
-    } as unknown as TripleStore;
+    const options = { source: 'agent.test.structured-mutation-effects' };
+    let inner!: TripleStore;
+    const structuredMutation = vi.fn(function (
+      this: TripleStore,
+      _mutation: unknown,
+      receivedOptions: unknown,
+    ) {
+      expect(this).toBe(inner);
+      expect(receivedOptions).toBe(options);
+      return inFlight;
+    });
+    inner = { structuredMutation } as unknown as TripleStore;
     const invalidate = vi.fn();
     const markProjectionDirty = vi.fn();
     const store = createListContextGraphsCacheInvalidatingStore(
@@ -175,7 +184,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       },
     };
 
-    const pending = store.structuredMutation!(mutation);
+    const pending = store.structuredMutation!(mutation, options);
     mutation.input.targetGraphUri = 'urn:test:redirected';
     expect(invalidate).not.toHaveBeenCalled();
     release();

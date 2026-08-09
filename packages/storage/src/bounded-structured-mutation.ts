@@ -12,11 +12,8 @@ import type {
   ReplaceProjectionFromGraphInput,
   ReplaceSubjectPredicatesInput,
   StructuredMutation,
-  TripleStore,
-  QueryOptions,
 } from './triple-store.js';
 import { formatRdfObjectTerm } from './rdf-term-format.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const BOUNDED_MUTATION_MAX_IRIS = 100_000;
 export const BOUNDED_MUTATION_MAX_PRUNE_DELETE = 10_000;
@@ -684,33 +681,19 @@ export function structuredMutationMightMutate(mutation: StructuredMutation): boo
   return mutation.kind !== 'delete-subjects' || mutation.input.subjects.length > 0;
 }
 
-/** Graph-scoped effects reported only after a structured mutation commits successfully. */
-export interface CommittedStructuredMutationEffects {
+/** Immutable graph-scoped effects captured before a structured mutation is dispatched. */
+export interface StructuredMutationEffects {
+  readonly mightMutate: boolean;
   readonly touchedGraphs: readonly string[];
 }
 
-/**
- * Execute one structured mutation and report its canonical graph effects after success.
- *
- * Effect scope is captured before the first await so a caller cannot redirect cache
- * invalidation by mutating an input object while the backend operation is in flight.
- * Structurally empty operations do not report a commit effect.
- */
-export async function runStructuredMutationWithCommittedEffects(
-  store: Pick<TripleStore, 'structuredMutation'>,
+/** Capture canonical effects without executing or probing a store capability. */
+export function captureStructuredMutationEffects(
   mutation: StructuredMutation,
-  options: QueryOptions | undefined,
-  onCommitted: (effects: CommittedStructuredMutationEffects) => void,
-): Promise<void> {
-  const execute = store.structuredMutation;
-  if (typeof execute !== 'function') {
-    throw new UnsupportedTripleStoreCapabilityError(
-      'structuredMutation',
-      'runStructuredMutationWithCommittedEffects',
-    );
-  }
-  const mightMutate = structuredMutationMightMutate(mutation);
+): StructuredMutationEffects {
   const touchedGraphs = Object.freeze([...structuredMutationTouchedGraphs(mutation)]);
-  await execute.call(store, mutation, options);
-  if (mightMutate) onCommitted(Object.freeze({ touchedGraphs }));
+  return Object.freeze({
+    mightMutate: structuredMutationMightMutate(mutation),
+    touchedGraphs,
+  });
 }
