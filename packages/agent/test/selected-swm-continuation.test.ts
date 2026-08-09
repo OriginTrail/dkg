@@ -11,7 +11,7 @@ import type {
 } from '../src/dkg-agent-types.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
-  runSelectedSwmContinuations,
+  runSelectedSwmSyncWork,
   SelectedSwmContinuationPlan,
 } from '../src/sync/selected-swm-continuation.js';
 
@@ -141,61 +141,81 @@ function merge(
 describe('selected RFC-64 SWM continuation', () => {
   it('re-enters admission promptly until incomplete coverage becomes complete', async () => {
     const contextGraphId = 'selected-public';
-    const plan = new SelectedSwmContinuationPlan(
-      PEER,
-      [contextGraphId],
-      { maxPasses: 4, budgetMs: 600_000 },
-      0,
-    );
-    plan.recordRound(contextGraphId, result(contextGraphId, 1, 3));
-    const admissions: number[] = [];
+    const rounds = [
+      result(contextGraphId, 1, 3),
+      result(contextGraphId, 3, 3, { insertedDataTriples: 2 }),
+    ];
+    const admissions: Array<{ selected: boolean; priority: number | undefined }> = [];
 
-    const summary = await runSelectedSwmContinuations({
-      plan,
-      initialResult: result(contextGraphId, 1, 3),
+    const summary = await runSelectedSwmSyncWork({
+      providerPeerId: PEER,
+      publicContextGraphIds: [contextGraphId],
+      work: [{
+        contextGraphId,
+        lane: 'shared_memory',
+        operationId: 'selected-public',
+        run: async () => rounds.shift()!,
+      }],
+      selectedEnabled: true,
+      selectedPriority: 2_000,
+      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
       nowMs: () => 1,
-      runPass: async (contextGraphIds) => {
-        admissions.push(plan.startContinuationPass(contextGraphIds[0]!));
-        const complete = result(contextGraphId, 3, 3, { insertedDataTriples: 2 });
-        plan.recordRound(contextGraphId, complete);
-        return complete;
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run, admission) => {
+        admissions.push({
+          selected: admission.selectedSwmPriority,
+          priority: admission.priorityOverride,
+        });
+        return run();
       },
       merge,
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
     });
 
-    expect(admissions).toEqual([1]);
+    expect(admissions).toEqual([
+      { selected: true, priority: 2_000 },
+      { selected: true, priority: 2_000 },
+    ]);
     expect(summary.continuationPasses).toBe(1);
     expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 3, snapshotsTotal: 3 });
   });
 
   it('allows one capable zero-progress retry, then stops when coverage stalls', async () => {
     const contextGraphId = 'selected-stalled';
-    const plan = new SelectedSwmContinuationPlan(
-      PEER,
-      [contextGraphId],
-      { maxPasses: 4, budgetMs: 600_000 },
-      0,
-    );
     const stalled = result(contextGraphId, 0, 3);
-    plan.recordRound(contextGraphId, stalled);
     const stop = vi.fn();
     let admissions = 0;
 
-    const summary = await runSelectedSwmContinuations({
-      plan,
-      initialResult: stalled,
+    const summary = await runSelectedSwmSyncWork({
+      providerPeerId: PEER,
+      publicContextGraphIds: [contextGraphId],
+      work: [{
+        contextGraphId,
+        lane: 'shared_memory',
+        operationId: 'selected-stalled',
+        run: async () => stalled,
+      }],
+      selectedEnabled: true,
+      selectedPriority: 2_000,
+      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
       nowMs: () => 1,
-      runPass: async (contextGraphIds) => {
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => {
         admissions += 1;
-        plan.startContinuationPass(contextGraphIds[0]!);
-        plan.recordRound(contextGraphId, stalled);
-        return stalled;
+        return run();
       },
       merge,
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
       onStop: stop,
     });
 
-    expect(admissions).toBe(1);
+    expect(admissions).toBe(2);
     expect(summary.continuationPasses).toBe(1);
     expect(stop).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId,
@@ -265,51 +285,105 @@ describe('selected RFC-64 SWM continuation', () => {
   it('stops immediately on initial or continuation backpressure', async () => {
     const contextGraphId = 'selected-pressure';
     const initialBackpressure = result(contextGraphId, 1, 3, { deferredBackpressure: 1 });
-    const initialPlan = new SelectedSwmContinuationPlan(
-      PEER,
-      [contextGraphId],
-      { maxPasses: 4, budgetMs: 600_000 },
-      0,
-    );
-    initialPlan.recordRound(contextGraphId, initialBackpressure);
     const initialRun = vi.fn();
     const initialStop = vi.fn();
 
-    await runSelectedSwmContinuations({
-      plan: initialPlan,
-      initialResult: initialBackpressure,
+    await runSelectedSwmSyncWork({
+      providerPeerId: PEER,
+      publicContextGraphIds: [contextGraphId],
+      work: [{
+        contextGraphId,
+        lane: 'shared_memory',
+        operationId: 'initial-pressure',
+        run: async () => initialBackpressure,
+      }],
+      selectedEnabled: true,
+      selectedPriority: 2_000,
+      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
       nowMs: () => 1,
-      runPass: initialRun,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => {
+        initialRun();
+        return run();
+      },
       merge,
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
       onBackpressure: initialStop,
     });
-    expect(initialRun).not.toHaveBeenCalled();
+    expect(initialRun).toHaveBeenCalledOnce();
     expect(initialStop).toHaveBeenCalledOnce();
 
-    const continuationPlan = new SelectedSwmContinuationPlan(
-      PEER,
-      [contextGraphId],
-      { maxPasses: 4, budgetMs: 600_000 },
-      0,
-    );
     const incomplete = result(contextGraphId, 1, 3);
-    continuationPlan.recordRound(contextGraphId, incomplete);
     const continuationStop = vi.fn();
-    const continuationRun = vi.fn(async (contextGraphIds: readonly string[]) => {
-      continuationPlan.startContinuationPass(contextGraphIds[0]!);
-      return result(contextGraphId, 1, 3, { deferredBackpressure: 1 });
-    });
+    const rounds = [
+      incomplete,
+      result(contextGraphId, 1, 3, { deferredBackpressure: 1 }),
+    ];
+    const continuationRun = vi.fn(async () => rounds.shift()!);
 
-    await runSelectedSwmContinuations({
-      plan: continuationPlan,
-      initialResult: incomplete,
+    await runSelectedSwmSyncWork({
+      providerPeerId: PEER,
+      publicContextGraphIds: [contextGraphId],
+      work: [{
+        contextGraphId,
+        lane: 'shared_memory',
+        operationId: 'continuation-pressure',
+        run: continuationRun,
+      }],
+      selectedEnabled: true,
+      selectedPriority: 2_000,
+      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
       nowMs: () => 1,
-      runPass: continuationRun,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => run(),
       merge,
+      markDeferred: (summary) => ({
+        ...summary,
+        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
+      }),
       onBackpressure: continuationStop,
     });
-    expect(continuationRun).toHaveBeenCalledOnce();
+    expect(continuationRun).toHaveBeenCalledTimes(2);
     expect(continuationStop).toHaveBeenCalledOnce();
+  });
+
+  it('owns continuationPasses even when initial and part results carry nonzero counters', async () => {
+    const contextGraphId = 'selected-counter-owner';
+    const rounds: SharedMemorySyncResult[] = [
+      { ...result(contextGraphId, 1, 2), continuationPasses: 17 },
+      {
+        ...result(contextGraphId, 2, 2, { insertedDataTriples: 1 }),
+        continuationPasses: 23,
+      },
+    ];
+
+    const summary = await runSelectedSwmSyncWork({
+      providerPeerId: PEER,
+      publicContextGraphIds: [contextGraphId],
+      work: [{
+        contextGraphId,
+        lane: 'shared_memory',
+        operationId: 'counter-owner',
+        run: async () => rounds.shift()!,
+      }],
+      selectedEnabled: true,
+      selectedPriority: 2_000,
+      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => run(),
+      merge: (left, right) => ({
+        ...merge(left, right),
+        continuationPasses:
+          (left.continuationPasses ?? 0) + (right.continuationPasses ?? 0),
+      }),
+      markDeferred: (current) => current,
+    });
+
+    expect(summary.continuationPasses).toBe(1);
   });
 });
 

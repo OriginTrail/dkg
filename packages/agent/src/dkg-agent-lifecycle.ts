@@ -308,8 +308,7 @@ import {
   type CatchupPassConfig,
 } from './sync/catchup-pass-policy.js';
 import {
-  runSelectedSwmContinuations,
-  SelectedSwmContinuationPlan,
+  runSelectedSwmSyncWork,
 } from './sync/selected-swm-continuation.js';
 import {
   classifyDurableProgress,
@@ -6106,33 +6105,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return admission;
       };
 
-      const shouldUseSelectedSwmContinuation = Boolean(
-        options?.selectedSwmPriority && publicContextGraphIds.length > 0,
-      );
-      let selectedSwmContinuation: SelectedSwmContinuationPlan | undefined;
-      const initialPublicResults = new Map<string, SharedMemorySyncResult>();
-      let continuationContextGraphIds = new Set<string>();
-
       const syncPublicContextGraph = async (
         contextGraphId: string,
         remainingContextGraphs: number,
       ): Promise<SharedMemorySyncResult> => {
-        const continuation = continuationContextGraphIds.has(contextGraphId);
-        let before = 0;
-        if (selectedSwmContinuation && continuation) {
-          // `run` is invoked from INSIDE global scheduler admission. Recheck
-          // the continuation budget here, not only before queueing: a selected
-          // transfer can wait behind an admitted operation long enough for its
-          // budget to expire, and must not begin fresh network I/O afterwards.
-          if (catchupPassNowMs() >= selectedSwmContinuation.deadlineMs) {
-            this.log.info(
-              ctx,
-              `Selected RFC-64 SWM continuation for "${contextGraphId}" expired while awaiting admission`,
-            );
-            return emptySharedMemorySyncResult();
-          }
-          before = selectedSwmContinuation.startContinuationPass(contextGraphId);
-        }
         const result = await runSharedMemorySync({
           ctx,
           remotePeerId,
@@ -6203,18 +6179,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           logWarn: (opCtx, message) => this.log.warn(opCtx, message),
           logDebug: (opCtx, message) => this.log.debug(opCtx, message),
         });
-        if (selectedSwmContinuation) {
-          selectedSwmContinuation.recordRound(contextGraphId, result);
-          if (continuation) {
-            this.log.info(
-              ctx,
-              `Continued selected RFC-64 SWM for "${contextGraphId}" from ${remotePeerId.slice(-8)}: `
-              + `snapshot coverage ${before} -> ${selectedSwmContinuation.progress(contextGraphId)}`,
-            );
-          }
-        } else if (shouldUseSelectedSwmContinuation) {
-          initialPublicResults.set(contextGraphId, result);
-        }
         return result;
       };
 
@@ -6279,35 +6243,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       }
 
-      const runWork = (
-        selectedWork: readonly ContextGraphSyncWork<SharedMemorySyncResult>[],
-        continuation: boolean,
-      ) => {
-        const continuationDeadlineMs = selectedSwmContinuation?.deadlineMs;
-        return runOrderedContextGraphSyncs({
-        work: selectedWork,
+      return runSelectedSwmSyncWork({
+        providerPeerId: remotePeerId,
+        publicContextGraphIds,
+        work,
+        selectedEnabled: Boolean(
+          options?.selectedSwmPriority && publicContextGraphIds.length > 0,
+        ),
+        selectedPriority: options?.priority,
         priorities: this.config.syncContextGraphPriorities,
+        resolvePassConfig: resolveSwmCatchupPassConfig,
+        nowMs: catchupPassNowMs,
         emptyResult: emptySharedMemorySyncResult,
-        runWithAdmission: (item, run) => this.runContextGraphSyncWithBackpressure(
+        runWithAdmission: (item, run, admission) => this.runContextGraphSyncWithBackpressure(
           ctx,
           item.contextGraphId,
           item.lane,
           item.operationId,
           run,
           {
-            priorityOverride: options?.selectedSwmPriority
-              ? (
-                item.lane === 'shared_memory' && publicSet.has(item.contextGraphId)
-                  ? options.priority
-                  : undefined
-              )
-              : options?.priority,
+            priorityOverride: admission.priorityOverride,
             source: options?.source,
-            selectedSwmPriority: Boolean(
-              options?.selectedSwmPriority
-              && item.lane === 'shared_memory'
-              && publicSet.has(item.contextGraphId),
-            ),
+            selectedSwmPriority: admission.selectedSwmPriority,
           },
         ),
         merge: mergeSharedMemorySyncResults,
@@ -6315,13 +6272,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
         }),
-        ...(continuation && continuationDeadlineMs !== undefined
-          ? {
-            // Do not start another admitted round after the shared absolute
-            // budget. A round admitted before the boundary still finishes.
-            shouldContinue: () => catchupPassNowMs() < continuationDeadlineMs,
-          }
-          : {}),
         // Mirrors the durable fanout: a failed CG round is already recorded in
         // the merged counters and must not cost the remaining CGs their turn.
         // `failedPeers` is the peer-never-responded signal on the public lane;
@@ -6335,42 +6285,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ctx,
           `Deferring ${item.lane} at CG ${item.contextGraphId} due to local backpressure: ${error.message}`,
         ),
-        });
-      };
-
-      const initialSummary = await runWork(work, false);
-      if (!shouldUseSelectedSwmContinuation) return initialSummary;
-
-      // The pass budget covers continuation work only, matching the shared
-      // foreground catch-up policy. A large initial walk must not spend the
-      // entire retry allowance before the continuation driver even exists.
-      selectedSwmContinuation = new SelectedSwmContinuationPlan(
-        remotePeerId,
-        publicContextGraphIds,
-        resolveSwmCatchupPassConfig(),
-        catchupPassNowMs(),
-      );
-      for (const [contextGraphId, result] of initialPublicResults) {
-        selectedSwmContinuation.recordRound(contextGraphId, result);
-      }
-
-      const publicWorkByContextGraph = new Map(
-        work
-          .filter((item) => publicSet.has(item.contextGraphId))
-          .map((item) => [item.contextGraphId, item] as const),
-      );
-      return runSelectedSwmContinuations({
-        plan: selectedSwmContinuation,
-        initialResult: initialSummary,
-        nowMs: catchupPassNowMs,
-        runPass: async (contextGraphIds) => {
-          continuationContextGraphIds = new Set(contextGraphIds);
-          const continuationWork = contextGraphIds
-            .map((contextGraphId) => publicWorkByContextGraph.get(contextGraphId))
-            .filter((item): item is ContextGraphSyncWork<SharedMemorySyncResult> => item !== undefined);
-          return runWork(continuationWork, true);
-        },
-        merge: mergeSharedMemorySyncResults,
         onStop: (stop) => {
           this.log.info(
             ctx,
@@ -6382,6 +6296,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           this.log.info(
             ctx,
             `Selected RFC-64 SWM continuation from ${remotePeerId.slice(-8)} stopped on local backpressure`,
+          );
+        },
+        onContinuation: (progress) => {
+          this.log.info(
+            ctx,
+            `Continued selected RFC-64 SWM for "${progress.contextGraphId}" from ${remotePeerId.slice(-8)}: `
+            + `snapshot coverage ${progress.coverageBefore} -> ${progress.coverageAfter}`,
+          );
+        },
+        onExpiredAfterAdmission: (contextGraphId) => {
+          this.log.info(
+            ctx,
+            `Selected RFC-64 SWM continuation for "${contextGraphId}" expired while awaiting admission`,
           );
         },
       });

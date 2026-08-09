@@ -8,6 +8,11 @@ import {
   type CatchupPassDecisionReason,
 } from './catchup-pass-policy.js';
 import { classifyDurableProgress } from './durable-progress.js';
+import type { SyncContextGraphPriorityConfig } from './policy.js';
+import {
+  runOrderedContextGraphSyncs,
+  type ContextGraphSyncWork,
+} from './requester/ordered-sync.js';
 
 interface SelectedSwmContextGraphState {
   readonly tracker: SwmCatchupPassTracker<SwmSnapshotCoverage>;
@@ -26,18 +31,52 @@ export interface SelectedSwmContinuationSelection {
   readonly stops: readonly SelectedSwmContinuationStop[];
 }
 
-export interface RunSelectedSwmContinuationsOptions {
-  readonly plan: SelectedSwmContinuationPlan;
-  readonly initialResult: SharedMemorySyncResult;
+export interface SelectedSwmAdmission {
+  readonly priorityOverride: number | undefined;
+  readonly selectedSwmPriority: boolean;
+}
+
+export interface SelectedSwmContinuationProgress {
+  readonly contextGraphId: string;
+  readonly coverageBefore: number;
+  readonly coverageAfter: number;
+}
+
+export interface RunSelectedSwmSyncWorkOptions {
+  readonly providerPeerId: string;
+  readonly publicContextGraphIds: readonly string[];
+  readonly work: readonly ContextGraphSyncWork<SharedMemorySyncResult>[];
+  readonly selectedEnabled: boolean;
+  readonly selectedPriority: number | undefined;
+  readonly priorities?: Readonly<SyncContextGraphPriorityConfig>;
+  /** Resolved lazily only when selected continuation is actually active. */
+  readonly resolvePassConfig: () => CatchupPassConfig;
   readonly nowMs: () => number;
-  /** Each call re-enters the caller's existing ordered scheduler admission. */
-  readonly runPass: (contextGraphIds: readonly string[]) => Promise<SharedMemorySyncResult>;
+  readonly emptyResult: () => SharedMemorySyncResult;
+  /**
+   * The only host-specific boundary. The focused driver decides selected
+   * membership and priority; the host admits the supplied callback through its
+   * existing global scheduler.
+   */
+  readonly runWithAdmission: (
+    item: ContextGraphSyncWork<SharedMemorySyncResult>,
+    run: () => Promise<SharedMemorySyncResult>,
+    admission: SelectedSwmAdmission,
+  ) => Promise<SharedMemorySyncResult>;
   readonly merge: (
     summary: SharedMemorySyncResult,
     part: SharedMemorySyncResult,
   ) => SharedMemorySyncResult;
+  readonly markDeferred: (summary: SharedMemorySyncResult) => SharedMemorySyncResult;
+  readonly isPeerTransportFailure?: (part: SharedMemorySyncResult) => boolean;
+  readonly onDeferred?: (
+    item: ContextGraphSyncWork<SharedMemorySyncResult>,
+    error: Error,
+  ) => void;
   readonly onStop?: (stop: SelectedSwmContinuationStop) => void;
   readonly onBackpressure?: () => void;
+  readonly onContinuation?: (progress: SelectedSwmContinuationProgress) => void;
+  readonly onExpiredAfterAdmission?: (contextGraphId: string) => void;
 }
 
 /**
@@ -134,29 +173,147 @@ export class SelectedSwmContinuationPlan {
   }
 }
 
+function withoutContinuationPasses(
+  result: SharedMemorySyncResult,
+): SharedMemorySyncResult {
+  return { ...result, continuationPasses: 0 };
+}
+
 /**
- * Run only the continuation passes selected by {@link SelectedSwmContinuationPlan}.
+ * Own the complete selected public-SWM protocol around the ordinary ordered
+ * work list: initial result capture, selected membership and admission flags,
+ * continuation deadline, progress ledger, continuation scheduling, and final
+ * diagnostics.
  *
- * The initial pass is supplied by the caller because it also contains ordinary
- * SWM/private work. Every continuation calls `runPass` anew, so the global
- * scheduler slot is released between rounds. Any admission deferral terminates
- * this same-call continuation immediately; the normal reconciler remains the
- * later recovery path.
+ * The host owns only the actual per-CG I/O callback and global scheduler
+ * admission. Every continuation is a fresh ordered batch, so its scheduler slot
+ * is released between passes. The absolute deadline is checked once before
+ * queueing and again from inside the admitted callback; an item that expires in
+ * the queue therefore starts neither a pass nor network/store I/O.
+ *
+ * `continuationPasses` deliberately has exactly one writer: this driver. Work
+ * results may originate in nested or reused runners, so their pass counters are
+ * stripped before every merge and the plan's exact total replaces the final
+ * field. This prevents merged part diagnostics from being counted twice.
  */
-export async function runSelectedSwmContinuations(
-  options: RunSelectedSwmContinuationsOptions,
+export async function runSelectedSwmSyncWork(
+  options: RunSelectedSwmSyncWorkOptions,
 ): Promise<SharedMemorySyncResult> {
-  let summary = options.initialResult;
+  const publicContextGraphSet = new Set(options.publicContextGraphIds);
+  const isSelectedPublicWork = (
+    item: ContextGraphSyncWork<SharedMemorySyncResult>,
+  ): boolean => (
+    options.selectedEnabled
+    && item.lane === 'shared_memory'
+    && publicContextGraphSet.has(item.contextGraphId)
+  );
+  const selectedPublicContextGraphIds = options.work
+    .filter(isSelectedPublicWork)
+    .map((item) => item.contextGraphId);
+  const initialPublicResults = new Map<string, SharedMemorySyncResult>();
+
+  const runOrdered = (
+    selectedWork: readonly ContextGraphSyncWork<SharedMemorySyncResult>[],
+    phase: 'initial' | 'continuation',
+    plan?: SelectedSwmContinuationPlan,
+  ): Promise<SharedMemorySyncResult> => {
+    const wrappedWork = selectedWork.map((item) => {
+      if (!isSelectedPublicWork(item)) return item;
+      return {
+        ...item,
+        run: async (remainingContextGraphs: number) => {
+          if (phase === 'initial') {
+            const result = await item.run(remainingContextGraphs);
+            initialPublicResults.set(item.contextGraphId, result);
+            return result;
+          }
+
+          if (!plan) throw new Error('Selected SWM continuation is missing its plan');
+          // This wrapper is invoked only by `runWithAdmission`, after the global
+          // scheduler grants a slot. Rechecking here closes the queue-wait race.
+          if (options.nowMs() >= plan.deadlineMs) {
+            options.onExpiredAfterAdmission?.(item.contextGraphId);
+            return options.emptyResult();
+          }
+          const coverageBefore = plan.startContinuationPass(item.contextGraphId);
+          const result = await item.run(remainingContextGraphs);
+          plan.recordRound(item.contextGraphId, result);
+          options.onContinuation?.({
+            contextGraphId: item.contextGraphId,
+            coverageBefore,
+            coverageAfter: plan.progress(item.contextGraphId),
+          });
+          return result;
+        },
+      };
+    });
+
+    return runOrderedContextGraphSyncs({
+      work: wrappedWork,
+      priorities: options.priorities,
+      emptyResult: options.emptyResult,
+      runWithAdmission: (item, run) => {
+        const selectedSwmPriority = isSelectedPublicWork(item);
+        return options.runWithAdmission(item, run, {
+          priorityOverride: options.selectedEnabled
+            ? (selectedSwmPriority ? options.selectedPriority : undefined)
+            : options.selectedPriority,
+          selectedSwmPriority,
+        });
+      },
+      merge: options.merge,
+      markDeferred: options.markDeferred,
+      ...(phase === 'continuation' && plan
+        ? { shouldContinue: () => options.nowMs() < plan.deadlineMs }
+        : {}),
+      ...(options.isPeerTransportFailure
+        ? { isPeerTransportFailure: options.isPeerTransportFailure }
+        : {}),
+      ...(options.onDeferred ? { onDeferred: options.onDeferred } : {}),
+    });
+  };
+
+  const initialSummary = await runOrdered(options.work, 'initial');
+  if (!options.selectedEnabled || selectedPublicContextGraphIds.length === 0) {
+    return initialSummary;
+  }
+
+  // The continuation budget starts only after the full initial public/private
+  // walk. A large initial walk therefore cannot consume the retry allowance.
+  const plan = new SelectedSwmContinuationPlan(
+    options.providerPeerId,
+    selectedPublicContextGraphIds,
+    options.resolvePassConfig(),
+    options.nowMs(),
+  );
+  for (const [contextGraphId, result] of initialPublicResults) {
+    plan.recordRound(contextGraphId, result);
+  }
+
+  // Driver-owned diagnostic: discard any nested/part counter before merging.
+  let summary = withoutContinuationPasses(initialSummary);
   if ((summary.deferredBackpressure ?? 0) > 0) {
     options.onBackpressure?.();
   } else {
+    const publicWorkByContextGraph = new Map(
+      options.work
+        .filter(isSelectedPublicWork)
+        .map((item) => [item.contextGraphId, item] as const),
+    );
     for (;;) {
-      const selection = options.plan.selectNextPass(options.nowMs());
+      const selection = plan.selectNextPass(options.nowMs());
       for (const stop of selection.stops) options.onStop?.(stop);
       if (selection.contextGraphIds.length === 0) break;
 
-      const part = await options.runPass(selection.contextGraphIds);
-      summary = options.merge(summary, part);
+      const continuationWork = selection.contextGraphIds
+        .map((contextGraphId) => publicWorkByContextGraph.get(contextGraphId))
+        .filter((item): item is ContextGraphSyncWork<SharedMemorySyncResult> => (
+          item !== undefined
+        ));
+      const part = withoutContinuationPasses(
+        await runOrdered(continuationWork, 'continuation', plan),
+      );
+      summary = withoutContinuationPasses(options.merge(summary, part));
       if ((part.deferredBackpressure ?? 0) > 0) {
         options.onBackpressure?.();
         break;
@@ -164,9 +321,5 @@ export async function runSelectedSwmContinuations(
     }
   }
 
-  return {
-    ...summary,
-    continuationPasses: (summary.continuationPasses ?? 0)
-      + options.plan.continuationPasses(),
-  };
+  return { ...summary, continuationPasses: plan.continuationPasses() };
 }
