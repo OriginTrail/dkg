@@ -14,12 +14,7 @@ export type TripleStoreCapability =
   | 'replaceSubject'
   | 'structuredMutation';
 
-/**
- * Decorators whose optional methods are always present use this non-mutating
- * probe to report the capability of the store they wrap. The symbol keeps the
- * forwarding contract explicit without adding another public method name to
- * every TripleStore implementation.
- */
+/** Explicit support override for decorators that add or constrain semantics. */
 export const TRIPLE_STORE_CAPABILITY_SUPPORT: unique symbol = Symbol(
   'dkg.tripleStoreCapabilitySupport',
 );

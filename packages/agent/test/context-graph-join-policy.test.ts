@@ -759,7 +759,9 @@ describe('context graph open enrollment policy', () => {
     const originalStore = (agent as any).store as TripleStore;
     const updateOnlyStore = new Proxy(originalStore, {
       get(target, property, receiver) {
-        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) return undefined;
+        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) {
+          return (capability: string) => capability === 'update';
+        }
         if (property === 'structuredMutation') return undefined;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === 'function' ? value.bind(target) : value;
@@ -806,7 +808,7 @@ describe('context graph open enrollment policy', () => {
     const originalStore = (agent as any).store as TripleStore;
     const legacyStore = new Proxy(originalStore, {
       get(target, property, receiver) {
-        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) return undefined;
+        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) return () => false;
         if (property === 'structuredMutation' || property === 'update') return undefined;
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === 'function' ? value.bind(target) : value;

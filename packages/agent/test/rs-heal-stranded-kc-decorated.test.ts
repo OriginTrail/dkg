@@ -595,6 +595,67 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(mutations).toEqual([]);
   });
 
+  it('does not copy metadata or stamp completion after becoming stale during data copy', async () => {
+    const cg = 'stale-after-data-copy';
+    const onChainId = '24';
+    const ual = 'did:dkg:hardhat:31337/0xstale-copy/42';
+    const root = 'urn:entity:stale-copy';
+    const mutations: StructuredMutation[] = [];
+    let isCurrent = true;
+    const scopedData = contextGraphDataUri(cg, onChainId);
+    const scopedMeta = contextGraphMetaUri(cg, onChainId);
+    const fakeStore = {
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes('SELECT ?ual ?b')) {
+          return { type: 'bindings' as const, bindings: [{ ual, b: String(KA_ID) }] };
+        }
+        if (sparql.includes('SELECT ?root')) {
+          return { type: 'bindings' as const, bindings: [{ root }] };
+        }
+        if (sparql.includes('ASK')) return { type: 'boolean' as const, value: true };
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+      structuredMutation: vi.fn(async (mutation: StructuredMutation) => {
+        mutations.push(mutation);
+        if (
+          mutation.kind === 'copy-subject-projection'
+          && mutation.input.targetGraphUri === scopedData
+        ) {
+          isCurrent = false;
+        }
+      }),
+    } as unknown as TripleStore;
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+      () => isCurrent,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    expect(mutations).toHaveLength(2);
+    expect(mutations[0]).toMatchObject({
+      kind: 'replace-subject-predicates',
+      input: { graphUri: scopedMeta, replacementQuads: [] },
+    });
+    expect(mutations[1]).toMatchObject({
+      kind: 'copy-subject-projection',
+      input: { targetGraphUri: scopedData },
+    });
+    expect(mutations.some((mutation) => (
+      mutation.kind === 'copy-subject-projection'
+      && mutation.input.targetGraphUri === scopedMeta
+    ))).toBe(false);
+    expect(mutations.some((mutation) => (
+      mutation.kind === 'replace-subject-predicates'
+      && mutation.input.replacementQuads.length > 0
+    ))).toBe(false);
+  });
+
   it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {
     // Guard the #1549 warm-index behaviour at the call site: a regression reverting
     // either INSERT to a plain `store.update(sparql)` would still relocate the KC

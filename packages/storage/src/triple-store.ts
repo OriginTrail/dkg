@@ -177,10 +177,7 @@ export type StructuredMutation =
   | { readonly kind: 'copy-subject-projection'; readonly input: CopySubjectProjectionInput };
 
 export interface TripleStore {
-  /**
-   * Truthful support probe for optional operations exposed by decorators.
-   * A wrapper whose method is always present must forward this to its backend.
-   */
+  /** Explicit override for wrappers that add or constrain optional operations. */
   [TRIPLE_STORE_CAPABILITY_SUPPORT]?(capability: TripleStoreCapability): boolean;
   /**
    * Whether `query(..., { signal })` can reject while a query is already in

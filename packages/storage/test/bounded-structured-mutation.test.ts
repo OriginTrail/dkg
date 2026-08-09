@@ -6,6 +6,7 @@ import {
   SharedMemoryLiteralBlobStore,
   OxigraphStore,
   OxigraphWorkerStore,
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
   supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
@@ -399,6 +400,13 @@ describe('bounded structured mutation capabilities', () => {
     const incapableWrapper = { structuredMutation: vi.fn() } as unknown as TripleStore;
     linkStoreChainV1(incapableWrapper, incapable);
     expect(supportsTripleStoreCapability(incapableWrapper, 'structuredMutation')).toBe(false);
+
+    const constrainingWrapper = {
+      structuredMutation: vi.fn(),
+      [TRIPLE_STORE_CAPABILITY_SUPPORT]: () => false,
+    } as unknown as TripleStore;
+    linkStoreChainV1(constrainingWrapper, capable);
+    expect(supportsTripleStoreCapability(constrainingWrapper, 'structuredMutation')).toBe(false);
   });
 
   it('executes every mutation variant through the real worker RPC boundary', async () => {
