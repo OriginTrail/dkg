@@ -13,28 +13,75 @@ import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers } from 'ethers';
 import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
 
-type RawKnowledgeAssetUpdateContext = {
-  merkleRootsCount?: unknown;
-  minted?: unknown;
-  byteSize?: unknown;
-  endEpoch?: unknown;
-  tokenAmount?: unknown;
-  isImmutable?: unknown;
-  merkleLeafCount?: unknown;
-} & readonly unknown[];
+const UPDATE_CONTEXT_FIELDS = [
+  'merkleRootsCount',
+  'minted',
+  'byteSize',
+  'endEpoch',
+  'tokenAmount',
+  'isImmutable',
+  'merkleLeafCount',
+] as const;
 
-function requireTupleField(
-  context: RawKnowledgeAssetUpdateContext,
-  name: 'merkleRootsCount' | 'minted' | 'byteSize' | 'endEpoch'
-    | 'tokenAmount' | 'isImmutable' | 'merkleLeafCount',
-  index: number,
-  kaId: bigint,
-): unknown {
-  const value = context[name] ?? context[index];
-  if (value === undefined) {
-    throw new Error(`Missing ${name} in update context for KA ${kaId}`);
+type UpdateContextField = (typeof UPDATE_CONTEXT_FIELDS)[number];
+type NormalizedUpdateContext = Record<UpdateContextField, unknown>;
+
+/** Normalize ethers' named Result and plain positional tuple shapes once. */
+function normalizeUpdateContext(raw: unknown, kaId: bigint): NormalizedUpdateContext {
+  const named = typeof raw === 'object' && raw !== null
+    ? raw as Record<string, unknown>
+    : {};
+  const positional = Array.isArray(raw) ? raw : [];
+  return Object.fromEntries(UPDATE_CONTEXT_FIELDS.map((name, index) => {
+    const value = named[name] ?? positional[index];
+    if (value === undefined) {
+      throw new Error(`Missing ${name} in update context for KA ${kaId}`);
+    }
+    return [name, value];
+  })) as NormalizedUpdateContext;
+}
+
+function decodeBigIntScalar(value: unknown, name: UpdateContextField, kaId: bigint): bigint {
+  if (
+    typeof value !== 'string'
+    && typeof value !== 'number'
+    && typeof value !== 'bigint'
+    && typeof value !== 'boolean'
+  ) {
+    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
   }
-  return value;
+  try {
+    return BigInt(value);
+  } catch {
+    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
+  }
+}
+
+function decodeKnowledgeAssetUpdateContext(
+  raw: unknown,
+  kaId: bigint,
+): KnowledgeAssetUpdateContext {
+  const context = normalizeUpdateContext(raw, kaId);
+  const merkleLeafCount = Number(decodeBigIntScalar(
+    context.merkleLeafCount,
+    'merkleLeafCount',
+    kaId,
+  ));
+  if (!Number.isSafeInteger(merkleLeafCount) || merkleLeafCount < 0) {
+    throw new Error(`Invalid merkleLeafCount in update context for KA ${kaId}`);
+  }
+  if (typeof context.isImmutable !== 'boolean') {
+    throw new Error(`Invalid isImmutable in update context for KA ${kaId}`);
+  }
+  return {
+    merkleRootsCount: decodeBigIntScalar(context.merkleRootsCount, 'merkleRootsCount', kaId),
+    minted: decodeBigIntScalar(context.minted, 'minted', kaId),
+    byteSize: decodeBigIntScalar(context.byteSize, 'byteSize', kaId),
+    endEpoch: decodeBigIntScalar(context.endEpoch, 'endEpoch', kaId),
+    tokenAmount: decodeBigIntScalar(context.tokenAmount, 'tokenAmount', kaId),
+    isImmutable: context.isImmutable,
+    merkleLeafCount,
+  };
 }
 
 export class StorageReadMethods extends EVMChainAdapterBase {
@@ -72,44 +119,14 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   ): Promise<KnowledgeAssetUpdateContext> {
     await this.init();
     const kas = this.requireKCStorage();
-    const context = await this.readContractWithOptions(
+    const rawContext = await this.readContractWithOptions(
       kas,
       'kas.getKnowledgeAssetUpdateContext',
       'getKnowledgeAssetUpdateContext',
       [kaId],
       { signal: options.signal },
-    ) as RawKnowledgeAssetUpdateContext;
-
-    const merkleLeafCount = Number(BigInt(requireTupleField(
-      context, 'merkleLeafCount', 6, kaId,
-    ) as string | number | bigint | boolean));
-    if (!Number.isSafeInteger(merkleLeafCount) || merkleLeafCount < 0) {
-      throw new Error(`Invalid merkleLeafCount in update context for KA ${kaId}`);
-    }
-    const isImmutable = requireTupleField(context, 'isImmutable', 5, kaId);
-    if (typeof isImmutable !== 'boolean') {
-      throw new Error(`Invalid isImmutable in update context for KA ${kaId}`);
-    }
-
-    return {
-      merkleRootsCount: BigInt(requireTupleField(
-        context, 'merkleRootsCount', 0, kaId,
-      ) as string | number | bigint | boolean),
-      minted: BigInt(requireTupleField(
-        context, 'minted', 1, kaId,
-      ) as string | number | bigint | boolean),
-      byteSize: BigInt(requireTupleField(
-        context, 'byteSize', 2, kaId,
-      ) as string | number | bigint | boolean),
-      endEpoch: BigInt(requireTupleField(
-        context, 'endEpoch', 3, kaId,
-      ) as string | number | bigint | boolean),
-      tokenAmount: BigInt(requireTupleField(
-        context, 'tokenAmount', 4, kaId,
-      ) as string | number | bigint | boolean),
-      isImmutable,
-      merkleLeafCount,
-    };
+    );
+    return decodeKnowledgeAssetUpdateContext(rawContext, kaId);
   }
 
   async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {

@@ -4753,19 +4753,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let currentTargets = targets.filter((target) =>
       target.localCgId === localCgId && target.onChainCgId === expectedOnChainCgId);
     if (currentTargets.length === 0) return noRecovery();
-    currentTargets = await enrichVmRecoveryFootprints(
-      currentTargets,
-      onChainCgId,
-      this.chain,
-      {
-        maxContextReads: MAX_EXACT_SYNC_ASSETS,
-        signal,
-        isCurrent: isRecoveryCurrent,
-        resolveLiveAccessPolicy: (contextGraphId) =>
-          this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
-      },
-    );
-    if (!isRecoveryCurrent()) return noRecovery();
     const admissionCursor = (
       this.vmReconcileRotationAdmissionCursorByCg.get(localCgId) ?? 0
     ) % currentTargets.length;
@@ -4873,6 +4860,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
       return noRecovery(initiallyEligible[0]?.ordinal, true);
+    }
+
+    // Sizing is optional recovery work, so it belongs behind the same
+    // per-CG admission decision as exact network fetches. Live-event nudges
+    // received during cooldown must not turn into repeated liveness, policy,
+    // or per-KA update-context RPCs when no transfer may run.
+    currentTargets = await enrichVmRecoveryFootprints(
+      currentTargets,
+      onChainCgId,
+      this.chain,
+      {
+        maxContextReads: MAX_EXACT_SYNC_ASSETS,
+        signal,
+        isCurrent: isRecoveryCurrent,
+        resolveLiveAccessPolicy: (contextGraphId) =>
+          this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
+      },
+    );
+    if (!isRecoveryCurrent()) {
+      this.vmReconcileFetchCooldownAt.delete(localCgId);
+      return noRecovery();
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:

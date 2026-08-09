@@ -467,9 +467,17 @@ async function createRecoveryHarness(options: {
     _localCgId: string,
     _onChainCgId: bigint,
     ordinal: number,
+    _headBlock: number | undefined,
+    reconcileOptions?: { recoveryFootprint?: VmRecoveryChainFootprint },
   ) => recovered.has(ordinal)
     ? { status: 'reconciled', blockNumber: 100 }
-    : { status: 'pending', recovery: targets[ordinal] };
+    : {
+        status: 'pending',
+        recovery: {
+          ...targets[ordinal]!,
+          recoveryFootprint: reconcileOptions?.recoveryFootprint,
+        },
+      };
 
   return {
     agent,
@@ -579,6 +587,46 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(harness.fetched[1]!.uals.length).toBeGreaterThan(1);
   });
 
+  it('does not perform optional footprint RPCs while exact recovery is cooling down', async () => {
+    const holder = '12D3KooWBridgeCooldownHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/host-bridge-cooldown';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchHostBridgeCooldown',
+      localCgId,
+      peers: [holder],
+      targetCount: 3,
+      onFetch: () => 'incomplete',
+    });
+    agents.push(harness.agent);
+    const unknownTargets: RecoveryTarget[] = harness.targets.map((target) => ({
+      ...target,
+      recoveryFootprint: { kind: 'unknown' },
+    }));
+    const internals = harness.internals as unknown as Record<string, any>;
+    internals.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
+    const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
+    const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
+    const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext');
+
+    const result = await harness.internals.recoverVmReconcileBatch(
+      localCgId,
+      1n,
+      unknownTargets,
+      100,
+      () => true,
+    );
+
+    expect(result).toMatchObject({
+      attemptedOrdinals: [],
+      continuationOrdinal: 0,
+      cooldownOnly: true,
+    });
+    expect(liveness).not.toHaveBeenCalled();
+    expect(policy).not.toHaveBeenCalled();
+    expect(updateContext).not.toHaveBeenCalled();
+    expect(harness.fetched).toEqual([]);
+  });
+
   it('requests ten 100-triple KAs as one probe followed by one nine-asset batch', async () => {
     const holder = '12D3KooWExactCountSmallHolder';
     const localCgId = '0x0000000000000000000000000000000000000001/exact-count-small';
@@ -669,7 +717,17 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     // A later bounded sweep supplies only the still-pending set. Rotation
     // evidence retained by #2183 selects the next provider; recovered members
     // are neither re-requested nor falsely credited as absent.
-    const unresolved = harness.targets.slice(3);
+    const unresolved = [3, 4, 5].map((ordinal) => {
+      const outcome = first.outcomes.get(ordinal);
+      if (outcome?.status !== 'pending' || !outcome.recovery) {
+        throw new Error(`expected pending recovery target for ordinal ${ordinal}`);
+      }
+      expect(outcome.recovery.recoveryFootprint).toMatchObject({
+        kind: 'public-v10',
+        assertionVersion: '1',
+      });
+      return outcome.recovery as RecoveryTarget;
+    });
     const second = await harness.internals.recoverVmReconcileBatch(
       localCgId, 1n, unresolved, 100, () => true,
     );
@@ -718,7 +776,17 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       expect(first.outcomes.get(ordinal)).toMatchObject({ status: 'pending' });
     }
 
-    const unresolved = harness.targets.slice(1);
+    const unresolved = [1, 2, 3, 4].map((ordinal) => {
+      const outcome = first.outcomes.get(ordinal);
+      if (outcome?.status !== 'pending' || !outcome.recovery) {
+        throw new Error(`expected pending recovery target for ordinal ${ordinal}`);
+      }
+      expect(outcome.recovery.recoveryFootprint).toMatchObject({
+        kind: 'public-v10',
+        assertionVersion: '1',
+      });
+      return outcome.recovery as RecoveryTarget;
+    });
     const second = await harness.internals.recoverVmReconcileBatch(
       localCgId, 1n, unresolved, 100, () => true,
     );
