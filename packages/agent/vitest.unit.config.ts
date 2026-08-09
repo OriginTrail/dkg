@@ -90,6 +90,7 @@ export default defineConfig({
       "test/catchup-concurrency.test.ts",
       // #2050 — the stop rule for the bounded repeat of the public SWM peer walk.
       "test/catchup-pass-policy.test.ts",
+      "test/selected-swm-continuation.test.ts",
       "test/map-with-concurrency.test.ts",
       "test/peer-selection.test.ts",
       "test/sync-requester-priority.test.ts",
