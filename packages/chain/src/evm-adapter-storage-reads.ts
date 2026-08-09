@@ -11,7 +11,10 @@
 
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers } from 'ethers';
-import type { ChainReadOptions } from './chain-adapter.js';
+import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
+import {
+  decodeKnowledgeAssetMerkleRootCount,
+} from './evm-knowledge-asset-update-context.js';
 
 export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -42,6 +45,15 @@ export class StorageReadMethods extends EVMChainAdapterBase {
     return ethers.getBytes(rootHex);
   }
 
+  async getKnowledgeAssetUpdateContext(
+    kaId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<KnowledgeAssetUpdateContext> {
+    await this.init();
+    const kas = this.requireKCStorage();
+    return this.readKnowledgeAssetUpdateContext(kas, kaId, options);
+  }
+
   async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
     await this.init();
     const kas = this.requireKCStorage();
@@ -51,12 +63,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       'getKnowledgeAssetUpdateContext',
       [kaId],
       { signal: options.signal },
-    ) as { merkleRootsCount?: bigint } & readonly unknown[];
-    const rawCount = context.merkleRootsCount ?? context[0];
-    if (rawCount === undefined) {
-      throw new Error(`Missing Merkle-root count for KA ${kaId}`);
-    }
-    return BigInt(rawCount as string | number | bigint | boolean);
+    );
+    return decodeKnowledgeAssetMerkleRootCount(context, kaId);
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {

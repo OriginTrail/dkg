@@ -720,13 +720,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     let endEpoch = 0n;
     if (kas) {
       try {
-        const ctx = await this.readContract(
-          kas, 'kas.getKnowledgeAssetUpdateContext', 'getKnowledgeAssetUpdateContext', params.kaId,
-        );
-        // Tuple shape from `DKGKnowledgeAssets.getKnowledgeAssetUpdateContext`:
-        // (preUpdateMerkleRootCount, minted, byteSize, endEpoch, tokenAmount, isImmutable, preUpdateMerkleLeafCount)
-        currentByteSize = BigInt(ctx[2]);
-        endEpoch = BigInt(ctx[3]);
+        const context = await this.readKnowledgeAssetUpdateContext(kas, params.kaId);
+        currentByteSize = context.byteSize;
+        endEpoch = context.endEpoch;
       } catch (err) {
         throw new Error(
           `Failed to read KA update context for kaId ${params.kaId}: ${(err as Error).message}`,
