@@ -640,31 +640,36 @@ export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
   };
 }
 
-/** Persist locally authored access controls outside sync-visible metadata. */
-export async function replaceLocallyTrustedKnowledgeAssetControls(
+/**
+ * Persist one validated local-control entry. Both the rolling-compatible
+ * metadata-quad API and the typed envelope API terminate here; neither needs
+ * to adapt through the other.
+ */
+async function writeLocallyTrustedKnowledgeAssetControlEntry(
   store: TripleStore,
   ual: string,
-  metadataQuads: readonly Quad[],
+  version: bigint,
+  root: string,
+  sidecarQuads: readonly Quad[],
 ): Promise<void> {
   assertSafeGraphIriForSparql(ual);
-  const version = parseControlVersion(
-    readControlAnchor(metadataQuads, `${DKG}assertionVersion`, 'assertionVersion'),
-  );
-  const root = normalizeControlRoot(
-    readControlAnchor(metadataQuads, `${DKG}merkleRoot`, 'merkleRoot'),
-  );
   const entry = `${ual}/_local_controls/${version}/${root}`;
   assertSafeGraphIriForSparql(entry);
-  const controls = metadataQuads
-    .filter(
-      (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
-    )
-    .map((quad) => ({
-      ...quad,
-      subject: entry,
-      graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
-    }));
+  const controls = sidecarQuads.map((quad) => ({
+    ...quad,
+    subject: entry,
+    graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  }));
   validateLocallyTrustedControlRows(controls);
+  const storedVersion = parseControlVersion(
+    readControlAnchor(controls, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const storedRoot = normalizeControlRoot(
+    readControlAnchor(controls, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  if (storedVersion !== version || storedRoot !== root) {
+    throw new Error('Locally trusted KA control entry does not match its assertion anchor');
+  }
   await store.insert([
     ...controls,
     {
@@ -674,6 +679,30 @@ export async function replaceLocallyTrustedKnowledgeAssetControls(
       graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
     },
   ]);
+}
+
+/** Persist locally authored access controls outside sync-visible metadata. */
+export async function replaceLocallyTrustedKnowledgeAssetControls(
+  store: TripleStore,
+  ual: string,
+  metadataQuads: readonly Quad[],
+): Promise<void> {
+  const sidecarQuads = metadataQuads.filter(
+    (quad) => quad.subject === ual && LOCAL_TRUSTED_KA_SIDECAR_PREDICATES.has(quad.predicate),
+  );
+  const version = parseControlVersion(
+    readControlAnchor(sidecarQuads, `${DKG}assertionVersion`, 'assertionVersion'),
+  );
+  const root = normalizeControlRoot(
+    readControlAnchor(sidecarQuads, `${DKG}merkleRoot`, 'merkleRoot'),
+  );
+  await writeLocallyTrustedKnowledgeAssetControlEntry(
+    store,
+    ual,
+    version,
+    root,
+    sidecarQuads,
+  );
 }
 
 /**
@@ -692,9 +721,11 @@ export async function replaceLocallyTrustedKnowledgeAssetControlEnvelope(
     throw new Error('Locally trusted KA controls require one 32-byte merkleRoot');
   }
   const graph = LOCAL_TRUSTED_KA_CONTROLS_GRAPH;
-  await replaceLocallyTrustedKnowledgeAssetControls(store, scope.ual, [
+  const version = BigInt(scope.assertionVersion);
+  const root = toHex(anchor.merkleRoot).toLowerCase();
+  await writeLocallyTrustedKnowledgeAssetControlEntry(store, scope.ual, version, root, [
     mq(scope.ual, `${DKG}assertionVersion`, intLit(BigInt(scope.assertionVersion)), graph),
-    mq(scope.ual, `${DKG}merkleRoot`, lit(toHex(anchor.merkleRoot)), graph),
+    mq(scope.ual, `${DKG}merkleRoot`, lit(root), graph),
     mq(scope.ual, `${DKG}accessPolicy`, lit(controls.accessPolicy), graph),
     mq(scope.ual, `${DKG}publisherPeerId`, lit(controls.publisherPeerId), graph),
     ...[...new Set(controls.allowedPeers)].sort().map((peerId) => (

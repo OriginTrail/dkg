@@ -33,10 +33,10 @@ import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
   generateSubGraphRegistration,
+  replaceLocallyTrustedKnowledgeAssetControlEnvelope,
 } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
-  persistLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -1417,15 +1417,19 @@ export class SharedMemoryHandler {
             normalized.map((quad) => ({ ...quad, graph: '' })),
             privateMerkleRoot?.length ? [privateMerkleRoot] : [],
           );
-          await persistLocallyTrustedKnowledgeAssetControls({
-            store: this.store,
-            kaUal: contentScope.ual,
-            assertionVersion: contentScope.assertionVersion,
-            merkleRoot,
-            publisherPeerId,
-            accessPolicy: graphAccessPolicy,
-            allowedPeers: graphAllowedPeers,
-          });
+          await replaceLocallyTrustedKnowledgeAssetControlEnvelope(
+            this.store,
+            contentScope.ual,
+            {
+              assertionVersion: contentScope.assertionVersion,
+              merkleRoot,
+            },
+            {
+              publisherPeerId,
+              accessPolicy: graphAccessPolicy,
+              allowedPeers: graphAllowedPeers,
+            },
+          );
         };
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()

@@ -16,7 +16,6 @@ import {
   agentDid,
   generateKnowledgeAssetShareMetadata,
   generateShareMetadata,
-  replaceLocallyTrustedKnowledgeAssetControlEnvelope,
   toHex,
 } from './metadata.js';
 import {
@@ -98,38 +97,6 @@ export interface KnowledgeAssetWorkspaceHead {
 
 export interface PublishedKnowledgeAssetWorkspaceHead extends KnowledgeAssetWorkspaceHead {
   readonly publishedAt: TimestampMsV1;
-}
-
-export interface PersistLocallyTrustedKnowledgeAssetControlsParams {
-  readonly store: TripleStore;
-  readonly kaUal: string;
-  readonly assertionVersion: string;
-  readonly merkleRoot: Uint8Array;
-  readonly publisherPeerId: string;
-  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList';
-  readonly allowedPeers: readonly string[];
-}
-
-/**
- * Persist the receiver-authenticated, local-only access-control sidecar for
- * one exact SWM assertion through the publisher-owned typed envelope boundary.
- */
-export async function persistLocallyTrustedKnowledgeAssetControls(
-  params: PersistLocallyTrustedKnowledgeAssetControlsParams,
-): Promise<void> {
-  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(
-    params.store,
-    params.kaUal,
-    {
-      assertionVersion: params.assertionVersion,
-      merkleRoot: params.merkleRoot,
-    },
-    {
-      publisherPeerId: params.publisherPeerId,
-      accessPolicy: params.accessPolicy,
-      allowedPeers: [...params.allowedPeers],
-    },
-  );
 }
 
 export interface ResolveKnowledgeAssetWorkspaceHeadParams {

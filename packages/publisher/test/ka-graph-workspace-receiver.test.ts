@@ -275,6 +275,17 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       object: `"${Buffer.from(merkleRoot).toString('hex')}"`,
       graph: visibleMetaGraph,
     }];
+    const trustedControlEntry = `${UAL}/_local_controls/1/${Buffer.from(merkleRoot).toString('hex')}`;
+    expect(await store.countQuads(LOCAL_TRUSTED_KA_CONTROLS_GRAPH)).toBe(7);
+    await expect(store.query(`ASK { GRAPH <${LOCAL_TRUSTED_KA_CONTROLS_GRAPH}> {
+      <${trustedControlEntry}>
+        <http://dkg.io/ontology/kaUal> <${UAL}> ;
+        <http://dkg.io/ontology/assertionVersion> "1"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+        <http://dkg.io/ontology/merkleRoot> "${Buffer.from(merkleRoot).toString('hex')}" ;
+        <http://dkg.io/ontology/accessPolicy> "allowList" ;
+        <http://dkg.io/ontology/publisherPeerId> "${PEER_ID}" ;
+        <http://dkg.io/ontology/allowedPeer> "peer-a", "peer-b" .
+    } }`)).resolves.toEqual({ type: 'boolean', value: true });
     const trustedControls = await readLocallyTrustedKnowledgeAssetControls(
       store,
       visibleMetaGraph,
