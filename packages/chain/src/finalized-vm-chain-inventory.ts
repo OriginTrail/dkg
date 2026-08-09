@@ -44,6 +44,8 @@ const CANDIDATE_KEYS = Object.freeze([
   'finalizedBlockNumber',
   'kaId',
   'knowledgeAssetStorageAddress',
+  'merkleLeafCount',
+  'onChainByteSize',
   'ordinal',
   'publisherAddress',
   'ual',
@@ -61,6 +63,15 @@ export interface FinalizedVmChainCandidateV1 {
   readonly publisherAddress: EvmAddressV1 | null;
   readonly assertionVersion: DecimalU64V1;
   readonly assertionRoot: Digest32V1;
+  /**
+   * Contract/economic byte size at the same finalized anchor as the assertion.
+   * It is an exact public-payload transfer hint only after the caller has
+   * independently established public CG access policy. A zero size or leaf
+   * count remains an unknown/singleton planning input, never a free asset.
+   */
+  readonly onChainByteSize: DecimalU256V1;
+  /** Current public-tree leaf count from the same pinned update context. */
+  readonly merkleLeafCount: number;
   readonly finalizedBlockNumber: BlockNumberV1;
   readonly finalizedBlockHash: Digest32V1;
 }
@@ -195,6 +206,19 @@ function snapshotInventoryCandidate(
     `finalized VM candidate ${index} assertion version`,
   );
   assertCanonicalDigest(record.assertionRoot, `finalized VM candidate ${index} assertion root`);
+  assertCanonicalDecimalU256(
+    record.onChainByteSize,
+    `finalized VM candidate ${index} on-chain byte size`,
+  );
+  const merkleLeafCount = record.merkleLeafCount;
+  if (
+    typeof merkleLeafCount !== 'number'
+    || !Number.isSafeInteger(merkleLeafCount)
+    || merkleLeafCount < 0
+    || merkleLeafCount > 0xffff_ffff
+  ) {
+    throw new Error(`finalized VM candidate ${index} Merkle leaf count is not uint32`);
+  }
   assertCanonicalDecimalU64(
     record.finalizedBlockNumber,
     `finalized VM candidate ${index} block number`,
@@ -230,6 +254,8 @@ function snapshotInventoryCandidate(
     publisherAddress: record.publisherAddress,
     assertionVersion: record.assertionVersion,
     assertionRoot: record.assertionRoot,
+    onChainByteSize: record.onChainByteSize,
+    merkleLeafCount,
     finalizedBlockNumber: record.finalizedBlockNumber,
     finalizedBlockHash: record.finalizedBlockHash,
   } satisfies FinalizedVmChainCandidateV1);

@@ -103,6 +103,8 @@ interface ScannerConfigSnapshotV1 extends ScannerSessionConfigSnapshotV1 {
 interface FinalizedVmAssertionReadV1 {
   readonly assertionVersion: DecimalU64V1;
   readonly assertionRoot: Digest32V1;
+  readonly onChainByteSize: DecimalU256V1;
+  readonly merkleLeafCount: number;
   readonly attestedAuthorAddress: EvmAddressV1 | null;
   readonly publisherAddress: EvmAddressV1 | null;
 }
@@ -252,6 +254,8 @@ async function scanPinnedInventory(
       publisherAddress: assertion.publisherAddress,
       assertionVersion: assertion.assertionVersion,
       assertionRoot: assertion.assertionRoot,
+      onChainByteSize: assertion.onChainByteSize,
+      merkleLeafCount: assertion.merkleLeafCount,
       finalizedBlockNumber: session.blockNumber,
       finalizedBlockHash: session.blockHash,
     } satisfies FinalizedVmChainCandidateV1);
@@ -328,8 +332,9 @@ async function readFinalizedVmAssertions(
     ) {
       throw malformedReturn(`Finalized VM ordinal ${ordinal} is missing assertion results`);
     }
+    const updateContext = decodeAssertionUpdateContext(encodedContext);
     rows.push(Object.freeze({
-      assertionVersion: decodeAssertionVersion(encodedContext),
+      assertionVersion: updateContext.assertionVersion,
       assertionRoot: decodeBytes32(
         KNOWLEDGE_ASSET_STORAGE_INTERFACE,
         'getLatestMerkleRoot',
@@ -345,6 +350,8 @@ async function readFinalizedVmAssertions(
         'getLatestMerkleRootPublisher',
         encodedPublisher,
       ),
+      onChainByteSize: updateContext.onChainByteSize,
+      merkleLeafCount: updateContext.merkleLeafCount,
     } satisfies FinalizedVmAssertionReadV1));
   }
   return Object.freeze(rows);
@@ -369,7 +376,11 @@ async function readBatches(
   return Object.freeze(results);
 }
 
-function decodeAssertionVersion(encoded: string): DecimalU64V1 {
+function decodeAssertionUpdateContext(encoded: string): Readonly<{
+  assertionVersion: DecimalU64V1;
+  onChainByteSize: DecimalU256V1;
+  merkleLeafCount: number;
+}> {
   const decoded = decodeCanonicalResult(
     KNOWLEDGE_ASSET_STORAGE_INTERFACE,
     'getKnowledgeAssetUpdateContext',
@@ -384,7 +395,21 @@ function decodeAssertionVersion(encoded: string): DecimalU64V1 {
   if (version === '0') {
     throw malformedReturn('Finalized VM assertion version must be positive');
   }
-  return version;
+  const onChainByteSize = BigInt(decoded[2] as bigint).toString(10);
+  try {
+    assertCanonicalDecimalU256(onChainByteSize, 'finalized VM on-chain byte size');
+  } catch (cause) {
+    throw malformedReturn('Finalized VM on-chain byte size is outside the canonical u256 domain', cause);
+  }
+  const merkleLeafCountBigInt = BigInt(decoded[6] as bigint);
+  if (merkleLeafCountBigInt < 0n || merkleLeafCountBigInt > 0xffff_ffffn) {
+    throw malformedReturn('Finalized VM Merkle leaf count is outside the uint32 domain');
+  }
+  return Object.freeze({
+    assertionVersion: version,
+    onChainByteSize,
+    merkleLeafCount: Number(merkleLeafCountBigInt),
+  });
 }
 
 function decodeUint256(

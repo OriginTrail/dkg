@@ -118,13 +118,13 @@ describe('RFC-64 finalized VM chain scanner', () => {
       if (calls.length === 1) return [boolResult(true), uintResult(2n)];
       if (calls.length === 2) return [uintResult(KA_A), uintResult(KA_B)];
       if (calls.length === 3) return [
-        updateContextResult(2n),
+        updateContextResult(2n, 100n, 3n),
         bytes32Result(ROOT_A),
         addressResult(AUTHOR_A),
         addressResult(PUBLISHER_A),
       ];
       return [
-        updateContextResult(3n),
+        updateContextResult(3n, 250n, 7n),
         bytes32Result(ROOT_B),
         addressResult(AUTHOR_B),
         addressResult(PUBLISHER_B),
@@ -157,6 +157,22 @@ describe('RFC-64 finalized VM chain scanner', () => {
       ...structuredClone(inventory),
       unexpected: true,
     })).toThrow(/not canonical/);
+    for (const onChainByteSize of ['01', '-1', 1]) {
+      const malformed = structuredClone(inventory) as unknown as {
+        rows: Array<Record<string, unknown>>;
+      };
+      malformed.rows[0]!.onChainByteSize = onChainByteSize;
+      expect(() => snapshotFinalizedVmChainInventoryV1(malformed))
+        .toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    }
+    for (const merkleLeafCount of [-1, 1.5, 0x1_0000_0000, '3']) {
+      const malformed = structuredClone(inventory) as unknown as {
+        rows: Array<Record<string, unknown>>;
+      };
+      malformed.rows[0]!.merkleLeafCount = merkleLeafCount;
+      expect(() => snapshotFinalizedVmChainInventoryV1(malformed))
+        .toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    }
     expect(inventory).toEqual({
       networkId: NETWORK_ID,
       contextGraphId: CG_ID,
@@ -179,6 +195,8 @@ describe('RFC-64 finalized VM chain scanner', () => {
           publisherAddress: PUBLISHER_A,
           assertionVersion: '2',
           assertionRoot: ROOT_A,
+          onChainByteSize: '100',
+          merkleLeafCount: 3,
           finalizedBlockNumber: BLOCK_NUMBER,
           finalizedBlockHash: BLOCK_HASH,
         },
@@ -194,6 +212,8 @@ describe('RFC-64 finalized VM chain scanner', () => {
           publisherAddress: PUBLISHER_B,
           assertionVersion: '3',
           assertionRoot: ROOT_B,
+          onChainByteSize: '250',
+          merkleLeafCount: 7,
           finalizedBlockNumber: BLOCK_NUMBER,
           finalizedBlockHash: BLOCK_HASH,
         },
@@ -449,7 +469,13 @@ describe('RFC-64 finalized VM chain scanner', () => {
             sendResult(response, call, uintResult(BigInt(ordinal) === 0n ? KA_A : KA_B));
           } else if (selector === KA_ABI.getFunction('getKnowledgeAssetUpdateContext')!.selector) {
             const [kaId] = KA_ABI.decodeFunctionData('getKnowledgeAssetUpdateContext', data);
-            sendResult(response, call, updateContextResult(BigInt(kaId) === KA_A ? 2n : 3n));
+            sendResult(
+              response,
+              call,
+              BigInt(kaId) === KA_A
+                ? updateContextResult(2n, 100n, 3n)
+                : updateContextResult(3n, 250n, 7n),
+            );
           } else if (selector === KA_ABI.getFunction('getLatestMerkleRoot')!.selector) {
             const [kaId] = KA_ABI.decodeFunctionData('getLatestMerkleRoot', data);
             sendResult(response, call, bytes32Result(BigInt(kaId) === KA_A ? ROOT_A : ROOT_B));
@@ -480,13 +506,33 @@ describe('RFC-64 finalized VM chain scanner', () => {
       signal: new AbortController().signal,
     });
 
-    expect(inventory.rows.map(({ ual, assertionVersion, assertionRoot }) => ({
+    expect(inventory.rows.map(({
       ual,
       assertionVersion,
       assertionRoot,
+      onChainByteSize,
+      merkleLeafCount,
+    }) => ({
+      ual,
+      assertionVersion,
+      assertionRoot,
+      onChainByteSize,
+      merkleLeafCount,
     }))).toEqual([
-      { ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/7`, assertionVersion: '2', assertionRoot: ROOT_A },
-      { ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`, assertionVersion: '3', assertionRoot: ROOT_B },
+      {
+        ual: `did:dkg:${NETWORK_ID}/${AUTHOR_A}/7`,
+        assertionVersion: '2',
+        assertionRoot: ROOT_A,
+        onChainByteSize: '100',
+        merkleLeafCount: 3,
+      },
+      {
+        ual: `did:dkg:${NETWORK_ID}/${AUTHOR_B}/9`,
+        assertionVersion: '3',
+        assertionRoot: ROOT_B,
+        onChainByteSize: '250',
+        merkleLeafCount: 7,
+      },
     ]);
     const ethCalls = rpc.calls.filter(({ method }) => method === 'eth_call');
     expect(ethCalls).toHaveLength(13);
@@ -585,9 +631,13 @@ function assertionResults(
   ];
 }
 
-function updateContextResult(version: bigint): string {
+function updateContextResult(
+  version: bigint,
+  byteSize = 100n,
+  merkleLeafCount = 3n,
+): string {
   return ABI.encode(
     ['uint256', 'uint256', 'uint88', 'uint40', 'uint96', 'bool', 'uint32'],
-    [version, 1n, 100n, 999n, 1n, false, 3n],
+    [version, 1n, byteSize, 999n, 1n, false, merkleLeafCount],
   );
 }

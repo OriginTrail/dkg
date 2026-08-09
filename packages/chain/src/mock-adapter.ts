@@ -31,6 +31,7 @@ import type {
   PcaContracts,
   PcaRpcMethod,
   VerifyACKIdentityResult,
+  KnowledgeAssetUpdateContext,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import {
@@ -79,8 +80,12 @@ export class MockChainAdapter implements ChainAdapter {
   private collections = new Map<bigint, {
     merkleRoot: Uint8Array;
     kaCount: number;
+    /** Contract scalar count, distinct from legacy batch-size fixtures. */
+    minted: bigint;
     /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
     merkleLeafCount: number;
+    /** Raw contract/economic byte size recorded on-chain. */
+    byteSize: bigint;
     /** Number of committed Merkle roots, including the initial publish. */
     merkleRootCount: bigint;
     /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
@@ -101,6 +106,7 @@ export class MockChainAdapter implements ChainAdapter {
     endEpoch: bigint;
     /** Token amount paid for the KC lifetime. Used to model per-epoch CG value. */
     tokenAmount: bigint;
+    isImmutable: boolean;
     /**
      * OT-RFC-49 — curated `_catalog` commitment (REPLACED the ciphertext-chunks
      * pair). `bytes32(0)` + 0 when omitted (default for legacy and public-CG
@@ -426,6 +432,12 @@ export class MockChainAdapter implements ChainAdapter {
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
       collection.merkleLeafCount = params.newMerkleLeafCount;
+      collection.byteSize = params.newByteSize;
+      if (params.boundNewTokenAmount !== undefined) {
+        collection.tokenAmount = params.boundNewTokenAmount;
+      } else if (params.newTokenAmount !== undefined) {
+        collection.tokenAmount = params.newTokenAmount;
+      }
       collection.merkleRootCount += 1n;
     }
     const hintedPublisherAddress = params.publisherAddress
@@ -479,7 +491,9 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
+      minted: BigInt(params.knowledgeAssetsCount),
       merkleLeafCount: 0,
+      byteSize: 0n,
       merkleRootCount: 1n,
       publisherAddress: this.signerAddress,
       // Legacy V8 path — no attestation, mirror the on-chain `address(0)`.
@@ -488,6 +502,7 @@ export class MockChainAdapter implements ChainAdapter {
       startEpoch: this.rsEpoch,
       endEpoch: this.rsEpoch + 1n,
       tokenAmount: 0n,
+      isImmutable: false,
       catalogRoot: new Uint8Array(32),
       catalogLeafCount: 0,
     });
@@ -1577,7 +1592,9 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
+      minted: 1n,
       merkleLeafCount: params.merkleLeafCount,
+      byteSize: params.byteSize,
       merkleRootCount: 1n,
       publisherAddress,
       authorAddress: ethers.getAddress(params.author.address),
@@ -1585,6 +1602,7 @@ export class MockChainAdapter implements ChainAdapter {
       startEpoch: this.rsEpoch,
       endEpoch: this.rsEpoch + BigInt(params.epochs),
       tokenAmount: params.tokenAmount,
+      isImmutable: params.isImmutable,
       catalogRoot: params.catalogRoot && params.catalogRoot.length === 32
         ? params.catalogRoot
         : new Uint8Array(32),
@@ -1774,6 +1792,7 @@ export class MockChainAdapter implements ChainAdapter {
     knowledgeAssetStorageContract?: string;
     chunks: Array<{ chunkId: bigint; chunk: string }>;
     merkleLeafCount?: number;
+    byteSize?: bigint;
     publisherAddress?: string;
     startEpoch?: bigint;
     endEpoch?: bigint;
@@ -1790,7 +1809,9 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(input.kaId, {
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
+      minted: 1n,
       merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
+      byteSize: input.byteSize ?? 0n,
       merkleRootCount: 1n,
       publisherAddress: input.publisherAddress ?? this.signerAddress,
       // `__registerKC` is a Random-Sampling test bridge that bypasses the
@@ -1801,6 +1822,7 @@ export class MockChainAdapter implements ChainAdapter {
       startEpoch: input.startEpoch ?? this.rsEpoch,
       endEpoch: input.endEpoch ?? ((input.startEpoch ?? this.rsEpoch) + 1n),
       tokenAmount: input.tokenAmount ?? 1n,
+      isImmutable: false,
       catalogRoot: new Uint8Array(32),
       catalogLeafCount: 0,
     });
@@ -2007,9 +2029,21 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+    return (await this.getKnowledgeAssetUpdateContext(kaId)).merkleRootsCount;
+  }
+
+  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.merkleRootCount;
+    return {
+      merkleRootsCount: entry.merkleRootCount,
+      minted: entry.minted,
+      byteSize: entry.byteSize,
+      endEpoch: entry.endEpoch,
+      tokenAmount: entry.tokenAmount,
+      isImmutable: entry.isImmutable,
+      merkleLeafCount: entry.merkleLeafCount,
+    };
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
