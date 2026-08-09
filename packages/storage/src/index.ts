@@ -81,6 +81,10 @@ export {
   type SystemRecordTransactionExecutorV1,
 } from './system-record-materializer-v1.js';
 export {
+  SystemRecordLaneForwarderV1,
+  type SystemRecordLaneOutcomePolicyV1,
+} from './system-record-lane-forwarder-v1.js';
+export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
