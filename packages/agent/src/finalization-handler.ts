@@ -202,6 +202,33 @@ type ExactGraphScopedLayerVerification =
       graphUri: string;
     };
 
+type VerifiedGraphScopedLayer = Extract<
+  ExactGraphScopedLayerVerification,
+  { status: 'verified' }
+>;
+
+/**
+ * Exact local content accepted by the receiptless public-finalization policy.
+ * The layer is the only semantic difference between metadata-only VM repair
+ * and SWM-to-VM promotion; callers cannot independently choose the associated
+ * `contentAlreadyMaterialized` behavior.
+ */
+type VerifiedPublicFinalizedLayer =
+  | {
+      layer: MemoryLayer.VerifiableMemory;
+      verification: VerifiedGraphScopedLayer;
+    }
+  | {
+      layer: MemoryLayer.SharedWorkingMemory;
+      verification: VerifiedGraphScopedLayer;
+    };
+
+type PublicFinalizedMaterializationOutcome =
+  | 'promoted'
+  | 'already-confirmed'
+  | 'stale-target'
+  | 'verified-vm-metadata-pending';
+
 type GraphScopedMaterializationEnvelope = Pick<
   KnowledgeAssetWorkspaceHead,
   | 'publicTripleCount'
@@ -1699,80 +1726,23 @@ export class FinalizationHandler {
             ctx,
           });
         }
-        const publicAuthority = await this.resolvePublicFinalizedMaterializationAuthority({
+        return this.applyPublicFinalizedMaterialization({
+          contextGraphId,
           onChainCgId,
           scope,
-          kaId,
+          head,
+          privateMerkleRoot,
           merkleRoot,
+          batchId: kaId,
+          versionBlock,
+          subGraphName,
+          verifiedLayer: {
+            layer: MemoryLayer.VerifiableMemory,
+            verification: vmVerification,
+          },
+          unavailableReason: `trusted receipt provenance (${recovery.reason})`,
           ctx,
         });
-        if (publicAuthority) {
-          const finalizedHead: GraphScopedMaterializationEnvelope = {
-            ...head,
-            publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
-            accessPolicy: 'public',
-            allowedPeers: [],
-          };
-          const finalizedVersion = { blockNumber: versionBlock, txIndex: 0 };
-          const finalizedMetadataState = await this.graphScopedMetadataState({
-            contextGraphId,
-            scope,
-            head: finalizedHead,
-            merkleRoot,
-            batchId: kaId,
-            materializedVersion: finalizedVersion,
-            accessPolicy: 'public',
-            allowedPeers: [],
-            confirmationKind: 'finalized-materialization',
-            authorAddress: publicAuthority.authorAddress,
-            subGraphName,
-          });
-          if (finalizedMetadataState === 'matching') {
-            await this.advanceExactGraphScopedVersion({
-              contextGraphId,
-              scope,
-              materializedVersion: finalizedVersion,
-            });
-            this.log.info(
-              ctx,
-              `Chain-reconcile: ${ual} already has exact receiptless public VM state`,
-            );
-            return 'already-confirmed';
-          }
-          const finalizedOutcome = await this.applyVerifiedGraphScopedFinalization({
-            contextGraphId,
-            scope,
-            verifiedQuads: vmVerification.quads,
-            head: finalizedHead,
-            privateMerkleRoot,
-            computedMerkleRoot: vmVerification.merkleRoot,
-            batchId: kaId,
-            authorAddress: publicAuthority.authorAddress,
-            confirmation: {
-              kind: 'finalized-materialization',
-              materializedVersion: finalizedVersion,
-            },
-            accessPolicy: 'public',
-            allowedPeers: [],
-            subGraphName,
-            source: 'chain-reconcile',
-            contentAlreadyMaterialized: true,
-            ctx,
-          });
-          if (finalizedOutcome === 'stale') return 'stale-target';
-          this.log.info(
-            ctx,
-            `Chain-reconcile: exact public VM graph already matches ${ual}; `
-              + 'repaired receiptless chain metadata',
-          );
-          return 'already-confirmed';
-        }
-        this.log.info(
-          ctx,
-          `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
-            + `trusted receipt provenance (${recovery.reason}); deferring`,
-        );
-        return 'verified-vm-metadata-pending';
       }
       // A confirmed publish may have committed the exact VM graph before its
       // graph-scoped metadata survived a crash. Reapply only the metadata tail:
@@ -1833,54 +1803,22 @@ export class FinalizationHandler {
     // `finalized-materialization` and deliberately omits transactionHash.
     // Private/unknown CGs still require assertion-specific receipt evidence.
     if (!trustedAssertionEvidence) {
-      const publicAuthority = await this.resolvePublicFinalizedMaterializationAuthority({
+      return this.applyPublicFinalizedMaterialization({
+        contextGraphId,
         onChainCgId,
         scope,
-        kaId,
-        merkleRoot,
-        ctx,
-      });
-      if (!publicAuthority) {
-        this.log.info(
-          ctx,
-          `Chain-reconcile: exact SWM content for ${ual} is verified but neither `
-            + 'transaction provenance nor public chain authority is available; deferring VM promotion',
-        );
-        return 'verified-vm-metadata-pending';
-      }
-      const finalizedHead: GraphScopedMaterializationEnvelope = {
-        ...head,
-        publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
-        accessPolicy: 'public',
-        allowedPeers: [],
-      };
-      const outcome = await this.applyVerifiedGraphScopedFinalization({
-        contextGraphId,
-        scope,
-        verifiedQuads: swmVerification.quads,
-        head: finalizedHead,
+        head,
         privateMerkleRoot,
-        computedMerkleRoot: swmVerification.merkleRoot,
+        merkleRoot,
         batchId: kaId,
-        authorAddress: publicAuthority.authorAddress,
-        confirmation: {
-          kind: 'finalized-materialization',
-          materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
-        },
-        accessPolicy: 'public',
-        allowedPeers: [],
+        versionBlock,
         subGraphName,
-        source: 'chain-reconcile',
+        verifiedLayer: {
+          layer: MemoryLayer.SharedWorkingMemory,
+          verification: swmVerification,
+        },
         ctx,
       });
-      if (outcome === 'stale') return 'stale-target';
-      if (outcome === 'preserved-metadata') return 'already-confirmed';
-      this.log.info(
-        ctx,
-        `Chain-reconcile: promoted exact public SWM assertion to VM from chain inventory `
-          + `for ${ual} (ka=${kaId})`,
-      );
-      return 'promoted';
     }
 
     const outcome = await this.applyVerifiedGraphScopedFinalization({
@@ -1918,6 +1856,143 @@ export class FinalizationHandler {
       `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,
     );
     return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'promoted';
+  }
+
+  /**
+   * Apply one exact public assertion after chain authority has been proven.
+   * Receiptless VM repair and SWM promotion intentionally share this policy so
+   * their authority fence and finalized metadata shape cannot drift apart.
+   */
+  private async applyPublicFinalizedMaterialization(input: {
+    contextGraphId: string;
+    onChainCgId?: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    head: GraphScopedMaterializationEnvelope;
+    privateMerkleRoot?: Uint8Array;
+    merkleRoot: Uint8Array;
+    batchId: bigint;
+    versionBlock: number;
+    subGraphName?: string;
+    verifiedLayer: VerifiedPublicFinalizedLayer;
+    /** VM repair keeps the receipt recovery diagnostic in its defer log. */
+    unavailableReason?: string;
+    ctx: OperationContext;
+  }): Promise<PublicFinalizedMaterializationOutcome> {
+    const {
+      contextGraphId,
+      onChainCgId,
+      scope,
+      head,
+      privateMerkleRoot,
+      merkleRoot,
+      batchId,
+      versionBlock,
+      subGraphName,
+      verifiedLayer,
+      unavailableReason,
+      ctx,
+    } = input;
+    const contentAlreadyMaterialized = verifiedLayer.layer === MemoryLayer.VerifiableMemory;
+    const publicAuthority = await this.resolvePublicFinalizedMaterializationAuthority({
+      onChainCgId,
+      scope,
+      kaId: batchId,
+      merkleRoot,
+      ctx,
+    });
+    if (!publicAuthority) {
+      if (contentAlreadyMaterialized) {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: exact VM metadata for ${scope.ual} cannot be repaired without `
+            + `${unavailableReason ?? 'public chain authority'}; deferring`,
+        );
+      } else {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: exact SWM content for ${scope.ual} is verified but neither `
+            + 'transaction provenance nor public chain authority is available; deferring VM promotion',
+        );
+      }
+      return 'verified-vm-metadata-pending';
+    }
+
+    const finalizedHead: GraphScopedMaterializationEnvelope = {
+      ...head,
+      publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    };
+    const finalizedVersion = { blockNumber: versionBlock, txIndex: 0 };
+
+    // An exact VM graph may already have a complete receiptless envelope. In
+    // that case only the ordering watermark needs to advance. SWM content has
+    // no VM metadata yet and proceeds directly to the shared atomic apply.
+    if (contentAlreadyMaterialized) {
+      const finalizedMetadataState = await this.graphScopedMetadataState({
+        contextGraphId,
+        scope,
+        head: finalizedHead,
+        merkleRoot,
+        batchId,
+        materializedVersion: finalizedVersion,
+        accessPolicy: 'public',
+        allowedPeers: [],
+        confirmationKind: 'finalized-materialization',
+        authorAddress: publicAuthority.authorAddress,
+        subGraphName,
+      });
+      if (finalizedMetadataState === 'matching') {
+        await this.advanceExactGraphScopedVersion({
+          contextGraphId,
+          scope,
+          materializedVersion: finalizedVersion,
+        });
+        this.log.info(
+          ctx,
+          `Chain-reconcile: ${scope.ual} already has exact receiptless public VM state`,
+        );
+        return 'already-confirmed';
+      }
+    }
+
+    const outcome = await this.applyVerifiedGraphScopedFinalization({
+      contextGraphId,
+      scope,
+      verifiedQuads: verifiedLayer.verification.quads,
+      head: finalizedHead,
+      privateMerkleRoot,
+      computedMerkleRoot: verifiedLayer.verification.merkleRoot,
+      batchId,
+      authorAddress: publicAuthority.authorAddress,
+      confirmation: {
+        kind: 'finalized-materialization',
+        materializedVersion: finalizedVersion,
+      },
+      accessPolicy: 'public',
+      allowedPeers: [],
+      subGraphName,
+      source: 'chain-reconcile',
+      contentAlreadyMaterialized,
+      ctx,
+    });
+    if (outcome === 'stale') return 'stale-target';
+
+    if (contentAlreadyMaterialized) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: exact public VM graph already matches ${scope.ual}; `
+          + 'repaired receiptless chain metadata',
+      );
+      return 'already-confirmed';
+    }
+    if (outcome === 'preserved-metadata') return 'already-confirmed';
+    this.log.info(
+      ctx,
+      `Chain-reconcile: promoted exact public SWM assertion to VM from chain inventory `
+        + `for ${scope.ual} (ka=${batchId})`,
+    );
+    return 'promoted';
   }
 
   private async repairExactGraphScopedVmMetadata(input: {

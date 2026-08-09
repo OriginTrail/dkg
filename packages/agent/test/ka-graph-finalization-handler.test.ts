@@ -452,6 +452,23 @@ describe('graph-scoped finalization handler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: present });
   }
 
+  async function retainExactContentOnlyInVm(
+    swmGraph: string,
+    vmGraph: string,
+  ): Promise<void> {
+    const staged = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
+    await store.dropGraph(vmGraph);
+    await store.insert(staged.quads.map((quad) => ({ ...quad, graph: vmGraph })));
+    await store.dropGraph(swmGraph);
+    await store.deleteByPattern({
+      graph: `did:dkg:context-graph:${CG}/_meta`,
+      subject: UAL,
+    });
+  }
+
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
 
@@ -2438,15 +2455,7 @@ describe('graph-scoped finalization handler', () => {
 
   it('repairs receiptless public metadata after exact VM content committed alone', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
-    const staged = await store.query(
-      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
-    );
-    if (staged.type !== 'quads') throw new Error('expected staged SWM quads');
-    await store.dropGraph(vmGraph);
-    await store.insert(staged.quads.map((quad) => ({ ...quad, graph: vmGraph })));
-    await store.dropGraph(swmGraph);
-    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
-    await store.deleteByPattern({ graph: metaGraph, subject: UAL });
+    await retainExactContentOnlyInVm(swmGraph, vmGraph);
 
     const repairHandler = makePublicReconcileHandler(message, {
       getLatestMerkleRootAuthor: async () => AUTHOR,
@@ -2464,6 +2473,74 @@ describe('graph-scoped finalization handler', () => {
       FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
     `);
   });
+
+  it.each([
+    {
+      sourceLayer: 'SWM',
+      stageExactVm: false,
+      expectedOutcome: 'promoted',
+      expectedSwmCount: 2,
+    },
+    {
+      sourceLayer: 'VM',
+      stageExactVm: true,
+      expectedOutcome: 'already-confirmed',
+      expectedSwmCount: 0,
+    },
+  ] as const)(
+    'uses the shared receiptless public policy for exact $sourceLayer content',
+    async ({ stageExactVm, expectedOutcome, expectedSwmCount }) => {
+      const { message, swmGraph, vmGraph } = await stageGraph();
+      if (stageExactVm) await retainExactContentOnlyInVm(swmGraph, vmGraph);
+      const publicHandler = makePublicReconcileHandler(message, {
+        getLatestMerkleRootAuthor: async () => AUTHOR,
+      });
+
+      await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe(expectedOutcome);
+
+      expect(await store.countQuads(vmGraph)).toBe(2);
+      expect(await store.countQuads(swmGraph)).toBe(expectedSwmCount);
+      await expectGraphScopedMetadata(`
+        <http://dkg.io/ontology/status> "confirmed" ;
+        <http://dkg.io/ontology/accessPolicy> "public" ;
+        <http://dkg.io/ontology/publisherPeerId> "chain-finalized-reconcile-v1" ;
+        <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
+        <http://dkg.io/ontology/materializedVersion> "123:0" ;
+        <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
+        FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
+      `);
+    },
+  );
+
+  it.each([
+    { sourceLayer: 'SWM', stageExactVm: false, expectedVmCount: 1, expectedSwmCount: 2 },
+    { sourceLayer: 'VM', stageExactVm: true, expectedVmCount: 2, expectedSwmCount: 0 },
+  ] as const)(
+    'fails closed before applying receiptless public $sourceLayer content when authority is unavailable',
+    async ({ stageExactVm, expectedVmCount, expectedSwmCount }) => {
+      const { message, swmGraph, vmGraph } = await stageGraph();
+      if (stageExactVm) await retainExactContentOnlyInVm(swmGraph, vmGraph);
+      const guardedHandler = makePublicReconcileHandler(message, {
+        isContextGraphActiveOnChain: async () => false,
+      });
+      const internals = guardedHandler as unknown as {
+        applyVerifiedGraphScopedFinalization: () => Promise<never>;
+      };
+      internals.applyVerifiedGraphScopedFinalization = async () => {
+        throw new Error('receiptless apply must not run without public chain authority');
+      };
+
+      await expect(reconcileGraphScoped(guardedHandler, message))
+        .resolves.toBe('verified-vm-metadata-pending');
+
+      expect(await store.countQuads(vmGraph)).toBe(expectedVmCount);
+      expect(await store.countQuads(swmGraph)).toBe(expectedSwmCount);
+      await expectGraphScopedMetadata(
+        '<http://dkg.io/ontology/status> "confirmed" .',
+        false,
+      );
+    },
+  );
 
   it('preserves one newer materialized version during stale receiptless metadata repair', async () => {
     const { message } = await stageGraph();
