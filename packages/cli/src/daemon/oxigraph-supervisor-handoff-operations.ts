@@ -1,4 +1,4 @@
-import type { ManagedOxigraphSupervisorHandoffV1 } from '@origintrail-official/dkg-storage';
+import type { ManagedOxigraphSupervisorHandoffV1 } from './managed-oxigraph-ownership-bridge.js';
 
 import {
   boundedOxigraphPhaseDelayMsV1,
