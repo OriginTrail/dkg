@@ -467,20 +467,29 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       },
     });
     agents.push(harness.agent);
-    const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain')
-      .mockResolvedValue(true);
-    const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy')
-      .mockResolvedValue(0);
-    const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext')
-      .mockImplementation(async () => ({
-        merkleRootsCount: 1n,
-        minted: 0n,
+    const { contextGraphId } = await harness.chainAdapter.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+    });
+    expect(contextGraphId).toBe(1n);
+    for (const target of harness.targets) {
+      const kaId = BigInt(target.kaId);
+      harness.chainAdapter.__registerKC({
+        kaId,
+        contextGraphId,
+        merkleRootHex: `0x${(kaId + 1n).toString(16).padStart(64, '0')}`,
+        chunks: [],
         byteSize: 1_024n,
-        endEpoch: 0n,
-        tokenAmount: 0n,
-        isImmutable: false,
         merkleLeafCount: 8,
-      }));
+      });
+    }
+
+    // Count the production host's reads without replacing the adapter
+    // implementations: liveness, policy, and sizing all come from the actual
+    // in-memory ContextGraph/KA state seeded above.
+    const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
+    const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
+    const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext');
     const unknownTargets: RecoveryTarget[] = harness.targets.map((target) => ({
       ...target,
       recoveryFootprint: { kind: 'unknown' },
