@@ -26,16 +26,9 @@ export interface SparqlOperationAnalysis {
 
 const PREFIX_DECL = /\s*PREFIX\s+[^\s:]*:\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
 const BASE_DECL = /\s*BASE\b\s*(?:<[^<>"{}|^`\\\x00-\x20]*>)?/iy;
-const OPERATION_AT_START = new RegExp(
-  `\\s*(${[...SPARQL_READ_ONLY_OPERATIONS, ...SPARQL_UPDATE_OPERATIONS].join('|')})\\b`,
-  'iy',
-);
-const MUTATING_TOKEN_PATTERN = new RegExp(
-  `\\b(${SPARQL_MUTATING_KEYWORDS.join('|')})\\b`,
-  'ig',
-);
 const UPDATE_OPERATION_SET = new Set<string>(SPARQL_UPDATE_OPERATIONS);
 const READ_ONLY_OPERATION_SET = new Set<string>(SPARQL_READ_ONLY_OPERATIONS);
+const MUTATING_KEYWORD_SET = new Set<string>(SPARQL_MUTATING_KEYWORDS);
 
 function isSparqlIriRefBodyChar(ch: string | undefined): ch is string {
   return !!ch && !/[<>"{}|^`\\\s]/.test(ch) && ch >= '\x21';
@@ -129,10 +122,10 @@ function detectSparqlOperationFormFromStripped(stripped: string): SparqlDetected
     }
     break;
   }
-  OPERATION_AT_START.lastIndex = offset;
-  const operationHit = OPERATION_AT_START.exec(stripped);
+  while (/\s/u.test(stripped[offset] ?? '')) offset++;
+  const operationHit = readStandaloneSparqlWord(stripped, offset);
   if (!operationHit) return 'UNKNOWN';
-  const operation = operationHit[1].toUpperCase();
+  const operation = operationHit.word;
   return isReadOnlySparqlOperation(operation) || isSparqlUpdateOperationForm(operation)
     ? operation
     : 'UNKNOWN';
@@ -152,10 +145,10 @@ function classifySparqlOperationForm(form: SparqlDetectedOperation): SparqlOpera
   return { kind: 'unknown' };
 }
 
-function isSparqlNameAdjacent(ch: string | undefined): boolean {
+function isSparqlNameCharacter(ch: string | undefined): boolean {
   return ch !== undefined && (
     isSparqlWordContinuation(ch)
-    || /[\p{L}\p{N}\p{M}?$:@.-]/u.test(ch)
+    || /[\p{L}\p{N}\p{M}:@.-]/u.test(ch)
   );
 }
 
@@ -170,11 +163,15 @@ function isEscapedPnLocalCharAt(src: string, index: number): boolean {
 }
 
 function isSparqlNameAdjacentBefore(src: string, index: number): boolean {
-  return isSparqlNameAdjacent(src[index - 1]) || isEscapedPnLocalCharAt(src, index - 1);
+  const previous = src[index - 1];
+  return isSparqlNameCharacter(previous)
+    || previous === '?'
+    || previous === '$'
+    || isEscapedPnLocalCharAt(src, index - 1);
 }
 
 function isSparqlNameAdjacentAfter(src: string, index: number): boolean {
-  return isSparqlNameAdjacent(src[index])
+  return isSparqlNameCharacter(src[index])
     || (src[index] === '\\' && PN_LOCAL_ESC_CHAR.test(src[index + 1] ?? ''));
 }
 
@@ -186,35 +183,43 @@ function isSparqlWordStart(ch: string | undefined): boolean {
   );
 }
 
-/** Shared ASCII keyword boundary used by admission and query rewriting. */
+/** Compatibility helper for callers that advance across ASCII keyword text. */
 export function isSparqlWordContinuation(ch: string | undefined): ch is string {
   return isSparqlWordStart(ch) || (!!ch && ch >= '0' && ch <= '9');
 }
 
-export function isSparqlKeywordStart(src: string, idx: number): boolean {
-  const ch = src[idx];
-  if (!isSparqlWordStart(ch)) return false;
-  const prev = idx > 0 ? src[idx - 1] : '';
-  return !prev || (
-    !isSparqlWordContinuation(prev)
-    && prev !== '?'
-    && prev !== '$'
-    && prev !== ':'
-    && prev !== '#'
-  );
+export interface StandaloneSparqlWord {
+  readonly word: string;
+  readonly start: number;
+  readonly end: number;
 }
 
+/** Read one standalone ASCII SPARQL word using the canonical name boundary model. */
+export function readStandaloneSparqlWord(
+  src: string,
+  start: number,
+): StandaloneSparqlWord | null {
+  if (!isSparqlWordStart(src[start]) || isSparqlNameAdjacentBefore(src, start)) return null;
+  let end = start + 1;
+  while (end < src.length && isSparqlWordContinuation(src[end])) end++;
+  if (isSparqlNameAdjacentAfter(src, end)) return null;
+  return Object.freeze({ word: src.slice(start, end).toUpperCase(), start, end });
+}
+
+/** Compatibility view over the canonical standalone-word scanner. */
+export function isSparqlKeywordStart(src: string, start: number): boolean {
+  return readStandaloneSparqlWord(src, start) !== null;
+}
+
+/** Compatibility view over the canonical standalone-word scanner. */
 export function isSparqlKeyword(
   src: string,
   start: number,
   end: number,
   keyword: string,
 ): boolean {
-  const next = src[end];
-  return src.slice(start, end).toUpperCase() === keyword
-    && next !== ':'
-    && next !== '-'
-    && next !== '.';
+  const token = readStandaloneSparqlWord(src, start);
+  return token?.end === end && token.word === keyword;
 }
 
 /**
@@ -225,19 +230,16 @@ export function isSparqlKeyword(
  * tokens from variable, prefixed-name, language-tag, and identifier text.
  */
 function findMutatingKeyword(stripped: string): string | null {
-  MUTATING_TOKEN_PATTERN.lastIndex = 0;
-  for (;;) {
-    const match = MUTATING_TOKEN_PATTERN.exec(stripped);
-    if (!match) return null;
-    const start = match.index;
-    const end = start + match[0].length;
-    if (
-      !isSparqlNameAdjacentBefore(stripped, start)
-      && !isSparqlNameAdjacentAfter(stripped, end)
-    ) {
-      return match[1] ?? null;
+  for (let index = 0; index < stripped.length;) {
+    const token = readStandaloneSparqlWord(stripped, index);
+    if (!token) {
+      index++;
+      continue;
     }
+    if (MUTATING_KEYWORD_SET.has(token.word)) return token.word;
+    index = token.end;
   }
+  return null;
 }
 
 export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis {
