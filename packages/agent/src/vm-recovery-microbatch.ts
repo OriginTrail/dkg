@@ -96,20 +96,27 @@ async function readVmRecoveryFootprintWithDeadline<T>(
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   let abortFromCaller: (() => void) | undefined;
+  let callerDidAbort = false;
+  let deadlineExpired = false;
   const callerAborted = new Promise<typeof VM_RECOVERY_BRIDGE_ABORTED>((resolve) => {
     if (!callerSignal) return;
     abortFromCaller = () => {
-      controller.abort(callerSignal.reason);
+      callerDidAbort = true;
       resolve(VM_RECOVERY_BRIDGE_ABORTED);
+      controller.abort(callerSignal.reason);
     };
     callerSignal.addEventListener('abort', abortFromCaller, { once: true });
   });
   const timedOut = new Promise<typeof VM_RECOVERY_BRIDGE_TIMED_OUT>((resolve) => {
     timer = setTimeout(() => {
+      // Make the deadline outcome authoritative before cancellation. Some
+      // signal-aware adapters synchronously settle their work from an abort
+      // handler; that late value must never beat the already-expired deadline.
+      deadlineExpired = true;
+      resolve(VM_RECOVERY_BRIDGE_TIMED_OUT);
       controller.abort(new Error(
         `VM recovery footprint read timed out after ${timeoutMs}ms`,
       ));
-      resolve(VM_RECOVERY_BRIDGE_TIMED_OUT);
     }, timeoutMs);
     timer.unref?.();
   });
@@ -122,7 +129,10 @@ async function readVmRecoveryFootprintWithDeadline<T>(
     work = Promise.reject(error);
   }
   try {
-    return await Promise.race([work, callerAborted, timedOut]);
+    const result = await Promise.race([work, callerAborted, timedOut]);
+    if (callerDidAbort) return VM_RECOVERY_BRIDGE_ABORTED;
+    if (deadlineExpired) return VM_RECOVERY_BRIDGE_TIMED_OUT;
+    return result;
   } finally {
     if (timer) clearTimeout(timer);
     if (callerSignal && abortFromCaller) {
