@@ -15,14 +15,13 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { ethers } from 'ethers';
 
-import { parseNQuads } from '../src/dkg-agent-utils.js';
 import { createEvmPersonalMessageSignerV1 } from '../src/evm-message-signer-v1.js';
 import { prepareAgentProfileV1 } from '../src/profile.js';
 import { createInMemoryAgentProfilePublicationStoreV1 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 import {
   createAgentProfileReceiverV1,
-  type AgentProfileReceiverApplyAdmissionV1,
   type AgentProfileReceiverCandidateV1,
+  type AgentProfileReceiverFreshApplyCapabilityV1,
 } from '../src/system-records/receiver-v1.js';
 import {
   createFixtureAgentProfileProducerV1,
@@ -171,12 +170,21 @@ async function rotatedPublishedFixture() {
   return { prior, prepared, envelope, transitionEnvelope, resolve, row };
 }
 
-function verifiedFixtureBundle(bundleBytes: Uint8Array) {
-  const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
-  return Object.freeze({
-    canonicalProjectionBytes: Uint8Array.from(projectionBytes),
-    projectionQuads: Object.freeze(parseNQuads(new TextDecoder().decode(projectionBytes))),
-  });
+const DEFAULT_MONOTONIC_APPLY_TIMING = Object.freeze({
+  existingMonotonicDeadlineMs: 10_000,
+  monotonicNowMs: 1_000,
+});
+
+function admitFixtureApply(
+  freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+  stateRevision: string,
+  digestCharacter: string,
+) {
+  return freshApply.admitFreshApply(DEFAULT_MONOTONIC_APPLY_TIMING, () => ({
+    outcome: 'applied',
+    stateRevision,
+    appliedStateDigest: `0x${digestCharacter.repeat(64)}`,
+  }));
 }
 
 describe('agent-profile system-record active receiver', () => {
@@ -193,13 +201,13 @@ describe('agent-profile system-record active receiver', () => {
       expect(head).toEqual(fixture.envelope.object);
       expect(bundleBytes).toEqual(bundleArtifact.canonicalBytes);
       expect(receivedSignal).toBe(signal);
-      return verifiedFixtureBundle(bundleBytes);
+      return true;
     });
-    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
-      outcome: 'applied' as const,
-      stateRevision: '1',
-      appliedStateDigest: `0x${'a'.repeat(64)}`,
-    }));
+    const consumeCandidate = vi.fn((
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => admitFixtureApply(freshApply, '1', 'a'));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
@@ -224,9 +232,9 @@ describe('agent-profile system-record active receiver', () => {
     expect(candidate).not.toHaveProperty('signal');
     expect(consumeCandidate.mock.calls[0]![1]).toBe(signal);
     expect(consumeCandidate.mock.calls[0]![2]).toMatchObject({
-      validUntilUnixMs: Date.parse(fixture.envelope.object.validUntil),
-      assertFreshAtApply: expect.any(Function),
+      admitFreshApply: expect.any(Function),
     });
+    expect(consumeCandidate.mock.calls[0]![2]).not.toHaveProperty('validUntilUnixMs');
     expect(Object.isFrozen(consumeCandidate.mock.calls[0]![2])).toBe(true);
   });
 
@@ -326,7 +334,7 @@ describe('agent-profile system-record active receiver', () => {
       .mockReturnValueOnce(validUntilMs - 1)
       .mockReturnValue(validUntilMs);
     const verifyCurrentBundle = vi.fn(
-      (_head, bundleBytes: Uint8Array) => verifiedFixtureBundle(bundleBytes),
+      () => true,
     );
     const consumeCandidate = vi.fn();
     const receiver = createAgentProfileReceiverV1({
@@ -344,7 +352,7 @@ describe('agent-profile system-record active receiver', () => {
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
-  it('returns remaining Unix lifetime for the bridge to clamp its monotonic deadline', async () => {
+  it('clamps signed wall-clock expiry onto the bridge monotonic deadline', async () => {
     const fixture = await publishedFixture();
     const validUntilUnixMs = Date.parse(fixture.envelope.object.validUntil);
     const nowMs = vi.fn()
@@ -354,29 +362,26 @@ describe('agent-profile system-record active receiver', () => {
     const existingMonotonicDeadlineMs = 5_200;
     const monotonicNowMs = 5_000;
     let admittedDeadlineMs: number | undefined;
-    const consumeCandidate = vi.fn(async (
+    const consumeCandidate = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
       _signal: AbortSignal,
-      admission: AgentProfileReceiverApplyAdmissionV1,
-    ) => {
-      expect(admission.validUntilUnixMs).toBe(validUntilUnixMs);
-      const remainingMs = admission.assertFreshAtApply();
-      expect(remainingMs).toBe(60);
-      admittedDeadlineMs = Math.min(
-        existingMonotonicDeadlineMs,
-        monotonicNowMs + remainingMs,
-      );
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => freshApply.admitFreshApply({
+      existingMonotonicDeadlineMs,
+      monotonicNowMs,
+    }, (deadline) => {
+      admittedDeadlineMs = deadline;
       return {
         outcome: 'applied' as const,
         stateRevision: '6',
         appliedStateDigest: `0x${'8'.repeat(64)}`,
       };
-    });
+    }));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -387,6 +392,59 @@ describe('agent-profile system-record active receiver', () => {
     expect(admittedDeadlineMs).not.toBe(validUntilUnixMs);
   });
 
+  it('allows the lifecycle bridge to enter fresh apply only once', async () => {
+    const fixture = await publishedFixture();
+    const apply = vi.fn(() => ({
+      outcome: 'applied' as const,
+      stateRevision: '6',
+      appliedStateDigest: `0x${'8'.repeat(64)}`,
+    }));
+    const consumeCandidate = vi.fn(async (
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => {
+      const result = await freshApply.admitFreshApply(
+        DEFAULT_MONOTONIC_APPLY_TIMING,
+        apply,
+      );
+      await expect(freshApply.admitFreshApply(
+        DEFAULT_MONOTONIC_APPLY_TIMING,
+        apply,
+      )).rejects.toThrow(/one-shot/);
+      return result;
+    });
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .resolves.toMatchObject({ outcome: 'applied' });
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not acknowledge a bridge result returned outside fresh apply', async () => {
+    const fixture = await publishedFixture();
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      consumeCandidate: vi.fn(async () => Object.freeze({
+        outcome: 'applied',
+        stateRevision: '6',
+        appliedStateDigest: `0x${'8'.repeat(64)}`,
+      }) as never),
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .rejects.toThrow(/did not return a fresh-apply result/);
+  });
+
   it('lets the lifecycle bridge reject expiry after its own asynchronous admission work', async () => {
     const fixture = await publishedFixture();
     const validUntilMs = Date.parse(fixture.envelope.object.validUntil);
@@ -394,27 +452,24 @@ describe('agent-profile system-record active receiver', () => {
       .mockReturnValueOnce(validUntilMs - 2)
       .mockReturnValueOnce(validUntilMs - 1)
       .mockReturnValue(validUntilMs);
-    let committed = false;
+    const apply = vi.fn(() => ({
+      outcome: 'applied' as const,
+      stateRevision: '6',
+      appliedStateDigest: `0x${'8'.repeat(64)}`,
+    }));
     const consumeCandidate = vi.fn(async (
       _candidate: AgentProfileReceiverCandidateV1,
       _signal: AbortSignal,
-      admission: AgentProfileReceiverApplyAdmissionV1,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
     ) => {
-      expect(admission.validUntilUnixMs).toBe(validUntilMs);
       await Promise.resolve();
-      admission.assertFreshAtApply();
-      committed = true;
-      return {
-        outcome: 'applied' as const,
-        stateRevision: '6',
-        appliedStateDigest: `0x${'8'.repeat(64)}`,
-      };
+      return freshApply.admitFreshApply(DEFAULT_MONOTONIC_APPLY_TIMING, apply);
     });
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -422,21 +477,21 @@ describe('agent-profile system-record active receiver', () => {
       .rejects.toThrow(/expired agent-profile head/);
     expect(nowMs).toHaveBeenCalledTimes(3);
     expect(consumeCandidate).toHaveBeenCalledTimes(1);
-    expect(committed).toBe(false);
+    expect(apply).not.toHaveBeenCalled();
   });
 
   it('hands every derived owned subject to the materializer candidate', async () => {
     const fixture = await publishedFixture(true);
-    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
-      outcome: 'applied' as const,
-      stateRevision: '1',
-      appliedStateDigest: `0x${'a'.repeat(64)}`,
-    }));
+    const consumeCandidate = vi.fn((
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => admitFixtureApply(freshApply, '1', 'a'));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -457,17 +512,17 @@ describe('agent-profile system-record active receiver', () => {
   it('traverses post-transition authority history and hands off its verified lineage', async () => {
     const fixture = await rotatedPublishedFixture();
     const verifyAuthorityEnvelope = vi.fn(() => true);
-    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
-      outcome: 'applied' as const,
-      stateRevision: '5',
-      appliedStateDigest: `0x${'9'.repeat(64)}`,
-    }));
+    const consumeCandidate = vi.fn((
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => admitFixtureApply(freshApply, '5', '9'));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: { resolve: fixture.resolve },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -517,7 +572,7 @@ describe('agent-profile system-record active receiver', () => {
         nowMs: () => PRODUCER_FIXTURE_NOW_MS,
         verifyAuthorityEnvelope: (candidate) => condition !== 'refused'
           || candidate.object.objectType !== 'authority-transition',
-        verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+        verifyCurrentBundle: () => true,
         consumeCandidate,
       });
 
@@ -539,7 +594,7 @@ describe('agent-profile system-record active receiver', () => {
           : fixture.store.resolve(lookup, signal),
       }),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -570,7 +625,7 @@ describe('agent-profile system-record active receiver', () => {
         },
       }),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -579,52 +634,19 @@ describe('agent-profile system-record active receiver', () => {
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
-  it('fails closed when verified projection bytes do not bind the supplied bundle', async () => {
+  it('fails closed when final bundle verification refuses the closure', async () => {
     const fixture = await publishedFixture();
     const consumeCandidate = vi.fn();
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => {
-        const verified = verifiedFixtureBundle(bundleBytes);
-        return Object.freeze({
-          ...verified,
-          canonicalProjectionBytes: Uint8Array.from([0]),
-        });
-      },
+      verifyCurrentBundle: () => false,
       consumeCandidate,
     });
 
     await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
-      .rejects.toThrow(/projection does not bind the supplied bundle/);
-    expect(consumeCandidate).not.toHaveBeenCalled();
-  });
-
-  it('fails closed when verified projection quads do not bind their authenticated bytes', async () => {
-    const fixture = await publishedFixture();
-    const consumeCandidate = vi.fn();
-    const receiver = createAgentProfileReceiverV1({
-      networkId: NETWORK,
-      artifacts: fixture.store,
-      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => {
-        const verified = verifiedFixtureBundle(bundleBytes);
-        return Object.freeze({
-          ...verified,
-          projectionQuads: Object.freeze([Object.freeze({
-            subject: 'urn:unrelated:subject',
-            predicate: 'urn:unrelated:predicate',
-            object: '"unrelated"',
-            graph: '',
-          })]),
-        });
-      },
-      consumeCandidate,
-    });
-
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
-      .rejects.toThrow(/projection quads do not bind the supplied bundle/);
+      .rejects.toThrow(/bundle verification failed/);
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
@@ -641,15 +663,14 @@ describe('agent-profile system-record active receiver', () => {
       decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes).projectionBytes,
     );
     const verifyCurrentBundle = vi.fn((_head, bundleBytes: Uint8Array) => {
-      const verified = verifiedFixtureBundle(Uint8Array.from(bundleBytes));
       bundleBytes.fill(0);
-      return verified;
+      return true;
     });
-    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
-      outcome: 'applied' as const,
-      stateRevision: '4',
-      appliedStateDigest: `0x${'f'.repeat(64)}`,
-    }));
+    const consumeCandidate = vi.fn((
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => admitFixtureApply(freshApply, '4', 'f'));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
@@ -674,15 +695,18 @@ describe('agent-profile system-record active receiver', () => {
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
-      consumeCandidate: async () => {
-        controller.abort(new Error('late stop'));
-        return {
-          outcome: 'applied',
-          stateRevision: '2',
-          appliedStateDigest: `0x${'c'.repeat(64)}`,
-        };
-      },
+      verifyCurrentBundle: () => true,
+      consumeCandidate: (_candidate, _signal, freshApply) => freshApply.admitFreshApply(
+        DEFAULT_MONOTONIC_APPLY_TIMING,
+        () => {
+          controller.abort(new Error('late stop'));
+          return {
+            outcome: 'applied',
+            stateRevision: '2',
+            appliedStateDigest: `0x${'c'.repeat(64)}`,
+          };
+        },
+      ),
     });
 
     await expect(receiver.receiveActive(fixture.row, controller.signal)).resolves.toEqual({
@@ -742,7 +766,7 @@ describe('agent-profile system-record active receiver', () => {
       networkId: NETWORK,
       artifacts: { resolve },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate: vi.fn(),
     });
 
@@ -758,7 +782,7 @@ describe('agent-profile system-record active receiver', () => {
     const consumeCandidate = vi.fn();
     const resolve = vi.fn(fixture.store.resolve.bind(fixture.store));
     const verifyCurrentBundle = vi.fn(
-      (_head, bundleBytes: Uint8Array) => verifiedFixtureBundle(bundleBytes),
+      () => true,
     );
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
@@ -785,7 +809,7 @@ describe('agent-profile system-record active receiver', () => {
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope: () => false,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -820,7 +844,7 @@ describe('agent-profile system-record active receiver', () => {
           : fixture.store.resolve(lookup, signal),
       },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -853,7 +877,7 @@ describe('agent-profile system-record active receiver', () => {
         },
       },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      verifyCurrentBundle: () => true,
       consumeCandidate,
     });
 
@@ -867,13 +891,13 @@ describe('agent-profile system-record active receiver', () => {
   it('captures lifecycle dependencies once instead of rereading mutable options', async () => {
     const fixture = await publishedFixture();
     const verifyCurrentBundle = vi.fn(
-      (_head, bundleBytes: Uint8Array) => verifiedFixtureBundle(bundleBytes),
+      () => true,
     );
-    const consumeCandidate = vi.fn(async () => ({
-      outcome: 'applied' as const,
-      stateRevision: '3',
-      appliedStateDigest: `0x${'e'.repeat(64)}`,
-    }));
+    const consumeCandidate = vi.fn((
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+    ) => admitFixtureApply(freshApply, '3', 'e'));
     const resolveArtifact = vi.fn(fixture.store.resolve.bind(fixture.store));
     const repository = { resolve: resolveArtifact };
     const mutable = {

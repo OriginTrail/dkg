@@ -41,13 +41,6 @@ import {
 } from './artifact-v1.js';
 import { parseNQuads } from '../dkg-agent-utils.js';
 
-export interface AgentProfileReceiverVerifiedBundleV1 {
-  /** Exact canonical projection bytes parsed and authenticated from the supplied bundle. */
-  readonly canonicalProjectionBytes: Uint8Array;
-  /** Exact graphless quads parsed from canonicalProjectionBytes. */
-  readonly projectionQuads: readonly Readonly<Quad>[];
-}
-
 export type SignedAgentProfileActiveHeadEnvelopeV1 = SignedAgentProfileHeadEnvelopeV1 & {
   readonly object: AgentProfileActiveHeadObjectV1;
 };
@@ -62,18 +55,34 @@ export interface AgentProfileReceiverCandidateV1 {
   readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
 }
 
-/** Expiry admission for translation onto the lifecycle bridge's monotonic clock. */
-export interface AgentProfileReceiverApplyAdmissionV1 {
-  /** Signed-head expiry as Unix wall-clock milliseconds; not a storage deadline. */
-  readonly validUntilUnixMs: number;
+export interface AgentProfileReceiverMonotonicApplyTimingV1 {
+  /** Existing authenticated Storage deadline in the bridge's monotonic clock domain. */
+  readonly existingMonotonicDeadlineMs: number;
+  /** `Math.floor(performance.now())` captured after bridge waits. */
+  readonly monotonicNowMs: number;
+}
+
+const FRESH_APPLY_OUTCOME_V1: unique symbol = Symbol('agent-profile-fresh-apply-outcome-v1');
+
+interface AgentProfileReceiverFreshApplyResultV1 {
+  readonly [FRESH_APPLY_OUTCOME_V1]: SystemRecordApplyOutcomeV1;
+}
+
+/** Receiver-owned one-shot entry into lifecycle proof issuance and atomic apply. */
+export interface AgentProfileReceiverFreshApplyCapabilityV1 {
   /**
-   * Re-read the wall clock, reject expiry, and return the positive remaining
-   * lifetime in milliseconds. After its waits, the lifecycle bridge must first
-   * capture its monotonic clock, call this method, and clamp its existing
-   * monotonic deadline to `monotonicNow + remainingMs` immediately before proof
-   * issuance/apply admission. It must never pass validUntilUnixMs to storage.
+   * After its preparation waits, the lifecycle bridge supplies its authenticated
+   * existing deadline and freshly captured monotonic time. The receiver checks
+   * signed wall-clock freshness, clamps the monotonic deadline, and immediately
+   * invokes apply. The callback receives no Unix timestamp and must begin proof
+   * issuance/apply admission with the supplied deadline.
    */
-  readonly assertFreshAtApply: () => number;
+  readonly admitFreshApply: (
+    timing: AgentProfileReceiverMonotonicApplyTimingV1,
+    apply: (
+      admittedDeadlineMs: number,
+    ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
+  ) => Promise<AgentProfileReceiverFreshApplyResultV1>;
 }
 
 export interface CreateAgentProfileReceiverOptionsV1 {
@@ -90,24 +99,24 @@ export interface CreateAgentProfileReceiverOptionsV1 {
       | SignedAgentProfileForkResolutionEnvelopeV1,
     signal: AbortSignal,
   ) => boolean | Promise<boolean>;
-  /** Final graph-scoped publication/seal verification of one coherent projection. */
+  /** Final graph-scoped publication/seal acceptance of the exact supplied bundle. */
   readonly verifyCurrentBundle: (
     head: AgentProfileActiveHeadObjectV1,
     canonicalBundleBytes: Uint8Array,
     signal: AbortSignal,
-  ) => AgentProfileReceiverVerifiedBundleV1 | Promise<AgentProfileReceiverVerifiedBundleV1>;
+  ) => boolean | Promise<boolean>;
   /**
    * Lifecycle-owned bridge into the storage runtime. It mints and consumes the
    * private replacement proof inside one structured call; no proof escapes.
-   * After any internal await, it must translate admission's remaining wall-clock
-   * lifetime onto its monotonic deadline immediately before proof issuance/apply
-   * admission, as specified by AgentProfileReceiverApplyAdmissionV1.
+   * Its return value must come from freshApply.admitFreshApply, so the receiver
+   * owns the final freshness check and monotonic-deadline clamp.
    */
   readonly consumeCandidate: (
     input: AgentProfileReceiverCandidateV1,
     signal: AbortSignal,
-    admission: AgentProfileReceiverApplyAdmissionV1,
-  ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
+    freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
+  ) => AgentProfileReceiverFreshApplyResultV1
+    | Promise<AgentProfileReceiverFreshApplyResultV1>;
   /** Unix wall-clock milliseconds, injectable for deterministic verification. */
   readonly nowMs?: () => number;
 }
@@ -168,29 +177,22 @@ export function createAgentProfileReceiverV1(
       });
       signal.throwIfAborted();
       const validUntilUnixMs = Date.parse(candidate.head.validUntil);
-      const admission: AgentProfileReceiverApplyAdmissionV1 = Object.freeze({
+      assertActiveDeadlineFreshV1(
         validUntilUnixMs,
-        assertFreshAtApply: () => assertActiveDeadlineFreshV1(
-          validUntilUnixMs,
-          receiverNowMs(nowMs?.() ?? Date.now()),
-        ),
+        receiverNowMs(nowMs?.() ?? Date.now()),
+      );
+      const freshApply = createFreshApplyCapabilityV1({
+        validUntilUnixMs,
+        signal,
+        nowUnixMs: () => receiverNowMs(nowMs?.() ?? Date.now()),
       });
-      admission.assertFreshAtApply();
-      const outcome = await consumeCandidate(candidate, signal, admission);
+      const result = await consumeCandidate(candidate, signal, freshApply);
       // Atomic apply is the point of no return. A cancellation that arrives
       // after the storage closure returns must not hide a committed outcome and
       // make the caller retry it as if nothing happened.
-      return outcome;
+      return unwrapFreshApplyResultV1(result);
     },
   });
-}
-
-interface VerifiedActiveProfileClosureV1 {
-  readonly closure: SystemRecordVerificationClosureV1;
-  readonly verifiedBundle: Readonly<{
-    readonly projectionQuads: readonly Readonly<Quad>[];
-    readonly canonicalProjectionBytes: Uint8Array;
-  }>;
 }
 
 interface BuildVerifiedActiveCandidateFactsOptionsV1 {
@@ -240,7 +242,7 @@ async function buildVerifiedActiveCandidateFactsV1(
   assertActiveHeadEnvelopeV1(envelope);
   assertActiveHeadFreshV1(envelope.object, nowMs);
 
-  const { closure, verifiedBundle } = await verifyActiveProfileClosureForRowV1({
+  const closure = await verifyActiveProfileClosureForRowV1({
     row,
     signal,
     nowMs,
@@ -250,12 +252,24 @@ async function buildVerifiedActiveCandidateFactsV1(
     verifyCurrentBundle,
   });
   signal.throwIfAborted();
-  if (!closure.objects.some((artifact) =>
-    artifact.objectKind === 'agent-profile-head' && artifact.digest === row.headDigest)) {
-    throw new Error('verification closure did not retain its current agent-profile head');
-  }
-
   const head = envelope.object;
+  requiredClosureArtifactV1(
+    closure,
+    'agent-profile-head',
+    row.headDigest,
+    'current agent-profile head',
+  );
+  const bundleArtifact = requiredClosureArtifactV1(
+    closure,
+    'profile-bundle',
+    head.bundleDigest,
+    'current profile bundle',
+  );
+  const decodedBundle = decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes);
+  const canonicalProjectionBytes = Uint8Array.from(decodedBundle.projectionBytes);
+  const projectionQuads = Object.freeze(
+    deriveCanonicalProjectionQuadsV1(canonicalProjectionBytes),
+  );
   const resolvedSubjectTableArtifact = await resolveArtifact({
     type: 'object',
     objectKind: 'owned-subject-table',
@@ -284,8 +298,8 @@ async function buildVerifiedActiveCandidateFactsV1(
   return Object.freeze({
     head,
     envelope,
-    canonicalProjectionBytes: verifiedBundle.canonicalProjectionBytes,
-    projectionQuads: verifiedBundle.projectionQuads,
+    canonicalProjectionBytes,
+    projectionQuads,
     ownedSubjectTable,
     verifiedAuthoritySummary: closure.authoritySummary,
   });
@@ -298,7 +312,7 @@ interface VerifyActiveProfileClosureOptionsV1
 
 async function verifyActiveProfileClosureForRowV1(
   options: VerifyActiveProfileClosureOptionsV1,
-): Promise<VerifiedActiveProfileClosureV1> {
+): Promise<SystemRecordVerificationClosureV1> {
   const {
     row,
     signal,
@@ -308,11 +322,7 @@ async function verifyActiveProfileClosureForRowV1(
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
   } = options;
-  const bundleVerification = createExactOnceBundleVerificationResultV1(
-    verifyCurrentBundle,
-    signal,
-  );
-  const closure = await buildAgentProfileVerificationClosureV1(row.headDigest, {
+  return buildAgentProfileVerificationClosureV1(row.headDigest, {
     nowMs,
     resolve: async (reference) => {
       signal.throwIfAborted();
@@ -334,50 +344,15 @@ async function verifyActiveProfileClosureForRowV1(
       signal.throwIfAborted();
       return verified === true;
     },
-    verifyCurrentBundle: bundleVerification.verify,
-  });
-  return bundleVerification.complete(closure);
-}
-
-interface ExactOnceBundleVerificationResultV1 {
-  readonly verify: (
-    head: AgentProfileActiveHeadObjectV1,
-    canonicalBundleBytes: Uint8Array,
-  ) => Promise<boolean>;
-  readonly complete: (
-    closure: SystemRecordVerificationClosureV1,
-  ) => VerifiedActiveProfileClosureV1;
-}
-
-function createExactOnceBundleVerificationResultV1(
-  verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'],
-  signal: AbortSignal,
-): ExactOnceBundleVerificationResultV1 {
-  let invoked = false;
-  let verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'] | undefined;
-  return Object.freeze({
-    verify: async (
-      head: AgentProfileActiveHeadObjectV1,
-      canonicalBundleBytes: Uint8Array,
-    ) => {
-      if (invoked) throw new Error('active profile bundle verification must run exactly once');
-      invoked = true;
+    verifyCurrentBundle: async (head, canonicalBundleBytes) => {
       signal.throwIfAborted();
-      const result = await verifyCurrentBundle(
+      const verified = await verifyCurrentBundle(
         head,
         Uint8Array.from(canonicalBundleBytes),
         signal,
       );
       signal.throwIfAborted();
-      const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
-      verifiedBundle = snapshotVerifiedBundle(result, decoded.projectionBytes);
-      return true;
-    },
-    complete: (closure: SystemRecordVerificationClosureV1) => {
-      if (!invoked || verifiedBundle === undefined) {
-        throw new Error('active profile receiver resolved a non-active verification closure');
-      }
-      return Object.freeze({ closure, verifiedBundle });
+      return verified === true;
     },
   });
 }
@@ -458,34 +433,88 @@ function snapshotExpectedArtifactV1(
   });
 }
 
-function snapshotVerifiedBundle(
-  value: AgentProfileReceiverVerifiedBundleV1,
-  expectedProjectionBytes: Uint8Array,
-): AgentProfileReceiverVerifiedBundleV1 {
-  if (value === null || typeof value !== 'object'
-    || !(value.canonicalProjectionBytes instanceof Uint8Array)
-    || !Array.isArray(value.projectionQuads)) {
-    throw new Error('bundle verifier returned an invalid projection');
+function requiredClosureArtifactV1(
+  closure: SystemRecordVerificationClosureV1,
+  objectKind: SystemRecordObjectKindV1,
+  digest: Digest32V1,
+  label: string,
+): SystemRecordVerificationClosureV1['objects'][number] {
+  const artifact = closure.objects.find((candidate) =>
+    candidate.objectKind === objectKind && candidate.digest === digest);
+  if (artifact === undefined) {
+    throw new Error(`verification closure did not retain its ${label}`);
   }
-  const suppliedProjectionBytes = value.canonicalProjectionBytes;
-  if (suppliedProjectionBytes.byteLength !== expectedProjectionBytes.byteLength
-    || suppliedProjectionBytes.some((byte, index) => byte !== expectedProjectionBytes[index])) {
-    throw new Error('bundle verifier projection does not bind the supplied bundle');
-  }
-  const suppliedProjectionQuads = value.projectionQuads.map((quad) => Object.freeze({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph,
-  }));
-  const projectionQuads = deriveCanonicalProjectionQuadsV1(expectedProjectionBytes);
-  if (!equalQuadMultisetsV1(suppliedProjectionQuads, projectionQuads)) {
-    throw new Error('bundle verifier projection quads do not bind the supplied bundle');
-  }
+  return artifact;
+}
+
+interface CreateFreshApplyCapabilityOptionsV1 {
+  readonly validUntilUnixMs: number;
+  readonly signal: AbortSignal;
+  readonly nowUnixMs: () => number;
+}
+
+function createFreshApplyCapabilityV1(
+  options: CreateFreshApplyCapabilityOptionsV1,
+): AgentProfileReceiverFreshApplyCapabilityV1 {
+  const { validUntilUnixMs, signal, nowUnixMs } = options;
+  let used = false;
   return Object.freeze({
-    canonicalProjectionBytes: Uint8Array.from(expectedProjectionBytes),
-    projectionQuads: Object.freeze(projectionQuads),
+    admitFreshApply: async (
+      timing: AgentProfileReceiverMonotonicApplyTimingV1,
+      apply: (
+        admittedDeadlineMs: number,
+      ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
+    ): Promise<AgentProfileReceiverFreshApplyResultV1> => {
+      if (used) throw new Error('agent-profile fresh-apply capability is one-shot');
+      used = true;
+      signal.throwIfAborted();
+      if (timing === null || typeof timing !== 'object') {
+        throw new Error('agent-profile monotonic apply timing is invalid');
+      }
+      const existingMonotonicDeadlineMs = monotonicApplyMsV1(
+        timing.existingMonotonicDeadlineMs,
+        'existing deadline',
+      );
+      const monotonicNowMs = monotonicApplyMsV1(
+        timing.monotonicNowMs,
+        'current time',
+      );
+      if (typeof apply !== 'function') {
+        throw new Error('agent-profile fresh apply callback is invalid');
+      }
+      const remainingMs = assertActiveDeadlineFreshV1(validUntilUnixMs, nowUnixMs());
+      const translatedDeadlineMs = monotonicNowMs + remainingMs;
+      if (!Number.isSafeInteger(translatedDeadlineMs)) {
+        throw new Error('agent-profile translated apply deadline is invalid');
+      }
+      const admittedDeadlineMs = Math.min(
+        existingMonotonicDeadlineMs,
+        translatedDeadlineMs,
+      );
+      if (admittedDeadlineMs <= monotonicNowMs) {
+        throw new Error('agent-profile monotonic apply admission is expired');
+      }
+      const outcome = await apply(admittedDeadlineMs);
+      return Object.freeze({ [FRESH_APPLY_OUTCOME_V1]: outcome });
+    },
   });
+}
+
+function unwrapFreshApplyResultV1(
+  value: AgentProfileReceiverFreshApplyResultV1,
+): SystemRecordApplyOutcomeV1 {
+  if (value === null || typeof value !== 'object'
+    || !Object.prototype.hasOwnProperty.call(value, FRESH_APPLY_OUTCOME_V1)) {
+    throw new Error('lifecycle bridge did not return a fresh-apply result');
+  }
+  return value[FRESH_APPLY_OUTCOME_V1];
+}
+
+function monotonicApplyMsV1(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`agent-profile monotonic apply ${label} is invalid`);
+  }
+  return value;
 }
 
 function assertActiveHeadFreshV1(head: AgentProfileActiveHeadObjectV1, nowMs: number): void {
@@ -507,7 +536,7 @@ function deriveCanonicalProjectionQuadsV1(
   try {
     projectionText = new TextDecoder('utf-8', { fatal: true }).decode(canonicalProjectionBytes);
   } catch {
-    throw new Error('bundle verifier projection bytes are not valid UTF-8');
+    throw new Error('profile bundle projection bytes are not valid UTF-8');
   }
   const quads = parseNQuads(projectionText).map((quad) => Object.freeze({
     subject: quad.subject,
@@ -525,7 +554,7 @@ function deriveCanonicalProjectionQuadsV1(
   let offset = 0;
   for (const quad of quads) {
     if (quad.graph !== '') {
-      throw new Error('bundle verifier projection must be graphless');
+      throw new Error('profile bundle projection must be graphless');
     }
     const line = tripleContentV10(quad.subject, quad.predicate, quad.object);
     reconstructed.set(line, offset);
@@ -535,30 +564,9 @@ function deriveCanonicalProjectionQuadsV1(
   }
   if (reconstructed.byteLength !== canonicalProjectionBytes.byteLength
     || reconstructed.some((byte, index) => byte !== canonicalProjectionBytes[index])) {
-    throw new Error('bundle verifier projection bytes do not encode exact canonical quads');
+    throw new Error('profile bundle projection bytes do not encode exact canonical quads');
   }
   return quads;
-}
-
-function equalQuadMultisetsV1(
-  left: readonly Readonly<Quad>[],
-  right: readonly Readonly<Quad>[],
-): boolean {
-  if (left.length !== right.length) return false;
-  const sortedLeft = [...left].sort(compareQuadsV1);
-  const sortedRight = [...right].sort(compareQuadsV1);
-  return sortedLeft.every((quad, index) => compareQuadsV1(quad, sortedRight[index]!) === 0);
-}
-
-function compareQuadsV1(left: Readonly<Quad>, right: Readonly<Quad>): number {
-  return compareStringsV1(left.subject, right.subject)
-    || compareStringsV1(left.predicate, right.predicate)
-    || compareStringsV1(left.object, right.object)
-    || compareStringsV1(left.graph, right.graph);
-}
-
-function compareStringsV1(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function receiverNowMs(value: number): number {
