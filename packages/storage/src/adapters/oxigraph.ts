@@ -28,9 +28,8 @@ import {
 } from '../atomic-graph-replace.js';
 import {
   buildStructuredMutationUpdate,
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
-  structuredMutationMightMutate,
-  structuredMutationTouchedGraphs,
 } from '../bounded-structured-mutation.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
@@ -421,6 +420,7 @@ export class OxigraphStore implements TripleStore {
     _options?: TripleStoreQueryOptions,
   ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
+    const effects = captureStructuredMutationEffects(normalized);
     if (normalized.kind === 'replace-subject-predicates') {
       assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
         maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
@@ -428,10 +428,10 @@ export class OxigraphStore implements TripleStore {
       });
     }
     const update = buildStructuredMutationUpdate(normalized);
-    if (!update || !structuredMutationMightMutate(normalized)) return;
+    if (!update || !effects) return;
     this.store.update(update);
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites(structuredMutationTouchedGraphs(normalized));
+    this.writeGen.recordGraphWrites(effects.touchedGraphs);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

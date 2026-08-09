@@ -683,17 +683,14 @@ export function structuredMutationMightMutate(mutation: StructuredMutation): boo
 
 /** Immutable graph-scoped effects captured before a structured mutation is dispatched. */
 export interface StructuredMutationEffects {
-  readonly mightMutate: boolean;
   readonly touchedGraphs: readonly string[];
 }
 
 /** Capture canonical effects without executing or probing a store capability. */
 export function captureStructuredMutationEffects(
   mutation: StructuredMutation,
-): StructuredMutationEffects {
+): StructuredMutationEffects | undefined {
+  if (!structuredMutationMightMutate(mutation)) return undefined;
   const touchedGraphs = Object.freeze([...structuredMutationTouchedGraphs(mutation)]);
-  return Object.freeze({
-    mightMutate: structuredMutationMightMutate(mutation),
-    touchedGraphs,
-  });
+  return Object.freeze({ touchedGraphs });
 }

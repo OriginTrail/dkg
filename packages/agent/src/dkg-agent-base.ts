@@ -581,8 +581,8 @@ export function createListContextGraphsCacheInvalidatingStore(
           const effects = captureStructuredMutationEffects(mutation);
           return invalidateAfterMutation(
             () => innerStore.structuredMutation!(mutation, options),
-            () => effects.mightMutate,
-            () => effects.touchedGraphs.forEach(
+            () => effects !== undefined,
+            () => effects?.touchedGraphs.forEach(
               (graph) => markProjectionDirty?.(undefined, graph),
             ),
           );

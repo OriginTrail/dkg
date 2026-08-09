@@ -54,10 +54,9 @@ import {
 } from '../atomic-graph-replace.js';
 import {
   buildStructuredMutationUpdate,
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
   structuredMutationGuardedGraphs,
-  structuredMutationMightMutate,
-  structuredMutationTouchedGraphs,
 } from '../bounded-structured-mutation.js';
 import {
   assertNotReservedInternalGraphV1,
@@ -1299,7 +1298,7 @@ export class SparqlHttpStore implements TripleStore {
     options?: QueryOptions,
   ): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
-    const touchedGraphs = structuredMutationTouchedGraphs(normalized);
+    const effects = captureStructuredMutationEffects(normalized);
     this.assertGenericMutationScope(structuredMutationGuardedGraphs(normalized), 'structuredMutation');
     if (normalized.kind === 'replace-subject-predicates') {
       assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
@@ -1308,24 +1307,24 @@ export class SparqlHttpStore implements TripleStore {
       });
     }
     const update = buildStructuredMutationUpdate(normalized);
-    if (!update || !structuredMutationMightMutate(normalized)) return;
+    if (!update || !effects) return;
     try {
       await this.postUpdate(
         update,
         { ...options, source: options?.source ?? 'sparql-http.structuredMutation' },
         'structuredMutation',
-        touchedGraphs,
+        effects.touchedGraphs,
       );
     } catch (error) {
       // A remote endpoint may commit before its response is lost. Fail open for
       // cache coherence: invalidate graph enumeration and advance each affected
       // write generation even though the caller still receives the failure.
       this.invalidateListGraphsCache();
-      this.writeGen.recordGraphWrites(touchedGraphs);
+      this.writeGen.recordGraphWrites(effects.touchedGraphs);
       throw error;
     }
     this.invalidateListGraphsCache();
-    this.writeGen.recordGraphWrites(touchedGraphs);
+    this.writeGen.recordGraphWrites(effects.touchedGraphs);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

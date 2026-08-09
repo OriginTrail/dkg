@@ -63,7 +63,7 @@ describe('bounded structured mutation capabilities', () => {
 
     const effects = captureStructuredMutationEffects(mutation);
     mutation.input.targetGraphUri = 'urn:test:redirected';
-    expect(effects).toEqual({ mightMutate: true, touchedGraphs: [OTHER_GRAPH] });
+    expect(effects).toEqual({ touchedGraphs: [OTHER_GRAPH] });
     expect(Object.isFrozen(effects)).toBe(true);
     expect(Object.isFrozen(effects.touchedGraphs)).toBe(true);
   });
@@ -72,11 +72,11 @@ describe('bounded structured mutation capabilities', () => {
     expect(captureStructuredMutationEffects({
       kind: 'delete-subjects',
       input: { graphUri: GRAPH, subjects: [] },
-    })).toEqual({ mightMutate: false, touchedGraphs: [GRAPH] });
+    })).toBeUndefined();
     expect(captureStructuredMutationEffects({
       kind: 'delete-subjects',
       input: { graphUri: GRAPH, subjects: ['urn:test:a'] },
-    })).toEqual({ mightMutate: true, touchedGraphs: [GRAPH] });
+    })).toEqual({ touchedGraphs: [GRAPH] });
   });
 
   it('reports the canonical target graph for every structured mutation kind', async () => {
@@ -109,7 +109,6 @@ describe('bounded structured mutation capabilities', () => {
     ];
     for (const [mutation, expectedGraph] of mutations) {
       expect(captureStructuredMutationEffects(mutation)).toEqual({
-        mightMutate: true,
         touchedGraphs: [expectedGraph],
       });
     }
