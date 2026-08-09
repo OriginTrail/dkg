@@ -1524,12 +1524,16 @@ export class DKGAgent extends DKGAgentBase {
       return err.partialResults;
     };
 
-    // Build a set of all known on-chain IDs (stored and computed) for fast dedup
-    const knownOnChainIds = new Set<string>();
+    // NameRegistry enumeration is keyed by bytes32 name hashes, while all
+    // authoritative agent bindings are positive decimal ContextGraphStorage
+    // ids. Keep those namespaces separate: the legacy
+    // ContextGraphOnChain.contextGraphId field is the former, not the latter.
+    const knownNameHashes = new Set<string>();
     for (const [localId, sub] of this.subscribedContextGraphs) {
-      if (sub.onChainId) knownOnChainIds.add(sub.onChainId);
-      // Also compute expected hash for locally-known context graph IDs
-      knownOnChainIds.add(ethers.keccak256(ethers.toUtf8Bytes(localId)));
+      if (sub.onChainHash && ethers.isHexString(sub.onChainHash, 32)) {
+        knownNameHashes.add(sub.onChainHash.toLowerCase());
+      }
+      knownNameHashes.add(ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase());
     }
     const readDurableContextGraphOnChainId = async (contextGraphId: string): Promise<string | null> => {
       const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -1546,18 +1550,73 @@ export class DKGAgent extends DKGAgentBase {
     let discovered = 0;
     const applyDiscoveredContextGraphs = async (contextGraphs: ContextGraphOnChain[]): Promise<void> => {
       for (const p of contextGraphs) {
-        if (knownOnChainIds.has(p.contextGraphId)) {
-          if (!p.name) continue;
-          const durableOnChainId = await readDurableContextGraphOnChainId(p.name);
-          if (durableOnChainId === p.contextGraphId) continue;
-          knownOnChainIds.delete(p.contextGraphId);
-        }
+        const registryNameHash = ethers.isHexString(p.contextGraphId, 32)
+          ? p.contextGraphId.toLowerCase()
+          : null;
 
         if (!p.name) {
           // Hash-only entry (metadata not revealed) — record for dedup but don't
           // subscribe to gossip topics since hash-keyed topics are unusable.
+          if (registryNameHash && knownNameHashes.has(registryNameHash)) continue;
           this.log.info(ctx, `Noted unresolved on-chain context graph ${p.contextGraphId.slice(0, 16)}… (no metadata)`);
-          knownOnChainIds.add(p.contextGraphId);
+          if (registryNameHash) knownNameHashes.add(registryNameHash);
+          continue;
+        }
+
+        let resolvedOnChainId: string;
+        if (registryNameHash) {
+          const expectedNameHash = ethers.keccak256(ethers.toUtf8Bytes(p.name)).toLowerCase();
+          if (expectedNameHash !== registryNameHash) {
+            this.log.warn(
+              ctx,
+              `Skipping revealed chain entry "${p.name}": registry name hash ` +
+              `${registryNameHash} does not match cleartext commitment ${expectedNameHash}`,
+            );
+            knownNameHashes.add(registryNameHash);
+            continue;
+          }
+
+          const resolveByNameHash = this.chain.resolveContextGraphIdByNameHash;
+          if (typeof resolveByNameHash !== 'function') {
+            this.log.warn(
+              ctx,
+              `Skipping revealed chain entry "${p.name}" (${registryNameHash.slice(0, 16)}…): ` +
+              'chain adapter cannot resolve its numeric ContextGraphStorage id',
+            );
+            continue;
+          }
+
+          // This resolver owns the current-chain/reorg/provider-consensus
+          // fences and revalidates a unique slot before returning it. Do not
+          // mutate RDF or subscriptions until that authoritative boundary has
+          // completed successfully.
+          const numericId = await resolveByNameHash.call(this.chain, registryNameHash);
+          if (numericId === null || numericId <= 0n) {
+            this.log.warn(
+              ctx,
+              `Skipping revealed chain entry "${p.name}" (${registryNameHash.slice(0, 16)}…): ` +
+              'no unique positive ContextGraphStorage id resolves from its name hash',
+            );
+            continue;
+          }
+          resolvedOnChainId = numericId.toString();
+        } else if (/^[1-9][0-9]*$/.test(p.contextGraphId)) {
+          // Compatibility for non-EVM/custom adapters that already return a
+          // resolved numeric id. The production NameRegistry adapter always
+          // takes the bytes32 branch above.
+          resolvedOnChainId = p.contextGraphId;
+        } else {
+          this.log.warn(
+            ctx,
+            `Skipping revealed chain entry "${p.name}": invalid NameRegistry identifier ` +
+            JSON.stringify(p.contextGraphId),
+          );
+          continue;
+        }
+
+        const durableOnChainId = await readDurableContextGraphOnChainId(p.name);
+        if (durableOnChainId === resolvedOnChainId) {
+          if (registryNameHash) knownNameHashes.add(registryNameHash);
           continue;
         }
 
@@ -1572,7 +1631,7 @@ export class DKGAgent extends DKGAgentBase {
             && p.creator.toLowerCase() === this.defaultAgentAddress.toLowerCase();
           if (!isCurator) {
             this.log.info(ctx, `Skipping private chain entry "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — not curator`);
-            knownOnChainIds.add(p.contextGraphId);
+            if (registryNameHash) knownNameHashes.add(registryNameHash);
             continue;
           }
         }
@@ -1596,20 +1655,21 @@ export class DKGAgent extends DKGAgentBase {
         await this.store.insert([{
           subject: cgUri,
           predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
-          object: `"${p.contextGraphId}"`,
+          object: `"${resolvedOnChainId}"`,
           graph: ontoGraph,
         }]);
 
         this.recordDiscoveredContextGraph(p.name, {
           name: p.name,
-          onChainId: p.contextGraphId,
+          onChainId: resolvedOnChainId,
+          ...(registryNameHash ? { onChainHash: registryNameHash } : {}),
         }, { trackSyncScope: false });
         this.contextGraphMetaProjection.markDirty(p.name);
         const roleOutcome = (this.config.nodeRole ?? 'edge') === 'core'
           ? 'auto-subscribed for core ACK hosting'
           : 'catalogued (not subscribed)';
-        this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${p.contextGraphId.slice(0, 16)}…) — ${roleOutcome}`);
-        knownOnChainIds.add(p.contextGraphId);
+        this.log.info(ctx, `Discovered on-chain context graph "${p.name}" (${resolvedOnChainId}) — ${roleOutcome}`);
+        if (registryNameHash) knownNameHashes.add(registryNameHash);
         discovered++;
       }
     };
