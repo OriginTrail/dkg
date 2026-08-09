@@ -23,6 +23,7 @@ describe('canonical standalone SPARQL word scanner', () => {
     ]) {
       expect(readStandaloneSparqlWord(source, source.indexOf('DELETE'))).toBeNull();
     }
+    expect(readStandaloneSparqlWord('drop.core:value', 0)).toBeNull();
 
     const dotSeparated = '?s ?p ?o.GRAPH <urn:outside> {}';
     const graphStart = dotSeparated.indexOf('GRAPH');
@@ -55,6 +56,12 @@ describe('canonical standalone SPARQL word scanner', () => {
     const prefixedName = 'SELECT * WHERE { BIND(ex:foo.DELETE AS ?value) }';
     expect(analyzeSparqlOperation(prefixedName).mutatingKeyword).toBeNull();
     expect(recognizedReadOnlySparqlForm(analyzeSparqlOperation(prefixedName))).toBe('SELECT');
+
+    for (const dottedPrefix of ['drop.core', 'graph.core', 'from.core']) {
+      const query = `PREFIX ${dottedPrefix}: <urn:test:> SELECT * WHERE { ${dottedPrefix}:value ?p ?o }`;
+      expect(analyzeSparqlOperation(query).mutatingKeyword).toBeNull();
+      expect(recognizedReadOnlySparqlForm(analyzeSparqlOperation(query))).toBe('SELECT');
+    }
   });
 
   it('has no shared regex or cursor state across interleaved calls', () => {

@@ -398,8 +398,17 @@ function loadDynamicQueryInventory() {
 }
 
 function serializeDynamicQueryInventory(records) {
-  const lines = records.map((record) => `    ${JSON.stringify(record)}`);
-  return `{\n  "version": 2,\n  "records": [\n${lines.join(',\n')}\n  ]\n}\n`;
+  return `${JSON.stringify({ version: 2, records }, null, 2)}\n`;
+}
+
+function writeDynamicQueryInventoryIfClean(records, violations, writer = writeFileSync) {
+  if (violations.length > 0) return false;
+  writer(
+    DYNAMIC_QUERY_INVENTORY_PATH,
+    serializeDynamicQueryInventory(records),
+    'utf8',
+  );
+  return true;
 }
 
 function selfTestStaticSparql() {
@@ -569,6 +578,14 @@ function selfTestDynamicQueryInventoryDiff() {
     || serializeDynamicQueryInventory(roundTripped.records) !== serialized) {
     throw new Error('dynamic query inventory self-test lost deterministic round-trip output');
   }
+  let writes = 0;
+  const countWrite = () => { writes += 1; };
+  if (writeDynamicQueryInventoryIfClean([base], ['scan failed'], countWrite) || writes !== 0) {
+    throw new Error('dynamic query inventory self-test rewrote a failed scan');
+  }
+  if (!writeDynamicQueryInventoryIfClean([base], [], countWrite) || writes !== 1) {
+    throw new Error('dynamic query inventory self-test did not write a clean scan exactly once');
+  }
   const label = dynamicQueryInventoryLabel(base);
   if (!label.includes(DYNAMIC_QUERY_REASON) || !label.endsWith(' - sparql')) {
     throw new Error('dynamic query inventory self-test lost review diagnostics');
@@ -701,15 +718,16 @@ const observedInventory = reviewedDynamicQueryInventory(
 );
 
 if (WRITE_INVENTORY) {
-  writeFileSync(
-    DYNAMIC_QUERY_INVENTORY_PATH,
-    serializeDynamicQueryInventory(observedInventory),
-    'utf8',
-  );
-  console.log(
-    `[managed-store-raw-channels] wrote ${observedInventory.length} reviewed record(s) `
-    + `to ${DYNAMIC_QUERY_INVENTORY_PATH}`,
-  );
+  if (writeDynamicQueryInventoryIfClean(observedInventory, violations)) {
+    console.log(
+      `[managed-store-raw-channels] wrote ${observedInventory.length} reviewed record(s) `
+      + `to ${DYNAMIC_QUERY_INVENTORY_PATH}`,
+    );
+  } else {
+    console.error(
+      '[managed-store-raw-channels] refusing to rewrite the inventory because the scan failed',
+    );
+  }
 } else {
   const expectedInventory = loadDynamicQueryInventory();
   const inventoryDiff = diffDynamicQueryInventory(expectedInventory, observedInventory);

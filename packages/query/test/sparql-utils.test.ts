@@ -27,6 +27,26 @@ describe('readNextSparqlCodeToken', () => {
     ]);
   });
 
+  it('keeps dotted prefix labels inside one prefixed-name token', () => {
+    const sparql = 'drop.core:value graph.core:edge from.core:item';
+    const tokens = [];
+    let cursor = 0;
+
+    for (let token = readNextSparqlCodeToken(sparql, cursor); token !== null;
+      token = readNextSparqlCodeToken(sparql, cursor)) {
+      tokens.push(token);
+      cursor = token.end;
+    }
+
+    expect(tokens.map((token) => token.kind === 'prefixedName'
+      ? `${token.prefixedName.prefix}:${token.prefixedName.local}`
+      : token.kind)).toEqual([
+      'drop.core:value',
+      'graph.core:edge',
+      'from.core:item',
+    ]);
+  });
+
   it('keeps adjacent comments and statement separators outside prefixed names', () => {
     const sparql = 'ex:o# GRAPH <urn:forbidden>\n. ex:escaped\\#value . ex:tail.]';
     const tokens = [];
