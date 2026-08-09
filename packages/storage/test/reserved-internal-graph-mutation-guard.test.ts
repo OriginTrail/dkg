@@ -338,6 +338,16 @@ describe('reserved internal graph mutation guard', () => {
       expect(String(fetchSpy.mock.calls[0]?.[1]?.body)).toContain(staging);
     });
 
+    it('keeps staging cleanup available through the leased structured channel', async () => {
+      const fetchSpy = stubFetch();
+      const staging = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
+
+      await expect(newLeasedStore().dropGraph(staging)).resolves.toBeUndefined();
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(String(fetchSpy.mock.calls[0]?.[1]?.body)).toContain(staging);
+    });
+
     it('leaves ordinary graphs untouched', async () => {
       const fetchSpy = stubFetch();
       await expect(
