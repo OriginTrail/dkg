@@ -6,7 +6,9 @@ import {
   canonicalizeOwnedSubjectTableObjectV1,
   computeSystemRecordStableKeyHashV1,
   deriveAgentProfileOwnedSubjectV1,
+  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
+  type AgentProfileHeadObjectV1,
   type OwnedSubjectTableObjectV1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -20,11 +22,13 @@ import {
 import {
   createFixtureAgentProfileProducerV1,
   DEPLOYMENT,
+  envelopeArtifact,
   NETWORK,
   produce,
   producerFixture,
   PRODUCER_FIXTURE_NOW_MS,
   publicationFor,
+  signHeadEnvelope,
 } from './support/agent-profile-producer-v1-fixture.js';
 
 async function publishedFixture(withDerivedSubjects = false) {
@@ -127,6 +131,59 @@ describe('agent-profile system-record active receiver', () => {
     );
     expect(candidate).not.toHaveProperty('signal');
     expect(consumeCandidate.mock.calls[0]![1]).toBe(signal);
+  });
+
+  it('does not invoke active bundle verification for a non-active current head', async () => {
+    const fixture = await publishedFixture();
+    const active = fixture.envelope.object;
+    const tombstone = {
+      objectType: 'agent-profile-head',
+      kind: 'agents',
+      state: 'tombstone',
+      networkId: active.networkId,
+      peerId: active.peerId,
+      peerPublicKey: active.peerPublicKey,
+      authoritySequence: active.authoritySequence,
+      version: '1',
+      previousHeadDigest: fixture.envelope.objectDigest,
+      evmIssuer: active.evmIssuer,
+      rootSubject: active.rootSubject,
+      projectionSchemaDigest: active.projectionSchemaDigest,
+      issuedAt: '2026-08-07T12:10:00Z',
+      ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+      ownedSubjectCount: '0',
+      projectionBytes: '0',
+      projectionQuads: '0',
+    } as AgentProfileHeadObjectV1;
+    const tombstoneEnvelope = await signHeadEnvelope(
+      tombstone,
+      fixture.peerSigner,
+      fixture.evmSigner,
+    );
+    const tombstoneArtifact = envelopeArtifact('agent-profile-head', tombstoneEnvelope);
+    const resolve = vi.fn(async (lookup, signal) => lookup.type === 'object'
+      && lookup.objectKind === 'agent-profile-head'
+      && lookup.objectDigest === tombstoneEnvelope.objectDigest
+      ? tombstoneArtifact
+      : fixture.store.resolve(lookup, signal));
+    const verifyCurrentBundle = vi.fn();
+    const consumeCandidate = vi.fn();
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: { resolve },
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle,
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(Object.freeze({
+      ...fixture.row,
+      version: tombstone.version,
+      headDigest: tombstoneEnvelope.objectDigest,
+    }), new AbortController().signal)).rejects.toThrow(/inventory row does not bind/);
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(verifyCurrentBundle).not.toHaveBeenCalled();
+    expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
   it('hands every derived owned subject to the materializer candidate', async () => {

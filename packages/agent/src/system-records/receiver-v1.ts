@@ -27,6 +27,7 @@ import {
   type SignedAgentProfileHeadEnvelopeV1,
   type SystemRecordInventoryRowV1,
   type SystemRecordObjectKindV1,
+  type SystemRecordVerificationClosureV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type {
   Quad,
@@ -134,11 +135,7 @@ export function createAgentProfileReceiverV1(
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
 
-      const {
-        envelope,
-        verifiedBundle,
-        verifiedAuthoritySummary,
-      } = await verifyActiveProfileClosureForRowV1({
+      const candidate = await buildVerifiedActiveCandidateFactsV1({
         networkId,
         row,
         signal,
@@ -148,41 +145,7 @@ export function createAgentProfileReceiverV1(
         verifyCurrentBundle,
       });
       signal.throwIfAborted();
-
-      const head = envelope.object;
-      const resolvedSubjectTableArtifact = await resolveArtifact({
-        type: 'object',
-        objectKind: 'owned-subject-table',
-        objectDigest: head.ownedSubjectTableDigest,
-      }, signal);
-      signal.throwIfAborted();
-      if (resolvedSubjectTableArtifact === null) {
-        throw new Error('active profile receiver is missing its exact owned-subject table');
-      }
-      const subjectTableArtifact = snapshotExpectedArtifactV1(
-        resolvedSubjectTableArtifact,
-        'owned-subject-table',
-        head.ownedSubjectTableDigest,
-        'owned-subject table',
-      );
-      const ownedSubjectTable = parseCanonicalOwnedSubjectTableObjectV1(
-        head.rootSubject,
-        subjectTableArtifact.canonicalBytes,
-      );
-      if (computeOwnedSubjectTableDigestV1(head.rootSubject, ownedSubjectTable)
-          !== head.ownedSubjectTableDigest
-        || BigInt(ownedSubjectTable.length) !== BigInt(head.ownedSubjectCount)) {
-        throw new Error('active profile owned-subject table does not bind the verified head');
-      }
-
-      const outcome = await consumeCandidate(Object.freeze({
-        head,
-        envelope,
-        canonicalProjectionBytes: verifiedBundle.canonicalProjectionBytes,
-        projectionQuads: verifiedBundle.projectionQuads,
-        ownedSubjectTable,
-        verifiedAuthoritySummary,
-      }), signal);
+      const outcome = await consumeCandidate(candidate, signal);
       // Atomic apply is the point of no return. A cancellation that arrives
       // after the storage closure returns must not hide a committed outcome and
       // make the caller retry it as if nothing happened.
@@ -192,15 +155,14 @@ export function createAgentProfileReceiverV1(
 }
 
 interface VerifiedActiveProfileClosureV1 {
-  readonly envelope: SignedAgentProfileActiveHeadEnvelopeV1;
+  readonly closure: SystemRecordVerificationClosureV1;
   readonly verifiedBundle: Readonly<{
     readonly projectionQuads: readonly Readonly<Quad>[];
     readonly canonicalProjectionBytes: Uint8Array;
   }>;
-  readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
 }
 
-interface VerifyActiveProfileClosureOptionsV1 {
+interface BuildVerifiedActiveCandidateFactsOptionsV1 {
   readonly networkId: NetworkIdV1;
   readonly row: SystemRecordInventoryRowV1;
   readonly signal: AbortSignal;
@@ -212,9 +174,9 @@ interface VerifyActiveProfileClosureOptionsV1 {
   readonly verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'];
 }
 
-async function verifyActiveProfileClosureForRowV1(
-  options: VerifyActiveProfileClosureOptionsV1,
-): Promise<VerifiedActiveProfileClosureV1> {
+async function buildVerifiedActiveCandidateFactsV1(
+  options: BuildVerifiedActiveCandidateFactsOptionsV1,
+): Promise<AgentProfileReceiverCandidateV1> {
   const {
     networkId,
     row,
@@ -224,76 +186,197 @@ async function verifyActiveProfileClosureForRowV1(
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
   } = options;
-  let verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'] | undefined;
-  const closure =
-    await buildAgentProfileVerificationClosureV1(row.headDigest, {
-      nowMs,
-      resolve: async (reference) => {
-        signal.throwIfAborted();
-        const artifact = await resolveArtifact({
-          type: 'object',
-          objectKind: reference.objectKind,
-          objectDigest: reference.digest,
-        }, signal);
-        signal.throwIfAborted();
-        if (artifact === null) return undefined;
-        const owned = snapshotExpectedArtifactV1(
-          artifact,
-          reference.objectKind,
-          reference.digest,
-          'closure artifact',
-        );
-        if (reference.objectKind === 'agent-profile-head'
-          && reference.digest === row.headDigest) {
-          assertRowBindsHead(
-            networkId,
-            row,
-            parseCanonicalSignedAgentProfileHeadEnvelopeV1(owned.canonicalBytes),
-          );
-        }
-        return Object.freeze({
-          objectKind: owned.objectKind,
-          digest: owned.objectDigest,
-          canonicalBytes: owned.canonicalBytes,
-        });
-      },
-      verifyAuthorityEnvelope: async (envelope) => {
-        signal.throwIfAborted();
-        const verified = await verifyAuthorityEnvelope(envelope, signal);
-        signal.throwIfAborted();
-        return verified === true;
-      },
-      verifyCurrentBundle: async (head, canonicalBundleBytes) => {
-        signal.throwIfAborted();
-        const result = await verifyCurrentBundle(
-          head,
-          Uint8Array.from(canonicalBundleBytes),
-          signal,
-        );
-        signal.throwIfAborted();
-        const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
-        verifiedBundle = snapshotVerifiedBundle(result, decoded.projectionBytes);
-        return true;
-      },
-    });
-  const currentHeadArtifact = closure.objects.find((artifact) =>
-    artifact.objectKind === 'agent-profile-head' && artifact.digest === row.headDigest,
+  signal.throwIfAborted();
+  const resolvedCurrentHeadArtifact = await resolveArtifact({
+    type: 'object',
+    objectKind: 'agent-profile-head',
+    objectDigest: row.headDigest,
+  }, signal);
+  signal.throwIfAborted();
+  if (resolvedCurrentHeadArtifact === null) {
+    throw new Error('verification closure is missing its current agent-profile head');
+  }
+  const currentHeadArtifact = snapshotExpectedArtifactV1(
+    resolvedCurrentHeadArtifact,
+    'agent-profile-head',
+    row.headDigest,
+    'closure artifact',
   );
-  if (currentHeadArtifact === undefined)
-    throw new Error('verification closure did not retain its current agent-profile head');
   const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
     currentHeadArtifact.canonicalBytes,
   );
   assertRowBindsHead(networkId, row, envelope);
   assertActiveHeadEnvelopeV1(envelope);
-  if (verifiedBundle === undefined) {
-    throw new Error('active profile receiver resolved a non-active verification closure');
+
+  const { closure, verifiedBundle } = await verifyActiveProfileClosureForRowV1({
+    row,
+    signal,
+    nowMs,
+    currentHeadArtifact,
+    resolveArtifact,
+    verifyAuthorityEnvelope,
+    verifyCurrentBundle,
+  });
+  signal.throwIfAborted();
+  if (!closure.objects.some((artifact) =>
+    artifact.objectKind === 'agent-profile-head' && artifact.digest === row.headDigest)) {
+    throw new Error('verification closure did not retain its current agent-profile head');
   }
+
+  const head = envelope.object;
+  const resolvedSubjectTableArtifact = await resolveArtifact({
+    type: 'object',
+    objectKind: 'owned-subject-table',
+    objectDigest: head.ownedSubjectTableDigest,
+  }, signal);
+  signal.throwIfAborted();
+  if (resolvedSubjectTableArtifact === null) {
+    throw new Error('active profile receiver is missing its exact owned-subject table');
+  }
+  const subjectTableArtifact = snapshotExpectedArtifactV1(
+    resolvedSubjectTableArtifact,
+    'owned-subject-table',
+    head.ownedSubjectTableDigest,
+    'owned-subject table',
+  );
+  const ownedSubjectTable = parseCanonicalOwnedSubjectTableObjectV1(
+    head.rootSubject,
+    subjectTableArtifact.canonicalBytes,
+  );
+  if (computeOwnedSubjectTableDigestV1(head.rootSubject, ownedSubjectTable)
+      !== head.ownedSubjectTableDigest
+    || BigInt(ownedSubjectTable.length) !== BigInt(head.ownedSubjectCount)) {
+    throw new Error('active profile owned-subject table does not bind the verified head');
+  }
+
   return Object.freeze({
+    head,
     envelope,
-    verifiedBundle,
+    canonicalProjectionBytes: verifiedBundle.canonicalProjectionBytes,
+    projectionQuads: verifiedBundle.projectionQuads,
+    ownedSubjectTable,
     verifiedAuthoritySummary: closure.authoritySummary,
   });
+}
+
+interface VerifyActiveProfileClosureOptionsV1
+  extends Omit<BuildVerifiedActiveCandidateFactsOptionsV1, 'networkId'> {
+  readonly currentHeadArtifact: SystemRecordArtifactV1;
+}
+
+async function verifyActiveProfileClosureForRowV1(
+  options: VerifyActiveProfileClosureOptionsV1,
+): Promise<VerifiedActiveProfileClosureV1> {
+  const {
+    row,
+    signal,
+    nowMs,
+    currentHeadArtifact,
+    resolveArtifact,
+    verifyAuthorityEnvelope,
+    verifyCurrentBundle,
+  } = options;
+  const bundleVerification = createExactOnceBundleVerificationAdapterV1(
+    verifyCurrentBundle,
+    signal,
+  );
+  const closure = await buildAgentProfileVerificationClosureV1(row.headDigest, {
+    nowMs,
+    resolve: async (reference) => {
+      signal.throwIfAborted();
+      const owned = reference.objectKind === 'agent-profile-head'
+        && reference.digest === row.headDigest
+        ? currentHeadArtifact
+        : await resolveClosureArtifactV1(reference, resolveArtifact, signal);
+      signal.throwIfAborted();
+      if (owned === undefined) return undefined;
+      return Object.freeze({
+        objectKind: owned.objectKind,
+        digest: owned.objectDigest,
+        canonicalBytes: owned.canonicalBytes,
+      });
+    },
+    verifyAuthorityEnvelope: async (envelope) => {
+      signal.throwIfAborted();
+      const verified = await verifyAuthorityEnvelope(envelope, signal);
+      signal.throwIfAborted();
+      return verified === true;
+    },
+    verifyCurrentBundle: bundleVerification.verify,
+  });
+  return bundleVerification.complete(closure);
+}
+
+interface ExactOnceBundleVerificationAdapterV1 {
+  readonly verify: (
+    head: AgentProfileActiveHeadObjectV1,
+    canonicalBundleBytes: Uint8Array,
+  ) => Promise<boolean>;
+  readonly complete: (
+    closure: SystemRecordVerificationClosureV1,
+  ) => VerifiedActiveProfileClosureV1;
+}
+
+function createExactOnceBundleVerificationAdapterV1(
+  verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'],
+  signal: AbortSignal,
+): ExactOnceBundleVerificationAdapterV1 {
+  let state:
+    | Readonly<{ phase: 'waiting' | 'verifying' }>
+    | Readonly<{
+      phase: 'verified';
+      verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'];
+    }> = Object.freeze({ phase: 'waiting' });
+
+  return Object.freeze({
+    verify: async (
+      head: AgentProfileActiveHeadObjectV1,
+      canonicalBundleBytes: Uint8Array,
+    ) => {
+      if (state.phase !== 'waiting') {
+        throw new Error('active profile bundle verification must run exactly once');
+      }
+      state = Object.freeze({ phase: 'verifying' });
+      signal.throwIfAborted();
+      const result = await verifyCurrentBundle(
+        head,
+        Uint8Array.from(canonicalBundleBytes),
+        signal,
+      );
+      signal.throwIfAborted();
+      const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
+      state = Object.freeze({
+        phase: 'verified',
+        verifiedBundle: snapshotVerifiedBundle(result, decoded.projectionBytes),
+      });
+      return true;
+    },
+    complete: (closure: SystemRecordVerificationClosureV1) => {
+      if (state.phase !== 'verified') {
+        throw new Error('active profile receiver resolved a non-active verification closure');
+      }
+      return Object.freeze({ closure, verifiedBundle: state.verifiedBundle });
+    },
+  });
+}
+
+async function resolveClosureArtifactV1(
+  reference: Readonly<{ objectKind: SystemRecordObjectKindV1; digest: Digest32V1 }>,
+  resolveArtifact: SystemRecordArtifactRepositoryV1['resolve'],
+  signal: AbortSignal,
+): Promise<SystemRecordArtifactV1 | undefined> {
+  const artifact = await resolveArtifact({
+    type: 'object',
+    objectKind: reference.objectKind,
+    objectDigest: reference.digest,
+  }, signal);
+  if (artifact === null) return undefined;
+  return snapshotExpectedArtifactV1(
+    artifact,
+    reference.objectKind,
+    reference.digest,
+    'closure artifact',
+  );
 }
 
 function assertActiveHeadEnvelopeV1(
