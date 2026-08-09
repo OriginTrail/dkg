@@ -121,4 +121,17 @@ describe('RS-heal materialization executor', () => {
     await applyRsHealMaterialization(store, input(), () => false);
     expect(structuredMutation).not.toHaveBeenCalled();
   });
+
+  it('preflights an unchunkable data plan before clearing completion', async () => {
+    const structuredMutation = vi.fn(async () => undefined);
+    const store = { structuredMutation } as unknown as TripleStore;
+    const oversizedRoot = `urn:test:rs-heal:${'a'.repeat(4 * 1024 * 1024)}`;
+
+    await expect(applyRsHealMaterialization(
+      store,
+      { ...input(), roots: [oversizedRoot] },
+      () => true,
+    )).rejects.toThrow(/copySubjectProjection exceeds .* operand bytes/);
+    expect(structuredMutation).not.toHaveBeenCalled();
+  });
 });
