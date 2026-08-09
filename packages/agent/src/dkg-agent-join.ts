@@ -96,7 +96,7 @@ import {
   OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, tryReplaceSubjectAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -1189,28 +1189,15 @@ export class JoinRequestMethods extends DKGAgentBase {
       predicate: REQUESTER_JOIN_STATE_CURATOR,
       object: `"${escapeSparqlLiteral(curatorPeerId)}"`,
     }] : [])];
-    const curatorInsert = curatorPeerId
-      ? ` ;\n                        <${REQUESTER_JOIN_STATE_CURATOR}> "${escapeSparqlLiteral(curatorPeerId)}"`
-      : '';
     try {
-      const updatedAtomically = await tryUpdateWithTouchedGraphs(
+      const updatedAtomically = await tryReplaceSubjectAtomically(
         this.store,
-        `DELETE {
-          GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . }
-        }
-        INSERT {
-          GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> {
-            <${subject}> <${REQUESTER_JOIN_STATE_STATUS}> "${state.status}" ;
-                        <${REQUESTER_JOIN_STATE_GENERATION}> "${state.requestGeneration}"${curatorInsert} .
-          }
-        }
-        WHERE {
-          OPTIONAL { GRAPH <${REQUESTER_JOIN_STATE_GRAPH}> { <${subject}> ?p ?o . } }
-        }`,
-        [REQUESTER_JOIN_STATE_GRAPH],
+        REQUESTER_JOIN_STATE_GRAPH,
+        subject,
+        quads,
       );
       if (!updatedAtomically) {
-        // Compatibility fallback for custom stores without SPARQL UPDATE.
+        // Compatibility fallback for custom stores without atomic subject replacement.
         // Restore the prior row best-effort if the replacement insert fails.
         await this.store.deleteByPattern({ graph: REQUESTER_JOIN_STATE_GRAPH, subject });
         try {
