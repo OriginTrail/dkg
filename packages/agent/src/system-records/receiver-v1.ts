@@ -207,11 +207,15 @@ async function buildVerifiedActiveCandidateFactsV1(
   );
   assertRowBindsHead(networkId, row, envelope);
   assertActiveHeadEnvelopeV1(envelope);
+  if (Date.parse(envelope.object.validUntil) <= nowMs) {
+    throw new Error('active profile receiver resolved an expired agent-profile head');
+  }
 
   const { closure, verifiedBundle } = await verifyActiveProfileClosureForRowV1({
     row,
     signal,
     nowMs,
+    envelope,
     currentHeadArtifact,
     resolveArtifact,
     verifyAuthorityEnvelope,
@@ -261,6 +265,7 @@ async function buildVerifiedActiveCandidateFactsV1(
 
 interface VerifyActiveProfileClosureOptionsV1
   extends Omit<BuildVerifiedActiveCandidateFactsOptionsV1, 'networkId'> {
+  readonly envelope: SignedAgentProfileActiveHeadEnvelopeV1;
   readonly currentHeadArtifact: SystemRecordArtifactV1;
 }
 
@@ -271,23 +276,42 @@ async function verifyActiveProfileClosureForRowV1(
     row,
     signal,
     nowMs,
+    envelope,
     currentHeadArtifact,
     resolveArtifact,
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
   } = options;
-  const bundleVerification = createExactOnceBundleVerificationAdapterV1(
-    verifyCurrentBundle,
-    signal,
+  signal.throwIfAborted();
+  const resolvedCurrentBundleArtifact = await resolveArtifact({
+    type: 'object',
+    objectKind: 'profile-bundle',
+    objectDigest: envelope.object.bundleDigest,
+  }, signal);
+  signal.throwIfAborted();
+  if (resolvedCurrentBundleArtifact === null) {
+    throw new Error(`verification closure is missing ${envelope.object.bundleDigest}`);
+  }
+  const currentBundleArtifact = snapshotExpectedArtifactV1(
+    resolvedCurrentBundleArtifact,
+    'profile-bundle',
+    envelope.object.bundleDigest,
+    'closure artifact',
   );
   const closure = await buildAgentProfileVerificationClosureV1(row.headDigest, {
     nowMs,
     resolve: async (reference) => {
       signal.throwIfAborted();
-      const owned = reference.objectKind === 'agent-profile-head'
-        && reference.digest === row.headDigest
-        ? currentHeadArtifact
-        : await resolveClosureArtifactV1(reference, resolveArtifact, signal);
+      let owned: SystemRecordArtifactV1 | undefined;
+      if (reference.objectKind === 'agent-profile-head'
+        && reference.digest === row.headDigest) {
+        owned = currentHeadArtifact;
+      } else if (reference.objectKind === 'profile-bundle'
+        && reference.digest === envelope.object.bundleDigest) {
+        owned = currentBundleArtifact;
+      } else {
+        owned = await resolveClosureArtifactV1(reference, resolveArtifact, signal);
+      }
       signal.throwIfAborted();
       if (owned === undefined) return undefined;
       return Object.freeze({
@@ -302,61 +326,21 @@ async function verifyActiveProfileClosureForRowV1(
       signal.throwIfAborted();
       return verified === true;
     },
-    verifyCurrentBundle: bundleVerification.verify,
+    verifyCurrentBundle: (head, canonicalBundleBytes) =>
+      head.bundleDigest === envelope.object.bundleDigest
+      && systemRecordBytesEqualV1(canonicalBundleBytes, currentBundleArtifact.canonicalBytes),
   });
-  return bundleVerification.complete(closure);
-}
-
-interface ExactOnceBundleVerificationAdapterV1 {
-  readonly verify: (
-    head: AgentProfileActiveHeadObjectV1,
-    canonicalBundleBytes: Uint8Array,
-  ) => Promise<boolean>;
-  readonly complete: (
-    closure: SystemRecordVerificationClosureV1,
-  ) => VerifiedActiveProfileClosureV1;
-}
-
-function createExactOnceBundleVerificationAdapterV1(
-  verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'],
-  signal: AbortSignal,
-): ExactOnceBundleVerificationAdapterV1 {
-  let state:
-    | Readonly<{ phase: 'waiting' | 'verifying' }>
-    | Readonly<{
-      phase: 'verified';
-      verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'];
-    }> = Object.freeze({ phase: 'waiting' });
-
+  signal.throwIfAborted();
+  const result = await verifyCurrentBundle(
+    envelope.object,
+    Uint8Array.from(currentBundleArtifact.canonicalBytes),
+    signal,
+  );
+  signal.throwIfAborted();
+  const decoded = decodeOpaqueKaBundleV1(currentBundleArtifact.canonicalBytes);
   return Object.freeze({
-    verify: async (
-      head: AgentProfileActiveHeadObjectV1,
-      canonicalBundleBytes: Uint8Array,
-    ) => {
-      if (state.phase !== 'waiting') {
-        throw new Error('active profile bundle verification must run exactly once');
-      }
-      state = Object.freeze({ phase: 'verifying' });
-      signal.throwIfAborted();
-      const result = await verifyCurrentBundle(
-        head,
-        Uint8Array.from(canonicalBundleBytes),
-        signal,
-      );
-      signal.throwIfAborted();
-      const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
-      state = Object.freeze({
-        phase: 'verified',
-        verifiedBundle: snapshotVerifiedBundle(result, decoded.projectionBytes),
-      });
-      return true;
-    },
-    complete: (closure: SystemRecordVerificationClosureV1) => {
-      if (state.phase !== 'verified') {
-        throw new Error('active profile receiver resolved a non-active verification closure');
-      }
-      return Object.freeze({ closure, verifiedBundle: state.verifiedBundle });
-    },
+    closure,
+    verifiedBundle: snapshotVerifiedBundle(result, decoded.projectionBytes),
   });
 }
 
@@ -460,6 +444,11 @@ function snapshotVerifiedBundle(
     canonicalProjectionBytes: Uint8Array.from(expectedProjectionBytes),
     projectionQuads: Object.freeze(projectionQuads),
   });
+}
+
+function systemRecordBytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
+  return left.byteLength === right.byteLength
+    && left.every((byte, index) => byte === right[index]);
 }
 
 function receiverNowMs(value: number): number {
