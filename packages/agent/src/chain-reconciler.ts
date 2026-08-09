@@ -34,6 +34,7 @@ import {
   VmReconcileQueueFullError,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
+import type { VmRecoveryChainFootprint } from './vm-recovery-microbatch.js';
 
 /**
  * Outcome of attempting to reconcile a single per-CG registration ordinal.
@@ -59,6 +60,8 @@ export interface OrdinalRecoveryTarget {
   merkleRoot: string;
   kaId: string;
   reason: 'no-swm' | 'verified-vm-metadata-pending';
+  /** Optional finalized, public-policy-proven exact-transfer cost hint. */
+  recoveryFootprint?: VmRecoveryChainFootprint;
 }
 
 export interface PendingOrdinalRecoveryResult {
