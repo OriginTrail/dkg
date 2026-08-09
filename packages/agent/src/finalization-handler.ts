@@ -347,6 +347,19 @@ interface ChainReconciledKCInput {
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
 }
 
+type VerifiedGraphScopedConfirmation =
+  | {
+      kind: 'transaction';
+      txHash: string;
+      publisherAddress: string;
+      blockNumber: number;
+      materializedVersion: MaterializedVersion;
+    }
+  | {
+      kind: 'finalized-materialization';
+      materializedVersion: MaterializedVersion;
+    };
+
 interface PreparedGraphScopedMaterialization
   extends FinalizationRecoveryPreparedMaterialization {
   candidate: ParsedGraphScopedFinalization;
@@ -1219,12 +1232,15 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: layerVerification.merkleRoot,
-      publisherAddress: msg.publisherAddress,
-      txHash: msg.txHash,
-      blockNumber: verifiedBlockNumber,
       batchId,
       authorAddress: verifiedAuthorAddress,
-      materializedVersion,
+      confirmation: {
+        kind: 'transaction',
+        txHash: msg.txHash,
+        publisherAddress: msg.publisherAddress,
+        blockNumber: verifiedBlockNumber,
+        materializedVersion,
+      },
       accessPolicy,
       allowedPeers,
       subGraphName,
@@ -1730,16 +1746,16 @@ export class FinalizationHandler {
             head: finalizedHead,
             privateMerkleRoot,
             computedMerkleRoot: vmVerification.merkleRoot,
-            publisherAddress,
-            blockNumber: versionBlock,
             batchId: kaId,
             authorAddress: publicAuthority.authorAddress,
-            materializedVersion: finalizedVersion,
+            confirmation: {
+              kind: 'finalized-materialization',
+              materializedVersion: finalizedVersion,
+            },
             accessPolicy: 'public',
             allowedPeers: [],
             subGraphName,
             source: 'chain-reconcile',
-            confirmationKind: 'finalized-materialization',
             contentAlreadyMaterialized: true,
             ctx,
           });
@@ -1845,16 +1861,16 @@ export class FinalizationHandler {
         head: finalizedHead,
         privateMerkleRoot,
         computedMerkleRoot: swmVerification.merkleRoot,
-        publisherAddress,
-        blockNumber: versionBlock,
         batchId: kaId,
         authorAddress: publicAuthority.authorAddress,
-        materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+        confirmation: {
+          kind: 'finalized-materialization',
+          materializedVersion: { blockNumber: versionBlock, txIndex: 0 },
+        },
         accessPolicy: 'public',
         allowedPeers: [],
         subGraphName,
         source: 'chain-reconcile',
-        confirmationKind: 'finalized-materialization',
         ctx,
       });
       if (outcome === 'stale') return 'stale-target';
@@ -1874,12 +1890,15 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: swmVerification.merkleRoot,
-      publisherAddress: evidencePublisherAddress,
-      txHash: trustedAssertionEvidence.transactionHash,
-      blockNumber: evidenceBlockNumber,
       batchId: kaId,
       authorAddress: evidenceAuthorAddress,
-      materializedVersion,
+      confirmation: {
+        kind: 'transaction',
+        txHash: trustedAssertionEvidence.transactionHash,
+        publisherAddress: evidencePublisherAddress,
+        blockNumber: evidenceBlockNumber,
+        materializedVersion,
+      },
       accessPolicy: trustedAssertionEvidence?.accessPolicy,
       allowedPeers: trustedAssertionEvidence?.allowedPeers,
       subGraphName,
@@ -1930,12 +1949,15 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot: input.privateMerkleRoot,
       computedMerkleRoot: input.computedMerkleRoot,
-      publisherAddress: evidence.publisherAddress,
-      txHash: evidence.transactionHash,
-      blockNumber: evidence.blockNumber,
       batchId: input.batchId,
       authorAddress: evidence.authorAddress,
-      materializedVersion: { blockNumber: evidence.blockNumber, txIndex: evidence.txIndex },
+      confirmation: {
+        kind: 'transaction',
+        txHash: evidence.transactionHash,
+        publisherAddress: evidence.publisherAddress,
+        blockNumber: evidence.blockNumber,
+        materializedVersion: { blockNumber: evidence.blockNumber, txIndex: evidence.txIndex },
+      },
       accessPolicy: evidence.accessPolicy,
       allowedPeers: evidence.allowedPeers,
       subGraphName: evidence.subGraphName,
@@ -1974,17 +1996,13 @@ export class FinalizationHandler {
     head: GraphScopedMaterializationEnvelope;
     privateMerkleRoot?: Uint8Array;
     computedMerkleRoot: Uint8Array;
-    publisherAddress: string;
-    txHash?: string;
-    blockNumber: number;
     batchId: bigint;
     authorAddress?: string;
-    materializedVersion: MaterializedVersion;
+    confirmation: VerifiedGraphScopedConfirmation;
     accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
     allowedPeers?: string[];
     subGraphName?: string;
     source: 'finalization' | 'chain-reconcile';
-    confirmationKind?: 'transaction' | 'finalized-materialization';
     contentAlreadyMaterialized?: boolean;
     ctx: OperationContext;
   }): Promise<'applied' | 'stale' | 'preserved-metadata'> {
@@ -1995,23 +2013,17 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot,
-      publisherAddress,
-      txHash,
-      blockNumber,
       batchId,
       authorAddress,
-      materializedVersion,
+      confirmation,
       accessPolicy: requestedAccessPolicy,
       allowedPeers: requestedAllowedPeers = [],
       subGraphName,
       source,
-      confirmationKind = 'transaction',
       contentAlreadyMaterialized = false,
       ctx,
     } = input;
-    if (confirmationKind === 'transaction' && !txHash) {
-      throw new Error('Receipt-backed graph-scoped finalization requires a transaction hash');
-    }
+    const materializedVersion = confirmation.materializedVersion;
     const publicTripleCount = head.publicTripleCount;
     const privateTripleCount = head.privateTripleCount;
     const vmGraph = knowledgeAssetLayerGraphUri(
@@ -2088,34 +2100,40 @@ export class FinalizationHandler {
         return 'preserved-metadata' as const;
       }
 
-      let confirmation: Parameters<typeof generateGraphKnowledgeAssetMetadata>[1];
-      if (confirmationKind === 'transaction') {
+      const effectiveVersion = incomingVersionIsStale
+        ? currentMaterializedVersion
+        : materializedVersion;
+      let metadataConfirmation: Parameters<typeof generateGraphKnowledgeAssetMetadata>[1];
+      if (confirmation.kind === 'transaction') {
         let blockTimestamp = Math.floor(Date.now() / 1000);
         if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
           try {
-            blockTimestamp = await (this.chain as any).getBlockTimestamp(blockNumber);
+            blockTimestamp = await (this.chain as any).getBlockTimestamp(confirmation.blockNumber);
           } catch {
-            this.log.info(ctx, `Could not fetch block timestamp for block ${blockNumber}, using local time`);
+            this.log.info(
+              ctx,
+              `Could not fetch block timestamp for block ${confirmation.blockNumber}, using local time`,
+            );
           }
         }
         const provenance: OnChainProvenance = {
-          txHash: txHash!,
-          blockNumber,
+          txHash: confirmation.txHash,
+          blockNumber: confirmation.blockNumber,
           blockTimestamp,
-          publisherAddress,
+          publisherAddress: confirmation.publisherAddress,
           batchId,
           chainId: this.chain?.chainId ?? 'unknown',
         };
-        confirmation = {
+        metadataConfirmation = {
           status: 'confirmed',
           confirmation: { kind: 'transaction', provenance },
         };
       } else {
-        confirmation = {
+        metadataConfirmation = {
           status: 'confirmed',
           confirmation: {
             kind: 'finalized-materialization',
-            provenance: { batchId, materializedVersion },
+            provenance: { batchId, materializedVersion: effectiveVersion },
           },
         };
       }
@@ -2138,11 +2156,11 @@ export class FinalizationHandler {
           privateTripleCount,
           assertionGraph: vmGraph,
         },
-        confirmation,
+        metadataConfirmation,
       );
-      const effectiveVersion = incomingVersionIsStale
-        ? currentMaterializedVersion
-        : materializedVersion;
+      const committedMetadata = confirmation.kind === 'transaction'
+        ? [...metadata, materializedVersionQuad(metaGraph, scope.ual, effectiveVersion)]
+        : metadata;
       const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
       const replaced = await tryReplaceGraphAndSubjectAtomically(
         this.store,
@@ -2150,7 +2168,7 @@ export class FinalizationHandler {
         vmQuads,
         metaGraph,
         scope.ual,
-        [...metadata, materializedVersionQuad(metaGraph, scope.ual, effectiveVersion)],
+        committedMetadata,
         { source: 'agent.finalization.graphScopedAtomicCommit' },
       );
       if (!replaced) {
@@ -2210,19 +2228,12 @@ export class FinalizationHandler {
     }
 
     try {
-      const [active, accessPolicy, rootCount, latestRoot] = await Promise.all([
+      const [active, accessPolicy, rootCountBefore] = await Promise.all([
         chain.isContextGraphActiveOnChain(onChainCgId),
         chain.getContextGraphAccessPolicy(onChainCgId),
         chain.getMerkleRootCount(input.kaId),
-        chain.getLatestMerkleRoot(input.kaId),
       ]);
-      if (
-        !active
-        || accessPolicy !== 0
-        || rootCount !== assertionVersion
-        || !equalBytes(latestRoot, input.merkleRoot)
-      ) return undefined;
-
+      const latestRoot = await chain.getLatestMerkleRoot(input.kaId);
       let authorAddress: string | undefined;
       if (chain.getLatestMerkleRootAuthor) {
         try {
@@ -2238,6 +2249,18 @@ export class FinalizationHandler {
           );
         }
       }
+      // Sandwich the latest-root and optional author reads between two
+      // monotonic root-count reads. Without adapter-level block tags this is
+      // the conservative coherence boundary: an overlapping update changes
+      // the count and fails closed, including same-root updates.
+      const rootCountAfter = await chain.getMerkleRootCount(input.kaId);
+      if (
+        !active
+        || accessPolicy !== 0
+        || rootCountBefore !== rootCountAfter
+        || rootCountAfter !== assertionVersion
+        || !equalBytes(latestRoot, input.merkleRoot)
+      ) return undefined;
       return authorAddress ? { authorAddress } : {};
     } catch (err) {
       this.log.info(
