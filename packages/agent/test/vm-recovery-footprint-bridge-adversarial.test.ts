@@ -1,7 +1,7 @@
 /**
  * Adversarial boundary tests for the classic reconciler's bounded sizing
  * bridge. The bridge may improve scheduling, but it must remain a soft hint:
- * private policy, malformed/latest reads, aborts, and missing capabilities all
+ * private policy, malformed/latest reads, aborts, and unavailable sizing all
  * retain the legacy unknown-footprint singleton behavior.
  */
 import { describe, expect, it, vi } from 'vitest';
@@ -9,10 +9,30 @@ import {
   enrichVmRecoveryFootprints,
   planVmRecoveryMicrobatch,
   type VmRecoveryChainFootprint,
-  type VmRecoveryFootprintBridgeReader,
+  type VmRecoveryFootprintBridge,
   type VmRecoveryMicrobatchLimits,
   type VmRecoveryUpdateContext,
 } from '../src/vm-recovery-microbatch.js';
+
+interface TestChainReader {
+  isContextGraphActiveOnChain(contextGraphId: bigint): Promise<boolean>;
+  getContextGraphAccessPolicy(contextGraphId: bigint): Promise<number>;
+  getKnowledgeAssetUpdateContext(
+    kaId: bigint,
+    options?: { signal?: AbortSignal },
+  ): Promise<VmRecoveryUpdateContext>;
+}
+
+function chainBridge(reader: TestChainReader): VmRecoveryFootprintBridge {
+  return {
+    authority: {
+      kind: 'chain-reader',
+      isContextGraphActive: reader.isContextGraphActiveOnChain,
+      readAccessPolicy: reader.getContextGraphAccessPolicy,
+    },
+    sizing: { readUpdateContext: reader.getKnowledgeAssetUpdateContext },
+  };
+}
 
 interface BridgeTarget {
   readonly kaId: string;
@@ -56,7 +76,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     const controller = new AbortController();
     const policyReads: bigint[] = [];
     const contextReads: Array<{ kaId: bigint; signal: AbortSignal | undefined }> = [];
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async (contextGraphId) => {
         policyReads.push(contextGraphId);
@@ -69,7 +89,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const targets = Array.from({ length: 25 }, (_, kaId) => target(kaId));
 
-    const enriched = await enrichVmRecoveryFootprints(targets, 77n, reader, {
+    const enriched = await enrichVmRecoveryFootprints(targets, 77n, chainBridge(reader), {
       maxContextReads: 10,
       signal: controller.signal,
       isCurrent: () => true,
@@ -90,7 +110,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
   it('does zero sizing reads for private CGs', async () => {
     let policyReads = 0;
     let contextReads = 0;
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => {
         policyReads += 1;
@@ -103,7 +123,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const targets = [target(1), target(2)];
 
-    const enriched = await enrichVmRecoveryFootprints(targets, 88n, reader, {
+    const enriched = await enrichVmRecoveryFootprints(targets, 88n, chainBridge(reader), {
       maxContextReads: 10,
       isCurrent: () => true,
     });
@@ -122,7 +142,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       anchor: { kind: 'pinned-finalized', blockHash: '0x1234' },
     };
     const contextReads: bigint[] = [];
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async (kaId) => {
@@ -132,7 +152,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const targets = [target(1, pinned), target(2), target(3, pinned)];
 
-    const enriched = await enrichVmRecoveryFootprints(targets, 99n, reader, {
+    const enriched = await enrichVmRecoveryFootprints(targets, 99n, chainBridge(reader), {
       maxContextReads: 10,
       isCurrent: () => true,
     });
@@ -146,7 +166,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
   });
 
   it('keeps zero, malformed, and failed reads unknown and therefore singleton', async () => {
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async (kaId) => {
@@ -160,7 +180,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const targets = [target(0), target(1), target(2), target(3), target(4)];
 
-    const enriched = await enrichVmRecoveryFootprints(targets, 111n, reader, {
+    const enriched = await enrichVmRecoveryFootprints(targets, 111n, chainBridge(reader), {
       maxContextReads: 10,
       isCurrent: () => true,
     });
@@ -182,7 +202,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
   it('invalidates the whole observation on abort and leaks no partial hint', async () => {
     const controller = new AbortController();
     const contextReads: Array<{ kaId: bigint; signal: AbortSignal | undefined }> = [];
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async (kaId, options) => {
@@ -193,7 +213,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const targets = [target(0), target(1), target(2)];
 
-    const enriched = await enrichVmRecoveryFootprints(targets, 222n, reader, {
+    const enriched = await enrichVmRecoveryFootprints(targets, 222n, chainBridge(reader), {
       maxContextReads: 10,
       signal: controller.signal,
       isCurrent: () => true,
@@ -217,14 +237,14 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       const pending = enrichVmRecoveryFootprints(
         targets,
         222n,
-        {
+        chainBridge({
           isContextGraphActiveOnChain: async () => true,
           getContextGraphAccessPolicy: async () => 0,
           getKnowledgeAssetUpdateContext: async (_kaId, options) => {
             sizingSignal = options?.signal;
             return new Promise((resolve) => { resolveLate = resolve; });
           },
-        },
+        }),
         {
           maxContextReads: 10,
           sizingReadTimeoutMs: 25,
@@ -260,7 +280,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       const pending = enrichVmRecoveryFootprints(
         targets,
         222n,
-        {
+        chainBridge({
           isContextGraphActiveOnChain: async () => true,
           getContextGraphAccessPolicy: async () => 0,
           getKnowledgeAssetUpdateContext: async (_kaId, options) =>
@@ -270,7 +290,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
                 resolve(publicContext(8n));
               }, { once: true });
             }),
-        },
+        }),
         {
           maxContextReads: 10,
           sizingReadTimeoutMs: 25,
@@ -291,7 +311,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
   });
 
   it('labels classic observations latest-bounded without fabricating a finalized anchor', async () => {
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async () => ({
@@ -301,7 +321,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       }),
     };
 
-    const [enriched] = await enrichVmRecoveryFootprints([target(7)], 333n, reader, {
+    const [enriched] = await enrichVmRecoveryFootprints([target(7)], 333n, chainBridge(reader), {
       maxContextReads: 10,
       isCurrent: () => true,
     });
@@ -322,7 +342,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
 
   it('proves positive-id liveness before consulting public policy or KA sizing', async () => {
     const calls: string[] = [];
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async (contextGraphId) => {
         calls.push(`active:${contextGraphId}`);
         return true;
@@ -337,7 +357,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       },
     };
 
-    const enriched = await enrichVmRecoveryFootprints([target(9)], 444n, reader, {
+    const enriched = await enrichVmRecoveryFootprints([target(9)], 444n, chainBridge(reader), {
       maxContextReads: 10,
       isCurrent: () => true,
     });
@@ -354,7 +374,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     let livenessReads = 0;
     let policyReads = 0;
     let contextReads = 0;
-    const reader: VmRecoveryFootprintBridgeReader = {
+    const reader: TestChainReader = {
       isContextGraphActiveOnChain: async () => {
         livenessReads += 1;
         return active;
@@ -370,10 +390,15 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const targets = [target(1)];
 
-    const enriched = await enrichVmRecoveryFootprints(targets, contextGraphId, reader, {
+    const enriched = await enrichVmRecoveryFootprints(
+      targets,
+      contextGraphId,
+      chainBridge(reader),
+      {
       maxContextReads: 10,
       isCurrent: () => true,
-    });
+      },
+    );
 
     expect(livenessReads).toBe(contextGraphId > 0n ? 1 : 0);
     expect(policyReads).toBe(0);
@@ -381,18 +406,17 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     expect(enriched).toEqual(targets);
   });
 
-  it('fails closed when liveness is missing or rejects', async () => {
-    for (const liveness of ['missing', 'rejects'] as const) {
-      let policyReads = 0;
-      let contextReads = 0;
-      const reader: VmRecoveryFootprintBridgeReader = {
-        ...(liveness === 'rejects'
-          ? {
-              isContextGraphActiveOnChain: async () => {
-                throw new Error('liveness unavailable');
-              },
-            }
-          : {}),
+  it('fails closed when the explicit chain authority rejects', async () => {
+    let policyReads = 0;
+    let contextReads = 0;
+    const targets = [target(1)];
+    const enriched = await enrichVmRecoveryFootprints(
+      targets,
+      5n,
+      chainBridge({
+        isContextGraphActiveOnChain: async () => {
+          throw new Error('liveness unavailable');
+        },
         getContextGraphAccessPolicy: async () => {
           policyReads += 1;
           return 0;
@@ -401,17 +425,12 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
           contextReads += 1;
           return publicContext(1n);
         },
-      };
-      const targets = [target(1)];
+      }),
+      { maxContextReads: 10, isCurrent: () => true },
+    );
 
-      const enriched = await enrichVmRecoveryFootprints(targets, 5n, reader, {
-        maxContextReads: 10,
-        isCurrent: () => true,
-      });
-
-      expect(policyReads, liveness).toBe(0);
-      expect(contextReads, liveness).toBe(0);
-      expect(enriched, liveness).toEqual(targets);
-    }
+    expect(policyReads).toBe(0);
+    expect(contextReads).toBe(0);
+    expect(enriched).toEqual(targets);
   });
 });

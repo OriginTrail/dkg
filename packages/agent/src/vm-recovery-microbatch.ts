@@ -39,13 +39,31 @@ export type VmRecoveryUpdateContext = Pick<
   'merkleRootsCount' | 'byteSize' | 'merkleLeafCount'
 >;
 
-export interface VmRecoveryFootprintBridgeReader {
-  isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
-  getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
-  getKnowledgeAssetUpdateContext?(
+export interface VmRecoveryFootprintSizingReader {
+  readUpdateContext(
     kaId: bigint,
     options?: { signal?: AbortSignal },
   ): Promise<VmRecoveryUpdateContext>;
+}
+
+export type VmRecoveryFootprintAuthority =
+  | {
+      readonly kind: 'host-policy';
+      resolveAccessPolicy(contextGraphId: bigint): Promise<0 | 1 | null>;
+    }
+  | {
+      readonly kind: 'chain-reader';
+      isContextGraphActive(contextGraphId: bigint): Promise<boolean>;
+      readAccessPolicy(contextGraphId: bigint): Promise<number>;
+    };
+
+/**
+ * Explicit bridge mode: authority is always present, while unavailable sizing
+ * is represented deliberately with `null` rather than capability probing.
+ */
+export interface VmRecoveryFootprintBridge {
+  readonly authority: VmRecoveryFootprintAuthority;
+  readonly sizing: VmRecoveryFootprintSizingReader | null;
 }
 
 export interface VmRecoveryFootprintBridgeOptions {
@@ -56,17 +74,15 @@ export interface VmRecoveryFootprintBridgeOptions {
   signal?: AbortSignal;
   /** Captured subscription/binding lifecycle guard. */
   isCurrent: () => boolean;
-  /**
-   * Optional host trust anchor for bounded, live-gated access-policy reads.
-   * Production supplies DKGAgent.readLiveOnChainAccessPolicy; direct helper
-   * tests and non-agent consumers may exercise the equivalent reader surface.
-   */
-  resolveLiveAccessPolicy?: (contextGraphId: bigint) => Promise<0 | 1 | null>;
 }
 
 const VM_RECOVERY_BRIDGE_ABORTED = Symbol('vm-recovery-bridge-aborted');
 const VM_RECOVERY_BRIDGE_TIMED_OUT = Symbol('vm-recovery-bridge-timed-out');
 export const VM_RECOVERY_FOOTPRINT_READ_TIMEOUT_MS = 2_500;
+
+function vmRecoveryBridgeSignalAborted(signal: AbortSignal | undefined): boolean {
+  return signal?.aborted === true;
+}
 
 async function raceVmRecoveryBridgeAbort<T>(
   promise: Promise<T>,
@@ -145,12 +161,52 @@ async function readVmRecoveryFootprintWithDeadline<T>(
   }
 }
 
+export type VmRecoveryFootprintEnrichedTarget<
+  T extends VmRecoveryFootprintBridgeTarget,
+> = T & { readonly recoveryFootprint?: VmRecoveryChainFootprint };
+
 function downgradeUnverifiedPublicFootprints<T extends VmRecoveryFootprintBridgeTarget>(
   targets: readonly T[],
-): T[] {
-  return targets.map((target) => target.recoveryFootprint?.kind === 'public-v10'
-    ? { ...target, recoveryFootprint: { kind: 'unknown' } }
-    : target) as T[];
+): VmRecoveryFootprintEnrichedTarget<T>[] {
+  return targets.map((target): VmRecoveryFootprintEnrichedTarget<T> =>
+    target.recoveryFootprint?.kind === 'public-v10'
+      ? { ...target, recoveryFootprint: { kind: 'unknown' } }
+      : target);
+}
+
+async function resolveVmRecoveryPublicAuthority(
+  onChainCgId: bigint,
+  authority: VmRecoveryFootprintAuthority,
+  signal: AbortSignal | undefined,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  try {
+    if (authority.kind === 'host-policy') {
+      const policy = await raceVmRecoveryBridgeAbort(
+        authority.resolveAccessPolicy(onChainCgId),
+        signal,
+      );
+      return policy !== VM_RECOVERY_BRIDGE_ABORTED
+        && policy === 0
+        && !vmRecoveryBridgeSignalAborted(signal)
+        && isCurrent();
+    }
+    const active = await raceVmRecoveryBridgeAbort(
+      authority.isContextGraphActive(onChainCgId),
+      signal,
+    );
+    if (active !== true || vmRecoveryBridgeSignalAborted(signal) || !isCurrent()) return false;
+    const policy = await raceVmRecoveryBridgeAbort(
+      authority.readAccessPolicy(onChainCgId),
+      signal,
+    );
+    return policy !== VM_RECOVERY_BRIDGE_ABORTED
+      && policy === 0
+      && !vmRecoveryBridgeSignalAborted(signal)
+      && isCurrent();
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -162,18 +218,18 @@ function downgradeUnverifiedPublicFootprints<T extends VmRecoveryFootprintBridge
  * not root-atomic. Consequently they get an explicit `latest-bounded` anchor
  * and can only influence soft packing. Positive CG liveness is required before
  * consulting the default-zero policy getter or trusting an existing public
- * hint. Any absent authority capability, inactive or non-public policy, abort,
- * or stale lifecycle downgrades public hints to unknown. Once public authority
- * is proven, failed/zero/deadline-limited scalar reads leave only their target
- * unknown so it retains the legacy singleton request shape.
+ * hint. An inactive, non-public, unavailable, aborted, or stale authority
+ * observation downgrades public hints to unknown. Once public authority is
+ * proven, unavailable sizing and failed/zero/deadline-limited scalar reads
+ * leave their target on the legacy singleton request shape.
  */
 export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBridgeTarget>(
   targets: readonly T[],
   onChainCgId: bigint,
-  reader: VmRecoveryFootprintBridgeReader,
+  bridge: VmRecoveryFootprintBridge,
   options: Readonly<VmRecoveryFootprintBridgeOptions>,
-): Promise<T[]> {
-  const original = [...targets];
+): Promise<VmRecoveryFootprintEnrichedTarget<T>[]> {
+  const original: VmRecoveryFootprintEnrichedTarget<T>[] = [...targets];
   const unverified = downgradeUnverifiedPublicFootprints(targets);
   if (targets.length === 0) return original;
   if (
@@ -182,49 +238,13 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
     || !options.isCurrent()
   ) return unverified;
 
-  let accessPolicy: number | null;
-  if (options.resolveLiveAccessPolicy) {
-    try {
-      const resolved = await raceVmRecoveryBridgeAbort(
-        options.resolveLiveAccessPolicy(onChainCgId),
-        options.signal,
-      );
-      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return unverified;
-      accessPolicy = resolved;
-    } catch {
-      return unverified;
-    }
-  } else {
-    if (
-      typeof reader.isContextGraphActiveOnChain !== 'function'
-      || typeof reader.getContextGraphAccessPolicy !== 'function'
-    ) return unverified;
-    let active: boolean | typeof VM_RECOVERY_BRIDGE_ABORTED;
-    try {
-      active = await raceVmRecoveryBridgeAbort(
-        reader.isContextGraphActiveOnChain(onChainCgId),
-        options.signal,
-      );
-    } catch {
-      return unverified;
-    }
-    if (
-      active !== true
-      || options.signal?.aborted
-      || !options.isCurrent()
-    ) return unverified;
-    try {
-      const resolved = await raceVmRecoveryBridgeAbort(
-        reader.getContextGraphAccessPolicy(onChainCgId),
-        options.signal,
-      );
-      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return unverified;
-      accessPolicy = resolved;
-    } catch {
-      return unverified;
-    }
-  }
-  if (accessPolicy !== 0 || options.signal?.aborted || !options.isCurrent()) {
+  const publicAuthority = await resolveVmRecoveryPublicAuthority(
+    onChainCgId,
+    bridge.authority,
+    options.signal,
+    options.isCurrent,
+  );
+  if (!publicAuthority || options.signal?.aborted || !options.isCurrent()) {
     return unverified;
   }
 
@@ -241,14 +261,16 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
     || options.maxContextReads <= 0
     || !Number.isSafeInteger(sizingReadTimeoutMs)
     || sizingReadTimeoutMs <= 0
-    || typeof reader.getKnowledgeAssetUpdateContext !== 'function'
+    || bridge.sizing === null
   ) return original;
+
+  const sizing = bridge.sizing;
 
   const observed = await Promise.all(unknownEntries.map(async ({ target, index }) => {
     if (options.signal?.aborted || !options.isCurrent()) return { index };
     try {
       const observedContext = await readVmRecoveryFootprintWithDeadline(
-        (signal) => reader.getKnowledgeAssetUpdateContext!(
+        (signal) => sizing.readUpdateContext(
           BigInt(target.kaId), { signal },
         ),
         options.signal,
@@ -285,7 +307,7 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   // An unsubscribe/rebind/abort invalidates the whole latest-state observation
   // instead of leaking a partially enriched scheduling plan across lifecycles.
   if (options.signal?.aborted || !options.isCurrent()) return unverified;
-  const enriched = [...targets];
+  const enriched: VmRecoveryFootprintEnrichedTarget<T>[] = [...targets];
   for (const { index, footprint } of observed) {
     if (!footprint) continue;
     enriched[index] = { ...targets[index]!, recoveryFootprint: footprint };
@@ -329,7 +351,15 @@ interface VmRecoveryPeerState {
   unavailable: boolean;
   provenHolder: boolean;
   provenHolderReuseSpent: boolean;
+  activeAttempt: VmRecoveryProviderAttempt | null;
   readonly ualDispositions: Map<string, VmRecoveryUalDisposition>;
+}
+
+export type VmRecoveryProviderAttemptKind = 'probe' | 'proven-holder-reuse';
+
+export interface VmRecoveryProviderAttempt {
+  readonly peerId: string;
+  readonly kind: VmRecoveryProviderAttemptKind;
 }
 
 /**
@@ -352,6 +382,7 @@ export class VmRecoveryProviderPolicy {
         unavailable: false,
         provenHolder: false,
         provenHolderReuseSpent: false,
+        activeAttempt: null,
         ualDispositions: new Map(),
       };
       this.#peers.set(peerId, state);
@@ -359,52 +390,72 @@ export class VmRecoveryProviderPolicy {
     return state;
   }
 
-  isProvenHolder(peerId: string): boolean {
+  #isProvenHolder(peerId: string): boolean {
     const state = this.#peers.get(peerId);
     return state?.provenHolder === true && !state.provenHolderReuseSpent;
   }
 
-  canAttempt(peerId: string): boolean {
+  #canAttempt(peerId: string): boolean {
     const state = this.#peers.get(peerId);
     return state?.unavailable !== true
+      && state?.activeAttempt == null
       && (state?.used !== true || (state.provenHolder && !state.provenHolderReuseSpent));
   }
 
-  tryConsider(peerId: string, maxPeers: number): boolean {
-    if (this.#consideredPeerIds.has(peerId)) return true;
-    if (this.#consideredPeerIds.size >= maxPeers) return false;
-    this.#consideredPeerIds.add(peerId);
-    return true;
+  selectNextCandidate(
+    candidatePeerIds: readonly string[],
+    maxPeers: number,
+  ): string | undefined {
+    const ordered = [
+      ...candidatePeerIds.filter((peerId) => this.#isProvenHolder(peerId)),
+      ...candidatePeerIds.filter((peerId) => !this.#isProvenHolder(peerId)),
+    ];
+    for (const peerId of ordered) {
+      if (!this.#canAttempt(peerId)) continue;
+      if (!this.#consideredPeerIds.has(peerId)) {
+        if (this.#consideredPeerIds.size >= maxPeers) return undefined;
+        this.#consideredPeerIds.add(peerId);
+      }
+      return peerId;
+    }
+    return undefined;
   }
 
-  recordAttempt(peerId: string): void {
-    this.#state(peerId).used = true;
-  }
-
-  recordUnavailable(peerId: string): void {
+  markUnavailable(peerId: string): void {
     const state = this.#state(peerId);
     state.unavailable = true;
     state.provenHolder = false;
+    state.activeAttempt = null;
   }
 
   /**
-   * Spend the one holder-affinity reuse available in this recovery slice.
-   * A successful post-probe request must not re-arm the same peer until the
-   * caller creates a fresh policy for the next slice.
+   * Atomically begin either a first probe or the one holder-affinity reuse
+   * available in this recovery slice. The reuse lease is spent here, before
+   * transport dispatch, so completion cannot accidentally re-arm it.
    */
-  consumeProvenHolderReuse(peerId: string): boolean {
+  beginAttempt(peerId: string): VmRecoveryProviderAttempt | undefined {
     const state = this.#state(peerId);
-    if (!state.provenHolder || state.provenHolderReuseSpent) return false;
-    state.provenHolderReuseSpent = true;
-    return true;
+    if (!this.#canAttempt(peerId)) return undefined;
+    const kind: VmRecoveryProviderAttemptKind = state.used
+      ? 'proven-holder-reuse'
+      : 'probe';
+    state.used = true;
+    const attempt = { peerId, kind } satisfies VmRecoveryProviderAttempt;
+    state.activeAttempt = attempt;
+    if (kind === 'proven-holder-reuse') state.provenHolderReuseSpent = true;
+    return attempt;
   }
 
-  recordBatch(
-    peerId: string,
+  finishAttempt(
+    attempt: VmRecoveryProviderAttempt,
     aggregateDisposition: VmRecoveryUalDisposition,
     perUalDispositions: ReadonlyMap<string, VmRecoveryUalDisposition>,
   ): void {
-    const state = this.#state(peerId);
+    const state = this.#state(attempt.peerId);
+    if (state.activeAttempt !== attempt) {
+      throw new Error(`VM recovery provider attempt is not active for ${attempt.peerId}`);
+    }
+    state.activeAttempt = null;
     for (const [ual, disposition] of perUalDispositions) {
       state.ualDispositions.set(ual, disposition);
     }
