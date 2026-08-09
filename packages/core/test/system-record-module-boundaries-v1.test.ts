@@ -42,6 +42,9 @@ describe('System Record V1 module ownership', () => {
       'system-record-cache-accounting-v1-internal.ts',
       'system-record-inventory-codecs-v1-internal.ts',
       'system-record-inventory-traversal-v1-internal.ts',
+      'system-record-inventory-cow-build-v1-internal.ts',
+      'system-record-inventory-cow-context-v1-internal.ts',
+      'system-record-inventory-cow-update-v1-internal.ts',
       'system-record-inventory-cow-v1-internal.ts',
     ]) {
       expect(source(unit)).not.toMatch(/system-record-(objects|inventory)-v1/u);
@@ -52,12 +55,28 @@ describe('System Record V1 module ownership', () => {
     for (const unit of [
       'system-record-inventory-codecs-v1-internal.ts',
       'system-record-inventory-traversal-v1-internal.ts',
+      'system-record-inventory-cow-build-v1-internal.ts',
+      'system-record-inventory-cow-context-v1-internal.ts',
+      'system-record-inventory-cow-update-v1-internal.ts',
       'system-record-inventory-cow-v1-internal.ts',
     ]) {
       expect(source(unit)).not.toMatch(
         /system-record-(objects-v1|authority-v1|verification-closure-v1|cache-accounting-v1)/u,
       );
     }
+  });
+
+  it('keeps COW implementation units acyclic and below the file-health boundary', () => {
+    const build = source('system-record-inventory-cow-build-v1-internal.ts');
+    const context = source('system-record-inventory-cow-context-v1-internal.ts');
+    const update = source('system-record-inventory-cow-update-v1-internal.ts');
+
+    expect(build).not.toMatch(/system-record-inventory-cow-(context-|update-)?v1-internal/u);
+    expect(context).not.toMatch(/system-record-inventory-cow-(update-)?v1-internal/u);
+    expect(update).not.toMatch(/system-record-inventory-cow-v1-internal/u);
+    expect(build.split('\n').length).toBeLessThan(1_000);
+    expect(context.split('\n').length).toBeLessThan(1_000);
+    expect(update.split('\n').length).toBeLessThan(1_000);
   });
 
   it('keeps profile data codecs independent of signature verification', () => {
