@@ -5,8 +5,13 @@ import {
   STORE_ADMISSION_SHARED_BYPASS_LIMIT,
   StoreControlBarrierTimeoutError,
   StorePriorityScheduler,
+  type StoreAdmissionV1,
   type StoreQueuedAdmissionV1,
 } from '../src/store-priority-scheduler.js';
+
+interface AuditedAdmissionFixture extends StoreAdmissionV1 {
+  readonly auditId: string;
+}
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
@@ -45,6 +50,17 @@ async function settle(predicate: () => boolean, label: string): Promise<void> {
 }
 
 describe('StorePriorityScheduler admission V1 — default-path invariance', () => {
+  it('preserves the public admission interface extension contract', () => {
+    const admission: AuditedAdmissionFixture = {
+      storeId: {},
+      generation: 'gen-1',
+      mode: 'shared',
+      auditId: 'audit-1',
+    };
+
+    expect(admission.auditId).toBe('audit-1');
+  });
+
   it('does no admission work at all when nothing carries admission metadata', async () => {
     const scheduler = new StorePriorityScheduler({
       maxConcurrent: 1,

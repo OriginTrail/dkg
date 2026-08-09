@@ -755,18 +755,37 @@ describe('system-record lane session lifecycle V1', () => {
       expect(handoff.calls).toEqual([]);
     });
 
-    // The result is captured inside the result-free barrier, then validated by
-    // the canonical epoch-rotation guard.
+    // The result is returned through the typed barrier, then snapshotted by the
+    // canonical epoch-rotation parser.
     //
     // Parameterized deliberately. The behaviour this change introduced is
     // rejecting a non-`undefined` FALSEY result: the previous `!rotated` logic
     // read `null` as "no binding" and fell through to enable. A truthy-but-wrong
     // object was ALREADY rejected beforehand, so a case using only that shape
     // pins the old behaviour and proves nothing about the new guard.
+    const accessorBinding = Object.defineProperties({}, {
+      epoch: {
+        enumerable: true,
+        get: () => {
+          throw new Error('getter invoked');
+        },
+      },
+      childGeneration: { enumerable: true, value: 'child-1' },
+    });
+    const trappedBinding = new Proxy(
+      { epoch: '1', childGeneration: 'child-1' },
+      {
+        ownKeys: () => {
+          throw new Error('ownKeys trap invoked');
+        },
+      },
+    );
     for (const [label, malformed] of [
       ['null', null],
       ['a non-object', 0],
       ['a truthy object with wrong field types', { epoch: 1, childGeneration: null }],
+      ['an accessor-bearing object', accessorBinding],
+      ['a trapped proxy object', trappedBinding],
     ] as const) {
       it(`fails managed mutations closed when the epoch binding is ${label}`, async () => {
         handoff.rotateMaterializationEpoch = (async () =>

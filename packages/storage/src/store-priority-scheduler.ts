@@ -106,7 +106,7 @@ export type StoreAdmissionMode =
  * sits in front of every store operation in the daemon, so the untagged path
  * must stay the pre-#2052 four-integer comparison it has always been.
  */
-interface StoreAdmissionBaseV1 {
+export interface StoreAdmissionV1 {
   /**
    * Opaque store-instance identity, compared by reference and never
    * serialized. Entries without one are untagged/legacy.
@@ -125,19 +125,22 @@ interface StoreAdmissionBaseV1 {
    * domain so they keep running during an ordinary profile apply.
    */
   readonly domain?: string;
+  readonly mode: StoreAdmissionMode;
 }
 
-export type StoreQueuedAdmissionV1 = StoreAdmissionBaseV1 & {
+export type StoreQueuedAdmissionV1 = StoreAdmissionV1 & {
   readonly mode: Exclude<StoreAdmissionMode, 'control-barrier'>;
 };
 
-export type StoreControlBarrierAdmissionV1 = StoreAdmissionBaseV1 & {
+export type StoreControlBarrierAdmissionV1 = StoreAdmissionV1 & {
   readonly mode: 'control-barrier';
 };
 
-export type StoreAdmissionV1 =
-  | StoreQueuedAdmissionV1
-  | StoreControlBarrierAdmissionV1;
+function isStoreQueuedAdmissionV1(
+  admission: StoreAdmissionV1,
+): admission is StoreQueuedAdmissionV1 {
+  return admission.mode !== 'control-barrier';
+}
 
 import {
   StoreControlBarrierCoordinator,
@@ -630,7 +633,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
         generationsInflight: this.countGenerationsInflight(),
         heldRuns: this.heldRunCount,
       }),
-      occupiedSlots: () => 0,
       observeDepths: () => this.observeDepths(),
     };
   }
@@ -681,7 +683,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
       barrierCoalesced: barrier.coalesced,
       barrierTimeouts: barrier.timeouts,
       barrierWaitMs: barrier.waitMs,
-      barrierWaitOccupiedSlotMs: barrier.waitOccupiedSlotMs,
+      // Control barriers run in a reserved controller slot outside ordinary
+      // scheduler capacity, so they structurally occupy zero measured slots.
+      barrierWaitOccupiedSlotMs: 0,
     };
   }
 
@@ -701,7 +705,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const normalizedPriority = priority ?? 'normal';
     // Routed FIRST: a control transition must not be rejectable by an
     // already-aborted caller signal any more than by queue capacity.
-    if (admission !== undefined && admission.mode === 'control-barrier') {
+    if (admission !== undefined && !isStoreQueuedAdmissionV1(admission)) {
       return await this.barrierCoordinator.enqueue(
         admission.storeId,
         operation,
@@ -1075,13 +1079,12 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * forever, to diagnose a caller bug faster, is the wrong trade for a
    * process-global scheduler.
    *
-   * @param timeoutMs Overrides the default bound for this transition.
-   */
-  /**
    * Historical result-preserving barrier API.
    *
    * New coalescible transitions should use {@link runControlBarrierEffect}; a
    * runtime string cannot itself bind the result type shared by later callers.
+   *
+   * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(
     storeId: object,

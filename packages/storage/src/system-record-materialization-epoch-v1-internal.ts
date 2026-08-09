@@ -18,16 +18,14 @@ import {
   SYSTEM_RECORD_V1_PREDICATES,
   systemRecordEpochSubjectV1,
 } from './system-record-rdf-schema-v1-internal.js';
+import type {
+  SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materializer-v1.js';
 
 const MAX_U64 = 0xffff_ffff_ffff_ffffn;
 const MAX_EPOCH_QUERY_BYTES = 4 * 1024;
 const MAX_EPOCH_UPDATE_BYTES = 4 * 1024;
 const MAX_EPOCH_RESPONSE_BYTES = 8 * 1024;
-
-export interface SystemRecordMaterializationEpochRotationV1 {
-  readonly epoch: string;
-  readonly childGeneration: string;
-}
 
 export interface SystemRecordMaterializationEpochRotationInputV1 {
   readonly networkId: string;
@@ -54,21 +52,6 @@ const exactKeys = (value: unknown, keys: readonly string[], label: string): Reco
   }
   return value as Record<string, unknown>;
 };
-
-export function isSystemRecordMaterializationEpochRotationV1(
-  value: unknown,
-): value is SystemRecordMaterializationEpochRotationV1 {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  // STRUCTURAL, not exact-shape. `rotateMaterializationEpoch` is declared as
-  // `Promise<void | { epoch: string; childGeneration: string }>`, and
-  // TypeScript satisfies that with any object carrying those two fields — so
-  // an implementation returning them alongside its own diagnostics is
-  // CONFORMING. An exact `keys.length === 2` check rejected that and failed
-  // the lane closed on a legitimate rotation, which is a stricter contract
-  // than the one the type publishes.
-  const record = value as Record<string, unknown>;
-  return typeof record.epoch === 'string' && typeof record.childGeneration === 'string';
-}
 
 const denseArray = (value: unknown, max: number, label: string): readonly unknown[] => {
   if (!Array.isArray(value) || value.length > max) throw new Error(`${label} is invalid`);

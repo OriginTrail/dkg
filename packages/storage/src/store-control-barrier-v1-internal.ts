@@ -69,8 +69,6 @@ export interface StoreBarrierHostV1 {
   quiescence(storeId: object): StoreBarrierQuiescenceV1;
   /** Diagnostics for an expired bound only. Never called while deciding readiness. */
   blockerDiagnostics(): StoreBarrierDiagnosticsV1;
-  /** Slots held by barrier-related work, for the occupied-slot-time metric. */
-  occupiedSlots(): number;
   observeDepths(): void;
 }
 
@@ -92,7 +90,6 @@ export interface StoreBarrierMetricsV1 {
   readonly coalesced: number;
   readonly timeouts: number;
   readonly waitMs: number;
-  readonly waitOccupiedSlotMs: number;
 }
 
 export class StoreControlBarrierCoordinator {
@@ -101,7 +98,6 @@ export class StoreControlBarrierCoordinator {
   private coalescedTotal = 0;
   private timeoutsTotal = 0;
   private waitMsTotal = 0;
-  private waitOccupiedSlotMsTotal = 0;
 
   constructor(
     private readonly host: StoreBarrierHostV1,
@@ -127,7 +123,6 @@ export class StoreControlBarrierCoordinator {
       coalesced: this.coalescedTotal,
       timeouts: this.timeoutsTotal,
       waitMs: this.waitMsTotal,
-      waitOccupiedSlotMs: this.waitOccupiedSlotMsTotal,
     };
   }
 
@@ -282,9 +277,6 @@ export class StoreControlBarrierCoordinator {
     this.running = barrier;
     const waitMs = Math.max(0, this.host.now() - barrier.waitStartedAt);
     this.waitMsTotal += waitMs;
-    // Product of two measured quantities, not a hardcoded zero: the slot count
-    // is whatever barrier work actually held while this barrier waited.
-    this.waitOccupiedSlotMsTotal += this.host.occupiedSlots() * waitMs;
     this.host.observeDepths();
 
     let result: Promise<unknown>;
