@@ -240,6 +240,30 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
+  it('preserves selected-only chain binding safety failures without creating cursor state', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64SelectedVmAmbiguousBinding', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const selected = 'rfc64-selected-vm-ambiguous';
+    (internals as any).config.syncContextGraphs = [selected];
+    (internals as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: {
+          payload: { accessPolicy: 0, contextGraphId: selected },
+        },
+        targets: [],
+      }],
+    };
+    const ambiguity = new Error('ambiguous name hash resolves to 2 numeric ids');
+    vi.spyOn(chain, 'resolveContextGraphIdByNameHash').mockRejectedValue(ambiguity);
+
+    await expect((internals as any).resolveVmReconcileTarget(selected))
+      .rejects.toBe(ambiguity);
+    expect((internals as any).selectedVmReconcileCursors.has(selected)).toBe(false);
+    expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
   it('executes selected-only VM reconciliation with a dedicated durable cursor and no subscription-owned work', async () => {
     const chain = new MockChainAdapter();
     const selected = 'rfc64-selected-vm-execute';

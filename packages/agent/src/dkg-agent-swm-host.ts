@@ -3325,6 +3325,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
         || signal?.aborted
         || !isCurrent()
       ) throw new VmReconcileQueueClosedError();
+      // A resolver rejection can carry chain-integrity evidence (for example,
+      // two current numeric slots claiming the same name hash) or an RPC
+      // consistency failure. Preserve it for callers and operators; only a
+      // genuine `null` result below means that no current binding exists.
+      throw err;
     }
     if (!isCurrent() || !this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
       throw new VmReconcileQueueClosedError();
