@@ -216,6 +216,162 @@ describe('agent-profile reconcile exact transport V1', () => {
     })).toBeNull();
   });
 
+  it('transfers exact leases across physical slices and serves retained hits without I/O', async () => {
+    const control = byteAdmission();
+    const success = successfulFetch(LOOKUP_A, 41);
+    const fetchExact = vi.fn(async () => success.result);
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+
+    const first = openSlice(transport, () => 0);
+    await expect(continuation.bind(first).resolve(
+      LOOKUP_A,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ objectDigest: DIGEST_A });
+    first.release();
+
+    expect(success.release).not.toHaveBeenCalled();
+    expect(continuation.stats()).toMatchObject({ artifacts: 1, bytes: 3 });
+    expect(transport.stats()).toMatchObject({
+      retainedContinuationArtifacts: 1,
+      retainedContinuationBytes: 3,
+    });
+    expect(control.activeReservations()).toBe(2);
+
+    const second = openSlice(transport, () => 0);
+    await expect(continuation.bind(second).resolve(
+      LOOKUP_A,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ objectDigest: DIGEST_A });
+    expect(second.stats()).toEqual({ requests: 0, wireBytes: 0 });
+    second.release();
+    expect(fetchExact).toHaveBeenCalledTimes(1);
+
+    continuation.clear();
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(control.activeReservations()).toBe(1);
+    expect(continuation.stats()).toMatchObject({ artifacts: 0, bytes: 0 });
+    continuation.release();
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(control.activeReservations()).toBe(0);
+  });
+
+  it('charges empty continuation handles and refuses them when control admission is full', () => {
+    let active = 0;
+    const release = vi.fn(() => { active -= 1; });
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: vi.fn(),
+      controlAdmission: {
+        tryReserve: () => {
+          if (active > 0) return null;
+          active += 1;
+          return Object.freeze({ release });
+        },
+      },
+    });
+
+    const first = transport.openArtifactContinuation();
+    expect(first).not.toBeNull();
+    expect(transport.openArtifactContinuation()).toBeNull();
+    expect(transport.stats().retainedContinuationControlBytes).toBeGreaterThan(0);
+
+    first?.release();
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(active).toBe(0);
+    expect(transport.stats().retainedContinuationControlBytes).toBe(0);
+  });
+
+  it('releases transferred leases and continuation metadata exactly once on close', async () => {
+    const control = byteAdmission();
+    const success = successfulFetch(LOOKUP_A, 41);
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => success.result,
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    const slice = openSlice(transport, () => 0);
+    await continuation.bind(slice).resolve(LOOKUP_A, new AbortController().signal);
+    slice.release();
+
+    transport.close();
+
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(control.activeReservations()).toBe(0);
+    expect(transport.stats()).toMatchObject({
+      retainedContinuationArtifacts: 0,
+      retainedContinuationBytes: 0,
+      closed: true,
+    });
+    continuation.release();
+    expect(success.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not retain a transferred lease when continuation metadata admission fails', async () => {
+    const success = successfulFetch(LOOKUP_A, 41);
+    let reservations = 0;
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => success.result,
+      controlAdmission: {
+        tryReserve: () => {
+          reservations += 1;
+          return reservations === 1 ? Object.freeze({ release: vi.fn() }) : null;
+        },
+      },
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    const slice = openSlice(transport, () => 0);
+
+    await expect(continuation.bind(slice).resolve(
+      LOOKUP_A,
+      new AbortController().signal,
+    )).rejects.toMatchObject({ outcome: 'capacity', retryable: true });
+    slice.release();
+
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(continuation.stats()).toMatchObject({ artifacts: 0, bytes: 0 });
+  });
+
+  it('rejects and releases a late lease when close races an exact fetch', async () => {
+    const control = byteAdmission();
+    const pending = Promise.withResolvers<SystemRecordExactFetchResultV1>();
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => pending.promise,
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    const slice = openSlice(transport, () => 0);
+    const resolving = continuation.bind(slice).resolve(
+      LOOKUP_A,
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(slice.stats().requests).toBe(1));
+    transport.close();
+    const success = successfulFetch(LOOKUP_A, 41);
+    pending.resolve(success.result);
+
+    await expect(resolving).rejects.toThrow();
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(control.activeReservations()).toBe(0);
+    expect(transport.stats()).toMatchObject({
+      retainedContinuationArtifacts: 0,
+      retainedContinuationBytes: 0,
+      retainedContinuationControlBytes: 0,
+      closed: true,
+    });
+  });
+
   it('does not memoize cancellation and releases a late successful lease after slice abort', async () => {
     let settle!: (result: SystemRecordExactFetchResultV1) => void;
     const pending = new Promise<SystemRecordExactFetchResultV1>((resolve) => { settle = resolve; });

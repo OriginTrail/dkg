@@ -3,6 +3,8 @@
 import { Buffer } from 'node:buffer';
 
 import {
+  SYSTEM_RECORD_MAX_CLOSURE_BYTES,
+  SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
   SYSTEM_RECORD_MAX_NEGATIVE_MEMO_ENTRIES,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_PEER_ID_BYTES,
@@ -18,6 +20,7 @@ import type {
   SystemRecordArtifactLookupV1,
   SystemRecordArtifactV1,
 } from './artifact-v1.js';
+import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
 import type {
   AgentProfileInventoryLoadRequestV1,
   AgentProfileInventoryLoadResultV1,
@@ -33,6 +36,11 @@ import {
   toSystemRecordExactArtifactLookupV1,
 } from './requester-api-v1.js';
 
+// Fixed control-state charges cover the handle/map entry itself. Requester leases
+// continue to own and account the retained payload bytes without copying them.
+const AGENT_PROFILE_RECONCILE_CONTINUATION_HANDLE_BYTES = 128;
+const AGENT_PROFILE_RECONCILE_CONTINUATION_ENTRY_BASE_BYTES = 96;
+
 export type AgentProfileReconcileNegativeFailureClassV1 =
   | 'timeout'
   | 'absence'
@@ -45,6 +53,11 @@ export type AgentProfileReconcileTransportFailureV1 = Exclude<
 
 export interface AgentProfileReconcileTransportSliceV1
   extends SystemRecordArtifactRepositoryV1 {
+  /** Transfer one exact requester lease to the logical continuation owner. */
+  takeExact(
+    lookup: SystemRecordExactArtifactLookupV1,
+    signal: AbortSignal,
+  ): Promise<SystemRecordExactFetchLeaseV1 | null>;
   loadInventoryObject(
     request: AgentProfileInventoryLoadRequestV1,
     signal: AbortSignal,
@@ -67,10 +80,23 @@ export interface AgentProfileReconcileTransportStatsV1 {
   readonly negativeMemoHits: number;
   readonly negativeMemoWrites: number;
   readonly negativeMemoEvictions: number;
+  readonly retainedContinuationArtifacts: number;
+  readonly retainedContinuationBytes: number;
+  readonly retainedContinuationControlBytes: number;
   readonly closed: boolean;
 }
 
+export interface AgentProfileReconcileArtifactContinuationV1 {
+  /** Bind one physical source while retaining exact objects across slice retries. */
+  bind(source: AgentProfileReconcileTransportSliceV1): SystemRecordArtifactRepositoryV1;
+  clear(): void;
+  stats(): Readonly<{ artifacts: number; bytes: number; controlBytes: number }>;
+  release(): void;
+}
+
 export interface AgentProfileReconcileTransportV1 {
+  /** Opens one logical per-row retained-artifact continuation. */
+  openArtifactContinuation(): AgentProfileReconcileArtifactContinuationV1 | null;
   /** Opens one nonqueued physical-slice view. */
   openSlice(input: Readonly<{
     signal: AbortSignal;
@@ -151,6 +177,7 @@ export function createAgentProfileReconcileTransportV1(
     negativeTtlMs,
     maxNegativeEntries,
   });
+  const artifactContinuations = new Set<AgentProfileReconcileArtifactContinuationV1>();
   let activeRelease: (() => void) | undefined;
   let activeSlice = false;
   let requests = 0;
@@ -158,7 +185,22 @@ export function createAgentProfileReconcileTransportV1(
   let closed = false;
   let lastNowMs = 0;
 
-  return Object.freeze({ openSlice, stats, close });
+  return Object.freeze({ openArtifactContinuation, openSlice, stats, close });
+
+  function openArtifactContinuation(): AgentProfileReconcileArtifactContinuationV1 | null {
+    if (closed) return null;
+    const handleReservation = controlAdmission.tryReserve(
+      AGENT_PROFILE_RECONCILE_CONTINUATION_HANDLE_BYTES,
+    );
+    if (handleReservation === null) return null;
+    const continuation = createArtifactContinuationV1({
+      controlAdmission,
+      handleReservation,
+      onRelease: () => artifactContinuations.delete(continuation),
+    });
+    artifactContinuations.add(continuation);
+    return continuation;
+  }
 
   function openSlice(input: Readonly<{
     signal: AbortSignal;
@@ -199,6 +241,28 @@ export function createAgentProfileReconcileTransportV1(
         }
         const fetched = await resolveExact(exactLookup, callerSignal);
         if (fetched.result.outcome === 'ok') return fetched.result.lease.artifact;
+        if (fetched.result.outcome === 'not-found'
+            || fetched.result.outcome === 'unsupported') return null;
+        throw new AgentProfileReconcileTransportErrorV1(
+          fetched.result.outcome,
+          fetched.wireBytes,
+        );
+      },
+      async takeExact(
+        lookup: SystemRecordExactArtifactLookupV1,
+        callerSignal: AbortSignal,
+      ): Promise<SystemRecordExactFetchLeaseV1 | null> {
+        const fetched = await resolveExact(lookup, callerSignal);
+        if (fetched.result.outcome === 'ok') {
+          const lease = fetched.result.lease;
+          const ownedIndex = leases.lastIndexOf(lease);
+          if (ownedIndex < 0) {
+            lease.release();
+            throw new Error('agent-profile transport lost exact lease ownership');
+          }
+          leases.splice(ownedIndex, 1);
+          return lease;
+        }
         if (fetched.result.outcome === 'not-found'
             || fetched.result.outcome === 'unsupported') return null;
         throw new AgentProfileReconcileTransportErrorV1(
@@ -331,11 +395,23 @@ export function createAgentProfileReconcileTransportV1(
 
   function stats(): AgentProfileReconcileTransportStatsV1 {
     const memoStats = negativeMemo.stats();
+    let retainedContinuationArtifacts = 0;
+    let retainedContinuationBytes = 0;
+    let retainedContinuationControlBytes = 0;
+    for (const continuation of artifactContinuations) {
+      const retained = continuation.stats();
+      retainedContinuationArtifacts += retained.artifacts;
+      retainedContinuationBytes += retained.bytes;
+      retainedContinuationControlBytes += retained.controlBytes;
+    }
     return Object.freeze({
       activeSlice: activeSlice ? 1 : 0,
       requests,
       wireBytes,
       ...memoStats,
+      retainedContinuationArtifacts,
+      retainedContinuationBytes,
+      retainedContinuationControlBytes,
       closed,
     });
   }
@@ -344,6 +420,7 @@ export function createAgentProfileReconcileTransportV1(
     if (closed) return;
     closed = true;
     activeRelease?.();
+    for (const continuation of [...artifactContinuations]) continuation.release();
     negativeMemo.close();
   }
 
@@ -354,6 +431,116 @@ export function createAgentProfileReconcileTransportV1(
     }
     lastNowMs = value;
     return value;
+  }
+}
+
+interface RetainedContinuationArtifactV1 {
+  readonly lease: SystemRecordExactFetchLeaseV1;
+  readonly bytes: number;
+  readonly metadataReservation: { release(): void };
+}
+
+function createArtifactContinuationV1(options: Readonly<{
+  controlAdmission: SystemRecordRequesterByteAdmissionV1;
+  handleReservation: { release(): void };
+  onRelease(): void;
+}>): AgentProfileReconcileArtifactContinuationV1 {
+  const retained = new Map<string, RetainedContinuationArtifactV1>();
+  let retainedBytes = 0;
+  let retainedControlBytes = AGENT_PROFILE_RECONCILE_CONTINUATION_HANDLE_BYTES;
+  let generation = 0;
+  let released = false;
+  return Object.freeze({ bind, clear, stats, release });
+
+  function bind(source: AgentProfileReconcileTransportSliceV1): SystemRecordArtifactRepositoryV1 {
+    if (released) throw new Error('agent-profile artifact continuation is released');
+    return Object.freeze({
+      async resolve(
+        lookup: SystemRecordArtifactLookupV1,
+        signal: AbortSignal,
+      ): Promise<SystemRecordArtifactV1 | null> {
+        if (released) throw new Error('agent-profile artifact continuation is released');
+        if (lookup.type !== 'object') {
+          throw new Error('agent-profile closure continuation requires an exact object lookup');
+        }
+        signal.throwIfAborted();
+        const key = systemRecordArtifactKeyV1({
+          objectKind: lookup.objectKind,
+          objectDigest: lookup.objectDigest,
+        });
+        const cached = retained.get(key);
+        if (cached !== undefined) return cached.lease.artifact;
+        const fetchGeneration = generation;
+        const exactLookup = toSystemRecordExactArtifactLookupV1(lookup);
+        if (exactLookup === null || exactLookup.type !== 'object') {
+          throw new Error('agent-profile closure continuation requires a control artifact');
+        }
+        const lease = await source.takeExact(exactLookup, signal);
+        if (lease === null) return null;
+        if (released || generation !== fetchGeneration || signal.aborted) {
+          lease.release();
+          if (released || generation !== fetchGeneration) {
+            throw new AgentProfileReconcileTransportErrorV1('closed', 0);
+          }
+          signal.throwIfAborted();
+        }
+        const artifact = lease.artifact;
+        if (artifact.objectKind !== lookup.objectKind
+            || artifact.objectDigest !== lookup.objectDigest) {
+          lease.release();
+          throw new Error('agent-profile continuation source returned a different artifact');
+        }
+        const concurrentlyRetained = retained.get(key);
+        if (concurrentlyRetained !== undefined) {
+          lease.release();
+          return concurrentlyRetained.lease.artifact;
+        }
+        const payloadBytes = artifact.canonicalBytes.byteLength;
+        if (retained.size >= SYSTEM_RECORD_MAX_CLOSURE_OBJECTS
+            || retainedBytes + payloadBytes > SYSTEM_RECORD_MAX_CLOSURE_BYTES) {
+          lease.release();
+          throw new Error('agent-profile closure continuation exceeds its retained bound');
+        }
+        const accountedBytes = AGENT_PROFILE_RECONCILE_CONTINUATION_ENTRY_BASE_BYTES
+          + Buffer.byteLength(key, 'utf8');
+        const metadataReservation = options.controlAdmission.tryReserve(accountedBytes);
+        if (metadataReservation === null) {
+          lease.release();
+          throw new AgentProfileReconcileTransportErrorV1('capacity', 0);
+        }
+        retained.set(key, Object.freeze({ lease, bytes: payloadBytes, metadataReservation }));
+        retainedBytes += payloadBytes;
+        retainedControlBytes += accountedBytes;
+        return artifact;
+      },
+    });
+  }
+
+  function clear(): void {
+    generation += 1;
+    for (const entry of retained.values()) {
+      entry.lease.release();
+      entry.metadataReservation.release();
+    }
+    retained.clear();
+    retainedBytes = 0;
+    retainedControlBytes = released ? 0 : AGENT_PROFILE_RECONCILE_CONTINUATION_HANDLE_BYTES;
+  }
+
+  function stats(): Readonly<{ artifacts: number; bytes: number; controlBytes: number }> {
+    return Object.freeze({
+      artifacts: retained.size,
+      bytes: retainedBytes,
+      controlBytes: retainedControlBytes,
+    });
+  }
+
+  function release(): void {
+    if (released) return;
+    released = true;
+    clear();
+    options.handleReservation.release();
+    options.onRelease();
   }
 }
 

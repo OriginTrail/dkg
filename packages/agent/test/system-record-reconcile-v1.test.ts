@@ -81,7 +81,7 @@ describe('agent-profile System Record reconciler V1', () => {
     const transport = createAgentProfileReconcileTransportV1({
       listProviderIds: () => ['provider-a'],
       fetchExact,
-      controlAdmission: { tryReserve: () => null },
+      controlAdmission: byteAdmission(),
     });
     const consumeCandidate = vi.fn(async () => ({
       outcome: 'applied' as const,
@@ -154,7 +154,7 @@ describe('agent-profile System Record reconciler V1', () => {
     const transport = createAgentProfileReconcileTransportV1({
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
-      controlAdmission: { tryReserve: () => null },
+      controlAdmission: byteAdmission(),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -204,7 +204,7 @@ describe('agent-profile System Record reconciler V1', () => {
     const transport = createAgentProfileReconcileTransportV1({
       listProviderIds: () => ['provider-a'],
       fetchExact,
-      controlAdmission: { tryReserve: () => null },
+      controlAdmission: byteAdmission(),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -266,7 +266,7 @@ describe('agent-profile System Record reconciler V1', () => {
     const transport = createAgentProfileReconcileTransportV1({
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
-      controlAdmission: { tryReserve: () => null },
+      controlAdmission: byteAdmission(),
     });
     const apply = vi.fn(async () => ({
       outcome: 'applied' as const,
@@ -288,6 +288,12 @@ describe('agent-profile System Record reconciler V1', () => {
       };
     const receiverWithRemotePreparation: AgentProfileReceiverV1 = Object.freeze({
       artifacts,
+      openPreparation(row) {
+        return Object.freeze({
+          prepare: (source, signal) => prepareActive(row, source, signal),
+          release: () => undefined,
+        });
+      },
       prepareActive,
       async receiveActive(row, admittedContext, signal) {
         const prepared = await prepareActive(row, artifacts, signal);
@@ -666,7 +672,7 @@ describe('agent-profile System Record reconciler V1', () => {
     const transport = createAgentProfileReconcileTransportV1({
       listProviderIds: () => ['provider-a'],
       fetchExact,
-      controlAdmission: { tryReserve: () => null },
+      controlAdmission: byteAdmission(),
     });
     const held = transport.openSlice(Object.freeze({
       signal: new AbortController().signal,
@@ -678,6 +684,7 @@ describe('agent-profile System Record reconciler V1', () => {
     const prepareActive = vi.fn(baseReceiver.prepareActive.bind(baseReceiver));
     const trackedReceiver: AgentProfileReceiverV1 = Object.freeze({
       artifacts: baseReceiver.artifacts,
+      openPreparation: baseReceiver.openPreparation.bind(baseReceiver),
       prepareActive,
       receiveActive: baseReceiver.receiveActive.bind(baseReceiver),
     });
@@ -1349,6 +1356,18 @@ function receiverWithPreparation(
   });
   const receiver: AgentProfileReceiverV1 = Object.freeze({
     artifacts,
+    openPreparation(row) {
+      let released = false;
+      return Object.freeze({
+        prepare(_artifacts: SystemRecordArtifactRepositoryV1, signal: AbortSignal) {
+          if (released) throw new Error('test preparation is released');
+          return prepareActive(row, signal);
+        },
+        release() {
+          released = true;
+        },
+      });
+    },
     prepareActive(row, _artifacts, signal) {
       return prepareActive(row, signal);
     },
@@ -1359,6 +1378,20 @@ function receiverWithPreparation(
     },
   });
   return receiver;
+}
+
+function byteAdmission() {
+  return Object.freeze({
+    tryReserve() {
+      let released = false;
+      return Object.freeze({
+        release() {
+          released = true;
+        },
+        isReleased: () => released,
+      });
+    },
+  });
 }
 
 function admissionGate(

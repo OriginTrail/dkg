@@ -6,7 +6,9 @@ import {
 import {
   buildAgentProfileVerificationClosureV1,
   copyBoundedSystemRecordBytesV1,
+  computeAgentProfileHeadObjectDigestV1,
   computeOwnedSubjectTableDigestV1,
+  computeSignedSystemRecordEnvelopeDigestV1,
   computeSystemRecordStableKeyHashV1,
   decodeSystemRecordInventoryRowV1,
   encodeSystemRecordInventoryRowV1,
@@ -96,6 +98,8 @@ export interface CreateAgentProfileReceiverOptionsV1 {
 export interface AgentProfileReceiverV1 {
   /** Immutable construction-time source used only by the legacy direct path. */
   readonly artifacts: SystemRecordArtifactRepositoryV1;
+  /** Open one bounded logical preparation that may resume across physical slices. */
+  openPreparation(row: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1;
   /** Prepare through one explicit admitted-slice artifact source. */
   prepareActive(
     row: SystemRecordInventoryRowV1,
@@ -108,6 +112,14 @@ export interface AgentProfileReceiverV1 {
     admittedContext: AgentProfileAdmittedSliceContextV1,
     signal: AbortSignal,
   ): Promise<SystemRecordApplyOutcomeV1>;
+}
+
+export interface AgentProfileActivePreparationV1 {
+  prepare(
+    artifacts: SystemRecordArtifactRepositoryV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1>;
+  release(): void;
 }
 
 export interface AgentProfilePreparedActiveV1 {
@@ -148,12 +160,51 @@ export function createAgentProfileReceiverV1(
   });
   const receiver: AgentProfileReceiverV1 = Object.freeze({
     artifacts: defaultArtifacts,
-    prepareActive(
+    openPreparation(inputRow: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1 {
+      const row = canonicalInventoryRow(networkId, inputRow);
+      if (!isOrdinaryActiveInventoryRowV1(row)) {
+        throw new Error('active profile receiver requires an ordinary active inventory row');
+      }
+      const verificationNowMs = receiverNowMs(nowMs?.() ?? Date.now());
+      const verifiedAuthorityEnvelopes = new Set<Digest32V1>();
+      const verifiedBundles = new Map<string, VerifiedActiveProfileClosureV1['verifiedBundle']>();
+      let released = false;
+      return Object.freeze({ prepare, release });
+
+      function prepare(
+        artifacts: SystemRecordArtifactRepositoryV1,
+        signal: AbortSignal,
+      ): Promise<AgentProfilePreparedActiveV1> {
+        if (released) throw new Error('agent-profile receiver preparation is released');
+        return prepareActiveFromResolver(
+          row,
+          artifacts.resolve.bind(artifacts),
+          signal,
+          verificationNowMs,
+          verifiedAuthorityEnvelopes,
+          verifiedBundles,
+        );
+      }
+
+      function release(): void {
+        if (released) return;
+        released = true;
+        verifiedAuthorityEnvelopes.clear();
+        verifiedBundles.clear();
+      }
+    },
+    async prepareActive(
       row: SystemRecordInventoryRowV1,
       artifacts: SystemRecordArtifactRepositoryV1,
       signal: AbortSignal,
     ): Promise<AgentProfilePreparedActiveV1> {
-      return prepareActiveFromResolver(row, artifacts.resolve.bind(artifacts), signal);
+      signal.throwIfAborted();
+      const preparation = receiver.openPreparation(row);
+      try {
+        return await preparation.prepare(artifacts, signal);
+      } finally {
+        preparation.release();
+      }
     },
     async receiveActive(
       row: SystemRecordInventoryRowV1,
@@ -168,16 +219,14 @@ export function createAgentProfileReceiverV1(
   return receiver;
 
   async function prepareActiveFromResolver(
-    inputRow: SystemRecordInventoryRowV1,
+    row: SystemRecordInventoryRowV1,
     resolveForCall: SystemRecordArtifactRepositoryV1['resolve'],
     signal: AbortSignal,
+    verificationNowMs: number,
+    verifiedAuthorityEnvelopes: Set<Digest32V1>,
+    verifiedBundles: Map<string, VerifiedActiveProfileClosureV1['verifiedBundle']>,
   ): Promise<AgentProfilePreparedActiveV1> {
     signal.throwIfAborted();
-    const row = canonicalInventoryRow(networkId, inputRow);
-    if (!isOrdinaryActiveInventoryRowV1(row)) {
-      throw new Error('active profile receiver requires an ordinary active inventory row');
-    }
-
     const {
       envelope,
       verifiedBundle,
@@ -186,10 +235,12 @@ export function createAgentProfileReceiverV1(
       networkId,
       row,
       signal,
-      nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
+      nowMs: verificationNowMs,
       resolveArtifact: resolveForCall,
       verifyAuthorityEnvelope,
       verifyCurrentBundle,
+      verifiedAuthorityEnvelopes,
+      verifiedBundles,
     });
     signal.throwIfAborted();
 
@@ -263,6 +314,8 @@ interface VerifyActiveProfileClosureOptionsV1 {
     CreateAgentProfileReceiverOptionsV1['verifyAuthorityEnvelope']
   >;
   readonly verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'];
+  readonly verifiedAuthorityEnvelopes: Set<Digest32V1>;
+  readonly verifiedBundles: Map<string, VerifiedActiveProfileClosureV1['verifiedBundle']>;
 }
 
 async function verifyActiveProfileClosureForRowV1(
@@ -276,6 +329,8 @@ async function verifyActiveProfileClosureForRowV1(
     resolveArtifact,
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
+    verifiedAuthorityEnvelopes,
+    verifiedBundles,
   } = options;
   let verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'] | undefined;
   const closure =
@@ -311,12 +366,26 @@ async function verifyActiveProfileClosureForRowV1(
         });
       },
       verifyAuthorityEnvelope: async (envelope) => {
+        const envelopeDigest = computeSignedSystemRecordEnvelopeDigestV1<
+          AgentProfileHeadObjectV1
+          | AgentProfileAuthorityTransitionV1
+          | AgentProfileForkResolutionV1
+        >(envelope);
+        if (verifiedAuthorityEnvelopes.has(envelopeDigest)) return true;
         signal.throwIfAborted();
         const verified = await verifyAuthorityEnvelope(envelope, signal);
         signal.throwIfAborted();
+        if (verified === true) verifiedAuthorityEnvelopes.add(envelopeDigest);
         return verified === true;
       },
       verifyCurrentBundle: async (head, canonicalBundleBytes) => {
+        const headDigest = computeAgentProfileHeadObjectDigestV1(head);
+        const memoKey = `${headDigest}\u0000${head.bundleDigest}`;
+        const memoized = verifiedBundles.get(memoKey);
+        if (memoized !== undefined) {
+          verifiedBundle = memoized;
+          return true;
+        }
         signal.throwIfAborted();
         const result = await verifyCurrentBundle(
           head,
@@ -326,6 +395,7 @@ async function verifyActiveProfileClosureForRowV1(
         signal.throwIfAborted();
         const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
         verifiedBundle = snapshotVerifiedBundle(result, decoded.projectionBytes);
+        verifiedBundles.set(memoKey, verifiedBundle);
         return true;
       },
     });
