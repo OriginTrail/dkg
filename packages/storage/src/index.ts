@@ -49,15 +49,18 @@ export {
   assertNotReservedInternalGraphV1,
   isReservedInternalGraphUriV1,
 } from './internal-graph-policy.js';
-// Managed-Oxigraph ownership authority is DELIBERATELY not exported here.
-// `createManagedOxigraphOwnershipControllerV1` is the mint for daemon ownership
-// capability; publishing it from the package barrel made a daemon-internal
-// authority part of the public API surface. The daemon (and only the daemon)
-// reaches it through the documented internal entry point
+// The managed-Oxigraph ownership authority is DELIBERATELY not exported here.
+// Its controller factory is the mint for daemon ownership capability;
+// publishing it from the package barrel made a daemon-internal authority part
+// of the public API surface. The daemon (and only the daemon) reaches it
+// through the documented internal entry point
 // `@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1`,
 // which the package `exports` map carries precisely so that the wholesale
 // `dist/*` deep-import surface could be closed without stranding the one
 // legitimate consumer. That subpath is NOT covered by semver for external use.
+// The packed artifact is gated on this staying true: see
+// `scripts/verify-pack-exports.mjs` (`pnpm run test:package-exports`), which
+// fails if any ownership symbol reappears on this barrel.
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,

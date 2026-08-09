@@ -10,13 +10,14 @@
       "default": "./dist/index.js"
     },
     "./internal/managed-oxigraph-ownership-v1": {
-      "types": "./dist/managed-oxigraph-ownership-v1-internal.d.ts",
-      "default": "./dist/managed-oxigraph-ownership-v1-internal.js"
+      "types": "./dist/internal/managed-oxigraph-ownership-v1.d.ts",
+      "default": "./dist/internal/managed-oxigraph-ownership-v1.js"
     }
   },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
+    "test:package-exports": "node scripts/verify-pack-exports.mjs",
     "test:coverage": "vitest run --coverage",
     "clean": "rm -rf dist tsconfig.tsbuildinfo"
   },
