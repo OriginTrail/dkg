@@ -426,6 +426,49 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(consumeCandidate).toHaveBeenCalledTimes(2);
   });
 
+  it.each([
+    {
+      outcome: { outcome: 'root-collision' as const },
+      reason: 'apply-root-collision',
+    },
+    {
+      outcome: { outcome: 'capacity-exhausted' as const },
+      reason: 'apply-capacity-exhausted',
+    },
+    {
+      outcome: { outcome: 'indeterminate' as const, recoveryGeneration: '7' },
+      reason: 'apply-indeterminate',
+    },
+    {
+      outcome: { outcome: 'capability-lost' as const },
+      reason: 'apply-capability-lost',
+    },
+  ])('retains a row after $outcome.outcome', async ({ outcome, reason }) => {
+    const fixture = await publishedFixture();
+    const apply = vi.fn(async () => outcome);
+    const prepareActive = vi.fn(async () => Object.freeze({ apply }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason,
+      processedRows: 0,
+      pendingRows: 1,
+      outcomes: [outcome],
+    });
+    expect(prepareActive).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledTimes(1);
+  });
+
   it('releases admission when close aborts a stalled predispatch receiver', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();

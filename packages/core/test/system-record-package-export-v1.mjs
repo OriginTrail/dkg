@@ -224,6 +224,7 @@ const expectedRuntimeExports = Object.freeze([
   'copyBoundedSystemRecordBytesV1',
   'createSystemRecordCacheMetadataV1',
   'createSystemRecordCacheReferenceV1',
+  'createSystemRecordInventoryRowTraversalV1',
   'createSystemRecordInventoryTraversalV1',
   'decodeInventoryRowBase64UrlV1',
   'decodeSystemRecordInventoryRowV1',

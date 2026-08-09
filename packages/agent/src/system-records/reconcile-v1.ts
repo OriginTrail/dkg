@@ -12,7 +12,7 @@ import {
   SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
-  createSystemRecordInventoryTraversalV1,
+  createSystemRecordInventoryRowTraversalV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type Digest32V1,
@@ -161,7 +161,7 @@ export async function createAgentProfileReconcilerV1(
     throw new Error('agent-profile inventory root provider signature is invalid');
   }
 
-  const traversal = createSystemRecordInventoryTraversalV1(rootEnvelope.object);
+  const traversal = createSystemRecordInventoryRowTraversalV1(rootEnvelope.object);
   let pendingRows: SystemRecordInventoryRowV1[] = [];
   let inventoryComplete = false;
   let completed = false;
@@ -300,7 +300,6 @@ export async function createAgentProfileReconcilerV1(
         maxWireBytes: SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
         deadlineMs: runtime.deadlineMs,
         nowMs: runtime.nowMs,
-        emitRows: true,
       },
     );
     inventoryRequests += slice.requests;

@@ -42,10 +42,13 @@ export {
 } from './system-record-inventory-signatures-v1-internal.js';
 
 export {
+  createSystemRecordInventoryRowTraversalV1,
   createSystemRecordInventoryTraversalV1,
   type SystemRecordInventoryLoadedObjectV1,
   type SystemRecordInventoryRejectedLoadV1,
-  type SystemRecordInventoryTraversalFailureV1,
+  type SystemRecordInventoryRowTraversalFailureV1,
+  type SystemRecordInventoryRowTraversalSliceResultV1,
+  type SystemRecordInventoryRowTraversalV1,
   type SystemRecordInventoryTraversalSliceResultV1,
   type SystemRecordInventoryTraversalSliceV1,
   type SystemRecordInventoryTraversalV1,

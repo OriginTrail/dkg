@@ -54,37 +54,57 @@ export interface SystemRecordInventoryTraversalSliceV1 {
   readonly maxWireBytes: number;
   readonly deadlineMs: number;
   readonly nowMs?: () => number;
-  /** Decode and return rows completed in this slice. Validation-only callers omit this. */
-  readonly emitRows?: boolean;
 }
 
-interface SystemRecordInventoryTraversalSliceResultBaseV1 {
+export interface SystemRecordInventoryTraversalSliceResultV1 {
+  readonly status: 'paused' | 'complete' | 'rejected';
+  readonly requests: number;
+  readonly wireBytes: number;
+  readonly rejection?: SystemRecordInventoryRejectedLoadV1['rejection'];
+  readonly result?: ValidatedSystemRecordInventoryTreeV1;
+}
+
+export interface SystemRecordInventoryTraversalV1 {
+  /** Advance one bounded validation slice. Concurrent calls are rejected. */
+  advance(
+    load: (
+      digest: Digest32V1,
+      expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined,
+      signal?: AbortSignal,
+    ) => Promise<
+      SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
+    >,
+    slice: SystemRecordInventoryTraversalSliceV1,
+  ): Promise<SystemRecordInventoryTraversalSliceResultV1>;
+}
+
+interface SystemRecordInventoryRowTraversalSliceResultBaseV1 {
   readonly requests: number;
   readonly wireBytes: number;
   readonly validatedRows: number;
   readonly validatedLeaves: number;
-  /** Canonical rows completed in this slice when `emitRows` was requested; otherwise empty. */
+  /** Canonical rows whose traversal work completed in this physical slice. */
   readonly rows: readonly SystemRecordInventoryRowV1[];
 }
 
-export type SystemRecordInventoryTraversalSliceResultV1 =
-  | Readonly<SystemRecordInventoryTraversalSliceResultBaseV1 & {
+export type SystemRecordInventoryRowTraversalSliceResultV1 =
+  | Readonly<SystemRecordInventoryRowTraversalSliceResultBaseV1 & {
       readonly status: 'paused';
     }>
-  | Readonly<SystemRecordInventoryTraversalSliceResultBaseV1 & {
+  | Readonly<SystemRecordInventoryRowTraversalSliceResultBaseV1 & {
       readonly status: 'complete';
       readonly result: ValidatedSystemRecordInventoryTreeV1;
     }>
-  | Readonly<SystemRecordInventoryTraversalSliceResultBaseV1 & {
+  | Readonly<SystemRecordInventoryRowTraversalSliceResultBaseV1 & {
       readonly status: 'rejected';
       readonly rejection: SystemRecordInventoryRejectedLoadV1['rejection'];
     }>
-  | Readonly<SystemRecordInventoryTraversalSliceResultBaseV1 & {
+  | Readonly<SystemRecordInventoryRowTraversalSliceResultBaseV1 & {
       readonly status: 'failed';
-      readonly failure: SystemRecordInventoryTraversalFailureV1;
+      readonly failure: SystemRecordInventoryRowTraversalFailureV1;
     }>;
 
-export interface SystemRecordInventoryTraversalFailureV1 {
+export interface SystemRecordInventoryRowTraversalFailureV1 {
   readonly reason:
     | 'aborted'
     | 'deadline'
@@ -95,8 +115,8 @@ export interface SystemRecordInventoryTraversalFailureV1 {
   readonly message: string;
 }
 
-export interface SystemRecordInventoryTraversalV1 {
-  /** Advance one bounded slice. Concurrent calls are rejected. */
+export interface SystemRecordInventoryRowTraversalV1 {
+  /** Advance one bounded row-producing slice. Concurrent calls are rejected. */
   advance(
     load: (
       digest: Digest32V1,
@@ -107,7 +127,7 @@ export interface SystemRecordInventoryTraversalV1 {
       SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
-  ): Promise<SystemRecordInventoryTraversalSliceResultV1>;
+  ): Promise<SystemRecordInventoryRowTraversalSliceResultV1>;
 }
 
 interface SystemRecordInventoryTraversalWorkBaseV1 {
@@ -136,10 +156,67 @@ type SystemRecordInventoryTraversalWorkV1 =
   | SystemRecordInventoryTraversalRootProbeWorkV1
   | SystemRecordInventoryTraversalNodeWorkV1;
 
-/** Create one opaque pinned traversal; callers must explicitly admit every bounded slice. */
+/** Preserve the original validation-only V1 contract and rejection behavior. */
 export function createSystemRecordInventoryTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryTraversalV1 {
+  const traversal = createSystemRecordInventoryTraversalEngineV1(descriptor, false);
+  return Object.freeze({ advance });
+
+  async function advance(
+    load: (
+      digest: Digest32V1,
+      expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined,
+      signal?: AbortSignal,
+    ) => Promise<
+      SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
+    >,
+    slice: SystemRecordInventoryTraversalSliceV1,
+  ): Promise<SystemRecordInventoryTraversalSliceResultV1> {
+    const advanced = await traversal.advance(
+      (digest, expectedKind, signal, path) => load(
+        digest,
+        path.length === 0 ? undefined : expectedKind,
+        signal,
+      ),
+      slice,
+    );
+    if (advanced.status === 'failed') throw new Error(advanced.failure.message);
+    if (advanced.status === 'complete') {
+      return Object.freeze({
+        status: advanced.status,
+        requests: advanced.requests,
+        wireBytes: advanced.wireBytes,
+        result: advanced.result,
+      });
+    }
+    if (advanced.status === 'rejected') {
+      return Object.freeze({
+        status: advanced.status,
+        requests: advanced.requests,
+        wireBytes: advanced.wireBytes,
+        rejection: advanced.rejection,
+      });
+    }
+    return Object.freeze({
+      status: advanced.status,
+      requests: advanced.requests,
+      wireBytes: advanced.wireBytes,
+    });
+  }
+}
+
+/** Create a pinned traversal dedicated to bounded, lossless row reconciliation. */
+export function createSystemRecordInventoryRowTraversalV1(
+  descriptor: SystemRecordRootDescriptorObjectV1,
+): SystemRecordInventoryRowTraversalV1 {
+  return createSystemRecordInventoryTraversalEngineV1(descriptor, true);
+}
+
+function createSystemRecordInventoryTraversalEngineV1(
+  descriptor: SystemRecordRootDescriptorObjectV1,
+  emitRows: boolean,
+): SystemRecordInventoryRowTraversalV1 {
   const pinned = validateRootDescriptor(descriptor);
   const expectedRows = Number(parseCanonicalDecimalU64(pinned.totalRows));
   const seen = new Set<string>();
@@ -178,7 +255,7 @@ export function createSystemRecordInventoryTraversalV1(
       SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
-  ): Promise<SystemRecordInventoryTraversalSliceResultV1> {
+  ): Promise<SystemRecordInventoryRowTraversalSliceResultV1> {
     if (advancing) throw new Error('inventory traversal already has an active slice');
     if (completed !== undefined) {
       return Object.freeze({
@@ -205,7 +282,6 @@ export function createSystemRecordInventoryTraversalV1(
       const maxWireBytes = slice.maxWireBytes;
       const deadlineMs = slice.deadlineMs;
       const now = slice.nowMs ?? Date.now;
-      const emitRows = slice.emitRows === true;
       if (typeof now !== 'function') throw new InventoryTraversalSliceError();
       const readNow = (): number => {
         let current: number;
@@ -499,7 +575,7 @@ export function createSystemRecordInventoryTraversalV1(
     requests: number,
     wireBytes: number,
     sliceRows: readonly SystemRecordInventoryRowV1[],
-  ): SystemRecordInventoryTraversalSliceResultV1 {
+  ): SystemRecordInventoryRowTraversalSliceResultV1 {
     return Object.freeze({
       status: 'paused',
       requests,
@@ -568,7 +644,7 @@ class InventoryTraversalTransportError extends Error {
 function traversalFailureReason(
   error: unknown,
   signal: AbortSignal | undefined,
-): SystemRecordInventoryTraversalFailureV1['reason'] {
+): SystemRecordInventoryRowTraversalFailureV1['reason'] {
   if (signal?.aborted) return 'aborted';
   if (error instanceof InventoryTraversalDeadlineError) return 'deadline';
   if (error instanceof InventoryTraversalNotFoundError) return 'not-found';
