@@ -14,14 +14,11 @@ import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import { linkStoreChainV1 } from './store-chain-capability.js';
 import { SystemRecordLaneForwarderV1 } from './system-record-lane-forwarder-v1.js';
 import {
-  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
-  supportsTripleStoreCapability,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
   isTripleStoreCapabilityRefusal,
-  type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
@@ -530,10 +527,6 @@ export class GraphSetIndexStore implements TripleStore {
       'replaceGraphAndSubject',
       options,
     );
-  }
-
-  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean {
-    return supportsTripleStoreCapability(this.inner, capability);
   }
 
   async replaceSubject(

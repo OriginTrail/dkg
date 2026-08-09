@@ -1,3 +1,8 @@
+import {
+  resolveStoreChainCapabilityV1,
+  resolveStoreChainTerminalV1,
+} from './store-chain-capability.js';
+
 /**
  * Optional TripleStore operations that a decorator may expose even when its
  * wrapped backend cannot perform them.
@@ -28,12 +33,17 @@ export function supportsTripleStoreCapability(
   store: unknown,
   capability: TripleStoreCapability,
 ): boolean {
-  const support = (store as Partial<TripleStoreCapabilitySupport> | null | undefined)
-    ?.[TRIPLE_STORE_CAPABILITY_SUPPORT];
-  if (typeof support === 'function') {
-    return support.call(store, capability);
+  const reporter = resolveStoreChainCapabilityV1(
+    store,
+    (candidate): candidate is TripleStoreCapabilitySupport => typeof (
+      candidate as Partial<TripleStoreCapabilitySupport> | null | undefined
+    )?.[TRIPLE_STORE_CAPABILITY_SUPPORT] === 'function',
+  );
+  if (reporter) {
+    return reporter[TRIPLE_STORE_CAPABILITY_SUPPORT](capability);
   }
-  return typeof (store as Partial<Record<TripleStoreCapability, unknown>> | null | undefined)
+  const terminal = resolveStoreChainTerminalV1(store);
+  return typeof (terminal as Partial<Record<TripleStoreCapability, unknown>> | null | undefined)
     ?.[capability] === 'function';
 }
 

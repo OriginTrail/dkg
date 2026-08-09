@@ -15,10 +15,7 @@ import type {
   StructuredMutation,
 } from './triple-store.js';
 import {
-  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
-  supportsTripleStoreCapability,
-  type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 import {
   rewriteStructuredMutationQuads,
@@ -97,10 +94,6 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     linkStoreChainV1(this, inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
-  }
-
-  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean {
-    return supportsTripleStoreCapability(this.inner, capability);
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {

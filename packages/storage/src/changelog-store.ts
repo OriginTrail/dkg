@@ -10,14 +10,11 @@ import type {
   StructuredMutation,
 } from './triple-store.js';
 import {
-  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
-  supportsTripleStoreCapability,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
   isTripleStoreCapabilityRefusal,
-  type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
@@ -254,10 +251,6 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
     this.reserved = reserved;
     this.onAppend = options.onAppend;
     this.eraGuard = options.eraGuard;
-  }
-
-  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean {
-    return supportsTripleStoreCapability(this.inner, capability);
   }
 
   // ------------------------------------------------------------------

@@ -25,6 +25,7 @@ import {
   normalizeDeleteSubjectsInput,
   normalizeReplaceSubjectPredicatesInput,
 } from '../src/bounded-structured-mutation.js';
+import { linkStoreChainV1 } from '../src/store-chain-capability.js';
 
 const GRAPH = 'urn:test:bounded';
 const OTHER_GRAPH = 'urn:test:bounded:other';
@@ -386,6 +387,18 @@ describe('bounded structured mutation capabilities', () => {
     ));
     expect(supportsTripleStoreCapability(capable, 'structuredMutation')).toBe(true);
     await capable.close();
+  });
+
+  it('discovers optional operations through link-only transparent wrappers', () => {
+    const capable = { structuredMutation: vi.fn() } as unknown as TripleStore;
+    const capableWrapper = { structuredMutation: vi.fn() } as unknown as TripleStore;
+    linkStoreChainV1(capableWrapper, capable);
+    expect(supportsTripleStoreCapability(capableWrapper, 'structuredMutation')).toBe(true);
+
+    const incapable = {} as TripleStore;
+    const incapableWrapper = { structuredMutation: vi.fn() } as unknown as TripleStore;
+    linkStoreChainV1(incapableWrapper, incapable);
+    expect(supportsTripleStoreCapability(incapableWrapper, 'structuredMutation')).toBe(false);
   });
 
   it('executes every mutation variant through the real worker RPC boundary', async () => {
