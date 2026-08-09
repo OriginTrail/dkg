@@ -13,6 +13,7 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
+import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 
 const PEER = '12D3KooWSelectedCompleteSwmProvider';
 
@@ -107,15 +108,17 @@ function result(
     insertedDataTriples: options.insertedDataTriples ?? snapshotsResolved,
     bytesReceived: 0,
     resumedPhases: 0,
-    timedOutPhases: completed ? 0 : 1,
+    // Production voluntary snapshot yield: the responder is healthy, our
+    // local round budget ended with refs outstanding.
+    timedOutPhases: 0,
     completedPhases: completed ? 1 : 0,
     checkpointAdvances: snapshotsResolved > 0 ? 1 : 0,
     emptyResponses: 0,
     droppedDataTriples: 0,
     failedPeers: 0,
-    failedPhases: 0,
+    failedPhases: completed ? 0 : 1,
     deniedPhases: 0,
-    backoffWorthyFailures: completed ? 0 : 1,
+    backoffWorthyFailures: 0,
     deferredBackpressure: options.deferredBackpressure ?? 0,
     snapshotPlaneIncomplete: completed ? 0 : 1,
     replayPhaseBytesReceived: 0,
@@ -134,6 +137,22 @@ function merge(
     insertedDataTriples: summary.insertedDataTriples + part.insertedDataTriples,
     deferredBackpressure:
       (summary.deferredBackpressure ?? 0) + (part.deferredBackpressure ?? 0),
+  };
+}
+
+function selectedUnit(
+  contextGraphId: string,
+  initialResult: SharedMemorySyncResult,
+  run: () => Promise<SharedMemorySyncResult>,
+) {
+  return {
+    work: {
+      contextGraphId,
+      lane: 'shared_memory' as const,
+      operationId: contextGraphId,
+      run,
+    },
+    initialResult,
   };
 }
 
@@ -413,15 +432,13 @@ describe('selected RFC-64 SWM continuation', () => {
   it('re-enters admission promptly until incomplete coverage becomes complete', async () => {
     const contextGraphId = 'selected-public';
     const admissions: string[] = [];
-    const summary = await runSelectedSwmContinuations({
+    const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work: [{
+      units: [selectedUnit(
         contextGraphId,
-        lane: 'shared_memory',
-        operationId: 'selected-public',
-        run: async () => result(contextGraphId, 3, 3, { insertedDataTriples: 2 }),
-      }],
-      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 3) }],
+        result(contextGraphId, 1, 3),
+        async () => result(contextGraphId, 3, 3, { insertedDataTriples: 2 }),
+      )],
       passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
@@ -447,15 +464,9 @@ describe('selected RFC-64 SWM continuation', () => {
     const stop = vi.fn();
     let admissions = 0;
 
-    const summary = await runSelectedSwmContinuations({
+    const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work: [{
-        contextGraphId,
-        lane: 'shared_memory',
-        operationId: 'selected-stalled',
-        run: async () => stalled,
-      }],
-      initialRounds: [{ contextGraphId, result: stalled }],
+      units: [selectedUnit(contextGraphId, stalled, async () => stalled)],
       passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
@@ -482,23 +493,18 @@ describe('selected RFC-64 SWM continuation', () => {
   it('keeps independent per-CG coverage and continues only the incomplete graph', async () => {
     const runs: string[] = [];
     const stop = vi.fn();
-    const work = ['complete-cg', 'incomplete-cg'].map((contextGraphId) => ({
+    const units = ['complete-cg', 'incomplete-cg'].map((contextGraphId) => selectedUnit(
       contextGraphId,
-      lane: 'shared_memory' as const,
-      operationId: contextGraphId,
-      run: async () => {
+      result(contextGraphId, contextGraphId === 'complete-cg' ? 2 : 1, contextGraphId === 'complete-cg' ? 2 : 5),
+      async () => {
         runs.push(contextGraphId);
         return result(contextGraphId, 5, 5);
       },
-    }));
+    ));
 
     await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work,
-      initialRounds: [
-        { contextGraphId: 'complete-cg', result: result('complete-cg', 2, 2) },
-        { contextGraphId: 'incomplete-cg', result: result('incomplete-cg', 1, 5) },
-      ],
+      units,
       passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
@@ -515,19 +521,61 @@ describe('selected RFC-64 SWM continuation', () => {
     }));
   });
 
+  it('continues two selected public CGs independently in priority order', async () => {
+    const publicA = 'selected-public-a';
+    const publicB = 'selected-public-b';
+    const runs: string[] = [];
+    const admissions: string[] = [];
+    const progress: Array<{
+      contextGraphId: string;
+      coverageBefore: number;
+      coverageAfter: number;
+    }> = [];
+
+    const execution = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
+      units: [publicA, publicB].map((contextGraphId) => selectedUnit(
+        contextGraphId,
+        result(contextGraphId, 1, 3),
+        async () => {
+          runs.push(contextGraphId);
+          return result(contextGraphId, 3, 3, { insertedDataTriples: 2 });
+        },
+      )),
+      priorities: { [publicA]: 100, [publicB]: 200 },
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (item, run) => {
+        admissions.push(item.contextGraphId);
+        return run();
+      },
+      merge,
+      markDeferred: (current) => current,
+      onContinuation: (event) => progress.push(event),
+    });
+
+    expect(admissions).toEqual([publicB, publicA]);
+    expect(runs).toEqual([publicB, publicA]);
+    expect(progress).toEqual([
+      { contextGraphId: publicB, coverageBefore: 1, coverageAfter: 3 },
+      { contextGraphId: publicA, coverageBefore: 1, coverageAfter: 3 },
+    ]);
+    expect(execution.summary.continuationPasses).toBe(2);
+    expect(execution.resolvedSnapshotPlaneIncomplete).toBe(2);
+  });
+
   it('stops at four total passes even while coverage keeps advancing', async () => {
     const contextGraphId = 'selected-bounded';
     const rounds = [2, 3, 4];
     const stop = vi.fn();
-    const summary = await runSelectedSwmContinuations({
+    const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work: [{
+      units: [selectedUnit(
         contextGraphId,
-        lane: 'shared_memory',
-        operationId: contextGraphId,
-        run: async () => result(contextGraphId, rounds.shift()!, 5),
-      }],
-      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 5) }],
+        result(contextGraphId, 1, 5),
+        async () => result(contextGraphId, rounds.shift()!, 5),
+      )],
       passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
@@ -549,10 +597,9 @@ describe('selected RFC-64 SWM continuation', () => {
     const contextGraphId = 'selected-expired';
     const run = vi.fn(async () => result(contextGraphId, 2, 2));
     const stop = vi.fn();
-    const summary = await runSelectedSwmContinuations({
+    const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work: [{ contextGraphId, lane: 'shared_memory', operationId: contextGraphId, run }],
-      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 2) }],
+      units: [selectedUnit(contextGraphId, result(contextGraphId, 1, 2), run)],
       passConfig: { maxPasses: 4, budgetMs: 0 },
       nowMs: () => 100,
       emptyResult: cleanDurableResult,
@@ -580,13 +627,7 @@ describe('selected RFC-64 SWM continuation', () => {
 
     await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work: [{
-        contextGraphId,
-        lane: 'shared_memory',
-        operationId: 'continuation-pressure',
-        run: continuationRun,
-      }],
-      initialRounds: [{ contextGraphId, result: incomplete }],
+      units: [selectedUnit(contextGraphId, incomplete, continuationRun)],
       passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
@@ -609,15 +650,13 @@ describe('selected RFC-64 SWM continuation', () => {
       continuationPasses: 23,
     };
 
-    const summary = await runSelectedSwmContinuations({
+    const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      work: [{
+      units: [selectedUnit(
         contextGraphId,
-        lane: 'shared_memory',
-        operationId: 'counter-owner',
-        run: async () => continuation,
-      }],
-      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 2) }],
+        result(contextGraphId, 1, 2),
+        async () => continuation,
+      )],
       passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
@@ -737,6 +776,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(summary.continuationPasses).toBe(1);
       expect(summary.snapshotPlaneIncomplete).toBe(1);
       expect(summary.failedPhases).toBe(1);
+      expect(summary.resolvedSnapshotPlaneIncomplete).toBe(1);
       expect(summary.timedOutPhases).toBe(0);
       expect(summary.backoffWorthyFailures).toBe(0);
       expect(initialSnapshotReads).toBe(672);
@@ -750,6 +790,30 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         { contextGraphId: publicCg, selected: true, priority: 2_000, event: 'start' },
         { contextGraphId: publicCg, selected: true, priority: 2_000, event: 'end' },
       ]);
+
+      const onPeerSynced = vi.fn();
+      const outcome = await runSyncOnConnect({
+        remotePeer: PEER,
+        syncingPeers: new Set(),
+        getPeerProtocols: async () => [PROTOCOL_SYNC],
+        knownCorePeerIds: new Set(),
+        knownCorePeerIdsV2: new Set(),
+        getSyncContextGraphs: () => [],
+        getDurableSyncContextGraphs: () => [],
+        getSharedMemorySyncContextGraphs: () => [publicCg],
+        getPrioritySharedMemorySyncContextGraphs: () => [publicCg],
+        syncFromPeer: async () => 0,
+        refreshMetaSyncedFlags: async () => undefined,
+        discoverContextGraphsFromStore: async () => 0,
+        syncSharedMemoryFromPeer: async () => summary,
+        onPeerSynced,
+        logInfo: () => {},
+      });
+      expect(outcome).toBe('synced');
+      expect(onPeerSynced).toHaveBeenCalledWith(PEER, {
+        fresh: true,
+        progress: false,
+      });
     } finally {
       await harness.close();
     }
@@ -802,5 +866,39 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       else process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = priorBudget;
       await harness.close();
     }
+  });
+
+  it('does not hide an unrelated shared-memory phase failure', async () => {
+    const contextGraphId = 'selected-with-unrelated-failure';
+    const onPeerSynced = vi.fn();
+    const shared = {
+      ...result(contextGraphId, 3, 3),
+      failedPhases: 2,
+      snapshotPlaneIncomplete: 1,
+      resolvedSnapshotPlaneIncomplete: 1,
+    };
+
+    await runSyncOnConnect({
+      remotePeer: PEER,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      knownCorePeerIdsV2: new Set(),
+      getSyncContextGraphs: () => [],
+      getDurableSyncContextGraphs: () => [],
+      getSharedMemorySyncContextGraphs: () => [contextGraphId],
+      getPrioritySharedMemorySyncContextGraphs: () => [contextGraphId],
+      syncFromPeer: async () => 0,
+      refreshMetaSyncedFlags: async () => undefined,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => shared,
+      onPeerSynced,
+      logInfo: () => {},
+    });
+
+    expect(onPeerSynced).toHaveBeenCalledWith(PEER, {
+      fresh: false,
+      progress: true,
+    });
   });
 });

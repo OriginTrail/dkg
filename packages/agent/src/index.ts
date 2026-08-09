@@ -376,6 +376,8 @@ export {
   type SwmCatchupContinuationStop,
   type SwmCatchupContinuationSummary,
   type SwmCatchupContinuationUnit,
+  type SwmCatchupStartedContinuation,
+  type SwmCatchupStartedResult,
 } from './sync/catchup-pass-policy.js';
 // Which peer may let one answer stand for a WHOLE Context Graph is the load-
 // bearing distinction of the foreground catch-up walk (#2006), and the walk

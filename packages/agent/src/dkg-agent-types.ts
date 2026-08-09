@@ -1147,6 +1147,17 @@ export interface SharedMemorySyncDiagnostics {
   /** Extra catch-up passes spent over the peer set beyond the first. */
   continuationPasses?: number;
   /**
+   * Historical `snapshotPlaneIncomplete` failures superseded by a later clean,
+   * complete selected-provider continuation in this same invocation.
+   *
+   * The raw failure and incomplete counters remain intact for telemetry. An
+   * on-connect caller may subtract only this bounded count when deciding final
+   * peer freshness; transport, timeout, denial and backpressure signals remain
+   * independent vetoes. Producers must maintain
+   * `0 <= resolved <= snapshotPlaneIncomplete <= failedPhases`.
+   */
+  resolvedSnapshotPlaneIncomplete?: number;
+  /**
    * Why the bounded repeat stopped. Typed as the policy's own closed union
    * rather than `string`, so a new stop reason cannot reach the terminal message
    * unnoticed — the terminal text renders this, and an unhandled reason there

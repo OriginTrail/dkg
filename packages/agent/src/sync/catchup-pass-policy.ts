@@ -199,21 +199,35 @@ export interface SwmCatchupContinuationUnit<
   readonly planeProven: () => boolean;
 }
 
+/** The pass state exposed only inside an executor-owned started-work callback. */
+export interface SwmCatchupStartedContinuation<Key> {
+  readonly key: Key;
+  readonly peers: readonly string[];
+  readonly progressBefore: number;
+  readonly progress: () => number;
+  readonly continuationPass: number;
+}
+
+export type SwmCatchupStartedResult<Result> =
+  | { readonly started: true; readonly result: Result }
+  | { readonly started: false; readonly reason: 'budget-exhausted' };
+
 /**
  * One continuation candidate selected by the shared pass executor.
  *
- * `start` is deliberately deferred until the caller is actually about to do
- * I/O. Selected-provider work can wait in the global scheduler after the
- * policy decision; if its budget expires in that queue, the callback is never
- * invoked and the diagnostic pass count remains exact. The closure is
- * idempotent so an adapter cannot count the same admitted round twice.
+ * `runStarted` is deliberately invoked only when an adapter is actually about
+ * to do I/O. It owns the deadline recheck and pass transition atomically, so a
+ * caller cannot perform transport work while forgetting the diagnostic count.
+ * Selected-provider work may wait in the global scheduler after the policy
+ * decision; if its budget expires there, the callback is never invoked and the
+ * result explicitly says that no pass started.
  */
 export interface SwmCatchupContinuationCandidate<Key> {
   readonly key: Key;
   readonly peers: readonly string[];
-  readonly start: () => number;
-  readonly progress: () => number;
-  readonly continuationPasses: () => number;
+  readonly runStarted: <Result>(
+    run: (started: SwmCatchupStartedContinuation<Key>) => Promise<Result>,
+  ) => Promise<SwmCatchupStartedResult<Result>>;
 }
 
 export interface SwmCatchupContinuationStop<Key> {
@@ -288,20 +302,31 @@ export async function runSwmCatchupContinuations<
       }
 
       let started = false;
-      let progressBefore = 0;
       candidates.push({
         key: unit.key,
         peers: decision.peers,
-        start: () => {
-          if (!started) {
-            started = true;
-            startsThisPass += 1;
-            progressBefore = unit.tracker.startContinuationPass();
+        runStarted: async (run) => {
+          if (started) {
+            throw new Error('SWM continuation candidate was started more than once');
           }
-          return progressBefore;
+          // The decision above can precede a global scheduler wait. Keep the
+          // deadline check beside the state transition so an adapter cannot
+          // accidentally count or execute work that expired in that queue.
+          if (options.nowMs() >= deadlineMs) {
+            return { started: false, reason: 'budget-exhausted' } as const;
+          }
+          started = true;
+          startsThisPass += 1;
+          const progressBefore = unit.tracker.startContinuationPass();
+          const result = await run({
+            key: unit.key,
+            peers: decision.peers,
+            progressBefore,
+            progress: () => unit.tracker.progress(),
+            continuationPass: unit.tracker.continuationPasses(),
+          });
+          return { started: true, result } as const;
         },
-        progress: () => unit.tracker.progress(),
-        continuationPasses: () => unit.tracker.continuationPasses(),
       });
     }
     if (candidates.length === 0) break;
@@ -312,9 +337,13 @@ export async function runSwmCatchupContinuations<
       break;
     }
     // A queued selected-provider batch can cross the absolute deadline before
-    // any candidate starts. Do not spin on the same still-capable units if the
-    // adapter correctly declined all work at that admission boundary.
-    if (startsThisPass === 0) break;
+    // any candidate starts. Re-enter the decision cycle exactly once so every
+    // active unit publishes `budget-exhausted` through the normal onStop path;
+    // a genuine runner decline while budget remains still terminates directly.
+    if (startsThisPass === 0) {
+      if (options.nowMs() >= deadlineMs) continue;
+      break;
+    }
   }
 
   return {

@@ -310,6 +310,7 @@ import {
 } from './sync/catchup-pass-policy.js';
 import {
   runSelectedSwmContinuations,
+  type SelectedSwmContinuationUnit,
 } from './sync/selected-swm-continuation.js';
 import {
   classifyDurableProgress,
@@ -1288,6 +1289,9 @@ function mergeSharedMemorySyncResults(
     deferredBackpressure: (a.deferredBackpressure ?? 0) + (b.deferredBackpressure ?? 0),
     snapshotPlaneIncomplete: (a.snapshotPlaneIncomplete ?? 0) + (b.snapshotPlaneIncomplete ?? 0),
     continuationPasses: (a.continuationPasses ?? 0) + (b.continuationPasses ?? 0),
+    resolvedSnapshotPlaneIncomplete:
+      (a.resolvedSnapshotPlaneIncomplete ?? 0)
+      + (b.resolvedSnapshotPlaneIncomplete ?? 0),
     // The two halves of `bytesReceived`, kept apart so replay cost stays
     // measurable once passes repeat.
     replayPhaseBytesReceived: (a.replayPhaseBytesReceived ?? 0) + (b.replayPhaseBytesReceived ?? 0),
@@ -6188,7 +6192,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const selectedSwmEnabled = Boolean(
         options?.selectedSwmPriority && publicContextGraphIds.length > 0,
       );
-      const selectedInitialRounds = new Map<string, SharedMemorySyncResult>();
+      const selectedContinuationUnits: SelectedSwmContinuationUnit[] = [];
       const work: ContextGraphSyncWork<SharedMemorySyncResult>[] = [];
       for (const contextGraphId of plan.eligibleContextGraphIds) {
         if (publicSet.has(contextGraphId)) {
@@ -6196,14 +6200,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             contextGraphId,
             lane: 'shared_memory',
             operationId: `shared-memory:${contextGraphId}:${remotePeerId.slice(-8)}`,
-            run: async (remainingContextGraphs: number) => {
-              const result = await syncPublicContextGraph(
-                contextGraphId,
-                remainingContextGraphs,
-              );
-              if (selectedSwmEnabled) selectedInitialRounds.set(contextGraphId, result);
-              return result;
-            },
+            run: (remainingContextGraphs: number) => syncPublicContextGraph(
+              contextGraphId,
+              remainingContextGraphs,
+            ),
           });
           continue;
         }
@@ -6274,6 +6274,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
         },
         merge: mergeSharedMemorySyncResults,
+        onResult: (item, result) => {
+          if (
+            selectedSwmEnabled
+            && item.lane === 'shared_memory'
+            && publicSet.has(item.contextGraphId)
+          ) {
+            selectedContinuationUnits.push({ work: item, initialResult: result });
+          }
+        },
         markDeferred: (summary) => ({
           ...summary,
           deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
@@ -6295,7 +6304,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
       if (
         !selectedSwmEnabled
-        || selectedInitialRounds.size === 0
+        || selectedContinuationUnits.length === 0
         || (initialSummary.deferredBackpressure ?? 0) > 0
       ) {
         if (selectedSwmEnabled && (initialSummary.deferredBackpressure ?? 0) > 0) {
@@ -6307,18 +6316,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return initialSummary;
       }
 
-      const selectedWork = work.filter((item) => (
-        item.lane === 'shared_memory'
-        && publicSet.has(item.contextGraphId)
-        && selectedInitialRounds.has(item.contextGraphId)
-      ));
-      const continuationSummary = await runSelectedSwmContinuations({
+      const continuationExecution = await runSelectedSwmContinuations({
         providerPeerId: remotePeerId,
-        work: selectedWork,
-        initialRounds: [...selectedInitialRounds].map(([contextGraphId, result]) => ({
-          contextGraphId,
-          result,
-        })),
+        units: selectedContinuationUnits,
         priorities: this.config.syncContextGraphPriorities,
         passConfig: resolveSwmCatchupPassConfig(),
         nowMs: catchupPassNowMs,
@@ -6374,7 +6374,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
         },
       });
-      return mergeSharedMemorySyncResults(initialSummary, continuationSummary);
+      const { summary: continuationSummary } = continuationExecution;
+      const finalSummary = mergeSharedMemorySyncResults(
+        initialSummary,
+        continuationSummary,
+      );
+      const resolvedSnapshotPlaneIncomplete = Math.min(
+        continuationExecution.resolvedSnapshotPlaneIncomplete,
+        finalSummary.snapshotPlaneIncomplete ?? 0,
+        finalSummary.failedPhases,
+      );
+      // Preserve the raw historical yield/failure counters for diagnostics;
+      // this bounded supersession count lets final on-connect accounting see
+      // that the same selected-provider invocation later completed them.
+      return {
+        ...finalSummary,
+        resolvedSnapshotPlaneIncomplete,
+      };
     };
 
     return runSyncSingleFlight(this, singleFlightKey, runSync, {
@@ -7078,34 +7094,35 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         },
         runPass: async ([candidate], deadlineMs) => {
           if (!candidate) return;
-          const before = candidate.start();
-          const mode = stats?.mode ?? 'background';
-          const continuationResults = await mapWithConcurrency(
-            candidate.peers,
-            CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
-            async (remotePeerId) => {
-              if (catchupPassNowMs() >= deadlineMs) return null;
-              const shared = await runCatchupPlaneWithPolicy(
-                mode,
-                ({ priority, source }) => this.syncSharedMemoryFromPeerDetailed(
-                  remotePeerId,
-                  [contextGraphId],
-                  { ...(priority === undefined ? {} : { priority }), source },
-                ).catch(emptyShared),
-                { sourceOverride: stats?.sourceOverride },
-              );
-              return { remotePeerId, shared };
-            },
-          );
-          for (const result of continuationResults) {
-            if (result) accumulateContinuationShared(result.remotePeerId, result.shared);
-          }
-          this.log.info(
-            ctx,
-            `Catch-up SWM pass ${1 + candidate.continuationPasses()} for `
-            + `"${contextGraphId}": ${candidate.peers.length} capable peer(s), progress `
-            + `${before} -> ${candidate.progress()} resolved summed across peers`,
-          );
+          await candidate.runStarted(async (pass) => {
+            const mode = stats?.mode ?? 'background';
+            const continuationResults = await mapWithConcurrency(
+              pass.peers,
+              CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
+              async (remotePeerId) => {
+                if (catchupPassNowMs() >= deadlineMs) return null;
+                const shared = await runCatchupPlaneWithPolicy(
+                  mode,
+                  ({ priority, source }) => this.syncSharedMemoryFromPeerDetailed(
+                    remotePeerId,
+                    [contextGraphId],
+                    { ...(priority === undefined ? {} : { priority }), source },
+                  ).catch(emptyShared),
+                  { sourceOverride: stats?.sourceOverride },
+                );
+                return { remotePeerId, shared };
+              },
+            );
+            for (const result of continuationResults) {
+              if (result) accumulateContinuationShared(result.remotePeerId, result.shared);
+            }
+            this.log.info(
+              ctx,
+              `Catch-up SWM pass ${1 + pass.continuationPass} for `
+              + `"${contextGraphId}": ${pass.peers.length} capable peer(s), progress `
+              + `${pass.progressBefore} -> ${pass.progress()} resolved summed across peers`,
+            );
+          });
         },
       });
       diagnostics.sharedMemory.continuationPasses = execution.continuationPasses;

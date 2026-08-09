@@ -252,14 +252,16 @@ describe('runSwmCatchupContinuations', () => {
       runPass: async (candidates) => {
         runs.push(candidates.map(({ key }) => key));
         for (const candidate of candidates) {
-          expect(candidate.start()).toBe(1);
-          // Idempotence protects the diagnostic from adapter double-starts.
-          expect(candidate.start()).toBe(1);
-          incomplete.recordPeerRound('peer-b', {
-            snapshotsResolved: 3,
-            snapshotsTotal: 3,
-            manifestComplete: true,
-          }, true);
+          const started = await candidate.runStarted(async (pass) => {
+            expect(pass.progressBefore).toBe(1);
+            expect(pass.continuationPass).toBe(1);
+            incomplete.recordPeerRound('peer-b', {
+              snapshotsResolved: 3,
+              snapshotsTotal: 3,
+              manifestComplete: true,
+            }, true);
+          });
+          expect(started.started).toBe(true);
         }
       },
       onStop: (stop) => stops.push(stop),
@@ -290,6 +292,38 @@ describe('runSwmCatchupContinuations', () => {
 
     expect(summary.continuationPasses).toBe(0);
     expect(tracker.continuationPasses()).toBe(0);
+  });
+
+  it('publishes budget exhaustion when admission expires before work starts', async () => {
+    const tracker = new SwmCatchupPassTracker();
+    tracker.recordPeerRound('peer-a', {
+      snapshotsResolved: 1,
+      snapshotsTotal: 2,
+      manifestComplete: true,
+    }, false);
+    const stops: Array<{ reason: string; continuationPasses: number }> = [];
+    let now = 10;
+
+    const summary = await runSwmCatchupContinuations({
+      units: [{ key: 'queued', tracker, planeProven: () => false }],
+      config: { maxPasses: 4, budgetMs: 5 },
+      nowMs: () => now,
+      runPass: async ([candidate]) => {
+        now = 15;
+        const started = await candidate!.runStarted(async () => {
+          throw new Error('expired work must not run');
+        });
+        expect(started).toEqual({ started: false, reason: 'budget-exhausted' });
+      },
+      onStop: (stop) => stops.push(stop),
+    });
+
+    expect(summary.continuationPasses).toBe(0);
+    expect(stops).toEqual([{
+      key: 'queued',
+      reason: 'budget-exhausted',
+      continuationPasses: 0,
+    }]);
   });
 });
 

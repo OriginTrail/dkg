@@ -730,29 +730,30 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       },
       runPass: async ([candidate], deadlineMs) => {
         if (!candidate) return;
-        const lastPassCoverage = candidate.start();
-        const passStartedMs = catchupPassNowMs();
-        await runWalk(candidate.peers, {
-          sharedMemoryOnly: true,
-          deadlineMs,
+        await candidate.runStarted(async (pass) => {
+          const passStartedMs = catchupPassNowMs();
+          await runWalk(pass.peers, {
+            sharedMemoryOnly: true,
+            deadlineMs,
+          });
+          // Progress BEFORE and AFTER on one line: a pass whose elapsed time is large
+          // and whose progress did not move is the signature of a job that is not
+          // converging, and that is not visible from either number alone.
+          //
+          // Labelled "summed across peers" because that is exactly what it is — a
+          // total over every peer's own high-water, spanning peers with different
+          // manifests. It sits beside `describeCoverage`, which is ONE whole record
+          // from ONE peer, and whose own doc warns that counts printed without their
+          // peer invite being read as a fleet total. Two different quantities on one
+          // line need the more surprising one named, or the reader will assume both
+          // describe the record at the end of the sentence.
+          await logPassLine(`Catch-up SWM pass ${1 + pass.continuationPass} for `
+            + `"${request.contextGraphId}": ${pass.peers.length} capable peer(s), progress `
+            + `${pass.progressBefore} -> ${pass.progress()} resolved `
+            + 'summed across peers, '
+            + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
+            + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
         });
-        // Progress BEFORE and AFTER on one line: a pass whose elapsed time is large
-        // and whose progress did not move is the signature of a job that is not
-        // converging, and that is not visible from either number alone.
-        //
-        // Labelled "summed across peers" because that is exactly what it is — a
-        // total over every peer's own high-water, spanning peers with different
-        // manifests. It sits beside `describeCoverage`, which is ONE whole record
-        // from ONE peer, and whose own doc warns that counts printed without their
-        // peer invite being read as a fleet total. Two different quantities on one
-        // line need the more surprising one named, or the reader will assume both
-        // describe the record at the end of the sentence.
-        await logPassLine(`Catch-up SWM pass ${1 + candidate.continuationPasses()} for `
-          + `"${request.contextGraphId}": ${candidate.peers.length} capable peer(s), progress `
-          + `${lastPassCoverage} -> ${candidate.progress()} resolved `
-          + 'summed across peers, '
-          + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
-          + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
       },
     });
     if (execution.continuationPasses > 0) {

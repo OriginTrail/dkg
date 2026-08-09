@@ -4,7 +4,11 @@ import {
   type DurableProgressSummary,
 } from '../durable-progress.js';
 
-type SyncProgressSummary = DurableProgressSummary & { insertedTriples: number };
+type SyncProgressSummary = DurableProgressSummary & {
+  insertedTriples: number;
+  snapshotPlaneIncomplete?: number;
+  resolvedSnapshotPlaneIncomplete?: number;
+};
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
@@ -93,6 +97,7 @@ interface SyncResultAccounting {
 
 function classifySyncResult(
   result: SyncFromPeerResult,
+  phase: 'durable' | 'shared',
   complete?: boolean,
 ): SyncResultAccounting {
   if (typeof result === 'number') {
@@ -109,7 +114,27 @@ function classifySyncResult(
     };
   }
 
-  const progress = classifyDurableProgress(result, { complete });
+  let progressResult = result;
+  if (phase === 'shared') {
+    const resolved = result.resolvedSnapshotPlaneIncomplete ?? 0;
+    const incomplete = result.snapshotPlaneIncomplete ?? 0;
+    const failed = result.failedPhases ?? 0;
+    // Fail closed on malformed producer metadata. Only a bounded, integral
+    // count can supersede the matching historical voluntary-yield failures;
+    // every other diagnostic remains untouched and authoritative.
+    if (
+      Number.isSafeInteger(resolved)
+      && resolved > 0
+      && resolved <= incomplete
+      && incomplete <= failed
+    ) {
+      progressResult = {
+        ...result,
+        failedPhases: failed - resolved,
+      };
+    }
+  }
+  const progress = classifyDurableProgress(progressResult, { complete });
   // `failedPeers` is folded across every Context Graph in this lane. It says
   // at least one round never got a response; it does not mean the peer failed
   // to answer every round. Preserve any response evidence from sibling CGs so
@@ -179,7 +204,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       && typeof result.complete === 'boolean'
         ? result.complete
         : undefined;
-    const accounting = classifySyncResult(result, complete);
+    const accounting = classifySyncResult(result, phase, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
     sawFailedPhase = sawFailedPhase || accounting.failed;
