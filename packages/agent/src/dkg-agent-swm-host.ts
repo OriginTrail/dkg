@@ -9,6 +9,7 @@
  */
 
 import { createHash, randomUUID } from 'node:crypto';
+import { Buffer } from 'node:buffer';
 import { performance } from 'node:perf_hooks';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -250,6 +251,17 @@ import {
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
+import {
+  planVmRecoveryMicrobatch,
+  VmRecoveryProviderPolicy,
+  type VmRecoveryChainFootprint,
+  type VmRecoveryTargetFootprint,
+  type VmRecoveryUalDisposition,
+} from './vm-recovery-microbatch.js';
+import {
+  encodeExactAssetUals,
+  MAX_EXACT_SYNC_ASSETS,
+} from './sync/exact-assets.js';
 
 function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
   return {
@@ -509,6 +521,8 @@ type VmReconcileOrdinalOptions = {
   isTargetCurrent?: () => boolean;
   /** Collect the missing KA for one batch fetch instead of fetching inline. */
   deferActiveFetch?: boolean;
+  /** Reuse the version-bound footprint captured by the initial inventory scan. */
+  recoveryFootprint?: VmRecoveryChainFootprint;
 };
 
 /**
@@ -520,6 +534,21 @@ type VmReconcileOrdinalOptions = {
  * amplify into a per-message `eth_call` (Branimir review #1239 follow-on).
  */
 const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
+
+const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
+  // Executor capability: the current exact-sync envelope accepts at most ten.
+  maxAssets: MAX_EXACT_SYNC_ASSETS,
+  // Soft recovery-window targets. A single public KA may exceed either; it is
+  // still admitted alone while the exact executor's own hard byte/quad guards
+  // remain authoritative.
+  targetBytes: 24n * 1024n * 1024n,
+  targetLeaves: 250_000n,
+  fixedBytesPerAsset: 64n * 1024n,
+  bytesPerLeafOverhead: 128n,
+  byteSizeMultiplierBps: 11_500n,
+  // Hard exact-selector cap, evaluated with the executor's real encoder.
+  maxSelectorBytes: 16 * 1024,
+});
 
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
@@ -4324,40 +4353,31 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /**
    * Select one physical peer for an exact-VM target. A peer that returned an
-   * exact hit in this slice is preferred and may be reused sequentially; all
-   * other peers remain one-use-per-slice. Unavailable peers and the global
-   * considered-peer cap remain authoritative for both classes.
+   * exact hit in this slice is preferred for one bounded microbatch; all other
+   * peers remain one-use-per-slice. The provider policy owns every mutable
+   * transition so partial responses revoke affinity consistently. Unavailable
+   * peers and the global considered-peer cap remain authoritative.
    */
   selectVmReconcileExactCandidate(
     this: DKGAgent,
     record: VmReconcileRotationRecord | undefined,
     fallbackCandidatePeerIds: readonly string[],
-    policy: {
-      provenHolderPeerIds: ReadonlySet<string>;
-      usedPeerIds: ReadonlySet<string>;
-      unavailablePeerIds: ReadonlySet<string>;
-      consideredPeerIds: Set<string>;
-    },
+    policy: VmRecoveryProviderPolicy,
   ): string | undefined {
     const uncreditedCandidateOrder = record
       ? this.vmReconcileUncreditedCandidateOrder(record)
       : [...fallbackCandidatePeerIds];
     const candidateOrder = [
       ...uncreditedCandidateOrder.filter((peerId) =>
-        policy.provenHolderPeerIds.has(peerId)),
+        policy.isProvenHolder(peerId)),
       ...uncreditedCandidateOrder.filter((peerId) =>
-        !policy.provenHolderPeerIds.has(peerId)),
+        !policy.isProvenHolder(peerId)),
     ];
     for (const peerId of candidateOrder) {
-      if (
-        (policy.usedPeerIds.has(peerId) && !policy.provenHolderPeerIds.has(peerId))
-        || policy.unavailablePeerIds.has(peerId)
-      ) continue;
-      if (
-        !policy.consideredPeerIds.has(peerId)
-        && policy.consideredPeerIds.size >= DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX
-      ) return undefined;
-      policy.consideredPeerIds.add(peerId);
+      if (!policy.canAttempt(peerId)) continue;
+      if (!policy.tryConsider(peerId, DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX)) {
+        return undefined;
+      }
       return peerId;
     }
     return undefined;
@@ -4687,6 +4707,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
     } catch {
       return 0;
     }
+  }
+
+  /**
+   * Best-effort finalized-inventory cost hint for exact VM recovery planning.
+   * Only a public-policy-proven tuple bound to the same root/version is usable;
+   * private/catalog sizing and partial legacy reads return `unknown`. Tests and
+   * the pinned-inventory adapter replace this narrow seam without changing
+   * provider selection or the transfer executor.
+   */
+  async readVmReconcileRecoveryFootprint(
+    this: DKGAgent,
+    _onChainCgId: bigint,
+    _kaId: bigint,
+    _merkleRoot: Uint8Array,
+  ): Promise<VmRecoveryChainFootprint> {
+    // The scalable source is the pinned finalized inventory row, which reads
+    // update-context + root in one snapshot. The legacy ordinal path does not
+    // own that row yet and must not add N sizing RPCs or use private/catalog
+    // byte size as a public payload estimate. A stacked inventory adapter (or
+    // a focused test) replaces this seam; unavailable hints stay singleton.
+    return { kind: 'unknown' };
   }
 
   /**
@@ -5024,22 +5065,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     const outcomes = new Map<number, OrdinalOutcome>();
     const attemptedOrdinals = new Set<number>();
-    const usedPeerIds = new Set<string>();
     // A clean exact hit proves only that this peer held the requested asset,
-    // not the whole CG. It is nevertheless the best bounded candidate for the
-    // next untouched target in this same slice. Reuse it sequentially while it
-    // keeps returning exact hits; one clean absence or incomplete response
-    // removes the hint immediately. This preserves the one-frame-per-request
-    // memory bound and peer-roster proof semantics while avoiding the former
-    // one-asset-per-provider-per-sweep throughput ceiling.
-    const provenHolderPeerIds = new Set<string>();
-    const consideredPeerIds = new Set<string>();
-    const unavailablePeerIds = new Set<string>();
+    // not the whole CG. It is nevertheless the best bounded candidate for one
+    // byte/leaf-aware microbatch of untouched targets in this same slice. One
+    // clean absence or incomplete response removes the hint immediately.
+    const providerPolicy = new VmRecoveryProviderPolicy();
+    const handledBatchOrdinals = new Set<number>();
     let recoveryWorkRan = false;
 
-    for (const entry of eligible) {
+    for (let eligibleIndex = 0; eligibleIndex < eligible.length; eligibleIndex += 1) {
       if (!isRecoveryCurrent()) break;
+      const entry = eligible[eligibleIndex]!;
       const { target } = entry;
+      if (handledBatchOrdinals.has(target.ordinal)) continue;
       const record = entry.prepared.record;
       const installedRecord = record
         && this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(target)) === record
@@ -5058,7 +5096,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const candidatePeerId = this.selectVmReconcileExactCandidate(
         installedRecord,
         orderedPeerIds,
-        { provenHolderPeerIds, usedPeerIds, unavailablePeerIds, consideredPeerIds },
+        providerPolicy,
       );
       if (candidatePeerId) {
         attemptedOrdinals.add(target.ordinal);
@@ -5092,7 +5130,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           : false;
         if (!isRecoveryCurrent()) return noRecovery();
         if (!connectedPeer || !protocolReady) {
-          unavailablePeerIds.add(candidatePeerId);
+          providerPolicy.recordUnavailable(candidatePeerId);
         } else {
           // Network boundary: a merely-connected peer is not necessarily
           // admitted to this DKG network. Never send an authenticated exact
@@ -5104,7 +5142,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             signal,
           );
           if (!isRecoveryCurrent()) return noRecovery();
-          if (!peerAdmitted) unavailablePeerIds.add(candidatePeerId);
+          if (!peerAdmitted) providerPolicy.recordUnavailable(candidatePeerId);
           else peerId = candidatePeerId;
         }
       }
@@ -5116,49 +5154,144 @@ export class SwmHostModeMethods extends DKGAgentBase {
             'incomplete',
             candidatePeerIds,
             installedRecord,
-            unavailablePeerIds,
+            providerPolicy.unavailablePeerIds(),
           );
         }
         continue;
       }
-      usedPeerIds.add(peerId);
+      providerPolicy.recordAttempt(peerId);
 
-      // A recovery target can approach the frame budget by itself. Each peer
-      // attempt therefore consumes at most one queue item, and each queue item
-      // consumes at most one peer attempt per eligible pass. A still-pending
-      // item rotates behind untouched work so one unavailable KA cannot spend
-      // every peer budget and starve the rest of the queue.
+      type EligibleEntry = (typeof eligible)[number];
+      type BatchAttempt = {
+        entry: EligibleEntry;
+        installedRecord: VmReconcileRotationRecord | undefined;
+        candidatePeerIds: string[];
+      };
+      let batchAttempts: BatchAttempt[] = [{
+        entry,
+        installedRecord,
+        candidatePeerIds,
+      }];
+
+      // The first exact request to a peer remains a single-KA probe. Once that
+      // probe has proved the peer is a holder, pack a stable compatible prefix
+      // by authoritative size hints. Unknown footprints stay singleton; the
+      // exact-sync protocol's ten-UAL cap remains the hard upper bound.
+      if (providerPolicy.isProvenHolder(peerId)) {
+        const compatible: BatchAttempt[] = [];
+        for (let candidateIndex = eligibleIndex; candidateIndex < eligible.length; candidateIndex += 1) {
+          const candidateEntry = eligible[candidateIndex]!;
+          const candidateTarget = candidateEntry.target;
+          if (handledBatchOrdinals.has(candidateTarget.ordinal)) continue;
+          const candidateRecord = candidateEntry.prepared.record;
+          const candidateInstalledRecord = candidateRecord
+            && this.vmReconcileRotationState.get(
+              this.vmReconcileRotationSlotKey(candidateTarget),
+            ) === candidateRecord
+            ? candidateRecord
+            : undefined;
+          // The current target was selected and marked attempted before the
+          // connection/admission boundary. Later candidates must still prove
+          // this peer remains uncredited in their independent rotation record.
+          const peerEligible = candidateIndex === eligibleIndex
+            || (candidateInstalledRecord
+              ? this.vmReconcileUncreditedCandidateOrder(candidateInstalledRecord).includes(peerId)
+              : orderedPeerIds.includes(peerId));
+          if (!peerEligible) break;
+          compatible.push({
+            entry: candidateEntry,
+            installedRecord: candidateInstalledRecord,
+            candidatePeerIds: candidateInstalledRecord
+              ? [...candidateInstalledRecord.candidatePeerIds]
+              : orderedPeerIds,
+          });
+        }
+        const plannableTargets = compatible.map((attempt) => ({
+          attempt,
+          recoveryFootprint: attempt.entry.target.recoveryFootprint
+            ?? { kind: 'unknown' as const },
+        } satisfies VmRecoveryTargetFootprint & { attempt: BatchAttempt }));
+        const plan = planVmRecoveryMicrobatch(
+          plannableTargets,
+          VM_EXACT_MICROBATCH_LIMITS,
+          (plannedTargets) => Buffer.byteLength(
+            encodeExactAssetUals(plannedTargets.map(
+              ({ attempt }) => attempt.entry.target.ual,
+            )),
+            'utf8',
+          ),
+        );
+        if (plan.targets.length === 0) {
+          this.log.warn(
+            ctx,
+            `VM exact recovery selector for "${localCgId}" exceeds the executor cap; `
+              + `ordinal=${target.ordinal} selectorCap=${VM_EXACT_MICROBATCH_LIMITS.maxSelectorBytes}`,
+          );
+          if (installedRecord) {
+            this.settleVmReconcileRotationAttempt(
+              target,
+              undefined,
+              'incomplete',
+              candidatePeerIds,
+              installedRecord,
+              providerPolicy.unavailablePeerIds(),
+            );
+          }
+          continue;
+        }
+        batchAttempts = plan.targets.map(({ attempt }) => attempt);
+        this.log.info(
+          ctx,
+          `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
+            + `assets=${batchAttempts.length} estimatedBytes=${plan.estimatedBytes} `
+            + `estimatedLeaves=${plan.estimatedLeaves} `
+            + `completeFootprints=${plan.completeFootprints}`,
+        );
+      }
+
+      for (const attempt of batchAttempts) {
+        const batchTarget = attempt.entry.target;
+        handledBatchOrdinals.add(batchTarget.ordinal);
+        attemptedOrdinals.add(batchTarget.ordinal);
+        if (attempt.installedRecord) {
+          attempt.installedRecord.lastAttemptedPeerId = peerId;
+          attempt.installedRecord.attemptedPeerIds.add(peerId);
+          attempt.installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
+            + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+          this.touchVmReconcileRotationRecord(
+            this.vmReconcileRotationSlotKey(batchTarget),
+            attempt.installedRecord,
+          );
+        }
+        this.emitReplication({
+          contextGraphId: localCgId,
+          onChainCgId: onChainCgId.toString(),
+          action: 'fetch',
+          ordinal: batchTarget.ordinal,
+          kaId: batchTarget.kaId,
+          ual: batchTarget.ual,
+          detail: batchAttempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
+        });
+      }
+
+      // Every queue item still consumes at most one peer attempt per eligible
+      // pass. A partial microbatch is revalidated per KA; unresolved members
+      // retain rotation state and fail open to another provider on a later pass.
       if (!isRecoveryCurrent()) return noRecovery();
-      this.emitReplication({
-        contextGraphId: localCgId,
-        onChainCgId: onChainCgId.toString(),
-        action: 'fetch',
-        ordinal: target.ordinal,
-        kaId: target.kaId,
-        ual: target.ual,
-        detail: 'exact-asset',
-      });
 
       let disposition: 'found' | 'clean-absent' | 'incomplete' = 'incomplete';
       try {
-        if (installedRecord) {
-          installedRecord.lastAttemptedPeerId = peerId;
-          this.touchVmReconcileRotationRecord(
-            this.vmReconcileRotationSlotKey(target),
-            installedRecord,
-          );
-        }
         const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
           peerId,
           localCgId,
-          [target.ual],
+          batchAttempts.map(({ entry: item }) => item.target.ual),
           { signal, isCurrent: isRecoveryCurrent },
         );
         const { result } = detailed;
         disposition = detailed.disposition;
         this.log.info(
           ctx,
-          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=1 fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
+          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${batchAttempts.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
         );
       } catch (error) {
         this.log.info(
@@ -5166,56 +5299,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
           `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
-      if (disposition === 'found') provenHolderPeerIds.add(peerId);
-      else provenHolderPeerIds.delete(peerId);
-
       // The exact request may have completed after unsubscribe, rebind, or
       // shutdown. Its authenticated materialization is already fail-closed,
       // but no process-local evidence or cooldown may outlive that lifecycle.
       if (!isRecoveryCurrent()) return noRecovery();
-      const outcome = await this.reconcileChainOrdinal(
-        localCgId,
-        onChainCgId,
-        target.ordinal,
-        headBlock,
-        { isTargetCurrent: isRecoveryCurrent, deferActiveFetch: true },
-      );
-      if (!isRecoveryCurrent()) return noRecovery();
-      outcomes.set(target.ordinal, outcome);
-      if (outcome.status === 'pending' && outcome.recovery) {
-        if (!installedRecord) continue;
-        if (this.vmReconcileRotationClosed) continue;
-        if (
-          this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(target))
-          !== installedRecord
-        ) continue;
-        const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(
+      const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
+      for (const attempt of batchAttempts) {
+        const batchTarget = attempt.entry.target;
+        const outcome = await this.reconcileChainOrdinal(
           localCgId,
+          onChainCgId,
+          batchTarget.ordinal,
+          headBlock,
+          {
+            isTargetCurrent: isRecoveryCurrent,
+            deferActiveFetch: true,
+            recoveryFootprint: batchTarget.recoveryFootprint ?? { kind: 'unknown' },
+          },
         );
-        if (!this.vmReconcilePeerMembershipMatches(
-          installedRecord.candidatePeerIds,
-          candidateMembershipAfter,
-        )) {
-          // Membership changed while the request was in flight. Invalidate the
-          // cycle before considering its response, then fail open.
-          this.prepareVmReconcileRotationTarget(
-            outcome.recovery,
+        if (!isRecoveryCurrent()) return noRecovery();
+        outcomes.set(batchTarget.ordinal, outcome);
+        const perTargetDisposition: VmRecoveryUalDisposition = (
+          outcome.status === 'reconciled' || outcome.status === 'already'
+        )
+          ? 'found'
+          : disposition === 'clean-absent'
+            ? 'clean-absent'
+            : 'incomplete';
+        perUalDispositions.set(batchTarget.ual, perTargetDisposition);
+        if (outcome.status === 'pending' && outcome.recovery) {
+          const batchRecord = attempt.installedRecord;
+          if (!batchRecord) continue;
+          if (this.vmReconcileRotationClosed) continue;
+          if (
+            this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(batchTarget))
+            !== batchRecord
+          ) continue;
+          const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(
+            localCgId,
+          );
+          if (!this.vmReconcilePeerMembershipMatches(
+            batchRecord.candidatePeerIds,
             candidateMembershipAfter,
-            this.vmReconcileRotationNow(),
-          );
-        } else if (this.vmReconcileRecoveryTargetMatches(target, outcome.recovery)) {
-          this.settleVmReconcileRotationAttempt(
-            target,
-            peerId,
-            disposition,
-            candidatePeerIds,
-            installedRecord,
-            unavailablePeerIds,
-          );
+          )) {
+            // Membership changed while the request was in flight. Invalidate the
+            // cycle before considering its response, then fail open.
+            this.prepareVmReconcileRotationTarget(
+              outcome.recovery,
+              candidateMembershipAfter,
+              this.vmReconcileRotationNow(),
+            );
+          } else if (this.vmReconcileRecoveryTargetMatches(batchTarget, outcome.recovery)) {
+            this.settleVmReconcileRotationAttempt(
+              batchTarget,
+              peerId,
+              perTargetDisposition,
+              attempt.candidatePeerIds,
+              batchRecord,
+              providerPolicy.unavailablePeerIds(),
+            );
+          }
+        } else {
+          this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(batchTarget));
         }
-      } else {
-        this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(target));
       }
+      providerPolicy.recordBatch(peerId, disposition, perUalDispositions);
     }
 
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
@@ -5365,6 +5513,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
+        const recoveryFootprint = options.recoveryFootprint
+          ?? await this.readVmReconcileRecoveryFootprint(onChainCgId, kaId, merkleRoot);
+        if (options.isTargetCurrent && !options.isTargetCurrent()) {
+          return { status: 'skip' };
+        }
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -5387,6 +5540,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             ).join(''),
             kaId: kaId.toString(),
             reason: outcome,
+            recoveryFootprint,
           },
         };
       }
