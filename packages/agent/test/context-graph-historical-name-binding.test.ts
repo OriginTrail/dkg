@@ -42,6 +42,9 @@ function selectedFixture(resolved: bigint | null = 42n) {
     invalidateListContextGraphsCache: vi.fn(),
     contextGraphBindingState: new ContextGraphBindingState(),
     reconcileCursors: new Map(),
+    selectedVmReconcileCursors: new Map(),
+    vmReconcileRotationClosed: false,
+    vmReconcileLifecycleGeneration: 0,
     persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
     emitReplication: vi.fn(),
     forceClearVmReconcileStateForContextGraph: vi.fn((localId: string) => {
@@ -113,6 +116,18 @@ function selectedFixture(resolved: bigint | null = 42n) {
       agent,
       requestedId,
     );
+  agent.isVmReconcileTargetCurrent = (
+    localCgId: string,
+    target: unknown,
+    lifecycleGeneration: number,
+    expectedCursor?: unknown,
+  ) => SwmHostModeMethods.prototype.isVmReconcileTargetCurrent.call(
+    agent,
+    localCgId,
+    target as never,
+    lifecycleGeneration,
+    expectedCursor as never,
+  );
   return {
     agent,
     query,
@@ -292,6 +307,7 @@ describe('cold current-state Context Graph name binding', () => {
     const reverseCursor = { watermark: 0, ahead: new Map(), scanOrdinal: 0 };
     reverseFixture.agent.reconcileCursors.set(LOCAL_ID, reverseCursor);
     const reverseTarget = {
+      kind: 'subscription' as const,
       sub: reverseFixture.subscription,
       bindingKind: 'reverse-name-hash' as const,
       onChainId: '42',
@@ -323,6 +339,7 @@ describe('cold current-state Context Graph name binding', () => {
     const authoritativeCursor = { watermark: 0, ahead: new Map(), scanOrdinal: 0 };
     authoritativeFixture.agent.reconcileCursors.set(LOCAL_ID, authoritativeCursor);
     const authoritativeTarget = {
+      kind: 'subscription' as const,
       sub: authoritativeFixture.subscription,
       bindingKind: 'authoritative' as const,
       onChainId: '42',
