@@ -223,7 +223,8 @@ export type RecountCode =
   | "E_RECOUNT_MANIFEST"           // leg's model binding disagrees with the manifest
   | "E_RECOUNT_EMBEDDED_OBJECT"    // an embedded rules/policy/manifest ≠ its own digest
   | "E_RECOUNT_LIMIT"              // token array or evidence size exceeds a policy bound
-  | "E_RECOUNT_BUILD";             // leg names a provider build the buyer did not audit
+  | "E_RECOUNT_BUILD"              // leg names a provider build the buyer did not audit
+  | "E_RECOUNT_ATTESTATION";       // leg names an attestation the buyer did not verify
 
 const seqEq = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -249,6 +250,10 @@ export function verifyInferenceRecount(args: {
   expectedBackendManifestDigest?: string;
   /** the provider build the buyer audited; a leg from another build is refused. */
   expectedProviderBuildDigest?: string;
+  /** the attestation the buyer INDEPENDENTLY verified; a leg claiming another,
+   *  or claiming none, is refused (Bo, event 5b4a4a18: comparing buildDigest
+   *  alone let a tampered attestationDigest through). */
+  expectedProviderAttestationDigest?: string;
 }): RecountVerdict {
   const e = args.evidence;
 
@@ -294,6 +299,9 @@ export function verifyInferenceRecount(args: {
 
   if (args.expectedProviderBuildDigest !== undefined && e.providerBuild?.buildDigest !== args.expectedProviderBuildDigest) {
     return { ok: false, code: "E_RECOUNT_BUILD", detail: `leg names build ${e.providerBuild?.buildDigest ?? "(none)"}, buyer audited ${args.expectedProviderBuildDigest}` };
+  }
+  if (args.expectedProviderAttestationDigest !== undefined && e.providerBuild?.attestationDigest !== args.expectedProviderAttestationDigest) {
+    return { ok: false, code: "E_RECOUNT_ATTESTATION", detail: `leg names attestation ${e.providerBuild?.attestationDigest ?? "(none)"}, buyer verified ${args.expectedProviderAttestationDigest}` };
   }
 
   // ── input: rendered prompt bytes + re-encoded sequence ──
