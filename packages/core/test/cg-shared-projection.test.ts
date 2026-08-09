@@ -17,6 +17,7 @@ import {
   CgSharedProjectionError,
   assertVerifiedCgSharedProjectionForTransferV1,
   assertVerifiedCgSharedProjectionV1,
+  parseCanonicalGraphlessProjectionStorageQuadsV1,
   readVerifiedCgSharedProjectionBytesV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedCgSharedProjectionV1,
@@ -75,6 +76,68 @@ const FULLY_WITHHELD =
   + `<${COMMITMENT}> <http://dkg.io/ontology/privateDataHash> "034349e1ac2b108ba81720c55dff02bcae22762921f5c8354db83e687015872c"^^<http://www.w3.org/2001/XMLSchema#hexBinary> .\n`;
 
 describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
+  it('parses exact canonical lines into storage-ready graphless quads', () => {
+    expect(parseCanonicalGraphlessProjectionStorageQuadsV1(UTF8.encode(PUBLIC))).toEqual([
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+        graph: '',
+      },
+    ]);
+    expect(parseCanonicalGraphlessProjectionStorageQuadsV1(UTF8.encode(
+      '<https://example.org/s> <https://example.org/p> <https://example.org/o> .\n',
+    ))).toEqual([{
+      subject: 'https://example.org/s',
+      predicate: 'https://example.org/p',
+      object: 'https://example.org/o',
+      graph: '',
+    }]);
+  });
+
+  it.each([
+    {
+      name: 'graph term',
+      bytes: UTF8.encode('<https://example.org/s> <https://example.org/p> <https://example.org/o> <https://example.org/g> .\n'),
+      code: 'projection-iri',
+    },
+    {
+      name: 'raw byte disorder',
+      bytes: UTF8.encode(PUBLIC.split('\n').filter(Boolean).reverse().join('\n') + '\n'),
+      code: 'projection-order',
+    },
+    {
+      name: 'invalid UTF-8',
+      bytes: new Uint8Array([
+        ...UTF8.encode('<https://example.org/s> <https://example.org/p> "'),
+        0xc3,
+        0x28,
+        ...UTF8.encode('" .\n'),
+      ]),
+      code: 'projection-utf8',
+    },
+  ])('rejects $name before returning storage quads', ({ bytes, code }) => {
+    expectFailure(
+      () => parseCanonicalGraphlessProjectionStorageQuadsV1(bytes),
+      code as CgSharedProjectionErrorCode,
+    );
+  });
+
+  it('rejects the first line beyond the signed count before parsing it', () => {
+    const firstLine = PUBLIC.split('\n')[0] + '\n';
+    const fixture = makeFixtureBytes(
+      new Uint8Array([...UTF8.encode(firstLine), 0xff, 0x0a]),
+      sealForProjection(firstLine, '0', null),
+    );
+    expectFailure(() => verifyProjection(fixture), 'projection-public-count');
+  });
+
   it.each([
     {
       name: 'public',
