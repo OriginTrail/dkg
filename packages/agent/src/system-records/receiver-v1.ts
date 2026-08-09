@@ -45,10 +45,14 @@ export interface AgentProfileReceiverVerifiedBundleV1 {
   readonly projectionQuads: readonly Readonly<Quad>[];
 }
 
+export type SignedAgentProfileActiveHeadEnvelopeV1 = SignedAgentProfileHeadEnvelopeV1 & {
+  readonly object: AgentProfileActiveHeadObjectV1;
+};
+
 /** Verified active-profile facts handed to the lifecycle-owned materializer bridge. */
 export interface AgentProfileReceiverCandidateV1 {
   readonly head: AgentProfileActiveHeadObjectV1;
-  readonly envelope: SignedAgentProfileHeadEnvelopeV1;
+  readonly envelope: SignedAgentProfileActiveHeadEnvelopeV1;
   readonly canonicalProjectionBytes: Uint8Array;
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
@@ -188,9 +192,7 @@ export function createAgentProfileReceiverV1(
 }
 
 interface VerifiedActiveProfileClosureV1 {
-  readonly envelope: SignedAgentProfileHeadEnvelopeV1 & {
-    readonly object: AgentProfileActiveHeadObjectV1;
-  };
+  readonly envelope: SignedAgentProfileActiveHeadEnvelopeV1;
   readonly verifiedBundle: Readonly<{
     readonly projectionQuads: readonly Readonly<Quad>[];
     readonly canonicalProjectionBytes: Uint8Array;
@@ -283,14 +285,23 @@ async function verifyActiveProfileClosureForRowV1(
     currentHeadArtifact.canonicalBytes,
   );
   assertRowBindsHead(networkId, row, envelope);
-  if (envelope.object.state !== 'active' || verifiedBundle === undefined) {
+  assertActiveHeadEnvelopeV1(envelope);
+  if (verifiedBundle === undefined) {
     throw new Error('active profile receiver resolved a non-active verification closure');
   }
   return Object.freeze({
-    envelope: envelope as VerifiedActiveProfileClosureV1['envelope'],
+    envelope,
     verifiedBundle,
     verifiedAuthoritySummary: closure.authoritySummary,
   });
+}
+
+function assertActiveHeadEnvelopeV1(
+  envelope: SignedAgentProfileHeadEnvelopeV1,
+): asserts envelope is SignedAgentProfileActiveHeadEnvelopeV1 {
+  if (envelope.object.state !== 'active') {
+    throw new Error('active profile receiver resolved a non-active verification closure');
+  }
 }
 
 function canonicalInventoryRow(

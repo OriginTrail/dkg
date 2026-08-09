@@ -12,8 +12,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import { parseNQuads } from '../src/dkg-agent-utils.js';
+import { prepareAgentProfileV1 } from '../src/profile.js';
 import {
   createAgentProfileReceiverV1,
+  type AgentProfileReceiverCandidateV1,
 } from '../src/system-records/receiver-v1.js';
 import {
   createFixtureAgentProfileProducerV1,
@@ -22,10 +24,32 @@ import {
   produce,
   producerFixture,
   PRODUCER_FIXTURE_NOW_MS,
+  publicationFor,
 } from './support/agent-profile-producer-v1-fixture.js';
 
-async function publishedFixture() {
+async function publishedFixture(withDerivedSubjects = false) {
   const fixture = await producerFixture();
+  const prepared = withDerivedSubjects
+    ? prepareAgentProfileV1({
+      peerId: fixture.peerSigner.peerId,
+      publicKey: Buffer.from(fixture.peerSigner.publicKey, 'base64url').toString('base64'),
+      agentAddress: fixture.evmSigner.address,
+      name: 'Receiver multi-subject fixture',
+      nodeRole: 'edge',
+      lastSeen: '2026-08-07T12:00:00.000Z',
+      skills: [{
+        skillType: 'GraphQuery',
+        pricePerCall: 1,
+        currency: 'TRAC',
+        successRate: 0.99,
+        pricingModel: 'PerInvocation',
+      }],
+      contextGraphsServed: ['receiver-test-graph'],
+    })
+    : fixture.prepared;
+  const publication = withDerivedSubjects
+    ? await publicationFor(prepared, fixture.evmSigner.address, '2026-08-07T12:00:00Z')
+    : fixture.publication;
   const producer = createFixtureAgentProfileProducerV1({
     networkId: NETWORK,
     publicationDeployment: DEPLOYMENT,
@@ -35,7 +59,7 @@ async function publishedFixture() {
     fence: () => undefined,
     install: () => undefined,
   });
-  await produce(producer, fixture.prepared, fixture.publication);
+  await produce(producer, prepared, publication);
   const envelope = fixture.store.snapshot().currentHead;
   if (envelope === null) throw new Error('fixture producer did not publish a head');
   const head = envelope.object;
@@ -48,10 +72,10 @@ async function publishedFixture() {
     tombstone: false,
     quarantined: false,
   });
-  return { ...fixture, envelope, row };
+  return { ...fixture, prepared, publication, envelope, row };
 }
 
-function verifyFixtureBundle(_head: unknown, bundleBytes: Uint8Array) {
+function verifiedFixtureBundle(bundleBytes: Uint8Array) {
   const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
   return Object.freeze({
     canonicalProjectionBytes: Uint8Array.from(projectionBytes),
@@ -62,7 +86,20 @@ function verifyFixtureBundle(_head: unknown, bundleBytes: Uint8Array) {
 describe('agent-profile system-record active receiver', () => {
   it('verifies the exact closure and submits one immutable active candidate', async () => {
     const fixture = await publishedFixture();
-    const consumeCandidate = vi.fn(async () => ({
+    const signal = new AbortController().signal;
+    const bundleArtifact = await fixture.store.resolve({
+      type: 'object',
+      objectKind: 'profile-bundle',
+      objectDigest: fixture.envelope.object.bundleDigest,
+    }, signal);
+    if (bundleArtifact === null) throw new Error('fixture bundle was not retained');
+    const verifyCurrentBundle = vi.fn((head, bundleBytes: Uint8Array, receivedSignal) => {
+      expect(head).toEqual(fixture.envelope.object);
+      expect(bundleBytes).toEqual(bundleArtifact.canonicalBytes);
+      expect(receivedSignal).toBe(signal);
+      return verifiedFixtureBundle(bundleBytes);
+    });
+    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
       outcome: 'applied' as const,
       stateRevision: '1',
       appliedStateDigest: `0x${'a'.repeat(64)}`,
@@ -71,13 +108,13 @@ describe('agent-profile system-record active receiver', () => {
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle,
       consumeCandidate,
     });
 
-    const signal = new AbortController().signal;
     await expect(receiver.receiveActive(fixture.row, signal))
       .resolves.toMatchObject({ outcome: 'applied' });
+    expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
     expect(consumeCandidate).toHaveBeenCalledTimes(1);
     const candidate = consumeCandidate.mock.calls[0]![0];
     expect(candidate.head).toEqual(fixture.envelope.object);
@@ -85,17 +122,40 @@ describe('agent-profile system-record active receiver', () => {
     expect([...candidate.projectionQuads].sort(compareQuad))
       .toEqual([...fixture.prepared.projectionQuads].sort(compareQuad));
     expect(candidate.ownedSubjectTable).toContain(fixture.prepared.rootEntity);
-    const bundleArtifact = await fixture.store.resolve({
-      type: 'object',
-      objectKind: 'profile-bundle',
-      objectDigest: fixture.envelope.object.bundleDigest,
-    }, signal);
-    if (bundleArtifact === null) throw new Error('fixture bundle was not retained');
     expect(candidate.canonicalProjectionBytes).toEqual(
       decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes).projectionBytes,
     );
     expect(candidate).not.toHaveProperty('signal');
     expect(consumeCandidate.mock.calls[0]![1]).toBe(signal);
+  });
+
+  it('hands every derived owned subject to the materializer candidate', async () => {
+    const fixture = await publishedFixture(true);
+    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
+      outcome: 'applied' as const,
+      stateRevision: '1',
+      appliedStateDigest: `0x${'a'.repeat(64)}`,
+    }));
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(
+      fixture.row,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'applied' });
+    const candidate = consumeCandidate.mock.calls[0]![0];
+    const expectedOwnedSubjects = [...new Set(
+      fixture.prepared.projectionQuads.map(({ subject }) => subject),
+    )].sort(compareUtf8);
+    expect(expectedOwnedSubjects.length).toBeGreaterThan(1);
+    expect(candidate.ownedSubjectTable).toEqual(expectedOwnedSubjects);
+    expect(candidate.head.ownedSubjectCount).toBe(String(expectedOwnedSubjects.length));
+    expect(candidate.envelope.object.state).toBe('active');
   });
 
   it('fails closed when the exact owned-subject table is unavailable', async () => {
@@ -110,7 +170,7 @@ describe('agent-profile system-record active receiver', () => {
           : fixture.store.resolve(lookup, signal),
       }),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
       consumeCandidate,
     });
 
@@ -141,7 +201,7 @@ describe('agent-profile system-record active receiver', () => {
         },
       }),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
       consumeCandidate,
     });
 
@@ -157,8 +217,8 @@ describe('agent-profile system-record active receiver', () => {
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: (head, bundleBytes) => {
-        const verified = verifyFixtureBundle(head, bundleBytes);
+      verifyCurrentBundle: (_head, bundleBytes) => {
+        const verified = verifiedFixtureBundle(bundleBytes);
         return Object.freeze({
           ...verified,
           canonicalProjectionBytes: Uint8Array.from([0]),
@@ -179,7 +239,7 @@ describe('agent-profile system-record active receiver', () => {
       networkId: NETWORK,
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
       consumeCandidate: async () => {
         controller.abort(new Error('late stop'));
         return {
@@ -247,7 +307,7 @@ describe('agent-profile system-record active receiver', () => {
       networkId: NETWORK,
       artifacts: { resolve },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
       consumeCandidate: vi.fn(),
     });
 
@@ -262,7 +322,9 @@ describe('agent-profile system-record active receiver', () => {
     const fixture = await publishedFixture();
     const consumeCandidate = vi.fn();
     const resolve = vi.fn(fixture.store.resolve.bind(fixture.store));
-    const verifyCurrentBundle = vi.fn(verifyFixtureBundle);
+    const verifyCurrentBundle = vi.fn(
+      (_head, bundleBytes: Uint8Array) => verifiedFixtureBundle(bundleBytes),
+    );
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: { resolve },
@@ -288,7 +350,7 @@ describe('agent-profile system-record active receiver', () => {
       artifacts: fixture.store,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope: () => false,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
       consumeCandidate,
     });
 
@@ -323,7 +385,7 @@ describe('agent-profile system-record active receiver', () => {
         },
       },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
       consumeCandidate,
     });
 
@@ -336,7 +398,9 @@ describe('agent-profile system-record active receiver', () => {
 
   it('captures lifecycle dependencies once instead of rereading mutable options', async () => {
     const fixture = await publishedFixture();
-    const verifyCurrentBundle = vi.fn(verifyFixtureBundle);
+    const verifyCurrentBundle = vi.fn(
+      (_head, bundleBytes: Uint8Array) => verifiedFixtureBundle(bundleBytes),
+    );
     const consumeCandidate = vi.fn(async () => ({
       outcome: 'applied' as const,
       stateRevision: '3',
@@ -380,4 +444,8 @@ function compareQuad(
     || left.predicate.localeCompare(right.predicate)
     || left.object.localeCompare(right.object)
     || left.graph.localeCompare(right.graph);
+}
+
+function compareUtf8(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
 }
