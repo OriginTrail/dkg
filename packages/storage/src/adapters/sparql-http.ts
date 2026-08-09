@@ -40,7 +40,7 @@ import {
 } from './sparql-json-results.js';
 import {
   externalStorePriorityScheduler,
-  type StoreAdmissionV1,
+  type StoreQueuedAdmissionV1,
 } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -124,7 +124,7 @@ const SYSTEM_CONTEXT_GRAPH_IRIS = [
 ] as const;
 
 interface ManagedMutationBindingV1 {
-  readonly admission: StoreAdmissionV1;
+  readonly admission: StoreQueuedAdmissionV1;
   readonly generation: string;
 }
 
@@ -753,15 +753,20 @@ export class SparqlHttpStore implements TripleStore {
           // the lane outlives any single child: sealing the generation observed
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
-          barrier: (purpose, transition) =>
-            externalStorePriorityScheduler.runControlBarrierEffect(
+          barrier: async (purpose, transition) => {
+            let result: Awaited<ReturnType<typeof transition>> | undefined;
+            await externalStorePriorityScheduler.runControlBarrierEffect(
               this,
               purpose,
-              transition,
+              async () => {
+                result = await transition();
+              },
               this.ownershipLease
                 ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
                 : undefined,
-            ),
+            );
+            return result as Awaited<ReturnType<typeof transition>>;
+          },
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
         });
         this.systemRecordLane = owner;

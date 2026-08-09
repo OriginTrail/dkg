@@ -216,10 +216,10 @@ export interface SystemRecordLaneExecutionBindingV1 {
  * handoff steps are limited to supervisor calls, owned-client drains and
  * synchronous cache invalidation.
  */
-export type SystemRecordLaneBarrierV1 = (
+export type SystemRecordLaneBarrierV1 = <T>(
   purpose: string,
-  transition: () => Promise<void>,
-) => Promise<void>;
+  transition: () => Promise<T>,
+) => Promise<T>;
 
 export interface SystemRecordLaneControllerDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
@@ -749,17 +749,17 @@ class SystemRecordLaneSession {
   ): Promise<void> {
     this.assertLeaseLive();
     this.commitState('enabling');
-    let rotated: void | SystemRecordMaterializationEpochRotationV1 = undefined;
+    let rotated: void | SystemRecordMaterializationEpochRotationV1;
     try {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      await this.deps.barrier('system-record.enable', async () => {
+      rotated = await this.deps.barrier('system-record.enable', async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
         await this.deps.handoff.startAndProveCleanGeneration();
-        rotated = await this.deps.handoff.rotateMaterializationEpoch(activation.networkId);
+        return this.deps.handoff.rotateMaterializationEpoch(activation.networkId);
       });
     } catch (error) {
       this.failManagedMutationsClosed('enable transition did not physically settle');

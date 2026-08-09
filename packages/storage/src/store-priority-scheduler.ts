@@ -106,7 +106,7 @@ export type StoreAdmissionMode =
  * sits in front of every store operation in the daemon, so the untagged path
  * must stay the pre-#2052 four-integer comparison it has always been.
  */
-export interface StoreAdmissionV1 {
+interface StoreAdmissionBaseV1 {
   /**
    * Opaque store-instance identity, compared by reference and never
    * serialized. Entries without one are untagged/legacy.
@@ -125,8 +125,19 @@ export interface StoreAdmissionV1 {
    * domain so they keep running during an ordinary profile apply.
    */
   readonly domain?: string;
-  readonly mode: StoreAdmissionMode;
 }
+
+export type StoreQueuedAdmissionV1 = StoreAdmissionBaseV1 & {
+  readonly mode: Exclude<StoreAdmissionMode, 'control-barrier'>;
+};
+
+export type StoreControlBarrierAdmissionV1 = StoreAdmissionBaseV1 & {
+  readonly mode: 'control-barrier';
+};
+
+export type StoreAdmissionV1 =
+  | StoreQueuedAdmissionV1
+  | StoreControlBarrierAdmissionV1;
 
 import {
   StoreControlBarrierCoordinator,
@@ -192,7 +203,7 @@ interface QueueEntry<T> {
   onAbort?: () => void;
   waitTimer?: ReturnType<typeof setTimeout>;
   /** V1 admission metadata; `undefined` for legacy/untagged entries. */
-  admission?: StoreAdmissionV1;
+  admission?: StoreQueuedAdmissionV1;
   /**
    * Monotonic enqueue sequence, `0` when untagged. Used to answer "is this
    * shared entry LATER than the exclusive it would bypass?" exactly, including
@@ -490,16 +501,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * for inflight. See `StoreBarrierHostV1`.
    */
   private readonly barrierCoordinator: StoreControlBarrierCoordinator;
-  /**
-   * Ordinary execution slots currently held by control-barrier work. A barrier
-   * is routed away from the queues before any slot accounting, so this is 0 by
-   * construction — it exists as a tripwire: if the routing ever regresses and a
-   * barrier becomes an ordinary queued entry, it would pin a slot for the whole
-   * drain and `barrierWaitOccupiedSlotMs` turns non-zero instead of the lane
-   * silently losing capacity.
-   */
-  private barrierOccupiedSlots = 0;
-
   constructor(options?: StorePrioritySchedulerOptions);
   /** @deprecated Use the named options object. Retained for package compatibility. */
   constructor(
@@ -629,7 +630,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         generationsInflight: this.countGenerationsInflight(),
         heldRuns: this.heldRunCount,
       }),
-      occupiedSlots: () => this.barrierOccupiedSlots,
+      occupiedSlots: () => 0,
       observeDepths: () => this.observeDepths(),
     };
   }
@@ -1253,12 +1254,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
       admission.generation,
       (state.runningPermits.get(admission.generation) ?? 0) + 1,
     );
-    if (admission.mode === 'control-barrier') {
-      // Unreachable while `run()` routes barriers away from the queues; see the
-      // `barrierOccupiedSlots` tripwire comment on the field declaration.
-      this.barrierOccupiedSlots += 1;
-      return;
-    }
     if (admission.mode === 'store-wide-exclusive') {
       state.storeWideExclusiveInflight += 1;
       return;
@@ -1287,9 +1282,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const permits = (state.runningPermits.get(admission.generation) ?? 1) - 1;
     if (permits > 0) state.runningPermits.set(admission.generation, permits);
     else state.runningPermits.delete(admission.generation);
-    if (admission.mode === 'control-barrier') {
-      this.barrierOccupiedSlots -= 1;
-    } else if (admission.mode === 'store-wide-exclusive') {
+    if (admission.mode === 'store-wide-exclusive') {
       state.storeWideExclusiveInflight -= 1;
     } else {
       const domain = state.domains.get(entry.domainKey);
@@ -1376,7 +1369,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     operation: string,
     work: () => Promise<T>,
     signal: AbortSignal | undefined,
-    admission: StoreAdmissionV1,
+    admission: StoreQueuedAdmissionV1,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const state = this.getOrCreateStoreState(admission.storeId);

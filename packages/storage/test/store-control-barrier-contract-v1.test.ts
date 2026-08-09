@@ -1,6 +1,9 @@
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
-import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
+import {
+  StorePriorityScheduler,
+  type StoreQueuedAdmissionV1,
+} from '../src/store-priority-scheduler.js';
 
 /**
  * The scheduler/coordinator boundary, asserted through the PUBLIC scheduler.
@@ -28,6 +31,12 @@ const deferred = <T>() => {
   });
   return { promise, resolve };
 };
+
+const queuedAdmission = (storeId: object): StoreQueuedAdmissionV1 => ({
+  mode: 'shared',
+  storeId,
+  generation: 'gen-1',
+});
 
 describe('control barrier contract survives the coordinator extraction', () => {
   it('clears cached tagged inflight before a later untagged-only barrier', async () => {
@@ -74,10 +83,13 @@ describe('control barrier contract survives the coordinator extraction', () => {
     const untagged = deferred<void>();
     const tagged = deferred<void>();
     const untaggedRun = scheduler.run('normal', 'untagged', () => untagged.promise);
-    const taggedRun = scheduler.run('normal', 'tagged', () => tagged.promise, undefined, {
-      mode: 'tagged',
-      storeId,
-    });
+    const taggedRun = scheduler.run(
+      'normal',
+      'tagged',
+      () => tagged.promise,
+      undefined,
+      queuedAdmission(storeId),
+    );
     await settle();
 
     let started = false;
@@ -117,7 +129,7 @@ describe('control barrier contract survives the coordinator extraction', () => {
     let ran = false;
     const held = scheduler.run('normal', 'after', async () => {
       ran = true;
-    }, undefined, { mode: 'tagged', storeId });
+    }, undefined, queuedAdmission(storeId));
     await settle();
     expect(ran).toBe(false); // sealed while the transition owns the store
 
@@ -167,7 +179,7 @@ describe('control barrier contract survives the coordinator extraction', () => {
     let ran = false;
     await scheduler.run('normal', 'after', async () => {
       ran = true;
-    }, undefined, { mode: 'tagged', storeId });
+    }, undefined, queuedAdmission(storeId));
 
     expect(ran).toBe(true);
   });

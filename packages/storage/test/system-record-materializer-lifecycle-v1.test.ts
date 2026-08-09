@@ -785,7 +785,7 @@ describe('system-record lane session lifecycle V1', () => {
         );
 
         // And it must not be reopenable as if nothing happened.
-        await expect(controller.open(ACTIVATION)).rejects.toThrow();
+        await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
       });
     }
 

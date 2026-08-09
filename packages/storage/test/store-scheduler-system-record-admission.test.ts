@@ -5,7 +5,7 @@ import {
   STORE_ADMISSION_SHARED_BYPASS_LIMIT,
   StoreControlBarrierTimeoutError,
   StorePriorityScheduler,
-  type StoreAdmissionV1,
+  type StoreQueuedAdmissionV1,
 } from '../src/store-priority-scheduler.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -26,10 +26,10 @@ function openScheduler(now?: () => number): StorePriorityScheduler {
 
 function admission(
   storeId: object,
-  mode: StoreAdmissionV1['mode'],
+  mode: StoreQueuedAdmissionV1['mode'],
   domain?: string,
   generation = 'gen-1',
-): StoreAdmissionV1 {
+): StoreQueuedAdmissionV1 {
   return domain === undefined
     ? { storeId, generation, mode }
     : { storeId, generation, domain, mode };
