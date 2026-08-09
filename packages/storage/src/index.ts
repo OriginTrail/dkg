@@ -88,6 +88,10 @@ export type {
   SystemRecordMaterializationEpochRotationV1,
 } from './system-record-materialization-epoch-contract-v1.js';
 export {
+  SystemRecordLaneForwarderV1,
+  type SystemRecordLaneOutcomePolicyV1,
+} from './system-record-lane-forwarder-v1.js';
+export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,

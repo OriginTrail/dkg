@@ -145,6 +145,7 @@ jobs:
             test/system-record-apply-command-v1.test.ts \
             test/system-record-atomic-apply-executor-v1.test.ts \
             test/system-record-materializer-lifecycle-v1.test.ts \
+            test/system-record-lane-forwarder-v1.test.ts \
             test/system-record-control-barrier-integration-v1.test.ts \
             test/system-record-capability-discovery-v1.test.ts \
             test/system-record-inspection-v1.test.ts \
