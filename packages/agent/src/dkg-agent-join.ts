@@ -96,7 +96,7 @@ import {
   OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, tryReplaceSubjectAtomically, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, supportsTripleStoreCapability, tryReplaceSubjectAtomically, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -389,7 +389,7 @@ import {
   type ContextGraphJoinAdmissionHost,
   type IncomingJoinRequestDecision,
 } from './context-graph-join-admission.js';
-import { pruneTerminalJoinRequestRecords } from './join-request-retention.js';
+import { tryPruneTerminalJoinRequestRecords } from './join-request-retention.js';
 
 const JOIN_REQUEST_INGRESS_WINDOW_MS = 60_000;
 const JOIN_REQUEST_INGRESS_PER_PEER = 20;
@@ -1990,7 +1990,7 @@ export class JoinRequestMethods extends DKGAgentBase {
 
     // Refuse to cross the membership boundary on a custom adapter that cannot
     // atomically replace the moderation predicates after the invite commits.
-    if (typeof this.store.structuredMutation !== 'function') {
+    if (!supportsTripleStoreCapability(this.store, 'structuredMutation')) {
       throw new Error(
         'Join approval requires atomic subject-predicate replacement support from the configured triple store.',
       );
@@ -2055,7 +2055,7 @@ export class JoinRequestMethods extends DKGAgentBase {
   /** Keep curator/requester moderation state bounded without risking the decision path. */
   async pruneTerminalJoinRequestHistory(this: DKGAgent, contextGraphId: string): Promise<void> {
     try {
-      await pruneTerminalJoinRequestRecords(this.store, contextGraphId);
+      await tryPruneTerminalJoinRequestRecords(this.store, contextGraphId);
     } catch (error) {
       // Retention is resource hygiene, not part of the authorization commit.
       // Keep the terminal decision durable and retry pruning on the next one.

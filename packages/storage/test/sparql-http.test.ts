@@ -2,6 +2,7 @@ import { createServer, type Server, type ServerResponse } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   SparqlHttpStore,
+  asGraphWriteGenSource,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
   tryReplaceGraphAtomically,
@@ -949,6 +950,31 @@ describe('SparqlHttpStore (test server)', () => {
         graph: 'http://ex.org/g2',
       }]);
       await expect(store.listGraphs()).resolves.toContain('http://ex.org/g1');
+      expect(listGraphsHits).toBe(2);
+    });
+
+    it('invalidates caches and write generations after an indeterminate structured mutation', async () => {
+      listGraphsHits = 0;
+      const store = new SparqlHttpStore({
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl.replace('/update', '/error-update'),
+        managedByDkg: true,
+      });
+      await store.listGraphs();
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(1);
+      const writeGen = asGraphWriteGenSource(store);
+      expect(writeGen).not.toBeNull();
+      const graph = 'http://ex.org/g2';
+      const before = writeGen?.getWriteGen(graph) ?? 0;
+
+      await expect(store.structuredMutation({ kind: 'delete-subjects', input: {
+        graphUri: graph,
+        subjects: ['http://ex.org/stale'],
+      } })).rejects.toThrow(/SPARQL HTTP structuredMutation failed \(500\)/);
+
+      expect(writeGen?.getWriteGen(graph)).toBeGreaterThan(before);
+      await store.listGraphs();
       expect(listGraphsHits).toBe(2);
     });
 

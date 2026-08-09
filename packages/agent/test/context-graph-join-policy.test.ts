@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGEvent, PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
+import { GraphSetIndexStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   DKGAgent,
   signAgentDelegation,
@@ -715,6 +716,39 @@ describe('context graph open enrollment policy', () => {
     } finally {
       store.update = originalUpdate;
     }
+  }, 30_000);
+
+  it('refuses approval before membership commit when a decorator wraps an incapable store', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-decorated-missing-structured-mutation';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('decorated-incapable-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending' });
+
+    const originalStore = (agent as any).store as TripleStore;
+    const legacyStore = new Proxy(originalStore, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') return undefined;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    (agent as any).store = new GraphSetIndexStore(legacyStore, { enabled: false });
+
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    )).rejects.toThrow(/requires atomic subject-predicate replacement support/i);
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('pending');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .not.toContain(joiner.agentAddress.toLowerCase());
   }, 30_000);
 
   it('repairs an interrupted approved-status write on a signed member retry', async () => {

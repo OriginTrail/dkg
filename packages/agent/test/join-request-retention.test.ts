@@ -6,7 +6,7 @@ import {
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { pruneTerminalJoinRequestRecords } from '../src/join-request-retention.js';
+import { tryPruneTerminalJoinRequestRecords } from '../src/join-request-retention.js';
 
 const CG = 'moderation-retention';
 const META = contextGraphMetaGraphUri(CG);
@@ -51,7 +51,7 @@ describe('terminal join-request retention', () => {
       ...requestQuads(6, 'pending'),
     ]);
 
-    await expect(pruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
+    await expect(tryPruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
 
     const result = await store.query(`
       SELECT ?request ?status WHERE {
@@ -82,7 +82,7 @@ describe('terminal join-request retention', () => {
       ...requestQuads(3, 'approved', { requestTimestamp: null, decisionTimestamp: 950 }),
     ]);
 
-    await expect(pruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
+    await expect(tryPruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
 
     const result = await store.query(`
       SELECT ?request WHERE {
@@ -109,7 +109,7 @@ describe('terminal join-request retention', () => {
       query: store.query.bind(store),
     } as unknown as TripleStore;
 
-    await expect(pruneTerminalJoinRequestRecords(legacyStore, CG, 1)).resolves.toBeUndefined();
+    await expect(tryPruneTerminalJoinRequestRecords(legacyStore, CG, 1)).resolves.toBeUndefined();
     expect((await rowsForStatus(store)).map((row) => row.request)).toHaveLength(2);
     await store.close();
   });
@@ -125,7 +125,7 @@ describe('terminal join-request retention', () => {
     })));
     const mutationSpy = vi.spyOn(store, 'structuredMutation');
 
-    await expect(pruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
+    await expect(tryPruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
 
     expect(mutationSpy).toHaveBeenCalledTimes(2);
     expect((await rowsForStatus(store)).map((row) => row.request)).toHaveLength(2);

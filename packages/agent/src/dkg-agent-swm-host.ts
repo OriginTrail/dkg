@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, supportsTripleStoreCapability, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3330,9 +3330,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!canApply() || !capturedOnChainId) {
         return { status: 'skipped', reason: 'not-current' };
       }
-      if (
-        typeof this.store.structuredMutation !== 'function'
-      ) {
+      if (!supportsTripleStoreCapability(this.store, 'structuredMutation')) {
         return { status: 'skipped', reason: 'unsupported-store' };
       }
       // Server-side byte-safe copy is the ONLY safe relocation mechanism. The

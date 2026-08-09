@@ -53,7 +53,7 @@ function terminalJoinRequestWhere(metaGraph: string): string {
  * select-then-delete fallback could erase a subject concurrently reused as a
  * pending request.
  */
-export async function pruneTerminalJoinRequestRecords(
+export async function tryPruneTerminalJoinRequestRecords(
   store: TripleStore,
   contextGraphId: string,
   maxRecords = MAX_TERMINAL_JOIN_REQUEST_RECORDS_PER_CONTEXT_GRAPH,

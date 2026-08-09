@@ -2,10 +2,14 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   BOUNDED_MUTATION_MAX_IRIS,
+  ChangelogStore,
+  GraphSetIndexStore,
+  SharedMemoryLiteralBlobStore,
   buildDeleteSubjectsUpdate,
   OxigraphStore,
   OxigraphWorkerStore,
   UnsupportedTripleStoreCapabilityError,
+  supportsTripleStoreCapability,
   tryDeleteSubjects,
   type Quad,
   type TripleStore,
@@ -287,6 +291,25 @@ describe('bounded structured mutation capabilities', () => {
       .rejects.toThrow('backend failed');
   });
 
+  it('reports structured mutation support truthfully through every decorator', async () => {
+    const incapable = new ChangelogStore(new GraphSetIndexStore(
+      new SharedMemoryLiteralBlobStore({} as TripleStore, {
+        blobDir: '/tmp/dkg-structured-mutation-capability-test',
+        thresholdBytes: 1024,
+      }),
+    ));
+    expect(supportsTripleStoreCapability(incapable, 'structuredMutation')).toBe(false);
+
+    const capable = new ChangelogStore(new GraphSetIndexStore(
+      new SharedMemoryLiteralBlobStore(new OxigraphStore(), {
+        blobDir: '/tmp/dkg-structured-mutation-capability-test',
+        thresholdBytes: 1024,
+      }),
+    ));
+    expect(supportsTripleStoreCapability(capable, 'structuredMutation')).toBe(true);
+    await capable.close();
+  });
+
   it('executes every mutation variant through the real worker RPC boundary', async () => {
     const store = new OxigraphWorkerStore();
     try {
@@ -332,6 +355,20 @@ describe('bounded structured mutation capabilities', () => {
         descendantSuffix: '/', excludedPredicates: [],
       } });
 
+      const sourceRows = await rows(store, GRAPH);
+      expect(sourceRows.some((row) => row.s === 'urn:test:delete')).toBe(false);
+      expect(sourceRows.some((row) => row.s === 'urn:test:req:old')).toBe(false);
+      expect(sourceRows.some((row) => row.s === 'urn:test:req:new')).toBe(true);
+      expect(sourceRows.some((row) => row.s === 'urn:test:record')).toBe(false);
+      expect(sourceRows.some((row) => row.s === 'urn:test:record/1')).toBe(false);
+      expect(sourceRows).toContainEqual({
+        s: 'urn:test:subject',
+        p: STATUS,
+        o: '"approved"',
+      });
+      expect(await rows(store, target)).toEqual([
+        { s: 'urn:test:projection', p: P, o: '"fresh"' },
+      ]);
       expect(await rows(store, OTHER_GRAPH)).toEqual([
         { s: 'urn:test:projection', p: P, o: '"fresh"' },
       ]);

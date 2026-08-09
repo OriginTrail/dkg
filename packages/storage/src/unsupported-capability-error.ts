@@ -10,6 +10,34 @@ export type TripleStoreCapability =
   | 'structuredMutation';
 
 /**
+ * Decorators whose optional methods are always present use this non-mutating
+ * probe to report the capability of the store they wrap. The symbol keeps the
+ * forwarding contract explicit without adding another public method name to
+ * every TripleStore implementation.
+ */
+export const TRIPLE_STORE_CAPABILITY_SUPPORT: unique symbol = Symbol(
+  'dkg.tripleStoreCapabilitySupport',
+);
+
+interface TripleStoreCapabilitySupport {
+  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean;
+}
+
+/** Return whether invoking an optional operation can reach a capable backend. */
+export function supportsTripleStoreCapability(
+  store: unknown,
+  capability: TripleStoreCapability,
+): boolean {
+  const support = (store as Partial<TripleStoreCapabilitySupport> | null | undefined)
+    ?.[TRIPLE_STORE_CAPABILITY_SUPPORT];
+  if (typeof support === 'function') {
+    return support.call(store, capability);
+  }
+  return typeof (store as Partial<Record<TripleStoreCapability, unknown>> | null | undefined)
+    ?.[capability] === 'function';
+}
+
+/**
  * Typed signal that an optional store capability is unavailable.
  *
  * Decorators use this instead of a generic Error when their public method is

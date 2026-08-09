@@ -1,5 +1,4 @@
 import {
-  assertSafeRdfTerm,
   isSafeIri,
   sparqlInt,
   sparqlString,
@@ -13,6 +12,7 @@ import type {
   ReplaceSubjectPredicatesInput,
   StructuredMutation,
 } from './triple-store.js';
+import { formatRdfObjectTerm } from './rdf-term-format.js';
 
 export const BOUNDED_MUTATION_MAX_IRIS = 100_000;
 export const BOUNDED_MUTATION_MAX_PRUNE_DELETE = 10_000;
@@ -53,22 +53,11 @@ function absoluteIri(value: string, label: string): string {
 }
 
 function normalizeStructuredRdfObject(value: string, label: string): string {
-  if (value.startsWith('"')) {
-    const bareDatatype = value.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    const normalized = bareDatatype
-      ? `${bareDatatype[1]}^^<${absoluteIri(bareDatatype[2], `${label} datatype`)}>`
-      : value;
-    try {
-      assertSafeRdfTerm(normalized);
-    } catch {
-      throw new Error(`${label} must be a safe RDF literal or absolute IRI`);
-    }
-    return normalized;
+  try {
+    return formatRdfObjectTerm(value, label, absoluteIri);
+  } catch {
+    throw new Error(`${label} must be a safe RDF literal or absolute IRI`);
   }
-  const unwrapped = value.startsWith('<') && value.endsWith('>')
-    ? value.slice(1, -1)
-    : value;
-  return `<${absoluteIri(unwrapped, label)}>`;
 }
 
 function uniqueIris(

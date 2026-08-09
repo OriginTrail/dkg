@@ -1234,12 +1234,21 @@ export class SparqlHttpStore implements TripleStore {
     }
     const update = buildStructuredMutationUpdate(normalized);
     if (!update || !structuredMutationMightMutate(normalized)) return;
-    await this.postUpdate(
-      update,
-      { ...options, source: options?.source ?? 'sparql-http.structuredMutation' },
-      'structuredMutation',
-      touchedGraphs,
-    );
+    try {
+      await this.postUpdate(
+        update,
+        { ...options, source: options?.source ?? 'sparql-http.structuredMutation' },
+        'structuredMutation',
+        touchedGraphs,
+      );
+    } catch (error) {
+      // A remote endpoint may commit before its response is lost. Fail open for
+      // cache coherence: invalidate graph enumeration and advance each affected
+      // write generation even though the caller still receives the failure.
+      this.invalidateListGraphsCache();
+      this.writeGen.recordGraphWrites(touchedGraphs);
+      throw error;
+    }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites(touchedGraphs);
   }

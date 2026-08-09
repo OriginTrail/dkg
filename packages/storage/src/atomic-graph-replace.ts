@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import {
-  assertSafeIri,
-  assertSafeRdfTerm,
-} from '@origintrail-official/dkg-core';
+import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
-import { buildReplaceSubjectPredicatesUpdate } from './bounded-structured-mutation.js';
-import type { ReplaceSubjectPredicatesInput } from './triple-store.js';
+import {
+  formatRdfObjectTerm,
+  formatRdfResourceTerm,
+  unwrapIriTerm,
+} from './rdf-term-format.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -49,7 +49,7 @@ export function buildAtomicGraphReplaceUpdate(
 
   const stagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
   const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
+    .map((quad) => `    ${formatRdfResourceTerm(quad.subject, 'Atomic graph replacement subject')} <${assertSafeIri(unwrapIriTerm(quad.predicate))}> ${formatRdfObjectTerm(quad.object, 'Atomic graph replacement object')} .`)
     .join('\n');
   const cleanup = `DROP SILENT GRAPH <${stagingGraph}>`;
   return {
@@ -160,12 +160,6 @@ export function buildAtomicSubjectReplaceUpdate(
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
 }
 
-export function buildAtomicSubjectPredicatesReplaceUpdate(
-  input: ReplaceSubjectPredicatesInput,
-): string {
-  return buildReplaceSubjectPredicatesUpdate(input);
-}
-
 function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {
   for (const [index, quad] of quads.entries()) {
     if (quad.graph !== graphUri) {
@@ -224,36 +218,7 @@ export function assertSubjectReplacementPayload(
 
 function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
   const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
+    .map((quad) => `    ${formatRdfResourceTerm(quad.subject, 'Atomic graph replacement subject')} <${assertSafeIri(unwrapIriTerm(quad.predicate))}> ${formatRdfObjectTerm(quad.object, 'Atomic graph replacement object')} .`)
     .join('\n');
   return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
-}
-
-function formatResource(term: string, role: string): string {
-  if (term.startsWith('"')) {
-    throw new Error(`Atomic graph replacement ${role} must be an IRI`);
-  }
-  return `<${assertSafeIri(unwrapIri(term))}>`;
-}
-
-function formatObject(term: string): string {
-  if (term.startsWith('"')) {
-    const normalized = normalizeLiteralDatatype(term);
-    assertSafeRdfTerm(normalized);
-    return normalized;
-  }
-  return formatResource(term, 'object');
-}
-
-function normalizeLiteralDatatype(term: string): string {
-  const bareDatatype = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-  return bareDatatype
-    ? `${bareDatatype[1]}^^<${assertSafeIri(unwrapIri(bareDatatype[2]))}>`
-    : term;
-}
-
-function unwrapIri(term: string): string {
-  return term.startsWith('<') && term.endsWith('>')
-    ? term.slice(1, -1)
-    : term;
 }

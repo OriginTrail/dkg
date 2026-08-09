@@ -43,7 +43,6 @@ export {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  buildAtomicSubjectPredicatesReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
@@ -122,6 +121,7 @@ export {
 } from './system-record-lane-forwarder-v1.js';
 export {
   UnsupportedTripleStoreCapabilityError,
+  supportsTripleStoreCapability,
   isTripleStoreCapabilityRefusal,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,

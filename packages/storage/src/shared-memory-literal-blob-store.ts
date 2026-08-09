@@ -14,7 +14,12 @@ import type {
   TripleStore,
   StructuredMutation,
 } from './triple-store.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
+  UnsupportedTripleStoreCapabilityError,
+  supportsTripleStoreCapability,
+  type TripleStoreCapability,
+} from './unsupported-capability-error.js';
 import { normalizeStructuredMutation } from './bounded-structured-mutation.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
@@ -90,6 +95,10 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
     linkStoreChainV1(this, inner);
     this.blobDir = options.blobDir;
     this.thresholdBytes = options.thresholdBytes;
+  }
+
+  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean {
+    return supportsTripleStoreCapability(this.inner, capability);
   }
 
   async insert(quads: Quad[], options?: QueryOptions): Promise<void> {
