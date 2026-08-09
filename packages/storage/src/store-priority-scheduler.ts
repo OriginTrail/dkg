@@ -143,12 +143,14 @@ export type StoreAdmissionV1 =
 
 import {
   StoreControlBarrierCoordinator,
-  StoreControlBarrierTimeoutError,
   type StoreBarrierHostV1,
+} from './store-control-barrier-v1-internal.js';
+import {
+  StoreControlBarrierTimeoutError,
   type StoreControlBarrierBlockers,
   type StoreControlBarrierPhase,
   type StoreGenerationSeal,
-} from './store-control-barrier-v1-internal.js';
+} from './store-barrier-contract.js';
 // Re-exported: these were declared here before the barrier subsystem moved out,
 // and they are part of the package's published surface.
 export {
@@ -464,6 +466,15 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * with nothing tagged queued there is nothing for it to block.
    */
   private taggedQueuedCount = 0;
+  /**
+   * Running total of per-store `taggedInflight`, maintained at the same two
+   * choke points that mutate it.
+   *
+   * Exists so the barrier quiescence check is O(1). It previously summed
+   * `storeStates` on every completion — `pump()` runs from each one — which
+   * made a hot path scale with the number of tracked stores.
+   */
+  private taggedInflightTotal = 0;
   /**
    * Held `run()` calls per lane. A held call has been ADMITTED — it is
    * admitted-but-not-running work exactly like a queued one — so it counts
@@ -1156,9 +1167,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   private countTaggedInflight(): number {
-    let total = 0;
-    for (const state of this.storeStates.values()) total += state.taggedInflight;
-    return total;
+    return this.taggedInflightTotal;
   }
 
   private countGenerationsInflight(): number {
@@ -1225,6 +1234,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     if (admission === undefined) return;
     const state = this.getOrCreateStoreState(admission.storeId);
     state.taggedInflight += 1;
+    this.taggedInflightTotal += 1;
     // The generation permit is held for EXECUTION only — see StoreAdmissionV1.
     state.runningPermits.set(
       admission.generation,
@@ -1261,6 +1271,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const state = this.storeStates.get(admission.storeId);
     if (state === undefined) return;
     state.taggedInflight -= 1;
+    this.taggedInflightTotal -= 1;
     const permits = (state.runningPermits.get(admission.generation) ?? 1) - 1;
     if (permits > 0) state.runningPermits.set(admission.generation, permits);
     else state.runningPermits.delete(admission.generation);
