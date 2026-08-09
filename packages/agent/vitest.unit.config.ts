@@ -111,6 +111,7 @@ export default defineConfig({
       "test/verify-batch.test.ts",
       "test/chain-cursor-wiring.test.ts",
       "test/chain-reconciler.test.ts",
+      "test/vm-reconcile-self-prime.test.ts",
       "test/core-fills-gap.test.ts",
       "test/finalization-reconcile-negative-memo.test.ts",
       "test/startup-jitter.test.ts",

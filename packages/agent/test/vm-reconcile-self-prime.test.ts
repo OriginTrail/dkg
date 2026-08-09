@@ -112,6 +112,133 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(triggered).toEqual([`periodic:${LOCAL}`]);
   });
 
+  it('sweeps only operator-selected accepted RFC-64 public CGs without creating a subscription', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64SelectedVmSweep', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const selected = 'rfc64-selected-vm';
+    const acceptedButUnselected = 'rfc64-accepted-only';
+    const syncScopedButUnaccepted = 'rfc64-sync-only';
+    const serializedPolicy = (contextGraphId: string) => JSON.parse(JSON.stringify({
+      policyEnvelope: {
+        payload: { accessPolicy: 0, contextGraphId },
+      },
+      targets: [],
+    }));
+    (internals as any).config.syncContextGraphs = [selected, syncScopedButUnaccepted];
+    (internals as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [
+        serializedPolicy(selected),
+        serializedPolicy(acceptedButUnselected),
+      ],
+    };
+    internals.subscribedContextGraphs.clear();
+
+    const triggered: string[] = [];
+    internals.vmReconcileDispatcher = {
+      dispatch: async (cg: string, reason: 'live' | 'periodic') => {
+        triggered.push(`${reason}:${cg}`);
+        return true;
+      },
+      triggerLive: () => undefined,
+      triggerPeriodic: () => undefined,
+      tryTriggerPeriodic: () => true,
+    };
+
+    await internals.runVmReconcileSweep();
+
+    expect(triggered).toEqual([`periodic:${selected}`]);
+    expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
+  it('resolves a selected-only RFC-64 VM target from chain binding without persisting member intent', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64SelectedVmTarget', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const selected = 'rfc64-selected-vm-target';
+    (internals as any).config.syncContextGraphs = [selected];
+    (internals as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: {
+          payload: { accessPolicy: 0, contextGraphId: selected },
+        },
+        targets: [],
+      }],
+    };
+    internals.subscribedContextGraphs.clear();
+    const resolveOnChainId = vi.fn(async () => '298');
+    (internals as any).getContextGraphOnChainId = resolveOnChainId;
+
+    const target = await (internals as any).resolveVmReconcileTarget(selected);
+
+    expect(target).toMatchObject({
+      rfc64SelectedOnly: true,
+      onChainId: '298',
+      onChainCgId: 298n,
+    });
+    expect(resolveOnChainId).toHaveBeenCalledWith(selected, expect.objectContaining({
+      source: 'agent.vmReconcile.resolveSelectedOnChainId',
+    }));
+    expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
+  it('invalidates a selected-only target when operator scope is removed during binding resolution', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64SelectedVmScopeFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const selected = 'rfc64-selected-vm-scope-fence';
+    const config = (internals as any).config;
+    config.syncContextGraphs = [selected];
+    config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } },
+        targets: [],
+      }],
+    };
+    const binding = deferred<string | null>();
+    (internals as any).getContextGraphOnChainId = () => binding.promise;
+
+    const target = (internals as any).resolveVmReconcileTarget(selected);
+    await Promise.resolve();
+    config.syncContextGraphs = [];
+    binding.resolve('298');
+
+    await expect(target).rejects.toMatchObject({ code: 'VmReconcileQueueClosed' });
+    expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
+  it('preserves lifecycle cancellation while a selected-only chain binding is unresolved', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'Rfc64SelectedVmAbortFence', chainAdapter: chain });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const selected = 'rfc64-selected-vm-abort-fence';
+    (internals as any).config.syncContextGraphs = [selected];
+    (internals as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } },
+        targets: [],
+      }],
+    };
+    const binding = deferred<string | null>();
+    (internals as any).getContextGraphOnChainId = () => binding.promise;
+    const controller = new AbortController();
+
+    const target = (internals as any).resolveVmReconcileTarget(
+      selected,
+      () => true,
+      controller.signal,
+    );
+    await Promise.resolve();
+    controller.abort();
+
+    await expect(target).rejects.toMatchObject({ code: 'VmReconcileQueueClosed' });
+    expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
   it('KACG nudge targeting: binds ONLY the unbound CG whose on-chain id matches the event, not an unrelated one', async () => {
     // This exercises the SAME `selfPrimeSubscriptionOnChainId` helper the live
     // onKARegisteredToContextGraph nudge delegates to, with a `targetOnChainId`
