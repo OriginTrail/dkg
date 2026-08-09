@@ -47,6 +47,8 @@ export interface VmRecoveryFootprintBridgeReader {
 export interface VmRecoveryFootprintBridgeOptions {
   /** Hard upper bound on per-slice update-context reads. */
   maxContextReads: number;
+  /** Per-KA wall-clock ceiling for optional latest-state sizing reads. */
+  sizingReadTimeoutMs?: number;
   signal?: AbortSignal;
   /** Captured subscription/binding lifecycle guard. */
   isCurrent: () => boolean;
@@ -59,6 +61,8 @@ export interface VmRecoveryFootprintBridgeOptions {
 }
 
 const VM_RECOVERY_BRIDGE_ABORTED = Symbol('vm-recovery-bridge-aborted');
+const VM_RECOVERY_BRIDGE_TIMED_OUT = Symbol('vm-recovery-bridge-timed-out');
+export const VM_RECOVERY_FOOTPRINT_READ_TIMEOUT_MS = 2_500;
 
 async function raceVmRecoveryBridgeAbort<T>(
   promise: Promise<T>,
@@ -78,6 +82,63 @@ async function raceVmRecoveryBridgeAbort<T>(
   }
 }
 
+async function readVmRecoveryFootprintWithDeadline<T>(
+  start: (signal: AbortSignal) => Promise<T>,
+  callerSignal: AbortSignal | undefined,
+  timeoutMs: number,
+): Promise<
+  T
+  | typeof VM_RECOVERY_BRIDGE_ABORTED
+  | typeof VM_RECOVERY_BRIDGE_TIMED_OUT
+> {
+  if (callerSignal?.aborted) return VM_RECOVERY_BRIDGE_ABORTED;
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let abortFromCaller: (() => void) | undefined;
+  const callerAborted = new Promise<typeof VM_RECOVERY_BRIDGE_ABORTED>((resolve) => {
+    if (!callerSignal) return;
+    abortFromCaller = () => {
+      controller.abort(callerSignal.reason);
+      resolve(VM_RECOVERY_BRIDGE_ABORTED);
+    };
+    callerSignal.addEventListener('abort', abortFromCaller, { once: true });
+  });
+  const timedOut = new Promise<typeof VM_RECOVERY_BRIDGE_TIMED_OUT>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort(new Error(
+        `VM recovery footprint read timed out after ${timeoutMs}ms`,
+      ));
+      resolve(VM_RECOVERY_BRIDGE_TIMED_OUT);
+    }, timeoutMs);
+    timer.unref?.();
+  });
+  let work: Promise<T>;
+  try {
+    // Invoke immediately so a synchronous lifecycle abort prevents later
+    // reads in the same bounded prefix from even starting.
+    work = Promise.resolve(start(controller.signal));
+  } catch (error) {
+    work = Promise.reject(error);
+  }
+  try {
+    return await Promise.race([work, callerAborted, timedOut]);
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (callerSignal && abortFromCaller) {
+      callerSignal.removeEventListener('abort', abortFromCaller);
+    }
+  }
+}
+
+function downgradeUnverifiedPublicFootprints<T extends VmRecoveryFootprintBridgeTarget>(
+  targets: readonly T[],
+): T[] {
+  return targets.map((target) => target.recoveryFootprint?.kind === 'public-v10'
+    ? { ...target, recoveryFootprint: { kind: 'unknown' } }
+    : target) as T[];
+}
+
 /**
  * Enrich a bounded prefix of classic-reconciler targets with public-chain
  * sizing hints.
@@ -86,9 +147,11 @@ async function raceVmRecoveryBridgeAbort<T>(
  * the access-policy and update-context calls are latest-state reads and are
  * not root-atomic. Consequently they get an explicit `latest-bounded` anchor
  * and can only influence soft packing. Positive CG liveness is required before
- * consulting the default-zero policy getter. Any absent capability, inactive
- * or non-public policy, failed/zero scalar read, abort, or stale lifecycle
- * leaves the target unknown so it retains the legacy singleton request shape.
+ * consulting the default-zero policy getter or trusting an existing public
+ * hint. Any absent authority capability, inactive or non-public policy, abort,
+ * or stale lifecycle downgrades public hints to unknown. Once public authority
+ * is proven, failed/zero/deadline-limited scalar reads leave only their target
+ * unknown so it retains the legacy singleton request shape.
  */
 export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBridgeTarget>(
   targets: readonly T[],
@@ -97,15 +160,13 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   options: Readonly<VmRecoveryFootprintBridgeOptions>,
 ): Promise<T[]> {
   const original = [...targets];
+  const unverified = downgradeUnverifiedPublicFootprints(targets);
+  if (targets.length === 0) return original;
   if (
-    !Number.isSafeInteger(options.maxContextReads)
-    || options.maxContextReads <= 0
-    || onChainCgId <= 0n
-    || targets.length === 0
+    onChainCgId <= 0n
     || options.signal?.aborted
     || !options.isCurrent()
-    || typeof reader.getKnowledgeAssetUpdateContext !== 'function'
-  ) return original;
+  ) return unverified;
 
   let accessPolicy: number | null;
   if (options.resolveLiveAccessPolicy) {
@@ -114,16 +175,16 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
         options.resolveLiveAccessPolicy(onChainCgId),
         options.signal,
       );
-      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return original;
+      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return unverified;
       accessPolicy = resolved;
     } catch {
-      return original;
+      return unverified;
     }
   } else {
     if (
       typeof reader.isContextGraphActiveOnChain !== 'function'
       || typeof reader.getContextGraphAccessPolicy !== 'function'
-    ) return original;
+    ) return unverified;
     let active: boolean | typeof VM_RECOVERY_BRIDGE_ABORTED;
     try {
       active = await raceVmRecoveryBridgeAbort(
@@ -131,26 +192,26 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
         options.signal,
       );
     } catch {
-      return original;
+      return unverified;
     }
     if (
       active !== true
       || options.signal?.aborted
       || !options.isCurrent()
-    ) return original;
+    ) return unverified;
     try {
       const resolved = await raceVmRecoveryBridgeAbort(
         reader.getContextGraphAccessPolicy(onChainCgId),
         options.signal,
       );
-      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return original;
+      if (resolved === VM_RECOVERY_BRIDGE_ABORTED) return unverified;
       accessPolicy = resolved;
     } catch {
-      return original;
+      return unverified;
     }
   }
   if (accessPolicy !== 0 || options.signal?.aborted || !options.isCurrent()) {
-    return original;
+    return unverified;
   }
 
   const unknownEntries = targets
@@ -159,18 +220,30 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
       || target.recoveryFootprint.kind === 'unknown')
     .slice(0, options.maxContextReads);
   if (unknownEntries.length === 0) return original;
+  const sizingReadTimeoutMs = options.sizingReadTimeoutMs
+    ?? VM_RECOVERY_FOOTPRINT_READ_TIMEOUT_MS;
+  if (
+    !Number.isSafeInteger(options.maxContextReads)
+    || options.maxContextReads <= 0
+    || !Number.isSafeInteger(sizingReadTimeoutMs)
+    || sizingReadTimeoutMs <= 0
+    || typeof reader.getKnowledgeAssetUpdateContext !== 'function'
+  ) return original;
 
   const observed = await Promise.all(unknownEntries.map(async ({ target, index }) => {
     if (options.signal?.aborted || !options.isCurrent()) return { index };
     try {
-      const observedContext = await raceVmRecoveryBridgeAbort(
-        reader.getKnowledgeAssetUpdateContext!(
-          BigInt(target.kaId),
-          options.signal ? { signal: options.signal } : undefined,
+      const observedContext = await readVmRecoveryFootprintWithDeadline(
+        (signal) => reader.getKnowledgeAssetUpdateContext!(
+          BigInt(target.kaId), { signal },
         ),
         options.signal,
+        sizingReadTimeoutMs,
       );
-      if (observedContext === VM_RECOVERY_BRIDGE_ABORTED) return { index };
+      if (
+        observedContext === VM_RECOVERY_BRIDGE_ABORTED
+        || observedContext === VM_RECOVERY_BRIDGE_TIMED_OUT
+      ) return { index };
       const context = observedContext;
       if (
         options.signal?.aborted
@@ -197,7 +270,7 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
 
   // An unsubscribe/rebind/abort invalidates the whole latest-state observation
   // instead of leaking a partially enriched scheduling plan across lifecycles.
-  if (options.signal?.aborted || !options.isCurrent()) return original;
+  if (options.signal?.aborted || !options.isCurrent()) return unverified;
   const enriched = [...targets];
   for (const { index, footprint } of observed) {
     if (!footprint) continue;

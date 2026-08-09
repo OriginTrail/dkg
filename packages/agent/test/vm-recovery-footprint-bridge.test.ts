@@ -170,7 +170,9 @@ describe('classic VM recovery footprint bridge', () => {
     );
 
     expect(updateContext).toHaveBeenCalledTimes(1);
-    expect(updateContext).toHaveBeenCalledWith(3n, undefined);
+    expect(updateContext).toHaveBeenCalledWith(3n, {
+      signal: expect.any(AbortSignal),
+    });
     expect(enriched[0]).toBe(targets[0]);
     expect(enriched[1]).toBe(targets[1]);
     expect(enriched[2]!.recoveryFootprint).toMatchObject({
@@ -306,5 +308,75 @@ describe('classic VM recovery footprint bridge', () => {
     controller.abort();
     await expect(pending).resolves.toEqual(targets);
     expect(updateContext).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    {
+      label: 'inactive',
+      reader: {
+        isContextGraphActiveOnChain: async () => false,
+        getContextGraphAccessPolicy: async () => 0,
+      },
+      options: {},
+    },
+    {
+      label: 'private',
+      reader: {
+        isContextGraphActiveOnChain: async () => true,
+        getContextGraphAccessPolicy: async () => 1,
+      },
+      options: {},
+    },
+    {
+      label: 'missing authority capability',
+      reader: {},
+      options: {},
+    },
+    {
+      label: 'bounded authority timeout',
+      reader: {},
+      options: { resolveLiveAccessPolicy: async () => null },
+    },
+  ])('downgrades pre-populated public hints when authority is $label', async ({
+    reader,
+    options,
+  }) => {
+    const targets = [pinnedTarget(1)];
+
+    const [result] = await enrichVmRecoveryFootprints(targets, 14n, reader, {
+      maxContextReads: 10,
+      isCurrent: () => true,
+      ...options,
+    });
+
+    expect(result).not.toBe(targets[0]);
+    expect(result!.recoveryFootprint).toEqual({ kind: 'unknown' });
+  });
+
+  it('preserves proven-public pre-populated hints without a sizing capability', async () => {
+    const latest: Target = {
+      kaId: '2',
+      recoveryFootprint: {
+        kind: 'public-v10',
+        byteSize: 456n,
+        merkleLeafCount: 8n,
+        assertionVersion: '3',
+        anchor: { kind: 'latest-bounded' },
+      },
+    };
+    const targets = [pinnedTarget(1), latest];
+
+    const enriched = await enrichVmRecoveryFootprints(
+      targets,
+      14n,
+      {
+        isContextGraphActiveOnChain: async () => true,
+        getContextGraphAccessPolicy: async () => 0,
+      },
+      { maxContextReads: 10, isCurrent: () => true },
+    );
+
+    expect(enriched[0]).toBe(targets[0]);
+    expect(enriched[1]).toBe(targets[1]);
   });
 });
