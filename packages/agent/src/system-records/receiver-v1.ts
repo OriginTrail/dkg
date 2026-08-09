@@ -135,16 +135,21 @@ export function createAgentProfileReceiverV1(
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
 
+      const verificationNowMs = receiverNowMs(nowMs?.() ?? Date.now());
       const candidate = await buildVerifiedActiveCandidateFactsV1({
         networkId,
         row,
         signal,
-        nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
+        nowMs: verificationNowMs,
         resolveArtifact,
         verifyAuthorityEnvelope,
         verifyCurrentBundle,
       });
       signal.throwIfAborted();
+      assertActiveHeadFreshV1(
+        candidate.head,
+        receiverNowMs(nowMs?.() ?? Date.now()),
+      );
       const outcome = await consumeCandidate(candidate, signal);
       // Atomic apply is the point of no return. A cancellation that arrives
       // after the storage closure returns must not hide a committed outcome and
@@ -207,15 +212,12 @@ async function buildVerifiedActiveCandidateFactsV1(
   );
   assertRowBindsHead(networkId, row, envelope);
   assertActiveHeadEnvelopeV1(envelope);
-  if (Date.parse(envelope.object.validUntil) <= nowMs) {
-    throw new Error('active profile receiver resolved an expired agent-profile head');
-  }
+  assertActiveHeadFreshV1(envelope.object, nowMs);
 
   const { closure, verifiedBundle } = await verifyActiveProfileClosureForRowV1({
     row,
     signal,
     nowMs,
-    envelope,
     currentHeadArtifact,
     resolveArtifact,
     verifyAuthorityEnvelope,
@@ -265,7 +267,6 @@ async function buildVerifiedActiveCandidateFactsV1(
 
 interface VerifyActiveProfileClosureOptionsV1
   extends Omit<BuildVerifiedActiveCandidateFactsOptionsV1, 'networkId'> {
-  readonly envelope: SignedAgentProfileActiveHeadEnvelopeV1;
   readonly currentHeadArtifact: SystemRecordArtifactV1;
 }
 
@@ -276,42 +277,23 @@ async function verifyActiveProfileClosureForRowV1(
     row,
     signal,
     nowMs,
-    envelope,
     currentHeadArtifact,
     resolveArtifact,
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
   } = options;
-  signal.throwIfAborted();
-  const resolvedCurrentBundleArtifact = await resolveArtifact({
-    type: 'object',
-    objectKind: 'profile-bundle',
-    objectDigest: envelope.object.bundleDigest,
-  }, signal);
-  signal.throwIfAborted();
-  if (resolvedCurrentBundleArtifact === null) {
-    throw new Error(`verification closure is missing ${envelope.object.bundleDigest}`);
-  }
-  const currentBundleArtifact = snapshotExpectedArtifactV1(
-    resolvedCurrentBundleArtifact,
-    'profile-bundle',
-    envelope.object.bundleDigest,
-    'closure artifact',
+  const bundleVerification = createExactOnceBundleVerificationResultV1(
+    verifyCurrentBundle,
+    signal,
   );
   const closure = await buildAgentProfileVerificationClosureV1(row.headDigest, {
     nowMs,
     resolve: async (reference) => {
       signal.throwIfAborted();
-      let owned: SystemRecordArtifactV1 | undefined;
-      if (reference.objectKind === 'agent-profile-head'
-        && reference.digest === row.headDigest) {
-        owned = currentHeadArtifact;
-      } else if (reference.objectKind === 'profile-bundle'
-        && reference.digest === envelope.object.bundleDigest) {
-        owned = currentBundleArtifact;
-      } else {
-        owned = await resolveClosureArtifactV1(reference, resolveArtifact, signal);
-      }
+      const owned = reference.objectKind === 'agent-profile-head'
+        && reference.digest === row.headDigest
+        ? currentHeadArtifact
+        : await resolveClosureArtifactV1(reference, resolveArtifact, signal);
       signal.throwIfAborted();
       if (owned === undefined) return undefined;
       return Object.freeze({
@@ -326,21 +308,51 @@ async function verifyActiveProfileClosureForRowV1(
       signal.throwIfAborted();
       return verified === true;
     },
-    verifyCurrentBundle: (head, canonicalBundleBytes) =>
-      head.bundleDigest === envelope.object.bundleDigest
-      && systemRecordBytesEqualV1(canonicalBundleBytes, currentBundleArtifact.canonicalBytes),
+    verifyCurrentBundle: bundleVerification.verify,
   });
-  signal.throwIfAborted();
-  const result = await verifyCurrentBundle(
-    envelope.object,
-    Uint8Array.from(currentBundleArtifact.canonicalBytes),
-    signal,
-  );
-  signal.throwIfAborted();
-  const decoded = decodeOpaqueKaBundleV1(currentBundleArtifact.canonicalBytes);
+  return bundleVerification.complete(closure);
+}
+
+interface ExactOnceBundleVerificationResultV1 {
+  readonly verify: (
+    head: AgentProfileActiveHeadObjectV1,
+    canonicalBundleBytes: Uint8Array,
+  ) => Promise<boolean>;
+  readonly complete: (
+    closure: SystemRecordVerificationClosureV1,
+  ) => VerifiedActiveProfileClosureV1;
+}
+
+function createExactOnceBundleVerificationResultV1(
+  verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'],
+  signal: AbortSignal,
+): ExactOnceBundleVerificationResultV1 {
+  let invoked = false;
+  let verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'] | undefined;
   return Object.freeze({
-    closure,
-    verifiedBundle: snapshotVerifiedBundle(result, decoded.projectionBytes),
+    verify: async (
+      head: AgentProfileActiveHeadObjectV1,
+      canonicalBundleBytes: Uint8Array,
+    ) => {
+      if (invoked) throw new Error('active profile bundle verification must run exactly once');
+      invoked = true;
+      signal.throwIfAborted();
+      const result = await verifyCurrentBundle(
+        head,
+        Uint8Array.from(canonicalBundleBytes),
+        signal,
+      );
+      signal.throwIfAborted();
+      const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
+      verifiedBundle = snapshotVerifiedBundle(result, decoded.projectionBytes);
+      return true;
+    },
+    complete: (closure: SystemRecordVerificationClosureV1) => {
+      if (!invoked || verifiedBundle === undefined) {
+        throw new Error('active profile receiver resolved a non-active verification closure');
+      }
+      return Object.freeze({ closure, verifiedBundle });
+    },
   });
 }
 
@@ -446,9 +458,10 @@ function snapshotVerifiedBundle(
   });
 }
 
-function systemRecordBytesEqualV1(left: Uint8Array, right: Uint8Array): boolean {
-  return left.byteLength === right.byteLength
-    && left.every((byte, index) => byte === right[index]);
+function assertActiveHeadFreshV1(head: AgentProfileActiveHeadObjectV1, nowMs: number): void {
+  if (Date.parse(head.validUntil) <= nowMs) {
+    throw new Error('active profile receiver resolved an expired agent-profile head');
+  }
 }
 
 function receiverNowMs(value: number): number {

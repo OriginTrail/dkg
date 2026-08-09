@@ -8,13 +8,17 @@ import {
   deriveAgentProfileOwnedSubjectV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
+  type AgentProfileAuthorityTransitionV1,
   type AgentProfileHeadObjectV1,
   type OwnedSubjectTableObjectV1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import { ethers } from 'ethers';
 
 import { parseNQuads } from '../src/dkg-agent-utils.js';
+import { createEvmPersonalMessageSignerV1 } from '../src/evm-message-signer-v1.js';
 import { prepareAgentProfileV1 } from '../src/profile.js';
+import { createInMemoryAgentProfilePublicationStoreV1 } from '../src/system-records/in-memory-agent-profile-publication-store-v1.js';
 import {
   createAgentProfileReceiverV1,
   type AgentProfileReceiverCandidateV1,
@@ -23,12 +27,15 @@ import {
   createFixtureAgentProfileProducerV1,
   DEPLOYMENT,
   envelopeArtifact,
+  makePrepared,
   NETWORK,
+  OTHER_PRIVATE_KEY,
   produce,
   producerFixture,
   PRODUCER_FIXTURE_NOW_MS,
   publicationFor,
   signHeadEnvelope,
+  signTransitionEnvelope,
 } from './support/agent-profile-producer-v1-fixture.js';
 
 async function publishedFixture(withDerivedSubjects = false) {
@@ -77,6 +84,90 @@ async function publishedFixture(withDerivedSubjects = false) {
     quarantined: false,
   });
   return { ...fixture, prepared, publication, envelope, row };
+}
+
+async function rotatedPublishedFixture() {
+  const prior = await publishedFixture();
+  const nextSigner = createEvmPersonalMessageSignerV1({
+    mode: 'custodial',
+    address: new ethers.Wallet(OTHER_PRIVATE_KEY).address,
+    privateKey: OTHER_PRIVATE_KEY,
+    purpose: 'receiver post-transition test',
+  });
+  const prepared = makePrepared(
+    prior.peerSigner,
+    nextSigner.address,
+    '2026-08-07T12:20:00.000Z',
+  );
+  const publication = await publicationFor(
+    prepared,
+    nextSigner.address,
+    '2026-08-07T12:20:00Z',
+    OTHER_PRIVATE_KEY,
+  );
+  const currentStore = createInMemoryAgentProfilePublicationStoreV1();
+  await produce(createFixtureAgentProfileProducerV1({
+    networkId: NETWORK,
+    publicationDeployment: DEPLOYMENT,
+    peerSigner: prior.peerSigner,
+    evmSigner: nextSigner,
+    store: currentStore,
+    fence: () => undefined,
+    install: () => undefined,
+  }), prepared, publication);
+  const bootstrapEnvelope = currentStore.snapshot().currentHead;
+  if (bootstrapEnvelope === null) throw new Error('rotated fixture did not publish a head');
+  const transition: AgentProfileAuthorityTransitionV1 = Object.freeze({
+    objectType: 'authority-transition',
+    kind: 'agents',
+    mode: 'co-signed',
+    networkId: NETWORK,
+    peerId: prior.peerSigner.peerId,
+    peerPublicKey: prior.peerSigner.publicKey,
+    priorAuthoritySequence: '0',
+    nextAuthoritySequence: '1',
+    priorHeadDigest: prior.envelope.objectDigest,
+    priorEvmIssuer: prior.evmSigner.address,
+    nextEvmIssuer: nextSigner.address,
+    nextRoot: prepared.rootEntity,
+    issuedAt: '2026-08-07T12:10:00Z',
+  });
+  const transitionEnvelope = await signTransitionEnvelope(
+    transition,
+    prior.peerSigner,
+    prior.evmSigner,
+    nextSigner,
+  );
+  const envelope = await signHeadEnvelope(Object.freeze({
+    ...bootstrapEnvelope.object,
+    authoritySequence: '1',
+    acceptedTransitionDigest: transitionEnvelope.objectDigest,
+  }), prior.peerSigner, nextSigner);
+  const currentHeadArtifact = envelopeArtifact('agent-profile-head', envelope);
+  const transitionArtifact = envelopeArtifact('authority-transition', transitionEnvelope);
+  const priorHeadArtifact = envelopeArtifact('agent-profile-head', prior.envelope);
+  const resolve = vi.fn(async (lookup, signal) => {
+    if (lookup.type === 'object') {
+      if (lookup.objectKind === currentHeadArtifact.objectKind
+        && lookup.objectDigest === currentHeadArtifact.objectDigest) return currentHeadArtifact;
+      if (lookup.objectKind === transitionArtifact.objectKind
+        && lookup.objectDigest === transitionArtifact.objectDigest) return transitionArtifact;
+      if (lookup.objectKind === priorHeadArtifact.objectKind
+        && lookup.objectDigest === priorHeadArtifact.objectDigest) return priorHeadArtifact;
+    }
+    return currentStore.resolve(lookup, signal);
+  });
+  const head = envelope.object;
+  const row: SystemRecordInventoryRowV1 = Object.freeze({
+    stableKeyHash: computeSystemRecordStableKeyHashV1(head.networkId, head.peerId),
+    peerId: head.peerId,
+    authoritySequence: head.authoritySequence,
+    version: head.version,
+    headDigest: envelope.objectDigest,
+    tombstone: false,
+    quarantined: false,
+  });
+  return { prior, prepared, envelope, transitionEnvelope, resolve, row };
 }
 
 function verifiedFixtureBundle(bundleBytes: Uint8Array) {
@@ -222,6 +313,31 @@ describe('agent-profile system-record active receiver', () => {
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
+  it('rechecks freshness immediately before the materialization point of no return', async () => {
+    const fixture = await publishedFixture();
+    const validUntilMs = Date.parse(fixture.envelope.object.validUntil);
+    const nowMs = vi.fn()
+      .mockReturnValueOnce(validUntilMs - 1)
+      .mockReturnValue(validUntilMs);
+    const verifyCurrentBundle = vi.fn(
+      (_head, bundleBytes: Uint8Array) => verifiedFixtureBundle(bundleBytes),
+    );
+    const consumeCandidate = vi.fn();
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs,
+      verifyCurrentBundle,
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .rejects.toThrow(/expired agent-profile head/);
+    expect(nowMs).toHaveBeenCalledTimes(2);
+    expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+  });
+
   it('hands every derived owned subject to the materializer candidate', async () => {
     const fixture = await publishedFixture(true);
     const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
@@ -250,6 +366,79 @@ describe('agent-profile system-record active receiver', () => {
     expect(candidate.head.ownedSubjectCount).toBe(String(expectedOwnedSubjects.length));
     expect(candidate.envelope.object.state).toBe('active');
   });
+
+  it('traverses post-transition authority history and hands off its verified lineage', async () => {
+    const fixture = await rotatedPublishedFixture();
+    const verifyAuthorityEnvelope = vi.fn(() => true);
+    const consumeCandidate = vi.fn(async (_candidate: AgentProfileReceiverCandidateV1) => ({
+      outcome: 'applied' as const,
+      stateRevision: '5',
+      appliedStateDigest: `0x${'9'.repeat(64)}`,
+    }));
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: { resolve: fixture.resolve },
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyAuthorityEnvelope,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .resolves.toMatchObject({ outcome: 'applied' });
+    const resolvedKinds = fixture.resolve.mock.calls
+      .map(([lookup]) => lookup.type === 'object' ? lookup.objectKind : lookup.type);
+    expect(resolvedKinds).toEqual(expect.arrayContaining([
+      'agent-profile-head',
+      'profile-bundle',
+      'authority-transition',
+      'owned-subject-table',
+    ]));
+    expect(verifyAuthorityEnvelope.mock.calls.map(([candidate]) => candidate.object.objectType))
+      .toEqual([
+        'agent-profile-head',
+        'authority-transition',
+        'agent-profile-head',
+      ]);
+    const candidate = consumeCandidate.mock.calls[0]![0];
+    expect(candidate.verifiedAuthoritySummary).toMatchObject({
+      candidateHeadDigest: fixture.envelope.objectDigest,
+      transitionLineage: [{
+        priorAuthoritySequence: '0',
+        nextAuthoritySequence: '1',
+        transitionDigest: fixture.transitionEnvelope.objectDigest,
+      }],
+      historicalRoots: [fixture.prior.envelope.object.rootSubject],
+      lastAuthorityTransitionPriorHeadDigest: fixture.prior.envelope.objectDigest,
+    });
+  });
+
+  it.each(['missing', 'refused'] as const)(
+    'fails closed when post-transition authority evidence is $condition',
+    async (condition) => {
+      const fixture = await rotatedPublishedFixture();
+      const consumeCandidate = vi.fn();
+      const receiver = createAgentProfileReceiverV1({
+        networkId: NETWORK,
+        artifacts: {
+          resolve: (lookup, signal) => condition === 'missing'
+            && lookup.type === 'object'
+            && lookup.objectKind === 'authority-transition'
+            ? Promise.resolve(null)
+            : fixture.resolve(lookup, signal),
+        },
+        nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+        verifyAuthorityEnvelope: (candidate) => condition !== 'refused'
+          || candidate.object.objectType !== 'authority-transition',
+        verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+        consumeCandidate,
+      });
+
+      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+        .rejects.toThrow(condition === 'missing' ? /missing/ : /authority-transition verification/);
+      expect(consumeCandidate).not.toHaveBeenCalled();
+    },
+  );
 
   it('fails closed when the exact owned-subject table is unavailable', async () => {
     const fixture = await publishedFixture();
