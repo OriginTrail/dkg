@@ -176,7 +176,11 @@ describe('agent-profile reconcile exact transport V1', () => {
     });
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const slice = openSlice(transport, () => 0);
-      await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).rejects.toThrow(outcome);
+      await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).rejects.toMatchObject({
+        outcome,
+        retryable: true,
+        wireBytes: 0,
+      });
       slice.release();
     }
     expect(calls).toBe(2);
@@ -184,6 +188,32 @@ describe('agent-profile reconcile exact transport V1', () => {
       negativeMemoEntries: 0,
       negativeMemoWrites: 0,
     });
+  });
+
+  it('closes an active slice and releases retained leases immediately', async () => {
+    const success = successfulFetch(LOOKUP_A, 41);
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => success.result,
+      controlAdmission: byteAdmission(),
+    });
+    const slice = openSlice(transport, () => 0);
+    await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).resolves.toMatchObject({
+      objectDigest: DIGEST_A,
+    });
+    expect(slice.stats()).toEqual({ requests: 1, wireBytes: 41 });
+
+    transport.close();
+
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(transport.stats()).toMatchObject({ activeSlice: 0, closed: true });
+    slice.release();
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(transport.openSlice({
+      signal: new AbortController().signal,
+      deadlineMs: 3_000,
+      nowMs: () => 0,
+    })).toBeNull();
   });
 
   it('does not memoize cancellation and releases a late successful lease after slice abort', async () => {

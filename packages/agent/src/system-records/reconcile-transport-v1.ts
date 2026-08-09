@@ -49,7 +49,13 @@ export interface AgentProfileReconcileTransportSliceV1
     request: AgentProfileInventoryLoadRequestV1,
     signal: AbortSignal,
   ): Promise<AgentProfileInventoryLoadResultV1>;
+  stats(): AgentProfileReconcileTransportSliceStatsV1;
   release(): void;
+}
+
+export interface AgentProfileReconcileTransportSliceStatsV1 {
+  readonly requests: number;
+  readonly wireBytes: number;
 }
 
 export interface AgentProfileReconcileTransportStatsV1 {
@@ -106,13 +112,17 @@ interface AggregateExactFetchResultV1 {
   readonly wireBytes: number;
 }
 
-class AgentProfileReconcileTransportErrorV1 extends Error {
+export class AgentProfileReconcileTransportErrorV1 extends Error {
   readonly outcome: AgentProfileReconcileTransportFailureV1;
+  readonly wireBytes: number;
+  readonly retryable: boolean;
 
-  constructor(outcome: AgentProfileReconcileTransportFailureV1) {
+  constructor(outcome: AgentProfileReconcileTransportFailureV1, wireBytes: number) {
     super(`agent-profile exact transport failed: ${outcome}`);
     this.name = 'AgentProfileReconcileTransportErrorV1';
     this.outcome = outcome;
+    this.wireBytes = wireBytes;
+    this.retryable = exactFailurePolicy(outcome).retryableClosure;
   }
 }
 
@@ -141,7 +151,7 @@ export function createAgentProfileReconcileTransportV1(
     negativeTtlMs,
     maxNegativeEntries,
   });
-  let activeController: AbortController | undefined;
+  let activeRelease: (() => void) | undefined;
   let activeSlice = false;
   let requests = 0;
   let wireBytes = 0;
@@ -168,7 +178,6 @@ export function createAgentProfileReconcileTransportV1(
     }
     activeSlice = true;
     const controller = new AbortController();
-    activeController = controller;
     const signal = AbortSignal.any([callerSignal, controller.signal]);
     const leases: SystemRecordExactFetchLeaseV1[] = [];
     const budget = createSliceBudgetV1({
@@ -192,7 +201,10 @@ export function createAgentProfileReconcileTransportV1(
         if (fetched.result.outcome === 'ok') return fetched.result.lease.artifact;
         if (fetched.result.outcome === 'not-found'
             || fetched.result.outcome === 'unsupported') return null;
-        throw new AgentProfileReconcileTransportErrorV1(fetched.result.outcome);
+        throw new AgentProfileReconcileTransportErrorV1(
+          fetched.result.outcome,
+          fetched.wireBytes,
+        );
       },
       async loadInventoryObject(
         request: AgentProfileInventoryLoadRequestV1,
@@ -216,11 +228,13 @@ export function createAgentProfileReconcileTransportV1(
         return Object.freeze({
           outcome: 'rejected',
           wireBytes: fetched.wireBytes,
-          rejection: inventoryRejection(fetched.result.outcome),
+          rejection: exactFailurePolicy(fetched.result.outcome).inventoryRejection,
         });
       },
+      stats: budget.stats,
       release,
     });
+    activeRelease = release;
     return slice;
 
     async function resolveExact(
@@ -294,7 +308,7 @@ export function createAgentProfileReconcileTransportV1(
         }
         attempt.releaseRejectedLease();
         selectedFailure = selectFailure(selectedFailure, attempt.failure);
-        const failureClass = negativeFailureClass(attempt.failure.outcome);
+        const failureClass = exactFailurePolicy(attempt.failure.outcome).memoClass;
         if (failureClass !== null && !attempt.memoInvalidBeforeSliceCapacity) {
           negativeMemo.remember(providerId, exactLookupKey, failureClass, completedAt);
         }
@@ -310,7 +324,7 @@ export function createAgentProfileReconcileTransportV1(
       released = true;
       controller.abort(new Error('agent-profile reconcile transport slice released'));
       for (const lease of leases.splice(0)) lease.release();
-      if (activeController === controller) activeController = undefined;
+      if (activeRelease === release) activeRelease = undefined;
       activeSlice = false;
     }
   }
@@ -329,7 +343,7 @@ export function createAgentProfileReconcileTransportV1(
   function close(): void {
     if (closed) return;
     closed = true;
-    activeController?.abort(new Error('agent-profile reconcile transport closed'));
+    activeRelease?.();
     negativeMemo.close();
   }
 
@@ -358,6 +372,7 @@ interface SliceBudgetV1 {
   beginAttempt(): void;
   accountWireBytes(bytes: number | null): void;
   exceedsWireLimit(): boolean;
+  stats(): AgentProfileReconcileTransportSliceStatsV1;
 }
 
 function createSliceBudgetV1(options: Readonly<{
@@ -379,6 +394,7 @@ function createSliceBudgetV1(options: Readonly<{
       options.onWireBytes(bytes);
     },
     exceedsWireLimit: () => wireBytes > SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
+    stats: () => Object.freeze({ requests, wireBytes }),
   });
 }
 
@@ -597,22 +613,86 @@ function normalizeExactAttemptV1(
   });
 }
 
-function negativeFailureClass(
+interface ExactFailurePolicyV1 {
+  readonly rank: number;
+  readonly memoClass: AgentProfileReconcileNegativeFailureClassV1 | null;
+  readonly inventoryRejection: 'not-found' | 'invalid-response' | 'busy' | 'transport';
+  readonly retryableClosure: boolean;
+}
+
+const EXACT_FAILURE_POLICY_V1 = Object.freeze({
+  'invalid-response': Object.freeze({
+    rank: 5,
+    memoClass: 'invalid',
+    inventoryRejection: 'invalid-response',
+    retryableClosure: false,
+  }),
+  deadline: Object.freeze({
+    rank: 4,
+    memoClass: 'timeout',
+    inventoryRejection: 'transport',
+    retryableClosure: true,
+  }),
+  transport: Object.freeze({
+    rank: 3,
+    memoClass: null,
+    inventoryRejection: 'transport',
+    retryableClosure: true,
+  }),
+  'remote-error': Object.freeze({
+    rank: 3,
+    memoClass: null,
+    inventoryRejection: 'transport',
+    retryableClosure: true,
+  }),
+  'remote-busy': Object.freeze({
+    rank: 2,
+    memoClass: null,
+    inventoryRejection: 'busy',
+    retryableClosure: true,
+  }),
+  busy: Object.freeze({
+    rank: 2,
+    memoClass: null,
+    inventoryRejection: 'busy',
+    retryableClosure: true,
+  }),
+  capacity: Object.freeze({
+    rank: 2,
+    memoClass: null,
+    inventoryRejection: 'busy',
+    retryableClosure: true,
+  }),
+  'waiter-limit': Object.freeze({
+    rank: 2,
+    memoClass: null,
+    inventoryRejection: 'busy',
+    retryableClosure: true,
+  }),
+  closed: Object.freeze({
+    rank: 2,
+    memoClass: null,
+    inventoryRejection: 'transport',
+    retryableClosure: true,
+  }),
+  'not-found': Object.freeze({
+    rank: 1,
+    memoClass: 'absence',
+    inventoryRejection: 'not-found',
+    retryableClosure: false,
+  }),
+  unsupported: Object.freeze({
+    rank: 1,
+    memoClass: 'absence',
+    inventoryRejection: 'not-found',
+    retryableClosure: false,
+  }),
+} satisfies Readonly<Record<AgentProfileReconcileTransportFailureV1, ExactFailurePolicyV1>>);
+
+function exactFailurePolicy(
   outcome: AgentProfileReconcileTransportFailureV1,
-): AgentProfileReconcileNegativeFailureClassV1 | null {
-  switch (outcome) {
-    case 'deadline': return 'timeout';
-    case 'not-found':
-    case 'unsupported': return 'absence';
-    case 'invalid-response': return 'invalid';
-    case 'remote-busy':
-    case 'remote-error':
-    case 'busy':
-    case 'capacity':
-    case 'waiter-limit':
-    case 'transport':
-    case 'closed': return null;
-  }
+): ExactFailurePolicyV1 {
+  return EXACT_FAILURE_POLICY_V1[outcome];
 }
 
 function selectFailure(
@@ -620,41 +700,9 @@ function selectFailure(
   candidate: Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }>,
 ): Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }> {
   if (current === undefined) return candidate;
-  return failureRank(candidate.outcome) > failureRank(current.outcome) ? candidate : current;
-}
-
-function failureRank(outcome: AgentProfileReconcileTransportFailureV1): number {
-  switch (outcome) {
-    case 'invalid-response': return 5;
-    case 'deadline': return 4;
-    case 'transport':
-    case 'remote-error': return 3;
-    case 'remote-busy':
-    case 'busy':
-    case 'capacity':
-    case 'waiter-limit':
-    case 'closed': return 2;
-    case 'not-found':
-    case 'unsupported': return 1;
-  }
-}
-
-function inventoryRejection(
-  outcome: AgentProfileReconcileTransportFailureV1,
-): 'not-found' | 'invalid-response' | 'busy' | 'transport' {
-  switch (outcome) {
-    case 'not-found':
-    case 'unsupported': return 'not-found';
-    case 'invalid-response': return 'invalid-response';
-    case 'remote-busy':
-    case 'busy':
-    case 'capacity':
-    case 'waiter-limit': return 'busy';
-    case 'deadline':
-    case 'remote-error':
-    case 'transport':
-    case 'closed': return 'transport';
-  }
+  return exactFailurePolicy(candidate.outcome).rank > exactFailurePolicy(current.outcome).rank
+    ? candidate
+    : current;
 }
 
 function memoKey(

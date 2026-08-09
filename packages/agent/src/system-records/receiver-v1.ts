@@ -94,22 +94,20 @@ export interface CreateAgentProfileReceiverOptionsV1 {
 }
 
 export interface AgentProfileReceiverV1 {
-  /** Bind one artifact source before entering an admitted physical slice. */
-  openPreparer(artifacts?: SystemRecordArtifactRepositoryV1): AgentProfileActivePreparerV1;
+  /** Immutable construction-time source used only by the legacy direct path. */
+  readonly artifacts: SystemRecordArtifactRepositoryV1;
+  /** Prepare through one explicit admitted-slice artifact source. */
+  prepareActive(
+    row: SystemRecordInventoryRowV1,
+    artifacts: SystemRecordArtifactRepositoryV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1>;
   /** Convenience for direct callers that already own the admitted slice lifetime. */
   receiveActive(
     row: SystemRecordInventoryRowV1,
     admittedContext: AgentProfileAdmittedSliceContextV1,
     signal: AbortSignal,
   ): Promise<SystemRecordApplyOutcomeV1>;
-}
-
-export interface AgentProfileActivePreparerV1 {
-  /** Complete abort-safe fetch/decode/verification through the bound artifact source. */
-  prepareActive(
-    row: SystemRecordInventoryRowV1,
-    signal: AbortSignal,
-  ): Promise<AgentProfilePreparedActiveV1>;
 }
 
 export interface AgentProfilePreparedActiveV1 {
@@ -145,24 +143,24 @@ export function createAgentProfileReceiverV1(
         | AgentProfileForkResolutionV1
       >(envelope));
 
+  const defaultArtifacts: SystemRecordArtifactRepositoryV1 = Object.freeze({
+    resolve: resolveArtifact,
+  });
   const receiver: AgentProfileReceiverV1 = Object.freeze({
-    openPreparer(artifacts?: SystemRecordArtifactRepositoryV1): AgentProfileActivePreparerV1 {
-      const resolveForSlice = artifacts === undefined
-        ? resolveArtifact
-        : artifacts.resolve.bind(artifacts);
-      return Object.freeze({
-        prepareActive: (
-          inputRow: SystemRecordInventoryRowV1,
-          signal: AbortSignal,
-        ) => prepareActiveFromResolver(inputRow, resolveForSlice, signal),
-      });
+    artifacts: defaultArtifacts,
+    prepareActive(
+      row: SystemRecordInventoryRowV1,
+      artifacts: SystemRecordArtifactRepositoryV1,
+      signal: AbortSignal,
+    ): Promise<AgentProfilePreparedActiveV1> {
+      return prepareActiveFromResolver(row, artifacts.resolve.bind(artifacts), signal);
     },
     async receiveActive(
       row: SystemRecordInventoryRowV1,
       admittedContext: AgentProfileAdmittedSliceContextV1,
       signal: AbortSignal,
     ): Promise<SystemRecordApplyOutcomeV1> {
-      const prepared = await receiver.openPreparer().prepareActive(row, signal);
+      const prepared = await receiver.prepareActive(row, receiver.artifacts, signal);
       signal.throwIfAborted();
       return prepared.apply(admittedContext, signal);
     },
