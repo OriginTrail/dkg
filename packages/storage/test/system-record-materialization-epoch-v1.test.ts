@@ -6,6 +6,8 @@ import {
   type ManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../src/system-record-materialization-epoch-v1-internal.js';
+import { snapshotSystemRecordMaterializationEpochRotationV1 } from '../src/system-record-materialization-epoch-guard-v1-internal.js';
+import type { SystemRecordMaterializationEpochRotationV1 } from '../src/system-record-materialization-epoch-contract-v1.js';
 
 const QUERY_ENDPOINT = 'http://127.0.0.1:7878/query';
 const UPDATE_ENDPOINT = 'http://127.0.0.1:7878/update';
@@ -155,5 +157,86 @@ describe('system-record materialization epoch V1', () => {
     client.values = [];
     await rotate('mainnet-gnosis');
     expect(client.calls[0]?.body).not.toBe(testnetQuery);
+  });
+});
+
+describe('epoch rotation snapshot guard is narrower than its own interface', () => {
+  // The exported interface is structural, the runtime guard demands plain data,
+  // and that gap was documented in neither direction. These pin the gap itself:
+  // each case below type-checks as a conforming rotation and is still refused.
+  // If the guard is ever widened to "match the type", these fail rather than
+  // the widening landing silently.
+  const VALID = { epoch: '7', childGeneration: '3' } as const;
+
+  it('accepts a plain literal and carries exactly the two contract fields', () => {
+    expect(snapshotSystemRecordMaterializationEpochRotationV1({ ...VALID })).toEqual(VALID);
+  });
+
+  it('accepts extra own fields and discards them', () => {
+    const snapshot = snapshotSystemRecordMaterializationEpochRotationV1({
+      ...VALID,
+      provenance: 'extra metadata a conforming producer may carry',
+    });
+    expect(snapshot).toEqual(VALID);
+    expect(Object.keys(snapshot ?? {})).toEqual(['epoch', 'childGeneration']);
+  });
+
+  it('accepts a null-prototype object', () => {
+    expect(snapshotSystemRecordMaterializationEpochRotationV1(
+      Object.assign(Object.create(null), VALID),
+    )).toEqual(VALID);
+  });
+
+  it('REJECTS a class instance that satisfies the interface', () => {
+    class Rotation {
+      constructor(readonly epoch: string, readonly childGeneration: string) {}
+    }
+    const instance: SystemRecordMaterializationEpochRotationV1 = new Rotation('7', '3');
+    expect(snapshotSystemRecordMaterializationEpochRotationV1(instance)).toBeUndefined();
+  });
+
+  it('REJECTS an accessor-backed object without ever invoking the accessor', () => {
+    // Why the guard is narrower than the type: this getter answers differently
+    // on a second read, so validating it and later dereferencing it would bind
+    // a generation nobody checked.
+    //
+    // The `reads` assertion is the load-bearing one. Rejection alone does not
+    // prove much here -- the guard snapshots through property DESCRIPTORS, and
+    // an accessor's `descriptor.value` is `undefined`, so this shape is also
+    // caught downstream by the string check. What only holds while the guard
+    // stays descriptor-based is that the getter is never run at all. Rewrite it
+    // to read `value.childGeneration` directly and `reads` becomes 1 here,
+    // while the rejection above still passes.
+    let reads = 0;
+    const shifty: SystemRecordMaterializationEpochRotationV1 = {
+      epoch: '7',
+      get childGeneration() {
+        reads += 1;
+        return reads === 1 ? '3' : 'a-generation-nobody-validated';
+      },
+    };
+    expect(snapshotSystemRecordMaterializationEpochRotationV1(shifty)).toBeUndefined();
+    expect(reads).toBe(0);
+  });
+
+  it('REJECTS a Proxy wrapping an otherwise valid rotation', () => {
+    const proxied: SystemRecordMaterializationEpochRotationV1 = new Proxy(
+      { ...VALID },
+      { get: (target, key) => Reflect.get(target, key) },
+    );
+    expect(snapshotSystemRecordMaterializationEpochRotationV1(proxied)).toBeUndefined();
+  });
+
+  it('rejects wrong field types and non-objects alike', () => {
+    for (const malformed of [
+      { epoch: 7, childGeneration: '3' },
+      { epoch: '7' },
+      null,
+      0,
+      'rotation',
+      ['7', '3'],
+    ]) {
+      expect(snapshotSystemRecordMaterializationEpochRotationV1(malformed)).toBeUndefined();
+    }
   });
 });
