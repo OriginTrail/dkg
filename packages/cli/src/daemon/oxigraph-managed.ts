@@ -33,7 +33,7 @@
  * can mint and which dies the instant the child does.
  */
 import { join } from 'node:path';
-import { attachManagedOxigraphLeaseV1 } from '@origintrail-official/dkg-storage';
+import { attachManagedOxigraphLeaseV1 } from './managed-oxigraph-ownership-bridge.js';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,

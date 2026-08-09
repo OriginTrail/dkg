@@ -73,22 +73,19 @@ export {
   assertNotReservedInternalGraphV1,
   isReservedInternalGraphUriV1,
 } from './internal-graph-policy.js';
-export {
-  MANAGED_OXIGRAPH_LEASE_OPTION_KEY,
-  ManagedOxigraphBackendUnownedError,
-  attachManagedOxigraphLeaseV1,
-  createManagedOxigraphOwnershipControllerV1,
-  extractManagedOxigraphHandoffV1,
-  extractManagedOxigraphLeaseV1,
-  isManagedOxigraphOwnershipLeaseV1,
-  isManagedOxigraphOwnershipLiveV1,
-  readManagedOxigraphOwnershipSnapshotV1,
-  type ManagedOxigraphOwnershipControllerV1,
-  type ManagedOxigraphOwnershipInvalidationV1,
-  type ManagedOxigraphOwnershipLeaseV1,
-  type ManagedOxigraphOwnershipSnapshotV1,
-  type ManagedOxigraphSupervisorHandoffV1,
-} from './managed-oxigraph-ownership-v1-internal.js';
+// The managed-Oxigraph ownership authority is DELIBERATELY not exported here.
+// Its controller factory is the mint for daemon ownership capability;
+// publishing it from the package barrel made a daemon-internal authority part
+// of the public API surface. The daemon (and only the daemon) reaches it
+// through the documented internal entry point
+// `@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1`,
+// which the package `exports` map carries precisely so that the wholesale
+// `dist/*` deep-import surface could be closed without stranding the one
+// legitimate consumer. That subpath is NOT covered by semver for external use.
+// The packed artifact is gated on this staying true: see
+// `scripts/verify-pack-exports.mjs` (`pnpm run test:package-exports`), which
+// fails if any ownership symbol reappears on this barrel.
+export { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-backend-unowned-error.js';
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,

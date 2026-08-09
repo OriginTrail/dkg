@@ -21,7 +21,7 @@ import {
   isTripleStoreCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
-import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
+import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-backend-unowned-error.js';
 import {
   captureStructuredMutationEffects,
   normalizeStructuredMutation,

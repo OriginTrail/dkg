@@ -63,8 +63,8 @@ import {
   isInternalGraphUriV1,
 } from '../internal-graph-policy.js';
 import { CACHED_READ_GATE_V1 } from '../cached-read-gate-v1.js';
+import { ManagedOxigraphBackendUnownedError } from '../managed-oxigraph-backend-unowned-error.js';
 import {
-  ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   managedOxigraphOwnershipEndpointsMatchV1,
@@ -72,7 +72,7 @@ import {
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
-} from '../managed-oxigraph-ownership-v1-internal.js';
+} from '../internal/managed-oxigraph-ownership-v1.js';
 import {
   SystemRecordControllerRegistrationError,
   releaseSystemRecordLaneControllerV1,

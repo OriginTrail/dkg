@@ -23,7 +23,7 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { describe, expect, it } from 'vitest';
 
-import { createManagedOxigraphOwnershipControllerV1 } from '../src/managed-oxigraph-ownership-v1-internal.js';
+import { createManagedOxigraphOwnershipControllerV1 } from '../src/internal/managed-oxigraph-ownership-v1.js';
 import { createSystemRecordNonQueuedReservationGateV1 } from '../src/system-record-reservation-gate-v1-internal.js';
 import {
   createSystemRecordVerifiedReplacementRegistryV1,

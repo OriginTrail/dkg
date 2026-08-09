@@ -1,15 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+// Public recognition contract from the BARREL; authority plumbing from the
+// internal entry. The split is the boundary this test rides on: the error is
+// package API, the mint is not.
 import {
   GraphSetIndexStore,
   ManagedOxigraphBackendUnownedError,
-  attachManagedOxigraphLeaseV1,
-  createManagedOxigraphOwnershipControllerV1,
   createTripleStore,
-  type ManagedOxigraphOwnershipControllerV1,
-  type ManagedOxigraphSupervisorHandoffV1,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import {
+  attachManagedOxigraphLeaseV1,
+  createManagedOxigraphOwnershipControllerV1,
+  type ManagedOxigraphOwnershipControllerV1,
+  type ManagedOxigraphSupervisorHandoffV1,
+} from './support/managed-oxigraph-ownership-v1.js';
 
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 

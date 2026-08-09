@@ -12,7 +12,7 @@ import {
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphSupervisorHandoffV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 import {
   __resetSystemRecordControllerRegistrationForTests,
   type SystemRecordChildHandoffV1,
