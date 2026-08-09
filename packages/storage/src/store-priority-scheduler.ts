@@ -7,6 +7,17 @@ import {
   type SchedulerPressureTicket,
 } from '@origintrail-official/dkg-core';
 import type { StorePressureSnapshot, StoreWorkPriority } from './triple-store.js';
+import {
+  StoreControlBarrierCoordinator,
+  type StoreBarrierHostV1,
+} from './store-control-barrier-v1-internal.js';
+import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
+import {
+  StoreControlBarrierTimeoutError,
+  type StoreControlBarrierBlockers,
+  type StoreControlBarrierPhase,
+  type StoreGenerationSeal,
+} from './store-barrier-contract.js';
 
 export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   ackInflight: number;
@@ -139,17 +150,6 @@ function isStoreQueuedAdmissionV1(
   return admission.mode !== 'control-barrier';
 }
 
-import {
-  StoreControlBarrierCoordinator,
-  type StoreBarrierHostV1,
-} from './store-control-barrier-v1-internal.js';
-import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
-import {
-  StoreControlBarrierTimeoutError,
-  type StoreControlBarrierBlockers,
-  type StoreControlBarrierPhase,
-  type StoreGenerationSeal,
-} from './store-barrier-contract.js';
 // Re-exported: these were declared here before the barrier subsystem moved out,
 // and they are part of the package's published surface.
 export {
@@ -703,12 +703,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
     // already-aborted caller signal any more than by queue capacity.
     if (admission !== undefined && !isStoreQueuedAdmissionV1(admission)) {
       // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-      return (await this.barrierCoordinator.enqueueLegacy(
-        admission.storeId,
-        operation,
-        work,
-        admission.generation,
-      )) as T;
+      return (await this.barrierCoordinator.enqueue({
+        storeId: admission.storeId,
+        coalescingIdentity: operation,
+        purpose: operation,
+        transition: work,
+        generation: admission.generation,
+      })) as T;
     }
     if (signal?.aborted) {
       const reason = signal.reason;
@@ -1098,13 +1099,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
     timeoutMs?: number,
   ): Promise<T> {
     // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-    return this.barrierCoordinator.enqueueLegacy(
+    return this.barrierCoordinator.enqueue({
       storeId,
+      coalescingIdentity: purpose,
       purpose,
       transition,
       generation,
       timeoutMs,
-    ) as Promise<T>;
+    }) as Promise<T>;
   }
 
   /** Type-safe control barrier for new lifecycle transitions. */
@@ -1115,13 +1117,16 @@ export class StorePriorityScheduler extends ObservableScheduler {
     generation?: string,
     timeoutMs?: number,
   ): Promise<T> {
-    return this.barrierCoordinator.enqueueTyped(
+    // Sound at this boundary: the nominal key binds every caller sharing this
+    // runtime identity to the same T.
+    return this.barrierCoordinator.enqueue({
       storeId,
-      key,
+      coalescingIdentity: key,
+      purpose: key.purpose,
       transition,
       generation,
       timeoutMs,
-    );
+    }) as Promise<T>;
   }
 
   private isSealed(storeId: object): boolean {

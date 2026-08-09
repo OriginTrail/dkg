@@ -191,6 +191,28 @@ describe('control barrier contract survives the coordinator extraction', () => {
     expect(scheduler.snapshot.barrierCoalesced).toBe(1);
   });
 
+  it('does not coalesce one typed key across different stores', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 8 });
+    const key = createStoreControlBarrierKeyV1<string>('shared.typed.key');
+    const firstGate = deferred<string>();
+    let secondStarted = false;
+
+    const first = scheduler.runTypedControlBarrier({}, key, () => firstGate.promise);
+    const second = scheduler.runTypedControlBarrier({}, key, async () => {
+      secondStarted = true;
+      return 'store-b';
+    });
+
+    await settle();
+    expect(secondStarted).toBe(false); // one global controller slot, not coalescing
+    expect(scheduler.snapshot.barrierCoalesced).toBe(0);
+
+    firstGate.resolve('store-a');
+    await expect(first).resolves.toBe('store-a');
+    await expect(second).resolves.toBe('store-b');
+    expect(secondStarted).toBe(true);
+  });
+
   it('a transition rejection propagates and still unseals the store', async () => {
     // The cleanup path runs in a `finally`, so a failed transition must not
     // leave the store sealed — the failure mode that would freeze a lane.

@@ -74,6 +74,11 @@ import {
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
+import type { SystemRecordMaterializationEpochRotationV1 } from '../system-record-materialization-epoch-contract-v1.js';
+import {
+  createStoreControlBarrierKeyV1,
+  type StoreControlBarrierKeyV1,
+} from '../store-control-barrier-key-v1.js';
 import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
@@ -91,6 +96,17 @@ import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
 } from '../abortable-store-work-lifecycle.js';
+
+const SYSTEM_RECORD_ENABLE_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void | SystemRecordMaterializationEpochRotationV1>(
+    'system-record.enable',
+  );
+const SYSTEM_RECORD_DISABLE_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void>('system-record.disable');
+const SYSTEM_RECORD_SHUTDOWN_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void>('system-record.shutdown');
+const SYSTEM_RECORD_RECOVERY_BARRIER_V1 =
+  createStoreControlBarrierKeyV1<void>('system-record.recovery');
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -728,6 +744,18 @@ export class SparqlHttpStore implements TripleStore {
     // already carries the property.
     if (this.systemRecordLane === undefined) {
       try {
+        const barrierGeneration = () => this.ownershipLease
+          ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
+          : undefined;
+        const runTypedBarrier = <T>(
+          key: StoreControlBarrierKeyV1<T>,
+          transition: () => Promise<T>,
+        ) => externalStorePriorityScheduler.runTypedControlBarrier(
+          this,
+          key,
+          transition,
+          barrierGeneration(),
+        );
         const owner = createManagedSystemRecordCoordinatorV1({
           lease: this.ownershipLease,
           handoff: this.buildChildHandoff(this.supervisorHandoff),
@@ -754,18 +782,23 @@ export class SparqlHttpStore implements TripleStore {
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
           //
-          // This domain barrier returns typed lifecycle data. Use the scheduler's
-          // result-preserving path so a coalesced caller receives the first
-          // transition's result rather than an unassigned local capture.
-          barrier: (key, transition) =>
-            externalStorePriorityScheduler.runTypedControlBarrier(
+          // Keep the published string callback intact for external/legacy
+          // coordinator composition. Production lifecycle calls use the
+          // domain-owned typed methods below, which translate to scheduler keys
+          // only at this adapter boundary.
+          barrier: (purpose, transition) =>
+            externalStorePriorityScheduler.runControlBarrier(
               this,
-              key,
+              purpose,
               transition,
-              this.ownershipLease
-                ? readManagedOxigraphOwnershipSnapshotV1(this.ownershipLease)?.childGeneration
-                : undefined,
+              barrierGeneration(),
             ),
+          typedBarriers: {
+            enable: (transition) => runTypedBarrier(SYSTEM_RECORD_ENABLE_BARRIER_V1, transition),
+            disable: (transition) => runTypedBarrier(SYSTEM_RECORD_DISABLE_BARRIER_V1, transition),
+            shutdown: (transition) => runTypedBarrier(SYSTEM_RECORD_SHUTDOWN_BARRIER_V1, transition),
+            recovery: (transition) => runTypedBarrier(SYSTEM_RECORD_RECOVERY_BARRIER_V1, transition),
+          },
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
         });
         this.systemRecordLane = owner;

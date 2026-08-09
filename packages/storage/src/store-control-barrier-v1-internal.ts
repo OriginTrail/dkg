@@ -28,14 +28,13 @@ import {
   type StoreControlBarrierBlockers,
   type StoreGenerationSeal,
 } from './store-barrier-contract.js';
-import type { StoreControlBarrierKeyV1 } from './store-control-barrier-key-v1.js';
 
 /** Label carried on a seal when the caller does not name a generation. */
 const BARRIER_ANY_GENERATION = '*';
 
 interface BarrierEntry {
   storeId: object;
-  coalescingKey: string | object;
+  coalescingIdentity: unknown;
   purpose: string;
   transition: () => Promise<unknown>;
   promise: Promise<unknown>;
@@ -47,6 +46,15 @@ interface BarrierEntry {
   settled: boolean;
   timer?: ReturnType<typeof setTimeout>;
   seal: StoreGenerationSeal;
+}
+
+interface StoreControlBarrierRequestV1 {
+  readonly storeId: object;
+  readonly coalescingIdentity: unknown;
+  readonly purpose: string;
+  readonly transition: () => Promise<unknown>;
+  readonly generation?: string;
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -128,62 +136,20 @@ export class StoreControlBarrierCoordinator {
     };
   }
 
-  /**
-   * Enqueue a control transition for `storeId`.
-   *
-   * Concurrent barriers with the same `(storeId, purpose)` coalesce into one:
-   * later callers receive the FIRST barrier's promise and their own
-   * `transition` is never invoked. That is the intended semantics for an
-   * idempotent control transition; do not use one purpose for two different
-   * transitions.
-   */
-  enqueueLegacy(
-    storeId: object,
-    purpose: string,
-    transition: () => Promise<unknown>,
-    generation?: string,
-    timeoutMs?: number,
-  ): Promise<unknown> {
-    return this.enqueueWithKey(
+  /** Enqueue one already-normalized control transition. */
+  enqueue(request: StoreControlBarrierRequestV1): Promise<unknown> {
+    const {
       storeId,
-      purpose,
+      coalescingIdentity,
       purpose,
       transition,
       generation,
       timeoutMs,
-    );
-  }
-
-  enqueueTyped<T>(
-    storeId: object,
-    key: StoreControlBarrierKeyV1<T>,
-    transition: () => Promise<T>,
-    generation?: string,
-    timeoutMs?: number,
-  ): Promise<T> {
-    // Sound at this boundary: coalescing uses this exact key object, whose
-    // phantom member binds every caller sharing it to the same T.
-    return this.enqueueWithKey(
-      storeId,
-      key,
-      key.purpose,
-      transition,
-      generation,
-      timeoutMs,
-    ) as Promise<T>;
-  }
-
-  private enqueueWithKey(
-    storeId: object,
-    coalescingKey: string | object,
-    purpose: string,
-    transition: () => Promise<unknown>,
-    generation?: string,
-    timeoutMs?: number,
-  ): Promise<unknown> {
+    } = request;
     const existing = this.barriers.find(
       (barrier) =>
-        barrier.storeId === storeId && barrier.coalescingKey === coalescingKey,
+        barrier.storeId === storeId &&
+        barrier.coalescingIdentity === coalescingIdentity,
     );
     if (existing !== undefined) {
       this.coalescedTotal += 1;
@@ -198,7 +164,7 @@ export class StoreControlBarrierCoordinator {
     });
     const barrier: BarrierEntry = {
       storeId,
-      coalescingKey,
+      coalescingIdentity,
       purpose,
       transition,
       promise,
