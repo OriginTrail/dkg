@@ -64,6 +64,7 @@ export const METERING_MODULE_MANIFEST = Object.freeze([
   "http-core.js",
   "infer-http-core.js",
   "inference-meter.js",
+  "inference-quote.js",
   "ledger.js",
   "metered-inference.js",
   "metered-read.js",

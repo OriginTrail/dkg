@@ -584,10 +584,27 @@ export function settlementOf(home: string, principal: string): { withdrawalId: s
 }
 
 /** Which tab lifecycle this principal is on. 0 = first tab. Incremented each
- *  time a new deposit opens a fresh tab after a prior settlement. */
+ *  time a new deposit opens a fresh tab after a prior terminal (settled/refunded) tab. */
 export function tabEpoch(home: string, principal: string): number {
   replay(home);
   return entry(home, principal).epoch;
+}
+
+/** The epoch a FRESH deposit would open right now: current epoch, or the next
+ *  one if the current tab is terminal (settled or refunded). Used to bind a
+ *  funded-run quote to the exact fresh epoch (Bo, deposit-stage). */
+export function nextEpochFor(home: string, principal: string): number {
+  replay(home);
+  const t = entry(home, principal);
+  return (t.settled || t.refunded) ? t.epoch + 1 : t.epoch;
+}
+
+/** Terminal state of the current epoch — exposed so a buyer sees a clean
+ *  pre-credit read for a fresh run. */
+export function tabTerminalState(home: string, principal: string): { settled: boolean; refunded: boolean } {
+  replay(home);
+  const t = entry(home, principal);
+  return { settled: !!t.settled, refunded: !!t.refunded };
 }
 
 /** Every PRIOR settlement for a principal (the current epoch's, if any, is in

@@ -18,6 +18,10 @@ import { meterInference, preflightInference, type ModelResult } from "./metered-
 import type { RecountTokenizer } from "./inference-meter.js";
 import type { CapabilityState } from "./capability.js";
 import { signedBuildAttestation } from "./build-attestation.js";
+import { buildFundedRunQuote } from "./inference-quote.js";
+import { nextEpochFor, providerSign, providerPublicPem } from "./ledger.js";
+import { COEFFICIENTS_CANONICAL as _COEF } from "./read-meter.js";
+import { createHash as _ch } from "node:crypto";
 
 const sha256 = (b: string) => createHash("sha256").update(b).digest("hex");
 
@@ -33,6 +37,8 @@ export interface InferRequest {
   /** resolved chain id, or null when the node cannot resolve one (fail closed). */
   chainId: number | null;
   home: string;
+  /** raw query string ("?a=b"), for read-only quote lookups. */
+  query?: string;
 }
 
 // ── the injected model backend (G1: Odysseus runs as a sidecar over HTTP) ────
@@ -84,6 +90,33 @@ export async function handleInfer(req: InferRequest, io: InferIo): Promise<boole
   if (req.path === "/api/metering/build") {
     if (req.method !== "GET") { io.json(405, { error: "E_METHOD" }); return true; }
     io.json(200, signedBuildAttestation({ home: req.home }));
+    return true;
+  }
+  // GET /api/metering/infer-terms?refundAddress=&provider= — the FULLY-BOUND
+  // funded-run quote (Bo, deposit-stage). Read-only, ledger-free-of-mutation:
+  // it reads the live nextEpoch for the principal and binds it, the inference
+  // pricing, and the run envelope into one signed quote with its own digest.
+  if (req.path === "/api/metering/infer-terms") {
+    if (req.method !== "GET") { io.json(405, { error: "E_METHOD" }); return true; }
+    const refundAddress = new URL("http://x" + (req.query ?? "")).searchParams.get("refundAddress");
+    const provider = new URL("http://x" + (req.query ?? "")).searchParams.get("provider") ?? "";
+    if (!refundAddress || !/^0x[0-9a-fA-F]{40}$/.test(refundAddress)) { io.json(400, { error: "E_MISSING_FIELD", required: ["refundAddress"] }); return true; }
+    if (!provider) { io.json(503, { error: "E_NO_PROVIDER_WALLET" }); return true; }
+    const scheduleDigest = _ch("sha256").update(canonicalize(_COEF)).digest("hex");
+    const quote = buildFundedRunQuote({
+      tabEpoch: nextEpochFor(req.home, refundAddress),   // the fresh epoch the deposit opens
+      providerAddress: provider,
+      refundAddress,
+      scheduleDigest,
+    });
+    // Provider-sign the quote digest, so the buyer can bind it and later prove
+    // the provider committed to these exact terms.
+    const digest = quote.fundedRunTermsDigest;
+    io.json(200, {
+      quote,
+      signature: providerSign(req.home, "odysseus-dkg:funded-run-quote:v1", digest),
+      providerPublicKeyPem: providerPublicPem(req.home),
+    });
     return true;
   }
   if (req.path !== "/api/metering/infer") return false;

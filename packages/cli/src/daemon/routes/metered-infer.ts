@@ -97,13 +97,14 @@ export function inferenceWiringStatus(): { configured: boolean; rejectedReason: 
 
 export async function handleMeteredInferRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path } = ctx;
-  if (path !== "/api/metering/infer" && path !== "/api/metering/build") return;
+  if (path !== "/api/metering/infer" && path !== "/api/metering/build" && path !== "/api/metering/infer-terms") return;
 
   const home = meterHome();
   tryWireBackendFromConfig(home);
 
+  const rawQuery = (() => { try { return new URL(req.url ?? "", "http://x").search; } catch { return ""; } })();
   await handleInfer(
-    { method: req.method ?? "GET", path, chainId: chainIdOf(ctx), home },
+    { method: req.method ?? "GET", path, chainId: chainIdOf(ctx), home, query: rawQuery },
     {
       json: (status, body) => jsonResponse(res, status, body as Record<string, unknown>),
       readBody: () => readBody(req, SMALL_BODY_BYTES),

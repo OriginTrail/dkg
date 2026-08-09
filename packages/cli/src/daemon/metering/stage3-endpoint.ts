@@ -15,7 +15,7 @@
 //  C.3  nothing here can bill: enforcement remains per-principal in the
 //       meter config, and shadow mode ignores all of it.
 import { createHash } from "node:crypto";
-import { canonicalize, balance, credit, settlementOf } from "./ledger.js";
+import { canonicalize, balance, credit, settlementOf, nextEpochFor, tabTerminalState } from "./ledger.js";
 import {
   buildOpeningArtifact, registerOpening, activeOpening, evaluateDeposit,
   creditDeposit, termsDigest, type TabTerms, type ObservedTransfer,
@@ -216,6 +216,14 @@ export function tabView(home: string, principal: string, safeHeadBlock: number |
     lastLegHash: b.lastHash,
     // A settled tab is closed and unclaimable regardless of a lingering opening
     // artifact — the on-chain payout is the final word (buyer-found, Bo).
+    // Bo (deposit-stage): expose the epoch so a buyer can bind a deposit to a
+    // FRESH lifecycle and distinguish it from a prior settled/refunded one.
+    epoch: b.epoch,
+    nextEpoch: nextEpochFor(home, principal),   // the epoch a fresh deposit opens
+    terminal: tabTerminalState(home, principal),
+    // Clean pre-credit state = the fresh epoch has no active opening and no
+    // balance yet. A buyer verifies this before funding a new run.
+    preCredit: !artifact && b.balance === 0,
     tabOpen: !!artifact && !settled,
     settled: !!settled,
     settlement: settled ? { withdrawalId: settled.withdrawalId, txHash: settled.txHash, netPaidMicroTrac: settled.netPaidMicroTrac, at: settled.at } : null,
