@@ -379,6 +379,79 @@ describe('graph-scoped finalization handler', () => {
     };
   }
 
+  type GraphReconcileInput = Parameters<FinalizationHandler['handleChainReconciledKC']>[0];
+
+  function graphReconcileInput(
+    message: FinalizationMessageMsg,
+    overrides: Partial<GraphReconcileInput> = {},
+  ): GraphReconcileInput {
+    return {
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 123,
+      authorAddress: AUTHOR,
+      ...overrides,
+    };
+  }
+
+  function makeReconcileHandler(
+    chainOverrides: Partial<ChainAdapter>,
+    options: { forbidLegacyRootScan?: boolean } = {},
+  ): FinalizationHandler {
+    const reconcileHandler = new FinalizationHandler(
+      store,
+      legacyFinalizationChain(4, chainOverrides),
+    );
+    const internals = reconcileHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+      findSwmSnapshotForMerkleRoot?: () => Promise<never>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+    if (options.forbidLegacyRootScan) {
+      internals.findSwmSnapshotForMerkleRoot = async () => {
+        throw new Error('legacy root scan must not run for graph-scoped SWM');
+      };
+    }
+    return reconcileHandler;
+  }
+
+  function makePublicReconcileHandler(
+    message: FinalizationMessageMsg,
+    chainOverrides: Partial<ChainAdapter> = {},
+  ): FinalizationHandler {
+    return makeReconcileHandler({
+      isContextGraphActiveOnChain: async () => true,
+      getContextGraphAccessPolicy: async () => 0,
+      getMerkleRootCount: async () => 1n,
+      getLatestMerkleRoot: async () => message.kcMerkleRoot,
+      ...chainOverrides,
+    }, { forbidLegacyRootScan: true });
+  }
+
+  function reconcileGraphScoped(
+    reconcileHandler: FinalizationHandler,
+    message: FinalizationMessageMsg,
+    overrides: Partial<GraphReconcileInput> = {},
+  ) {
+    return reconcileHandler.handleChainReconciledKC(
+      graphReconcileInput(message, overrides),
+      createOperationContext('system'),
+    );
+  }
+
+  async function expectGraphScopedMetadata(
+    pattern: string,
+    present = true,
+  ): Promise<void> {
+    await expect(store.query(
+      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> { <${UAL}> ${pattern} } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: present });
+  }
+
   it('atomically replaces the exact VM graph and emits constant-size rootless metadata', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
 
@@ -2264,7 +2337,7 @@ describe('graph-scoped finalization handler', () => {
 
   it('promotes exact public SWM from chain inventory without inventing transaction provenance', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
-    const publicHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const publicHandler = makePublicReconcileHandler(message, {
       isContextGraphActiveOnChain: async (contextGraphId) => {
         expect(contextGraphId).toBe(42n);
         return true;
@@ -2285,82 +2358,36 @@ describe('graph-scoped finalization handler', () => {
         expect(kaId).toBe(PACKED_KA_ID);
         return AUTHOR;
       },
-    }));
-    const internals = publicHandler as unknown as {
-      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
-    };
-    internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for graph-scoped SWM');
-    };
+    });
 
-    const reconcileInput = {
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 123,
-      authorAddress: AUTHOR,
-    };
-    const outcome = await publicHandler.handleChainReconciledKC(
-      reconcileInput,
-      createOperationContext('system'),
-    );
+    const outcome = await reconcileGraphScoped(publicHandler, message);
 
     expect(outcome).toBe('promoted');
-    await expect(publicHandler.handleChainReconciledKC(
-      reconcileInput,
-      createOperationContext('system'),
-    )).resolves.toBe('already-confirmed');
+    await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('already-confirmed');
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
-    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/accessPolicy> "public" ;
-          <http://dkg.io/ontology/publisherPeerId> "chain-finalized-reconcile-v1" ;
-          <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
-          <http://dkg.io/ontology/materializedVersion> "123:0" ;
-          <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
-        FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
-      } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/status> "confirmed" ;
+      <http://dkg.io/ontology/accessPolicy> "public" ;
+      <http://dkg.io/ontology/publisherPeerId> "chain-finalized-reconcile-v1" ;
+      <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
+      <http://dkg.io/ontology/materializedVersion> "123:0" ;
+      <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
+      FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
+    `);
   });
 
   it('promotes a later exact public SWM assertion when the chain version advances', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     let rootCount = 1n;
     let latestRoot = message.kcMerkleRoot;
-    const publicHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
-      isContextGraphActiveOnChain: async () => true,
-      getContextGraphAccessPolicy: async () => 0,
+    const publicHandler = makePublicReconcileHandler(message, {
       getMerkleRootCount: async () => rootCount,
       getLatestMerkleRoot: async () => latestRoot,
       getLatestMerkleRootAuthor: async () => AUTHOR,
-    }));
-    const internals = publicHandler as unknown as {
-      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
-    };
-    internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for graph-scoped SWM');
-    };
+    });
 
-    await expect(publicHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 123,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('promoted');
+    await expect(reconcileGraphScoped(publicHandler, message)).resolves.toBe('promoted');
 
     await stageNewerWorkspaceAssertion(
       swmGraph,
@@ -2385,23 +2412,11 @@ describe('graph-scoped finalization handler', () => {
     rootCount = 2n;
 
     const reconcileUpdate = {
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
       merkleRoot: latestRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
       versionBlock: 124,
-      authorAddress: AUTHOR,
     };
-    await expect(publicHandler.handleChainReconciledKC(
-      reconcileUpdate,
-      createOperationContext('system'),
-    )).resolves.toBe('promoted');
-    await expect(publicHandler.handleChainReconciledKC(
-      reconcileUpdate,
-      createOperationContext('system'),
-    )).resolves.toBe('already-confirmed');
+    await expect(reconcileGraphScoped(publicHandler, message, reconcileUpdate)).resolves.toBe('promoted');
+    await expect(reconcileGraphScoped(publicHandler, message, reconcileUpdate)).resolves.toBe('already-confirmed');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
@@ -2412,15 +2427,13 @@ describe('graph-scoped finalization handler', () => {
     await expect(store.query(
       `ASK { GRAPH <${vmGraph}> { <urn:asset:one> ?p ?o } }`,
     )).resolves.toMatchObject({ type: 'boolean', value: false });
-    await expect(store.query(
-      `ASK { GRAPH <did:dkg:context-graph:${CG}/_meta> {
-        <${UAL}> <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
-          <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
-          <http://dkg.io/ontology/materializedVersion> "124:0" .
-        FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
-      } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+      <http://dkg.io/ontology/status> "confirmed" ;
+      <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
+      <http://dkg.io/ontology/materializedVersion> "124:0" .
+      FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
+    `);
   });
 
   it('repairs receiptless public metadata after exact VM content committed alone', async () => {
@@ -2435,67 +2448,31 @@ describe('graph-scoped finalization handler', () => {
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
     await store.deleteByPattern({ graph: metaGraph, subject: UAL });
 
-    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
-      isContextGraphActiveOnChain: async () => true,
-      getContextGraphAccessPolicy: async () => 0,
-      getMerkleRootCount: async () => 1n,
-      getLatestMerkleRoot: async () => message.kcMerkleRoot,
+    const repairHandler = makePublicReconcileHandler(message, {
       getLatestMerkleRootAuthor: async () => AUTHOR,
-    }));
-    (repairHandler as unknown as {
-      verifyChainCgBinding: () => Promise<boolean>;
-    }).verifyChainCgBinding = async () => true;
+    });
 
-    await expect(repairHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 123,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+    await expect(reconcileGraphScoped(repairHandler, message)).resolves.toBe('already-confirmed');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(0);
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <http://dkg.io/ontology/status> "confirmed" ;
-          <http://dkg.io/ontology/accessPolicy> "public" ;
-          <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
-          <http://dkg.io/ontology/materializedVersion> "123:0" .
-        FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
-      } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/status> "confirmed" ;
+      <http://dkg.io/ontology/accessPolicy> "public" ;
+      <http://dkg.io/ontology/confirmationKind> "finalized-materialization" ;
+      <http://dkg.io/ontology/materializedVersion> "123:0" .
+      FILTER NOT EXISTS { <${UAL}> <http://dkg.io/ontology/transactionHash> ?tx }
+    `);
   });
 
   it('preserves one newer materialized version during stale receiptless metadata repair', async () => {
     const { message } = await stageGraph();
-    const publicHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
-      isContextGraphActiveOnChain: async () => true,
-      getContextGraphAccessPolicy: async () => 0,
-      getMerkleRootCount: async () => 1n,
-      getLatestMerkleRoot: async () => message.kcMerkleRoot,
-    }));
-    (publicHandler as unknown as {
-      verifyChainCgBinding: () => Promise<boolean>;
-    }).verifyChainCgBinding = async () => true;
+    const publicHandler = makePublicReconcileHandler(message);
 
     const reconcileInput = {
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
       versionBlock: 200,
-      authorAddress: AUTHOR,
     };
-    await expect(publicHandler.handleChainReconciledKC(
-      reconcileInput,
-      createOperationContext('system'),
-    )).resolves.toBe('promoted');
+    await expect(reconcileGraphScoped(publicHandler, message, reconcileInput)).resolves.toBe('promoted');
 
     const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
     await store.deleteByPattern({
@@ -2503,9 +2480,10 @@ describe('graph-scoped finalization handler', () => {
       subject: UAL,
       predicate: 'http://dkg.io/ontology/accessPolicy',
     });
-    await expect(publicHandler.handleChainReconciledKC(
+    await expect(reconcileGraphScoped(
+      publicHandler,
+      message,
       { ...reconcileInput, versionBlock: 123 },
-      createOperationContext('system'),
     )).resolves.toBe('already-confirmed');
 
     const versions = await store.query(
@@ -2520,31 +2498,15 @@ describe('graph-scoped finalization handler', () => {
 
   it('keeps exact private SWM fail-closed without transaction provenance', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
-    const privateHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const privateHandler = makeReconcileHandler({
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 1,
       getMerkleRootCount: async () => 1n,
       getLatestMerkleRoot: async () => message.kcMerkleRoot,
-    }));
-    const internals = privateHandler as unknown as {
-      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-      findSwmSnapshotForMerkleRoot: () => Promise<never>;
-    };
-    internals.verifyChainCgBinding = async () => true;
-    internals.findSwmSnapshotForMerkleRoot = async () => {
-      throw new Error('legacy root scan must not run for graph-scoped SWM');
-    };
+    }, { forbidLegacyRootScan: true });
 
-    await expect(privateHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 123,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+    await expect(reconcileGraphScoped(privateHandler, message))
+      .resolves.toBe('verified-vm-metadata-pending');
 
     expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
@@ -2560,29 +2522,17 @@ describe('graph-scoped finalization handler', () => {
     latestRootMatches,
   }) => {
     const { message, swmGraph, vmGraph } = await stageGraph();
-    const guardedHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const guardedHandler = makeReconcileHandler({
       isContextGraphActiveOnChain: async () => active,
       getContextGraphAccessPolicy: async () => 0,
       getMerkleRootCount: async () => rootCount,
       getLatestMerkleRoot: async () => latestRootMatches
         ? message.kcMerkleRoot
         : Uint8Array.from({ length: 32 }, () => 0x44),
-    }));
-    const internals = guardedHandler as unknown as {
-      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-    };
-    internals.verifyChainCgBinding = async () => true;
+    });
 
-    await expect(guardedHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 123,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+    await expect(reconcileGraphScoped(guardedHandler, message))
+      .resolves.toBe('verified-vm-metadata-pending');
 
     expect(await store.countQuads(vmGraph)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(2);
@@ -2591,7 +2541,7 @@ describe('graph-scoped finalization handler', () => {
   it('fails closed when a same-root chain update overlaps the public authority read', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     let rootCountReads = 0;
-    const guardedHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const guardedHandler = makePublicReconcileHandler(message, {
       isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getMerkleRootCount: async () => {
@@ -2599,21 +2549,10 @@ describe('graph-scoped finalization handler', () => {
         return rootCountReads === 1 ? 1n : 2n;
       },
       getLatestMerkleRoot: async () => message.kcMerkleRoot,
-    }));
-    (guardedHandler as unknown as {
-      verifyChainCgBinding: () => Promise<boolean>;
-    }).verifyChainCgBinding = async () => true;
+    });
 
-    await expect(guardedHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 123,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+    await expect(reconcileGraphScoped(guardedHandler, message))
+      .resolves.toBe('verified-vm-metadata-pending');
 
     expect(rootCountReads).toBe(2);
     expect(await store.countQuads(vmGraph)).toBe(1);
@@ -2636,43 +2575,29 @@ describe('graph-scoped finalization handler', () => {
     }
 
     let receiptReads = 0;
-    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const repairHandler = makeReconcileHandler({
       getMerkleRootCount: async () => 1n,
       resolveCanonicalFinalizationReceipt: async (transactionHash) => {
         receiptReads += 1;
         expect(transactionHash).toBe(message.txHash);
         return canonicalReceipt(message);
       },
-    }));
-    const internals = repairHandler as unknown as {
-      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-    };
-    internals.verifyChainCgBinding = async () => true;
+    });
 
-    await expect(repairHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 200,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+    await expect(reconcileGraphScoped(repairHandler, message, { versionBlock: 200 }))
+      .resolves.toBe('already-confirmed');
 
     expect(receiptReads).toBe(1);
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(await store.countQuads(swmGraph)).toBe(2);
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <http://dkg.io/ontology/accessPolicy> "ownerOnly" ;
-          <http://dkg.io/ontology/publisherPeerId> "12D3KooWPublisher" ;
-          <http://dkg.io/ontology/confirmationKind> "transaction" ;
-          <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
-          <http://dkg.io/ontology/materializedVersion> "123:4" ;
-          <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
-      } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/accessPolicy> "ownerOnly" ;
+      <http://dkg.io/ontology/publisherPeerId> "12D3KooWPublisher" ;
+      <http://dkg.io/ontology/confirmationKind> "transaction" ;
+      <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
+      <http://dkg.io/ontology/materializedVersion> "123:4" ;
+      <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
+    `);
   });
 
   it('does not trust peer-recovered workspace controls without an authenticated local sidecar', async () => {
@@ -2691,7 +2616,7 @@ describe('graph-scoped finalization handler', () => {
       await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
     }
     let accessPolicyReads = 0;
-    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const repairHandler = makeReconcileHandler({
       isContextGraphActiveOnChain: async (contextGraphId) => {
         expect(contextGraphId).toBe(42n);
         return true;
@@ -2703,28 +2628,17 @@ describe('graph-scoped finalization handler', () => {
         expect(contextGraphId).toBe(42n);
         return 1;
       },
-    }));
-    (repairHandler as unknown as {
-      verifyChainCgBinding: () => Promise<boolean>;
-    }).verifyChainCgBinding = async () => true;
+    });
 
-    await expect(repairHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 200,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+    await expect(reconcileGraphScoped(repairHandler, message, { versionBlock: 200 }))
+      .resolves.toBe('verified-vm-metadata-pending');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
     expect(accessPolicyReads).toBe(1);
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
-        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWAttacker" } }',
-    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expectGraphScopedMetadata(
+      '<http://dkg.io/ontology/allowedPeer> "12D3KooWAttacker" .',
+      false,
+    );
   });
 
   it('repairs public VM metadata from chain truth without a local SWM control sidecar', async () => {
@@ -2743,7 +2657,7 @@ describe('graph-scoped finalization handler', () => {
       await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
     }
     let accessPolicyReads = 0;
-    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const repairHandler = makeReconcileHandler({
       isContextGraphActiveOnChain: async (contextGraphId) => {
         expect(contextGraphId).toBe(42n);
         return true;
@@ -2755,35 +2669,22 @@ describe('graph-scoped finalization handler', () => {
         expect(contextGraphId).toBe(42n);
         return 0;
       },
-    }));
-    (repairHandler as unknown as {
-      verifyChainCgBinding: () => Promise<boolean>;
-    }).verifyChainCgBinding = async () => true;
+    });
 
-    await expect(repairHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 200,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+    await expect(reconcileGraphScoped(repairHandler, message, { versionBlock: 200 }))
+      .resolves.toBe('already-confirmed');
 
     expect(accessPolicyReads).toBe(1);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <http://dkg.io/ontology/accessPolicy> "public" ;
-          <http://dkg.io/ontology/publisherPeerId> "unknown" ;
-          <http://dkg.io/ontology/transactionHash> "${message.txHash}" .
-      } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: true });
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
-        + '<http://dkg.io/ontology/allowedPeer> "12D3KooWUntrustedWorkspacePeer" } }',
-    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/accessPolicy> "public" ;
+      <http://dkg.io/ontology/publisherPeerId> "unknown" ;
+      <http://dkg.io/ontology/transactionHash> "${message.txHash}" .
+    `);
+    await expectGraphScopedMetadata(
+      '<http://dkg.io/ontology/allowedPeer> "12D3KooWUntrustedWorkspacePeer" .',
+      false,
+    );
   });
 
   it.each([
@@ -2823,7 +2724,7 @@ describe('graph-scoped finalization handler', () => {
     }
     let activeReads = 0;
     let accessPolicyReads = 0;
-    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const repairHandler = makeReconcileHandler({
       ...(activeOnChain === undefined ? {} : {
         isContextGraphActiveOnChain: async (contextGraphId) => {
           activeReads += 1;
@@ -2837,29 +2738,20 @@ describe('graph-scoped finalization handler', () => {
         accessPolicyReads += 1;
         return 0;
       },
-    }));
-    (repairHandler as unknown as {
-      verifyChainCgBinding: () => Promise<boolean>;
-    }).verifyChainCgBinding = async () => true;
+    });
 
-    await expect(repairHandler.handleChainReconciledKC({
-      contextGraphId: CG,
+    await expect(reconcileGraphScoped(repairHandler, message, {
       onChainCgId,
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
       versionBlock: 200,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+    })).resolves.toBe('verified-vm-metadata-pending');
 
     expect(activeReads).toBe(expectedActiveReads);
     expect(accessPolicyReads).toBe(0);
     expect(await store.countQuads(vmGraph)).toBe(2);
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
-        + '<http://dkg.io/ontology/accessPolicy> "public" } }',
-    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expectGraphScopedMetadata(
+      '<http://dkg.io/ontology/accessPolicy> "public" .',
+      false,
+    );
   });
 
   it('does not repair peer-materialized VM metadata from a non-unique on-chain root', async () => {
@@ -2874,32 +2766,19 @@ describe('graph-scoped finalization handler', () => {
       predicate: 'http://dkg.io/ontology/accessPolicy',
     });
 
-    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+    const repairHandler = makeReconcileHandler({
       getMerkleRootCount: async () => 2n,
       resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
-    }));
-    const internals = repairHandler as unknown as {
-      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
-    };
-    internals.verifyChainCgBinding = async () => true;
+    });
 
-    await expect(repairHandler.handleChainReconciledKC({
-      contextGraphId: CG,
-      onChainCgId: '42',
-      ual: UAL,
-      merkleRoot: message.kcMerkleRoot,
-      publisherAddress: PUBLISHER,
-      kaId: PACKED_KA_ID,
-      versionBlock: 200,
-      authorAddress: AUTHOR,
-    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+    await expect(reconcileGraphScoped(repairHandler, message, { versionBlock: 200 }))
+      .resolves.toBe('verified-vm-metadata-pending');
 
     expect(await store.countQuads(vmGraph)).toBe(2);
-    await expect(store.query(
-      `ASK { GRAPH <${metaGraph}> {
-        <${UAL}> <http://dkg.io/ontology/accessPolicy> ?policy .
-      } }`,
-    )).resolves.toMatchObject({ type: 'boolean', value: false });
+    await expectGraphScopedMetadata(
+      '<http://dkg.io/ontology/accessPolicy> ?policy .',
+      false,
+    );
   });
 
   it.each([
@@ -2937,28 +2816,17 @@ describe('graph-scoped finalization handler', () => {
       } else {
         mismatched.receipt.endKAId = PACKED_KA_ID + 1n;
       }
-      const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      const repairHandler = makeReconcileHandler({
         getMerkleRootCount: async () => 1n,
         resolveCanonicalFinalizationReceipt: async () => mismatched,
-      }));
-      (repairHandler as unknown as {
-        verifyChainCgBinding: () => Promise<boolean>;
-      }).verifyChainCgBinding = async () => true;
+      });
 
-      await expect(repairHandler.handleChainReconciledKC({
-        contextGraphId: CG,
-        onChainCgId: '42',
-        ual: UAL,
-        merkleRoot: message.kcMerkleRoot,
-        publisherAddress: PUBLISHER,
-        kaId: PACKED_KA_ID,
-        versionBlock: 200,
-        authorAddress: AUTHOR,
-      }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
-      await expect(store.query(
-        `ASK { GRAPH <${metaGraph}> { <${UAL}> `
-          + '<http://dkg.io/ontology/accessPolicy> ?policy } }',
-      )).resolves.toMatchObject({ type: 'boolean', value: false });
+      await expect(reconcileGraphScoped(repairHandler, message, { versionBlock: 200 }))
+        .resolves.toBe('verified-vm-metadata-pending');
+      await expectGraphScopedMetadata(
+        '<http://dkg.io/ontology/accessPolicy> ?policy .',
+        false,
+      );
     },
   );
 
