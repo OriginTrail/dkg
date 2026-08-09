@@ -12,7 +12,7 @@ import {
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
-} from './system-record-signatures-v1-internal.js';
+} from './system-record-signed-envelope-codecs-v1-internal.js';
 import {
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
 } from './system-record-inventory-codecs-v1-internal.js';
@@ -22,17 +22,15 @@ export interface SystemRecordArtifactIdentitiesV1 {
   readonly cacheDigest: Digest32V1;
 }
 
-interface SystemRecordObjectIdentityDescriptorV1 {
-  readonly derive: (canonicalBytes: Uint8Array) => SystemRecordArtifactIdentitiesV1;
-}
+type SystemRecordObjectIdentityDeriverV1 = (
+  canonicalBytes: Uint8Array,
+) => SystemRecordArtifactIdentitiesV1;
 
-function byteIdentity(domain: string): SystemRecordObjectIdentityDescriptorV1 {
-  return Object.freeze({
-    derive: (canonicalBytes: Uint8Array) => {
-      const digest = digestSystemRecordBytesV1(domain, canonicalBytes);
-      return Object.freeze({ semanticDigest: digest, cacheDigest: digest });
-    },
-  });
+function byteIdentity(domain: string): SystemRecordObjectIdentityDeriverV1 {
+  return (canonicalBytes: Uint8Array) => {
+    const digest = digestSystemRecordBytesV1(domain, canonicalBytes);
+    return Object.freeze({ semanticDigest: digest, cacheDigest: digest });
+  };
 }
 
 function signedEnvelopeIdentity<TEnvelope extends Readonly<{ objectDigest: Digest32V1 }>>(
@@ -41,19 +39,17 @@ function signedEnvelopeIdentity<TEnvelope extends Readonly<{ objectDigest: Diges
     envelope: TEnvelope,
     canonicalBytes: Uint8Array,
   ) => Digest32V1,
-): SystemRecordObjectIdentityDescriptorV1 {
-  return Object.freeze({
-    derive: (canonicalBytes: Uint8Array) => {
-      const envelope = parse(canonicalBytes);
-      return Object.freeze({
-        semanticDigest: envelope.objectDigest,
-        cacheDigest: cacheDigest(envelope, canonicalBytes),
-      });
-    },
-  });
+): SystemRecordObjectIdentityDeriverV1 {
+  return (canonicalBytes: Uint8Array) => {
+    const envelope = parse(canonicalBytes);
+    return Object.freeze({
+      semanticDigest: envelope.objectDigest,
+      cacheDigest: cacheDigest(envelope, canonicalBytes),
+    });
+  };
 }
 
-export const SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1 = Object.freeze({
+export const SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1 = Object.freeze({
   'root-descriptor': signedEnvelopeIdentity(
     parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
     (_envelope, canonicalBytes) => digestSystemRecordBytesV1(
@@ -79,7 +75,7 @@ export const SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1 = Object.freeze({
   'owned-subject-table': byteIdentity(SYSTEM_RECORD_DIGEST_DOMAINS_V1.ownedSubjectTable),
   'profile-bundle': byteIdentity(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle),
 } satisfies Readonly<
-  Record<SystemRecordObjectKindV1, SystemRecordObjectIdentityDescriptorV1>
+  Record<SystemRecordObjectKindV1, SystemRecordObjectIdentityDeriverV1>
 >);
 
 export function deriveSystemRecordArtifactIdentitiesV1(
@@ -87,10 +83,10 @@ export function deriveSystemRecordArtifactIdentitiesV1(
   canonicalBytes: Uint8Array,
   label: string,
 ): SystemRecordArtifactIdentitiesV1 {
-  if (!Object.prototype.hasOwnProperty.call(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1, objectKind)) {
+  if (!Object.prototype.hasOwnProperty.call(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1, objectKind)) {
     fail('system-record-closure', `${label} artifact identity is invalid`);
   }
-  const identities = SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1[objectKind].derive(canonicalBytes);
+  const identities = SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1[objectKind](canonicalBytes);
   if (identities.semanticDigest.length !== 66 || identities.cacheDigest.length !== 66) {
     fail('system-record-closure', `${label} artifact identity is invalid`);
   }
