@@ -8,9 +8,9 @@ import type {
 import type { VmReconcileRotationRecord } from '../../src/dkg-agent-types.js';
 import { DKGAgent } from '../../src/index.js';
 import type {
-  VmRecoveryChainFootprint,
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-microbatch.js';
+import type { VmRecoveryChainFootprint } from '../../src/vm-recovery-types.js';
 
 interface TestPeerId {
   toString(): string;
