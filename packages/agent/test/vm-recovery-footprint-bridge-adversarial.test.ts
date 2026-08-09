@@ -232,4 +232,99 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     expect(anchor).toEqual({ kind: 'latest-bounded' });
     expect(anchor && Object.hasOwn(anchor, 'blockHash')).toBe(false);
   });
+
+  it('proves positive-id liveness before consulting public policy or KA sizing', async () => {
+    const calls: string[] = [];
+    const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async (contextGraphId) => {
+        calls.push(`active:${contextGraphId}`);
+        return true;
+      },
+      getContextGraphAccessPolicy: async (contextGraphId) => {
+        calls.push(`policy:${contextGraphId}`);
+        return 0;
+      },
+      getKnowledgeAssetUpdateContext: async (kaId) => {
+        calls.push(`context:${kaId}`);
+        return publicContext(kaId);
+      },
+    };
+
+    const enriched = await enrichVmRecoveryFootprints([target(9)], 444n, reader, {
+      maxContextReads: 10,
+      isCurrent: () => true,
+    });
+
+    expect(calls).toEqual(['active:444', 'policy:444', 'context:9']);
+    expect(enriched[0]!.recoveryFootprint?.kind).toBe('public-v10');
+  });
+
+  it.each([
+    { label: 'zero id', contextGraphId: 0n, active: true },
+    { label: 'negative id', contextGraphId: -1n, active: true },
+    { label: 'inactive slot', contextGraphId: 5n, active: false },
+  ])('does zero policy and sizing reads for $label', async ({ contextGraphId, active }) => {
+    let livenessReads = 0;
+    let policyReads = 0;
+    let contextReads = 0;
+    const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => {
+        livenessReads += 1;
+        return active;
+      },
+      getContextGraphAccessPolicy: async () => {
+        policyReads += 1;
+        return 0;
+      },
+      getKnowledgeAssetUpdateContext: async () => {
+        contextReads += 1;
+        return publicContext(1n);
+      },
+    };
+    const targets = [target(1)];
+
+    const enriched = await enrichVmRecoveryFootprints(targets, contextGraphId, reader, {
+      maxContextReads: 10,
+      isCurrent: () => true,
+    });
+
+    expect(livenessReads).toBe(contextGraphId > 0n ? 1 : 0);
+    expect(policyReads).toBe(0);
+    expect(contextReads).toBe(0);
+    expect(enriched).toEqual(targets);
+  });
+
+  it('fails closed when liveness is missing or rejects', async () => {
+    for (const liveness of ['missing', 'rejects'] as const) {
+      let policyReads = 0;
+      let contextReads = 0;
+      const reader: VmRecoveryFootprintBridgeReader = {
+        ...(liveness === 'rejects'
+          ? {
+              isContextGraphActiveOnChain: async () => {
+                throw new Error('liveness unavailable');
+              },
+            }
+          : {}),
+        getContextGraphAccessPolicy: async () => {
+          policyReads += 1;
+          return 0;
+        },
+        getKnowledgeAssetUpdateContext: async () => {
+          contextReads += 1;
+          return publicContext(1n);
+        },
+      };
+      const targets = [target(1)];
+
+      const enriched = await enrichVmRecoveryFootprints(targets, 5n, reader, {
+        maxContextReads: 10,
+        isCurrent: () => true,
+      });
+
+      expect(policyReads, liveness).toBe(0);
+      expect(contextReads, liveness).toBe(0);
+      expect(enriched, liveness).toEqual(targets);
+    }
+  });
 });
