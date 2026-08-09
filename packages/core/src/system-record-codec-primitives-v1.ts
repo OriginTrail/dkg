@@ -104,10 +104,6 @@ export function copyBoundedSystemRecordBytesV1(
   return copy;
 }
 
-export function systemRecordHexToBytesV1(value: string): Uint8Array {
-  return Uint8Array.from(Buffer.from(value.slice(2), 'hex'));
-}
-
 export function concatSystemRecordBytesV1(...values: readonly Uint8Array[]): Uint8Array {
   const length = values.reduce((sum, value) => sum + value.byteLength, 0);
   const result = new Uint8Array(length);
