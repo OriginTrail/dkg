@@ -26,9 +26,9 @@ import {
   InvalidSystemRecordResponseError,
   SystemRecordRequesterTransferError,
   exchangeSystemRecordResponseV1,
+  openSystemRecordRequesterExchangeV1,
   retainVerifiedSystemRecordResponseV1,
   type SystemRecordRetainedSourceV1,
-  type SystemRecordRetainTransferResultV1,
 } from './requester-transfer-v1-internal.js';
 import {
   createSystemRecordExactRequestV1,
@@ -36,17 +36,26 @@ import {
 import { raceSystemRecordAbortV1 } from './transport-v1.js';
 
 type SystemRecordRequesterSettlementV1 =
-  | SystemRecordRetainTransferResultV1
+  | Readonly<{ outcome: 'ok'; wireBytes: number }>
   | Exclude<SystemRecordExactFetchResultV1, Readonly<{ outcome: 'ok' }>>;
+
+interface PendingFetchPhaseV1 {
+  readonly state: 'pending';
+  readonly controller: AbortController;
+  readonly transfer: Promise<SystemRecordRequesterSettlementV1>;
+  abortReason?: SystemRecordRequesterResetReasonV1;
+}
+
+interface RetainedFetchPhaseV1 {
+  readonly state: 'retained';
+  readonly source: SystemRecordRetainedSourceV1;
+}
 
 interface FetchEntryV1 {
   readonly key: string;
-  readonly controller: AbortController;
-  readonly transfer: Promise<SystemRecordRequesterSettlementV1>;
   observerCount: number;
   leaseCount: number;
-  abortReason?: SystemRecordRequesterResetReasonV1;
-  retained?: SystemRecordRetainedSourceV1;
+  phase: PendingFetchPhaseV1 | RetainedFetchPhaseV1;
 }
 
 /**
@@ -95,7 +104,7 @@ export function createSystemRecordRequesterV1(
     const { key, request } = exact;
     let entry = entries.get(key);
     if (entry !== undefined) {
-      if (entry.controller.signal.aborted) {
+      if (entry.phase.state === 'pending' && entry.phase.controller.signal.aborted) {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       // The first observer owns the transfer; the frozen limit counts followers.
@@ -123,10 +132,13 @@ export function createSystemRecordRequesterV1(
     });
     entry = {
       key,
-      controller: new AbortController(),
-      transfer,
       observerCount: 0,
       leaseCount: 0,
+      phase: {
+        state: 'pending',
+        controller: new AbortController(),
+        transfer,
+      },
     };
     entries.set(key, entry);
     started += 1;
@@ -159,30 +171,19 @@ export function createSystemRecordRequesterV1(
       signal.throwIfAborted();
     }
     try {
-      const shared = await raceSystemRecordAbortV1(entry.transfer, signal);
-      return shared.outcome === 'ok' ? deliverLease(entry, shared.retained) : shared;
+      const phase = entry.phase;
+      if (phase.state === 'retained') return deliverLease(entry, phase.source);
+      const shared = await raceSystemRecordAbortV1(phase.transfer, signal);
+      if (shared.outcome !== 'ok') return shared;
+      const retained = entry.phase;
+      if (retained.state !== 'retained') {
+        throw new Error('successful System Record transfer has no retained source');
+      }
+      return deliverLease(entry, retained.source);
     } finally {
       signal.removeEventListener('abort', releaseObserver);
       releaseObserver();
     }
-  }
-
-  async function openRequesterExchangeV1(
-    entry: FetchEntryV1,
-  ): Promise<SystemRecordRequesterExchangeV1> {
-    const opening = options.openExchange(entry.controller.signal);
-    let accepted = false;
-    void opening.then((lateExchange) => {
-      if (accepted || !entry.controller.signal.aborted) return;
-      try {
-        lateExchange.reset(entry.abortReason ?? 'cancelled');
-      } catch {
-        // A late transport owns no requester resources; reset remains best-effort.
-      }
-    }, () => undefined);
-    const exchange = await raceSystemRecordAbortV1(opening, entry.controller.signal);
-    accepted = true;
-    return exchange;
   }
 
   async function run(
@@ -191,6 +192,10 @@ export function createSystemRecordRequesterV1(
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
   ): Promise<SystemRecordRequesterSettlementV1> {
+    const pending = entry.phase;
+    if (pending.state !== 'pending') {
+      throw new Error('System Record transfer started outside the pending phase');
+    }
     let exchange: SystemRecordRequesterExchangeV1 | undefined;
     let wireBytes = 0;
     const timeout = setTimeout(
@@ -204,23 +209,30 @@ export function createSystemRecordRequesterV1(
     timeout.unref?.();
     let shared: SystemRecordRequesterSettlementV1;
     try {
-      exchange = await openRequesterExchangeV1(entry);
+      exchange = await openSystemRecordRequesterExchangeV1({
+        openExchange: options.openExchange,
+        signal: pending.controller.signal,
+        resetReason: () => pending.abortReason ?? 'cancelled',
+      });
       const transfer = await exchangeSystemRecordResponseV1({
         request,
         exchange,
         frameReservation,
-        signal: entry.controller.signal,
+        signal: pending.controller.signal,
       });
       wireBytes = transfer.wireBytes;
-      shared = retainVerifiedSystemRecordResponseV1({
+      const retained = retainVerifiedSystemRecordResponseV1({
         request,
         transfer,
         decodeAdmission: options.decodeAdmission,
         byteAdmission: options.byteAdmission,
       });
-      if (shared.outcome === 'ok') {
-        entry.retained = shared.retained;
-        retainedPayloadBytes += shared.retained.artifact.canonicalBytes.byteLength;
+      if (retained.outcome === 'ok') {
+        entry.phase = Object.freeze({ state: 'retained', source: retained.retained });
+        retainedPayloadBytes += retained.retained.artifact.canonicalBytes.byteLength;
+        shared = Object.freeze({ outcome: 'ok', wireBytes: retained.retained.wireBytes });
+      } else {
+        shared = retained;
       }
     } catch (error) {
       if (error instanceof SystemRecordRequesterTransferError) {
@@ -228,10 +240,10 @@ export function createSystemRecordRequesterV1(
       }
       const outcome = error instanceof InvalidSystemRecordResponseError
         ? 'invalid-response'
-        : entry.controller.signal.aborted
-          ? entry.abortReason === 'closed'
+        : pending.controller.signal.aborted
+          ? pending.abortReason === 'closed'
             ? 'closed'
-            : entry.abortReason === 'deadline'
+            : pending.abortReason === 'deadline'
               ? 'deadline'
               : 'transport'
           : 'transport';
@@ -239,7 +251,7 @@ export function createSystemRecordRequesterV1(
         exchange?.reset(
           outcome === 'invalid-response'
             ? 'invalid-response'
-            : entry.abortReason ?? outcome,
+            : pending.abortReason ?? outcome,
         );
       } catch {
         // Reset is best-effort cleanup and cannot strand the single-flight entry.
@@ -297,18 +309,19 @@ export function createSystemRecordRequesterV1(
   function abortIfUnobserved(entry: FetchEntryV1): void {
     if (entry.observerCount !== 0 || entry.leaseCount !== 0) return;
     if (entries.get(entry.key) !== entry) return;
-    if (entry.retained === undefined) {
+    if (entry.phase.state === 'pending') {
       abortEntry(entry, 'cancelled', new Error('system-record requester has no callers'));
     }
     releaseRetainedIfUnobserved(entry);
   }
 
   function releaseRetainedIfUnobserved(entry: FetchEntryV1): void {
-    if (entry.observerCount !== 0 || entry.leaseCount !== 0 || entry.retained === undefined) return;
+    if (entry.observerCount !== 0 || entry.leaseCount !== 0) return;
+    const phase = entry.phase;
+    if (phase.state !== 'retained') return;
     if (entries.get(entry.key) === entry) entries.delete(entry.key);
-    retainedPayloadBytes -= entry.retained.artifact.canonicalBytes.byteLength;
-    entry.retained.release();
-    entry.retained = undefined;
+    retainedPayloadBytes -= phase.source.artifact.canonicalBytes.byteLength;
+    phase.source.release();
   }
 
   function stats(): SystemRecordRequesterStatsV1 {
@@ -331,7 +344,7 @@ export function createSystemRecordRequesterV1(
     if (closed) return;
     closed = true;
     for (const entry of entries.values()) {
-      if (entry.retained === undefined) {
+      if (entry.phase.state === 'pending') {
         abortEntry(entry, 'closed', new Error('system-record requester closed'));
       }
     }
@@ -342,9 +355,10 @@ export function createSystemRecordRequesterV1(
     reason: SystemRecordRequesterResetReasonV1,
     error: Error,
   ): void {
-    if (entry.controller.signal.aborted) return;
-    entry.abortReason = reason;
-    entry.controller.abort(error);
+    const phase = entry.phase;
+    if (phase.state !== 'pending' || phase.controller.signal.aborted) return;
+    phase.abortReason = reason;
+    phase.controller.abort(error);
   }
 }
 

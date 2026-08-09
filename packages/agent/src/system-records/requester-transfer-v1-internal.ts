@@ -18,6 +18,7 @@ import type {
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterByteReservationV1,
   SystemRecordRequesterExchangeV1,
+  SystemRecordRequesterResetReasonV1,
 } from './requester-api-v1.js';
 import {
   systemRecordExactResponseOutcomeV1,
@@ -42,6 +43,26 @@ export type SystemRecordRetainTransferResultV1 =
     outcome: SystemRecordRemoteFetchOutcomeV1 | 'busy' | 'capacity';
     wireBytes: number;
   }>;
+
+export async function openSystemRecordRequesterExchangeV1(input: {
+  readonly openExchange: (signal: AbortSignal) => Promise<SystemRecordRequesterExchangeV1>;
+  readonly signal: AbortSignal;
+  readonly resetReason: () => SystemRecordRequesterResetReasonV1;
+}): Promise<SystemRecordRequesterExchangeV1> {
+  const opening = input.openExchange(input.signal);
+  let accepted = false;
+  void opening.then((lateExchange) => {
+    if (accepted || !input.signal.aborted) return;
+    try {
+      lateExchange.reset(input.resetReason());
+    } catch {
+      // A late transport owns no requester resources; reset remains best-effort.
+    }
+  }, () => undefined);
+  const exchange = await raceSystemRecordAbortV1(opening, input.signal);
+  accepted = true;
+  return exchange;
+}
 
 export async function exchangeSystemRecordResponseV1(input: {
   readonly request: SystemRecordRequestHeaderV1;
