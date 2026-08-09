@@ -266,3 +266,39 @@ describe('control barrier contract survives the coordinator extraction', () => {
     expect(ran).toBe(true);
   });
 });
+
+describe('typed barrier keys close the generic result channel (#2179)', () => {
+  // The retired contract's defect was that `T` was chosen per CALL while
+  // coalescing was keyed per runtime STRING, so the type system had no say in
+  // which caller's `T` a coalesced promise satisfied. These are type-level
+  // pins that the replacement actually closes that channel: `T` is chosen per
+  // KEY, once, and no call site can renegotiate it.
+  it('binds the result type to the key, not the call site', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1 });
+    const epochKey = createStoreControlBarrierKeyV1<{ epoch: string }>('typed.epoch');
+    const effectKey = createStoreControlBarrierKeyV1<void>('typed.effect');
+
+    const typed = scheduler.runTypedControlBarrier({}, epochKey, async () => ({ epoch: '1' }));
+    expectTypeOf(typed).toEqualTypeOf<Promise<{ epoch: string }>>();
+    expect(await typed).toEqual({ epoch: '1' });
+
+    // A void key is an effect barrier BY TYPE: its promise carries no data, so
+    // it cannot be used as a typed side channel between coalescing callers.
+    const effect = scheduler.runTypedControlBarrier({}, effectKey, async () => {});
+    expectTypeOf(effect).toEqualTypeOf<Promise<void>>();
+    await effect;
+
+    // A transition cannot smuggle a different result type past its key.
+    // @ts-expect-error — the epoch key demands { epoch: string }, not number
+    void scheduler.runTypedControlBarrier({}, epochKey, async () => 7);
+
+    // A key cannot be forged from a plain literal: the module-private brand is
+    // a required member no caller outside the factory can produce.
+    // @ts-expect-error — structural literal lacks the private brand
+    void scheduler.runTypedControlBarrier({}, { purpose: 'forged' }, async () => 7);
+  });
+
+  it('rejects an empty purpose at key creation', () => {
+    expect(() => createStoreControlBarrierKeyV1('')).toThrow(/must not be empty/);
+  });
+});

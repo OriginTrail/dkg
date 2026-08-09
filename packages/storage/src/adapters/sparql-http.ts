@@ -783,17 +783,28 @@ export class SparqlHttpStore implements TripleStore {
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
           //
-          // Keep the published string callback intact for external/legacy
-          // coordinator composition. Production lifecycle calls use the
-          // domain-owned typed methods below, which translate to scheduler keys
-          // only at this adapter boundary.
-          barrier: (purpose, transition) =>
-            externalStorePriorityScheduler.runControlBarrier(
-              this,
-              purpose,
-              transition,
-              barrierGeneration(),
-            ),
+          // The string barrier is POISONED in managed composition, not
+          // supplied (#2179). Every production lifecycle call goes through
+          // `typedBarrier` below, so this callback is reachable only through
+          // the controller's legacy fallback — i.e. only if a future edit
+          // removes `typedBarrier` from these deps or reorders the fallback.
+          // Supplying the real string barrier here would make that edit
+          // SILENT: transitions would keep working while quietly moving onto
+          // the deprecated purpose-string contract with its unsound result
+          // cast. A loud throw turns the same edit into an immediate, named
+          // failure. The member itself stays required on the deps interface —
+          // required-ness is the compile-time guard that already caught a
+          // barrier shipping with zero callers once in this stack's history —
+          // and external composers keep supplying real string barriers until
+          // the deprecated contract is removed at a breaking version.
+          barrier: () => {
+            throw new Error(
+              'system-record managed composition retired the purpose-string barrier (#2179): ' +
+                'lifecycle transitions must run through typedBarrier and the scheduler\'s ' +
+                'runTypedControlBarrier. Reaching this throw means the typed path was ' +
+                'removed or bypassed in sparql-http\'s controller deps.',
+            );
+          },
           typedBarrier: (kind, transition) =>
             runTypedBarrier(SYSTEM_RECORD_BARRIER_KEYS_V1[kind], transition),
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },

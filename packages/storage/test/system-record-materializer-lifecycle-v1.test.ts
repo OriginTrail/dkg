@@ -2915,4 +2915,40 @@ describe('system-record lane session lifecycle V1', () => {
       expect(session.state).toBe('shutdown');
     });
   });
+
+  describe('poisoned string barrier under the legacy fallback (#2179)', () => {
+    // Managed composition routes every lifecycle call through `typedBarrier`
+    // and supplies a string barrier that THROWS. The controller's fallback
+    // reaches that string barrier only when `typedBarrier` is absent — i.e.
+    // only if a future edit removes it from the production deps. This pins
+    // what such an edit produces: an immediate, NAMED failure, instead of the
+    // silent alternative where transitions keep working while quietly moving
+    // onto the deprecated purpose-string contract and its unsound result cast.
+    it('a lane composed with only a poisoned barrier fails enable loudly, named, and closed', async () => {
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff,
+        executor,
+        // The same shape sparql-http supplies in managed composition.
+        barrier: () => {
+          throw new Error(
+            'system-record managed composition retired the purpose-string barrier (#2179)',
+          );
+        },
+      });
+
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/#2179/);
+
+      // Closed, not just loud, in one assertion: the ONLY handoff interaction
+      // is the fail-closed order. The poison threw at the barrier boundary, so
+      // no physical step ran — the child was never stopped, destroyed, or
+      // replaced under an enable that could not settle.
+      expect(handoff.calls).toEqual([
+        'failManagedMutationsClosed:enable transition did not physically settle',
+      ]);
+      // The lane is terminally unavailable, matching every other failed-enable
+      // path in this file.
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
+    });
+  });
 });

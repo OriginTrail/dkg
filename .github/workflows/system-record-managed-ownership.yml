@@ -136,6 +136,14 @@ jobs:
       - name: Typecheck the ownership gate harness
         run: pnpm typecheck:live:system-record-managed-ownership
 
+      - name: Typecheck barrier type contracts (issue 2179)
+        # The type-level pins in store-control-barrier-contract-v1.test.ts
+        # (expectTypeOf + @ts-expect-error) only PROVE anything under a
+        # compiler. The package tsconfig includes only src/ and vitest does
+        # not typecheck, so without this lane every type assertion in that
+        # file is decorative — a check that cannot fail.
+        run: pnpm --filter @origintrail-official/dkg-storage run typecheck:type-contracts
+
       - name: Storage unit conformance
         run: |
           pnpm --filter @origintrail-official/dkg-storage exec vitest run \

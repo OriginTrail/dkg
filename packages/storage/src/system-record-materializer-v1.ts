@@ -248,13 +248,28 @@ export interface SystemRecordLaneControllerDepsV1 {
    * Required, not optional. An optional barrier is one that gets forgotten:
    * this capability shipped once with a barrier implemented, exported and
    * tested but with zero production callers, so the enable path stopped the
-   * child while ordinary requests were still in flight.
+   * child while ordinary requests were still in flight. Required-ness is the
+   * compile-time guard against that recurring, which is why retiring the
+   * string contract does NOT make this member optional before the break.
    *
-   * @deprecated Managed composition uses `typedBarrier`. Retained so existing
-   * external controller integrations keep their purpose-string contract.
+   * @deprecated The purpose-string contract cannot carry a sound result type:
+   * coalescing is keyed by a runtime string while each caller picks a static
+   * `T`, so a later same-purpose caller receives the first promise under its
+   * own `T`. Supply {@link typedBarrier}; migrate string barriers to
+   * `runTypedControlBarrier` with keys from `createStoreControlBarrierKeyV1`.
+   * Managed composition already supplies a POISONED callback here (throws on
+   * use) so the retired path cannot silently re-animate. Removal of this
+   * member — and the required/optional flip that makes `typedBarrier` the
+   * mandatory one — happens together at the next allowed breaking version
+   * boundary, not before: both are source-incompatible for external
+   * composers.
    */
   readonly barrier: SystemRecordLaneBarrierV1;
-  /** Optional typed path; the string callback above remains the compatibility contract. */
+  /**
+   * The production lifecycle path. When supplied it is ALWAYS used and the
+   * string callback above is never invoked; the fallback exists only for
+   * external composers that predate typed keys.
+   */
   readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
   /**
    * Adapter-owned admission latch, driven by the lifecycle's physical state.

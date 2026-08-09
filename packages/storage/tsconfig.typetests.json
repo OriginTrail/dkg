@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "rootDir": "."
+  },
+  "include": [
+    "src",
+    "test/store-control-barrier-contract-v1.test.ts"
+  ],
+  "references": [{ "path": "../core" }, { "path": "../rdf-utils" }]
+}
