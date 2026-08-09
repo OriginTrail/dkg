@@ -34,7 +34,7 @@ const MANIFEST = { instanceId: "inst-1", weightsDigest: "sha256:w", tokenizerBun
 const MANIFEST_DIGEST = M.backendManifestDigest(MANIFEST);
 const MODEL = {
   modelId: "stub/qwen", weightsDigest: "sha256:w", tokenizerDigest: "sha256:bundle",
-  chatTemplateDigest: "sha256:c", tokenizer: BUNDLE, backendManifestDigest: MANIFEST_DIGEST,
+  chatTemplateDigest: "sha256:c", tokenizer: BUNDLE, backendManifestDigest: MANIFEST_DIGEST, backendManifest: MANIFEST,
 };
 const ev = (o) => M.buildInferenceEvidence({ requestCanonical: { m: "x" }, model: MODEL, finishReason: "stop", stopBoundary: { kind: "eos" }, ...o });
 const verify = (o) => M.verifyInferenceRecount({ tokenizer, specialTokenIds: SPECIAL, ...o });
@@ -134,9 +134,52 @@ console.log("\nblockers from Bo's adversarial pass (1571496d):");
   ok("a leg from a DIFFERENT deployment (restart/config drift) is REJECTED", v.ok === false && v.code === "E_RECOUNT_MANIFEST", JSON.stringify(v));
 }
 {
-  const stripped = { ...evidence, model: { ...MODEL, backendManifestDigest: undefined } };
+  const stripped = { ...evidence, model: { ...MODEL, backendManifestDigest: undefined, backendManifest: undefined } };
   const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence: stripped });
-  ok("a leg omitting the backend manifest binding is REJECTED (no silent downgrade)", v.ok === false && v.code === "E_RECOUNT_MANIFEST", JSON.stringify(v));
+  ok("a leg omitting the backend manifest binding is REJECTED (no silent downgrade)",
+    v.ok === false && (v.code === "E_RECOUNT_MANIFEST" || v.code === "E_RECOUNT_EMBEDDED_OBJECT"), JSON.stringify(v));
+}
+
+console.log("\nBo's audit conditions (1571496d → d14ebae0):");
+{
+  // Condition 1: the leg must be SELF-CONTAINED evidence — the objects travel
+  // with it, and each must hash to the digest beside it.
+  ok("the leg embeds the canonicalization RULES object, not just its digest",
+    typeof evidence.canonicalization.rules === "object" && evidence.canonicalization.rules.normalization === "none");
+  ok("the leg embeds the pricing POLICY object", typeof evidence.policy === "object" && evidence.policy.perOutputTokenMicroTrac === 6);
+  ok("the leg embeds the backend MANIFEST object", typeof evidence.model.backendManifest === "object" && evidence.model.backendManifest.instanceId === "inst-1");
+}
+{
+  // ...and an embedded object that disagrees with its own digest is refused, so
+  // the embedding cannot become a place to hide different rules.
+  const tampered = { ...evidence, canonicalization: { ...evidence.canonicalization, rules: { ...evidence.canonicalization.rules, normalization: "NFKC" } } };
+  const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence: tampered });
+  ok("embedded rules that disagree with their own digest are REJECTED", v.ok === false && v.code === "E_RECOUNT_EMBEDDED_OBJECT", JSON.stringify(v));
+}
+{
+  const tampered = { ...evidence, policy: { ...evidence.policy, perOutputTokenMicroTrac: 1 } };
+  const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence: tampered });
+  ok("an embedded policy that disagrees with its own digest is REJECTED", v.ok === false && v.code === "E_RECOUNT_EMBEDDED_OBJECT", JSON.stringify(v));
+}
+{
+  const tampered = { ...evidence, model: { ...MODEL, backendManifest: { ...MANIFEST, weightsDigest: "sha256:different-weights" } } };
+  const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence: tampered });
+  ok("an embedded manifest that disagrees with its own digest is REJECTED", v.ok === false && v.code === "E_RECOUNT_EMBEDDED_OBJECT", JSON.stringify(v));
+}
+{
+  // Condition 1, second half: bounds on what a signed leg may carry.
+  const lim = M.INFERENCE_POLICY_CANONICAL.limits;
+  const huge = { ...evidence, outputTokenIds: new Array(lim.maxOutputTokens + 1).fill(1), outputTokens: lim.maxOutputTokens + 1 };
+  const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence: huge });
+  ok("a token array beyond the policy bound is REJECTED (E_RECOUNT_LIMIT)", v.ok === false && v.code === "E_RECOUNT_LIMIT", JSON.stringify(v));
+  ok("the limits are part of the digest-bound policy", lim.maxInputTokens > 0 && lim.maxOutputTokens > 0 && lim.maxEvidenceBytes > 0);
+}
+{
+  // Counts and price must be DERIVED from the arrays, never taken from the
+  // duplicate count fields (Bo's proviso on clearing (c)).
+  const lying = { ...evidence, inputTokens: 999999, outputTokens: 999999, pricing: { ...evidence.pricing, costMicroTrac: 2 * 999999 + 6 * 999999 } };
+  const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence: lying });
+  ok("inflated duplicate count fields cannot raise the bill (derived from arrays)", v.ok === false && v.code === "E_RECOUNT_COUNT_MISMATCH", JSON.stringify(v));
 }
 {
   const v = verify({ renderedPrompt: rendered, deliveredCompletion: completion, evidence, expectedTokenizerBundleDigest: BUNDLE.bundleDigest, expectedBackendManifestDigest: MANIFEST_DIGEST });

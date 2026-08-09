@@ -38,7 +38,7 @@ const tokenizer = { encode: (t) => [...t.matchAll(/ |[^ ]+/g)].map((m) => idOf(m
 const MANIFEST = { instanceId: "inst-1", weightsDigest: "sha256:w", tokenizerBundleDigest: "sha256:bundle", engineBuild: "stub", samplerConfig: { temperature: "0" }, chatTemplateDigest: "sha256:c" };
 const MODEL = { modelId: "stub", weightsDigest: "sha256:w", tokenizerDigest: "sha256:bundle", chatTemplateDigest: "sha256:c",
   tokenizer: { bundleDigest: "sha256:bundle", bundleFiles: ["tokenizer.json"], engine: "stub", engineVersion: "1.0.0" },
-  backendManifestDigest: "PLACEHOLDER" };
+  backendManifestDigest: "PLACEHOLDER", backendManifest: MANIFEST };
 MODEL.backendManifestDigest = IM.backendManifestDigest(MANIFEST);
 const CHAIN = 8453;
 const sched = createHash("sha256").update(L.canonicalize(RM.COEFFICIENTS_CANONICAL)).digest("hex");

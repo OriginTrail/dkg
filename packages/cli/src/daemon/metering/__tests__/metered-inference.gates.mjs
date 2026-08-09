@@ -35,7 +35,7 @@ const tokenizer = { encode: (t) => [...t.matchAll(/ |[^ ]+/g)].map((m) => idOf(m
 const MANIFEST = { instanceId: "inst-1", weightsDigest: "sha256:w", tokenizerBundleDigest: "sha256:bundle", engineBuild: "stub", samplerConfig: { temperature: "0" }, chatTemplateDigest: "sha256:c" };
 const MODEL = { modelId: "stub", weightsDigest: "sha256:w", tokenizerDigest: "sha256:bundle", chatTemplateDigest: "sha256:c",
   tokenizer: { bundleDigest: "sha256:bundle", bundleFiles: ["tokenizer.json"], engine: "stub", engineVersion: "1.0.0" },
-  backendManifestDigest: "PLACEHOLDER" };
+  backendManifestDigest: "PLACEHOLDER", backendManifest: MANIFEST };
 MODEL.backendManifestDigest = IM.backendManifestDigest(MANIFEST);
 const CHAIN = 8453;
 const sched = createHash("sha256").update(L.canonicalize(RM.COEFFICIENTS_CANONICAL)).digest("hex");
@@ -139,6 +139,20 @@ console.log("\nshadow mode bills nothing:");
 {
   const r = MI.meterInference(call({ cfg: shadow }));
   ok("shadow inference is metered but not billed", r.ok && r.billed === false && r.leg.legType === "inference-shadow");
+}
+
+console.log("\nfail-closed refusals mutate NOTHING (Bo's DoS mitigation, d14ebae0):");
+{
+  // A buyer CAN steer generation toward unrepresentable output. Every refusal
+  // path must leave the tab exactly as it was — no partial debit, no reservation.
+  const before = L.balance(home, BUYER).balance;
+  const lossyTok = { encode: (t) => tokenizer.encode(t), decode: () => "not the delivered bytes" };
+  const r1 = MI.meterInference(call({ tokenizer: lossyTok }));
+  ok("a round-trip failure is refused 422 and debits nothing", r1.ok === false && r1.code === "E_RECOUNT_ROUND_TRIP" && L.balance(home, BUYER).balance === before, JSON.stringify(r1));
+  const r2 = MI.meterInference(call({ model: { ...modelResult("the cat", "sat on mat"), deliveredCompletion: "tampered" } }));
+  ok("a tampered-bytes call is refused and debits nothing", r2.ok === false && L.balance(home, BUYER).balance === before, JSON.stringify(r2));
+  const r3 = MI.meterInference(call({ request: { delegation: signDeleg({ routes: ["POST /api/metering/read"] }), bindingProof: proof, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } } }));
+  ok("an unauthorised call is refused and debits nothing", r3.ok === false && L.balance(home, BUYER).balance === before, JSON.stringify(r3));
 }
 
 console.log("\nsettles through the SAME spine (close → countersign → settle):");

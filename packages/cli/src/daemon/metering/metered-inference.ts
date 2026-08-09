@@ -10,7 +10,8 @@ import { authoriseMeteredRead, type MeteredReadRequest } from "./metered-read.js
 import { recordInferenceLeg } from "./ledger.js";
 import {
   verifyInferenceRecount, buildInferenceEvidence, inferenceCostMicroTrac,
-  inferencePolicyDigest, type ModelBinding, type RecountTokenizer, type StopBoundary,
+  inferencePolicyDigest, INFERENCE_POLICY_CANONICAL,
+  type ModelBinding, type RecountTokenizer, type StopBoundary,
 } from "./inference-meter.js";
 import { isExempt, type MeterConfig } from "./read-meter.js";
 
@@ -113,6 +114,17 @@ export function meterInference(args: {
     expectedTokenizerBundleDigest: args.expectedTokenizerBundleDigest,
   });
   if (!rc.ok) return { ok: false, status: 422, code: rc.code, detail: rc.detail };
+  // Bo's DoS note (d14ebae0): a buyer CAN influence output — via prompts,
+  // adversarial text, requested quoting, future tool payloads — so a
+  // round-trip failure is an availability surface, not merely a provider risk.
+  // The answer is bounds and fail-closed refusal with ZERO tab mutation, never
+  // an approximate bill. Every refusal above returns before recordInferenceLeg,
+  // so no balance moves on any rejected call.
+  const lim = INFERENCE_POLICY_CANONICAL.limits;
+  if (rc.inputTokens > lim.maxInputTokens || rc.outputTokens > lim.maxOutputTokens) {
+    return { ok: false, status: 413, code: "E_OVER_POLICY_LIMIT", detail: `in=${rc.inputTokens}/${lim.maxInputTokens} out=${rc.outputTokens}/${lim.maxOutputTokens}` };
+  }
+
   const cost = inferenceCostMicroTrac(rc.inputTokens, rc.outputTokens);
   const billable = !isExempt(auth.principal, args.cfg);
 

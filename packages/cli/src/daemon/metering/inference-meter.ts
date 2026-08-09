@@ -73,6 +73,14 @@ export const INFERENCE_POLICY_CANONICAL = Object.freeze({
   arithmetic: "cost = perInputTokenMicroTrac * inputTokens + perOutputTokenMicroTrac * outputTokens, integer micro-units, no rounding",
   billableOutput: "emitted-token-ids-only" as const,
   stopTokenPolicy: "generated stop/EOS tokens are NOT billed" as const,
+  // Bounds, bound by digest. A leg is a signed liability: it must not be able to
+  // carry an unbounded array, and a request must not be able to demand an
+  // unbounded generation. Exceeding a bound is a refusal, never a clamped bill.
+  limits: {
+    maxInputTokens: 131072,
+    maxOutputTokens: 32768,
+    maxEvidenceBytes: 4194304,
+  },
 });
 
 export function inferencePolicyDigest(): string {
@@ -129,6 +137,8 @@ export interface ModelBinding {
   chatTemplateDigest: string;
   tokenizer: TokenizerBinding;        // recount substrate, content-addressed
   backendManifestDigest: string;      // the deployment that produced the bytes
+  /** the manifest OBJECT itself, so the leg is self-contained evidence. */
+  backendManifest: BackendManifest;
 }
 
 /** How generation ended, and — for a stop sequence — exactly where. */
@@ -142,7 +152,10 @@ export interface StopBoundary {
 export interface InferenceEvidence {
   schemaVersion: string;
   route: { path: string; schemaVersion: string };
-  canonicalization: { version: string; digest: string };
+  /** The rules OBJECT is embedded, not merely digested: a leg must stay
+   *  verifiable years later without asking the sidecar that produced it what
+   *  its rules were (Bo, audit condition 1). */
+  canonicalization: { version: string; digest: string; rules: Record<string, unknown> };
 
   requestDigest: string;          // canonical request: messages, tools, sampler, seed, stops, max-tokens
   renderedPromptBytesDigest: string;
@@ -162,6 +175,8 @@ export interface InferenceEvidence {
 
   model: ModelBinding;
   policyDigest: string;
+  /** the pricing policy OBJECT, for the same self-containment reason. */
+  policy: Record<string, unknown>;
   pricing: {
     perInputTokenMicroTrac: number;
     perOutputTokenMicroTrac: number;
@@ -200,7 +215,9 @@ export type RecountCode =
   | "E_RECOUNT_ROUND_TRIP"         // decode(encode(bytes)) ≠ bytes — UNBILLABLE
   | "E_RECOUNT_CANON_VERSION"      // leg's canonicalization rules are not ours
   | "E_RECOUNT_PRICING"            // leg's stated cost ≠ policy arithmetic
-  | "E_RECOUNT_MANIFEST";          // leg's model binding disagrees with the manifest
+  | "E_RECOUNT_MANIFEST"           // leg's model binding disagrees with the manifest
+  | "E_RECOUNT_EMBEDDED_OBJECT"    // an embedded rules/policy/manifest ≠ its own digest
+  | "E_RECOUNT_LIMIT";             // token array or evidence size exceeds a policy bound
 
 const seqEq = (a: number[], b: number[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -227,12 +244,33 @@ export function verifyInferenceRecount(args: {
 }): RecountVerdict {
   const e = args.evidence;
 
-  // ── the leg must be written under OUR rules, or the counts mean something else ──
+  // ── the leg must be self-contained: the rules and the deployment travel WITH
+  //    it, and each embedded object must hash to the digest beside it. A leg
+  //    whose verification depends on asking the sidecar that produced it what
+  //    its rules were is not evidence (Bo, audit condition 1).
   if (e.canonicalization?.digest !== canonicalizationDigest() || e.canonicalization?.version !== CANONICALIZATION_CANONICAL.version) {
     return { ok: false, code: "E_RECOUNT_CANON_VERSION", detail: "leg canonicalization rules differ from this verifier's" };
   }
+  if (!e.canonicalization?.rules || sha256(canonicalize(e.canonicalization.rules)) !== e.canonicalization.digest) {
+    return { ok: false, code: "E_RECOUNT_EMBEDDED_OBJECT", detail: "embedded canonicalization rules absent or ≠ their own digest" };
+  }
   if (e.policyDigest !== inferencePolicyDigest()) {
     return { ok: false, code: "E_RECOUNT_PRICING", detail: "leg pricing policy differs from this verifier's" };
+  }
+  if (!e.policy || sha256(canonicalize(e.policy)) !== e.policyDigest) {
+    return { ok: false, code: "E_RECOUNT_EMBEDDED_OBJECT", detail: "embedded pricing policy absent or ≠ its own digest" };
+  }
+  if (!e.model?.backendManifest || backendManifestDigest(e.model.backendManifest) !== e.model.backendManifestDigest) {
+    return { ok: false, code: "E_RECOUNT_EMBEDDED_OBJECT", detail: "embedded backend manifest absent or ≠ its own digest" };
+  }
+
+  // ── bounds BEFORE any work proportional to the arrays ──
+  const lim = INFERENCE_POLICY_CANONICAL.limits;
+  if ((e.inputTokenIds?.length ?? 0) > lim.maxInputTokens || (e.outputTokenIds?.length ?? 0) > lim.maxOutputTokens) {
+    return { ok: false, code: "E_RECOUNT_LIMIT", detail: "token-ID array exceeds the policy bound" };
+  }
+  if (Buffer.byteLength(JSON.stringify(e), "utf8") > lim.maxEvidenceBytes) {
+    return { ok: false, code: "E_RECOUNT_LIMIT", detail: "evidence exceeds the policy byte bound" };
   }
 
   // ── provenance: the tokenizer that counted, and the deployment that served ──
@@ -257,7 +295,11 @@ export function verifyInferenceRecount(args: {
   if (sha256(canonicalize(reInput)) !== e.inputTokenIdsDigest) {
     return { ok: false, code: "E_RECOUNT_INPUT_SEQ", detail: "input sequence digest mismatch" };
   }
-  if (reInput.length !== e.inputTokens) {
+  // Counts are DERIVED from the re-encoded array. The leg's count field is only
+  // a claim, checked against the derivation — never the source of a price
+  // (Bo: "derived from those arrays rather than trusted duplicate count fields").
+  const inputTokens = reInput.length;
+  if (inputTokens !== e.inputTokens) {
     return { ok: false, code: "E_RECOUNT_COUNT_MISMATCH", detail: "input" };
   }
 
@@ -294,17 +336,19 @@ export function verifyInferenceRecount(args: {
   if (sha256(canonicalize(canonicalOut)) !== e.outputTokenIdsDigest) {
     return { ok: false, code: "E_RECOUNT_OUTPUT_SEQ", detail: "output sequence digest mismatch" };
   }
-  if (canonicalOut.length !== e.outputTokens) {
+  const outputTokens = canonicalOut.length;
+  if (outputTokens !== e.outputTokens) {
     return { ok: false, code: "E_RECOUNT_COUNT_MISMATCH", detail: "output" };
   }
 
-  // ── the arithmetic the leg states must be the arithmetic we compute ──
-  const cost = inferenceCostMicroTrac(e.inputTokens, e.outputTokens);
+  // ── the arithmetic the leg states must be the arithmetic we compute, over the
+  //    DERIVED counts ──
+  const cost = inferenceCostMicroTrac(inputTokens, outputTokens);
   if (e.pricing?.costMicroTrac !== cost) {
     return { ok: false, code: "E_RECOUNT_PRICING", detail: `leg says ${e.pricing?.costMicroTrac}, policy computes ${cost}` };
   }
 
-  return { ok: true, inputTokens: e.inputTokens, outputTokens: e.outputTokens, costMicroTrac: cost };
+  return { ok: true, inputTokens, outputTokens, costMicroTrac: cost };
 }
 
 /** Build the evidence block from verified artifacts. Pure; no tokenizer. */
@@ -324,7 +368,11 @@ export function buildInferenceEvidence(args: {
   return {
     schemaVersion: RECEIPT_SCHEMA_VERSION,
     route: { path: INFERENCE_ROUTE, schemaVersion: INFERENCE_ROUTE_SCHEMA_VERSION },
-    canonicalization: { version: CANONICALIZATION_CANONICAL.version, digest: canonicalizationDigest() },
+    canonicalization: {
+      version: CANONICALIZATION_CANONICAL.version,
+      digest: canonicalizationDigest(),
+      rules: CANONICALIZATION_CANONICAL as unknown as Record<string, unknown>,
+    },
 
     requestDigest: sha256(canonicalize(args.requestCanonical as Record<string, unknown>)),
     renderedPromptBytesDigest: sha256(Buffer.from(args.renderedPrompt, "utf8")),
@@ -342,6 +390,7 @@ export function buildInferenceEvidence(args: {
 
     model: args.model,
     policyDigest: inferencePolicyDigest(),
+    policy: INFERENCE_POLICY_CANONICAL as unknown as Record<string, unknown>,
     pricing: {
       perInputTokenMicroTrac: p.perInputTokenMicroTrac,
       perOutputTokenMicroTrac: p.perOutputTokenMicroTrac,

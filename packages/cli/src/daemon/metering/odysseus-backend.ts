@@ -156,6 +156,7 @@ export function makeOdysseusBackend(cfg: OdysseusBackendConfig): InferenceBacken
           engineVersion: String(s.tokenizerEngineVersion ?? "unknown"),
         },
         backendManifestDigest: manifestDigest,
+        backendManifest: manifest,
       };
 
       const result: ModelResult = {
