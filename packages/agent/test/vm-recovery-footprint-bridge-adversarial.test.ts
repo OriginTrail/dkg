@@ -56,6 +56,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     const policyReads: bigint[] = [];
     const contextReads: Array<{ kaId: bigint; signal: AbortSignal | undefined }> = [];
     const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async (contextGraphId) => {
         policyReads.push(contextGraphId);
         return 0;
@@ -88,6 +89,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     let policyReads = 0;
     let contextReads = 0;
     const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => {
         policyReads += 1;
         return 1;
@@ -119,6 +121,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     };
     const contextReads: bigint[] = [];
     const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async (kaId) => {
         contextReads.push(kaId);
@@ -142,6 +145,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
 
   it('keeps zero, malformed, and failed reads unknown and therefore singleton', async () => {
     const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async (kaId) => {
         if (kaId === 0n) return { ...publicContext(kaId), byteSize: 0n };
@@ -177,6 +181,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     const controller = new AbortController();
     const contextReads: Array<{ kaId: bigint; signal: AbortSignal | undefined }> = [];
     const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async (kaId, options) => {
         contextReads.push({ kaId, signal: options?.signal });
@@ -200,6 +205,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
 
   it('labels classic observations latest-bounded without fabricating a finalized anchor', async () => {
     const reader: VmRecoveryFootprintBridgeReader = {
+      isContextGraphActiveOnChain: async () => true,
       getContextGraphAccessPolicy: async () => 0,
       getKnowledgeAssetUpdateContext: async () => ({
         merkleRootsCount: 7n,

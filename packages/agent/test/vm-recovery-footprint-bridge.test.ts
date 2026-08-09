@@ -27,6 +27,7 @@ const pinnedTarget = (kaId: number): Target => ({
 
 describe('classic VM recovery footprint bridge', () => {
   it('reads public policy once and enriches at most the bounded ten-target prefix', async () => {
+    const liveness = vi.fn(async () => true);
     const policy = vi.fn(async () => 0);
     const updateContext = vi.fn(async (kaId: bigint) => ({
       merkleRootsCount: kaId + 1n,
@@ -43,12 +44,15 @@ describe('classic VM recovery footprint bridge', () => {
       targets,
       14n,
       {
+        isContextGraphActiveOnChain: liveness,
         getContextGraphAccessPolicy: policy,
         getKnowledgeAssetUpdateContext: updateContext,
       },
       { maxContextReads: 10, isCurrent: () => true },
     );
 
+    expect(liveness).toHaveBeenCalledTimes(1);
+    expect(liveness).toHaveBeenCalledWith(14n);
     expect(policy).toHaveBeenCalledTimes(1);
     expect(policy).toHaveBeenCalledWith(14n);
     expect(updateContext).toHaveBeenCalledTimes(10);
@@ -77,6 +81,7 @@ describe('classic VM recovery footprint bridge', () => {
       targets,
       14n,
       {
+        isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 1,
         getKnowledgeAssetUpdateContext: updateContext,
       },
@@ -95,6 +100,7 @@ describe('classic VM recovery footprint bridge', () => {
       [unknownTarget(1)],
       14n,
       {
+        isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => {
           controller.abort();
           return 0;
@@ -124,6 +130,7 @@ describe('classic VM recovery footprint bridge', () => {
       targets,
       14n,
       {
+        isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
         getKnowledgeAssetUpdateContext: updateContext,
       },
@@ -155,6 +162,7 @@ describe('classic VM recovery footprint bridge', () => {
       targets,
       14n,
       {
+        isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
         getKnowledgeAssetUpdateContext: updateContext,
       },
@@ -177,6 +185,7 @@ describe('classic VM recovery footprint bridge', () => {
       targets,
       14n,
       {
+        isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
         getKnowledgeAssetUpdateContext: async (kaId) => {
           if (kaId === 1n) throw new Error('rpc failed');
@@ -191,5 +200,60 @@ describe('classic VM recovery footprint bridge', () => {
     );
 
     expect(enriched).toEqual(targets);
+  });
+
+  it.each([
+    ['inactive', async () => false],
+    ['liveness-error', async () => { throw new Error('liveness unavailable'); }],
+  ])('does not read policy or sizing for an %s CG', async (_label, readActive) => {
+    const policy = vi.fn(async () => 0);
+    const updateContext = vi.fn();
+    const targets = [unknownTarget(1)];
+
+    const enriched = await enrichVmRecoveryFootprints(
+      targets,
+      14n,
+      {
+        isContextGraphActiveOnChain: readActive,
+        getContextGraphAccessPolicy: policy,
+        getKnowledgeAssetUpdateContext: updateContext,
+      },
+      { maxContextReads: 10, isCurrent: () => true },
+    );
+
+    expect(policy).not.toHaveBeenCalled();
+    expect(updateContext).not.toHaveBeenCalled();
+    expect(enriched).toEqual(targets);
+  });
+
+  it('fails closed when liveness capability is absent or the CG id is non-positive', async () => {
+    const policy = vi.fn(async () => 0);
+    const updateContext = vi.fn();
+    const targets = [unknownTarget(1)];
+
+    const missingCapability = await enrichVmRecoveryFootprints(
+      targets,
+      14n,
+      {
+        getContextGraphAccessPolicy: policy,
+        getKnowledgeAssetUpdateContext: updateContext,
+      },
+      { maxContextReads: 10, isCurrent: () => true },
+    );
+    const invalidId = await enrichVmRecoveryFootprints(
+      targets,
+      0n,
+      {
+        isContextGraphActiveOnChain: async () => true,
+        getContextGraphAccessPolicy: policy,
+        getKnowledgeAssetUpdateContext: updateContext,
+      },
+      { maxContextReads: 10, isCurrent: () => true },
+    );
+
+    expect(policy).not.toHaveBeenCalled();
+    expect(updateContext).not.toHaveBeenCalled();
+    expect(missingCapability).toEqual(targets);
+    expect(invalidId).toEqual(targets);
   });
 });
