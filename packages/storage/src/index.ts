@@ -97,6 +97,10 @@ export {
   type SystemRecordDeferralReasonV1,
   type SystemRecordLaneActivationV1,
   type SystemRecordLaneControllerDepsV1,
+  // The shared deps base is deliberately NOT published: it is a factoring
+  // device, not a valid factory input (no barrier of either kind), and a
+  // public name for an incomplete shape is compatibility burden without use.
+  type SystemRecordLaneControllerTypedDepsV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneSessionV1,
   type SystemRecordLaneStateV1,

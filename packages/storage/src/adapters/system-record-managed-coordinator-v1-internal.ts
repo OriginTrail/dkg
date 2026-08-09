@@ -7,7 +7,7 @@ import {
   createSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
-  type SystemRecordLaneBarrierV1,
+  type SystemRecordLaneControllerTypedDepsV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneExecutionBindingV1,
   type SystemRecordLaneTypedBarrierV1,
@@ -27,7 +27,10 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
     proof: unknown,
     childGeneration: string,
   ) => Promise<SystemRecordApplyOutcomeV1>;
-  readonly barrier: SystemRecordLaneBarrierV1;
+  /**
+   * The ONLY barrier the managed path accepts — no string member exists here
+   * by design; rationale on {@link SystemRecordLaneControllerTypedDepsV1}.
+   */
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;
 }
@@ -44,7 +47,11 @@ export function createManagedSystemRecordCoordinatorV1(
     updateEndpoint: options.updateEndpoint,
     resolveClient: options.resolveClient,
   });
-  return createSystemRecordLaneControllerV1({
+  // The deps literal is typed as the typed-only shape, so the managed path
+  // resolves the single factory's typed overload: no string member exists
+  // here to fall back to, and adding one is a type error pinned in the
+  // typecheck lane.
+  const typedDeps: SystemRecordLaneControllerTypedDepsV1 = {
     lease: options.lease,
     handoff: options.handoff,
     executor: {
@@ -53,8 +60,8 @@ export function createManagedSystemRecordCoordinatorV1(
       applyVerifiedSettlementBound: (proof, binding, registerRecovery) =>
         atomicExecutor.execute(proof, binding, registerRecovery),
     },
-    barrier: options.barrier,
     typedBarrier: options.typedBarrier,
     setAdmissionActive: options.setAdmissionActive,
-  });
+  };
+  return createSystemRecordLaneControllerV1(typedDeps);
 }

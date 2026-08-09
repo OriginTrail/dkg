@@ -901,6 +901,29 @@ describe('system-record lane session lifecycle V1', () => {
       build();
       expect(() => build()).toThrow(SystemRecordControllerRegistrationError);
     });
+
+    it('refuses a second registration BEFORE reading composer-supplied deps', () => {
+      // Deps come from composers and may carry accessors. The duplicate guard
+      // must run before ANY dependency property is read — otherwise a second
+      // registration surfaces whatever a composer accessor throws (or runs
+      // its side effects) instead of the typed refusal. Every property access
+      // on this deps object throws, so the assertion below discriminates: the
+      // typed error can only surface if nothing was read first.
+      build();
+      const boobyTrapped = new Proxy({}, {
+        get() {
+          throw new Error('composer accessor ran before the registration guard');
+        },
+        // `in` narrowing triggers `has`, not `get` — trap both so ANY deps
+        // inspection before the guard trips this, including the normalizer's
+        // discriminating `'barrier' in deps` check.
+        has() {
+          throw new Error('composer deps were inspected before the registration guard');
+        },
+      });
+      expect(() => createSystemRecordLaneControllerV1(boobyTrapped as never))
+        .toThrow(SystemRecordControllerRegistrationError);
+    });
   });
 
   describe('transition precedence', () => {
@@ -2913,6 +2936,38 @@ describe('system-record lane session lifecycle V1', () => {
         'system-record.disable',
       ]);
       expect(session.state).toBe('shutdown');
+    });
+  });
+
+  describe('compatibility adapter with a failing string barrier (#2179)', () => {
+    // First-party composition is typed-only and structurally cannot reach the
+    // string path (the managed coordinator's deps have no string member).
+    // External composers still enter through this public adapter with string
+    // barriers, so the compat path's failure shape is pinned here: a barrier
+    // that throws at the boundary must fail CLOSED, not leave a half-enabled
+    // lane over a child nobody stopped.
+    it('a string barrier that throws at the boundary fails enable loudly and closed', async () => {
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff,
+        executor,
+        barrier: () => {
+          throw new Error('external barrier infrastructure refused the transition');
+        },
+      });
+
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/refused the transition/);
+
+      // Closed, not just loud, in one assertion: the ONLY handoff interaction
+      // is the fail-closed order. The barrier threw before the transition ran,
+      // so no physical step happened — the child was never stopped, destroyed,
+      // or replaced under an enable that could not settle.
+      expect(handoff.calls).toEqual([
+        'failManagedMutationsClosed:enable transition did not physically settle',
+      ]);
+      // The lane is terminally unavailable, matching every other failed-enable
+      // path in this file.
+      await expect(controller.open(ACTIVATION)).rejects.toThrow(/terminal/);
     });
   });
 });

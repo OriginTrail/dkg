@@ -23,6 +23,9 @@ vi.mock('../src/system-record-materializer-v1.js', async (importOriginal) => {
   >();
   return {
     ...actual,
+    // There is ONE controller constructor (#2179 round 3): both the managed
+    // coordinator and any legacy composer go through it, so this single
+    // injection point covers every construction route.
     createSystemRecordLaneControllerV1: (deps: never) => {
       if (injected.error) throw injected.error;
       return actual.createSystemRecordLaneControllerV1(deps);

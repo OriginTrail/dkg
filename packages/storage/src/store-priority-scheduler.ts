@@ -140,6 +140,16 @@ export type StoreQueuedAdmissionV1 = StoreAdmissionV1 & {
   readonly mode: Exclude<StoreAdmissionMode, 'control-barrier'>;
 };
 
+/**
+ * @deprecated The `run()` control-barrier admission is the same unsound
+ * purpose-string contract as {@link StorePriorityScheduler.runControlBarrier}:
+ * the run() generic `T` is chosen by each caller while coalescing is keyed by
+ * `(storeId, purpose-string)`, so a coalesced caller receives the first
+ * transition's value under its own `T`. Use
+ * {@link StorePriorityScheduler.runTypedControlBarrier} with a key from
+ * `createStoreControlBarrierKeyV1`. Removed, together with `runControlBarrier`,
+ * at the next allowed breaking version boundary.
+ */
 export type StoreControlBarrierAdmissionV1 = StoreAdmissionV1 & {
   readonly mode: 'control-barrier';
 };
@@ -1080,7 +1090,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * callers that already use the historical free-form string contract.
    *
    * @deprecated Use {@link runTypedControlBarrier} with a key created by
-   * `createStoreControlBarrierKeyV1`.
+   * `createStoreControlBarrierKeyV1` — one key per transition, created once at
+   * module scope, binds every coalescing caller to that key's result type.
+   * First-party code no longer calls this method: managed composition
+   * structurally omits the string barrier (its deps shape has no such
+   * member). It is removed, together with the `'control-barrier'` `run()`
+   * admission mode, at the next allowed breaking version boundary. Until
+   * then behavior is unchanged: both entry points share the coordinator, so
+   * coalescing, timeout, sealing, quiescence and metrics are identical.
    * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(

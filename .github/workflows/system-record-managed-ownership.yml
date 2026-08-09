@@ -136,6 +136,15 @@ jobs:
       - name: Typecheck the ownership gate harness
         run: pnpm typecheck:live:system-record-managed-ownership
 
+      - name: Typecheck barrier type contracts (issue 2179)
+        # Compiles the runtime spec's expectTypeOf assertions
+        # (store-control-barrier-contract-v1.test.ts) and the compile-only
+        # negative contracts (store-control-barrier-contract-v1.typetest.ts,
+        # which vitest never executes). Type assertions only PROVE anything
+        # under a compiler: the package tsconfig includes only src/ and vitest
+        # does not typecheck, so without this lane they are decorative.
+        run: pnpm --filter @origintrail-official/dkg-storage run typecheck:type-contracts
+
       - name: Storage unit conformance
         run: |
           pnpm --filter @origintrail-official/dkg-storage exec vitest run \
@@ -168,6 +177,7 @@ jobs:
             test/changelog-store.test.ts \
             test/graph-write-gen.test.ts \
             test/system-record-decorator-apply-outcomes-v1.test.ts \
+            test/system-record-managed-coordinator-v1.test.ts \
             test/store-control-barrier-contract-v1.test.ts \
             test/store-priority-scheduler.test.ts \
             test/store-scheduler-system-record-admission.test.ts \

@@ -203,72 +203,33 @@ export interface SystemRecordLaneExecutionBindingV1 {
   readonly materializationEpoch: string;
 }
 
-/**
- * Run a lifecycle transition as an exclusive section over the whole store.
- *
- * Every transition here can invalidate the client or the child, so ordinary
- * store traffic must be sealed and drained around it — otherwise a request that
- * was already in flight is cut off mid-exchange when the child is stopped, and
- * turns into a transport failure or an ambiguous write rather than
- * backpressure. The adapter backs this with the scheduler's control barrier;
- * tests supply a recording pass-through.
- *
- * The transition MUST NOT re-enter the store scheduler: it owns the store
- * exclusively for the duration, so scheduled work issued from inside it waits
- * for a barrier that cannot commit until the work drains. That is why the
- * handoff steps are limited to supervisor calls, owned-client drains and
- * synchronous cache invalidation.
- */
-export type SystemRecordLaneBarrierV1 = <T>(
-  purpose: string,
-  transition: () => Promise<T>,
-) => Promise<T>;
+// The controller-barrier contract (barrier vocabulary, deps shapes, and the
+// typed/legacy normalizer) lives in its own focused module; re-exported here
+// so the materializer's public surface is unchanged.
+// Re-exported: the contract types with real consumers (the barrel and the
+// coordinator). The normalizer and the shared deps base are deliberately NOT
+// re-exported — the normalizer is constructor plumbing and the shared base is
+// not a valid factory input; both stay reachable only through the contract
+// module itself, which the package barrel does not publish.
+export {
+  type SystemRecordLaneBarrierKindV1,
+  type SystemRecordLaneBarrierResultsV1,
+  type SystemRecordLaneBarrierV1,
+  type SystemRecordLaneControllerDepsV1,
+  type SystemRecordLaneControllerTypedDepsV1,
+  type SystemRecordLaneTypedBarrierV1,
+} from './system-record-lane-controller-contract-v1.js';
+import {
+  normalizeControllerBarrierV1,
+  type SystemRecordLaneBarrierKindV1,
+  type SystemRecordLaneBarrierResultsV1,
+  type SystemRecordLaneControllerDepsV1,
+  type SystemRecordLaneControllerSharedDepsV1,
+  type SystemRecordLaneControllerTypedDepsV1,
+  type SystemRecordLaneTypedBarrierV1,
+} from './system-record-lane-controller-contract-v1.js';
 
-export interface SystemRecordLaneBarrierResultsV1 {
-  readonly enable: void | SystemRecordMaterializationEpochRotationV1;
-  readonly disable: void;
-  readonly shutdown: void;
-  readonly recovery: void;
-}
-
-export type SystemRecordLaneBarrierKindV1 = keyof SystemRecordLaneBarrierResultsV1;
-
-/** Additive typed lifecycle path; adapters may translate kinds to scheduler keys. */
-export type SystemRecordLaneTypedBarrierV1 = <K extends SystemRecordLaneBarrierKindV1>(
-  kind: K,
-  transition: () => Promise<SystemRecordLaneBarrierResultsV1[K]>,
-) => Promise<SystemRecordLaneBarrierResultsV1[K]>;
-
-export interface SystemRecordLaneControllerDepsV1 {
-  /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
-  readonly lease: ManagedOxigraphOwnershipLeaseV1;
-  readonly handoff: SystemRecordChildHandoffV1;
-  readonly executor: SystemRecordTransactionExecutorV1;
-  /**
-   * Required, not optional. An optional barrier is one that gets forgotten:
-   * this capability shipped once with a barrier implemented, exported and
-   * tested but with zero production callers, so the enable path stopped the
-   * child while ordinary requests were still in flight.
-   *
-   * @deprecated Managed composition uses `typedBarrier`. Retained so existing
-   * external controller integrations keep their purpose-string contract.
-   */
-  readonly barrier: SystemRecordLaneBarrierV1;
-  /** Optional typed path; the string callback above remains the compatibility contract. */
-  readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
-  /**
-   * Adapter-owned admission latch, driven by the lifecycle's physical state.
-   * `true` is published synchronously before enable can enqueue its barrier;
-   * `false` is published only after disable physically commits or the lane is
-   * terminally unavailable. Merely constructing the controller never calls it.
-   */
-  readonly setAdmissionActive?: (active: boolean) => void;
-}
-
-type SystemRecordLaneSessionDepsV1 = Pick<
-  SystemRecordLaneControllerDepsV1,
-  'lease' | 'handoff' | 'executor' | 'setAdmissionActive'
-> & {
+type SystemRecordLaneSessionDepsV1 = SystemRecordLaneControllerSharedDepsV1 & {
   readonly runEnableBarrier: (
     transition: () => Promise<SystemRecordLaneBarrierResultsV1['enable']>,
   ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
@@ -428,13 +389,17 @@ export async function releaseSystemRecordLaneControllerV1(
   CONTROLLER_SESSIONS.delete(controller);
 }
 
-export function createSystemRecordLaneControllerV1(
-  deps: SystemRecordLaneControllerDepsV1,
+/**
+ * The typed-only CORE: builds the session from already-normalized deps and
+ * knows nothing about the legacy string-barrier shape. MODULE-PRIVATE by
+ * design — one review round rejected a second exported constructor (a second
+ * deep-importable construction surface), a later one asked that the canonical
+ * layer not reason about both input models; a private core satisfies both.
+ * Assumes the caller has already run the duplicate-registration guard.
+ */
+function buildSystemRecordLaneControllerFromTypedV1(
+  deps: SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneControllerV1 {
-  if (registeredController) throw new SystemRecordControllerRegistrationError();
-
-  const publicBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
-    ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
   const session = new SystemRecordLaneSession({
     lease: deps.lease,
     handoff: deps.handoff,
@@ -442,9 +407,9 @@ export function createSystemRecordLaneControllerV1(
     setAdmissionActive: deps.setAdmissionActive,
     runEnableBarrier: async (transition) =>
       snapshotSystemRecordMaterializationEpochRotationV1(
-        await publicBarrier('enable', transition),
+        await deps.typedBarrier('enable', transition),
       ),
-    runVoidBarrier: (kind, transition) => publicBarrier(kind, transition),
+    runVoidBarrier: (kind, transition) => deps.typedBarrier(kind, transition),
   });
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
@@ -453,6 +418,39 @@ export function createSystemRecordLaneControllerV1(
   CONTROLLER_SESSIONS.set(controller, session);
   registeredController = controller;
   return controller;
+}
+
+/**
+ * The one EXPORTED controller constructor — a thin adapter: guard, normalize,
+ * delegate to the typed-only core. Accepts the typed-only or the
+ * legacy-capable deps shape (see {@link SystemRecordLaneControllerTypedDepsV1}
+ * for why the shapes differ); the legacy shape exists only until its
+ * breaking-version removal, and no construction code below this function's
+ * body reasons about it.
+ *
+ * The duplicate-registration guard runs before ANY caller-supplied dependency
+ * property is read: deps may carry accessors, and a second registration must
+ * be refused with {@link SystemRecordControllerRegistrationError} before
+ * composer code can run from a property read.
+ */
+export function createSystemRecordLaneControllerV1(
+  deps: SystemRecordLaneControllerTypedDepsV1,
+): SystemRecordLaneControllerV1;
+export function createSystemRecordLaneControllerV1(
+  deps: SystemRecordLaneControllerDepsV1,
+): SystemRecordLaneControllerV1;
+export function createSystemRecordLaneControllerV1(
+  deps: SystemRecordLaneControllerDepsV1 | SystemRecordLaneControllerTypedDepsV1,
+): SystemRecordLaneControllerV1 {
+  if (registeredController) throw new SystemRecordControllerRegistrationError();
+
+  return buildSystemRecordLaneControllerFromTypedV1({
+    lease: deps.lease,
+    handoff: deps.handoff,
+    executor: deps.executor,
+    typedBarrier: normalizeControllerBarrierV1(deps),
+    setAdmissionActive: deps.setAdmissionActive,
+  });
 }
 
 /* ------------------------------------------------------------------ *

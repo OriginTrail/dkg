@@ -791,17 +791,8 @@ export class SparqlHttpStore implements TripleStore {
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
           //
-          // Keep the published string callback intact for external/legacy
-          // coordinator composition. Production lifecycle calls use the
-          // domain-owned typed methods below, which translate to scheduler keys
-          // only at this adapter boundary.
-          barrier: (purpose, transition) =>
-            externalStorePriorityScheduler.runControlBarrier(
-              this,
-              purpose,
-              transition,
-              barrierGeneration(),
-            ),
+          // The only barrier managed composition has (#2179) — rationale on
+          // SystemRecordLaneControllerTypedDepsV1.
           typedBarrier: (kind, transition) =>
             runTypedBarrier(SYSTEM_RECORD_BARRIER_KEYS_V1[kind], transition),
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
