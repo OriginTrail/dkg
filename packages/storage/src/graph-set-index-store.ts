@@ -11,6 +11,7 @@ import type {
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import { linkStoreChainV1 } from './store-chain-capability.js';
+import { SystemRecordLaneForwarderV1 } from './system-record-lane-forwarder-v1.js';
 import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
@@ -25,10 +26,7 @@ import {
   type CachedReadGateHostV1,
 } from './cached-read-gate-v1.js';
 import type {
-  SystemRecordApplyOutcomeV1,
-  SystemRecordLaneActivationV1,
   SystemRecordLaneControllerV1,
-  SystemRecordLaneSessionV1,
 } from './system-record-materializer-v1.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
@@ -237,77 +235,40 @@ export class GraphSetIndexStore implements TripleStore {
    * is the same escape hatch used for an indeterminate `replaceGraph`.
    */
   getSystemRecordLaneControllerV1(): SystemRecordLaneControllerV1 | undefined {
-    // PROBE THE INNER STORE EVERY TIME. The memo preserves wrapper identity; it
-    // must never answer the capability question itself.
-    //
-    // Absence was already re-probed — the adapter reports undefined during any
-    // window in which the managed child is not the proven-ready listener, and
-    // latching that would disable the lane for the whole process on one probe
-    // landing inside an ordinary revive. But PRESENCE was latched, so once a
-    // wrapper had been cached this kept advertising a lane after the lease went
-    // terminal, while the adapter underneath would have denied it. Discovery is
-    // the safety gate callers use, so a stale "yes" is the dangerous direction.
-    const inner = this.inner.getSystemRecordLaneControllerV1?.();
-    if (!inner) {
-      this.systemRecordLaneMemo = null;
-      this.systemRecordLaneInner = null;
-      return undefined;
-    }
-    // Keyed on the inner controller's identity, so a replacement is wrapped
-    // afresh rather than masked by a facade over the old one.
-    if (this.systemRecordLaneMemo && this.systemRecordLaneInner === inner) {
-      return this.systemRecordLaneMemo;
-    }
-    this.systemRecordLaneInner = inner;
-    this.systemRecordLaneMemo = Object.freeze({
-      open: async (activation: SystemRecordLaneActivationV1) => {
-        const session = await inner.open(activation);
-        return this.wrapSystemRecordSession(session);
-      },
-    });
-    return this.systemRecordLaneMemo;
-  }
-
-  private wrapSystemRecordSession(session: SystemRecordLaneSessionV1): SystemRecordLaneSessionV1 {
-    const owner = this;
-    return {
-      get state() {
-        return session.state;
-      },
-      get activationGeneration() {
-        return session.activationGeneration;
-      },
-      async applyVerified(proof: unknown): Promise<SystemRecordApplyOutcomeV1> {
-        const outcome = await session.applyVerified(proof);
-        if (outcome.outcome === 'applied') {
-          owner.bumpMutation();
-          owner.scheduleFullRefresh('system-record.applied');
-        } else if (outcome.outcome === 'indeterminate') {
-          owner.scheduleFullRefresh('system-record.indeterminate');
-        }
-        // Every other outcome (`already-applied`, `stale`, `root-collision`,
-        // `capacity-exhausted`, `deferred`, `capability-lost`) leaves GRAPH
-        // MEMBERSHIP unchanged, so dirtying the index on them would force a
-        // full-store scan for no reason — the exact cost this class exists to
-        // avoid.
-        //
-        // Membership, not "wrote nothing", and the distinction matters for
-        // `root-collision` specifically: it can durably quarantine state, so it
-        // is not a no-op write. It is still irrelevant HERE because it does not
-        // add or remove a named graph. The agent cache facade, which tracks
-        // readable content rather than graph membership, therefore treats it
-        // differently and invalidates.
-        return outcome;
-      },
-      close: (mode: 'disable' | 'shutdown') => session.close(mode),
-    };
+    // Probe the inner store on EVERY call; the shared forwarder owns the memo
+    // and the identity keying, so absence is never latched and a replacement
+    // controller is wrapped afresh.
+    return this.systemRecordLaneForwarder.forward();
   }
 
   private readonly inner: TripleStore;
 
-  private systemRecordLaneMemo: SystemRecordLaneControllerV1 | null | undefined;
-  /** The inner controller the memo wraps, so a replacement is not masked. */
-  private systemRecordLaneInner: SystemRecordLaneControllerV1 | null | undefined;
+  /**
+   * Shared lane-forwarding protocol; this class supplies only the policy.
+   *
+   * `applied` changes graph MEMBERSHIP, so the index must dirty and rebuild.
+   * `indeterminate` may or may not have committed, which is exactly when a
+   * stale membership set becomes a silent wrong answer, so it dirties too.
+   *
+   * Every other outcome leaves membership unchanged and is deliberately
+   * ignored — including `root-collision`, which can durably quarantine state
+   * but adds and removes no named graph. The agent's cache tracks readable
+   * CONTENT rather than membership, so its policy treats that one
+   * differently; the disagreement is correct, not drift.
+   */
+  private readonly systemRecordLaneForwarder = new SystemRecordLaneForwarderV1(
+    () => this.inner.getSystemRecordLaneControllerV1?.(),
+    {
+      onOutcome: (outcome) => {
+        if (outcome.outcome === 'applied') {
+          this.bumpMutation();
+          this.scheduleFullRefresh('system-record.applied');
+        } else if (outcome.outcome === 'indeterminate') {
+          this.scheduleFullRefresh('system-record.indeterminate');
+        }
+      },
+    },
+  );
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;
