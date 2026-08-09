@@ -69,9 +69,18 @@ function capState(home: string, id: string): CapabilityState {
 
 /** Returns true when this request was a metered-inference route request. */
 export async function handleInfer(req: InferRequest, io: InferIo): Promise<boolean> {
-  // GET /api/metering/build — which code is actually serving. Unauthenticated
-  // on purpose: a buyer must be able to check the build BEFORE committing money
-  // to it, and provenance is not a secret. Read-only; touches no ledger state.
+  // GET /api/metering/build — which code is actually serving.
+  //
+  // It carries NO metering auth: it takes no delegation, bills nothing and
+  // touches no ledger state, because a buyer must be able to check the build
+  // BEFORE committing money to it and provenance is not a secret. Note what
+  // that does and does not mean: the NODE's own transport auth still applies,
+  // so this is not a public endpoint — buyers reach it through the provider
+  // front's allowlist with a scoped front token. An earlier comment here said
+  // "unauthenticated", which was wrong about the deployed reality.
+  //
+  // Nothing returned is authority-bearing: digests, a signature, and the
+  // provider PUBLIC key. The buyer verifies against the key he already holds.
   if (req.path === "/api/metering/build") {
     if (req.method !== "GET") { io.json(405, { error: "E_METHOD" }); return true; }
     io.json(200, signedBuildAttestation({ home: req.home }));
