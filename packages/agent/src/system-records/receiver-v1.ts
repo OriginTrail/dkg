@@ -27,7 +27,6 @@ import {
   type SignedAgentProfileHeadEnvelopeV1,
   type SystemRecordInventoryRowV1,
   type SystemRecordObjectKindV1,
-  type SystemRecordVerificationClosureObjectV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type {
   Quad,
@@ -136,68 +135,70 @@ export function createAgentProfileReceiverV1(
         projectionQuads: readonly Readonly<Quad>[];
         canonicalProjectionBytes: Uint8Array;
       }> | undefined;
-      const closure = await buildAgentProfileVerificationClosureV1(row.headDigest, {
-        nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
-        resolve: async (reference) => {
-          signal.throwIfAborted();
-          const artifact = await resolveArtifact({
-            type: 'object',
-            objectKind: reference.objectKind,
-            objectDigest: reference.digest,
-          }, signal);
-          signal.throwIfAborted();
-          if (artifact === null) return undefined;
-          const owned = snapshotExpectedArtifactV1(
-            artifact,
-            reference.objectKind,
-            reference.digest,
-            'closure artifact',
-          );
-          return Object.freeze({
-            objectKind: owned.objectKind,
-            digest: owned.objectDigest,
-            canonicalBytes: owned.canonicalBytes,
-          });
-        },
-        verifyAuthorityEnvelope: async (envelope) => {
-          signal.throwIfAborted();
-          const verified = await verifyAuthorityEnvelope(envelope, signal);
-          signal.throwIfAborted();
-          return verified === true;
-        },
-        verifyCurrentBundle: async (head, canonicalBundleBytes) => {
-          signal.throwIfAborted();
-          const result = await verifyCurrentBundle(
-            head,
-            Uint8Array.from(canonicalBundleBytes),
-            signal,
-          );
-          signal.throwIfAborted();
-          const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
-          verifiedBundle = Object.freeze({
-            ...snapshotVerifiedBundle(result),
-            canonicalProjectionBytes: Uint8Array.from(decoded.projectionBytes),
-          });
-          return true;
-        },
-      });
+      let currentEnvelope: SignedAgentProfileHeadEnvelopeV1 | undefined;
+      const { authoritySummary: verifiedAuthoritySummary } =
+        await buildAgentProfileVerificationClosureV1(row.headDigest, {
+          nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
+          resolve: async (reference) => {
+            signal.throwIfAborted();
+            const artifact = await resolveArtifact({
+              type: 'object',
+              objectKind: reference.objectKind,
+              objectDigest: reference.digest,
+            }, signal);
+            signal.throwIfAborted();
+            if (artifact === null) return undefined;
+            const owned = snapshotExpectedArtifactV1(
+              artifact,
+              reference.objectKind,
+              reference.digest,
+              'closure artifact',
+            );
+            if (reference.objectKind === 'agent-profile-head'
+              && reference.digest === row.headDigest) {
+              currentEnvelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
+                owned.canonicalBytes,
+              );
+              assertRowBindsHead(networkId, row, currentEnvelope);
+            }
+            return Object.freeze({
+              objectKind: owned.objectKind,
+              digest: owned.objectDigest,
+              canonicalBytes: owned.canonicalBytes,
+            });
+          },
+          verifyAuthorityEnvelope: async (envelope) => {
+            signal.throwIfAborted();
+            const verified = await verifyAuthorityEnvelope(envelope, signal);
+            signal.throwIfAborted();
+            return verified === true;
+          },
+          verifyCurrentBundle: async (head, canonicalBundleBytes) => {
+            signal.throwIfAborted();
+            const result = await verifyCurrentBundle(
+              head,
+              Uint8Array.from(canonicalBundleBytes),
+              signal,
+            );
+            signal.throwIfAborted();
+            const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
+            verifiedBundle = Object.freeze({
+              ...snapshotVerifiedBundle(result),
+              canonicalProjectionBytes: Uint8Array.from(decoded.projectionBytes),
+            });
+            return true;
+          },
+        });
       signal.throwIfAborted();
 
-      const headArtifact = requiredArtifact(
-        closure.objects,
-        'agent-profile-head',
-        row.headDigest,
-      );
-      const envelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
-        headArtifact.canonicalBytes,
-      );
+      const envelope = currentEnvelope;
+      if (envelope === undefined) {
+        throw new Error('verification closure did not retain its current agent-profile head');
+      }
       const head = envelope.object;
-      assertRowBindsHead(networkId, row, envelope);
       if (head.state !== 'active' || verifiedBundle === undefined) {
         throw new Error('active profile receiver resolved a non-active verification closure');
       }
-      const verifiedAuthoritySummary = closure.authoritySummary;
-
       const resolvedSubjectTableArtifact = await resolveArtifact({
         type: 'object',
         objectKind: 'owned-subject-table',
@@ -265,20 +266,6 @@ function assertRowBindsHead(
     || (head.state === 'tombstone') !== row.tombstone) {
     throw new Error('inventory row does not bind the verified agent-profile head');
   }
-}
-
-function requiredArtifact(
-  artifacts: readonly SystemRecordVerificationClosureObjectV1[],
-  objectKind: SystemRecordObjectKindV1,
-  objectDigest: Digest32V1,
-): SystemRecordVerificationClosureObjectV1 {
-  const artifact = artifacts.find(
-    (candidate) => candidate.objectKind === objectKind && candidate.digest === objectDigest,
-  );
-  if (artifact === undefined) {
-    throw new Error(`verification closure did not retain ${objectKind}:${objectDigest}`);
-  }
-  return artifact;
 }
 
 function snapshotExpectedArtifactV1(

@@ -186,11 +186,13 @@ describe('agent-profile system-record active receiver', () => {
   it('fails closed when the verified head does not bind the inventory version', async () => {
     const fixture = await publishedFixture();
     const consumeCandidate = vi.fn();
+    const resolve = vi.fn(fixture.store.resolve.bind(fixture.store));
+    const verifyCurrentBundle = vi.fn(verifyFixtureBundle);
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: { resolve },
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle: verifyFixtureBundle,
+      verifyCurrentBundle,
       consumeCandidate,
     });
 
@@ -199,6 +201,8 @@ describe('agent-profile system-record active receiver', () => {
       new AbortController().signal,
     )).rejects.toThrow(/inventory row does not bind/);
     expect(consumeCandidate).not.toHaveBeenCalled();
+    expect(resolve).toHaveBeenCalledTimes(1);
+    expect(verifyCurrentBundle).not.toHaveBeenCalled();
   });
 
   it('fails closed when final authority verification refuses the closure', async () => {
