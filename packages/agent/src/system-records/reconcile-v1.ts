@@ -12,7 +12,6 @@ import {
   SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
-  createSystemRecordInventoryRowTraversalV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type Digest32V1,
@@ -23,6 +22,9 @@ import {
   type SystemRecordInventoryRowV1,
   type SystemRecordPeerPublicKeyV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  createSystemRecordInventoryRowTraversalV1,
+} from '@origintrail-official/dkg-core/dist/system-record-inventory-traversal-v1-internal.js';
 import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
 import type {

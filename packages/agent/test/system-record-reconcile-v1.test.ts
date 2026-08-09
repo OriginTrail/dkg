@@ -832,6 +832,36 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(reconciler.stats()).toMatchObject({ inventoryRequests: 1, inventoryWireBytes: 0 });
   });
 
+  it('maps a thrown inventory loader failure to a released transport block', async () => {
+    const fixture = await publishedFixture();
+    const admission = admissionGate();
+    const sentinel = new Error('inventory transport socket closed');
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: async () => { throw sentinel; },
+      receiver: receiver(fixture.store, vi.fn()),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'inventory',
+      reason: 'inventory-transport',
+      inventoryRequests: 1,
+      inventoryWireBytes: 0,
+      processedRows: 0,
+      pendingRows: 0,
+    });
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 1 });
+    expect(reconciler.stats()).toMatchObject({
+      inventoryRequests: 1,
+      inventoryWireBytes: 0,
+      active: 0,
+    });
+  });
+
   it('rejects an untrusted provider root before acquiring admission or loading inventory', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();

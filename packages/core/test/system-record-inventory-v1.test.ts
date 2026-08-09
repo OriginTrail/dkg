@@ -5,7 +5,6 @@ import { describe, expect, it } from 'vitest';
 import {
   assertSystemRecordInventoryCowUpdateBoundV1,
   buildSystemRecordInventoryTreeV1,
-  createSystemRecordInventoryRowTraversalV1,
   createSystemRecordInventoryTraversalV1,
   chooseSystemRecordByteAwareSplitIndexV1,
   chooseSystemRecordRebalanceV1,
@@ -30,6 +29,9 @@ import {
   type SystemRecordInventoryStoredObjectV1,
   type SystemRecordInventoryTreeSnapshotV1,
 } from '../src/system-record-inventory-v1.js';
+import {
+  createSystemRecordInventoryRowTraversalV1,
+} from '../src/system-record-inventory-traversal-v1-internal.js';
 import {
   SYSTEM_RECORD_MAX_EVIDENCE_ROW_BYTES,
   SYSTEM_RECORD_MAX_INVENTORY_RECORDS,
@@ -345,6 +347,25 @@ describe('system-record immutable B+tree objects', () => {
       wireBytes: rootLoaded.wireBytes,
       failure: { reason: 'invalid-response' },
     });
+
+    const transportSentinel = new Error('row traversal socket closed');
+    const thrownTransport = createSystemRecordInventoryRowTraversalV1(snapshot.descriptor);
+    const transportResult = await thrownTransport.advance(async () => {
+      throw transportSentinel;
+    }, {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    });
+    expect(transportResult).toMatchObject({
+      status: 'failed',
+      requests: 1,
+      wireBytes: 0,
+      rows: [],
+      failure: { reason: 'transport' },
+    });
+    if (transportResult.status !== 'failed') throw new Error('expected failed row traversal');
+    expect(transportResult.failure.cause).toBe(transportSentinel);
   });
 
   it('pins slice admission while an awaited loader mutates its source object', async () => {
