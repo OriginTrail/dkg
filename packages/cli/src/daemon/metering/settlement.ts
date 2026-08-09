@@ -22,7 +22,7 @@
 //      balance arithmetic.
 import { createHash } from "node:crypto";
 import {
-  canonicalize, providerPublicPem, providerSign, readJournal, appendJournal,
+  canonicalize, providerPublicPem, providerSign, readJournal, appendJournal, settleTab,
 } from "./ledger.js";
 import { createPublicKey, verify as edVerify } from "node:crypto";
 
@@ -212,6 +212,7 @@ export interface WithdrawalState {
   statementDigest: string;
   amountMicroTrac: number;
   destination: string;
+  tabPrincipal?: string;
   chainId: number;
   sender?: string;
   accountNonce?: number;
@@ -234,6 +235,7 @@ export function replayWithdrawals(home: string): Map<string, WithdrawalState> {
       statementDigest: String(rec.statementDigest ?? prev?.statementDigest ?? ""),
       amountMicroTrac: Number(rec.amountMicroTrac ?? prev?.amountMicroTrac ?? 0),
       destination: String(rec.destination ?? prev?.destination ?? ""),
+      tabPrincipal: (rec.tabPrincipal as string) ?? prev?.tabPrincipal,
       chainId: Number(rec.chainId ?? prev?.chainId ?? 0),
       sender: (rec.sender as string) ?? prev?.sender,
       accountNonce: rec.accountNonce !== undefined ? Number(rec.accountNonce) : prev?.accountNonce,
@@ -252,7 +254,7 @@ export function replayWithdrawals(home: string): Map<string, WithdrawalState> {
 /** CAS-guarded prepare: refuses to open a second withdrawal for the same id. */
 export function prepareWithdrawal(home: string, args: {
   withdrawalId: string; statementDigest: string; amountMicroTrac: number;
-  destination: string; chainId: number;
+  destination: string; chainId: number; tabPrincipal?: string;
 }): { ok: boolean; code?: string; state?: WithdrawalState } {
   const existing = replayWithdrawals(home).get(args.withdrawalId);
   if (existing) {
@@ -263,7 +265,8 @@ export function prepareWithdrawal(home: string, args: {
   appendJournal(home, {
     kind: "withdrawal", phase: "prepared",
     withdrawalId: args.withdrawalId, statementDigest: args.statementDigest,
-    amountMicroTrac: args.amountMicroTrac, destination: args.destination, chainId: args.chainId,
+    amountMicroTrac: args.amountMicroTrac, destination: args.destination,
+    tabPrincipal: args.tabPrincipal ?? args.destination, chainId: args.chainId,
     at: new Date().toISOString(),
   });
   return { ok: true, state: replayWithdrawals(home).get(args.withdrawalId) };
@@ -308,5 +311,9 @@ export function confirmWithdrawal(home: string, args: {
     kind: "withdrawal", phase: "confirmed",
     withdrawalId: args.withdrawalId, confirmedTxHash: r.txHash, at: new Date().toISOString(),
   });
+  // Reconcile the tab: a confirmed payout settles the tab so it shows no
+  // residual claim and can never be double-refunded (buyer-found, Bo).
+  const principal = st.tabPrincipal ?? st.destination;
+  if (principal) settleTab(home, principal, { withdrawalId: args.withdrawalId, txHash: r.txHash, netPaidMicroTrac: st.amountMicroTrac });
   return { ok: true, code: "OK" };
 }

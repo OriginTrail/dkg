@@ -78,7 +78,7 @@ function providerKeys(home: string) {
 export const providerKeyId = (home: string) => "ed25519:" + sha256(providerKeys(home).publicPem).slice(0, 16);
 
 // ── journal ─────────────────────────────────────────────────────────────────
-interface TabState { balance: number; sequence: number; lastHash: string; seen: Set<string>; }
+interface TabState { balance: number; sequence: number; lastHash: string; seen: Set<string>; settled?: { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string }; }
 
 // State is keyed BY DKG_HOME. A module-global map leaks balances between
 // homes — which is not a hypothetical: the isolated Stage-1 node and the
@@ -119,6 +119,15 @@ function replay(home: string) {
     // still had it to spend, and in enforce mode they could have spent it twice.
     // Subtraction rather than zeroing, so a future partial refund replays right.
     if (rec.kind === "refund") { t.balance = Math.max(0, t.balance - rec.amountMicroTrac); continue; }
+    // Buyer-found (Hermes/Bo) at settlement close-out: a confirmed withdrawal
+    // must reconcile the TAB, not just the withdrawal journal. Without this the
+    // buyer-visible tab still shows a claimable balance after on-chain payout —
+    // a phantom residual claim and a double-refund risk if expiry ever sweeps.
+    if (rec.kind === "settled") {
+      t.balance = 0;
+      t.settled = { withdrawalId: String(rec.withdrawalId), txHash: String(rec.txHash), netPaidMicroTrac: Number(rec.netPaidMicroTrac), at: String(rec.at) };
+      continue;
+    }
     if (rec.kind === "debit") {
       t.balance = rec.leg.tab.after;
       t.sequence = rec.leg.sequence;
@@ -289,6 +298,11 @@ export function loadMeterConfig(home: string): MeterConfig {
  */
 export function refundOnExpiry(home: string, principal: string, refundAddress: string, termsDigest: string) {
   replay(home);
+  // A tab settled on-chain must never be refunded — that would pay twice
+  // (buyer-found, Bo). Settlement is terminal.
+  if (entry(home, principal).settled) {
+    return { alreadyRefunded: true, refundedMicroTrac: 0, at: entry(home, principal).settled!.at, settled: true };
+  }
   const p = journalPath(home);
   if (existsSync(p)) {
     for (const line of readFileSync(p, "utf8").split("\n")) {
@@ -398,4 +412,30 @@ export function readJournal(home: string): Array<Record<string, unknown>> {
 /** Append a settlement/withdrawal record durably (fsync before returning). */
 export function appendJournal(home: string, record: Record<string, unknown>): void {
   durableAppend(home, record);
+}
+
+
+/**
+ * Reconcile a tab against a CONFIRMED on-chain settlement (buyer-found, Bo).
+ * Zeros the buyer-visible balance and records the settlement so the tab reads
+ * as closed with no residual claim, and so expiry can never double-refund it.
+ * Idempotent by withdrawalId: replaying or re-confirming appends nothing new.
+ */
+export function settleTab(home: string, principal: string, info: { withdrawalId: string; txHash: string; netPaidMicroTrac: number }): { ok: boolean; alreadySettled: boolean } {
+  replay(home);
+  const t = entry(home, principal);
+  if (t.settled) return { ok: true, alreadySettled: true };
+  durableAppend(home, {
+    kind: "settled", principal, withdrawalId: info.withdrawalId, txHash: info.txHash,
+    netPaidMicroTrac: info.netPaidMicroTrac, at: new Date().toISOString(),
+  });
+  t.balance = 0;
+  t.settled = { ...info, at: new Date().toISOString() };
+  return { ok: true, alreadySettled: false };
+}
+
+/** The confirmed settlement for a principal, or null. Buyer-visible receipt. */
+export function settlementOf(home: string, principal: string): { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string } | null {
+  replay(home);
+  return entry(home, principal).settled ?? null;
 }

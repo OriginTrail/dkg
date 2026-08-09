@@ -15,7 +15,7 @@
 //  C.3  nothing here can bill: enforcement remains per-principal in the
 //       meter config, and shadow mode ignores all of it.
 import { createHash } from "node:crypto";
-import { canonicalize, balance, credit } from "./ledger.js";
+import { canonicalize, balance, credit, settlementOf } from "./ledger.js";
 import {
   buildOpeningArtifact, registerOpening, activeOpening, evaluateDeposit,
   creditDeposit, termsDigest, type TabTerms, type ObservedTransfer,
@@ -208,12 +208,17 @@ export function creditObservedDeposit(home: string, principal: string, transfer:
 export function tabView(home: string, principal: string, safeHeadBlock: number | null) {
   const artifact = activeOpening(home, principal);
   const b = balance(home, principal);
+  const settled = settlementOf(home, principal);
   return {
     principal,
     balanceMicroTrac: b.balance,
     sequence: b.sequence,
     lastLegHash: b.lastHash,
-    tabOpen: !!artifact,
+    // A settled tab is closed and unclaimable regardless of a lingering opening
+    // artifact — the on-chain payout is the final word (buyer-found, Bo).
+    tabOpen: !!artifact && !settled,
+    settled: !!settled,
+    settlement: settled ? { withdrawalId: settled.withdrawalId, txHash: settled.txHash, netPaidMicroTrac: settled.netPaidMicroTrac, at: settled.at } : null,
     expiresAt: artifact?.expiresAt ?? null,
     expired: artifact ? Date.now() > Date.parse(artifact.expiresAt) : null,
     refundAddress: artifact?.terms.refundAddress ?? null,

@@ -22,6 +22,9 @@ mkdirSync(join(home, "metering"), { recursive: true });
 
 const S = await import(join(dist, "metering/settlement.js"));
 const L = await import(join(dist, "metering/ledger.js"));
+const D = await import(join(dist, "metering/deposit-rail.js"));
+const RM = await import(join(dist, "metering/read-meter.js"));
+const ST = await import(join(dist, "metering/stage3-endpoint.js"));
 
 let pass = 0, fail = 0;
 const ok = (n, c, d) => { if (c) { pass++; console.log(`  ✓ ${n}`); } else { fail++; console.log(`  ✗ ${n}${d ? ` — ${d}` : ""}`); } };
@@ -221,6 +224,48 @@ ok("crash after FINALITY: re-confirm is an idempotent no-op (E_WD_ALREADY_CONFIR
   const j = readFileSync(join(home, "metering", "read-journal.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((r) => r.kind === "withdrawal");
   const confirmed = j.filter((r) => r.phase === "confirmed");
   ok("exactly one 'confirmed' journal record for the withdrawal — at most one payout", confirmed.length === 1, `${confirmed.length}`);
+}
+
+console.log("\ntab reconciliation after settlement (buyer-found, Bo — no residual claim):");
+{
+  const { mkdtempSync, mkdirSync } = await import("node:fs");
+  const h = mkdtempSync(join(tmpdir(), "settle-recon-"));
+  mkdirSync(join(h, "metering"), { recursive: true });
+  L.setDebitGate((home, p, now) => D.debitAllowed(home, p, now));
+  // fund a tab, bill a leg so there is a residual balance
+  const terms = ST.stage3Terms(PROVIDER, BUYER, 100, RM.SCHEDULE_VERSION, CHAINID);
+  const art = D.buildOpeningArtifact(BUYER, terms); D.registerOpening(h, art);
+  const tr = { txHash: "0xdep", from: BUYER, to: PROVIDER, token: terms.tracContract, amountTrac: "1", blockNumber: 100, safeHeadBlock: 111 };
+  D.creditDeposit(h, tr, art, D.evaluateDeposit(tr, art));
+  L.recordReadLeg(h, { principal: BUYER, units: 3, breakdown: { markers: {} }, scopeQuads: 26200, sparql: "Q", responseBody: "R", askMicroPer1k: 100 });
+  const beforeBal = L.balance(h, BUYER).balance;
+  ok("tab has a residual balance before settlement", beforeBal > 0 && beforeBal < 1_000_000, String(beforeBal));
+
+  // run the withdrawal to confirmed
+  const WID = "wd:recon-test";
+  L.appendJournal; // ensure imported path
+  S.prepareWithdrawal(h, { withdrawalId: WID, statementDigest: "d", amountMicroTrac: beforeBal, destination: BUYER, tabPrincipal: BUYER, chainId: CHAINID });
+  S.recordSignedWithdrawal(h, { withdrawalId: WID, sender: PROVIDER, accountNonce: 1, txHash: "0xset" });
+  const conf = S.confirmWithdrawal(h, { withdrawalId: WID, receipt: { txHash: "0xset", to: BUYER, amountMicroTrac: beforeBal, success: true, confirmations: 20 }, requiredConfirmations: 12 });
+  ok("withdrawal confirms", conf.ok);
+
+  // THE fix: tab is now settled, balance zero, buyer-visible
+  ok("balance is zeroed after confirmed settlement", L.balance(h, BUYER).balance === 0, String(L.balance(h, BUYER).balance));
+  const sm = L.settlementOf(h, BUYER);
+  ok("a buyer-visible settlement receipt exists keyed by withdrawalId + txHash",
+    sm && sm.withdrawalId === WID && sm.txHash === "0xset", JSON.stringify(sm));
+  const view = ST.tabView(h, BUYER, 999);
+  ok("tabView reports tabOpen=false and settled=true after settlement",
+    view.tabOpen === false && view.settled === true && view.settlement?.txHash === "0xset", JSON.stringify({open:view.tabOpen,settled:view.settled}));
+
+  // no double-refund: expiry must not refund a settled tab
+  const refund = L.refundOnExpiry(h, BUYER, BUYER, "digest");
+  ok("expiry cannot refund a settled tab (no double payout)", refund.refundedMicroTrac === 0 && refund.settled === true, JSON.stringify(refund));
+
+  // survives a restart (journal-derived)
+  const { execFileSync } = require("node:child_process");
+  const out = JSON.parse(execFileSync(process.execPath, ["-e", `(async()=>{const L=await import(${JSON.stringify(join(dist,"metering/ledger.js"))});console.log(JSON.stringify({bal:L.balance(${JSON.stringify(h)},${JSON.stringify(BUYER)}).balance,settled:!!L.settlementOf(${JSON.stringify(h)},${JSON.stringify(BUYER)})}))})()`], { encoding: "utf8", env: { ...process.env, DKG_HOME: h } }).trim());
+  ok("settlement + zero balance survive a real restart", out.bal === 0 && out.settled === true, JSON.stringify(out));
 }
 
 console.log(`\n${pass}/${pass + fail} settlement gates pass\n`);
