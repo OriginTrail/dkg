@@ -136,7 +136,8 @@ describe('agent-profile system-record active receiver', () => {
       ...fixture.row,
       version: tombstone.version,
       headDigest: tombstoneEnvelope.objectDigest,
-    }), ADMITTED_CONTEXT, new AbortController().signal)).rejects.toThrow(/inventory row does not bind/);
+    }), ADMITTED_CONTEXT, new AbortController().signal))
+      .rejects.toThrow(/inventory row does not bind/);
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(verifyCurrentBundle).not.toHaveBeenCalled();
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -172,7 +173,8 @@ describe('agent-profile system-record active receiver', () => {
     await expect(receiver.receiveActive(Object.freeze({
       ...fixture.row,
       headDigest: expiredEnvelope.objectDigest,
-    }), ADMITTED_CONTEXT, new AbortController().signal)).rejects.toThrow(/expired agent-profile head/);
+    }), ADMITTED_CONTEXT, new AbortController().signal))
+      .rejects.toThrow(/expired agent-profile head/);
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(verifyCurrentBundle).not.toHaveBeenCalled();
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -196,7 +198,11 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    ))
       .rejects.toThrow(/expired agent-profile head/);
     expect(nowMs).toHaveBeenCalledTimes(2);
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
@@ -214,12 +220,13 @@ describe('agent-profile system-record active receiver', () => {
     let admittedDeadlineMs: number | undefined;
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
-      _admittedContext: AgentProfileAdmittedSliceContextV1,
+      admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => Object.freeze({
       existingMonotonicDeadlineMs,
       monotonicNowMs,
       apply: (deadline: number) => {
+      expect(admittedContext).toBe(ADMITTED_CONTEXT);
         admittedDeadlineMs = deadline;
         return {
           outcome: 'applied' as const,
@@ -236,7 +243,11 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    ))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(nowMs).toHaveBeenCalledTimes(2);
     expect(admittedDeadlineMs).toBe(5_060);
@@ -348,9 +359,10 @@ describe('agent-profile system-record active receiver', () => {
     }));
     const prepareCandidateApply = vi.fn(async (
       _candidate: AgentProfileReceiverCandidateV1,
-      _admittedContext: AgentProfileAdmittedSliceContextV1,
+      admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => {
+      expect(admittedContext).toBe(ADMITTED_CONTEXT);
       await Promise.resolve();
       return Object.freeze({ ...DEFAULT_MONOTONIC_APPLY_TIMING, apply });
     });
@@ -362,11 +374,48 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    ))
       .rejects.toThrow(/expired agent-profile head/);
     expect(nowMs).toHaveBeenCalledTimes(2);
     expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('dispatches a real prepared apply once and honors abort before dispatch', async () => {
+    const fixture = await publishedFixture();
+    const apply = vi.fn(async () => preparedFixtureApply('1', 'a').apply(10_000));
+    const prepareCandidateApply = vi.fn(() => Object.freeze({
+      ...DEFAULT_MONOTONIC_APPLY_TIMING,
+      apply,
+    }));
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply,
+    });
+    const signal = new AbortController().signal;
+    const prepared = await receiver.prepareActive(fixture.row, signal);
+
+    await expect(prepared.apply(ADMITTED_CONTEXT, signal))
+      .resolves.toMatchObject({ outcome: 'applied' });
+    await expect(prepared.apply(ADMITTED_CONTEXT, signal))
+      .rejects.toThrow(/already dispatched/);
+    expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledTimes(1);
+
+    const abortedPrepared = await receiver.prepareActive(fixture.row, signal);
+    const controller = new AbortController();
+    controller.abort(new Error('abort before prepared apply'));
+    await expect(abortedPrepared.apply(ADMITTED_CONTEXT, controller.signal))
+      .rejects.toThrow(/abort before prepared apply/);
+    expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledTimes(1);
   });
 
   it('hands every derived owned subject to the materializer candidate', async () => {

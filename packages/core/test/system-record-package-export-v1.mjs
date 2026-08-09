@@ -151,6 +151,7 @@ const expectedRuntimeExports = Object.freeze([
   'SYSTEM_RECORD_SLICE_TIMEOUT_MS',
   'SYSTEM_RECORD_STATUS_TIMEOUT_MS',
   'SYSTEM_RECORD_WIRE_VERSION_V1',
+  'SystemRecordInventoryTraversalErrorV1',
   'SystemRecordObjectErrorV1',
   'agentProfileIdentityFactsV1',
   'assertAgentProfileAuthorityTransitionV1',

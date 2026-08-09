@@ -115,7 +115,6 @@ export interface AgentProfileReceiverV1 {
    */
   prepareActive(
     row: SystemRecordInventoryRowV1,
-    admittedContext: AgentProfileAdmittedSliceContextV1,
     signal: AbortSignal,
   ): Promise<AgentProfilePreparedActiveV1>;
   /** Convenience for direct callers that already own the admitted slice lifetime. */
@@ -131,7 +130,10 @@ export interface AgentProfilePreparedActiveV1 {
    * Dispatch exactly once. Once called, the returned promise is the physical
    * settlement boundary and must not be detached on abort or deadline.
    */
-  apply(signal: AbortSignal): Promise<SystemRecordApplyOutcomeV1>;
+  apply(
+    admittedContext: AgentProfileAdmittedSliceContextV1,
+    signal: AbortSignal,
+  ): Promise<SystemRecordApplyOutcomeV1>;
 }
 
 /**
@@ -159,7 +161,6 @@ export function createAgentProfileReceiverV1(
   const receiver: AgentProfileReceiverV1 = Object.freeze({
     async prepareActive(
       inputRow: SystemRecordInventoryRowV1,
-      admittedContext: AgentProfileAdmittedSliceContextV1,
       signal: AbortSignal,
     ): Promise<AgentProfilePreparedActiveV1> {
       signal.throwIfAborted();
@@ -182,7 +183,10 @@ export function createAgentProfileReceiverV1(
       const validUntilUnixMs = Date.parse(candidate.head.validUntil);
       let dispatched = false;
       return Object.freeze({
-        async apply(applySignal: AbortSignal): Promise<SystemRecordApplyOutcomeV1> {
+        async apply(
+          admittedContext: AgentProfileAdmittedSliceContextV1,
+          applySignal: AbortSignal,
+        ): Promise<SystemRecordApplyOutcomeV1> {
           if (dispatched) throw new Error('active profile receiver apply was already dispatched');
           applySignal.throwIfAborted();
           dispatched = true;
@@ -220,9 +224,9 @@ export function createAgentProfileReceiverV1(
       admittedContext: AgentProfileAdmittedSliceContextV1,
       signal: AbortSignal,
     ): Promise<SystemRecordApplyOutcomeV1> {
-      const prepared = await receiver.prepareActive(row, admittedContext, signal);
+      const prepared = await receiver.prepareActive(row, signal);
       signal.throwIfAborted();
-      return prepared.apply(signal);
+      return prepared.apply(admittedContext, signal);
     },
   });
   return receiver;

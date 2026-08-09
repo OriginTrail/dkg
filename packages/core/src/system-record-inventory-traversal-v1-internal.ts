@@ -54,6 +54,8 @@ export interface SystemRecordInventoryTraversalSliceV1 {
   readonly maxWireBytes: number;
   readonly deadlineMs: number;
   readonly nowMs?: () => number;
+  /** Decode and return rows completed in this slice. Validation-only callers omit this. */
+  readonly emitRows?: boolean;
 }
 
 export interface SystemRecordInventoryTraversalSliceResultV1 {
@@ -62,7 +64,7 @@ export interface SystemRecordInventoryTraversalSliceResultV1 {
   readonly wireBytes: number;
   readonly validatedRows: number;
   readonly validatedLeaves: number;
-  /** Canonical rows decoded from leaves completed during this slice only. */
+  /** Canonical rows completed in this slice when `emitRows` was requested; otherwise empty. */
   readonly rows: readonly SystemRecordInventoryRowV1[];
   readonly rejection?: SystemRecordInventoryRejectedLoadV1['rejection'];
   readonly result?: ValidatedSystemRecordInventoryTreeV1;
@@ -80,6 +82,25 @@ export interface SystemRecordInventoryTraversalFailureV1 {
   readonly wireBytes: number;
 }
 
+/** Direct typed boundary for failed slices with their physically observed accounting. */
+export class SystemRecordInventoryTraversalErrorV1 extends Error {
+  readonly reason: SystemRecordInventoryTraversalFailureV1['reason'];
+  readonly requests: number;
+  readonly wireBytes: number;
+
+  constructor(
+    message: string,
+    failure: SystemRecordInventoryTraversalFailureV1,
+    cause?: unknown,
+  ) {
+    super(message, { cause });
+    this.name = 'SystemRecordInventoryTraversalErrorV1';
+    this.reason = failure.reason;
+    this.requests = failure.requests;
+    this.wireBytes = failure.wireBytes;
+  }
+}
+
 export interface SystemRecordInventoryTraversalV1 {
   /** Advance one bounded slice. Concurrent calls are rejected. */
   advance(
@@ -93,14 +114,12 @@ export interface SystemRecordInventoryTraversalV1 {
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
   ): Promise<SystemRecordInventoryTraversalSliceResultV1>;
-  /** Return accounting only for a failure thrown by this traversal instance. */
-  failureFor(error: unknown): SystemRecordInventoryTraversalFailureV1 | undefined;
 }
 
 interface SystemRecordInventoryTraversalWorkV1 {
   readonly digest: Digest32V1;
   readonly depth: number;
-  readonly expectedKinds: readonly ('inventory-internal' | 'inventory-leaf')[];
+  readonly expectedKind: 'inventory-internal' | 'inventory-leaf';
   readonly expectedFirst?: Digest32V1;
   readonly upperExclusive?: Digest32V1;
   readonly expectedLast?: Digest32V1;
@@ -114,11 +133,14 @@ export function createSystemRecordInventoryTraversalV1(
   const pinned = validateRootDescriptor(descriptor);
   const expectedRows = Number(parseCanonicalDecimalU64(pinned.totalRows));
   const seen = new Set<string>();
+  // Root kind is the only ambiguous work item; child work remains single-kind.
+  const rootProbeKinds = rootExpectedKinds(expectedRows);
+  let rootProbeIndex = 0;
   const pending: SystemRecordInventoryTraversalWorkV1[] = [
     {
       digest: pinned.treeRootDigest,
       depth: 1,
-      expectedKinds: rootExpectedKinds(expectedRows),
+      expectedKind: rootProbeKinds[rootProbeIndex]!,
       path: Object.freeze([]),
     },
   ];
@@ -127,7 +149,6 @@ export function createSystemRecordInventoryTraversalV1(
   let maximumDepth = 0;
   let leafDepth: number | undefined;
   let advancing = false;
-  const failures = new WeakMap<object, SystemRecordInventoryTraversalFailureV1>();
   let completed:
     | Readonly<{
         totalRows: number;
@@ -137,7 +158,7 @@ export function createSystemRecordInventoryTraversalV1(
       }>
     | undefined;
 
-  return Object.freeze({ advance, failureFor });
+  return Object.freeze({ advance });
 
   async function advance(
     load: (
@@ -164,21 +185,28 @@ export function createSystemRecordInventoryTraversalV1(
     }
     let requests = 0;
     let wireBytes = 0;
-    let failureReason: SystemRecordInventoryTraversalFailureV1['reason'] = 'invalid-slice';
+    let admittedSignal: AbortSignal | undefined;
     advancing = true;
     try {
       // Pin the admitted budget before the first await. Callers commonly reuse mutable
       // scheduler state; re-reading it after load() would let one slice grow in flight.
-      const signal = slice.signal;
+      admittedSignal = slice.signal;
+      const signal = admittedSignal;
       const maxRequests = slice.maxRequests;
       const maxWireBytes = slice.maxWireBytes;
       const deadlineMs = slice.deadlineMs;
       const now = slice.nowMs ?? Date.now;
-      if (typeof now !== 'function') throw new Error('inventory traversal slice budget is invalid');
+      const emitRows = slice.emitRows === true;
+      if (typeof now !== 'function') throw new InventoryTraversalSliceError();
       const readNow = (): number => {
-        const current = now();
+        let current: number;
+        try {
+          current = now();
+        } catch (error) {
+          throw new InventoryTraversalSliceError('inventory traversal clock failed', error);
+        }
         if (!Number.isSafeInteger(current) || current < 0) {
-          throw new Error('inventory traversal clock is invalid');
+          throw new InventoryTraversalSliceError('inventory traversal clock is invalid');
         }
         return current;
       };
@@ -195,16 +223,14 @@ export function createSystemRecordInventoryTraversalV1(
         admittedAtMs < 0 ||
         deadlineMs > admittedAtMs + SYSTEM_RECORD_SLICE_TIMEOUT_MS
       ) {
-        throw new Error('inventory traversal slice budget is invalid');
+        throw new InventoryTraversalSliceError();
       }
-      failureReason = 'invalid-response';
       const sliceRows: SystemRecordInventoryRowV1[] = [];
       while (pending.length > 0) {
-        if (signal?.aborted) failureReason = 'aborted';
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) break;
         const work = pending[pending.length - 1];
-        const expectedKind = work.expectedKinds[0]!;
+        let expectedKind = work.expectedKind;
         const maximumNextBytes = framedObjectMaximum(
           expectedKind,
         );
@@ -222,7 +248,6 @@ export function createSystemRecordInventoryTraversalV1(
           | SystemRecordInventoryLoadedObjectV1
           | SystemRecordInventoryRejectedLoadV1
           | undefined;
-        failureReason = 'transport';
         try {
           loaded = await loadInventoryObjectWithinDeadlineV1(
             (loadSignal) => {
@@ -238,15 +263,12 @@ export function createSystemRecordInventoryTraversalV1(
             remainingMs,
           );
         } catch (error) {
-          if (signal?.aborted) failureReason = 'aborted';
-          else if (error instanceof InventoryTraversalDeadlineError) failureReason = 'deadline';
-          throw error;
+          if (signal?.aborted || error instanceof InventoryTraversalDeadlineError) throw error;
+          throw new InventoryTraversalTransportError(error);
         }
         if (loaded === undefined) {
-          failureReason = 'not-found';
-          throw new Error(`inventory tree is missing ${work.digest}`);
+          throw new InventoryTraversalNotFoundError(work.digest);
         }
-        failureReason = 'invalid-response';
         const probe = snapshotDataRecord(loaded, 'inventory loader result', {
           rejectNullValues: true,
         });
@@ -259,10 +281,8 @@ export function createSystemRecordInventoryTraversalV1(
           throw new Error('inventory loader returned invalid actual wire accounting');
         }
         wireBytes += probe.wireBytes as number;
-        if (signal?.aborted) failureReason = 'aborted';
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) {
-          failureReason = 'deadline';
           throw new InventoryTraversalDeadlineError();
         }
         if (probe.outcome === 'rejected') {
@@ -279,11 +299,7 @@ export function createSystemRecordInventoryTraversalV1(
           ) {
             throw new Error('inventory loader returned an invalid rejection');
           }
-          if (rejected.rejection === 'not-found' && work.expectedKinds.length > 1) {
-            pending[pending.length - 1] = Object.freeze({
-              ...work,
-              expectedKinds: Object.freeze(work.expectedKinds.slice(1)),
-            });
+          if (rejected.rejection === 'not-found' && advanceRootProbe(work)) {
             return Object.freeze({
               status: 'paused',
               requests,
@@ -327,6 +343,14 @@ export function createSystemRecordInventoryTraversalV1(
         );
         if ((artifact.wireBytes as number) < 6 + canonicalBytes.byteLength) {
           throw new Error('inventory loader returned an over-cap object');
+        }
+        if (
+          artifact.objectKind !== expectedKind
+          && work.depth === 1
+          && rootProbeKinds.includes(artifact.objectKind)
+        ) {
+          rootProbeIndex = rootProbeKinds.indexOf(artifact.objectKind);
+          expectedKind = artifact.objectKind;
         }
         if (artifact.objectKind !== expectedKind) {
           throw new Error('inventory child kind mismatch');
@@ -378,8 +402,10 @@ export function createSystemRecordInventoryTraversalV1(
           leafDepth = work.depth;
           leaves += 1;
           rows += leaf.rows.length;
-          sliceRows.push(...leaf.rows.map((encoded) =>
-            decodeInventoryRowBase64UrlV1(pinned.networkId, encoded)));
+          for (const encoded of leaf.rows) {
+            const decoded = decodeInventoryRowBase64UrlV1(pinned.networkId, encoded);
+            if (emitRows) sliceRows.push(decoded);
+          }
           if (
             leaves > SYSTEM_RECORD_MAX_INVENTORY_LEAVES ||
             rows > SYSTEM_RECORD_MAX_INVENTORY_RECORDS ||
@@ -397,7 +423,7 @@ export function createSystemRecordInventoryTraversalV1(
             pending.push({
               digest: entry.childDigest,
               depth: work.depth + 1,
-              expectedKinds: Object.freeze([entry.childKind]),
+              expectedKind: entry.childKind,
               expectedFirst: entry.separatorKeyHash,
               ...(index === internal.entries.length - 1
                 ? {}
@@ -441,31 +467,28 @@ export function createSystemRecordInventoryTraversalV1(
         result: completedResult(),
       });
     } catch (error) {
-      throw recordFailure(error, failureReason, requests, wireBytes);
+      throw new SystemRecordInventoryTraversalErrorV1(
+        error instanceof Error ? error.message : 'inventory traversal failed',
+        Object.freeze({
+          reason: traversalFailureReason(error, admittedSignal),
+          requests,
+          wireBytes,
+        }),
+        error,
+      );
     } finally {
       advancing = false;
     }
   }
 
-  function failureFor(error: unknown): SystemRecordInventoryTraversalFailureV1 | undefined {
-    if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
-      return undefined;
-    }
-    const failure = failures.get(error);
-    return failure === undefined ? undefined : Object.freeze({ ...failure });
-  }
-
-  function recordFailure(
-    error: unknown,
-    reason: SystemRecordInventoryTraversalFailureV1['reason'],
-    requests: number,
-    wireBytes: number,
-  ): Error {
-    const wrapped = error instanceof Error
-      ? error
-      : new Error('inventory traversal failed', { cause: error });
-    failures.set(wrapped, Object.freeze({ reason, requests, wireBytes }));
-    return wrapped;
+  function advanceRootProbe(work: SystemRecordInventoryTraversalWorkV1): boolean {
+    if (work.depth !== 1 || rootProbeIndex + 1 >= rootProbeKinds.length) return false;
+    rootProbeIndex += 1;
+    pending[pending.length - 1] = Object.freeze({
+      ...work,
+      expectedKind: rootProbeKinds[rootProbeIndex]!,
+    });
+    return true;
   }
 
   function completedResult(): ValidatedSystemRecordInventoryTreeV1 {
@@ -499,10 +522,40 @@ function abortIfNeeded(signal?: AbortSignal): void {
   if (signal?.aborted) throw signal.reason ?? new Error('inventory traversal aborted');
 }
 
+class InventoryTraversalSliceError extends Error {
+  constructor(message = 'inventory traversal slice budget is invalid', cause?: unknown) {
+    super(message, { cause });
+  }
+}
+
 class InventoryTraversalDeadlineError extends Error {
   constructor() {
     super('inventory traversal slice deadline expired during load');
   }
+}
+
+class InventoryTraversalNotFoundError extends Error {
+  constructor(digest: Digest32V1) {
+    super(`inventory tree is missing ${digest}`);
+  }
+}
+
+class InventoryTraversalTransportError extends Error {
+  constructor(cause: unknown) {
+    super('inventory traversal loader failed', { cause });
+  }
+}
+
+function traversalFailureReason(
+  error: unknown,
+  signal: AbortSignal | undefined,
+): SystemRecordInventoryTraversalFailureV1['reason'] {
+  if (signal?.aborted) return 'aborted';
+  if (error instanceof InventoryTraversalDeadlineError) return 'deadline';
+  if (error instanceof InventoryTraversalNotFoundError) return 'not-found';
+  if (error instanceof InventoryTraversalTransportError) return 'transport';
+  if (error instanceof InventoryTraversalSliceError) return 'invalid-slice';
+  return 'invalid-response';
 }
 
 async function loadInventoryObjectWithinDeadlineV1<T>(

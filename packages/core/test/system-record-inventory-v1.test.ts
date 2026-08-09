@@ -6,6 +6,7 @@ import {
   assertSystemRecordInventoryCowUpdateBoundV1,
   buildSystemRecordInventoryTreeV1,
   createSystemRecordInventoryTraversalV1,
+  SystemRecordInventoryTraversalErrorV1,
   chooseSystemRecordByteAwareSplitIndexV1,
   chooseSystemRecordRebalanceV1,
   canonicalizeSystemRecordInventoryInternalObjectV1,
@@ -204,6 +205,7 @@ describe('system-record immutable B+tree objects', () => {
         maxRequests: 1,
         maxWireBytes: 2 * 1024 * 1024,
         deadlineMs: Date.now() + 3_000,
+        emitRows: true,
       });
       slices += 1;
       totalWireBytes += result.wireBytes;
@@ -279,8 +281,9 @@ describe('system-record immutable B+tree objects', () => {
       abortedError = error;
     }
     expect(abortedError).toBeInstanceOf(Error);
+    expect(abortedError).toBeInstanceOf(SystemRecordInventoryTraversalErrorV1);
     expect((abortedError as Error).message).toMatch(/aborted-after-load/);
-    expect(aborted.failureFor(abortedError)).toEqual({
+    expect(abortedError).toMatchObject({
       reason: 'aborted',
       requests: 1,
       wireBytes: rootLoaded.wireBytes,
@@ -301,7 +304,8 @@ describe('system-record immutable B+tree objects', () => {
       malformedError = error;
     }
     expect(malformedError).toBeInstanceOf(Error);
-    expect(malformed.failureFor(malformedError)).toEqual({
+    expect(malformedError).toBeInstanceOf(SystemRecordInventoryTraversalErrorV1);
+    expect(malformedError).toMatchObject({
       reason: 'invalid-response',
       requests: 1,
       wireBytes: rootLoaded.wireBytes,
@@ -529,11 +533,38 @@ describe('system-record immutable B+tree objects', () => {
       loadedInventoryObject(snapshot.objects.get(digest)!)
     ), slice);
     expect(first.status).toBe('complete');
+    expect(first.rows).toEqual([]);
     (first.result!.objectDigests as Set<string>).clear();
     const repeated = await completed.advance(async () => {
       throw new Error('completed traversal must not load again');
     }, slice);
     expect(repeated.result?.objectDigests.size).toBe(1);
+  });
+
+  it('accepts the actual ambiguous root kind from a digest-addressed loader', async () => {
+    const sorted = deterministicPeers(256).map(row)
+      .sort((left, right) => left.stableKeyHash.localeCompare(right.stableKeyHash));
+    const snapshot = twoLeafSnapshot(sorted.slice(0, 128), sorted.slice(128));
+    const traversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    const requestedKinds: string[] = [];
+    let result: Awaited<ReturnType<typeof traversal.advance>>;
+    do {
+      result = await traversal.advance(async (digest, expectedKind) => {
+        requestedKinds.push(expectedKind);
+        return loadedInventoryObject(snapshot.objects.get(digest)!);
+      }, {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 3_000,
+      });
+    } while (result.status === 'paused');
+
+    expect(result).toMatchObject({ status: 'complete', validatedRows: 256 });
+    expect(requestedKinds).toEqual([
+      'inventory-leaf',
+      'inventory-leaf',
+      'inventory-leaf',
+    ]);
   });
 
   it('rejects mixed child kinds before traversal', () => {

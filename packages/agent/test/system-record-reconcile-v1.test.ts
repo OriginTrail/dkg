@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
+  buildSystemRecordInventoryTreeV1,
   buildSystemRecordProviderSignatureMessageV1,
   computeSystemRecordRootDescriptorDigestV1,
+  computeSystemRecordStableKeyHashV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
+  type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import { parseNQuads } from '../src/dkg-agent-utils.js';
@@ -28,6 +31,18 @@ import {
   PRODUCER_FIXTURE_NOW_MS,
   DEPLOYMENT,
 } from './support/agent-profile-producer-v1-fixture.js';
+
+const TEST_PEER_IDS = Object.freeze([
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkf',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkg',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkh',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwki',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkj',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkk',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkm',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkn',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwko',
+]);
 
 describe('agent-profile System Record reconciler V1', () => {
   it('pins one provider root and completes one active row across bounded slices', async () => {
@@ -86,6 +101,74 @@ describe('agent-profile System Record reconciler V1', () => {
       peakActive: 1,
       queued: 0,
     });
+  });
+
+  it('retains rows beyond the eight-apply physical slice limit', async () => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const rows = TEST_PEER_IDS.map((peerId): SystemRecordInventoryRowV1 => ({
+      stableKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, peerId),
+      peerId,
+      authoritySequence: headEnvelope.object.authoritySequence,
+      version: headEnvelope.object.version,
+      headDigest: headEnvelope.objectDigest,
+      tombstone: false,
+      quarantined: false,
+    }));
+    const inventory = buildSystemRecordInventoryTreeV1(NETWORK, rows);
+    const rootEnvelope = await signRootDescriptor(fixture, inventory.descriptor);
+    const admission = admissionGate();
+    const apply = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '5',
+      appliedStateDigest: `0x${'ee'.repeat(32)}`,
+    }));
+    const prepareActive = vi.fn(async () => Object.freeze({ apply }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: async (request) => {
+        const stored = inventory.objects.get(request.objectDigest);
+        return stored === undefined
+          ? Object.freeze({
+              outcome: 'rejected' as const,
+              wireBytes: 0,
+              rejection: 'not-found' as const,
+            })
+          : Object.freeze({
+              outcome: 'ok' as const,
+              objectKind: stored.objectKind,
+              canonicalBytes: stored.canonicalBytes,
+              wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
+            });
+      },
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 9,
+    });
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      processedRows: 8,
+      pendingRows: 1,
+    });
+    expect(prepareActive).toHaveBeenCalledTimes(8);
+    expect(apply).toHaveBeenCalledTimes(8);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      processedRows: 1,
+      pendingRows: 0,
+    });
+    expect(prepareActive).toHaveBeenCalledTimes(9);
+    expect(apply).toHaveBeenCalledTimes(9);
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 3 });
+    expect(reconciler.stats()).toMatchObject({ processedRows: 9, pendingRows: 0 });
   });
 
   it('probes an ambiguous root kind across separate admitted slices', async () => {
@@ -303,6 +386,40 @@ describe('agent-profile System Record reconciler V1', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it('does not dispatch a prepared apply without the required admitted budget', async () => {
+    const fixture = await publishedFixture();
+    let nowMs = 1_000;
+    const admission = admissionGate(false, () => nowMs);
+    const apply = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '4',
+      appliedStateDigest: `0x${'dd'.repeat(32)}`,
+    }));
+    const preparedReceiver = receiverWithPreparation(async () => {
+      nowMs = 2_501;
+      return Object.freeze({ apply });
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: preparedReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      processedRows: 0,
+      pendingRows: 1,
+      outcomes: [],
+    });
+    expect(apply).not.toHaveBeenCalled();
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
   });
 
   it('awaits physical settlement after atomic apply dispatch even when closed', async () => {
@@ -556,6 +673,13 @@ async function resignRootTotalRows(
   totalRows: SignedSystemRecordRootDescriptorEnvelopeV1['object']['totalRows'],
 ): Promise<SignedSystemRecordRootDescriptorEnvelopeV1> {
   const object = Object.freeze({ ...fixture.rootEnvelope.object, totalRows });
+  return signRootDescriptor(fixture, object);
+}
+
+async function signRootDescriptor(
+  fixture: Awaited<ReturnType<typeof publishedFixture>>,
+  object: SignedSystemRecordRootDescriptorEnvelopeV1['object'],
+): Promise<SignedSystemRecordRootDescriptorEnvelopeV1> {
   const objectDigest = computeSystemRecordRootDescriptorDigestV1(object);
   const signature = await fixture.peerSigner.sign(buildSystemRecordProviderSignatureMessageV1(
     object,
@@ -596,15 +720,18 @@ function receiverWithPreparation(
   const receiver: AgentProfileReceiverV1 = Object.freeze({
     prepareActive,
     async receiveActive(row, admittedContext, signal) {
-      const prepared = await prepareActive(row, admittedContext, signal);
+      const prepared = await prepareActive(row, signal);
       signal.throwIfAborted();
-      return prepared.apply(signal);
+      return prepared.apply(admittedContext, signal);
     },
   });
   return receiver;
 }
 
-function admissionGate(initiallyHeld = false): AgentProfileReconcileAdmissionV1 & {
+function admissionGate(
+  initiallyHeld = false,
+  nowMs: () => number = Date.now,
+): AgentProfileReconcileAdmissionV1 & {
   stats(): { active: 0 | 1; peak: 0 | 1; acquisitions: number };
   lastContext(): AgentProfileAdmittedSliceContextV1 | undefined;
 } {
@@ -620,7 +747,7 @@ function admissionGate(initiallyHeld = false): AgentProfileReconcileAdmissionV1 
       peak = 1;
       acquisitions += 1;
       const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
-      contexts.set(context, Date.now() + 3_000);
+      contexts.set(context, nowMs() + 3_000);
       lastContext = context;
       let live = true;
       return Object.freeze({
@@ -635,7 +762,7 @@ function admissionGate(initiallyHeld = false): AgentProfileReconcileAdmissionV1 
     inspectAdmittedContext(context) {
       const admittedDeadlineMs = contexts.get(context);
       if (admittedDeadlineMs === undefined) throw new Error('test admitted context is invalid');
-      return Object.freeze({ nowMs: Date.now(), admittedDeadlineMs });
+      return Object.freeze({ nowMs: nowMs(), admittedDeadlineMs });
     },
     stats() {
       return { active: held ? 1 : 0, peak, acquisitions };
