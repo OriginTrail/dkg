@@ -4,7 +4,7 @@
  * private policy, malformed/latest reads, aborts, and missing capabilities all
  * retain the legacy unknown-footprint singleton behavior.
  */
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   enrichVmRecoveryFootprints,
   planVmRecoveryMicrobatch,
@@ -78,7 +78,8 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     expect(contextReads.map(({ kaId }) => kaId)).toEqual(
       Array.from({ length: 10 }, (_, kaId) => BigInt(kaId)),
     );
-    expect(contextReads.every(({ signal }) => signal === controller.signal)).toBe(true);
+    expect(contextReads.every(({ signal }) =>
+      signal instanceof AbortSignal && signal !== controller.signal)).toBe(true);
     expect(enriched.slice(0, 10).every(({ recoveryFootprint }) =>
       recoveryFootprint?.kind === 'public-v10')).toBe(true);
     expect(enriched.slice(10).every(({ recoveryFootprint }) =>
@@ -197,10 +198,57 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       isCurrent: () => true,
     });
 
-    expect(contextReads).toEqual([{ kaId: 0n, signal: controller.signal }]);
+    expect(contextReads).toHaveLength(1);
+    expect(contextReads[0]!.kaId).toBe(0n);
+    expect(contextReads[0]!.signal).not.toBe(controller.signal);
+    expect(contextReads[0]!.signal?.aborted).toBe(true);
     expect(enriched).toEqual(targets);
     expect(enriched.every(({ recoveryFootprint }) =>
       recoveryFootprint === undefined)).toBe(true);
+  });
+
+  it('bounds a hung sizing read, aborts its child signal, and admits no late hint', async () => {
+    vi.useFakeTimers();
+    try {
+      let sizingSignal: AbortSignal | undefined;
+      let resolveLate: ((value: ReturnType<typeof publicContext>) => void) | undefined;
+      const targets = [target(7)];
+      const pending = enrichVmRecoveryFootprints(
+        targets,
+        222n,
+        {
+          isContextGraphActiveOnChain: async () => true,
+          getContextGraphAccessPolicy: async () => 0,
+          getKnowledgeAssetUpdateContext: async (_kaId, options) => {
+            sizingSignal = options?.signal;
+            return new Promise((resolve) => { resolveLate = resolve; });
+          },
+        },
+        {
+          maxContextReads: 10,
+          sizingReadTimeoutMs: 25,
+          isCurrent: () => true,
+        },
+      );
+      let settled = false;
+      void pending.finally(() => { settled = true; });
+
+      await vi.advanceTimersByTimeAsync(24);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      const enriched = await pending;
+
+      expect(settled).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(sizingSignal?.aborted).toBe(true);
+      expect(enriched).toEqual(targets);
+      resolveLate?.(publicContext(7n));
+      await vi.runAllTicks();
+      expect(enriched).toEqual(targets);
+      expect(targets[0]!.recoveryFootprint).toBeUndefined();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('labels classic observations latest-bounded without fabricating a finalized anchor', async () => {

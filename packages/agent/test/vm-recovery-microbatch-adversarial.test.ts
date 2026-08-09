@@ -384,6 +384,13 @@ async function createRecoveryHarness(options: {
   ) => 'found' | 'clean-absent' | 'incomplete';
 }) {
   const chainAdapter = new MockChainAdapter();
+  const { contextGraphId } = await chainAdapter.createOnChainContextGraph({
+    accessPolicy: 0,
+    publishPolicy: 1,
+  });
+  if (contextGraphId !== 1n) {
+    throw new Error(`unexpected mock context graph id ${contextGraphId}`);
+  }
   const agent = await DKGAgent.create({
     name: options.name,
     chainAdapter,
@@ -467,6 +474,7 @@ async function createRecoveryHarness(options: {
   return {
     agent,
     chainAdapter,
+    contextGraphId,
     internals,
     targets,
     fetched,
@@ -528,16 +536,11 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       },
     });
     agents.push(harness.agent);
-    const { contextGraphId } = await harness.chainAdapter.createOnChainContextGraph({
-      accessPolicy: 0,
-      publishPolicy: 1,
-    });
-    expect(contextGraphId).toBe(1n);
     for (const target of harness.targets) {
       const kaId = BigInt(target.kaId);
       harness.chainAdapter.__registerKC({
         kaId,
-        contextGraphId,
+        contextGraphId: harness.contextGraphId,
         merkleRootHex: `0x${(kaId + 1n).toString(16).padStart(64, '0')}`,
         chunks: [],
         byteSize: 1_024n,
