@@ -17,7 +17,7 @@ import {
   CgSharedProjectionError,
   assertVerifiedCgSharedProjectionForTransferV1,
   assertVerifiedCgSharedProjectionV1,
-  parseCanonicalGraphlessProjectionLinesV1,
+  parseCanonicalGraphlessProjectionStorageQuadsV1,
   readVerifiedCgSharedProjectionBytesV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedCgSharedProjectionV1,
@@ -76,25 +76,28 @@ const FULLY_WITHHELD =
   + `<${COMMITMENT}> <http://dkg.io/ontology/privateDataHash> "034349e1ac2b108ba81720c55dff02bcae22762921f5c8354db83e687015872c"^^<http://www.w3.org/2001/XMLSchema#hexBinary> .\n`;
 
 describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
-  it('parses exact canonical lines into graphless triples', () => {
-    expect(parseCanonicalGraphlessProjectionLinesV1(UTF8.encode(PUBLIC))).toEqual([
+  it('parses exact canonical lines into storage-ready graphless quads', () => {
+    expect(parseCanonicalGraphlessProjectionStorageQuadsV1(UTF8.encode(PUBLIC))).toEqual([
       {
         subject: 'https://example.org/alice',
         predicate: 'https://schema.org/age',
         object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: '',
       },
       {
         subject: 'https://example.org/alice',
         predicate: 'https://schema.org/name',
         object: '"Alice"',
+        graph: '',
       },
     ]);
-    expect(parseCanonicalGraphlessProjectionLinesV1(UTF8.encode(
+    expect(parseCanonicalGraphlessProjectionStorageQuadsV1(UTF8.encode(
       '<https://example.org/s> <https://example.org/p> <https://example.org/o> .\n',
     ))).toEqual([{
       subject: 'https://example.org/s',
       predicate: 'https://example.org/p',
       object: 'https://example.org/o',
+      graph: '',
     }]);
   });
 
@@ -119,9 +122,9 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
       ]),
       code: 'projection-utf8',
     },
-  ])('rejects $name before returning triples', ({ bytes, code }) => {
+  ])('rejects $name before returning storage quads', ({ bytes, code }) => {
     expectFailure(
-      () => parseCanonicalGraphlessProjectionLinesV1(bytes),
+      () => parseCanonicalGraphlessProjectionStorageQuadsV1(bytes),
       code as CgSharedProjectionErrorCode,
     );
   });

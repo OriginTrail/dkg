@@ -2,7 +2,7 @@
 
 import {
   decodeOpaqueKaBundleV1,
-  parseCanonicalGraphlessProjectionLinesV1,
+  parseCanonicalGraphlessProjectionStorageQuadsV1,
 } from '@origintrail-official/dkg-core';
 import {
   assertAgentProfileProjectionIdentityV1,
@@ -264,14 +264,9 @@ async function buildVerifiedActiveCandidateFactsV1(
   );
   const decodedBundle = decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes);
   const canonicalProjectionBytes = Uint8Array.from(decodedBundle.projectionBytes);
-  const projectionQuads = Object.freeze(parseCanonicalGraphlessProjectionLinesV1(
+  const projectionQuads = parseCanonicalGraphlessProjectionStorageQuadsV1(
     canonicalProjectionBytes,
-  ).map(({ subject, predicate, object }) => Object.freeze({
-    subject,
-    predicate,
-    object,
-    graph: '',
-  })));
+  );
   if (BigInt(canonicalProjectionBytes.byteLength) !== BigInt(head.projectionBytes)) {
     throw new Error('profile bundle projection byte count does not bind the verified head');
   }

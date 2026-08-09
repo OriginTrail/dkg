@@ -77,11 +77,13 @@ export interface CgSharedPublicRootProjectionTripleV1 {
   readonly object: string;
 }
 
-/** A graphless triple decoded from exact canonical V10 projection bytes. */
-export interface CanonicalGraphlessProjectionTripleV1 {
+/** A storage-ready graphless quad parsed from canonical V10 projection bytes. */
+export interface CanonicalGraphlessProjectionStorageQuadV1 {
   readonly subject: string;
   readonly predicate: string;
+  /** IRI value without angle brackets, or the exact canonical literal term. */
   readonly object: string;
+  readonly graph: '';
 }
 
 /**
@@ -111,30 +113,33 @@ export function encodeCanonicalCgSharedPublicRootProjectionV1(
 }
 
 /**
- * Parse exact canonical V10 projection lines under the same bounded syntactic
- * rules as cg-shared-v1 verification. The wire representation has no graph
- * component. This provides no authority, digest, signed-count, seal, or
- * projection-schema proof; callers must establish those bindings separately.
+ * Parse exact canonical V10 projection lines into storage-ready graphless
+ * quads under the same bounded syntactic rules as cg-shared-v1 verification.
+ * Subject, predicate, and IRI object terms are returned without angle brackets;
+ * literal objects remain exact canonical lexical terms. This provides no
+ * authority, digest, signed-count, seal, or projection-schema proof; callers
+ * must establish those bindings separately.
  */
-export function parseCanonicalGraphlessProjectionLinesV1(
+export function parseCanonicalGraphlessProjectionStorageQuadsV1(
   projectionBytes: Uint8Array,
   limits: CgSharedProjectionVerificationLimitsV1 =
     DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
-): readonly Readonly<CanonicalGraphlessProjectionTripleV1>[] {
-  const triples: Readonly<CanonicalGraphlessProjectionTripleV1>[] = [];
+): readonly Readonly<CanonicalGraphlessProjectionStorageQuadV1>[] {
+  const quads: Readonly<CanonicalGraphlessProjectionStorageQuadV1>[] = [];
   walkCanonicalProjectionLinesV1(
     projectionBytes,
     normalizeVerificationLimits(limits),
     undefined,
     ({ subject, predicate, object }) => {
-      triples.push(Object.freeze({
+      quads.push(Object.freeze({
         subject,
         predicate,
         object: object.startsWith('<') ? object.slice(1, -1) : object,
+        graph: '',
       }));
     },
   );
-  return Object.freeze(triples);
+  return Object.freeze(quads);
 }
 
 /**
