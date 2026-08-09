@@ -193,6 +193,7 @@ export function createSystemRecordInventoryTraversalV1(
     }
     let requests = 0;
     let wireBytes = 0;
+    const sliceRows: SystemRecordInventoryRowV1[] = [];
     let admittedSignal: AbortSignal | undefined;
     advancing = true;
     try {
@@ -233,7 +234,6 @@ export function createSystemRecordInventoryTraversalV1(
       ) {
         throw new InventoryTraversalSliceError();
       }
-      const sliceRows: SystemRecordInventoryRowV1[] = [];
       while (pending.length > 0) {
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) break;
@@ -475,7 +475,7 @@ export function createSystemRecordInventoryTraversalV1(
         wireBytes,
         validatedRows: rows,
         validatedLeaves: leaves,
-        rows: Object.freeze([]),
+        rows: Object.freeze([...sliceRows]),
         failure: Object.freeze({
           reason: traversalFailureReason(error, admittedSignal),
           message: error instanceof Error ? error.message : 'inventory traversal failed',

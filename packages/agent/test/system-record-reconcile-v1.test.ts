@@ -268,6 +268,74 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(reconciler.stats()).toMatchObject({ processedRows: 0, pendingRows: 0 });
   });
 
+  it.each([
+    {
+      label: 'tombstone',
+      patch: { tombstone: true },
+    },
+    {
+      label: 'quarantined conflict-evidence',
+      patch: {
+        quarantined: true,
+        conflictEvidenceDigest: `0x${'dd'.repeat(32)}` as const,
+      },
+    },
+  ])('retains an unsupported $label row without receiver dispatch', async ({ patch }) => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const unsupportedRow: SystemRecordInventoryRowV1 = {
+      stableKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, fixture.peerSigner.peerId),
+      peerId: fixture.peerSigner.peerId,
+      authoritySequence: headEnvelope.object.authoritySequence,
+      version: headEnvelope.object.version,
+      headDigest: headEnvelope.objectDigest,
+      tombstone: false,
+      quarantined: false,
+      ...patch,
+    };
+    const inventory = buildSystemRecordInventoryTreeV1(NETWORK, [unsupportedRow]);
+    const rootEnvelope = await signRootDescriptor(fixture, inventory.descriptor);
+    const prepareActive = vi.fn();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: async (request) => {
+        const stored = inventory.objects.get(request.objectDigest);
+        if (stored === undefined) {
+          return Object.freeze({
+            outcome: 'rejected' as const,
+            wireBytes: 0,
+            rejection: 'not-found' as const,
+          });
+        }
+        return Object.freeze({
+          outcome: 'ok' as const,
+          objectKind: stored.objectKind,
+          canonicalBytes: stored.canonicalBytes,
+          wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
+        });
+      },
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'unsupported-row-state',
+      processedRows: 0,
+      pendingRows: 1,
+    });
+    expect(prepareActive).not.toHaveBeenCalled();
+  });
+
   it('defers without timers or I/O when shared admission is occupied', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate(true);

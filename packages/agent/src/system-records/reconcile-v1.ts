@@ -308,6 +308,7 @@ export async function createAgentProfileReconcilerV1(
     if (slice.status === 'failed') {
       if (slice.failure.reason === 'invalid-slice') throw new Error(slice.failure.message);
       if (slice.failure.reason === 'aborted' || slice.failure.reason === 'deadline') {
+        pendingRows = [...slice.rows];
         return runtime.stop(
           currentPhase(),
           [],

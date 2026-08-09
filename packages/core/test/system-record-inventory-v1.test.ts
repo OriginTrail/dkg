@@ -283,6 +283,57 @@ describe('system-record immutable B+tree objects', () => {
       },
     });
 
+    const interrupted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(interrupted.advance(async (digest) => (
+      loadedInventoryObject(snapshot.objects.get(digest)!)
+    ), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+      emitRows: true,
+    })).resolves.toMatchObject({ status: 'paused', requests: 1, rows: [] });
+    const interruptedController = new AbortController();
+    let childRequests = 0;
+    const interruptedResult = await interrupted.advance(async (digest) => {
+      childRequests += 1;
+      if (childRequests === 2) {
+        interruptedController.abort(new Error('abort-after-validated-leaf'));
+        return new Promise<never>(() => undefined);
+      }
+      return loadedInventoryObject(snapshot.objects.get(digest)!);
+    }, {
+      signal: interruptedController.signal,
+      maxRequests: 2,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+      emitRows: true,
+    });
+    expect(interruptedResult).toMatchObject({
+      status: 'failed',
+      requests: 2,
+      failure: {
+        reason: 'aborted',
+        message: expect.stringMatching(/abort-after-validated-leaf/),
+      },
+    });
+    expect(interruptedResult.rows.length).toBeGreaterThan(0);
+    expect(interruptedResult.rows).toHaveLength(interruptedResult.validatedRows);
+    const resumedRows = [...interruptedResult.rows];
+    while (true) {
+      const resumed = await interrupted.advance(async (digest) => (
+        loadedInventoryObject(snapshot.objects.get(digest)!)
+      ), {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 3_000,
+        emitRows: true,
+      });
+      resumedRows.push(...resumed.rows);
+      if (resumed.status === 'complete') break;
+    }
+    expect(resumedRows).toHaveLength(513);
+    expect(new Set(resumedRows.map(({ stableKeyHash }) => stableKeyHash)).size).toBe(513);
+
     const malformed = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(malformed.advance(async () => ({
       ...rootLoaded,
