@@ -1,7 +1,12 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { pruneTerminalJoinRequestRecords } from '../src/join-request-retention.js';
+import {
+  BOUNDED_MUTATION_MAX_PRUNE_DELETE,
+  OxigraphStore,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import { tryPruneTerminalJoinRequestRecords } from '../src/join-request-retention.js';
 
 const CG = 'moderation-retention';
 const META = contextGraphMetaGraphUri(CG);
@@ -46,7 +51,7 @@ describe('terminal join-request retention', () => {
       ...requestQuads(6, 'pending'),
     ]);
 
-    await expect(pruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBe(3);
+    await expect(tryPruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
 
     const result = await store.query(`
       SELECT ?request ?status WHERE {
@@ -77,7 +82,7 @@ describe('terminal join-request retention', () => {
       ...requestQuads(3, 'approved', { requestTimestamp: null, decisionTimestamp: 950 }),
     ]);
 
-    await expect(pruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBe(1);
+    await expect(tryPruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
 
     const result = await store.query(`
       SELECT ?request WHERE {
@@ -93,4 +98,47 @@ describe('terminal join-request retention', () => {
     ]);
     await store.close();
   });
+
+  it('skips pruning when the store cannot atomically recheck terminal state', async () => {
+    const store = new OxigraphStore();
+    await store.insert([
+      ...requestQuads(1, 'approved'),
+      ...requestQuads(2, 'rejected'),
+    ]);
+    const legacyStore = {
+      query: store.query.bind(store),
+    } as unknown as TripleStore;
+
+    await expect(tryPruneTerminalJoinRequestRecords(legacyStore, CG, 1)).resolves.toBeUndefined();
+    expect((await rowsForStatus(store)).map((row) => row.request)).toHaveLength(2);
+    await store.close();
+  });
+
+  it('drains overflow larger than one bounded mutation batch', async () => {
+    const store = new OxigraphStore();
+    const terminalRecords = BOUNDED_MUTATION_MAX_PRUNE_DELETE + 5;
+    await store.insert(Array.from({ length: terminalRecords }, (_, index) => ({
+      graph: META,
+      subject: `did:dkg:join-request:${CG}:0x${(index + 1).toString(16).padStart(40, '0')}`,
+      predicate: STATUS,
+      object: '"approved"',
+    })));
+    const mutationSpy = vi.spyOn(store, 'structuredMutation');
+
+    await expect(tryPruneTerminalJoinRequestRecords(store, CG, 2)).resolves.toBeUndefined();
+
+    expect(mutationSpy).toHaveBeenCalledTimes(2);
+    expect((await rowsForStatus(store)).map((row) => row.request)).toHaveLength(2);
+    await store.close();
+  }, 30_000);
 });
+
+async function rowsForStatus(store: TripleStore): Promise<Array<Record<string, string>>> {
+  const result = await store.query(`
+    SELECT ?request WHERE {
+      GRAPH <${META}> { ?request <${STATUS}> ?status }
+    }
+    ORDER BY ?request
+  `);
+  return result.type === 'bindings' ? result.bindings : [];
+}

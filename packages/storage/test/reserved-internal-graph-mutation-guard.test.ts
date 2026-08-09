@@ -68,6 +68,61 @@ const mutations: ReadonlyArray<{
     run: (s, g) => s.replaceGraphAndSubject!('urn:data', [], g, 'urn:s', []),
   },
   { name: 'replaceSubject', run: (s, g) => s.replaceSubject!(g, 'urn:s', []) },
+  { name: 'deleteSubjects', run: (s, g) => s.structuredMutation!({
+    kind: 'delete-subjects', input: { graphUri: g, subjects: [] },
+  }) },
+  {
+    name: 'pruneTerminalSubjects',
+    run: (s, g) => s.structuredMutation!({ kind: 'prune-ranked-subjects', input: {
+      graphUri: g,
+      subjectPrefix: 'urn:request:',
+      eligibilityPredicate: 'urn:status',
+      eligibleObjects: ['done'],
+      primaryRankPredicate: 'urn:decided',
+      secondaryRankPredicate: 'urn:requested',
+      retainNewest: 1,
+      maxDelete: 1,
+    } }),
+  },
+  {
+    name: 'pruneRecordClosures',
+    run: (s, g) => s.structuredMutation!({ kind: 'prune-linked-record-closures', input: {
+      graphUri: g,
+      matchObjectIris: ['urn:root'],
+      linkPredicates: ['urn:member'],
+      recordParentPredicate: 'urn:parent',
+      descendantSeparator: '/',
+    } }),
+  },
+  {
+    name: 'replaceSubjectPredicates',
+    run: (s, g) => s.structuredMutation!({ kind: 'replace-subject-predicates', input: {
+      graphUri: g,
+      subject: 'urn:s',
+      predicates: ['urn:p'],
+      replacementQuads: [],
+    } }),
+  },
+  {
+    name: 'replaceProjectionFromGraph(target)',
+    run: (s, g) => s.structuredMutation!({ kind: 'replace-projection-from-graph', input: {
+      targetGraphUri: g,
+      stagingGraphUri: 'urn:staging',
+      targetSubject: 'urn:s',
+      preservedTargetPredicates: [],
+      targetSubjectPrefixes: [],
+    } }),
+  },
+  {
+    name: 'copySubjectProjection(target)',
+    run: (s, g) => s.structuredMutation!({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: ['urn:source'],
+      targetGraphUri: g,
+      roots: ['urn:s'],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } }),
+  },
 ];
 
 describe('reserved internal graph mutation guard', () => {
@@ -108,6 +163,32 @@ describe('reserved internal graph mutation guard', () => {
         nonAtomic.replaceSubject!(SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH, 'urn:s', []),
       ).rejects.toThrow(ReservedInternalGraphWriteError);
     });
+
+    for (const graph of RESERVED) {
+      it(`refuses replaceProjectionFromGraph source ${graph.split(':').pop()} before I/O`, async () => {
+        const fetchSpy = stubFetch();
+        await expect(newStore().structuredMutation!({ kind: 'replace-projection-from-graph', input: {
+          targetGraphUri: 'urn:target',
+          stagingGraphUri: graph,
+          targetSubject: 'urn:s',
+          preservedTargetPredicates: [],
+          targetSubjectPrefixes: [],
+        } })).rejects.toThrow(ReservedInternalGraphWriteError);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+
+      it(`refuses copySubjectProjection source ${graph.split(':').pop()} before I/O`, async () => {
+        const fetchSpy = stubFetch();
+        await expect(newStore().structuredMutation!({ kind: 'copy-subject-projection', input: {
+          sourceGraphUris: [graph],
+          targetGraphUri: 'urn:target',
+          roots: ['urn:s'],
+          descendantSuffix: '/',
+          excludedPredicates: [],
+        } })).rejects.toThrow(ReservedInternalGraphWriteError);
+        expect(fetchSpy).not.toHaveBeenCalled();
+      });
+    }
 
     describe('the opaque update() channel is a KNOWN-OPEN route, closed in Stack C', () => {
       /**

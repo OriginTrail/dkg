@@ -344,6 +344,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     );
     const fakeStore = {
       update: async () => undefined,
+      structuredMutation: async () => undefined,
       query: async (_sparql: string, queryOptions?: QueryOptions) => {
         queryCalls += 1;
         options.push(queryOptions ?? {});
@@ -397,6 +398,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     let legacyReadStarted = false;
     const fakeStore = {
       update: async () => undefined,
+      structuredMutation: async () => undefined,
       query: async (_sparql: string, options?: QueryOptions) => {
         if (options?.source === 'agent.swm.rsHeal.guard') {
           return { type: 'boolean', value: true } as const;
@@ -641,20 +643,21 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       ...publicTriples().map((triple) => ({ ...triple, graph: contextGraphDataUri(cg) })),
     ]);
 
-    const originalUpdate = store.update.bind(store);
+    const originalMutation = store.structuredMutation.bind(store);
     const scopedMeta = contextGraphMetaUri(cg, onChainId);
     let failMetadataCopyOnce = true;
-    store.update = async (sparql, options) => {
+    store.structuredMutation = async (mutation, options) => {
       if (
         failMetadataCopyOnce
-        && sparql.includes(`FILTER(?p != <${DKG}materializedVersion>)`)
+        && mutation.kind === 'copy-subject-projection'
+        && mutation.input.targetGraphUri === scopedMeta
       ) {
         failMetadataCopyOnce = false;
-        await originalUpdate(sparql, options);
+        await originalMutation(mutation, options);
         // Model a non-transactional endpoint that applied only part of the
         // metadata INSERT before reporting failure. Completion must remain
         // unstamped so the next sweep repairs the missing child row.
-        await originalUpdate(
+        await store.update(
           `DELETE WHERE {
              GRAPH <${scopedMeta}> {
                <${ual}/1> <${RDF}type> ?type
@@ -664,7 +667,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
         );
         throw new Error('injected partial metadata copy failure');
       }
-      return originalUpdate(sparql, options);
+      return originalMutation(mutation, options);
     };
 
     await runHeal(store, cg, onChainId);

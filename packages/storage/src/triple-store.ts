@@ -20,7 +20,18 @@ import {
   ChangelogStore,
   type ChangelogStoreOptions,
 } from './changelog-store.js';
-import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
+import {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
+  UnsupportedTripleStoreCapabilityError,
+  supportsTripleStoreCapability,
+  type TripleStoreCapability,
+} from './unsupported-capability-error.js';
+import {
+  buildCopySubjectProjectionUpdate,
+  buildPruneLinkedRecordClosuresUpdate,
+  buildReplaceProjectionFromGraphUpdate,
+  buildReplaceSubjectPredicatesUpdate,
+} from './bounded-structured-mutation.js';
 
 export interface Quad {
   subject: string;
@@ -105,7 +116,69 @@ export interface UpdateOptions extends QueryOptions {
   touchedGraphs?: readonly string[];
 }
 
+export interface DeleteSubjectsInput {
+  readonly graphUri: string;
+  readonly subjects: readonly string[];
+}
+
+export interface PruneRankedSubjectsInput {
+  readonly graphUri: string;
+  readonly subjectPrefix: string;
+  readonly eligibilityPredicate: string;
+  readonly eligibleObjects: readonly string[];
+  readonly primaryRankPredicate: string;
+  readonly secondaryRankPredicate: string;
+  readonly retainNewest: number;
+  readonly maxDelete: number;
+}
+
+export interface PruneLinkedRecordClosuresInput {
+  readonly graphUri: string;
+  readonly matchObjectIris: readonly string[];
+  readonly linkPredicates: readonly string[];
+  readonly recordParentPredicate: string;
+  readonly protectedRecordIri?: string;
+  readonly descendantSeparator: string;
+}
+
+export interface ReplaceSubjectPredicatesInput {
+  readonly graphUri: string;
+  readonly subject: string;
+  readonly predicates: readonly string[];
+  readonly replacementQuads: readonly Quad[];
+}
+
+export interface ReplaceProjectionFromGraphInput {
+  readonly targetGraphUri: string;
+  readonly stagingGraphUri: string;
+  readonly targetSubject: string;
+  readonly preservedTargetPredicates: readonly string[];
+  readonly targetSubjectPrefixes: readonly string[];
+}
+
+export interface CopySubjectProjectionInput {
+  readonly sourceGraphUris: readonly string[];
+  readonly targetGraphUri: string;
+  readonly roots: readonly string[];
+  readonly descendantSuffix: string;
+  readonly excludedPredicates: readonly string[];
+}
+
+/**
+ * Closed, validated server-side mutation vocabulary. A single capability keeps
+ * adapter/decorator forwarding stable while this bounded vocabulary evolves.
+ */
+export type StructuredMutation =
+  | { readonly kind: 'delete-subjects'; readonly input: DeleteSubjectsInput }
+  | { readonly kind: 'prune-ranked-subjects'; readonly input: PruneRankedSubjectsInput }
+  | { readonly kind: 'prune-linked-record-closures'; readonly input: PruneLinkedRecordClosuresInput }
+  | { readonly kind: 'replace-subject-predicates'; readonly input: ReplaceSubjectPredicatesInput }
+  | { readonly kind: 'replace-projection-from-graph'; readonly input: ReplaceProjectionFromGraphInput }
+  | { readonly kind: 'copy-subject-projection'; readonly input: CopySubjectProjectionInput };
+
 export interface TripleStore {
+  /** Explicit override for wrappers that add or constrain optional operations. */
+  [TRIPLE_STORE_CAPABILITY_SUPPORT]?(capability: TripleStoreCapability): boolean;
   /**
    * Whether `query(..., { signal })` can reject while a query is already in
    * flight (`interruptible`) or can only observe cancellation before dispatch
@@ -191,6 +264,8 @@ export interface TripleStore {
     quads: Quad[],
     options?: QueryOptions,
   ): Promise<void>;
+  /** Execute one validated, bounded server-side mutation in one commit. */
+  structuredMutation?(mutation: StructuredMutation, options?: QueryOptions): Promise<void>;
   listGraphs(options?: QueryOptions): Promise<string[]>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
@@ -353,6 +428,151 @@ export async function tryReplaceSubjectAtomically(
     }
     throw error;
   }
+}
+
+async function tryOptionalStoreCapability(
+  capability: TripleStoreCapability,
+  operation: (() => Promise<void>) | undefined,
+): Promise<boolean> {
+  if (!operation) return false;
+  try {
+    await operation();
+    return true;
+  } catch (error) {
+    if (
+      error instanceof UnsupportedTripleStoreCapabilityError
+      && error.capability === capability
+    ) {
+      return false;
+    }
+    throw error;
+  }
+}
+
+export async function tryStructuredMutation(
+  store: TripleStore,
+  mutation: StructuredMutation,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  const operation = store.structuredMutation;
+  return tryOptionalStoreCapability(
+    'structuredMutation',
+    operation ? () => operation.call(store, mutation, options) : undefined,
+  );
+}
+
+export async function tryDeleteSubjects(
+  store: TripleStore,
+  input: DeleteSubjectsInput,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  return tryStructuredMutation(store, { kind: 'delete-subjects', input }, options);
+}
+
+export async function tryPruneRankedSubjects(
+  store: TripleStore,
+  input: PruneRankedSubjectsInput,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  return tryStructuredMutation(store, { kind: 'prune-ranked-subjects', input }, options);
+}
+
+export async function tryPruneLinkedRecordClosures(
+  store: TripleStore,
+  input: PruneLinkedRecordClosuresInput,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  if (await tryStructuredMutation(
+    store,
+    { kind: 'prune-linked-record-closures', input },
+    options,
+  )) {
+    return true;
+  }
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildPruneLinkedRecordClosuresUpdate(input),
+    [input.graphUri],
+    options,
+  );
+}
+
+/**
+ * Return whether the store can perform the atomic predicate transition used by
+ * {@link tryReplaceSubjectPredicatesAtomically}. The operation deliberately
+ * preserves the pre-capability `update()` contract for third-party stores, so
+ * callers should probe this operation rather than either transport primitive.
+ */
+export function supportsReplaceSubjectPredicatesAtomically(store: TripleStore): boolean {
+  return supportsTripleStoreCapability(store, 'structuredMutation')
+    || supportsTripleStoreCapability(store, 'update');
+}
+
+export async function tryReplaceSubjectPredicatesAtomically(
+  store: TripleStore,
+  input: ReplaceSubjectPredicatesInput,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  if (!supportsReplaceSubjectPredicatesAtomically(store)) return false;
+  if (await tryStructuredMutation(
+    store,
+    { kind: 'replace-subject-predicates', input },
+    options,
+  )) {
+    return true;
+  }
+
+  // Third-party stores cannot hold the daemon ownership lease and may still
+  // implement only the pre-capability atomic SPARQL Update contract. Keep that
+  // compatibility path inside storage so feature callers never author SPARQL.
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildReplaceSubjectPredicatesUpdate(input),
+    [input.graphUri],
+    options,
+  );
+}
+
+export async function tryReplaceProjectionFromGraphAtomically(
+  store: TripleStore,
+  input: ReplaceProjectionFromGraphInput,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  if (await tryStructuredMutation(
+    store,
+    { kind: 'replace-projection-from-graph', input },
+    options,
+  )) {
+    return true;
+  }
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildReplaceProjectionFromGraphUpdate(input),
+    [input.targetGraphUri],
+    options,
+  );
+}
+
+export function supportsCopySubjectProjection(store: TripleStore): boolean {
+  return supportsTripleStoreCapability(store, 'structuredMutation')
+    || supportsTripleStoreCapability(store, 'update');
+}
+
+export async function tryCopySubjectProjection(
+  store: TripleStore,
+  input: CopySubjectProjectionInput,
+  options: QueryOptions = {},
+): Promise<boolean> {
+  if (!supportsCopySubjectProjection(store)) return false;
+  if (await tryStructuredMutation(store, { kind: 'copy-subject-projection', input }, options)) {
+    return true;
+  }
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildCopySubjectProjectionUpdate(input),
+    [input.targetGraphUri],
+    options,
+  );
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;

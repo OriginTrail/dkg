@@ -3,6 +3,11 @@ import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGEvent, PROTOCOL_JOIN_REQUEST } from '@origintrail-official/dkg-core';
 import {
+  GraphSetIndexStore,
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
+import {
   DKGAgent,
   signAgentDelegation,
   type ContextGraphJoinPolicyAuditEvent,
@@ -11,6 +16,7 @@ import {
 } from '../src/index.js';
 import { joinDelegationScope } from '../src/dkg-agent-helpers.js';
 import { ContextGraphJoinAdmissionLockManager } from '../src/context-graph-join-admission-lock.js';
+import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { Messenger } from '../src/p2p/messenger.js';
 
 type JoinRequestHandler = (data: Uint8Array, peerId: string) => Promise<Uint8Array>;
@@ -287,9 +293,15 @@ describe('context graph open enrollment policy', () => {
     const store = (agent as any).store;
     const insertSpy = vi.spyOn(store, 'insert');
     const deleteSpy = vi.spyOn(store, 'deleteByPattern');
+    const structuredMutationSpy = vi.spyOn(store, 'structuredMutation');
     insertSpy.mockClear();
     deleteSpy.mockClear();
-    const mutationCounts = () => [insertSpy.mock.calls.length, deleteSpy.mock.calls.length];
+    structuredMutationSpy.mockClear();
+    const mutationCounts = () => [
+      insertSpy.mock.calls.length,
+      deleteSpy.mock.calls.length,
+      structuredMutationSpy.mock.calls.length,
+    ];
     const expectRejectedBeforeMutation = async (operation: () => Promise<unknown>) => {
       const before = mutationCounts();
       await expect(operation()).rejects.toThrow(/live admission-lock token/i);
@@ -688,6 +700,135 @@ describe('context graph open enrollment policy', () => {
     }
   }, 30_000);
 
+  it('approves through the structured predicate capability without raw update()', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-no-raw-update';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('no-raw-update-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const store = (agent as any).store as { update?: unknown };
+    const originalUpdate = store.update;
+    store.update = undefined;
+    try {
+      await expect(agent.processIncomingJoinRequest(
+        contextGraphId,
+        delegation,
+        joiner.name,
+        agent.peerId,
+      )).resolves.toMatchObject({ status: 'approved', autoApproved: true });
+      expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress))
+        .toBe('approved');
+    } finally {
+      store.update = originalUpdate;
+    }
+  }, 30_000);
+
+  it('preserves approval through an update-only store wrapped by a decorator', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-decorated-update-only';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('decorated-update-only-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const rejectedJoiner = await agent.registerAgent(
+      'decorated-update-only-rejected-joiner',
+      { framework: 'test' },
+    );
+    const rejectedDelegation = await agent.signJoinRequest(
+      contextGraphId,
+      rejectedJoiner.agentAddress,
+    );
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending' });
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      rejectedDelegation,
+      rejectedJoiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending' });
+
+    const originalStore = (agent as any).store as TripleStore;
+    const updateOnlyStore = new Proxy(originalStore, {
+      get(target, property, receiver) {
+        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) {
+          return (capability: string) => capability === 'update';
+        }
+        if (property === 'structuredMutation') return undefined;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    (agent as any).store = createListContextGraphsCacheInvalidatingStore(
+      new GraphSetIndexStore(updateOnlyStore, { enabled: false }),
+      () => undefined,
+    );
+
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    )).resolves.toBeUndefined();
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .toContain(joiner.agentAddress.toLowerCase());
+
+    await expect(agent.rejectJoinRequest(
+      contextGraphId,
+      rejectedJoiner.agentAddress,
+      owner.agentAddress,
+    )).resolves.toBeUndefined();
+    expect(await agent.getJoinRequestStatus(contextGraphId, rejectedJoiner.agentAddress))
+      .toBe('rejected');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .not.toContain(rejectedJoiner.agentAddress.toLowerCase());
+  }, 30_000);
+
+  it('refuses approval before membership commit when a decorator wraps an incapable store', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-decorated-missing-structured-mutation';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    const joiner = await agent.registerAgent('decorated-incapable-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(
+      contextGraphId,
+      delegation,
+      joiner.name,
+      agent.peerId,
+    )).resolves.toMatchObject({ status: 'pending' });
+
+    const originalStore = (agent as any).store as TripleStore;
+    const legacyStore = new Proxy(originalStore, {
+      get(target, property, receiver) {
+        if (property === TRIPLE_STORE_CAPABILITY_SUPPORT) return () => false;
+        if (property === 'structuredMutation' || property === 'update') return undefined;
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    (agent as any).store = createListContextGraphsCacheInvalidatingStore(
+      new GraphSetIndexStore(legacyStore, { enabled: false }),
+      () => undefined,
+    );
+
+    await expect(agent.approveJoinRequest(
+      contextGraphId,
+      joiner.agentAddress,
+      owner.agentAddress,
+    )).rejects.toThrow(/requires atomic subject-predicate replacement support/i);
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('pending');
+    expect((await agent.getContextGraphAllowedAgents(contextGraphId)).map((address) => address.toLowerCase()))
+      .not.toContain(joiner.agentAddress.toLowerCase());
+  }, 30_000);
+
   it('repairs an interrupted approved-status write on a signed member retry', async () => {
     const { agent, owner, policyStore } = await boot();
     const contextGraphId = 'private-policy-status-repair';
@@ -700,11 +841,13 @@ describe('context graph open enrollment policy', () => {
     }, owner.agentAddress);
     const joiner = await agent.registerAgent('status-repair-joiner', { framework: 'test' });
     const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
-    const store = (agent as any).store as { update: (sparql: string, options?: unknown) => Promise<void> };
-    const originalUpdate = store.update.bind(store);
-    vi.spyOn(store, 'update')
+    const store = (agent as any).store as {
+      structuredMutation: (mutation: unknown, options?: unknown) => Promise<void>;
+    };
+    const originalReplace = store.structuredMutation.bind(store);
+    vi.spyOn(store, 'structuredMutation')
       .mockRejectedValueOnce(new Error('simulated atomic status update failure'))
-      .mockImplementation(originalUpdate);
+      .mockImplementation(originalReplace);
 
     // Make the initial admission consume the final verified-agent ingress slot.
     // The exact signed repair retry must bypass that just-consumed slot, while

@@ -1,3 +1,8 @@
+import {
+  resolveStoreChainCapabilityV1,
+  resolveStoreChainTerminalV1,
+} from './store-chain-capability.js';
+
 /**
  * Optional TripleStore operations that a decorator may expose even when its
  * wrapped backend cannot perform them.
@@ -6,7 +11,36 @@ export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
-  | 'replaceSubject';
+  | 'replaceSubject'
+  | 'structuredMutation';
+
+/** Explicit support override for decorators that add or constrain semantics. */
+export const TRIPLE_STORE_CAPABILITY_SUPPORT: unique symbol = Symbol(
+  'dkg.tripleStoreCapabilitySupport',
+);
+
+interface TripleStoreCapabilitySupport {
+  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean;
+}
+
+/** Return whether invoking an optional operation can reach a capable backend. */
+export function supportsTripleStoreCapability(
+  store: unknown,
+  capability: TripleStoreCapability,
+): boolean {
+  const reporter = resolveStoreChainCapabilityV1(
+    store,
+    (candidate): candidate is TripleStoreCapabilitySupport => typeof (
+      candidate as Partial<TripleStoreCapabilitySupport> | null | undefined
+    )?.[TRIPLE_STORE_CAPABILITY_SUPPORT] === 'function',
+  );
+  if (reporter) {
+    return reporter[TRIPLE_STORE_CAPABILITY_SUPPORT](capability);
+  }
+  const terminal = resolveStoreChainTerminalV1(store);
+  return typeof (terminal as Partial<Record<TripleStoreCapability, unknown>> | null | undefined)
+    ?.[capability] === 'function';
+}
 
 /**
  * Typed signal that an optional store capability is unavailable.
@@ -29,6 +63,14 @@ export class UnsupportedTripleStoreCapabilityError extends Error {
   }
 }
 
+export function isTripleStoreCapabilityRefusal(
+  error: unknown,
+  capability: TripleStoreCapability,
+): boolean {
+  return error instanceof UnsupportedTripleStoreCapabilityError
+    && error.capability === capability;
+}
+
 /**
  * A capability refusal is a clean preflight outcome — the contract requires it
  * to be raised before the operation starts — so decorators that treat a failed
@@ -36,22 +78,13 @@ export class UnsupportedTripleStoreCapabilityError extends Error {
  * it from cache-dirtying and reconcile flagging.
  */
 export function isReplaceGraphCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceGraph'
-  );
+  return isTripleStoreCapabilityRefusal(error, 'replaceGraph');
 }
 
 export function isReplaceGraphAndSubjectCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceGraphAndSubject'
-  );
+  return isTripleStoreCapabilityRefusal(error, 'replaceGraphAndSubject');
 }
 
 export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceSubject'
-  );
+  return isTripleStoreCapabilityRefusal(error, 'replaceSubject');
 }

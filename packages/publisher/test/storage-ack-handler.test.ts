@@ -40,12 +40,12 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  * hitting the live store. Mirrors `storeWithFailingOps` in
  * storage-ack-core-unavailable.test.ts — the curated-catalog store-failure
  * regressions below need the SAME real-store-with-armed-failure model so
- * they exercise the actual persist path (parse → verify → targeted update →
+ * they exercise the actual persist path (parse → verify → targeted delete →
  * insert) up to the failing store call.
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'update' | 'flush')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'structuredMutation' | 'update' | 'flush')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -1037,7 +1037,7 @@ describe('StorageACKHandler', () => {
     }
 
     async function curatedHandlerWithFailingStore(
-      failingOps: readonly ('deleteByPattern' | 'update' | 'insert' | 'flush')[],
+      failingOps: readonly ('deleteByPattern' | 'structuredMutation' | 'insert' | 'flush')[],
       configOverrides: Partial<StorageACKHandlerConfig> = {},
     ) {
       const base = new OxigraphStore();
@@ -1047,7 +1047,7 @@ describe('StorageACKHandler', () => {
       );
     }
 
-    it('uses one targeted update with graph hints, avoids deleteByPattern counts, and preserves unrelated subjects', async () => {
+    it('uses one targeted subject-set delete, avoids deleteByPattern counts, and preserves unrelated subjects', async () => {
       const catalogGraph = `${cgDid}/_catalog`;
       const unrelatedSubject = 'urn:test:unrelated-catalog-subject';
       const stalePredicate = 'urn:test:stale-catalog-predicate';
@@ -1056,14 +1056,14 @@ describe('StorageACKHandler', () => {
         { subject: cgDid, predicate: stalePredicate, object: '"stale"', graph: catalogGraph },
         { subject: unrelatedSubject, predicate: 'urn:test:kept', object: '"yes"', graph: catalogGraph },
       ]);
-      const updates: Array<{ sparql: string; options?: { source?: string; priority?: string; touchedGraphs?: readonly string[] } }> = [];
+      const deletes: Array<{ input: { graphUri: string; subjects: readonly string[] }; options?: { source?: string; priority?: string } }> = [];
       let deleteByPatternCalls = 0;
       const store = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
-          if (prop === 'update') {
-            return async (sparql: string, options?: { source?: string; priority?: string; touchedGraphs?: readonly string[] }) => {
-              updates.push({ sparql, options });
-              return target.update!.call(target, sparql, options);
+          if (prop === 'structuredMutation') {
+            return async (mutation: Parameters<NonNullable<TripleStore['structuredMutation']>>[0], options?: { source?: string; priority?: string }) => {
+              if (mutation.kind === 'delete-subjects') deletes.push({ input: mutation.input, options });
+              return target.structuredMutation!.call(target, mutation, options);
             };
           }
           if (prop === 'deleteByPattern') {
@@ -1082,12 +1082,11 @@ describe('StorageACKHandler', () => {
 
       expect(isStorageACKDecline(decoded)).toBe(false);
       expect(deleteByPatternCalls).toBe(0);
-      expect(updates).toHaveLength(1);
-      expect(updates[0]?.sparql).toContain(`VALUES ?s { <${cgDid}> }`);
-      expect(updates[0]?.options).toMatchObject({
-        source: 'storage-ack.persistCatalog.update',
+      expect(deletes).toHaveLength(1);
+      expect(deletes[0]?.input).toEqual({ graphUri: catalogGraph, subjects: [cgDid] });
+      expect(deletes[0]?.options).toMatchObject({
+        source: 'storage-ack.persistCatalog.deleteSubjects',
         priority: 'ack',
-        touchedGraphs: [catalogGraph],
       });
       const stale = await base.query(`ASK { GRAPH <${catalogGraph}> { <${cgDid}> <${stalePredicate}> ?o } }`);
       expect(stale).toMatchObject({ type: 'boolean', value: false });
@@ -1095,12 +1094,12 @@ describe('StorageACKHandler', () => {
       expect(unrelated).toMatchObject({ type: 'boolean', value: true });
     });
 
-    it('falls back to per-subject deleteByPattern when update() is unavailable', async () => {
+    it('falls back to per-subject deleteByPattern when deleteSubjects() is unavailable', async () => {
       const base = new OxigraphStore();
       let deleteByPatternCalls = 0;
       const store = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
-          if (prop === 'update') return undefined;
+          if (prop === 'structuredMutation') return undefined;
           if (prop === 'deleteByPattern') {
             return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
               deleteByPatternCalls += 1;
@@ -1119,12 +1118,12 @@ describe('StorageACKHandler', () => {
       expect(deleteByPatternCalls).toBe(1);
     });
 
-    it('falls back through a decorator whose inner store does not support update()', async () => {
+    it('falls back through a decorator whose inner store lacks deleteSubjects()', async () => {
       const base = new OxigraphStore();
       let deleteByPatternCalls = 0;
       const innerWithoutUpdate = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
-          if (prop === 'update') return undefined;
+          if (prop === 'structuredMutation') return undefined;
           if (prop === 'deleteByPattern') {
             return async (...args: Parameters<TripleStore['deleteByPattern']>) => {
               deleteByPatternCalls += 1;
@@ -1136,7 +1135,7 @@ describe('StorageACKHandler', () => {
         },
       });
       const decoratedStore = new GraphSetIndexStore(innerWithoutUpdate);
-      expect(typeof decoratedStore.update).toBe('function');
+      expect(typeof decoratedStore.structuredMutation).toBe('function');
       const handler = curatedHandlerWithStore(decoratedStore);
 
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
@@ -1156,14 +1155,14 @@ describe('StorageACKHandler', () => {
       const blankCatalogBytes = new TextEncoder().encode(blankCatalogNquads);
       const blankCatalogRoot = computeCatalogRoot(blankCatalogTriples);
       const base = new OxigraphStore();
-      let updateCalls = 0;
+      let targetedDeleteCalls = 0;
       const deletedPatterns: Array<Partial<Quad>> = [];
       const store = new Proxy(base as unknown as TripleStore, {
         get(target, prop, receiver) {
-          if (prop === 'update') {
-            return async (...args: Parameters<NonNullable<TripleStore['update']>>) => {
-              updateCalls += 1;
-              return target.update!.call(target, ...args);
+          if (prop === 'structuredMutation') {
+            return async (...args: Parameters<NonNullable<TripleStore['structuredMutation']>>) => {
+              if (args[0].kind === 'delete-subjects') targetedDeleteCalls += 1;
+              return target.structuredMutation!.call(target, ...args);
             };
           }
           if (prop === 'deleteByPattern') {
@@ -1191,7 +1190,7 @@ describe('StorageACKHandler', () => {
       }), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(false);
-      expect(updateCalls).toBe(0);
+      expect(targetedDeleteCalls).toBe(0);
       expect(deletedPatterns).toEqual([{
         graph: `${cgDid}/_catalog`,
         subject: '_:catalog',
@@ -1199,13 +1198,13 @@ describe('StorageACKHandler', () => {
       await expect(base.countQuads(`${cgDid}/_catalog`)).resolves.toBe(1);
     });
 
-    it('curated catalog persist / targeted update throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
+    it('curated catalog persist / targeted delete throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
       // Dead-air regression: a curated encrypted publish with a VALID catalog
-      // root whose `<cg>/_catalog` targeted DELETE update hits a closed
+      // root whose `<cg>/_catalog` targeted subject delete hits a closed
       // store used to throw out of the handler → stream reset → publisher
       // no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      const handler = await curatedHandlerWithFailingStore(['update'], { onDecline });
+      const handler = await curatedHandlerWithFailingStore(['structuredMutation'], { onDecline });
       const decoded = decodeStorageACK(await handler.handler(curatedIntent(), fakePeerId));
 
       expect(isStorageACKDecline(decoded)).toBe(true);

@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, tryUpdateWithTouchedGraphs, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, chunkCopySubjectProjectionInput, createTripleStore, supportsCopySubjectProjection, supportsReplaceSubjectPredicatesAtomically, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -323,6 +323,46 @@ function advanceRsHealCursor(
     if (oldest === undefined) break;
     cursorMap.delete(oldest);
   }
+}
+
+type RsHealCopyInput = Parameters<typeof tryCopySubjectProjection>[1];
+type RsHealPredicateReplacement = Parameters<typeof tryReplaceSubjectPredicatesAtomically>[1];
+
+interface RsHealMaterializationPlan {
+  dataCopy: RsHealCopyInput;
+  metadataCopy: RsHealCopyInput;
+  completionReset: RsHealPredicateReplacement;
+  completionStamp: RsHealPredicateReplacement;
+}
+
+/** Apply one fail-closed RS-heal projection transition after candidate discovery. */
+async function applyRsHealMaterialization(
+  plan: RsHealMaterializationPlan,
+  operations: {
+    canApply: () => boolean;
+    copyProjection: (input: RsHealCopyInput) => Promise<void>;
+    replacePredicates: (input: RsHealPredicateReplacement) => Promise<void>;
+  },
+): Promise<void> {
+  // Preflight the complete plan before crossing the first write boundary. An
+  // individually unrepresentable root must not clear an otherwise valid
+  // completion marker before failing.
+  const dataCopyChunks = chunkCopySubjectProjectionInput(plan.dataCopy);
+
+  // Clear completion before the first data chunk. A crash between chunks then
+  // remains retryable instead of exposing a partial projection as complete.
+  if (!operations.canApply()) return;
+  await operations.replacePredicates(plan.completionReset);
+
+  for (const chunk of dataCopyChunks) {
+    if (!operations.canApply()) return;
+    await operations.copyProjection(chunk);
+  }
+
+  if (!operations.canApply()) return;
+  await operations.copyProjection(plan.metadataCopy);
+  if (!operations.canApply()) return;
+  await operations.replacePredicates(plan.completionStamp);
 }
 
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -3303,7 +3343,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * the prover can find it, while leaving the label-graph view intact.
    *
    * CONTENT-BINDING RULE: the data/meta copies go through
-   * `this.store.update(INSERT…WHERE)` so the terms NEVER leave the store. A
+   * structured server-side copy so the terms NEVER leave the store. A
    * `query()`/CONSTRUCT → `insert(quads)` round-trip would double backslashes
    * in escape-bearing literals and change the leaf bytes the on-chain
    * `challengeRoot` was committed over, making the proof permanently
@@ -3330,25 +3370,34 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!canApply() || !capturedOnChainId) {
         return { status: 'skipped', reason: 'not-current' };
       }
-      // Server-side byte-safe copy is the ONLY safe relocation mechanism; if the
-      // backend can't do SPARQL UPDATE we bail rather than risk a lossy JS round-trip.
-      if (typeof this.store.update !== 'function') {
+      if (
+        !supportsCopySubjectProjection(this.store)
+        || !supportsReplaceSubjectPredicatesAtomically(this.store)
+      ) {
         return { status: 'skipped', reason: 'unsupported-store' };
       }
-      // #1549: every server-side INSERT in this RS-heal path has a statically-known
-      // target graph, so `touchedGraphs` is REQUIRED — the index then maintains
-      // itself incrementally (a bounded `hasGraph`) instead of marking the whole
-      // index dirty and forcing a full store scan on the next enumeration. Requiring
-      // it (not optional) closes the escape hatch: a future `update(sparql)` here that
-      // forgot to declare its graph would silently fall back to dirtying the index.
-      const update = async (sparql: string, touchedGraphs: readonly string[]): Promise<void> => {
-        const updated = await tryUpdateWithTouchedGraphs(
+      // Server-side byte-safe copy is the ONLY safe relocation mechanism. The
+      // structured capabilities keep RDF terms inside the store while making
+      // source/target graph ownership and mutation scope explicit to decorators.
+      const copyProjection = async (
+        input: Parameters<typeof tryCopySubjectProjection>[1],
+      ): Promise<void> => {
+        const copied = await tryCopySubjectProjection(
           this.store,
-          sparql,
-          touchedGraphs,
-          rsHealStoreOptions('materialize', signal),
+          input,
+          rsHealStoreOptions('materialize.copy', signal),
         );
-        if (!updated) throw new Error('RS heal requires server-side update() support');
+        if (!copied) throw new Error('RS heal requires server-side subject projection copy support');
+      };
+      const replacePredicates = async (
+        input: Parameters<typeof tryReplaceSubjectPredicatesAtomically>[1],
+      ): Promise<void> => {
+        const replaced = await tryReplaceSubjectPredicatesAtomically(
+          this.store,
+          input,
+          rsHealStoreOptions('materialize.marker', signal),
+        );
+        if (!replaced) throw new Error('RS heal requires atomic subject-predicate replacement support');
       };
 
       const DKG = 'http://dkg.io/ontology/';
@@ -3514,69 +3563,49 @@ export class SwmHostModeMethods extends DKGAgentBase {
               if (!canApply() || present.type !== 'boolean' || !present.value) return;
             }
 
-            // DATA copy (per root) — MANDATORY server-side, byte-safe, read-both
+            // DATA copy — MANDATORY server-side, byte-safe, read-both
             // (legacy root data UNION per-KA VM graph). Skip the post-publish
             // trustLevel stamps in BOTH branches so the recomputed leaf set stays
-            // bit-identical with the on-chain merkleLeafCount.
-            for (const root of roots) {
-              if (!canApply()) return;
-              await update(
-                `INSERT { GRAPH <${scopedData}> { ?s ?p ?o } } WHERE {
-                   {
-                     GRAPH <${rootData}> {
-                       ?s ?p ?o .
-                       FILTER(?s = <${root}> || STRSTARTS(STR(?s), "${root}/.well-known/genid/"))
-                       FILTER(?p != <${TRUST_LEVEL_PREDICATE}> && ?p != <${LEGACY_TRUST_LEVEL_PREDICATE}>)
-                     }
-                   } UNION {
-                     GRAPH <${vmGraph}> {
-                       ?s ?p ?o .
-                       FILTER(?s = <${root}> || STRSTARTS(STR(?s), "${root}/.well-known/genid/"))
-                       FILTER(?p != <${TRUST_LEVEL_PREDICATE}> && ?p != <${LEGACY_TRUST_LEVEL_PREDICATE}>)
-                     }
-                   }
-                 }`,
-                [scopedData],
-              );
-              if (!canApply()) return;
-            }
-
-            // `update()` is not an atomic transaction on every supported HTTP
-            // store. Remove the completion marker first, copy metadata without
-            // that marker, and stamp completion only after the copy succeeds.
-            // Any partial copy therefore remains visible to the next heal.
-            if (!canApply()) return;
-            await update(
-              `DELETE WHERE {
-                 GRAPH <${scopedMeta}> {
-                   <${ual}> <${DKG}materializedVersion> ?oldVersion
-                 }
-               }`,
-              [scopedMeta],
-            );
-            if (!canApply()) return;
-            await update(
-              `INSERT {
-                 GRAPH <${scopedMeta}> { ?s ?p ?o }
-               }
-               WHERE {
-                 GRAPH <${legacyMeta}> {
-                   ?s ?p ?o .
-                   FILTER(?s = <${ual}> || STRSTARTS(STR(?s), "${ual}/"))
-                   FILTER(?p != <${DKG}materializedVersion>)
-                 }
-               }`,
-              [scopedMeta],
-            );
-            if (!canApply()) return;
-            await update(
-              `INSERT DATA {
-                 GRAPH <${scopedMeta}> {
-                   <${ual}> <${DKG}materializedVersion> "${version.blockNumber}:${version.txIndex}"
-                 }
-               }`,
-              [scopedMeta],
-            );
+            // bit-identical with the on-chain merkleLeafCount. Root order is
+            // preserved while large multi-root KCs are split below both 4 MiB
+            // structured-mutation limits.
+            await applyRsHealMaterialization({
+              dataCopy: {
+                sourceGraphUris: [rootData, vmGraph],
+                targetGraphUri: scopedData,
+                roots,
+                descendantSuffix: '/.well-known/genid/',
+                excludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
+              },
+              metadataCopy: {
+                sourceGraphUris: [legacyMeta],
+                targetGraphUri: scopedMeta,
+                roots: [ual],
+                descendantSuffix: '/',
+                excludedPredicates: [`${DKG}materializedVersion`],
+              },
+              completionReset: {
+                graphUri: scopedMeta,
+                subject: ual,
+                predicates: [`${DKG}materializedVersion`],
+                replacementQuads: [],
+              },
+              completionStamp: {
+                graphUri: scopedMeta,
+                subject: ual,
+                predicates: [`${DKG}materializedVersion`],
+                replacementQuads: [{
+                  subject: ual,
+                  predicate: `${DKG}materializedVersion`,
+                  object: `"${version.blockNumber}:${version.txIndex}"`,
+                  graph: scopedMeta,
+                }],
+              },
+            }, {
+              canApply,
+              copyProjection,
+              replacePredicates,
+            });
 
             if (canApply()) {
               this.log.info(

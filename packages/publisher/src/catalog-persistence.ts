@@ -1,10 +1,9 @@
 import {
-  tryUpdateWithTouchedGraphs,
+  tryDeleteSubjects,
   type Quad,
   type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
-import { sparqlIri } from '@origintrail-official/dkg-core';
 
 function catalogStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
   return {
@@ -18,11 +17,11 @@ function catalogStoreOptions(operation: string, signal?: AbortSignal): QueryOpti
  * Replace the touched subjects in a verified public catalog and make the
  * replacement durable.
  *
- * The fast path clears IRI subjects in one server-side UPDATE. Blank-node
+ * The fast path clears IRI subjects in one bounded server-side operation. Blank-node
  * labels are scoped to a single RDF operation and therefore cannot safely be
- * carried into a later UPDATE; catalogs containing one use the legacy
- * per-subject delete path. Stores with no real UPDATE capability use that same
- * compatibility path, while genuine UPDATE execution errors still propagate.
+ * carried into a later subject-set operation; catalogs containing one use the legacy
+ * per-subject delete path. Stores without the structured capability use that same
+ * compatibility path, while genuine execution errors still propagate.
  */
 export async function replaceCatalogQuads(
   store: TripleStore,
@@ -33,15 +32,10 @@ export async function replaceCatalogQuads(
   const catalogSubjects = [...new Set(parsedCatalog.map((quad) => quad.subject))];
   const canUseTargetedUpdate = catalogSubjects.length > 0 &&
     catalogSubjects.every((subject) => !subject.startsWith('_:'));
-  const usedTargetedUpdate = canUseTargetedUpdate && await tryUpdateWithTouchedGraphs(
+  const usedTargetedUpdate = canUseTargetedUpdate && await tryDeleteSubjects(
     store,
-    `DELETE { GRAPH ${sparqlIri(catalogGraph)} { ?s ?p ?o } }
-WHERE { GRAPH ${sparqlIri(catalogGraph)} {
-  VALUES ?s { ${catalogSubjects.map((subject) => sparqlIri(subject)).join(' ')} }
-  ?s ?p ?o
-} }`,
-    [catalogGraph],
-    catalogStoreOptions('update', signal),
+    { graphUri: catalogGraph, subjects: catalogSubjects },
+    catalogStoreOptions('deleteSubjects', signal),
   );
 
   if (!usedTargetedUpdate) {

@@ -8,6 +8,7 @@ import type {
   StoreWorkPriority,
   TripleStore,
   UpdateOptions,
+  StructuredMutation,
 } from './triple-store.js';
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import { linkStoreChainV1 } from './store-chain-capability.js';
@@ -17,9 +18,15 @@ import {
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
+  isTripleStoreCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-ownership-v1-internal.js';
+import {
+  normalizeStructuredMutation,
+  structuredMutationMightMutate,
+  structuredMutationTouchedGraphs,
+} from './bounded-structured-mutation.js';
 import {
   CACHED_READ_GATE_V1,
   asCachedReadGateV1,
@@ -47,6 +54,7 @@ export type GraphSetMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'structuredMutation'
   | 'query'
   | 'update';
 
@@ -57,6 +65,7 @@ type TouchedGraphMutationSource =
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
   | 'replaceSubject'
+  | 'structuredMutation'
   | 'update';
 /**
  * `system-record.*` (#2052 B2) are dirty-sources rather than touched-graph
@@ -546,6 +555,29 @@ export class GraphSetIndexStore implements TripleStore {
     }
     this.bumpMutation();
     await this.maintainTouchedGraphs([graphUri], 'replaceSubject', options);
+  }
+
+  async structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
+    const normalized = normalizeStructuredMutation(mutation);
+    const operation = this.inner.structuredMutation;
+    if (!operation) {
+      throw new UnsupportedTripleStoreCapabilityError('structuredMutation', 'GraphSetIndexStore');
+    }
+    try {
+      await operation.call(this.inner, normalized, options);
+    } catch (error) {
+      if (!isTripleStoreCapabilityRefusal(error, 'structuredMutation')) {
+        this.scheduleFullRefresh('structuredMutation');
+      }
+      throw error;
+    }
+    if (!this.enabled || !structuredMutationMightMutate(normalized)) return;
+    this.bumpMutation();
+    await this.maintainTouchedGraphs(
+      [...structuredMutationTouchedGraphs(normalized)],
+      'structuredMutation',
+      options,
+    );
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {

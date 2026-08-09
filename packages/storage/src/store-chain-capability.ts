@@ -98,6 +98,22 @@ export function resolveStoreChainCapabilityV1<T>(
 }
 
 /**
+ * Return the innermost node reached by the canonical decorator-chain walk.
+ *
+ * Transparent decorators use this when an optional operation's availability is
+ * defined by the backend they forward to. A decorator that adds or constrains a
+ * capability should expose that decision explicitly instead of relying on the
+ * terminal method shape.
+ */
+export function resolveStoreChainTerminalV1(store: unknown): unknown | null {
+  return walk(
+    store,
+    (candidate): candidate is object => registeredOrPublic(candidate as object) == null,
+    registeredOrPublic,
+  );
+}
+
+/**
  * As {@link resolveStoreChainCapabilityV1}, but also follows a `inner` property.
  *
  * Compatibility only, for `asGraphWriteGenSource`, whose published contract

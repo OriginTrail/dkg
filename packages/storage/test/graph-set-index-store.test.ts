@@ -11,6 +11,8 @@ import {
   registerTripleStoreAdapter,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
+  type CopySubjectProjectionInput,
+  type StructuredMutation,
   type QueryOptions,
   type StoreWorkPriority,
 } from '../src/index.js';
@@ -82,6 +84,109 @@ async function exhaustTouchedGraphProbeRetries(
 }
 
 describe('GraphSetIndexStore', () => {
+  it('keeps the graph index warm after a structured copy and attributes only the target', async () => {
+    const source = 'did:dkg:context-graph:projection-source';
+    const target = 'did:dkg:context-graph:projection-target';
+    const root = 'urn:projection-root';
+    const inner = new OxigraphStore();
+    await inner.insert([q(source, root)]);
+    const counting = new CountingStore(inner);
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      onMutation: (event) => events.push(event),
+    });
+
+    await expect(store.listGraphs()).resolves.toEqual([source]);
+    await store.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: target,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } });
+
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([source, target]));
+    expect(counting.listGraphsCalls).toBe(1);
+    expect(events).toContainEqual({
+      type: 'graph-added',
+      graph: target,
+      source: 'structuredMutation',
+    });
+    expect(events).not.toContainEqual(expect.objectContaining({
+      graph: source,
+      source: 'structuredMutation',
+    }));
+    await inner.close();
+  });
+
+  it('defensively snapshots structured operands before asynchronous forwarding', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let observed: StructuredMutation | undefined;
+    const inner = new OxigraphStore();
+    const delayed = new (class extends CountingStore {
+      override async structuredMutation(mutation: StructuredMutation): Promise<void> {
+        await gate;
+        observed = mutation;
+      }
+    })(inner);
+    const store = new GraphSetIndexStore(delayed);
+    const input: CopySubjectProjectionInput = {
+      sourceGraphUris: ['did:dkg:context-graph:source-before'],
+      targetGraphUri: 'did:dkg:context-graph:target',
+      roots: ['urn:root-before'],
+      descendantSuffix: '/',
+      excludedPredicates: ['urn:predicate-before'],
+    };
+
+    const pending = store.structuredMutation({ kind: 'copy-subject-projection', input });
+    (input.sourceGraphUris as string[])[0] = 'did:dkg:context-graph:source-after';
+    (input.roots as string[])[0] = 'urn:root-after';
+    (input.excludedPredicates as string[])[0] = 'urn:predicate-after';
+    release();
+    await pending;
+
+    expect(observed).toEqual({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: ['did:dkg:context-graph:source-before'],
+      targetGraphUri: 'did:dkg:context-graph:target',
+      roots: ['urn:root-before'],
+      descendantSuffix: '/',
+      excludedPredicates: ['urn:predicate-before'],
+    } });
+    await inner.close();
+  });
+
+  it('rebuilds a warm graph index after an indeterminate structured mutation failure', async () => {
+    const source = 'did:dkg:context-graph:indeterminate-source';
+    const target = 'did:dkg:context-graph:indeterminate-target';
+    const root = 'urn:indeterminate-root';
+    const inner = new OxigraphStore();
+    await inner.insert([q(source, root)]);
+    const uncertain = new (class extends CountingStore {
+      override async structuredMutation(
+        mutation: StructuredMutation,
+        options?: QueryOptions,
+      ): Promise<void> {
+        await super.structuredMutation(mutation, options);
+        throw new Error('lost structured mutation response');
+      }
+    })(inner);
+    const store = new GraphSetIndexStore(uncertain);
+
+    await expect(store.listGraphs()).resolves.toEqual([source]);
+    await expect(store.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: target,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } })).rejects.toThrow('lost structured mutation response');
+
+    await expect(store.listGraphs()).resolves.toEqual(expect.arrayContaining([source, target]));
+    expect(uncertain.listGraphsCalls).toBe(2);
+    await inner.close();
+  });
+
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {
     const inner = new OxigraphStore();
     await inner.insert([
