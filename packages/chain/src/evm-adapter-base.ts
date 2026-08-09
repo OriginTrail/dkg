@@ -38,6 +38,7 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
@@ -912,47 +913,49 @@ export class EVMChainAdapterBase {
    */
   protected getContextGraphNameHashResolver(): EvmContextGraphNameHashResolver {
     this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
-      initialize: () => this.init(),
-      requireContextGraphStorage: () => this.requireContextGraphStorage(),
-      providers: () => this.providers,
-      rpcUrls: () => this.rpcUrls,
-      scanPageSize: () => this.cgRegistryScanPageSize,
-      ensureConfiguredStaticChainIdValidated: (provider) =>
-        this.ensureConfiguredStaticChainIdValidated(provider),
-      rebindContract: (contract, provider) => this.rebindContract(contract, provider),
-      readLatestBlock: () => this.readTipProvider(
-        'resolveContextGraphIdByNameHash current-slot anchor',
-        (provider) => provider.getBlock('latest'),
-      ),
-      readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
-        'resolveContextGraphIdByNameHash validate current-slot anchor',
-        async (provider) => {
-          const block = await provider.getBlock(blockNumber);
-          return block?.hash?.toLowerCase() ?? null;
-        },
-        { skipPreferred: true },
-      ),
-      resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
-        this.resolveContractDeployBlock(address, operationLabel, contractLabel),
-      queryEventLogsPage: (
-        baseContract,
-        filter,
-        lo,
-        hi,
-        scanProviders,
-        connected,
-        label,
-        preferred,
-      ) => this.queryEventLogsPage(
-        baseContract,
-        filter,
-        lo,
-        hi,
-        scanProviders,
-        connected,
-        label,
-        preferred,
-      ),
+      reader: new EvmContextGraphNameHashFence({
+        initialize: () => this.init(),
+        requireContextGraphStorage: () => this.requireContextGraphStorage(),
+        providers: () => this.providers,
+        rpcUrls: () => this.rpcUrls,
+        scanPageSize: () => this.cgRegistryScanPageSize,
+        ensureConfiguredStaticChainIdValidated: (provider) =>
+          this.ensureConfiguredStaticChainIdValidated(provider),
+        rebindContract: (contract, provider) => this.rebindContract(contract, provider),
+        readLatestBlock: () => this.readTipProvider(
+          'resolveContextGraphIdByNameHash current-slot anchor',
+          (provider) => provider.getBlock('latest'),
+        ),
+        readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
+          'resolveContextGraphIdByNameHash validate current-slot anchor',
+          async (provider) => {
+            const block = await provider.getBlock(blockNumber);
+            return block?.hash?.toLowerCase() ?? null;
+          },
+          { skipPreferred: true },
+        ),
+        resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+          this.resolveContractDeployBlock(address, operationLabel, contractLabel),
+        queryEventLogsPage: (
+          baseContract,
+          filter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          label,
+          preferred,
+        ) => this.queryEventLogsPage(
+          baseContract,
+          filter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          label,
+          preferred,
+        ),
+      }),
     });
     return this.contextGraphNameHashResolver;
   }

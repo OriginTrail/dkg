@@ -2766,10 +2766,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
-        const hasVmBindingCandidate = this.contextGraphBindingState.currentBindingFor(
+        const hasVmBindingCandidate = this.contextGraphBindingState.hasBindingCandidate(
           localCgId,
           sub,
-        ) !== undefined;
+        );
         if (sub.subscribed && !hasVmBindingCandidate) {
           await this.selfPrimeSubscriptionOnChainId(
             localCgId,
@@ -2783,7 +2783,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Member subscriptions AND Phase D core-hosted public CGs get swept.
         if (
           (!sub.subscribed && !sub.coreHosted)
-          || this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
+          || !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)
         ) continue;
         eligible.push(localCgId);
       }
@@ -2840,7 +2840,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const isSubscriptionCurrent = () => isCurrent()
       && this.subscribedContextGraphs.get(localCgId) === sub
       && sub.subscribed
-      && this.contextGraphBindingState.currentBindingFor(localCgId, sub) === undefined
+      && !this.contextGraphBindingState.hasBindingCandidate(localCgId, sub)
       && this.contextGraphBindingState.isGenerationCurrent(localCgId, bindingGeneration);
     if (!isSubscriptionCurrent()) return null;
     let resolved: (
@@ -2934,11 +2934,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (targetOnChain !== null) {
         for (const [lcg, sub] of this.subscribedContextGraphs) {
           if (!isLifecycleCurrent()) return null;
-          const binding = this.contextGraphBindingState.currentBindingFor(lcg, sub);
           if (
             sub.subscribed
-            && binding?.bindingKind === 'reverse-name-hash'
-            && binding.onChainId === targetOnChain.toString()
+            && this.contextGraphBindingState.matchesReverseCandidate(
+              lcg,
+              sub,
+              targetOnChain.toString(),
+            )
           ) {
             // Candidate equality is only a scheduling hint. The dispatched VM
             // target resolver re-enumerates the name hash before any chain/store

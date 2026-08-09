@@ -33,6 +33,30 @@ export interface EvmContextGraphNameHashFenceDependencies {
     readonly hash: string | null;
   } | null>;
   readonly readAnchorHash: (blockNumber: number) => Promise<string | null>;
+  readonly scanPageSize: () => number;
+  readonly resolveContractDeployBlock: (
+    address: string,
+    operationLabel: string,
+    contractLabel: string,
+  ) => Promise<{
+    readonly fromBlock: number;
+    readonly head: number;
+    readonly scanProviders: ReadonlyArray<ContextGraphNameHashScanProvider>;
+    readonly degradedFromGenesis?: boolean;
+  }>;
+  readonly queryEventLogsPage: (
+    baseContract: Contract,
+    filter: unknown,
+    lo: number,
+    hi: number,
+    scanProviders: ReadonlyArray<ContextGraphNameHashScanProvider>,
+    connected: Map<JsonRpcProvider, Contract>,
+    label: string,
+    preferred?: JsonRpcProvider,
+  ) => Promise<{
+    readonly logs: ReadonlyArray<ethers.EventLog | ethers.Log>;
+    readonly provider: JsonRpcProvider;
+  }>;
 }
 
 export interface ContextGraphNameHashProviderHighWaters {
@@ -49,6 +73,62 @@ export interface ContextGraphNameHashHistoricalHeadAnchor<TProvider> {
   readonly head: number;
   readonly headHash: string;
   readonly scanProviders: readonly TProvider[];
+}
+
+export interface ContextGraphNameHashScanProvider {
+  readonly provider: JsonRpcProvider;
+  readonly backendHead: number;
+}
+
+export interface ContextGraphNameHashAnchoredHistoricalScan {
+  readonly headAnchor: ContextGraphNameHashHistoricalHeadAnchor<
+    ContextGraphNameHashScanProvider
+  >;
+  readonly readContextGraphCreatedPage: (
+    normalizedNameHash: string,
+    lo: number,
+    hi: number,
+    preferred?: JsonRpcProvider,
+  ) => Promise<{
+    readonly ids: readonly bigint[];
+    readonly provider: JsonRpcProvider;
+  }>;
+}
+
+export interface ContextGraphNameHashHistoricalScan {
+  readonly fromBlock: number;
+  readonly head: number;
+  readonly pageSize: number;
+  readonly anchor: () => Promise<ContextGraphNameHashAnchoredHistoricalScan>;
+}
+
+/** Domain-shaped chain reader consumed by both reverse-resolution lanes. */
+export interface EvmContextGraphNameHashReader {
+  initialize(): Promise<void>;
+  invalidate(): void;
+  captureScope(): Promise<ContextGraphNameHashSlotIndexScope>;
+  captureScopeToken(): Promise<ContextGraphNameHashScopeToken>;
+  assertScopeCurrent(
+    token: ContextGraphNameHashScopeToken,
+    lane: 'current-slot resolution' | 'historical scan',
+  ): Promise<void>;
+  captureAnchor(): Promise<ContextGraphNameHashSlotIndexAnchor>;
+  loadAnchorHash(blockNumber: number): Promise<string | null>;
+  loadProviderHighWaters(): Promise<ContextGraphNameHashProviderHighWaters>;
+  readCurrentNameHash(
+    contextGraphId: bigint,
+    signal?: AbortSignal,
+    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
+  ): Promise<string | null>;
+  prepareHistoricalScan(): Promise<ContextGraphNameHashHistoricalScan>;
+  loadHistoricalRegistryHighWaterAtHead(
+    providers: readonly JsonRpcProvider[],
+    head: number,
+  ): Promise<bigint>;
+  assertHistoricalHeadCurrent(
+    anchor: Pick<ContextGraphNameHashHistoricalHeadAnchor<unknown>, 'head' | 'headHash'>,
+    usedProviders: ReadonlySet<JsonRpcProvider>,
+  ): Promise<void>;
 }
 
 function sameScope(
@@ -79,7 +159,7 @@ function waitForContextGraphSlotRead<T>(
   });
 }
 
-export class EvmContextGraphNameHashFence {
+export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashReader {
   private bindingEpoch = 0;
 
   constructor(
@@ -210,6 +290,67 @@ export class EvmContextGraphNameHashFence {
       );
     }
     return observed.values().next().value ?? null;
+  }
+
+  /** Build one exact-topic historical scan session behind a domain boundary. */
+  async prepareHistoricalScan(): Promise<ContextGraphNameHashHistoricalScan> {
+    await this.dependencies.initialize();
+    const contextGraphStorage = this.dependencies.requireContextGraphStorage();
+    const storageAddress = (await contextGraphStorage.getAddress()).toLowerCase();
+    const {
+      fromBlock,
+      head,
+      scanProviders: reachableProviders,
+    } = await this.dependencies.resolveContractDeployBlock(
+      storageAddress,
+      'resolveContextGraphIdByNameHash',
+      'ContextGraphStorage',
+    );
+    return {
+      fromBlock,
+      head,
+      pageSize: this.dependencies.scanPageSize(),
+      anchor: async () => {
+        const headAnchor = await this.captureHistoricalHead(reachableProviders, head);
+        const connected = new Map<JsonRpcProvider, Contract>();
+        return {
+          headAnchor,
+          readContextGraphCreatedPage: async (
+            normalizedNameHash,
+            lo,
+            hi,
+            preferred,
+          ) => {
+            const filter = contextGraphStorage.filters.ContextGraphCreated(
+              null,
+              null,
+              normalizedNameHash,
+            );
+            const page = await this.dependencies.queryEventLogsPage(
+              contextGraphStorage,
+              filter,
+              lo,
+              hi,
+              headAnchor.scanProviders,
+              connected,
+              'resolveContextGraphIdByNameHash ContextGraphCreated',
+              preferred,
+            );
+            const ids: bigint[] = [];
+            for (const log of page.logs) {
+              const parsed = contextGraphStorage.interface.parseLog({
+                topics: [...log.topics],
+                data: log.data,
+              });
+              if (parsed?.name === 'ContextGraphCreated') {
+                ids.push(BigInt(parsed.args.contextGraphId));
+              }
+            }
+            return { ids, provider: page.provider };
+          },
+        };
+      },
+    };
   }
 
   /** Pin the registry counter to the same canonical block as a log scan. */

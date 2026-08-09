@@ -13,22 +13,20 @@ import {
   EvmContextGraphNameHashCurrentSlotResolver,
 } from './evm-context-graph-name-hash-current-slot-resolver.js';
 import {
-  EvmContextGraphNameHashFence,
-  type EvmContextGraphNameHashFenceDependencies,
+  type EvmContextGraphNameHashReader,
 } from './evm-context-graph-name-hash-fence.js';
 import {
   EvmContextGraphNameHashHistoricalLogResolver,
-  type EvmContextGraphNameHashHistoricalLogResolverDependencies,
 } from './evm-context-graph-name-hash-historical-log-resolver.js';
 
-export interface EvmContextGraphNameHashResolverDependencies
-  extends EvmContextGraphNameHashFenceDependencies,
-    EvmContextGraphNameHashHistoricalLogResolverDependencies {}
+export interface EvmContextGraphNameHashResolverDependencies {
+  readonly reader: EvmContextGraphNameHashReader;
+}
 
 export class EvmContextGraphNameHashResolver {
   private readonly resolutionCache: ContextGraphNameHashResolver;
 
-  private readonly fence: EvmContextGraphNameHashFence;
+  private readonly reader: EvmContextGraphNameHashReader;
 
   private readonly currentSlotResolver: EvmContextGraphNameHashCurrentSlotResolver;
 
@@ -38,14 +36,13 @@ export class EvmContextGraphNameHashResolver {
     this.resolutionCache = new ContextGraphNameHashResolver({
       load: (nameHash) => this.loadFromChain(nameHash),
     });
-    this.fence = new EvmContextGraphNameHashFence(dependencies);
+    this.reader = dependencies.reader;
     this.currentSlotResolver = new EvmContextGraphNameHashCurrentSlotResolver(
-      this.fence,
+      this.reader,
       { onIndexCommit: () => this.resolutionCache.invalidateAll() },
     );
     this.historicalLogResolver = new EvmContextGraphNameHashHistoricalLogResolver(
-      this.fence,
-      dependencies,
+      this.reader,
     );
   }
 
@@ -54,7 +51,7 @@ export class EvmContextGraphNameHashResolver {
   }
 
   invalidateAll(): void {
-    this.fence.invalidate();
+    this.reader.invalidate();
     this.currentSlotResolver.clear();
     this.resolutionCache.invalidateAll();
   }

@@ -7433,21 +7433,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
-    const currentBinding = this.contextGraphBindingState.currentBindingFor(
+    const bindingEffects = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
       previous,
+      canonicalNext,
+      nextWireId,
     );
-    const reverseBinding = currentBinding?.bindingKind === 'reverse-name-hash'
-      ? currentBinding
-      : undefined;
-    if (
-      previous === undefined
-      || canonicalNext.onChainId !== undefined
-      || (!canonicalNext.subscribed && !canonicalNext.coreHosted)
-      || reverseBinding?.nameHash !== nextWireId
-    ) {
-      this.clearSubscriptionReverseNameHashBinding(contextGraphId);
-    }
     if (
       previousWireId !== nextWireId
       && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
@@ -7456,7 +7447,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
+    if (bindingEffects.vmStateReset === 'force') {
+      this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    } else if (bindingEffects.vmStateReset === 'inactive') {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     // On-demand member subscriptions deliberately keep their live state and

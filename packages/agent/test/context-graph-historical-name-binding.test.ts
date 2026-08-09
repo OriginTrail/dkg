@@ -455,6 +455,78 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
   });
 
+  it('clears a reverse candidate and cursor when the subscription gains an authoritative id', () => {
+    const fixture = selectedFixture();
+    fixture.agent.bindSubscriptionReverseNameHashOnChainId(
+      LOCAL_ID,
+      fixture.subscription,
+      '42',
+      NAME_HASH,
+    );
+    fixture.agent.reconcileCursors.set(LOCAL_ID, {
+      watermark: 3,
+      ahead: new Map(),
+      scanOrdinal: 4,
+    });
+    const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
+
+    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
+      fixture.agent,
+      LOCAL_ID,
+      { ...fixture.subscription, onChainId: '42' },
+      { persist: false },
+    );
+
+    const promoted = fixture.agent.subscribedContextGraphs.get(LOCAL_ID);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, promoted)).toEqual({
+      bindingKind: 'authoritative',
+      onChainId: '42',
+    });
+    expect(fixture.agent.contextGraphBindingState.size).toBe(0);
+    expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
+    expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
+  });
+
+  it('clears a reverse candidate and cursor when admission is removed and never revives it', () => {
+    const fixture = selectedFixture();
+    fixture.agent.bindSubscriptionReverseNameHashOnChainId(
+      LOCAL_ID,
+      fixture.subscription,
+      '42',
+      NAME_HASH,
+    );
+    fixture.agent.reconcileCursors.set(LOCAL_ID, {
+      watermark: 3,
+      ahead: new Map(),
+      scanOrdinal: 4,
+    });
+    const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
+
+    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
+      fixture.agent,
+      LOCAL_ID,
+      { ...fixture.subscription, subscribed: false, coreHosted: false },
+      { persist: false },
+    );
+
+    const deactivated = fixture.agent.subscribedContextGraphs.get(LOCAL_ID);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, deactivated))
+      .toBeUndefined();
+    expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
+    expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
+
+    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
+      fixture.agent,
+      LOCAL_ID,
+      { ...deactivated, subscribed: true },
+      { persist: false },
+    );
+    const reused = fixture.agent.subscribedContextGraphs.get(LOCAL_ID);
+    expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, reused))
+      .toBeUndefined();
+    expect(fixture.agent.contextGraphBindingState.size).toBe(0);
+  });
+
   it('uses a reverse candidate only to schedule a live KACG nudge, then revalidates the VM target', async () => {
     const fixture = selectedFixture();
     fixture.agent.contextGraphBindingState.bindReverseCandidate(

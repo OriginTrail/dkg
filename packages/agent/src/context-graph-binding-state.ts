@@ -31,6 +31,16 @@ export type ContextGraphBindingSubscription = {
   onChainId?: string;
 };
 
+export type ContextGraphBindingSubscriptionState = ContextGraphBindingSubscription & {
+  subscribed?: boolean;
+  coreHosted?: boolean;
+};
+
+export type ContextGraphBindingSubscriptionEffects = {
+  readonly reverseCandidateCleared: boolean;
+  readonly vmStateReset: 'none' | 'force' | 'inactive';
+};
+
 /** Contract Context Graph ids are positive, canonically formatted decimals. */
 export function isCanonicalPositiveContextGraphId(value: unknown): value is string {
   return typeof value === 'string' && /^[1-9][0-9]*$/.test(value);
@@ -85,6 +95,54 @@ export class ContextGraphBindingState {
       };
     }
     return this.reverseCandidates.get(localCgId);
+  }
+
+  hasBindingCandidate(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+  ): boolean {
+    return this.currentBindingFor(localCgId, subscription) !== undefined;
+  }
+
+  matchesReverseCandidate(
+    localCgId: string,
+    subscription: ContextGraphBindingSubscription | undefined,
+    onChainId: string,
+  ): boolean {
+    const binding = this.currentBindingFor(localCgId, subscription);
+    return binding?.bindingKind === 'reverse-name-hash'
+      && binding.onChainId === onChainId;
+  }
+
+  /**
+   * Apply the binding-owned portion of one normalized subscription transition.
+   * The lifecycle layer supplies the canonical next commitment and consumes
+   * only explicit VM cleanup effects; it does not reconstruct provenance.
+   */
+  applySubscriptionTransition(
+    localCgId: string,
+    previous: ContextGraphBindingSubscriptionState | undefined,
+    next: ContextGraphBindingSubscriptionState,
+    nextNameHash: string,
+  ): ContextGraphBindingSubscriptionEffects {
+    const reverseCandidate = this.reverseCandidates.get(localCgId);
+    const admitted = next.subscribed === true || next.coreHosted === true;
+    const retainsReverseCandidate = previous !== undefined
+      && previous.onChainId === undefined
+      && next.onChainId === undefined
+      && admitted
+      && reverseCandidate?.nameHash === nextNameHash;
+    const reverseCandidateCleared = retainsReverseCandidate
+      ? false
+      : this.clear(localCgId);
+    return {
+      reverseCandidateCleared,
+      vmStateReset: reverseCandidateCleared
+        ? 'force'
+        : admitted
+          ? 'none'
+          : 'inactive',
+    };
   }
 
   bindAuthoritative(

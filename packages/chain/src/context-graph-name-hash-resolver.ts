@@ -48,14 +48,21 @@ interface ContextGraphNameHashSlotIndexState {
   readonly idsByHash: ReadonlyMap<string, readonly bigint[]>;
 }
 
-export interface ContextGraphNameHashSlotIndexDependencies {
+export interface ContextGraphNameHashSlotIndexHighWaterSnapshot {
+  readonly latestId: bigint;
+}
+
+export interface ContextGraphNameHashSlotIndexDependencies<
+  THighWaterSnapshot extends ContextGraphNameHashSlotIndexHighWaterSnapshot,
+> {
   readonly captureScope: () => Promise<ContextGraphNameHashSlotIndexScope>;
   readonly captureAnchor: () => Promise<ContextGraphNameHashSlotIndexAnchor>;
   readonly loadAnchorHash: (blockNumber: number) => Promise<string | null>;
-  readonly loadLatestId: () => Promise<bigint>;
+  readonly loadHighWaterSnapshot: () => Promise<THighWaterSnapshot>;
   readonly loadRange: (
     firstId: bigint,
     lastId: bigint,
+    highWaterSnapshot: THighWaterSnapshot,
   ) => Promise<readonly ContextGraphNameHashSlot[]>;
   readonly onCommit?: () => void;
 }
@@ -81,9 +88,9 @@ export class ContextGraphNameHashSlotIndex {
 
   private tail: Promise<void> = Promise.resolve();
 
-  resolve(
+  resolve<THighWaterSnapshot extends ContextGraphNameHashSlotIndexHighWaterSnapshot>(
     normalizedNameHash: string,
-    dependencies: ContextGraphNameHashSlotIndexDependencies,
+    dependencies: ContextGraphNameHashSlotIndexDependencies<THighWaterSnapshot>,
   ): Promise<ContextGraphNameHashSlotIndexResult> {
     const run = this.tail.then(
       () => this.resolveSerialized(normalizedNameHash, dependencies),
@@ -98,13 +105,16 @@ export class ContextGraphNameHashSlotIndex {
     this.state = undefined;
   }
 
-  private async resolveSerialized(
+  private async resolveSerialized<
+    THighWaterSnapshot extends ContextGraphNameHashSlotIndexHighWaterSnapshot,
+  >(
     normalizedNameHash: string,
-    dependencies: ContextGraphNameHashSlotIndexDependencies,
+    dependencies: ContextGraphNameHashSlotIndexDependencies<THighWaterSnapshot>,
   ): Promise<ContextGraphNameHashSlotIndexResult> {
     const epoch = this.epoch;
     const scope = await dependencies.captureScope();
-    const latestId = await dependencies.loadLatestId();
+    const highWaterSnapshot = await dependencies.loadHighWaterSnapshot();
+    const { latestId } = highWaterSnapshot;
     if (latestId < 0n) {
       throw new Error(
         `resolveContextGraphIdByNameHash: getLatestContextGraphId returned ` +
@@ -130,7 +140,7 @@ export class ContextGraphNameHashSlotIndex {
       ? await dependencies.captureAnchor()
       : previous?.anchor;
     const staged = firstId <= latestId
-      ? await dependencies.loadRange(firstId, latestId)
+      ? await dependencies.loadRange(firstId, latestId, highWaterSnapshot)
       : [];
 
     if (nextAnchor === undefined) {

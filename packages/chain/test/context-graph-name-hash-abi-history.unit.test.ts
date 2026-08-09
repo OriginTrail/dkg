@@ -4,6 +4,7 @@ import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { EvmContextGraphNameHashFence } from '../src/evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from '../src/evm-context-graph-name-hash-resolver.js';
 import { CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS } from '../src/context-graph-name-hash-resolver.js';
 
@@ -78,50 +79,52 @@ describe('Context Graph name-hash historical ABI path', () => {
     const currentSlotReads: bigint[] = [];
 
     const resolver = new EvmContextGraphNameHashResolver({
-      initialize: async () => {},
-      requireContextGraphStorage: () => contextGraphStorage,
-      providers: () => [provider],
-      rpcUrls: () => ['http://history.test.invalid'],
-      scanPageSize: () => 2,
-      ensureConfiguredStaticChainIdValidated: async () => 31337n,
-      rebindContract: () => ({
-        getLatestContextGraphId: async (options?: { blockTag?: number }) => {
-          providerHighWaterReads.push(options);
-          return HISTORICAL_HIGH_WATER;
+      reader: new EvmContextGraphNameHashFence({
+        initialize: async () => {},
+        requireContextGraphStorage: () => contextGraphStorage,
+        providers: () => [provider],
+        rpcUrls: () => ['http://history.test.invalid'],
+        scanPageSize: () => 2,
+        ensureConfiguredStaticChainIdValidated: async () => 31337n,
+        rebindContract: () => ({
+          getLatestContextGraphId: async (options?: { blockTag?: number }) => {
+            providerHighWaterReads.push(options);
+            return HISTORICAL_HIGH_WATER;
+          },
+          getNameHash: async (id: bigint) => {
+            currentSlotReads.push(id);
+            return id === 77n ? NAME_HASH : OTHER_HASH;
+          },
+        }) as unknown as Contract,
+        readLatestBlock: async () => ({ number: 103, hash: HEAD_HASH }),
+        readAnchorHash: async () => HEAD_HASH,
+        resolveContractDeployBlock: async () => ({
+          fromBlock: 100,
+          head: 103,
+          scanProviders: [{ provider, backendHead: 103 }],
+        }),
+        queryEventLogsPage: async (_contract, filter, lo, hi) => {
+          const topics = await (filter as {
+            getTopicFilter: () => Promise<readonly (string | readonly string[] | null)[]>;
+          }).getTopicFilter();
+          const selected = allLogs.filter((log) =>
+            log.blockNumber >= lo
+            && log.blockNumber <= hi
+            && topics.every((expected, index) => topicMatches(log.topics[index]!, expected)),
+          );
+          pageCalls.push({
+            lo,
+            hi,
+            topics,
+            returnedIds: selected.map((log) =>
+              BigInt(contextGraphStorage.interface.parseLog(log)!.args.contextGraphId)),
+          });
+          return {
+            logs: selected as unknown as readonly ethers.Log[],
+            provider,
+          };
         },
-        getNameHash: async (id: bigint) => {
-          currentSlotReads.push(id);
-          return id === 77n ? NAME_HASH : OTHER_HASH;
-        },
-      }) as unknown as Contract,
-      readLatestBlock: async () => ({ number: 103, hash: HEAD_HASH }),
-      readAnchorHash: async () => HEAD_HASH,
-      resolveContractDeployBlock: async () => ({
-        fromBlock: 100,
-        head: 103,
-        scanProviders: [{ provider, backendHead: 103 }],
       }),
-      queryEventLogsPage: async (_contract, filter, lo, hi) => {
-        const topics = await (filter as {
-          getTopicFilter: () => Promise<readonly (string | readonly string[] | null)[]>;
-        }).getTopicFilter();
-        const selected = allLogs.filter((log) =>
-          log.blockNumber >= lo
-          && log.blockNumber <= hi
-          && topics.every((expected, index) => topicMatches(log.topics[index]!, expected)),
-        );
-        pageCalls.push({
-          lo,
-          hi,
-          topics,
-          returnedIds: selected.map((log) =>
-            BigInt(contextGraphStorage.interface.parseLog(log)!.args.contextGraphId)),
-        });
-        return {
-          logs: selected as unknown as readonly ethers.Log[],
-          provider,
-        };
-      },
     });
 
     await expect(resolver.resolve(NAME_HASH)).resolves.toBe(77n);
