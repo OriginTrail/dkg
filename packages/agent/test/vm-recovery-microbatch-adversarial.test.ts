@@ -280,58 +280,74 @@ describe('VM recovery microbatch planner — adversarial boundaries', () => {
   it('revokes provider affinity on partial or incomplete per-UAL outcomes', () => {
     const peerId = '12D3KooWPolicyHolder';
     const policy = new VmRecoveryProviderPolicy();
-    policy.recordAttempt(peerId);
-    policy.recordBatch(peerId, 'found', dispositions(['ual-0', 'found']));
-    expect(policy.isProvenHolder(peerId)).toBe(true);
-    expect(policy.canAttempt(peerId)).toBe(true);
+    expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
+    const probe = policy.beginAttempt(peerId)!;
+    expect(probe.kind).toBe('probe');
+    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
+    expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
+    const reuse = policy.beginAttempt(peerId)!;
+    expect(reuse.kind).toBe('proven-holder-reuse');
 
-    policy.recordBatch(peerId, 'found', dispositions(
+    policy.finishAttempt(reuse, 'found', dispositions(
       ['ual-1', 'found'],
       ['ual-2', 'incomplete'],
     ));
 
     expect(policy.ualDisposition(peerId, 'ual-1')).toBe('found');
     expect(policy.ualDisposition(peerId, 'ual-2')).toBe('incomplete');
-    expect(policy.isProvenHolder(peerId)).toBe(false);
-    expect(policy.canAttempt(peerId)).toBe(false);
+    expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
 
     const nextSweep = new VmRecoveryProviderPolicy();
-    expect(nextSweep.isProvenHolder(peerId)).toBe(false);
-    expect(nextSweep.canAttempt(peerId)).toBe(true);
+    expect(nextSweep.selectNextCandidate([peerId], 3)).toBe(peerId);
+    expect(nextSweep.beginAttempt(peerId)?.kind).toBe('probe');
   });
 
   it('revokes provider affinity when the aggregate response is incomplete', () => {
     const peerId = '12D3KooWAggregateIncomplete';
     const policy = new VmRecoveryProviderPolicy();
-    policy.recordAttempt(peerId);
-    policy.recordBatch(peerId, 'found', dispositions(['ual-0', 'found']));
-    expect(policy.isProvenHolder(peerId)).toBe(true);
+    const probe = policy.beginAttempt(peerId)!;
+    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
+    const reuse = policy.beginAttempt(peerId)!;
+    expect(reuse.kind).toBe('proven-holder-reuse');
 
-    policy.recordBatch(peerId, 'incomplete', dispositions(
+    policy.finishAttempt(reuse, 'incomplete', dispositions(
       ['ual-1', 'found'],
       ['ual-2', 'found'],
     ));
 
-    expect(policy.isProvenHolder(peerId)).toBe(false);
-    expect(policy.canAttempt(peerId)).toBe(false);
+    expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
   });
 
   it('spends proven-holder affinity once and cannot re-arm it in the same slice', () => {
     const peerId = '12D3KooWOneReusePerSlice';
     const policy = new VmRecoveryProviderPolicy();
-    policy.recordAttempt(peerId);
-    policy.recordBatch(peerId, 'found', dispositions(['ual-0', 'found']));
+    const probe = policy.beginAttempt(peerId)!;
+    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
 
-    expect(policy.consumeProvenHolderReuse(peerId)).toBe(true);
-    expect(policy.consumeProvenHolderReuse(peerId)).toBe(false);
-    expect(policy.canAttempt(peerId)).toBe(false);
+    const reuse = policy.beginAttempt(peerId)!;
+    expect(reuse.kind).toBe('proven-holder-reuse');
+    expect(policy.beginAttempt(peerId)).toBeUndefined();
 
-    policy.recordBatch(peerId, 'found', dispositions(
+    policy.finishAttempt(reuse, 'found', dispositions(
       ['ual-1', 'found'],
       ['ual-2', 'found'],
     ));
-    expect(policy.isProvenHolder(peerId)).toBe(false);
-    expect(policy.canAttempt(peerId)).toBe(false);
+    expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
+  });
+
+  it('settles only the exact attempt token returned by beginAttempt', () => {
+    const peerId = '12D3KooWAttemptToken';
+    const policy = new VmRecoveryProviderPolicy();
+    const attempt = policy.beginAttempt(peerId)!;
+
+    expect(() => policy.finishAttempt(
+      { ...attempt },
+      'found',
+      dispositions(['ual-0', 'found']),
+    )).toThrow(/not active/);
+
+    policy.finishAttempt(attempt, 'found', dispositions(['ual-0', 'found']));
+    expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
   });
 });
 

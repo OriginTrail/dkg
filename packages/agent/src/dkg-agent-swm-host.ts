@@ -4375,20 +4375,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const uncreditedCandidateOrder = record
       ? this.vmReconcileUncreditedCandidateOrder(record)
       : [...fallbackCandidatePeerIds];
-    const candidateOrder = [
-      ...uncreditedCandidateOrder.filter((peerId) =>
-        policy.isProvenHolder(peerId)),
-      ...uncreditedCandidateOrder.filter((peerId) =>
-        !policy.isProvenHolder(peerId)),
-    ];
-    for (const peerId of candidateOrder) {
-      if (!policy.canAttempt(peerId)) continue;
-      if (!policy.tryConsider(peerId, DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX)) {
-        return undefined;
-      }
-      return peerId;
-    }
-    return undefined;
+    return policy.selectNextCandidate(
+      uncreditedCandidateOrder,
+      DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
+    );
   }
 
   findVmReconcileRotationReplacement(
@@ -4866,16 +4856,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // per-CG admission decision as exact network fetches. Live-event nudges
     // received during cooldown must not turn into repeated liveness, policy,
     // or per-KA update-context RPCs when no transfer may run.
+    const readVmRecoveryUpdateContext = this.chain.getKnowledgeAssetUpdateContext;
     currentTargets = await enrichVmRecoveryFootprints(
       currentTargets,
       onChainCgId,
-      this.chain,
+      {
+        authority: {
+          kind: 'host-policy',
+          resolveAccessPolicy: (contextGraphId) =>
+            this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
+        },
+        sizing: typeof readVmRecoveryUpdateContext === 'function'
+          ? {
+              readUpdateContext: (kaId, readOptions) =>
+                readVmRecoveryUpdateContext.call(this.chain, kaId, readOptions),
+            }
+          : null,
+      },
       {
         maxContextReads: MAX_EXACT_SYNC_ASSETS,
         signal,
         isCurrent: isRecoveryCurrent,
-        resolveLiveAccessPolicy: (contextGraphId) =>
-          this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
       },
     );
     if (!isRecoveryCurrent()) {
@@ -5138,7 +5139,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           : false;
         if (!isRecoveryCurrent()) return noRecovery();
         if (!connectedPeer || !protocolReady) {
-          providerPolicy.recordUnavailable(candidatePeerId);
+          providerPolicy.markUnavailable(candidatePeerId);
         } else {
           // Network boundary: a merely-connected peer is not necessarily
           // admitted to this DKG network. Never send an authenticated exact
@@ -5150,7 +5151,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             signal,
           );
           if (!isRecoveryCurrent()) return noRecovery();
-          if (!peerAdmitted) providerPolicy.recordUnavailable(candidatePeerId);
+          if (!peerAdmitted) providerPolicy.markUnavailable(candidatePeerId);
           else peerId = candidatePeerId;
         }
       }
@@ -5167,7 +5168,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
         continue;
       }
-      providerPolicy.recordAttempt(peerId);
+      const providerAttempt = providerPolicy.beginAttempt(peerId);
+      if (!providerAttempt) continue;
 
       type EligibleEntry = (typeof eligible)[number];
       type BatchAttempt = {
@@ -5185,11 +5187,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // probe has proved the peer is a holder, pack a stable compatible prefix
       // by authoritative size hints. Unknown footprints stay singleton; the
       // exact-sync protocol's ten-UAL cap remains the hard upper bound.
-      if (providerPolicy.isProvenHolder(peerId)) {
-        // Holder affinity is a one-use lease for this recovery slice. Consume
-        // it before planning so a successful post-probe microbatch cannot
-        // re-arm the same peer and monopolize later bounded work.
-        providerPolicy.consumeProvenHolderReuse(peerId);
+      if (providerAttempt.kind === 'proven-holder-reuse') {
         const compatible: BatchAttempt[] = [];
         for (let candidateIndex = eligibleIndex; candidateIndex < eligible.length; candidateIndex += 1) {
           const candidateEntry = eligible[candidateIndex]!;
@@ -5249,6 +5247,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
               providerPolicy.unavailablePeerIds(),
             );
           }
+          providerPolicy.finishAttempt(
+            providerAttempt,
+            'incomplete',
+            new Map<string, VmRecoveryUalDisposition>([[target.ual, 'incomplete']]),
+          );
           continue;
         }
         batchAttempts = plan.targets.map(({ attempt }) => attempt);
@@ -5375,7 +5378,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(batchTarget));
         }
       }
-      providerPolicy.recordBatch(peerId, disposition, perUalDispositions);
+      providerPolicy.finishAttempt(providerAttempt, disposition, perUalDispositions);
     }
 
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));

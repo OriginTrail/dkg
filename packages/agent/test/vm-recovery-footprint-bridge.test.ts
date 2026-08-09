@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   enrichVmRecoveryFootprints,
   type VmRecoveryChainFootprint,
+  type VmRecoveryFootprintBridge,
+  type VmRecoveryUpdateContext,
 } from '../src/vm-recovery-microbatch.js';
 
 interface Target {
@@ -25,6 +27,39 @@ const pinnedTarget = (kaId: number): Target => ({
   },
 });
 
+function chainBridge(reader: {
+  isContextGraphActiveOnChain: (contextGraphId: bigint) => Promise<boolean>;
+  getContextGraphAccessPolicy: (contextGraphId: bigint) => Promise<number>;
+  getKnowledgeAssetUpdateContext?: (
+    kaId: bigint,
+    options?: { signal?: AbortSignal },
+  ) => Promise<VmRecoveryUpdateContext>;
+}): VmRecoveryFootprintBridge {
+  return {
+    authority: {
+      kind: 'chain-reader',
+      isContextGraphActive: reader.isContextGraphActiveOnChain,
+      readAccessPolicy: reader.getContextGraphAccessPolicy,
+    },
+    sizing: reader.getKnowledgeAssetUpdateContext
+      ? { readUpdateContext: reader.getKnowledgeAssetUpdateContext }
+      : null,
+  };
+}
+
+function hostBridge(
+  resolveAccessPolicy: (contextGraphId: bigint) => Promise<0 | 1 | null>,
+  readUpdateContext?: (
+    kaId: bigint,
+    options?: { signal?: AbortSignal },
+  ) => Promise<VmRecoveryUpdateContext>,
+): VmRecoveryFootprintBridge {
+  return {
+    authority: { kind: 'host-policy', resolveAccessPolicy },
+    sizing: readUpdateContext ? { readUpdateContext } : null,
+  };
+}
+
 describe('classic VM recovery footprint bridge', () => {
   it('reads public policy once and enriches at most the bounded ten-target prefix', async () => {
     const liveness = vi.fn(async () => true);
@@ -43,11 +78,11 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: liveness,
         getContextGraphAccessPolicy: policy,
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
@@ -80,11 +115,11 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 1,
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
@@ -99,14 +134,14 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       [unknownTarget(1)],
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => {
           controller.abort();
           return 0;
         },
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, signal: controller.signal, isCurrent: () => true },
     );
 
@@ -129,11 +164,11 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => current },
     );
 
@@ -161,11 +196,11 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
@@ -186,7 +221,7 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
         getKnowledgeAssetUpdateContext: async (kaId) => {
@@ -197,7 +232,7 @@ describe('classic VM recovery footprint bridge', () => {
             merkleLeafCount: kaId === 3n ? 0 : 10,
           };
         },
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
@@ -215,11 +250,11 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: readActive,
         getContextGraphAccessPolicy: policy,
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
@@ -228,34 +263,34 @@ describe('classic VM recovery footprint bridge', () => {
     expect(enriched).toEqual(targets);
   });
 
-  it('fails closed when liveness capability is absent or the CG id is non-positive', async () => {
+  it('represents unavailable sizing explicitly and fails closed for a non-positive CG id', async () => {
     const policy = vi.fn(async () => 0);
     const updateContext = vi.fn();
     const targets = [unknownTarget(1)];
 
-    const missingCapability = await enrichVmRecoveryFootprints(
+    const unavailableSizing = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
+        isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: policy,
-        getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
     const invalidId = await enrichVmRecoveryFootprints(
       targets,
       0n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: policy,
         getKnowledgeAssetUpdateContext: updateContext,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
-    expect(policy).not.toHaveBeenCalled();
+    expect(policy).toHaveBeenCalledTimes(1);
     expect(updateContext).not.toHaveBeenCalled();
-    expect(missingCapability).toEqual(targets);
+    expect(unavailableSizing).toEqual(targets);
     expect(invalidId).toEqual(targets);
   });
 
@@ -266,19 +301,14 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       [unknownTarget(1)],
       14n,
-      {
-        isContextGraphActiveOnChain: rawLiveness,
-        getContextGraphAccessPolicy: rawPolicy,
-        getKnowledgeAssetUpdateContext: async () => ({
+      hostBridge(resolveLiveAccessPolicy, async () => ({
           merkleRootsCount: 2n,
           byteSize: 1_000n,
           merkleLeafCount: 10,
-        }),
-      },
+      })),
       {
         maxContextReads: 10,
         isCurrent: () => true,
-        resolveLiveAccessPolicy,
       },
     );
 
@@ -296,12 +326,14 @@ describe('classic VM recovery footprint bridge', () => {
     const pending = enrichVmRecoveryFootprints(
       targets,
       14n,
-      { getKnowledgeAssetUpdateContext: updateContext },
+      hostBridge(
+        () => new Promise<0 | 1 | null>(() => undefined),
+        updateContext,
+      ),
       {
         maxContextReads: 10,
         signal: controller.signal,
         isCurrent: () => true,
-        resolveLiveAccessPolicy: () => new Promise<0 | 1 | null>(() => undefined),
       },
     );
 
@@ -313,40 +345,34 @@ describe('classic VM recovery footprint bridge', () => {
   it.each([
     {
       label: 'inactive',
-      reader: {
+      bridge: chainBridge({
         isContextGraphActiveOnChain: async () => false,
         getContextGraphAccessPolicy: async () => 0,
-      },
-      options: {},
+      }),
     },
     {
       label: 'private',
-      reader: {
+      bridge: chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 1,
-      },
-      options: {},
+      }),
     },
     {
-      label: 'missing authority capability',
-      reader: {},
-      options: {},
+      label: 'unavailable host authority',
+      bridge: hostBridge(async () => null),
     },
     {
       label: 'bounded authority timeout',
-      reader: {},
-      options: { resolveLiveAccessPolicy: async () => null },
+      bridge: hostBridge(async () => null),
     },
   ])('downgrades pre-populated public hints when authority is $label', async ({
-    reader,
-    options,
+    bridge,
   }) => {
     const targets = [pinnedTarget(1)];
 
-    const [result] = await enrichVmRecoveryFootprints(targets, 14n, reader, {
+    const [result] = await enrichVmRecoveryFootprints(targets, 14n, bridge, {
       maxContextReads: 10,
       isCurrent: () => true,
-      ...options,
     });
 
     expect(result).not.toBe(targets[0]);
@@ -369,10 +395,10 @@ describe('classic VM recovery footprint bridge', () => {
     const enriched = await enrichVmRecoveryFootprints(
       targets,
       14n,
-      {
+      chainBridge({
         isContextGraphActiveOnChain: async () => true,
         getContextGraphAccessPolicy: async () => 0,
-      },
+      }),
       { maxContextReads: 10, isCurrent: () => true },
     );
 
