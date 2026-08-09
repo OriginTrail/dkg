@@ -21,6 +21,8 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  supportsCopySubjectProjection,
+  supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
   type QueryOptions,
   type Quad,
@@ -137,7 +139,7 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(supportsTripleStoreCapability(store, 'structuredMutation')).toBe(true);
   });
 
-  it('reports unsupported RS-heal capability through the full decorator stack', async () => {
+  it('preserves update-only RS-heal compatibility through the full decorator stack', async () => {
     const adapter = new Proxy(new OxigraphStore(), {
       get(target, prop, receiver) {
         if (prop === 'structuredMutation') return undefined;
@@ -152,11 +154,13 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
     expect(typeof wrapped.structuredMutation).toBe('function');
     expect(supportsTripleStoreCapability(wrapped, 'structuredMutation')).toBe(false);
+    expect(supportsCopySubjectProjection(wrapped)).toBe(true);
+    expect(supportsReplaceSubjectPredicatesAtomically(wrapped)).toBe(true);
     await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store: wrapped } as never,
+      { store: wrapped, rsHealCursorByCg: new Map() } as never,
       TEST_CG,
       { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
-    )).resolves.toEqual({ status: 'skipped', reason: 'unsupported-store' });
+    )).resolves.toEqual({ status: 'skipped', reason: 'no-work' });
 
     await wrapped.close();
   });
@@ -478,6 +482,41 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(completionResetIndex).toBeGreaterThanOrEqual(0);
     expect(completionResetIndex).toBeLessThan(firstDataIndex);
     expect(completionStampIndex).toBeGreaterThan(lastDataIndex);
+  });
+
+  it('rejects an individually over-budget root before clearing completion', async () => {
+    const cg = 'unrepresentable-root';
+    const onChainId = '22';
+    const ual = 'did:dkg:hardhat:31337/0xunrepresentable/42';
+    const root = `urn:entity:unrepresentable:${'x'.repeat(4 * 1024 * 1024)}`;
+    const mutations: StructuredMutation[] = [];
+    const fakeStore = {
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes('SELECT ?ual ?b')) {
+          return { type: 'bindings' as const, bindings: [{ ual, b: String(KA_ID) }] };
+        }
+        if (sparql.includes('SELECT ?root')) {
+          return { type: 'bindings' as const, bindings: [{ root }] };
+        }
+        if (sparql.includes('ASK')) return { type: 'boolean' as const, value: true };
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+      structuredMutation: vi.fn(async (mutation: StructuredMutation) => {
+        mutations.push(mutation);
+      }),
+    } as unknown as TripleStore;
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    expect(mutations).toEqual([]);
   });
 
   it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {

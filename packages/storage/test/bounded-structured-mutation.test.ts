@@ -1,24 +1,26 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  BOUNDED_MUTATION_MAX_IRIS,
-  BOUNDED_MUTATION_MAX_UPDATE_BYTES,
   ChangelogStore,
   GraphSetIndexStore,
   SharedMemoryLiteralBlobStore,
-  buildCopySubjectProjectionUpdate,
-  buildDeleteSubjectsUpdate,
-  chunkCopySubjectProjectionInput,
   OxigraphStore,
   OxigraphWorkerStore,
   UnsupportedTripleStoreCapabilityError,
   supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
+  tryCopySubjectProjection,
   tryDeleteSubjects,
+  tryReplaceProjectionFromGraphAtomically,
   type Quad,
   type TripleStore,
 } from '../src/index.js';
 import {
+  BOUNDED_MUTATION_MAX_IRIS,
+  BOUNDED_MUTATION_MAX_UPDATE_BYTES,
+  buildCopySubjectProjectionUpdate,
+  buildDeleteSubjectsUpdate,
+  chunkCopySubjectProjectionInput,
   normalizeCopySubjectProjectionInput,
   normalizeDeleteSubjectsInput,
   normalizeReplaceSubjectPredicatesInput,
@@ -243,6 +245,39 @@ describe('bounded structured mutation capabilities', () => {
     expect(supportsTripleStoreCapability(updateOnly, 'structuredMutation')).toBe(false);
     expect(supportsReplaceSubjectPredicatesAtomically(updateOnly)).toBe(true);
     expect(supportsReplaceSubjectPredicatesAtomically(incapable)).toBe(false);
+  });
+
+  it('preserves bounded projection operations for update-only stores', async () => {
+    const update = vi.fn(async () => undefined);
+    const store = { update } as unknown as TripleStore;
+    const projection = {
+      targetGraphUri: OTHER_GRAPH,
+      stagingGraphUri: 'urn:test:staging',
+      targetSubject: 'urn:test:subject',
+      preservedTargetPredicates: [STATUS],
+      targetSubjectPrefixes: ['urn:test:prefix:'],
+    };
+    const copy = {
+      sourceGraphUris: [GRAPH],
+      targetGraphUri: OTHER_GRAPH,
+      roots: ['urn:test:root'],
+      descendantSuffix: '/.well-known/genid/',
+      excludedPredicates: [STATUS],
+    };
+
+    await expect(tryReplaceProjectionFromGraphAtomically(store, projection))
+      .resolves.toBe(true);
+    await expect(tryCopySubjectProjection(store, copy)).resolves.toBe(true);
+    expect(update).toHaveBeenNthCalledWith(
+      1,
+      expect.stringContaining(`GRAPH <${OTHER_GRAPH}>`),
+      { touchedGraphs: [OTHER_GRAPH] },
+    );
+    expect(update).toHaveBeenNthCalledWith(
+      2,
+      expect.stringContaining('VALUES ?root { <urn:test:root> }'),
+      { touchedGraphs: [OTHER_GRAPH] },
+    );
   });
 
   it('dispatches a max accepted subject set as one embedded update', async () => {

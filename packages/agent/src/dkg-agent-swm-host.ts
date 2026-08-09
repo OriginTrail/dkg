@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, chunkCopySubjectProjectionInput, createTripleStore, supportsTripleStoreCapability, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, chunkCopySubjectProjectionInput, createTripleStore, supportsCopySubjectProjection, supportsReplaceSubjectPredicatesAtomically, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -323,6 +323,45 @@ function advanceRsHealCursor(
     if (oldest === undefined) break;
     cursorMap.delete(oldest);
   }
+}
+
+type RsHealCopyInput = Parameters<typeof tryCopySubjectProjection>[1];
+type RsHealPredicateReplacement = Parameters<typeof tryReplaceSubjectPredicatesAtomically>[1];
+
+interface RsHealMaterializationPlan {
+  dataCopy: RsHealCopyInput;
+  metadataCopy: RsHealCopyInput;
+  completionReset: RsHealPredicateReplacement;
+  completionStamp: RsHealPredicateReplacement;
+}
+
+/** Apply one fail-closed RS-heal projection transition after candidate discovery. */
+async function applyRsHealMaterialization(
+  plan: RsHealMaterializationPlan,
+  operations: {
+    canApply: () => boolean;
+    copyProjection: (input: RsHealCopyInput) => Promise<void>;
+    replacePredicates: (input: RsHealPredicateReplacement) => Promise<void>;
+  },
+): Promise<void> {
+  // Preflight the complete plan before crossing the first write boundary. An
+  // individually unrepresentable root must not clear an otherwise valid
+  // completion marker before failing.
+  const dataCopyChunks = chunkCopySubjectProjectionInput(plan.dataCopy);
+
+  // Clear completion before the first data chunk. A crash between chunks then
+  // remains retryable instead of exposing a partial projection as complete.
+  await operations.replacePredicates(plan.completionReset);
+  if (!operations.canApply()) return;
+
+  for (const chunk of dataCopyChunks) {
+    await operations.copyProjection(chunk);
+    if (!operations.canApply()) return;
+  }
+
+  await operations.copyProjection(plan.metadataCopy);
+  if (!operations.canApply()) return;
+  await operations.replacePredicates(plan.completionStamp);
 }
 
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -3330,7 +3369,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       if (!canApply() || !capturedOnChainId) {
         return { status: 'skipped', reason: 'not-current' };
       }
-      if (!supportsTripleStoreCapability(this.store, 'structuredMutation')) {
+      if (
+        !supportsCopySubjectProjection(this.store)
+        || !supportsReplaceSubjectPredicatesAtomically(this.store)
+      ) {
         return { status: 'skipped', reason: 'unsupported-store' };
       }
       // Server-side byte-safe copy is the ONLY safe relocation mechanism. The
@@ -3526,55 +3568,42 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // bit-identical with the on-chain merkleLeafCount. Root order is
             // preserved while large multi-root KCs are split below both 4 MiB
             // structured-mutation limits.
-            const dataCopy = {
-              sourceGraphUris: [rootData, vmGraph],
-              targetGraphUri: scopedData,
-              roots,
-              descendantSuffix: '/.well-known/genid/',
-              excludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
-            };
-            // Validate the complete chunk plan before crossing the first write
-            // boundary. An individually unrepresentable root must not clear an
-            // otherwise valid completion marker before failing.
-            const dataCopyChunks = chunkCopySubjectProjectionInput(dataCopy);
-
-            // Clear completion before the first chunk. A crash between chunks
-            // must leave this KC eligible for repair rather than exposing a
-            // partially refreshed projection under an older completion stamp.
-            await replacePredicates({
-              graphUri: scopedMeta,
-              subject: ual,
-              predicates: [`${DKG}materializedVersion`],
-              replacementQuads: [],
-            });
-            if (!canApply()) return;
-
-            for (const chunk of dataCopyChunks) {
-              await copyProjection(chunk);
-              if (!canApply()) return;
-            }
-
-            // Metadata copy and the final stamp remain separate backend
-            // operations. Stamp completion only after every data chunk and the
-            // metadata copy succeed.
-            await copyProjection({
-              sourceGraphUris: [legacyMeta],
-              targetGraphUri: scopedMeta,
-              roots: [ual],
-              descendantSuffix: '/',
-              excludedPredicates: [`${DKG}materializedVersion`],
-            });
-            if (!canApply()) return;
-            await replacePredicates({
-              graphUri: scopedMeta,
-              subject: ual,
-              predicates: [`${DKG}materializedVersion`],
-              replacementQuads: [{
+            await applyRsHealMaterialization({
+              dataCopy: {
+                sourceGraphUris: [rootData, vmGraph],
+                targetGraphUri: scopedData,
+                roots,
+                descendantSuffix: '/.well-known/genid/',
+                excludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
+              },
+              metadataCopy: {
+                sourceGraphUris: [legacyMeta],
+                targetGraphUri: scopedMeta,
+                roots: [ual],
+                descendantSuffix: '/',
+                excludedPredicates: [`${DKG}materializedVersion`],
+              },
+              completionReset: {
+                graphUri: scopedMeta,
                 subject: ual,
-                predicate: `${DKG}materializedVersion`,
-                object: `"${version.blockNumber}:${version.txIndex}"`,
-                graph: scopedMeta,
-              }],
+                predicates: [`${DKG}materializedVersion`],
+                replacementQuads: [],
+              },
+              completionStamp: {
+                graphUri: scopedMeta,
+                subject: ual,
+                predicates: [`${DKG}materializedVersion`],
+                replacementQuads: [{
+                  subject: ual,
+                  predicate: `${DKG}materializedVersion`,
+                  object: `"${version.blockNumber}:${version.txIndex}"`,
+                  graph: scopedMeta,
+                }],
+              },
+            }, {
+              canApply,
+              copyProjection,
+              replacePredicates,
             });
 
             if (canApply()) {

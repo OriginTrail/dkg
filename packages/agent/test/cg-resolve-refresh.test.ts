@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   OxigraphStore,
@@ -405,6 +405,61 @@ describe('refreshMetaFromCurator', () => {
 
     expect(refreshed).toBe(true);
     expect(staged).toHaveLength(2);
+  });
+
+  it('preserves curator projection replacement through an update-only store', async () => {
+    const contextGraphId = 'public/update-only-curator-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    const update = vi.fn(async () => undefined);
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'update-only-authoritative-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async () => undefined,
+        update,
+        dropGraph: async () => undefined,
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    await expect(ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+    )).resolves.toBe(true);
+    expect(update).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledWith(
+      expect.stringContaining(`GRAPH <${metaGraph}>`),
+      expect.objectContaining({ touchedGraphs: [metaGraph] }),
+    );
   });
 
   it('rejects a public-only snapshot when private member proof was required', async () => {

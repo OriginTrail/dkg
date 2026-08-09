@@ -33,6 +33,7 @@ export {
   supportsReplaceSubjectPredicatesAtomically,
   tryReplaceSubjectPredicatesAtomically,
   tryReplaceProjectionFromGraphAtomically,
+  supportsCopySubjectProjection,
   tryCopySubjectProjection,
   isExternalBackend,
   getSparqlEndpoint,
@@ -49,26 +50,10 @@ export {
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
 export {
-  BOUNDED_MUTATION_MAX_IRIS,
-  BOUNDED_MUTATION_MAX_OPERAND_BYTES,
-  BOUNDED_MUTATION_MAX_UPDATE_BYTES,
-  BOUNDED_MUTATION_MAX_PREDICATES,
-  BOUNDED_MUTATION_MAX_PREFIXES,
   BOUNDED_MUTATION_MAX_PRUNE_DELETE,
-  BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
-  buildCopySubjectProjectionUpdate,
   chunkCopySubjectProjectionInput,
-  buildDeleteSubjectsUpdate,
-  buildPruneLinkedRecordClosuresUpdate,
-  buildPruneRankedSubjectsUpdate,
-  buildReplaceProjectionFromGraphUpdate,
-  buildReplaceSubjectPredicatesUpdate,
-  buildStructuredMutationUpdate,
-  normalizeStructuredMutation,
-  structuredMutationGuardedGraphs,
   structuredMutationMightMutate,
   structuredMutationTouchedGraphs,
-  assertBoundedStructuredUpdate,
 } from './bounded-structured-mutation.js';
 // System-record V1 (#2052 Stack B2). Default-unused: these modules perform no
 // I/O, scheduling, timer, or per-store lane work until the daemon supervisor

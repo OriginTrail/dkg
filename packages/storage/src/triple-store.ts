@@ -26,7 +26,11 @@ import {
   supportsTripleStoreCapability,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
-import { buildReplaceSubjectPredicatesUpdate } from './bounded-structured-mutation.js';
+import {
+  buildCopySubjectProjectionUpdate,
+  buildReplaceProjectionFromGraphUpdate,
+  buildReplaceSubjectPredicatesUpdate,
+} from './bounded-structured-mutation.js';
 
 export interface Quad {
   subject: string;
@@ -524,7 +528,24 @@ export async function tryReplaceProjectionFromGraphAtomically(
   input: ReplaceProjectionFromGraphInput,
   options: QueryOptions = {},
 ): Promise<boolean> {
-  return tryStructuredMutation(store, { kind: 'replace-projection-from-graph', input }, options);
+  if (await tryStructuredMutation(
+    store,
+    { kind: 'replace-projection-from-graph', input },
+    options,
+  )) {
+    return true;
+  }
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildReplaceProjectionFromGraphUpdate(input),
+    [input.targetGraphUri],
+    options,
+  );
+}
+
+export function supportsCopySubjectProjection(store: TripleStore): boolean {
+  return supportsTripleStoreCapability(store, 'structuredMutation')
+    || supportsTripleStoreCapability(store, 'update');
 }
 
 export async function tryCopySubjectProjection(
@@ -532,7 +553,16 @@ export async function tryCopySubjectProjection(
   input: CopySubjectProjectionInput,
   options: QueryOptions = {},
 ): Promise<boolean> {
-  return tryStructuredMutation(store, { kind: 'copy-subject-projection', input }, options);
+  if (!supportsCopySubjectProjection(store)) return false;
+  if (await tryStructuredMutation(store, { kind: 'copy-subject-projection', input }, options)) {
+    return true;
+  }
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildCopySubjectProjectionUpdate(input),
+    [input.targetGraphUri],
+    options,
+  );
 }
 
 export type TripleStoreBackend = 'oxigraph' | 'oxigraph-persistent' | 'oxigraph-worker' | 'blazegraph' | 'sparql-http' | string;
