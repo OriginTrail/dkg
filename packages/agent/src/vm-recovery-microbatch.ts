@@ -1,3 +1,5 @@
+import type { KnowledgeAssetUpdateContext } from '@origintrail-official/dkg-chain';
+
 /** Version-bound public-chain cost hints used only for VM recovery admission. */
 export type VmRecoveryChainFootprint =
   | {
@@ -31,17 +33,19 @@ export interface VmRecoveryFootprintBridgeTarget {
   readonly recoveryFootprint?: VmRecoveryChainFootprint;
 }
 
+/** Canonical chain fields consumed by the classic VM recovery sizing bridge. */
+export type VmRecoveryUpdateContext = Pick<
+  KnowledgeAssetUpdateContext,
+  'merkleRootsCount' | 'byteSize' | 'merkleLeafCount'
+>;
+
 export interface VmRecoveryFootprintBridgeReader {
   isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
   getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
   getKnowledgeAssetUpdateContext?(
     kaId: bigint,
     options?: { signal?: AbortSignal },
-  ): Promise<{
-    merkleRootsCount: bigint;
-    byteSize: bigint;
-    merkleLeafCount: number;
-  }>;
+  ): Promise<VmRecoveryUpdateContext>;
 }
 
 export interface VmRecoveryFootprintBridgeOptions {
