@@ -51,7 +51,6 @@ export interface AgentProfileReceiverCandidateV1 {
   readonly projectionQuads: readonly Readonly<Quad>[];
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
   readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
-  readonly signal: AbortSignal;
 }
 
 export interface CreateAgentProfileReceiverOptionsV1 {
@@ -83,6 +82,7 @@ export interface CreateAgentProfileReceiverOptionsV1 {
    */
   readonly consumeCandidate: (
     input: AgentProfileReceiverCandidateV1,
+    signal: AbortSignal,
   ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
   readonly nowMs?: () => number;
 }
@@ -131,74 +131,22 @@ export function createAgentProfileReceiverV1(
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
 
-      let verifiedBundle: Readonly<{
-        projectionQuads: readonly Readonly<Quad>[];
-        canonicalProjectionBytes: Uint8Array;
-      }> | undefined;
-      let currentEnvelope: SignedAgentProfileHeadEnvelopeV1 | undefined;
-      const { authoritySummary: verifiedAuthoritySummary } =
-        await buildAgentProfileVerificationClosureV1(row.headDigest, {
-          nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
-          resolve: async (reference) => {
-            signal.throwIfAborted();
-            const artifact = await resolveArtifact({
-              type: 'object',
-              objectKind: reference.objectKind,
-              objectDigest: reference.digest,
-            }, signal);
-            signal.throwIfAborted();
-            if (artifact === null) return undefined;
-            const owned = snapshotExpectedArtifactV1(
-              artifact,
-              reference.objectKind,
-              reference.digest,
-              'closure artifact',
-            );
-            if (reference.objectKind === 'agent-profile-head'
-              && reference.digest === row.headDigest) {
-              currentEnvelope = parseCanonicalSignedAgentProfileHeadEnvelopeV1(
-                owned.canonicalBytes,
-              );
-              assertRowBindsHead(networkId, row, currentEnvelope);
-            }
-            return Object.freeze({
-              objectKind: owned.objectKind,
-              digest: owned.objectDigest,
-              canonicalBytes: owned.canonicalBytes,
-            });
-          },
-          verifyAuthorityEnvelope: async (envelope) => {
-            signal.throwIfAborted();
-            const verified = await verifyAuthorityEnvelope(envelope, signal);
-            signal.throwIfAborted();
-            return verified === true;
-          },
-          verifyCurrentBundle: async (head, canonicalBundleBytes) => {
-            signal.throwIfAborted();
-            const result = await verifyCurrentBundle(
-              head,
-              Uint8Array.from(canonicalBundleBytes),
-              signal,
-            );
-            signal.throwIfAborted();
-            const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
-            verifiedBundle = Object.freeze({
-              ...snapshotVerifiedBundle(result),
-              canonicalProjectionBytes: Uint8Array.from(decoded.projectionBytes),
-            });
-            return true;
-          },
-        });
+      const {
+        envelope,
+        verifiedBundle,
+        verifiedAuthoritySummary,
+      } = await verifyActiveProfileClosureForRowV1({
+        networkId,
+        row,
+        signal,
+        nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
+        resolveArtifact,
+        verifyAuthorityEnvelope,
+        verifyCurrentBundle,
+      });
       signal.throwIfAborted();
 
-      const envelope = currentEnvelope;
-      if (envelope === undefined) {
-        throw new Error('verification closure did not retain its current agent-profile head');
-      }
       const head = envelope.object;
-      if (head.state !== 'active' || verifiedBundle === undefined) {
-        throw new Error('active profile receiver resolved a non-active verification closure');
-      }
       const resolvedSubjectTableArtifact = await resolveArtifact({
         type: 'object',
         objectKind: 'owned-subject-table',
@@ -231,13 +179,115 @@ export function createAgentProfileReceiverV1(
         projectionQuads: verifiedBundle.projectionQuads,
         ownedSubjectTable,
         verifiedAuthoritySummary,
-        signal,
-      }));
+      }), signal);
       // Atomic apply is the point of no return. A cancellation that arrives
       // after the storage closure returns must not hide a committed outcome and
       // make the caller retry it as if nothing happened.
       return outcome;
     },
+  });
+}
+
+interface VerifiedActiveProfileClosureV1 {
+  readonly envelope: SignedAgentProfileHeadEnvelopeV1 & {
+    readonly object: AgentProfileActiveHeadObjectV1;
+  };
+  readonly verifiedBundle: Readonly<{
+    readonly projectionQuads: readonly Readonly<Quad>[];
+    readonly canonicalProjectionBytes: Uint8Array;
+  }>;
+  readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
+}
+
+interface VerifyActiveProfileClosureOptionsV1 {
+  readonly networkId: NetworkIdV1;
+  readonly row: SystemRecordInventoryRowV1;
+  readonly signal: AbortSignal;
+  readonly nowMs: number;
+  readonly resolveArtifact: SystemRecordArtifactRepositoryV1['resolve'];
+  readonly verifyAuthorityEnvelope: NonNullable<
+    CreateAgentProfileReceiverOptionsV1['verifyAuthorityEnvelope']
+  >;
+  readonly verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'];
+}
+
+async function verifyActiveProfileClosureForRowV1(
+  options: VerifyActiveProfileClosureOptionsV1,
+): Promise<VerifiedActiveProfileClosureV1> {
+  const {
+    networkId,
+    row,
+    signal,
+    nowMs,
+    resolveArtifact,
+    verifyAuthorityEnvelope,
+    verifyCurrentBundle,
+  } = options;
+  let verifiedBundle: VerifiedActiveProfileClosureV1['verifiedBundle'] | undefined;
+  let currentEnvelope: SignedAgentProfileHeadEnvelopeV1 | undefined;
+  const { authoritySummary: verifiedAuthoritySummary } =
+    await buildAgentProfileVerificationClosureV1(row.headDigest, {
+      nowMs,
+      resolve: async (reference) => {
+        signal.throwIfAborted();
+        const artifact = await resolveArtifact({
+          type: 'object',
+          objectKind: reference.objectKind,
+          objectDigest: reference.digest,
+        }, signal);
+        signal.throwIfAborted();
+        if (artifact === null) return undefined;
+        const owned = snapshotExpectedArtifactV1(
+          artifact,
+          reference.objectKind,
+          reference.digest,
+          'closure artifact',
+        );
+        if (reference.objectKind === 'agent-profile-head'
+          && reference.digest === row.headDigest) {
+          const parsed = parseCanonicalSignedAgentProfileHeadEnvelopeV1(owned.canonicalBytes);
+          assertRowBindsHead(networkId, row, parsed);
+          currentEnvelope = parsed;
+        }
+        return Object.freeze({
+          objectKind: owned.objectKind,
+          digest: owned.objectDigest,
+          canonicalBytes: owned.canonicalBytes,
+        });
+      },
+      verifyAuthorityEnvelope: async (envelope) => {
+        signal.throwIfAborted();
+        const verified = await verifyAuthorityEnvelope(envelope, signal);
+        signal.throwIfAborted();
+        return verified === true;
+      },
+      verifyCurrentBundle: async (head, canonicalBundleBytes) => {
+        signal.throwIfAborted();
+        const result = await verifyCurrentBundle(
+          head,
+          Uint8Array.from(canonicalBundleBytes),
+          signal,
+        );
+        signal.throwIfAborted();
+        const decoded = decodeOpaqueKaBundleV1(canonicalBundleBytes);
+        verifiedBundle = Object.freeze({
+          ...snapshotVerifiedBundle(result),
+          canonicalProjectionBytes: Uint8Array.from(decoded.projectionBytes),
+        });
+        return true;
+      },
+    });
+  const envelope = currentEnvelope;
+  if (envelope === undefined) {
+    throw new Error('verification closure did not retain its current agent-profile head');
+  }
+  if (envelope.object.state !== 'active' || verifiedBundle === undefined) {
+    throw new Error('active profile receiver resolved a non-active verification closure');
+  }
+  return Object.freeze({
+    envelope: envelope as VerifiedActiveProfileClosureV1['envelope'],
+    verifiedBundle,
+    verifiedAuthoritySummary,
   });
 }
 

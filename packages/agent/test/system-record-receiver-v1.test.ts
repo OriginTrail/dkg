@@ -71,7 +71,8 @@ describe('agent-profile system-record active receiver', () => {
       consumeCandidate,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    const signal = new AbortController().signal;
+    await expect(receiver.receiveActive(fixture.row, signal))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(consumeCandidate).toHaveBeenCalledTimes(1);
     const candidate = consumeCandidate.mock.calls[0]![0];
@@ -81,6 +82,8 @@ describe('agent-profile system-record active receiver', () => {
       .toEqual([...fixture.prepared.projectionQuads].sort(compareQuad));
     expect(candidate.ownedSubjectTable).toContain(fixture.prepared.rootEntity);
     expect(candidate.canonicalProjectionBytes.byteLength).toBeGreaterThan(0);
+    expect(candidate).not.toHaveProperty('signal');
+    expect(consumeCandidate.mock.calls[0]![1]).toBe(signal);
   });
 
   it('fails closed when the exact owned-subject table is unavailable', async () => {
@@ -157,6 +160,7 @@ describe('agent-profile system-record active receiver', () => {
     {
       label: 'tombstone',
       patch: { tombstone: true },
+      error: /ordinary active inventory row/,
     },
     {
       label: 'quarantined',
@@ -164,8 +168,14 @@ describe('agent-profile system-record active receiver', () => {
         quarantined: true,
         conflictEvidenceDigest: `0x${'d'.repeat(64)}`,
       },
+      error: /ordinary active inventory row/,
     },
-  ])('rejects a $label row before fetching closure artifacts', async ({ patch }) => {
+    {
+      label: 'conflict evidence',
+      patch: { conflictEvidenceDigest: `0x${'d'.repeat(64)}` },
+      error: /conflict evidence may appear only on quarantined rows|ordinary active inventory row/,
+    },
+  ])('rejects a $label row before fetching closure artifacts', async ({ patch, error }) => {
     const fixture = await publishedFixture();
     const resolve = vi.fn(fixture.store.resolve.bind(fixture.store));
     const receiver = createAgentProfileReceiverV1({
@@ -179,7 +189,7 @@ describe('agent-profile system-record active receiver', () => {
     await expect(receiver.receiveActive(
       Object.freeze({ ...fixture.row, ...patch }),
       new AbortController().signal,
-    )).rejects.toThrow(/ordinary active inventory row/);
+    )).rejects.toThrow(error);
     expect(resolve).not.toHaveBeenCalled();
   });
 
