@@ -13,7 +13,7 @@
  * transport success must never turn an unresolved member into clean absence
  * or a successful VM reconciliation.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKG_GOSSIP_MAX_MESSAGE_BYTES } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
@@ -27,6 +27,7 @@ import {
 import {
   planVmRecoveryMicrobatch,
   VmRecoveryProviderPolicy,
+  type VmRecoveryChainFootprint,
   type VmRecoveryTargetFootprint,
   type VmRecoveryMicrobatchLimits,
   type VmRecoveryUalDisposition,
@@ -274,16 +275,7 @@ interface RecoveryTarget {
   readonly merkleRoot: string;
   readonly kaId: string;
   readonly reason: 'no-swm';
-  readonly recoveryFootprint: {
-    readonly kind: 'public-v10';
-    readonly byteSize: bigint;
-    readonly merkleLeafCount: bigint;
-    readonly assertionVersion: string;
-    readonly anchor: {
-      readonly kind: 'pinned-finalized';
-      readonly blockHash: string;
-    };
-  };
+  readonly recoveryFootprint: VmRecoveryChainFootprint;
 }
 
 interface RecoveryInternals {
@@ -334,9 +326,10 @@ async function createRecoveryHarness(options: {
     signal?: AbortSignal,
   ) => 'found' | 'clean-absent' | 'incomplete';
 }) {
+  const chainAdapter = new MockChainAdapter();
   const agent = await DKGAgent.create({
     name: options.name,
-    chainAdapter: new MockChainAdapter(),
+    chainAdapter,
   });
   const internals = agent as unknown as RecoveryInternals & Record<string, any>;
   const connected = options.peers.map((peerId) => ({ toString: () => peerId }));
@@ -412,6 +405,7 @@ async function createRecoveryHarness(options: {
 
   return {
     agent,
+    chainAdapter,
     internals,
     targets,
     fetched,
@@ -457,6 +451,59 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       harness.targets.map(() => ({ status: 'reconciled', blockNumber: 100 })),
     );
     expect(harness.maxActiveFetches()).toBe(1);
+  });
+
+  it('enriches unknown targets through the production host before batching', async () => {
+    const holder = '12D3KooWBridgeAHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/host-bridge';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchHostBridge',
+      localCgId,
+      peers: [holder],
+      targetCount: 8,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain')
+      .mockResolvedValue(true);
+    const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy')
+      .mockResolvedValue(0);
+    const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext')
+      .mockImplementation(async () => ({
+        merkleRootsCount: 1n,
+        minted: 0n,
+        byteSize: 1_024n,
+        endEpoch: 0n,
+        tokenAmount: 0n,
+        isImmutable: false,
+        merkleLeafCount: 8,
+      }));
+    const unknownTargets: RecoveryTarget[] = harness.targets.map((target) => ({
+      ...target,
+      recoveryFootprint: { kind: 'unknown' },
+    }));
+
+    await harness.internals.recoverVmReconcileBatch(
+      localCgId,
+      1n,
+      unknownTargets,
+      100,
+      () => true,
+    );
+
+    expect(liveness).toHaveBeenCalledTimes(1);
+    expect(liveness).toHaveBeenCalledWith(1n);
+    expect(policy).toHaveBeenCalledTimes(1);
+    expect(policy).toHaveBeenCalledWith(1n);
+    expect(updateContext).toHaveBeenCalledTimes(8);
+    expect(harness.fetched).toEqual([
+      { peerId: holder, uals: [unknownTargets[0]!.ual] },
+      { peerId: holder, uals: unknownTargets.slice(1).map(({ ual }) => ual) },
+    ]);
+    expect(harness.fetched[1]!.uals.length).toBeGreaterThan(1);
   });
 
   it('commits found members but rotates unresolved members without false absence', async () => {
