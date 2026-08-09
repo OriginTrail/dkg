@@ -1,6 +1,11 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  type Quad,
+  type ReplaceProjectionFromGraphInput,
+  type StructuredMutation,
+} from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
@@ -15,6 +20,17 @@ const CURATOR_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const RELAY_ADDR = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 function noop(): void {}
+
+function projectionMutation(
+  apply: (input: ReplaceProjectionFromGraphInput) => void | Promise<void>,
+): (mutation: StructuredMutation) => Promise<void> {
+  return async (mutation) => {
+    if (mutation.kind !== 'replace-projection-from-graph') {
+      throw new Error(`Unexpected structured mutation: ${mutation.kind}`);
+    }
+    await apply(mutation.input);
+  };
+}
 
 function operationContext(): OperationContext {
   return { kind: 'sync', id: 'cg-refresh-test', startedAt: Date.now() } as never;
@@ -371,7 +387,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async (quads: Quad[]) => { staged = quads; },
-        update: async () => undefined,
+        structuredMutation: projectionMutation(noop),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -389,6 +405,61 @@ describe('refreshMetaFromCurator', () => {
 
     expect(refreshed).toBe(true);
     expect(staged).toHaveLength(2);
+  });
+
+  it('preserves curator projection replacement through an update-only store', async () => {
+    const contextGraphId = 'public/update-only-curator-snapshot';
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
+    const snapshot: Quad[] = [{
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.RDF_TYPE,
+      object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH,
+      graph: metaGraph,
+    }, {
+      subject: contextGraphUri,
+      predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY,
+      object: '"public"',
+      graph: metaGraph,
+    }];
+    const update = vi.fn(async () => undefined);
+    const agent = {
+      metaRefreshTimestamps: new Map<string, number>(),
+      peerId: 'local-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [{ remotePeer: { toString: () => CURATOR_PEER_ID } }],
+        },
+      },
+      discovery: {},
+      fetchSyncPages: async () => ({
+        quads: snapshot,
+        checkpointKey: 'update-only-authoritative-snapshot',
+        resumedFromOffset: 0,
+        completed: true,
+      }),
+      store: {
+        insert: async () => undefined,
+        update,
+        dropGraph: async () => undefined,
+      },
+      oversizeTombstoneLog: { record: noop },
+      invalidateListContextGraphsCache: noop,
+      contextGraphMetaProjection: { markDirty: noop },
+      syncCheckpoints: new Map<string, number>(),
+      log: { warn: noop, info: noop },
+    };
+
+    await expect(ContextGraphResolveMethods.prototype.refreshMetaFromCurator.call(
+      agent as never,
+      contextGraphId,
+      { trustedCuratorPeerId: CURATOR_PEER_ID, force: true },
+    )).resolves.toBe(true);
+    expect(update).toHaveBeenCalledOnce();
+    expect(update).toHaveBeenCalledWith(
+      expect.stringContaining(`GRAPH <${metaGraph}>`),
+      expect.objectContaining({ touchedGraphs: [metaGraph] }),
+    );
   });
 
   it('rejects a public-only snapshot when private member proof was required', async () => {
@@ -424,7 +495,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => { targetMutated = true; },
-        update: async () => { targetMutated = true; },
+        structuredMutation: projectionMutation(() => { targetMutated = true; }),
         dropGraph: async () => { targetMutated = true; },
       },
       oversizeTombstoneLog: { record: noop },
@@ -488,7 +559,7 @@ describe('refreshMetaFromCurator', () => {
     let fetchDeadline: number | undefined;
     let forceFreshSession: boolean | undefined;
     let staged: Quad[] = [];
-    let replacementUpdate = '';
+    let replacementInput: ReplaceProjectionFromGraphInput | undefined;
     const agent = {
       // A recent auth-driven refresh would suppress a normal call.
       metaRefreshTimestamps: new Map([[contextGraphId, Date.now()]]),
@@ -517,7 +588,9 @@ describe('refreshMetaFromCurator', () => {
       },
       store: {
         insert: async (quads: Quad[]) => { staged = quads; },
-        update: async (sparql: string) => { replacementUpdate = sparql; },
+        structuredMutation: projectionMutation((input) => {
+          replacementInput = input;
+        }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -551,8 +624,13 @@ describe('refreshMetaFromCurator', () => {
       object: inserted[0].object,
     });
     expect(staged[0].graph).toMatch(/^urn:dkg:curator-meta-refresh:/);
-    expect(replacementUpdate).toContain(`GRAPH <${metaGraph}>`);
-    expect(replacementUpdate).not.toContain(inserted[4].graph);
+    expect(replacementInput).toMatchObject({
+      targetGraphUri: metaGraph,
+      targetSubject: contextGraphDataGraphUri(contextGraphId),
+      preservedTargetPredicates: [DKG_ONTOLOGY.DKG_REVOKED_AGENT],
+      targetSubjectPrefixes: [`did:dkg:agent-delegation:${contextGraphId}:`],
+    });
+    expect(replacementInput?.stagingGraphUri).not.toBe(inserted[4].graph);
     expect(agent.syncCheckpoints.has('trusted-meta-checkpoint')).toBe(false);
   });
 
@@ -678,7 +756,7 @@ describe('refreshMetaFromCurator', () => {
         insert: async (quads: Quad[]) => {
           storedSnapshots.push(quads.map((quad) => ({ ...quad, graph: metaGraph })));
         },
-        update: async () => undefined,
+        structuredMutation: projectionMutation(noop),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -739,7 +817,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => { targetMutated = true; },
-        update: async () => { targetMutated = true; },
+        structuredMutation: projectionMutation(() => { targetMutated = true; }),
         dropGraph: async () => { targetMutated = true; },
       },
       syncCheckpoints: new Map<string, number>(),
@@ -792,7 +870,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => undefined,
-        update: async () => { targetUpdates += 1; },
+        structuredMutation: projectionMutation(() => { targetUpdates += 1; }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: {
@@ -970,12 +1048,12 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => undefined,
-        update: async () => {
-          // Model ChangelogStore.update: inner SPARQL committed, then the
+        structuredMutation: projectionMutation(() => {
+          // Model ChangelogStore: inner projection committed, then the
           // post-mutation marker append failed and surfaced an exception.
           targetCommitted = true;
           throw new Error('post-mutation marker append failed');
-        },
+        }),
         dropGraph: async () => {
           signalCleanupStarted();
           await cleanupGate;
@@ -1041,7 +1119,7 @@ describe('refreshMetaFromCurator', () => {
       },
       store: {
         insert: async () => undefined,
-        update: async () => { replacements += 1; },
+        structuredMutation: projectionMutation(() => { replacements += 1; }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -1115,7 +1193,7 @@ describe('refreshMetaFromCurator', () => {
       },
       store: {
         insert: async () => undefined,
-        update: async () => { replacements += 1; },
+        structuredMutation: projectionMutation(() => { replacements += 1; }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },

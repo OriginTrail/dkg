@@ -22,7 +22,8 @@ import { OxigraphStore } from '../src/adapters/oxigraph.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
-import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import type { Quad, QueryOptions, QueryResult, StructuredMutation, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from '../src/unsupported-capability-error.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -212,6 +213,79 @@ describe('ChangelogStore — restart reseed & reserved-graph hiding', () => {
 });
 
 describe('ChangelogStore — opaque update handling', () => {
+  it('attributes a structured projection copy only to its target graph', async () => {
+    const source = 'http://ex.org/projection-source';
+    const target = 'http://ex.org/projection-target';
+    const root = 'http://ex.org/projection-root';
+    const base = new OxigraphStore();
+    await base.insert([q(root, source)]);
+    const log = new ChangelogStore(base);
+
+    await log.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: target,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } });
+
+    expect(await log.readChanges(0, 100)).toEqual([
+      { seq: 1, graph: target, op: 'upsert' },
+    ]);
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('treats a typed structured-capability refusal as mutation-free preflight', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(new SpyStore(base));
+
+    await expect(log.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [G1],
+      targetGraphUri: G2,
+      roots: ['http://ex.org/root'],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } })).rejects.toMatchObject<Partial<UnsupportedTripleStoreCapabilityError>>({
+      name: 'UnsupportedTripleStoreCapabilityError',
+      capability: 'structuredMutation',
+    });
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('flags reconcile after an indeterminate structured mutation failure', async () => {
+    const source = 'http://ex.org/indeterminate-source';
+    const targetGraph = 'http://ex.org/indeterminate-target';
+    const root = 'http://ex.org/indeterminate-root';
+    const base = new OxigraphStore();
+    await base.insert([q(root, source)]);
+    const uncertain = new Proxy(base, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') {
+          return async (mutation: StructuredMutation, options?: QueryOptions) => {
+            await target.structuredMutation(mutation, options);
+            throw new Error('lost structured mutation response');
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const log = new ChangelogStore(uncertain);
+
+    await expect(log.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: targetGraph,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } })).rejects.toThrow('lost structured mutation response');
+    expect(log.needsReconcile).toBe(true);
+    expect(await base.hasGraph(targetGraph)).toBe(true);
+    await base.close();
+  });
+
   it('an update() with touchedGraphs emits markers; without, it flags reconcile', async () => {
     const base = new OxigraphStore();
     const log = new ChangelogStore(base);

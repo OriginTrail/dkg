@@ -3,7 +3,6 @@
 import { randomUUID } from 'node:crypto';
 import { multiaddr } from '@multiformats/multiaddr';
 import {
-  assertSafeIri,
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
   createOperationContext,
@@ -11,7 +10,7 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import {
-  tryUpdateWithTouchedGraphs,
+  tryReplaceProjectionFromGraphAtomically,
   type Quad,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
@@ -415,45 +414,6 @@ async function fetchAuthoritativeMetaSnapshot(
   return { checkpointKey: result.checkpointKey, quads: controlMetaQuads };
 }
 
-/**
- * Replace only the curator-replicated portion of a CG's root `_meta` graph.
- * `dkg:revokedAgent` is deliberately retained as a node-local tombstone.
- */
-function replaceCuratorMetaProjectionSparql(
-  contextGraphId: string,
-  metaGraph: string,
-  stagingGraph: string,
-): string {
-  const contextGraphUri = assertSafeIri(contextGraphDataGraphUri(contextGraphId));
-  const delegationPrefix = `did:dkg:agent-delegation:${contextGraphId}:`;
-  assertSafeIri(metaGraph);
-  assertSafeIri(stagingGraph);
-  return `DELETE {
-    GRAPH <${metaGraph}> { ?staleSubject ?stalePredicate ?staleObject . }
-  }
-  INSERT {
-    GRAPH <${metaGraph}> { ?freshSubject ?freshPredicate ?freshObject . }
-  }
-  WHERE {
-    {
-      GRAPH <${metaGraph}> {
-        ?staleSubject ?stalePredicate ?staleObject .
-        FILTER (
-          (
-            ?staleSubject = <${contextGraphUri}> &&
-            ?stalePredicate != <${DKG_ONTOLOGY.DKG_REVOKED_AGENT}>
-          ) ||
-          STRSTARTS(STR(?staleSubject), ${JSON.stringify(delegationPrefix)})
-        )
-      }
-    }
-    UNION
-    {
-      GRAPH <${stagingGraph}> { ?freshSubject ?freshPredicate ?freshObject . }
-    }
-  }`;
-}
-
 async function atomicallyReplaceCuratorMetaSnapshot(
   agent: CuratorMetaRefreshAgent,
   contextGraphId: string,
@@ -488,10 +448,15 @@ async function atomicallyReplaceCuratorMetaSnapshot(
     invalidateTargetProjections();
     let replaced = false;
     try {
-      replaced = await tryUpdateWithTouchedGraphs(
+      replaced = await tryReplaceProjectionFromGraphAtomically(
         agent.store,
-        replaceCuratorMetaProjectionSparql(contextGraphId, metaGraph, stagingGraph),
-        [metaGraph],
+        {
+          targetGraphUri: metaGraph,
+          stagingGraphUri: stagingGraph,
+          targetSubject: contextGraphDataGraphUri(contextGraphId),
+          preservedTargetPredicates: [DKG_ONTOLOGY.DKG_REVOKED_AGENT],
+          targetSubjectPrefixes: [`did:dkg:agent-delegation:${contextGraphId}:`],
+        },
         { source: 'agent.metaRefresh.replace' },
       );
     } finally {

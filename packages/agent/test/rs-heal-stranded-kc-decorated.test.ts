@@ -2,16 +2,16 @@
  * RS-heal — runs through the PRODUCTION store decorator stack.
  *
  * Regression for the review finding: `healStrandedScopedKCs` bails unless
- * `this.store.update` is a function, but the agent's store is NOT a bare
+ * the structured copy capabilities are present, but the agent's store is NOT a bare
  * adapter. `createTripleStore` wraps it in `SharedMemoryLiteralBlobStore` /
  * `GraphSetIndexStore`, and `DKGAgent.create` wraps THAT in
  * `createListContextGraphsCacheInvalidatingStore`. If any layer fails to
- * forward the (optional) `update` method, `this.store.update` is `undefined`
+ * forward the optional methods, the capability is `undefined`
  * in every normal daemon config → the guard silently returns → the heal never
  * runs and RS stays stuck. The bare-adapter gate tests cannot see this.
  *
  * This builds the production decorator order around a counted adapter and
- * proves: (1) `update` propagates to the top of the stack; (2) the heal
+ * proves: (1) the capabilities propagate to the top of the stack; (2) the heal
  * actually RELOCATES through it (byte-exact root equality — if `update` were
  * dropped the guard would no-op and scoped would stay empty); (3) the wrapper's
  * cache invalidation fires and the GraphSetIndex touched-graph maintenance keeps
@@ -21,8 +21,12 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  supportsCopySubjectProjection,
+  supportsReplaceSubjectPredicatesAtomically,
+  supportsTripleStoreCapability,
   type QueryOptions,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { V10MerkleTree, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
@@ -130,8 +134,109 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     );
   }
 
-  it('exposes update() at the top of the decorator stack (capability propagation)', () => {
-    expect(typeof store.update).toBe('function');
+  it('exposes structured RS-heal capabilities at the top of the decorator stack', () => {
+    expect(typeof store.structuredMutation).toBe('function');
+    expect(supportsTripleStoreCapability(store, 'structuredMutation')).toBe(true);
+  });
+
+  it('preserves update-only RS-heal compatibility through the full decorator stack', async () => {
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'structuredMutation') return undefined;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      new GraphSetIndexStore(adapter),
+      () => undefined,
+    );
+
+    expect(typeof wrapped.structuredMutation).toBe('function');
+    expect(supportsTripleStoreCapability(wrapped, 'structuredMutation')).toBe(false);
+    expect(supportsCopySubjectProjection(wrapped)).toBe(true);
+    expect(supportsReplaceSubjectPredicatesAtomically(wrapped)).toBe(true);
+
+    const legacyMeta = contextGraphMetaUri(TEST_CG);
+    await wrapped.insert([
+      {
+        subject: `did:dkg:context-graph:${TEST_CG}`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
+        object: `"${TEST_ONCHAIN}"`,
+        graph: ONTOLOGY_GRAPH,
+      },
+      ...metaQuads(TEST_UAL, legacyMeta),
+      ...publicTriples().map((triple) => ({ ...triple, graph: contextGraphDataUri(TEST_CG) })),
+    ]);
+    await writeMaterializedVersion(wrapped, legacyMeta, TEST_UAL, {
+      blockNumber: 100,
+      txIndex: 0,
+    });
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: wrapped,
+        rsHealCursorByCg: new Map(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      TEST_CG,
+      { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
+    const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
+    const dataPresent = await wrapped.query(
+      `ASK { GRAPH <${scopedData}> { <${ROOT}> <urn:p:name> "strand" } }`,
+    );
+    const metadataPresent = await wrapped.query(
+      `ASK { GRAPH <${scopedMeta}> { <${TEST_UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
+    );
+    const completionPresent = await wrapped.query(
+      `ASK { GRAPH <${scopedMeta}> { <${TEST_UAL}> <${DKG}materializedVersion> ?version } }`,
+    );
+    expect(dataPresent).toEqual({ type: 'boolean', value: true });
+    expect(metadataPresent).toEqual({ type: 'boolean', value: true });
+    expect(completionPresent).toEqual({ type: 'boolean', value: true });
+
+    await wrapped.close();
+  });
+
+  it('snapshots structured-mutation cache bookkeeping before async dispatch', async () => {
+    let release!: () => void;
+    const structuredMutation = vi.fn(() => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'structuredMutation') return structuredMutation;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const dirtiedGraphs: string[] = [];
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => undefined,
+      (_quads, targetGraph) => {
+        if (targetGraph) dirtiedGraphs.push(targetGraph);
+      },
+    );
+    const input = {
+      sourceGraphUris: ['urn:test:source'],
+      targetGraphUri: 'urn:test:target',
+      roots: ['urn:test:root'],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    };
+
+    const pending = wrapped.structuredMutation!({ kind: 'copy-subject-projection', input });
+    input.targetGraphUri = 'urn:test:mutated-after-dispatch';
+    release();
+    await pending;
+
+    expect(structuredMutation).toHaveBeenCalledTimes(1);
+    expect(dirtiedGraphs).toEqual(['urn:test:target']);
+    await wrapped.close();
   });
 
   it('forwards atomic graph-and-subject replacement through the agent decorator', async () => {
@@ -294,14 +399,171 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
   });
 
+  it('relocates every root of a multi-root KC with byte-identical proof data', async () => {
+    const cg = 'multi-root-strand';
+    const onChainId = '19';
+    const controlCg = 'multi-root-control';
+    const controlOnChainId = '20';
+    const ual = 'did:dkg:hardhat:31337/0xmulti/42';
+    const controlUal = 'did:dkg:hardhat:31337/0xmulticontrol/42';
+    const roots = ['urn:entity:multi-a', 'urn:entity:multi-b'];
+    const data = roots.flatMap((root, index) => [
+      { subject: root, predicate: 'urn:p:value', object: `"${index}"` },
+      {
+        subject: `${root}/.well-known/genid/child`,
+        predicate: 'urn:p:child',
+        object: `"child-${index}"`,
+      },
+    ]);
+    const metadata = (subject: string, graph: string): Quad[] => [
+      { subject, predicate: `${RDF}type`, object: `${DKG}KnowledgeCollection`, graph },
+      { subject, predicate: `${DKG}batchId`, object: `"${KA_ID}"^^<${XSD}integer>`, graph },
+      ...roots.flatMap((root, index) => [
+        { subject: `${subject}/${index + 1}`, predicate: `${DKG}partOf`, object: subject, graph },
+        { subject: `${subject}/${index + 1}`, predicate: `${DKG}rootEntity`, object: root, graph },
+      ]),
+    ];
+    await store.insert([
+      {
+        subject: `did:dkg:context-graph:${cg}`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
+        object: `"${onChainId}"`,
+        graph: ONTOLOGY_GRAPH,
+      },
+      {
+        subject: `did:dkg:context-graph:${controlCg}`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
+        object: `"${controlOnChainId}"`,
+        graph: ONTOLOGY_GRAPH,
+      },
+      ...metadata(ual, contextGraphMetaUri(cg)),
+      ...data.map((quad) => ({ ...quad, graph: contextGraphDataUri(cg) })),
+      ...metadata(controlUal, contextGraphMetaUri(controlCg, controlOnChainId)),
+      ...data.map((quad) => ({ ...quad, graph: contextGraphDataUri(controlCg, controlOnChainId) })),
+    ]);
+    await writeMaterializedVersion(store, contextGraphMetaUri(cg), ual, {
+      blockNumber: 100,
+      txIndex: 0,
+    });
+
+    const control = await extractV10KCFromStore(store, BigInt(controlOnChainId), KA_ID);
+    await runHeal(cg, onChainId);
+    const healed = await extractV10KCFromStore(store, BigInt(onChainId), KA_ID);
+
+    expect(new V10MerkleTree(healed.leaves).root).toEqual(new V10MerkleTree(control.leaves).root);
+    for (const root of roots) {
+      const present = await store.query(
+        `ASK { GRAPH <${contextGraphDataUri(cg, onChainId)}> { <${root}> ?p ?o } }`,
+      );
+      expect(present.type === 'boolean' && present.value).toBe(true);
+    }
+  });
+
+  it('chunks an over-budget root set and stamps completion after every data chunk', async () => {
+    const cg = 'oversized-root-set';
+    const onChainId = '21';
+    const ual = 'did:dkg:hardhat:31337/0xoversized/42';
+    const roots = Array.from(
+      { length: 10 },
+      (_, index) => `urn:entity:oversized:${index}:${'x'.repeat(500_000)}`,
+    );
+    const mutations: StructuredMutation[] = [];
+    const fakeStore = {
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes('SELECT ?ual ?b')) {
+          return { type: 'bindings' as const, bindings: [{ ual, b: String(KA_ID) }] };
+        }
+        if (sparql.includes('SELECT ?root')) {
+          return {
+            type: 'bindings' as const,
+            bindings: roots.map((root) => ({ root })),
+          };
+        }
+        if (sparql.includes('ASK')) return { type: 'boolean' as const, value: true };
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+      structuredMutation: vi.fn(async (mutation: StructuredMutation) => {
+        mutations.push(mutation);
+      }),
+    } as unknown as TripleStore;
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    const scopedData = contextGraphDataUri(cg, onChainId);
+    const dataCopies = mutations.filter((mutation) => mutation.kind === 'copy-subject-projection'
+      && mutation.input.targetGraphUri === scopedData);
+    expect(dataCopies.length).toBeGreaterThan(1);
+    expect(dataCopies.flatMap((mutation) => mutation.kind === 'copy-subject-projection'
+      ? mutation.input.roots
+      : [])).toEqual(roots);
+
+    const firstDataIndex = mutations.indexOf(dataCopies[0]);
+    const lastDataIndex = mutations.indexOf(dataCopies[dataCopies.length - 1]);
+    const completionResetIndex = mutations.findIndex((mutation) => (
+      mutation.kind === 'replace-subject-predicates'
+      && mutation.input.replacementQuads.length === 0
+    ));
+    const completionStampIndex = mutations.findIndex((mutation) => (
+      mutation.kind === 'replace-subject-predicates'
+      && mutation.input.replacementQuads.some((quad) => quad.predicate === `${DKG}materializedVersion`)
+    ));
+    expect(completionResetIndex).toBeGreaterThanOrEqual(0);
+    expect(completionResetIndex).toBeLessThan(firstDataIndex);
+    expect(completionStampIndex).toBeGreaterThan(lastDataIndex);
+  });
+
+  it('rejects an individually over-budget root before clearing completion', async () => {
+    const cg = 'unrepresentable-root';
+    const onChainId = '22';
+    const ual = 'did:dkg:hardhat:31337/0xunrepresentable/42';
+    const root = `urn:entity:unrepresentable:${'x'.repeat(4 * 1024 * 1024)}`;
+    const mutations: StructuredMutation[] = [];
+    const fakeStore = {
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes('SELECT ?ual ?b')) {
+          return { type: 'bindings' as const, bindings: [{ ual, b: String(KA_ID) }] };
+        }
+        if (sparql.includes('SELECT ?root')) {
+          return { type: 'bindings' as const, bindings: [{ root }] };
+        }
+        if (sparql.includes('ASK')) return { type: 'boolean' as const, value: true };
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+      structuredMutation: vi.fn(async (mutation: StructuredMutation) => {
+        mutations.push(mutation);
+      }),
+    } as unknown as TripleStore;
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    expect(mutations).toEqual([]);
+  });
+
   it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {
     // Guard the #1549 warm-index behaviour at the call site: a regression reverting
     // either INSERT to a plain `store.update(sparql)` would still relocate the KC
     // (the graphsAfter/merkle assertions above stay green) but would re-dirty the
-    // graph-set index and force a full rebuild scan. Capture the update() options the
-    // heal sends through the top of the production stack and assert each INSERT
-    // declares its scoped target graph + source tag.
-    const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    // graph-set index and force a full rebuild scan. Capture the structured
+    // operations the heal sends through the top of the production stack and
+    // assert each declares its scoped target graph + source tag.
+    const copyCalls: Array<{ targetGraphUri: string; options?: QueryOptions }> = [];
+    const replaceCalls: Array<{ graphUri: string; options?: QueryOptions }> = [];
     const operationOptions: Array<{ method: string; options?: QueryOptions }> = [];
     const capturing = new Proxy(store, {
       get(target, prop, receiver) {
@@ -326,12 +588,17 @@ describe('healStrandedScopedKCs — through the production store decorator stack
             return orig.call(target, pattern, options);
           };
         }
-        if (prop === 'update') {
-          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
-          return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
-            updateCalls.push({ sparql, options });
-            operationOptions.push({ method: 'update', options });
-            return orig.call(target, sparql, options);
+        if (prop === 'structuredMutation') {
+          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['structuredMutation']>;
+          return (mutation: Parameters<NonNullable<TripleStore['structuredMutation']>>[0], options?: QueryOptions) => {
+            if (mutation.kind === 'copy-subject-projection') {
+              copyCalls.push({ targetGraphUri: mutation.input.targetGraphUri, options });
+            }
+            if (mutation.kind === 'replace-subject-predicates') {
+              replaceCalls.push({ graphUri: mutation.input.graphUri, options });
+            }
+            operationOptions.push({ method: `structuredMutation:${mutation.kind}`, options });
+            return orig.call(target, mutation, options);
           };
         }
         return Reflect.get(target, prop, receiver);
@@ -350,18 +617,17 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
     const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
     const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
-    const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
-    const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
-    expect(dataInsert?.options).toMatchObject({
+    const dataCopy = copyCalls.find((call) => call.targetGraphUri === scopedData);
+    const metaCopy = copyCalls.find((call) => call.targetGraphUri === scopedMeta);
+    expect(dataCopy?.options).toMatchObject({
       priority: 'background',
-      source: 'agent.swm.rsHeal.materialize',
-      touchedGraphs: [scopedData],
+      source: 'agent.swm.rsHeal.materialize.copy',
     });
-    expect(metaInsert?.options).toMatchObject({
+    expect(metaCopy?.options).toMatchObject({
       priority: 'background',
-      source: 'agent.swm.rsHeal.materialize',
-      touchedGraphs: [scopedMeta],
+      source: 'agent.swm.rsHeal.materialize.copy',
     });
+    expect(replaceCalls.filter((call) => call.graphUri === scopedMeta)).toHaveLength(2);
     expect(operationOptions.length).toBeGreaterThan(0);
     expect(operationOptions.every(({ options }) => options?.priority === 'background')).toBe(true);
     expect(operationOptions.every(({ options }) => options?.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);

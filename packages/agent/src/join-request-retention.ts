@@ -3,12 +3,24 @@ import {
   contextGraphMetaGraphUri,
   sparqlString,
 } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  BOUNDED_MUTATION_MAX_PRUNE_DELETE,
+  tryPruneRankedSubjects,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 
 const JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const REQUEST_STATUS = 'https://dkg.network/ontology#requestStatus';
 const REQUEST_TIMESTAMP = 'https://dkg.network/ontology#requestTimestamp';
 const DECISION_TIMESTAMP = 'https://dkg.network/ontology#decisionTimestamp';
+
+const TERMINAL_JOIN_REQUEST_RETENTION_POLICY = {
+  subjectPrefix: JOIN_REQUEST_SUBJECT_PREFIX,
+  eligibilityPredicate: REQUEST_STATUS,
+  eligibleObjects: ['approved', 'rejected'] as const,
+  primaryRankPredicate: DECISION_TIMESTAMP,
+  secondaryRankPredicate: REQUEST_TIMESTAMP,
+};
 
 /**
  * Terminal moderation resources are useful for curator diagnostics, but unlike
@@ -25,13 +37,19 @@ function bindingInteger(value: string | undefined): number {
 }
 
 function terminalJoinRequestWhere(metaGraph: string): string {
+  const policy = TERMINAL_JOIN_REQUEST_RETENTION_POLICY;
+  const eligibleStatuses = policy.eligibleObjects.map(sparqlString);
   return `
     GRAPH <${assertSafeIri(metaGraph)}> {
-      ?request <${REQUEST_STATUS}> ?status .
-      OPTIONAL { ?request <${REQUEST_TIMESTAMP}> ?requestTimestamp }
-      OPTIONAL { ?request <${DECISION_TIMESTAMP}> ?decisionTimestamp }
-      VALUES ?status { "approved" "rejected" }
-      FILTER(STRSTARTS(STR(?request), ${sparqlString(JOIN_REQUEST_SUBJECT_PREFIX)}))
+      ?request <${policy.eligibilityPredicate}> ?status .
+      OPTIONAL { ?request <${policy.secondaryRankPredicate}> ?requestTimestamp }
+      OPTIONAL { ?request <${policy.primaryRankPredicate}> ?decisionTimestamp }
+      VALUES ?status { ${eligibleStatuses.join(' ')} }
+      FILTER NOT EXISTS {
+        ?request <${policy.eligibilityPredicate}> ?nonTerminalStatus .
+        FILTER(?nonTerminalStatus NOT IN (${eligibleStatuses.join(', ')}))
+      }
+      FILTER(STRSTARTS(STR(?request), ${sparqlString(policy.subjectPrefix)}))
     }
   `;
 }
@@ -40,14 +58,16 @@ function terminalJoinRequestWhere(metaGraph: string): string {
  * Delete terminal join-request subjects beyond the newest `maxRecords`.
  *
  * Pending requests are never candidates. Production stores prune wholly in a
- * server-side SPARQL update; the compatibility fallback materializes only the
- * overflow subject IDs, never their full moderation payloads.
+ * server-side atomic operation that rechecks terminal state at commit time.
+ * Legacy stores without that capability skip this resource-hygiene pass: a
+ * select-then-delete fallback could erase a subject concurrently reused as a
+ * pending request.
  */
-export async function pruneTerminalJoinRequestRecords(
+export async function tryPruneTerminalJoinRequestRecords(
   store: TripleStore,
   contextGraphId: string,
   maxRecords = MAX_TERMINAL_JOIN_REQUEST_RECORDS_PER_CONTEXT_GRAPH,
-): Promise<number> {
+): Promise<void> {
   const cap = Math.max(0, Math.floor(maxRecords));
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const countResult = await store.query(`
@@ -59,53 +79,30 @@ export async function pruneTerminalJoinRequestRecords(
     ? bindingInteger(countResult.bindings[0]?.['count'])
     : 0;
   const overflow = Math.max(0, total - cap);
-  if (overflow === 0) return 0;
+  if (overflow === 0) return;
 
-  const overflowSelection = `
-    SELECT ?request
-           (MAX(?decisionTimestamp) AS ?latestDecisionTimestamp)
-           (MAX(?requestTimestamp) AS ?latestRequestTimestamp)
-    WHERE {
-      ${terminalJoinRequestWhere(metaGraph)}
-    }
-    GROUP BY ?request
-    ORDER BY DESC(COALESCE(
-      xsd:integer(STR(?latestDecisionTimestamp)),
-      xsd:integer(STR(?latestRequestTimestamp)),
-      0
-    )) DESC(STR(?request))
-    OFFSET ${cap}
-  `;
-
-  if (typeof store.update === 'function') {
-    await store.update(`
-      PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-      DELETE { GRAPH <${assertSafeIri(metaGraph)}> { ?request ?predicate ?object } }
-      WHERE {
-        { ${overflowSelection} }
-        GRAPH <${assertSafeIri(metaGraph)}> { ?request ?predicate ?object }
-      }
-    `, {
-      touchedGraphs: [metaGraph],
-      priority: 'background',
-      source: 'join.moderationRetention.prune',
-    });
-    return overflow;
-  }
-
-  const result = await store.query(`
-    PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-    ${overflowSelection}
-  `, { priority: 'background', source: 'join.moderationRetention.selectOverflow' });
-  if (result.type !== 'bindings') return 0;
-  const subjects = result.bindings
-    .map((row) => row['request'])
-    .filter((subject): subject is string => Boolean(subject));
-  for (const subject of subjects) {
-    await store.deleteByPattern(
-      { graph: metaGraph, subject },
-      { priority: 'background', source: 'join.moderationRetention.pruneFallback' },
+  // Drain the pre-counted overflow in independently scheduled batches. Each
+  // mutation rechecks terminal eligibility atomically, and releasing the store
+  // scheduler between batches prevents a large historical backlog from holding
+  // one unbounded mutation permit.
+  let remainingOverflow = overflow;
+  while (remainingOverflow > 0) {
+    const policy = TERMINAL_JOIN_REQUEST_RETENTION_POLICY;
+    const batchSize = Math.min(
+      remainingOverflow,
+      BOUNDED_MUTATION_MAX_PRUNE_DELETE,
     );
+    const supported = await tryPruneRankedSubjects(store, {
+      graphUri: metaGraph,
+      subjectPrefix: policy.subjectPrefix,
+      eligibilityPredicate: policy.eligibilityPredicate,
+      eligibleObjects: [...policy.eligibleObjects],
+      primaryRankPredicate: policy.primaryRankPredicate,
+      secondaryRankPredicate: policy.secondaryRankPredicate,
+      retainNewest: cap,
+      maxDelete: batchSize,
+    }, { priority: 'background', source: 'join.moderationRetention.prune' });
+    if (!supported) return;
+    remainingOverflow -= batchSize;
   }
-  return subjects.length;
 }

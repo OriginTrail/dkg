@@ -2,9 +2,21 @@ import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
+import type {
+  TripleStore,
+  Quad,
+  TripleStoreQueryOptions,
+  QueryResult,
+  UpdateOptions,
+  StructuredMutation,
+} from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import {
+  normalizeStructuredMutation,
+  structuredMutationMightMutate,
+  structuredMutationTouchedGraphs,
+} from '../bounded-structured-mutation.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -678,6 +690,18 @@ export class OxigraphWorkerStore implements TripleStore {
     // single-message commit, same contract as insert/replaceGraph.
     await this.call('replaceSubject', graphUri, subject, quads);
     this.writeGen.recordGraphWrites([graphUri]);
+  }
+  async structuredMutation(
+    mutation: StructuredMutation,
+    // Mutations intentionally use the unbounded, non-cancellable worker lane:
+    // aborting the caller could report failure while the worker later commits.
+    _options?: TripleStoreQueryOptions,
+  ): Promise<void> {
+    const normalized = normalizeStructuredMutation(mutation);
+    await this.call('structuredMutation', normalized);
+    if (structuredMutationMightMutate(normalized)) {
+      this.writeGen.recordGraphWrites(structuredMutationTouchedGraphs(normalized));
+    }
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);

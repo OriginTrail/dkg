@@ -6,7 +6,36 @@ export type TripleStoreCapability =
   | 'update'
   | 'replaceGraph'
   | 'replaceGraphAndSubject'
-  | 'replaceSubject';
+  | 'replaceSubject'
+  | 'structuredMutation';
+
+/**
+ * Decorators whose optional methods are always present use this non-mutating
+ * probe to report the capability of the store they wrap. The symbol keeps the
+ * forwarding contract explicit without adding another public method name to
+ * every TripleStore implementation.
+ */
+export const TRIPLE_STORE_CAPABILITY_SUPPORT: unique symbol = Symbol(
+  'dkg.tripleStoreCapabilitySupport',
+);
+
+interface TripleStoreCapabilitySupport {
+  [TRIPLE_STORE_CAPABILITY_SUPPORT](capability: TripleStoreCapability): boolean;
+}
+
+/** Return whether invoking an optional operation can reach a capable backend. */
+export function supportsTripleStoreCapability(
+  store: unknown,
+  capability: TripleStoreCapability,
+): boolean {
+  const support = (store as Partial<TripleStoreCapabilitySupport> | null | undefined)
+    ?.[TRIPLE_STORE_CAPABILITY_SUPPORT];
+  if (typeof support === 'function') {
+    return support.call(store, capability);
+  }
+  return typeof (store as Partial<Record<TripleStoreCapability, unknown>> | null | undefined)
+    ?.[capability] === 'function';
+}
 
 /**
  * Typed signal that an optional store capability is unavailable.
@@ -29,6 +58,14 @@ export class UnsupportedTripleStoreCapabilityError extends Error {
   }
 }
 
+export function isTripleStoreCapabilityRefusal(
+  error: unknown,
+  capability: TripleStoreCapability,
+): boolean {
+  return error instanceof UnsupportedTripleStoreCapabilityError
+    && error.capability === capability;
+}
+
 /**
  * A capability refusal is a clean preflight outcome — the contract requires it
  * to be raised before the operation starts — so decorators that treat a failed
@@ -36,22 +73,13 @@ export class UnsupportedTripleStoreCapabilityError extends Error {
  * it from cache-dirtying and reconcile flagging.
  */
 export function isReplaceGraphCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceGraph'
-  );
+  return isTripleStoreCapabilityRefusal(error, 'replaceGraph');
 }
 
 export function isReplaceGraphAndSubjectCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceGraphAndSubject'
-  );
+  return isTripleStoreCapabilityRefusal(error, 'replaceGraphAndSubject');
 }
 
 export function isReplaceSubjectCapabilityRefusal(error: unknown): boolean {
-  return (
-    error instanceof UnsupportedTripleStoreCapabilityError &&
-    error.capability === 'replaceSubject'
-  );
+  return isTripleStoreCapabilityRefusal(error, 'replaceSubject');
 }

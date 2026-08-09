@@ -2,6 +2,7 @@ import { createServer, type Server, type ServerResponse } from 'node:http';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import {
   SparqlHttpStore,
+  asGraphWriteGenSource,
   createTripleStore,
   getExternalStorePrioritySchedulerSnapshot,
   tryReplaceGraphAtomically,
@@ -844,6 +845,36 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(1);
   });
 
+  it('replaceSubjectPredicates uses one atomic DELETE/INSERT WHERE operation', async () => {
+    insertedQuads.length = 0;
+    await store.structuredMutation!({ kind: 'replace-subject-predicates', input: {
+      graphUri: 'http://ex.org/g1',
+      subject: 'http://ex.org/job',
+      predicates: ['http://ex.org/status', 'http://ex.org/decidedAt'],
+      replacementQuads: [
+        {
+          subject: 'http://ex.org/job',
+          predicate: 'http://ex.org/status',
+          object: '"approved"',
+          graph: 'http://ex.org/g1',
+        },
+        {
+          subject: 'http://ex.org/job',
+          predicate: 'http://ex.org/decidedAt',
+          object: '"2"',
+          graph: 'http://ex.org/g1',
+        },
+      ],
+    } });
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE {');
+    expect(insertedQuads[0]).toContain('INSERT {');
+    expect(insertedQuads[0]).toContain('WHERE {');
+    expect(insertedQuads[0]).not.toContain('INSERT DATA');
+    expect(insertedQuads[0]).not.toContain(';');
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });
@@ -919,6 +950,31 @@ describe('SparqlHttpStore (test server)', () => {
         graph: 'http://ex.org/g2',
       }]);
       await expect(store.listGraphs()).resolves.toContain('http://ex.org/g1');
+      expect(listGraphsHits).toBe(2);
+    });
+
+    it('invalidates caches and write generations after an indeterminate structured mutation', async () => {
+      listGraphsHits = 0;
+      const store = new SparqlHttpStore({
+        queryEndpoint: queryUrl,
+        updateEndpoint: updateUrl.replace('/update', '/error-update'),
+        managedByDkg: true,
+      });
+      await store.listGraphs();
+      await store.listGraphs();
+      expect(listGraphsHits).toBe(1);
+      const writeGen = asGraphWriteGenSource(store);
+      expect(writeGen).not.toBeNull();
+      const graph = 'http://ex.org/g2';
+      const before = writeGen?.getWriteGen(graph) ?? 0;
+
+      await expect(store.structuredMutation({ kind: 'delete-subjects', input: {
+        graphUri: graph,
+        subjects: ['http://ex.org/stale'],
+      } })).rejects.toThrow(/SPARQL HTTP structuredMutation failed \(500\)/);
+
+      expect(writeGen?.getWriteGen(graph)).toBeGreaterThan(before);
+      await store.listGraphs();
       expect(listGraphsHits).toBe(2);
     });
 

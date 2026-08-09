@@ -10,6 +10,7 @@ import type {
   SelectResult,
   ConstructResult,
   AskResult,
+  StructuredMutation,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { buildBlankNodeSafeDelete } from './sparql-http.js';
@@ -31,6 +32,11 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import {
+  buildStructuredMutationUpdate,
+  normalizeStructuredMutation,
+  structuredMutationMightMutate,
+} from '../bounded-structured-mutation.js';
 import { quadToNQuad } from '../bounded-rdf.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 
@@ -403,6 +409,26 @@ export class BlazegraphStore implements TripleStore {
       buildAtomicSubjectReplaceUpdate(graphUri, subject, quads),
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
+    );
+  }
+
+  async structuredMutation(
+    mutation: StructuredMutation,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const normalized = normalizeStructuredMutation(mutation);
+    if (normalized.kind === 'replace-subject-predicates') {
+      assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'BlazegraphStore.structuredMutation',
+      });
+    }
+    const update = buildStructuredMutationUpdate(normalized);
+    if (!update || !structuredMutationMightMutate(normalized)) return;
+    await this.sparqlUpdate(
+      update,
+      { ...options, source: options?.source ?? 'blazegraph.structuredMutation' },
+      'structuredMutation',
     );
   }
 

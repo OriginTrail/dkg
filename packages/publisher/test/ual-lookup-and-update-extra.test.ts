@@ -28,7 +28,7 @@
  * pinned against the expected behavior; if the metadata resolver
  * regresses, the failures ARE the bug signal.
  */
-import { describe, expect, it, beforeEach } from 'vitest';
+import { describe, expect, it, beforeEach, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { resolveUalByBatchId, updateMetaMerkleRoot } from '../src/index.js';
 import { GraphManager } from '@origintrail-official/dkg-storage';
@@ -109,6 +109,48 @@ describe('P-18: resolveUalByBatchId uses a typed integer literal (batchId 1 ≠ 
   it('batchId=10 resolves to the "/10" UAL (no prefix collision with batchId=1)', async () => {
     const result = await resolveUalByBatchId(store, metaGraph, BATCH_10);
     expect(result).toBe(UAL_10);
+  });
+
+  it('updates the root through the predicate capability without a mutating query', async () => {
+    const DKG = 'http://dkg.io/ontology/';
+    await store.insert([{
+      subject: UAL_1,
+      predicate: `${DKG}merkleRoot`,
+      object: '"old-root"',
+      graph: metaGraph,
+    }]);
+    const originalQuery = store.query.bind(store);
+    const mutatingQueries: string[] = [];
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (/\b(?:INSERT|DELETE|DROP|CLEAR|COPY|MOVE|ADD|LOAD)\b/i.test(sparql)) {
+        mutatingQueries.push(sparql);
+        throw new Error('mutating query channel reached');
+      }
+      return originalQuery(sparql, options);
+    });
+    const replace = vi.spyOn(store, 'structuredMutation');
+    const newRoot = new Uint8Array(32).fill(0x5a);
+
+    await updateMetaMerkleRoot(store, new GraphManager(store), CG, BATCH_1, newRoot);
+
+    expect(mutatingQueries).toEqual([]);
+    expect(replace).toHaveBeenCalledWith({ kind: 'replace-subject-predicates', input: {
+      graphUri: metaGraph,
+      subject: UAL_1,
+      predicates: [`${DKG}merkleRoot`],
+      replacementQuads: [{
+        subject: UAL_1,
+        predicate: `${DKG}merkleRoot`,
+        object: `"${'5a'.repeat(32)}"`,
+        graph: metaGraph,
+      }],
+    } }, { source: 'publisher.metadata.updateMerkleRoot' });
+    const roots = await originalQuery(
+      `SELECT ?root WHERE { GRAPH <${metaGraph}> { <${UAL_1}> <${DKG}merkleRoot> ?root } }`,
+    );
+    expect(roots.type === 'bindings' ? roots.bindings : []).toEqual([
+      { root: `"${'5a'.repeat(32)}"` },
+    ]);
   });
 
   it('batchId that would substring-match a real row still returns undefined', async () => {

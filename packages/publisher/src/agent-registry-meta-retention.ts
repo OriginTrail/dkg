@@ -1,4 +1,4 @@
-import { tryUpdateWithTouchedGraphs, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
+import { tryPruneLinkedRecordClosures, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   isAgentRegistryContextGraph,
   sparqlIri,
@@ -15,17 +15,6 @@ const log = new Logger('AgentRegistryMetaRetention');
 // subjects (`<ual>/<n> dkg:partOf <ual>`). Used here to resolve a matched member
 // subject back to its record ROOT (the KC `<ual>`).
 const DKG_PART_OF = 'http://dkg.io/ontology/partOf';
-
-/**
- * Reject SPARQL-structure-breaking characters before a graph IRI is embedded in
- * a `GRAPH <...>` clause. Local copy of the guard in `metadata.ts` so this
- * module stays self-contained (metadata.ts is now pure quad generation).
- */
-function assertSafeGraphIriForSparql(graphIri: string): void {
-  if (/[<>"{}|^`\\\s]/.test(graphIri)) {
-    throw new Error(`Unsafe graph IRI for SPARQL query: "${graphIri}"`);
-  }
-}
 
 // Per-INDIVIDUAL-root serialization (#1533/#1534 review). Two concurrent
 // agents/_meta writes whose root sets INTERSECT each insert a fresh record and then
@@ -235,7 +224,7 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
   const { store, contextGraphId, metaGraph, rootEntities, keepUal } = opts;
   if (!isAgentRegistryContextGraph(contextGraphId)) return;
 
-  // Build the `VALUES ?root { … }` list with the canonical `sparqlIri` guard,
+  // Validate the requested roots with the canonical `sparqlIri` guard,
   // which THROWS on an unsafe IRI. An unsafe root is therefore an explicit
   // boundary, not a silent drop: we collect it and WARN (naming it) rather than
   // degrade the retention invariant without any signal.
@@ -243,7 +232,8 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
   const droppedRoots: string[] = [];
   for (const root of new Set(rootEntities)) {
     try {
-      rootIris.push(sparqlIri(root));
+      sparqlIri(root);
+      rootIris.push(root);
     } catch {
       droppedRoots.push(root);
     }
@@ -257,44 +247,27 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
     );
   }
   if (rootIris.length === 0) return;
-  assertSafeGraphIriForSparql(metaGraph);
 
-  // COUNT-FREE by construction: ONE server-side SPARQL `DELETE … WHERE`, never a
+  // COUNT-FREE by construction: ONE bounded server-side prune, never a
   // per-record `deleteByPattern`/`deleteBySubjectPrefix` loop. On the production
   // Blazegraph/SparqlHttp backends those helpers bracket every delete with TWO
   // full-graph `countQuads` scans (blazegraph.ts deleteByPattern/
   // deleteBySubjectPrefix) — evicting an agent's backlog on the first heartbeat
   // would fan out into thousands of full-graph scans on the very cores this
   // change exists to relieve. A single UPDATE does the whole eviction inside the
-  // store with no client round-trips or counts. Same "bail if the backend can't
-  // do server-side UPDATE" contract as the RS heal (dkg-agent-swm-host.ts
-  // healStrandedScopedKCs); every production + test backend implements it.
-  if (typeof store.update !== 'function') {
-    // Pruning IS required here (agents CG + non-empty roots), but the store
-    // cannot run a server-side UPDATE. Do NOT silently skip — and do NOT throw
-    // (a defensive bound must never break the publish path). WARN loudly so the
-    // invariant violation is visible: every production + test backend implements
-    // update(), so this means a misconfigured store and agents/_meta will grow
-    // unbounded on it.
-    log.warn(
-      createOperationContext('system'),
-      `agents/_meta bound SKIPPED for context graph "${contextGraphId}": the triple store ` +
-        `lacks server-side update(); the agents-registry _meta graph will grow UNBOUNDED on ` +
-        `this backend (#1233). Every production/test backend implements update() — this ` +
-        `indicates a misconfigured store.`,
-    );
-    return;
-  }
-
+  // store with no client round-trips or counts. The structured capability owns
+  // escaping, admission, reserved-graph policy, changelog accounting, and
+  // graph-set maintenance; callers never assemble executable SPARQL.
+  //
   // `keepUal` protects a record (insert-first ordering). If it cannot be safely
   // embedded, pruning would delete the protected record, so SKIP the prune
   // (warn) rather than risk the loss. Absent `keepUal` ⇒ no protection (the
   // legacy prune-only contract).
-  let keepFilter = '';
+  let safeKeepUal: string | undefined;
   if (keepUal !== undefined) {
-    let keepIri: string;
     try {
-      keepIri = sparqlIri(keepUal);
+      sparqlIri(keepUal);
+      safeKeepUal = keepUal;
     } catch {
       log.warn(
         createOperationContext('system'),
@@ -303,7 +276,6 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
       );
       return;
     }
-    keepFilter = `FILTER(?record != ${keepIri})`;
   }
 
   // Resolve each matched MEMBER subject to its record ROOT before deleting. The
@@ -315,26 +287,25 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
   // the token subtree (the legacy-shape leak, PR #1526 #1). Collapsed records
   // have no `partOf` self-edge (metadata.ts) so COALESCE → member = `<ual>`.
   // Read-both on the member predicate (`dkg:rootEntity` ‖ `dkg:entity`).
-  const values = rootIris.join(' ');
-  const sparql = `DELETE { GRAPH <${metaGraph}> { ?s ?p ?o } }
-WHERE { GRAPH <${metaGraph}> {
-  VALUES ?root { ${values} }
-  { ?member <${DKG_ROOT_ENTITY_LEGACY}> ?root } UNION { ?member <${DKG_ENTITY}> ?root }
-  OPTIONAL { ?member <${DKG_PART_OF}> ?parent }
-  BIND(COALESCE(?parent, ?member) AS ?record)
-  ${keepFilter}
-  ?s ?p ?o .
-  FILTER(?s = ?record || STRSTARTS(STR(?s), CONCAT(STR(?record), "/")))
-} }`;
-  // #1549: the prune's DELETE only touches `metaGraph`, so declare it — the
-  // graph-set index then maintains itself incrementally (one `hasGraph`) instead
-  // of marking the whole index dirty and forcing a full store scan on the next
-  // enumeration. The agents-meta prune is one of only two recurring server-side
-  // UPDATE sources that dirtied the index on managed cores.
-  await tryUpdateWithTouchedGraphs(
+  const pruned = await tryPruneLinkedRecordClosures(
     store,
-    sparql,
-    [metaGraph],
+    {
+      graphUri: metaGraph,
+      matchObjectIris: rootIris,
+      linkPredicates: [DKG_ROOT_ENTITY_LEGACY, DKG_ENTITY],
+      recordParentPredicate: DKG_PART_OF,
+      protectedRecordIri: safeKeepUal,
+      descendantSeparator: '/',
+    },
     { source: 'agent-registry-meta.prune' },
   );
+  if (!pruned) {
+    log.warn(
+      createOperationContext('system'),
+      `agents/_meta bound SKIPPED for context graph "${contextGraphId}": the triple store ` +
+        `lacks structuredMutation() and update(); the agents-registry _meta graph will grow UNBOUNDED ` +
+        `on this backend (#1233). Managed production stores expose this capability; this ` +
+        `indicates a legacy or misconfigured store.`,
+    );
+  }
 }

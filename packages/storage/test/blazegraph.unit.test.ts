@@ -662,6 +662,47 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(body).not.toContain('atomic-graph-replace:');
   });
 
+  it('structuredMutation posts one bounded predicate replacement update', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    await s.structuredMutation({ kind: 'replace-subject-predicates', input: {
+      graphUri: 'http://ex.org/g',
+      subject: 'http://ex.org/job',
+      predicates: ['http://ex.org/status'],
+      replacementQuads: [{
+        subject: 'http://ex.org/job',
+        predicate: 'http://ex.org/status',
+        object: '"approved"',
+        graph: 'http://ex.org/g',
+      }],
+    } });
+
+    expect(fetchCalls).toHaveLength(1);
+    const [, init] = fetchCalls[0];
+    const body = String(init?.body);
+    expect((init?.headers as Record<string, string>)['Content-Type'])
+      .toBe('application/sparql-update; charset=utf-8');
+    expect(body).toContain('DELETE {');
+    expect(body).toContain('INSERT {');
+    expect(body).toContain('GRAPH <http://ex.org/g>');
+    expect(body).toContain('<http://ex.org/job> <http://ex.org/status> "approved"');
+  });
+
+  it('structuredMutation rejects oversized replacement literals before fetch', async () => {
+    const s = new BlazegraphStore(baseUrl);
+    await expect(s.structuredMutation({ kind: 'replace-subject-predicates', input: {
+      graphUri: 'http://ex.org/g',
+      subject: 'http://ex.org/job',
+      predicates: ['http://ex.org/status'],
+      replacementQuads: [{
+        subject: 'http://ex.org/job',
+        predicate: 'http://ex.org/status',
+        object: `"${'x'.repeat(70_000)}"`,
+        graph: 'http://ex.org/g',
+      }],
+    } })).rejects.toMatchObject({ code: 'OVERSIZED_RDF_LITERAL' });
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it('update honors pre-aborted options before dispatch', async () => {
     const s = new BlazegraphStore(baseUrl);
     const controller = new AbortController();

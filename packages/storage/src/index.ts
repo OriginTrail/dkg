@@ -12,6 +12,13 @@ export {
   type TripleStoreBackend,
   type TripleStoreQueryOptions,
   type UpdateOptions,
+  type DeleteSubjectsInput,
+  type PruneRankedSubjectsInput,
+  type PruneLinkedRecordClosuresInput,
+  type ReplaceSubjectPredicatesInput,
+  type ReplaceProjectionFromGraphInput,
+  type CopySubjectProjectionInput,
+  type StructuredMutation,
   type LargeLiteralStorageConfig,
   registerTripleStoreAdapter,
   createTripleStore,
@@ -19,6 +26,15 @@ export {
   tryReplaceGraphAtomically,
   tryReplaceGraphAndSubjectAtomically,
   tryReplaceSubjectAtomically,
+  tryDeleteSubjects,
+  tryStructuredMutation,
+  tryPruneRankedSubjects,
+  tryPruneLinkedRecordClosures,
+  supportsReplaceSubjectPredicatesAtomically,
+  tryReplaceSubjectPredicatesAtomically,
+  tryReplaceProjectionFromGraphAtomically,
+  supportsCopySubjectProjection,
+  tryCopySubjectProjection,
   isExternalBackend,
   getSparqlEndpoint,
   type SparqlEndpoint,
@@ -33,6 +49,12 @@ export {
   type AtomicGraphAndSubjectReplaceUpdate,
   type AtomicGraphReplaceUpdate,
 } from './atomic-graph-replace.js';
+export {
+  BOUNDED_MUTATION_MAX_PRUNE_DELETE,
+  chunkCopySubjectProjectionInput,
+  structuredMutationMightMutate,
+  structuredMutationTouchedGraphs,
+} from './bounded-structured-mutation.js';
 // System-record V1 (#2052 Stack B2). Default-unused: these modules perform no
 // I/O, scheduling, timer, or per-store lane work until the daemon supervisor
 // supplies a live ownership lease. Their fixed module-level registries remain
@@ -95,7 +117,10 @@ export {
   type SystemRecordLaneOutcomePolicyV1,
 } from './system-record-lane-forwarder-v1.js';
 export {
+  TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
+  supportsTripleStoreCapability,
+  isTripleStoreCapabilityRefusal,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,

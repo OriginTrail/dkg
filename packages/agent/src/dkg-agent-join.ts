@@ -96,7 +96,7 @@ import {
   OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, tryReplaceSubjectAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, supportsReplaceSubjectPredicatesAtomically, tryReplaceSubjectAtomically, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -389,13 +389,44 @@ import {
   type ContextGraphJoinAdmissionHost,
   type IncomingJoinRequestDecision,
 } from './context-graph-join-admission.js';
-import { pruneTerminalJoinRequestRecords } from './join-request-retention.js';
+import { tryPruneTerminalJoinRequestRecords } from './join-request-retention.js';
 
 const JOIN_REQUEST_INGRESS_WINDOW_MS = 60_000;
 const JOIN_REQUEST_INGRESS_PER_PEER = 20;
 const JOIN_REQUEST_INGRESS_PER_AGENT = 6;
 const JOIN_REQUEST_INGRESS_PER_CONTEXT_GRAPH = 100;
 const JOIN_REQUEST_INGRESS_MAX_QUEUE_DEPTH = 64;
+const JOIN_REQUEST_STATUS_PREDICATE = 'https://dkg.network/ontology#requestStatus';
+const JOIN_REQUEST_DECISION_TIMESTAMP_PREDICATE = 'https://dkg.network/ontology#decisionTimestamp';
+
+function joinRequestDecisionReplacement(
+  contextGraphId: string,
+  agentAddress: string,
+  status: 'approved' | 'rejected',
+  decidedAt = Date.now(),
+) {
+  const graphUri = contextGraphMetaGraphUri(contextGraphId);
+  const subject = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
+  return {
+    graphUri,
+    subject,
+    predicates: [JOIN_REQUEST_STATUS_PREDICATE, JOIN_REQUEST_DECISION_TIMESTAMP_PREDICATE],
+    replacementQuads: [
+      {
+        subject,
+        predicate: JOIN_REQUEST_STATUS_PREDICATE,
+        object: `"${status}"`,
+        graph: graphUri,
+      },
+      {
+        subject,
+        predicate: JOIN_REQUEST_DECISION_TIMESTAMP_PREDICATE,
+        object: `"${decidedAt}"`,
+        graph: graphUri,
+      },
+    ],
+  };
+}
 
 export interface ContextGraphJoinPolicyStatus {
   contextGraphId: string;
@@ -1957,12 +1988,11 @@ export class JoinRequestMethods extends DKGAgentBase {
       );
     }
 
-    // Every production adapter implements SPARQL UPDATE. Refuse to cross the
-    // membership boundary on a custom adapter that cannot atomically replace
-    // the moderation status.
-    if (typeof this.store.update !== 'function') {
+    // Refuse to cross the membership boundary on a custom adapter that cannot
+    // atomically replace the moderation predicates after the invite commits.
+    if (!supportsReplaceSubjectPredicatesAtomically(this.store)) {
       throw new Error(
-        'Join approval requires atomic SPARQL UPDATE support from the configured triple store.',
+        'Join approval requires atomic subject-predicate replacement support from the configured triple store.',
       );
     }
 
@@ -2009,44 +2039,23 @@ export class JoinRequestMethods extends DKGAgentBase {
 
   /** Complete the moderation side of an approval; safe to repeat after retry. */
   async markJoinRequestApproved(this: DKGAgent, contextGraphId: string, agentAddress: string): Promise<void> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
-    const requestStatus = 'https://dkg.network/ontology#requestStatus';
-    const decisionTimestamp = 'https://dkg.network/ontology#decisionTimestamp';
-    const decidedAt = Date.now();
-    if (typeof this.store.update !== 'function') {
+    const replaced = await tryReplaceSubjectPredicatesAtomically(
+      this.store,
+      joinRequestDecisionReplacement(contextGraphId, agentAddress, 'approved'),
+      { source: 'join-approval-status' },
+    );
+    if (!replaced) {
       throw new Error(
-        'Join approval requires atomic SPARQL UPDATE support from the configured triple store.',
+        'Join approval requires atomic subject-predicate replacement support from the configured triple store.',
       );
     }
-    // Status and retention ordering must cross the terminal boundary together.
-    await this.store.update(`
-      DELETE { GRAPH <${cgMetaGraph}> {
-        <${requestUri}> <${requestStatus}> ?oldStatus .
-        <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp .
-      } }
-      INSERT { GRAPH <${cgMetaGraph}> {
-        <${requestUri}> <${requestStatus}> "approved" .
-        <${requestUri}> <${decisionTimestamp}> "${decidedAt}" .
-      } }
-      WHERE  {
-        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
-        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
-      }
-    `, { touchedGraphs: [cgMetaGraph], source: 'join-approval-status' });
     await this.pruneTerminalJoinRequestHistory(contextGraphId);
   }
 
   /** Keep curator/requester moderation state bounded without risking the decision path. */
   async pruneTerminalJoinRequestHistory(this: DKGAgent, contextGraphId: string): Promise<void> {
     try {
-      const pruned = await pruneTerminalJoinRequestRecords(this.store, contextGraphId);
-      if (pruned > 0) {
-        this.log.info(
-          createOperationContext('system'),
-          `Pruned ${pruned} terminal join-request record(s) for "${contextGraphId}"`,
-        );
-      }
+      await tryPruneTerminalJoinRequestRecords(this.store, contextGraphId);
     } catch (error) {
       // Retention is resource hygiene, not part of the authorization commit.
       // Keep the terminal decision durable and retry pruning on the next one.
@@ -2256,55 +2265,27 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     status: 'approved' | 'rejected',
   ): Promise<void> {
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
-    const requestStatus = 'https://dkg.network/ontology#requestStatus';
-    const decisionTimestamp = 'https://dkg.network/ontology#decisionTimestamp';
-    const decidedAt = Date.now();
-
-    if (typeof this.store.update === 'function') {
-      await this.store.update(`
-        DELETE { GRAPH <${cgMetaGraph}> {
-          <${requestUri}> <${requestStatus}> ?oldStatus .
-          <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp .
-        } }
-        INSERT { GRAPH <${cgMetaGraph}> {
-          <${requestUri}> <${requestStatus}> "${status}" .
-          <${requestUri}> <${decisionTimestamp}> "${decidedAt}" .
-        } }
-        WHERE  {
-          OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
-          OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
-        }
-      `, { touchedGraphs: [cgMetaGraph], source: `local-join-${status}-status` });
-    } else {
-      // Compatibility fallback for custom stores without SPARQL UPDATE.
+    const replacement = joinRequestDecisionReplacement(contextGraphId, agentAddress, status);
+    const replaced = await tryReplaceSubjectPredicatesAtomically(
+      this.store,
+      replacement,
+      { source: `local-join-${status}-status` },
+    );
+    if (!replaced) {
+      // Compatibility fallback for custom stores without atomic replacement.
       // The curator remains authoritative if a crash lands between these two
       // mutations, and an approval can be redelivered to repair local state.
       await this.store.deleteByPattern({
-        graph: cgMetaGraph,
-        subject: requestUri,
-        predicate: requestStatus,
+        graph: replacement.graphUri,
+        subject: replacement.subject,
+        predicate: JOIN_REQUEST_STATUS_PREDICATE,
       });
       await this.store.deleteByPattern({
-        graph: cgMetaGraph,
-        subject: requestUri,
-        predicate: decisionTimestamp,
+        graph: replacement.graphUri,
+        subject: replacement.subject,
+        predicate: JOIN_REQUEST_DECISION_TIMESTAMP_PREDICATE,
       });
-      await this.store.insert([
-        {
-          subject: requestUri,
-          predicate: requestStatus,
-          object: `"${status}"`,
-          graph: cgMetaGraph,
-        },
-        {
-          subject: requestUri,
-          predicate: decisionTimestamp,
-          object: `"${decidedAt}"`,
-          graph: cgMetaGraph,
-        },
-      ]);
+      await this.store.insert(replacement.replacementQuads);
     }
 
     await this.pruneTerminalJoinRequestHistory(contextGraphId);
@@ -2488,9 +2469,6 @@ export class JoinRequestMethods extends DKGAgentBase {
     // graph curator can …" (403 at the route) for a non-curator.
     await this.assertContextGraphOwner(contextGraphId, callerAgentAddress, 'manage join requests');
 
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const requestUri = `did:dkg:join-request:${contextGraphId}:${agentAddress.toLowerCase()}`;
-    const DKG = 'https://dkg.network/ontology#';
     const delegation = await this.loadPendingJoinDelegation(contextGraphId, agentAddress);
     if (!delegation) {
       throw new Error(`No pending join request found from ${agentAddress}`);
@@ -2506,28 +2484,16 @@ export class JoinRequestMethods extends DKGAgentBase {
     ) {
       throw new Error('Pending join request generation does not match its signed delegation');
     }
-    const requestStatus = `${DKG}requestStatus`;
-    const decisionTimestamp = `${DKG}decisionTimestamp`;
-    const decidedAt = Date.now();
-    if (typeof this.store.update !== 'function') {
+    const replaced = await tryReplaceSubjectPredicatesAtomically(
+      this.store,
+      joinRequestDecisionReplacement(contextGraphId, agentAddress, 'rejected'),
+      { source: 'join-rejected' },
+    );
+    if (!replaced) {
       throw new Error(
-        'Join rejection requires atomic SPARQL UPDATE support from the configured triple store.',
+        'Join rejection requires atomic subject-predicate replacement support from the configured triple store.',
       );
     }
-    await this.store.update(`
-      DELETE { GRAPH <${cgMetaGraph}> {
-        <${requestUri}> <${requestStatus}> ?oldStatus .
-        <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp .
-      } }
-      INSERT { GRAPH <${cgMetaGraph}> {
-        <${requestUri}> <${requestStatus}> "rejected" .
-        <${requestUri}> <${decisionTimestamp}> "${decidedAt}" .
-      } }
-      WHERE  {
-        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${requestStatus}> ?oldStatus . } }
-        OPTIONAL { GRAPH <${cgMetaGraph}> { <${requestUri}> <${decisionTimestamp}> ?oldDecisionTimestamp . } }
-      }
-    `, { touchedGraphs: [cgMetaGraph], source: 'join-rejected' });
     await this.pruneTerminalJoinRequestHistory(contextGraphId);
     this.upsertContextGraphMember({
       contextGraphId,
