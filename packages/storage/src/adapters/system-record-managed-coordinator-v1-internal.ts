@@ -4,7 +4,7 @@ import {
   type SystemRecordAtomicApplyHttpClientV1,
 } from '../system-record-atomic-apply-executor-v1-internal.js';
 import {
-  createSystemRecordLaneControllerTypedV1,
+  createSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerTypedDepsV1,
@@ -47,7 +47,11 @@ export function createManagedSystemRecordCoordinatorV1(
     updateEndpoint: options.updateEndpoint,
     resolveClient: options.resolveClient,
   });
-  return createSystemRecordLaneControllerTypedV1({
+  // The deps literal is typed as the typed-only shape, so the managed path
+  // resolves the single factory's typed overload: no string member exists
+  // here to fall back to, and adding one is a type error pinned in the
+  // typecheck lane.
+  const typedDeps: SystemRecordLaneControllerTypedDepsV1 = {
     lease: options.lease,
     handoff: options.handoff,
     executor: {
@@ -58,5 +62,6 @@ export function createManagedSystemRecordCoordinatorV1(
     },
     typedBarrier: options.typedBarrier,
     setAdmissionActive: options.setAdmissionActive,
-  });
+  };
+  return createSystemRecordLaneControllerV1(typedDeps);
 }

@@ -901,6 +901,23 @@ describe('system-record lane session lifecycle V1', () => {
       build();
       expect(() => build()).toThrow(SystemRecordControllerRegistrationError);
     });
+
+    it('refuses a second registration BEFORE reading composer-supplied deps', () => {
+      // Deps come from composers and may carry accessors. The duplicate guard
+      // must run before ANY dependency property is read — otherwise a second
+      // registration surfaces whatever a composer accessor throws (or runs
+      // its side effects) instead of the typed refusal. Every property access
+      // on this deps object throws, so the assertion below discriminates: the
+      // typed error can only surface if nothing was read first.
+      build();
+      const boobyTrapped = new Proxy({}, {
+        get() {
+          throw new Error('composer accessor ran before the registration guard');
+        },
+      });
+      expect(() => createSystemRecordLaneControllerV1(boobyTrapped as never))
+        .toThrow(SystemRecordControllerRegistrationError);
+    });
   });
 
   describe('transition precedence', () => {

@@ -13,12 +13,13 @@ vi.mock('../src/system-record-atomic-apply-executor-v1-internal.js', () => ({
   createSystemRecordAtomicApplyExecutorV1: probes.atomicFactory,
 }));
 
-// The coordinator builds on the TYPED-ONLY factory (#2179). Mocking only that
-// export is deliberate: if the coordinator ever reaches for the legacy
-// createSystemRecordLaneControllerV1 again, its import resolves to undefined
-// here and this test fails at the call, not silently.
+// One controller constructor (#2179 round 3): the coordinator calls the
+// single factory with its typed-only deps shape. The structural invariant is
+// asserted below on the DEPS VALUE the factory receives — no 'barrier' key —
+// rather than on which of two factories was called, because there is only
+// one.
 vi.mock('../src/system-record-materializer-v1.js', () => ({
-  createSystemRecordLaneControllerTypedV1: probes.laneFactory,
+  createSystemRecordLaneControllerV1: probes.laneFactory,
 }));
 
 vi.mock('../src/system-record-runtime-v1-internal.js', () => ({
