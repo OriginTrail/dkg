@@ -1094,6 +1094,10 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * New coalescible transitions should use {@link runControlBarrierEffect}; a
    * runtime string cannot itself bind the result type shared by later callers.
    *
+   * @deprecated Result-bearing coalescing cannot be type-safe with a runtime
+   * purpose string. Use `runControlBarrierEffect` for new transitions; #2179
+   * tracks the versioned replacement for typed results.
+   *
    * @param timeoutMs Overrides the default bound for this transition.
    */
   runControlBarrier<T>(
@@ -1174,6 +1178,10 @@ export class StorePriorityScheduler extends ObservableScheduler {
     if (state.taggedQueued > 0 || state.taggedInflight > 0) return;
     if (state.seals > 0 || state.heldRuns.length > 0) return;
     if (state.domains.size > 0 || state.runningPermits.size > 0) return;
+    // A seal can retain an old state object while releasing held work. That
+    // work may synchronously replace the map entry before the seal finishes;
+    // the stale owner must never delete the replacement by key.
+    if (this.storeStates.get(storeId) !== state) return;
     this.storeStates.delete(storeId);
   }
 
@@ -1291,7 +1299,9 @@ export class StorePriorityScheduler extends ObservableScheduler {
     const admission = entry.admission;
     if (admission === undefined) return;
     const state = this.storeStates.get(admission.storeId);
-    if (state === undefined) return;
+    if (state === undefined) {
+      throw new Error('store scheduler running admission lost its state row');
+    }
     this.adjustTaggedInflight(state, -1);
     const permits = (state.runningPermits.get(admission.generation) ?? 1) - 1;
     if (permits > 0) state.runningPermits.set(admission.generation, permits);

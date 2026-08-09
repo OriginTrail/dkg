@@ -78,9 +78,11 @@ export {
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneSessionV1,
   type SystemRecordLaneStateV1,
-  type SystemRecordMaterializationEpochRotationV1,
   type SystemRecordTransactionExecutorV1,
 } from './system-record-materializer-v1.js';
+export type {
+  SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-contract-v1-internal.js';
 export {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,

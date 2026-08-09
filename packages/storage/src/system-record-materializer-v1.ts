@@ -14,10 +14,13 @@ import {
   type SystemRecordOwnedRecoverySettlementV1,
 } from './system-record-lane-coordination-v1-internal.js';
 import {
-  snapshotSystemRecordDataRecordV1,
   snapshotSystemRecordDenseArrayV1,
   snapshotSystemRecordExactDataRecordV1,
 } from './system-record-input-guards-v1-internal.js';
+import {
+  snapshotSystemRecordMaterializationEpochRotationV1,
+  type SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-contract-v1-internal.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).
@@ -108,40 +111,6 @@ export interface SystemRecordLaneSessionV1 {
 
 export interface SystemRecordLaneControllerV1 {
   open(activation: SystemRecordLaneActivationV1): Promise<SystemRecordLaneSessionV1>;
-}
-
-/** Typed result returned by the child-handoff epoch rotation boundary. */
-export interface SystemRecordMaterializationEpochRotationV1 {
-  readonly epoch: string;
-  readonly childGeneration: string;
-}
-
-/**
- * Snapshot an untrusted epoch rotation result through the canonical plain-data
- * guard. Extra data fields are permitted by the structural handoff interface
- * and discarded here. `undefined` means no valid binding; callers distinguish
- * the legacy absent case from a malformed non-undefined value and fail the
- * latter closed.
- */
-function snapshotSystemRecordMaterializationEpochRotationV1(
-  value: unknown,
-): SystemRecordMaterializationEpochRotationV1 | undefined {
-  let record: Readonly<Record<string, unknown>>;
-  try {
-    record = snapshotSystemRecordDataRecordV1(
-      value,
-      'system-record materialization epoch rotation',
-    );
-  } catch {
-    return undefined;
-  }
-  if (typeof record.epoch !== 'string' || typeof record.childGeneration !== 'string') {
-    return undefined;
-  }
-  return Object.freeze({
-    epoch: record.epoch,
-    childGeneration: record.childGeneration,
-  });
 }
 
 /* ------------------------------------------------------------------ *
