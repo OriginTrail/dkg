@@ -2,7 +2,7 @@ import { ethers } from 'ethers';
 import { describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
-} from '../src/context-graph-name-hash-resolver.js';
+} from '../src/evm-context-graph-name-hash-fence.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
 import {
   callsForMethod,

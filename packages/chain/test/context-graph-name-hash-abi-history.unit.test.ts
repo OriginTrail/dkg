@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { EvmContextGraphNameHashFence } from '../src/evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from '../src/evm-context-graph-name-hash-resolver.js';
-import { CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS } from '../src/context-graph-name-hash-resolver.js';
+import { CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS } from '../src/evm-context-graph-name-hash-fence.js';
 
 const STORAGE_ADDRESS = '0x00000000000000000000000000000000000000c6';
 const OWNER = '0x000000000000000000000000000000000000000b';

@@ -3,7 +3,7 @@ import { expect, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
-} from '../src/context-graph-name-hash-resolver.js';
+} from '../src/evm-context-graph-name-hash-fence.js';
 import type { EvmContextGraphNameHashFence } from '../src/evm-context-graph-name-hash-fence.js';
 
 const PRIVATE_KEY =
