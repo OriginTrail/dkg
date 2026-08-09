@@ -9,11 +9,12 @@
  * path. The fix is to repeat the walk — bounded, and only while it is provably
  * getting somewhere.
  *
- * This module is ONLY the decision. It runs no I/O, reads no clock and holds no
- * state, so the rule that decides how much extra network and store work a node
- * may spend exists in one place and is tested in one place. Both drivers — the
- * CLI worker's `runCatchup` and the in-agent `runCatchupOverPeers` — call it, so
- * they cannot drift apart.
+ * The pure decision and its state ledger live here beside the small executor
+ * that owns their deadline/decision/pass-count lifecycle. The executor runs no
+ * transport or store I/O itself; callers inject the actual round runner. The
+ * CLI worker, in-agent foreground catch-up and selected RFC-64 provider path
+ * therefore share the same continuation mechanics without sharing their
+ * different transport shapes.
  *
  * It is deliberately NOT a new mechanism: the repo already runs a bounded round
  * loop with a clean-completion stop on this exact lane for post-approval curator
@@ -187,6 +188,143 @@ export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
     this.completedContinuationPasses += 1;
     return before;
   }
+}
+
+export interface SwmCatchupContinuationUnit<
+  Key,
+  TCoverage extends CatchupPassCoverage,
+> {
+  readonly key: Key;
+  readonly tracker: SwmCatchupPassTracker<TCoverage>;
+  readonly planeProven: () => boolean;
+}
+
+/**
+ * One continuation candidate selected by the shared pass executor.
+ *
+ * `start` is deliberately deferred until the caller is actually about to do
+ * I/O. Selected-provider work can wait in the global scheduler after the
+ * policy decision; if its budget expires in that queue, the callback is never
+ * invoked and the diagnostic pass count remains exact. The closure is
+ * idempotent so an adapter cannot count the same admitted round twice.
+ */
+export interface SwmCatchupContinuationCandidate<Key> {
+  readonly key: Key;
+  readonly peers: readonly string[];
+  readonly start: () => number;
+  readonly progress: () => number;
+  readonly continuationPasses: () => number;
+}
+
+export interface SwmCatchupContinuationStop<Key> {
+  readonly key: Key;
+  readonly continuationPasses: number;
+  readonly reason: CatchupPassDecisionReason;
+}
+
+export interface RunSwmCatchupContinuationsOptions<
+  Key,
+  TCoverage extends CatchupPassCoverage,
+  PassResult,
+> {
+  readonly units: readonly SwmCatchupContinuationUnit<Key, TCoverage>[];
+  readonly config: CatchupPassConfig;
+  readonly nowMs: () => number;
+  readonly runPass: (
+    candidates: readonly SwmCatchupContinuationCandidate<Key>[],
+    deadlineMs: number,
+  ) => Promise<PassResult>;
+  /** Stop after the admitted pass, for example when global backpressure fired. */
+  readonly shouldStopAfterPass?: (result: PassResult) => boolean;
+  readonly onStop?: (stop: SwmCatchupContinuationStop<Key>) => void | Promise<void>;
+}
+
+export interface SwmCatchupContinuationSummary {
+  readonly continuationPasses: number;
+  readonly deadlineMs: number;
+  readonly stoppedAfterPass: boolean;
+}
+
+/**
+ * Canonical bounded SWM continuation executor.
+ *
+ * Policy selection, the one absolute continuation deadline and pass-count
+ * ownership live here. Callers provide only the unit-specific round runner:
+ * the CLI and foreground agent walk capable peers, while RFC-64 selected sync
+ * schedules incomplete Context Graphs through the existing global admission
+ * queue. This keeps those transport shapes distinct without letting their
+ * retry semantics drift.
+ */
+export async function runSwmCatchupContinuations<
+  Key,
+  TCoverage extends CatchupPassCoverage,
+  PassResult,
+>(
+  options: RunSwmCatchupContinuationsOptions<Key, TCoverage, PassResult>,
+): Promise<SwmCatchupContinuationSummary> {
+  const deadlineMs = options.nowMs() + options.config.budgetMs;
+  const stopped = new Set<Key>();
+  let stoppedAfterPass = false;
+
+  for (;;) {
+    let startsThisPass = 0;
+    const candidates: SwmCatchupContinuationCandidate<Key>[] = [];
+    for (const unit of options.units) {
+      if (stopped.has(unit.key)) continue;
+      const decision = unit.tracker.decide({
+        nowMs: options.nowMs(),
+        deadlineMs,
+        maxPasses: options.config.maxPasses,
+        planeProven: unit.planeProven(),
+      });
+      if (!decision.continue) {
+        stopped.add(unit.key);
+        await options.onStop?.({
+          key: unit.key,
+          continuationPasses: unit.tracker.continuationPasses(),
+          reason: decision.reason,
+        });
+        continue;
+      }
+
+      let started = false;
+      let progressBefore = 0;
+      candidates.push({
+        key: unit.key,
+        peers: decision.peers,
+        start: () => {
+          if (!started) {
+            started = true;
+            startsThisPass += 1;
+            progressBefore = unit.tracker.startContinuationPass();
+          }
+          return progressBefore;
+        },
+        progress: () => unit.tracker.progress(),
+        continuationPasses: () => unit.tracker.continuationPasses(),
+      });
+    }
+    if (candidates.length === 0) break;
+
+    const passResult = await options.runPass(candidates, deadlineMs);
+    if (options.shouldStopAfterPass?.(passResult)) {
+      stoppedAfterPass = true;
+      break;
+    }
+    // A queued selected-provider batch can cross the absolute deadline before
+    // any candidate starts. Do not spin on the same still-capable units if the
+    // adapter correctly declined all work at that admission boundary.
+    if (startsThisPass === 0) break;
+  }
+
+  return {
+    continuationPasses: options.units.reduce(
+      (total, unit) => total + unit.tracker.continuationPasses(),
+      0,
+    ),
+    deadlineMs,
+    stoppedAfterPass,
+  };
 }
 
 /**

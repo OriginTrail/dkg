@@ -11,8 +11,7 @@ import type {
 } from '../src/dkg-agent-types.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
-  runSelectedSwmSyncWork,
-  SelectedSwmContinuationPlan,
+  runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
 
 const PEER = '12D3KooWSelectedCompleteSwmProvider';
@@ -138,34 +137,296 @@ function merge(
   };
 }
 
+interface SelectedProviderSelectionAgent {
+  started: boolean;
+  config: {
+    syncOnConnect: boolean;
+    syncSharedMemoryOnConnect: boolean;
+    syncContextGraphs: string[];
+    rfc64PublicCatalogBootstrap: {
+      acceptedPublicPolicies: Array<{ completeSwmProviders: string[] }>;
+    };
+  };
+  networkAdmissionCoordinator: { isAcceptedPeer: (peerId: string) => boolean };
+  syncingPeers: Set<string>;
+  knownCorePeerIds: Set<string>;
+  knownCorePeerIdsV2: Set<string>;
+  skippedNoSyncPeers: Set<string>;
+  lastSuccessfulSyncAt: Map<string, number>;
+  lastSyncProgressAt: Map<string, number>;
+  syncReconcilerBackoff: Map<string, unknown>;
+  getPeerProtocols: () => Promise<string[]>;
+  planSharedMemorySyncContextGraphs: () => Promise<{
+    publicContextGraphIds: string[];
+    privateRecoverFromCurator: string[];
+    eligibleContextGraphIds: string[];
+  }>;
+  resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
+  syncFromPeerDetailed: () => Promise<number>;
+  refreshMetaSyncedFlags: () => Promise<void>;
+  discoverContextGraphsFromStore: () => Promise<number>;
+  syncSharedMemoryFromPeerDetailed: (
+    peerId: string,
+    contextGraphIds: readonly string[],
+    options?: { selectedSwmPriority?: boolean },
+  ) => Promise<SharedMemorySyncResult>;
+  log: { info: () => void; warn: () => void; debug: () => void };
+}
+
+const callTrySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer as unknown as (
+  this: SelectedProviderSelectionAgent,
+  remotePeer: string,
+) => Promise<unknown>;
+
+interface AdmissionProbe {
+  readonly contextGraphId: string;
+  readonly selected: boolean;
+  readonly priority: number | undefined;
+  readonly event: 'start' | 'end';
+}
+
+interface SelectedSwmLifecycleHarnessOptions {
+  readonly contextGraphs: {
+    readonly public: string;
+    readonly private?: string;
+  };
+  readonly manifest: ReturnType<typeof snapshotManifest>;
+  readonly clock: {
+    readonly now: () => number;
+    readonly deadline: () => number;
+  };
+  readonly priorities?: Readonly<Record<string, number>>;
+  readonly onSnapshotRead?: (probe: {
+    readonly ref: string;
+    readonly publicAdmission: number;
+    readonly snapshotRead: number;
+  }) => void;
+  readonly beforeAdmissionRun?: (probe: {
+    readonly contextGraphId: string;
+    readonly publicAdmission: number;
+  }) => Promise<void> | void;
+}
+
+interface SelectedSwmLifecycleAgentFixture {
+  config: { syncContextGraphPriorities: Readonly<Record<string, number>> };
+  store: OxigraphStore;
+  writeLocks: Map<string, Promise<void>>;
+  publicSnapshotStore: {
+    getSnapshot: (ref: string) => Promise<Quad[] | null>;
+    putSnapshot: (input: { digest: string }) => Promise<{ ref: string; byteLength: number }>;
+  };
+  listSubGraphs: () => Promise<string[]>;
+  createContextGraphSyncDeadline: () => number;
+  fetchSyncPages: (
+    ctx: unknown,
+    peerId: string,
+    contextGraphId: string,
+    includeSharedMemory: boolean,
+    phase: string,
+    graphUri: string,
+    deadline: number,
+    snapshotRef?: string,
+  ) => Promise<{
+    quads: Quad[];
+    bytesReceived: number;
+    resumedFromOffset: number;
+    nextOffset: number;
+    checkpointKey: string;
+    completed: boolean;
+    timedOut: boolean;
+  }>;
+  getOrCreateSyncVerifyWorker: () => {
+    processSharedMemoryBatch: (dataQuads: Quad[], metaQuads: Quad[]) => Promise<{
+      verifiedData: Quad[];
+      verifiedMeta: Quad[];
+      totalFetchedDataQuads: number;
+      totalFetchedMetaQuads: number;
+      droppedDataTriples: number;
+      emptyResponses: number;
+      entityCreators: string[];
+    }>;
+  };
+  runContextGraphSyncWithBackpressure: (
+    ctx: unknown,
+    contextGraphId: string,
+    lane: string,
+    operationId: string,
+    work: () => Promise<SharedMemorySyncResult>,
+    admission: { priorityOverride?: number; selectedSwmPriority?: boolean },
+  ) => Promise<SharedMemorySyncResult>;
+  syncCheckpoints: Map<string, number>;
+  workspaceOwnedEntities: Map<string, Map<string, string>>;
+  invalidateListContextGraphsCache: () => void;
+  contextGraphMetaProjection: { markDirtyFromQuads: () => void };
+  oversizeTombstoneLog: { record: () => void };
+  log: { info: () => void; warn: () => void; debug: () => void };
+}
+
+interface SelectedSwmLifecycleHarness {
+  readonly agent: SelectedSwmLifecycleAgentFixture;
+  readonly probes: {
+    readonly admissions: AdmissionProbe[];
+    readonly snapshotFetches: string[];
+    readonly publicAdmissions: () => number;
+    readonly snapshotReads: () => number;
+    readonly metaFetches: () => number;
+    readonly maxActiveAdmissions: () => number;
+  };
+  readonly close: () => Promise<void>;
+}
+
+type SyncSharedMemoryOptions = Parameters<
+  typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed
+>[2];
+
+const callSyncSharedMemoryFromPeerDetailed = (
+  agent: SelectedSwmLifecycleAgentFixture,
+  contextGraphIds: string[],
+  options: SyncSharedMemoryOptions,
+): Promise<SharedMemorySyncResult> => {
+  const method = LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as unknown as (
+    this: SelectedSwmLifecycleAgentFixture,
+    remotePeerId: string,
+    ids: string[],
+    syncOptions: SyncSharedMemoryOptions,
+  ) => Promise<SharedMemorySyncResult>;
+  return method.call(agent, PEER, contextGraphIds, options);
+};
+
+function createSelectedSwmLifecycleHarness(
+  options: SelectedSwmLifecycleHarnessOptions,
+): SelectedSwmLifecycleHarness {
+  const store = new OxigraphStore();
+  const admissions: AdmissionProbe[] = [];
+  const snapshotFetches: string[] = [];
+  let activeAdmissions = 0;
+  let maxActiveAdmissions = 0;
+  let publicAdmissions = 0;
+  let snapshotReads = 0;
+  let metaFetches = 0;
+  const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
+
+  const agent: SelectedSwmLifecycleAgentFixture = {
+    config: { syncContextGraphPriorities: options.priorities ?? {} },
+    store,
+    writeLocks: new Map(),
+    publicSnapshotStore: {
+      getSnapshot: async (ref) => {
+        snapshotReads += 1;
+        options.onSnapshotRead?.({ ref, publicAdmission: publicAdmissions, snapshotRead: snapshotReads });
+        return options.manifest.payloadByRef.get(ref) ?? null;
+      },
+      putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 0 }),
+    },
+    listSubGraphs: async () => [],
+    createContextGraphSyncDeadline: options.clock.deadline,
+    fetchSyncPages: async (
+      _ctx,
+      _peerId,
+      contextGraphId,
+      _includeSharedMemory,
+      phase,
+      _graphUri,
+      _deadline,
+      snapshotRef,
+    ) => {
+      if (phase === 'snapshot') {
+        snapshotFetches.push(snapshotRef ?? 'missing-ref');
+        throw new Error('all snapshot fixtures should be cache hits');
+      }
+      if (phase === 'meta') metaFetches += 1;
+      const quads = phase === 'meta' && contextGraphId === options.contextGraphs.public
+        ? options.manifest.meta
+        : [];
+      return {
+        quads,
+        bytesReceived: quads.length,
+        resumedFromOffset: 0,
+        nextOffset: quads.length,
+        checkpointKey: `${contextGraphId}:${phase}`,
+        completed: true,
+        timedOut: false,
+      };
+    },
+    getOrCreateSyncVerifyWorker: () => ({
+      processSharedMemoryBatch: async (dataQuads, metaQuads) => ({
+        verifiedData: dataQuads,
+        verifiedMeta: metaQuads,
+        totalFetchedDataQuads: dataQuads.length,
+        totalFetchedMetaQuads: metaQuads.length,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [],
+      }),
+    }),
+    runContextGraphSyncWithBackpressure: async (
+      _ctx,
+      contextGraphId,
+      _lane,
+      _operationId,
+      work,
+      admission,
+    ) => {
+      activeAdmissions += 1;
+      maxActiveAdmissions = Math.max(maxActiveAdmissions, activeAdmissions);
+      if (contextGraphId === options.contextGraphs.public) publicAdmissions += 1;
+      const row = {
+        contextGraphId,
+        selected: admission.selectedSwmPriority === true,
+        priority: admission.priorityOverride,
+      };
+      admissions.push({ ...row, event: 'start' });
+      try {
+        await options.beforeAdmissionRun?.({ contextGraphId, publicAdmission: publicAdmissions });
+        return await work();
+      } finally {
+        admissions.push({ ...row, event: 'end' });
+        activeAdmissions -= 1;
+      }
+    },
+    syncCheckpoints: new Map(),
+    workspaceOwnedEntities: new Map(),
+    invalidateListContextGraphsCache: () => {},
+    contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
+    oversizeTombstoneLog: { record: () => {} },
+    log: { info: () => {}, warn: () => {}, debug: () => {} },
+  };
+
+  return {
+    agent,
+    probes: {
+      admissions,
+      snapshotFetches,
+      publicAdmissions: () => publicAdmissions,
+      snapshotReads: () => snapshotReads,
+      metaFetches: () => metaFetches,
+      maxActiveAdmissions: () => maxActiveAdmissions,
+    },
+    close: async () => {
+      dateNow.mockRestore();
+      await store.close();
+    },
+  };
+}
+
 describe('selected RFC-64 SWM continuation', () => {
   it('re-enters admission promptly until incomplete coverage becomes complete', async () => {
     const contextGraphId = 'selected-public';
-    const rounds = [
-      result(contextGraphId, 1, 3),
-      result(contextGraphId, 3, 3, { insertedDataTriples: 2 }),
-    ];
-    const admissions: Array<{ selected: boolean; priority: number | undefined }> = [];
-
-    const summary = await runSelectedSwmSyncWork({
+    const admissions: string[] = [];
+    const summary = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      publicContextGraphIds: [contextGraphId],
       work: [{
         contextGraphId,
         lane: 'shared_memory',
         operationId: 'selected-public',
-        run: async () => rounds.shift()!,
+        run: async () => result(contextGraphId, 3, 3, { insertedDataTriples: 2 }),
       }],
-      selectedEnabled: true,
-      selectedPriority: 2_000,
-      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
+      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 3) }],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
-      runWithAdmission: async (_item, run, admission) => {
-        admissions.push({
-          selected: admission.selectedSwmPriority,
-          priority: admission.priorityOverride,
-        });
+      runWithAdmission: async (item, run) => {
+        admissions.push(item.contextGraphId);
         return run();
       },
       merge,
@@ -175,10 +436,7 @@ describe('selected RFC-64 SWM continuation', () => {
       }),
     });
 
-    expect(admissions).toEqual([
-      { selected: true, priority: 2_000 },
-      { selected: true, priority: 2_000 },
-    ]);
+    expect(admissions).toEqual([contextGraphId]);
     expect(summary.continuationPasses).toBe(1);
     expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 3, snapshotsTotal: 3 });
   });
@@ -189,18 +447,16 @@ describe('selected RFC-64 SWM continuation', () => {
     const stop = vi.fn();
     let admissions = 0;
 
-    const summary = await runSelectedSwmSyncWork({
+    const summary = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      publicContextGraphIds: [contextGraphId],
       work: [{
         contextGraphId,
         lane: 'shared_memory',
         operationId: 'selected-stalled',
         run: async () => stalled,
       }],
-      selectedEnabled: true,
-      selectedPriority: 2_000,
-      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
+      initialRounds: [{ contextGraphId, result: stalled }],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
       runWithAdmission: async (_item, run) => {
@@ -215,7 +471,7 @@ describe('selected RFC-64 SWM continuation', () => {
       onStop: stop,
     });
 
-    expect(admissions).toBe(2);
+    expect(admissions).toBe(1);
     expect(summary.continuationPasses).toBe(1);
     expect(stop).toHaveBeenCalledWith(expect.objectContaining({
       contextGraphId,
@@ -223,119 +479,115 @@ describe('selected RFC-64 SWM continuation', () => {
     }));
   });
 
-  it('keeps independent per-CG coverage and continues only the incomplete graph', () => {
-    const plan = new SelectedSwmContinuationPlan(
-      PEER,
-      ['complete-cg', 'incomplete-cg'],
-      { maxPasses: 4, budgetMs: 600_000 },
-      0,
-    );
-    plan.recordRound('complete-cg', result('complete-cg', 2, 2));
-    plan.recordRound('incomplete-cg', result('incomplete-cg', 1, 5));
+  it('keeps independent per-CG coverage and continues only the incomplete graph', async () => {
+    const runs: string[] = [];
+    const stop = vi.fn();
+    const work = ['complete-cg', 'incomplete-cg'].map((contextGraphId) => ({
+      contextGraphId,
+      lane: 'shared_memory' as const,
+      operationId: contextGraphId,
+      run: async () => {
+        runs.push(contextGraphId);
+        return result(contextGraphId, 5, 5);
+      },
+    }));
 
-    const selection = plan.selectNextPass(1);
-
-    expect(selection.contextGraphIds).toEqual(['incomplete-cg']);
-    expect(selection.stops).toEqual([
-      expect.objectContaining({ contextGraphId: 'complete-cg', reason: 'plane-proven' }),
-    ]);
-  });
-
-  it('stops at four total passes even while coverage keeps advancing', () => {
-    const contextGraphId = 'selected-bounded';
-    const plan = new SelectedSwmContinuationPlan(
-      PEER,
-      [contextGraphId],
-      { maxPasses: 4, budgetMs: 600_000 },
-      0,
-    );
-    plan.recordRound(contextGraphId, result(contextGraphId, 1, 5));
-
-    for (const resolved of [2, 3, 4]) {
-      expect(plan.selectNextPass(1).contextGraphIds).toEqual([contextGraphId]);
-      plan.startContinuationPass(contextGraphId);
-      plan.recordRound(contextGraphId, result(contextGraphId, resolved, 5));
-    }
-
-    expect(plan.selectNextPass(1).stops).toEqual([
-      expect.objectContaining({
-        contextGraphId,
-        continuationPasses: 3,
-        reason: 'max-passes-reached',
-      }),
-    ]);
-  });
-
-  it('does not start a continuation after the absolute budget expires', () => {
-    const contextGraphId = 'selected-expired';
-    const plan = new SelectedSwmContinuationPlan(
-      PEER,
-      [contextGraphId],
-      { maxPasses: 4, budgetMs: 10 },
-      100,
-    );
-    plan.recordRound(contextGraphId, result(contextGraphId, 1, 2));
-
-    expect(plan.selectNextPass(110)).toEqual({
-      contextGraphIds: [],
-      stops: [expect.objectContaining({ contextGraphId, reason: 'budget-exhausted' })],
-    });
-  });
-
-  it('stops immediately on initial or continuation backpressure', async () => {
-    const contextGraphId = 'selected-pressure';
-    const initialBackpressure = result(contextGraphId, 1, 3, { deferredBackpressure: 1 });
-    const initialRun = vi.fn();
-    const initialStop = vi.fn();
-
-    await runSelectedSwmSyncWork({
+    await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      publicContextGraphIds: [contextGraphId],
+      work,
+      initialRounds: [
+        { contextGraphId: 'complete-cg', result: result('complete-cg', 2, 2) },
+        { contextGraphId: 'incomplete-cg', result: result('incomplete-cg', 1, 5) },
+      ],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => run(),
+      merge,
+      markDeferred: (current) => current,
+      onStop: stop,
+    });
+
+    expect(runs).toEqual(['incomplete-cg']);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId: 'complete-cg',
+      reason: 'plane-proven',
+    }));
+  });
+
+  it('stops at four total passes even while coverage keeps advancing', async () => {
+    const contextGraphId = 'selected-bounded';
+    const rounds = [2, 3, 4];
+    const stop = vi.fn();
+    const summary = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
       work: [{
         contextGraphId,
         lane: 'shared_memory',
-        operationId: 'initial-pressure',
-        run: async () => initialBackpressure,
+        operationId: contextGraphId,
+        run: async () => result(contextGraphId, rounds.shift()!, 5),
       }],
-      selectedEnabled: true,
-      selectedPriority: 2_000,
-      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
+      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 5) }],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
-      runWithAdmission: async (_item, run) => {
-        initialRun();
-        return run();
-      },
+      runWithAdmission: async (_item, run) => run(),
       merge,
-      markDeferred: (summary) => ({
-        ...summary,
-        deferredBackpressure: (summary.deferredBackpressure ?? 0) + 1,
-      }),
-      onBackpressure: initialStop,
+      markDeferred: (current) => current,
+      onStop: stop,
     });
-    expect(initialRun).toHaveBeenCalledOnce();
-    expect(initialStop).toHaveBeenCalledOnce();
 
+    expect(summary.continuationPasses).toBe(3);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      continuationPasses: 3,
+      reason: 'max-passes-reached',
+    }));
+  });
+
+  it('does not start a continuation after the absolute budget expires', async () => {
+    const contextGraphId = 'selected-expired';
+    const run = vi.fn(async () => result(contextGraphId, 2, 2));
+    const stop = vi.fn();
+    const summary = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
+      work: [{ contextGraphId, lane: 'shared_memory', operationId: contextGraphId, run }],
+      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 2) }],
+      passConfig: { maxPasses: 4, budgetMs: 0 },
+      nowMs: () => 100,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, work) => work(),
+      merge,
+      markDeferred: (current) => current,
+      onStop: stop,
+    });
+
+    expect(run).not.toHaveBeenCalled();
+    expect(summary.continuationPasses).toBe(0);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      reason: 'budget-exhausted',
+    }));
+  });
+
+  it('stops immediately on continuation backpressure', async () => {
+    const contextGraphId = 'selected-pressure';
     const incomplete = result(contextGraphId, 1, 3);
     const continuationStop = vi.fn();
-    const rounds = [
-      incomplete,
-      result(contextGraphId, 1, 3, { deferredBackpressure: 1 }),
-    ];
-    const continuationRun = vi.fn(async () => rounds.shift()!);
+    const continuationRun = vi.fn(async () => (
+      result(contextGraphId, 1, 3, { deferredBackpressure: 1 })
+    ));
 
-    await runSelectedSwmSyncWork({
+    await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      publicContextGraphIds: [contextGraphId],
       work: [{
         contextGraphId,
         lane: 'shared_memory',
         operationId: 'continuation-pressure',
         run: continuationRun,
       }],
-      selectedEnabled: true,
-      selectedPriority: 2_000,
-      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
+      initialRounds: [{ contextGraphId, result: incomplete }],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
       runWithAdmission: async (_item, run) => run(),
@@ -346,32 +598,27 @@ describe('selected RFC-64 SWM continuation', () => {
       }),
       onBackpressure: continuationStop,
     });
-    expect(continuationRun).toHaveBeenCalledTimes(2);
+    expect(continuationRun).toHaveBeenCalledOnce();
     expect(continuationStop).toHaveBeenCalledOnce();
   });
 
-  it('owns continuationPasses even when initial and part results carry nonzero counters', async () => {
+  it('owns continuationPasses even when a part result carries a nonzero counter', async () => {
     const contextGraphId = 'selected-counter-owner';
-    const rounds: SharedMemorySyncResult[] = [
-      { ...result(contextGraphId, 1, 2), continuationPasses: 17 },
-      {
-        ...result(contextGraphId, 2, 2, { insertedDataTriples: 1 }),
-        continuationPasses: 23,
-      },
-    ];
+    const continuation = {
+      ...result(contextGraphId, 2, 2, { insertedDataTriples: 1 }),
+      continuationPasses: 23,
+    };
 
-    const summary = await runSelectedSwmSyncWork({
+    const summary = await runSelectedSwmContinuations({
       providerPeerId: PEER,
-      publicContextGraphIds: [contextGraphId],
       work: [{
         contextGraphId,
         lane: 'shared_memory',
         operationId: 'counter-owner',
-        run: async () => rounds.shift()!,
+        run: async () => continuation,
       }],
-      selectedEnabled: true,
-      selectedPriority: 2_000,
-      resolvePassConfig: () => ({ maxPasses: 4, budgetMs: 600_000 }),
+      initialRounds: [{ contextGraphId, result: result(contextGraphId, 1, 2) }],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
       nowMs: () => 1,
       emptyResult: cleanDurableResult,
       runWithAdmission: async (_item, run) => run(),
@@ -400,7 +647,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       privateRecoverFromCurator: [privateCg],
       eligibleContextGraphIds: [publicCg, privateCg],
     };
-    const agent = {
+    const agent: SelectedProviderSelectionAgent = {
       started: true,
       config: {
         syncOnConnect: true,
@@ -440,7 +687,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
 
-    await (LifecycleSyncMethods.prototype.trySyncFromPeer as any).call(agent, PEER);
+    await callTrySyncFromPeer.call(agent, PEER);
 
     expect(syncCalls).toEqual([
       { contextGraphIds: [publicCg], selected: true },
@@ -451,114 +698,26 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
   it('continues a voluntary 672/905 public snapshot yield to 905/905 with fresh admission', async () => {
     const publicCg = 'selected-production-shape';
     const privateCg = 'selected-private-unaffected';
-    const { meta, payloadByRef } = snapshotManifest(publicCg, 905);
-    const store = new OxigraphStore();
-    const admissions: Array<{
-      contextGraphId: string;
-      selected: boolean;
-      priority: number | undefined;
-      event: 'start' | 'end';
-    }> = [];
-    let activeAdmissions = 0;
-    let maxActiveAdmissions = 0;
-    let publicAdmissions = 0;
     let initialSnapshotReads = 0;
     let wallNow = 1_000;
-    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => wallNow);
-    const snapshotFetches: string[] = [];
-
-    const publicSnapshotStore = {
-      getSnapshot: async (ref: string) => {
-        const payload = payloadByRef.get(ref) ?? null;
-        if (publicAdmissions === 1) {
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg, private: privateCg },
+      manifest: snapshotManifest(publicCg, 905),
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      priorities: { [publicCg]: 100, [privateCg]: 0 },
+      onSnapshotRead: ({ publicAdmission }) => {
+        if (publicAdmission === 1) {
           initialSnapshotReads += 1;
           if (initialSnapshotReads === 672) wallNow += 120_000;
         }
-        return payload;
       },
-      putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 0 }),
-    };
-    const agent = {
-      config: {
-        syncContextGraphPriorities: { [publicCg]: 100, [privateCg]: 0 },
-      },
-      store,
-      writeLocks: new Map<string, Promise<void>>(),
-      publicSnapshotStore,
-      listSubGraphs: async () => [],
-      createContextGraphSyncDeadline: () => wallNow + 1,
-      fetchSyncPages: async (
-        _ctx: unknown,
-        _peerId: string,
-        contextGraphId: string,
-        _includeSharedMemory: boolean,
-        phase: string,
-        _graphUri: string,
-        _deadline: number,
-        snapshotRef?: string,
-      ) => {
-        if (phase === 'snapshot') {
-          snapshotFetches.push(snapshotRef ?? 'missing-ref');
-          throw new Error('all snapshot fixtures should be cache hits');
-        }
-        const quads = phase === 'meta' && contextGraphId === publicCg ? meta : [];
-        return {
-          quads,
-          bytesReceived: quads.length,
-          resumedFromOffset: 0,
-          nextOffset: quads.length,
-          checkpointKey: `${contextGraphId}:${phase}`,
-          completed: true,
-          timedOut: false,
-        };
-      },
-      getOrCreateSyncVerifyWorker: () => ({
-        processSharedMemoryBatch: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
-          verifiedData: dataQuads,
-          verifiedMeta: metaQuads,
-          totalFetchedDataQuads: dataQuads.length,
-          totalFetchedMetaQuads: metaQuads.length,
-          droppedDataTriples: 0,
-          emptyResponses: 0,
-          entityCreators: [],
-        }),
-      }),
-      runContextGraphSyncWithBackpressure: async (
-        _ctx: unknown,
-        contextGraphId: string,
-        _lane: string,
-        _operationId: string,
-        work: () => Promise<SharedMemorySyncResult>,
-        admission: { priorityOverride?: number; selectedSwmPriority?: boolean },
-      ) => {
-        activeAdmissions += 1;
-        maxActiveAdmissions = Math.max(maxActiveAdmissions, activeAdmissions);
-        if (contextGraphId === publicCg) publicAdmissions += 1;
-        const row = {
-          contextGraphId,
-          selected: admission.selectedSwmPriority === true,
-          priority: admission.priorityOverride,
-        };
-        admissions.push({ ...row, event: 'start' });
-        try {
-          return await work();
-        } finally {
-          admissions.push({ ...row, event: 'end' });
-          activeAdmissions -= 1;
-        }
-      },
-      syncCheckpoints: new Map<string, number>(),
-      workspaceOwnedEntities: new Map<string, Map<string, string>>(),
-      invalidateListContextGraphsCache: () => {},
-      contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
-      oversizeTombstoneLog: { record: () => {} },
-      log: { info: () => {}, warn: () => {}, debug: () => {} },
-    };
+    });
 
     try {
-      const summary = await (
-        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
-      ).call(agent, PEER, [publicCg, privateCg], {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg, privateCg],
+        {
         selectedSwmPriority: true,
         priority: 2_000,
         sharedMemorySyncPlan: {
@@ -566,7 +725,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           privateRecoverFromCurator: [privateCg],
           eligibleContextGraphIds: [publicCg, privateCg],
         },
-      });
+        },
+      );
 
       expect(summary.swmCoverage).toMatchObject({
         contextGraphId: publicCg,
@@ -580,9 +740,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(summary.timedOutPhases).toBe(0);
       expect(summary.backoffWorthyFailures).toBe(0);
       expect(initialSnapshotReads).toBe(672);
-      expect(snapshotFetches).toEqual([]);
-      expect(maxActiveAdmissions).toBe(1);
-      expect(admissions).toEqual([
+      expect(harness.probes.snapshotFetches).toEqual([]);
+      expect(harness.probes.maxActiveAdmissions()).toBe(1);
+      expect(harness.probes.admissions).toEqual([
         { contextGraphId: publicCg, selected: true, priority: 2_000, event: 'start' },
         { contextGraphId: publicCg, selected: true, priority: 2_000, event: 'end' },
         { contextGraphId: privateCg, selected: false, priority: undefined, event: 'start' },
@@ -591,92 +751,34 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         { contextGraphId: publicCg, selected: true, priority: 2_000, event: 'end' },
       ]);
     } finally {
-      dateNow.mockRestore();
-      await store.close();
+      await harness.close();
     }
   });
 
   it('rechecks the continuation budget after queued scheduler admission', async () => {
     const contextGraphId = 'selected-expired-in-queue';
-    const { meta, payloadByRef } = snapshotManifest(contextGraphId, 2);
-    const store = new OxigraphStore();
     const priorBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
     process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '50';
     let wallNow = 2_000;
-    let publicAdmissions = 0;
-    let snapshotReads = 0;
-    let metaFetches = 0;
-    const dateNow = vi.spyOn(Date, 'now').mockImplementation(() => wallNow);
-    const agent = {
-      config: { syncContextGraphPriorities: {} },
-      store,
-      writeLocks: new Map<string, Promise<void>>(),
-      publicSnapshotStore: {
-        getSnapshot: async (ref: string) => {
-          snapshotReads += 1;
-          if (publicAdmissions === 1 && snapshotReads === 1) wallNow += 120_000;
-          return payloadByRef.get(ref) ?? null;
-        },
-        putSnapshot: async ({ digest }: { digest: string }) => ({ ref: digest, byteLength: 0 }),
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: contextGraphId },
+      manifest: snapshotManifest(contextGraphId, 2),
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      onSnapshotRead: ({ publicAdmission, snapshotRead }) => {
+        if (publicAdmission === 1 && snapshotRead === 1) wallNow += 120_000;
       },
-      listSubGraphs: async () => [],
-      createContextGraphSyncDeadline: () => wallNow + 1,
-      fetchSyncPages: async (
-        _ctx: unknown,
-        _peerId: string,
-        _contextGraphId: string,
-        _includeSharedMemory: boolean,
-        phase: string,
-      ) => {
-        if (phase === 'meta') metaFetches += 1;
-        if (phase === 'snapshot') throw new Error('unexpected snapshot fetch');
-        const quads = phase === 'meta' ? meta : [];
-        return {
-          quads,
-          bytesReceived: 0,
-          resumedFromOffset: 0,
-          nextOffset: quads.length,
-          checkpointKey: `${contextGraphId}:${phase}`,
-          completed: true,
-          timedOut: false,
-        };
-      },
-      getOrCreateSyncVerifyWorker: () => ({
-        processSharedMemoryBatch: async (dataQuads: Quad[], metaQuads: Quad[]) => ({
-          verifiedData: dataQuads,
-          verifiedMeta: metaQuads,
-          totalFetchedDataQuads: dataQuads.length,
-          totalFetchedMetaQuads: metaQuads.length,
-          droppedDataTriples: 0,
-          emptyResponses: 0,
-          entityCreators: [],
-        }),
-      }),
-      runContextGraphSyncWithBackpressure: async (
-        _ctx: unknown,
-        _contextGraphId: string,
-        _lane: string,
-        _operationId: string,
-        work: () => Promise<SharedMemorySyncResult>,
-      ) => {
-        publicAdmissions += 1;
-        if (publicAdmissions === 2) {
+      beforeAdmissionRun: async ({ publicAdmission }) => {
+        if (publicAdmission === 2) {
           await new Promise((resolve) => setTimeout(resolve, 75));
         }
-        return work();
       },
-      syncCheckpoints: new Map<string, number>(),
-      workspaceOwnedEntities: new Map<string, Map<string, string>>(),
-      invalidateListContextGraphsCache: () => {},
-      contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
-      oversizeTombstoneLog: { record: () => {} },
-      log: { info: () => {}, warn: () => {}, debug: () => {} },
-    };
+    });
 
     try {
-      const summary = await (
-        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as any
-      ).call(agent, PEER, [contextGraphId], {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [contextGraphId],
+        {
         selectedSwmPriority: true,
         priority: 2_000,
         sharedMemorySyncPlan: {
@@ -684,21 +786,21 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           privateRecoverFromCurator: [],
           eligibleContextGraphIds: [contextGraphId],
         },
-      });
+        },
+      );
 
-      expect(publicAdmissions).toBe(2);
-      expect(metaFetches).toBe(1);
-      expect(snapshotReads).toBe(1);
+      expect(harness.probes.publicAdmissions()).toBe(2);
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(harness.probes.snapshotReads()).toBe(1);
       expect(summary.continuationPasses).toBe(0);
       expect(summary.swmCoverage).toMatchObject({
         snapshotsResolved: 1,
         snapshotsTotal: 2,
       });
     } finally {
-      dateNow.mockRestore();
       if (priorBudget === undefined) delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
       else process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = priorBudget;
-      await store.close();
+      await harness.close();
     }
   });
 });

@@ -4,6 +4,7 @@ import type {
 } from '../dkg-agent-types.js';
 import {
   SwmCatchupPassTracker,
+  runSwmCatchupContinuations,
   type CatchupPassConfig,
   type CatchupPassDecisionReason,
 } from './catchup-pass-policy.js';
@@ -14,10 +15,9 @@ import {
   type ContextGraphSyncWork,
 } from './requester/ordered-sync.js';
 
-interface SelectedSwmContextGraphState {
-  readonly tracker: SwmCatchupPassTracker<SwmSnapshotCoverage>;
-  planeProven: boolean;
-  stopped: boolean;
+export interface SelectedSwmInitialRound {
+  readonly contextGraphId: string;
+  readonly result: SharedMemorySyncResult;
 }
 
 export interface SelectedSwmContinuationStop {
@@ -26,42 +26,25 @@ export interface SelectedSwmContinuationStop {
   readonly reason: CatchupPassDecisionReason;
 }
 
-export interface SelectedSwmContinuationSelection {
-  readonly contextGraphIds: readonly string[];
-  readonly stops: readonly SelectedSwmContinuationStop[];
-}
-
-export interface SelectedSwmAdmission {
-  readonly priorityOverride: number | undefined;
-  readonly selectedSwmPriority: boolean;
-}
-
 export interface SelectedSwmContinuationProgress {
   readonly contextGraphId: string;
   readonly coverageBefore: number;
   readonly coverageAfter: number;
 }
 
-export interface RunSelectedSwmSyncWorkOptions {
+export interface RunSelectedSwmContinuationsOptions {
   readonly providerPeerId: string;
-  readonly publicContextGraphIds: readonly string[];
+  /** Public selected-provider work only; initial mixed-CG ordering stays outside. */
   readonly work: readonly ContextGraphSyncWork<SharedMemorySyncResult>[];
-  readonly selectedEnabled: boolean;
-  readonly selectedPriority: number | undefined;
+  /** Results captured explicitly by the caller during the initial ordered walk. */
+  readonly initialRounds: readonly SelectedSwmInitialRound[];
   readonly priorities?: Readonly<SyncContextGraphPriorityConfig>;
-  /** Resolved lazily only when selected continuation is actually active. */
-  readonly resolvePassConfig: () => CatchupPassConfig;
+  readonly passConfig: CatchupPassConfig;
   readonly nowMs: () => number;
   readonly emptyResult: () => SharedMemorySyncResult;
-  /**
-   * The only host-specific boundary. The focused driver decides selected
-   * membership and priority; the host admits the supplied callback through its
-   * existing global scheduler.
-   */
   readonly runWithAdmission: (
     item: ContextGraphSyncWork<SharedMemorySyncResult>,
     run: () => Promise<SharedMemorySyncResult>,
-    admission: SelectedSwmAdmission,
   ) => Promise<SharedMemorySyncResult>;
   readonly merge: (
     summary: SharedMemorySyncResult,
@@ -79,100 +62,6 @@ export interface RunSelectedSwmSyncWorkOptions {
   readonly onExpiredAfterAdmission?: (contextGraphId: string) => void;
 }
 
-/**
- * Per-provider, per-CG state for RFC-64's selected public-SWM continuation.
- *
- * This deliberately owns no I/O and no retry loop. The caller keeps every
- * round behind the existing global scheduler, while this class reuses the
- * foreground catch-up policy to decide whether another admitted round is
- * warranted. Keeping one tracker per CG prevents coverage from independent
- * manifests being combined into a synthetic progress signal.
- */
-export class SelectedSwmContinuationPlan {
-  readonly deadlineMs: number;
-
-  private readonly contextGraphs = new Map<string, SelectedSwmContextGraphState>();
-
-  constructor(
-    private readonly providerPeerId: string,
-    contextGraphIds: readonly string[],
-    private readonly config: CatchupPassConfig,
-    startedAtMs: number,
-  ) {
-    this.deadlineMs = startedAtMs + config.budgetMs;
-    for (const contextGraphId of new Set(contextGraphIds)) {
-      this.contextGraphs.set(contextGraphId, {
-        tracker: new SwmCatchupPassTracker<SwmSnapshotCoverage>(),
-        planeProven: false,
-        stopped: false,
-      });
-    }
-  }
-
-  recordRound(contextGraphId: string, result: SharedMemorySyncResult): void {
-    const state = this.requireState(contextGraphId);
-    const progress = classifyDurableProgress(result);
-    state.tracker.recordPeerRound(
-      this.providerPeerId,
-      result.swmCoverage,
-      progress.completedWithoutFailure,
-    );
-    state.planeProven = state.planeProven || (
-      result.insertedDataTriples > 0 && progress.completedWithoutFailure
-    );
-  }
-
-  selectNextPass(nowMs: number): SelectedSwmContinuationSelection {
-    const contextGraphIds: string[] = [];
-    const stops: SelectedSwmContinuationStop[] = [];
-    for (const [contextGraphId, state] of this.contextGraphs) {
-      if (state.stopped) continue;
-      const decision = state.tracker.decide({
-        nowMs,
-        deadlineMs: this.deadlineMs,
-        maxPasses: this.config.maxPasses,
-        planeProven: state.planeProven,
-      });
-      if (decision.continue) {
-        contextGraphIds.push(contextGraphId);
-        continue;
-      }
-      state.stopped = true;
-      stops.push({
-        contextGraphId,
-        continuationPasses: state.tracker.continuationPasses(),
-        reason: decision.reason,
-      });
-    }
-    return { contextGraphIds, stops };
-  }
-
-  /** Called from inside scheduler admission, immediately before network I/O. */
-  startContinuationPass(contextGraphId: string): number {
-    return this.requireState(contextGraphId).tracker.startContinuationPass();
-  }
-
-  continuationPasses(): number {
-    let total = 0;
-    for (const state of this.contextGraphs.values()) {
-      total += state.tracker.continuationPasses();
-    }
-    return total;
-  }
-
-  progress(contextGraphId: string): number {
-    return this.requireState(contextGraphId).tracker.progress();
-  }
-
-  private requireState(contextGraphId: string): SelectedSwmContextGraphState {
-    const state = this.contextGraphs.get(contextGraphId);
-    if (!state) {
-      throw new Error(`Selected SWM continuation received unknown Context Graph: ${contextGraphId}`);
-    }
-    return state;
-  }
-}
-
 function withoutContinuationPasses(
   result: SharedMemorySyncResult,
 ): SharedMemorySyncResult {
@@ -180,146 +69,138 @@ function withoutContinuationPasses(
 }
 
 /**
- * Own the complete selected public-SWM protocol around the ordinary ordered
- * work list: initial result capture, selected membership and admission flags,
- * continuation deadline, progress ledger, continuation scheduling, and final
- * diagnostics.
+ * Run only the continuation portion of selected RFC-64 public-SWM sync.
  *
- * The host owns only the actual per-CG I/O callback and global scheduler
- * admission. Every continuation is a fresh ordered batch, so its scheduler slot
- * is released between passes. The absolute deadline is checked once before
- * queueing and again from inside the admitted callback; an item that expires in
- * the queue therefore starts neither a pass nor network/store I/O.
- *
- * `continuationPasses` deliberately has exactly one writer: this driver. Work
- * results may originate in nested or reused runners, so their pass counters are
- * stripped before every merge and the plan's exact total replaces the final
- * field. This prevents merged part diagnostics from being counted twice.
+ * The lifecycle owns the initial public/private ordered walk and passes its
+ * selected public results here explicitly. This adapter seeds one shared-policy
+ * tracker per Context Graph, then maps the canonical continuation executor onto
+ * fresh global-scheduler admissions. The budget is checked both before queueing
+ * and inside the admitted callback, so queue wait cannot start late I/O or
+ * inflate `continuationPasses`.
  */
-export async function runSelectedSwmSyncWork(
-  options: RunSelectedSwmSyncWorkOptions,
+export async function runSelectedSwmContinuations(
+  options: RunSelectedSwmContinuationsOptions,
 ): Promise<SharedMemorySyncResult> {
-  const publicContextGraphSet = new Set(options.publicContextGraphIds);
-  const isSelectedPublicWork = (
-    item: ContextGraphSyncWork<SharedMemorySyncResult>,
-  ): boolean => (
-    options.selectedEnabled
-    && item.lane === 'shared_memory'
-    && publicContextGraphSet.has(item.contextGraphId)
+  const initialByContextGraph = new Map(
+    options.initialRounds.map((round) => [round.contextGraphId, round.result] as const),
   );
-  const selectedPublicContextGraphIds = options.work
-    .filter(isSelectedPublicWork)
-    .map((item) => item.contextGraphId);
-  const initialPublicResults = new Map<string, SharedMemorySyncResult>();
-
-  const runOrdered = (
-    selectedWork: readonly ContextGraphSyncWork<SharedMemorySyncResult>[],
-    phase: 'initial' | 'continuation',
-    plan?: SelectedSwmContinuationPlan,
-  ): Promise<SharedMemorySyncResult> => {
-    const wrappedWork = selectedWork.map((item) => {
-      if (!isSelectedPublicWork(item)) return item;
-      return {
-        ...item,
-        run: async (remainingContextGraphs: number) => {
-          if (phase === 'initial') {
-            const result = await item.run(remainingContextGraphs);
-            initialPublicResults.set(item.contextGraphId, result);
-            return result;
-          }
-
-          if (!plan) throw new Error('Selected SWM continuation is missing its plan');
-          // This wrapper is invoked only by `runWithAdmission`, after the global
-          // scheduler grants a slot. Rechecking here closes the queue-wait race.
-          if (options.nowMs() >= plan.deadlineMs) {
-            options.onExpiredAfterAdmission?.(item.contextGraphId);
-            return options.emptyResult();
-          }
-          const coverageBefore = plan.startContinuationPass(item.contextGraphId);
-          const result = await item.run(remainingContextGraphs);
-          plan.recordRound(item.contextGraphId, result);
-          options.onContinuation?.({
-            contextGraphId: item.contextGraphId,
-            coverageBefore,
-            coverageAfter: plan.progress(item.contextGraphId),
-          });
-          return result;
-        },
-      };
-    });
-
-    return runOrderedContextGraphSyncs({
-      work: wrappedWork,
-      priorities: options.priorities,
-      emptyResult: options.emptyResult,
-      runWithAdmission: (item, run) => {
-        const selectedSwmPriority = isSelectedPublicWork(item);
-        return options.runWithAdmission(item, run, {
-          priorityOverride: options.selectedEnabled
-            ? (selectedSwmPriority ? options.selectedPriority : undefined)
-            : options.selectedPriority,
-          selectedSwmPriority,
-        });
-      },
-      merge: options.merge,
-      markDeferred: options.markDeferred,
-      ...(phase === 'continuation' && plan
-        ? { shouldContinue: () => options.nowMs() < plan.deadlineMs }
-        : {}),
-      ...(options.isPeerTransportFailure
-        ? { isPeerTransportFailure: options.isPeerTransportFailure }
-        : {}),
-      ...(options.onDeferred ? { onDeferred: options.onDeferred } : {}),
-    });
-  };
-
-  const initialSummary = await runOrdered(options.work, 'initial');
-  if (!options.selectedEnabled || selectedPublicContextGraphIds.length === 0) {
-    return initialSummary;
-  }
-
-  // The continuation budget starts only after the full initial public/private
-  // walk. A large initial walk therefore cannot consume the retry allowance.
-  const plan = new SelectedSwmContinuationPlan(
-    options.providerPeerId,
-    selectedPublicContextGraphIds,
-    options.resolvePassConfig(),
-    options.nowMs(),
-  );
-  for (const [contextGraphId, result] of initialPublicResults) {
-    plan.recordRound(contextGraphId, result);
-  }
-
-  // Driver-owned diagnostic: discard any nested/part counter before merging.
-  let summary = withoutContinuationPasses(initialSummary);
-  if ((summary.deferredBackpressure ?? 0) > 0) {
-    options.onBackpressure?.();
-  } else {
-    const publicWorkByContextGraph = new Map(
-      options.work
-        .filter(isSelectedPublicWork)
-        .map((item) => [item.contextGraphId, item] as const),
-    );
-    for (;;) {
-      const selection = plan.selectNextPass(options.nowMs());
-      for (const stop of selection.stops) options.onStop?.(stop);
-      if (selection.contextGraphIds.length === 0) break;
-
-      const continuationWork = selection.contextGraphIds
-        .map((contextGraphId) => publicWorkByContextGraph.get(contextGraphId))
-        .filter((item): item is ContextGraphSyncWork<SharedMemorySyncResult> => (
-          item !== undefined
-        ));
-      const part = withoutContinuationPasses(
-        await runOrdered(continuationWork, 'continuation', plan),
-      );
-      summary = withoutContinuationPasses(options.merge(summary, part));
-      if ((part.deferredBackpressure ?? 0) > 0) {
-        options.onBackpressure?.();
-        break;
-      }
+  const workByContextGraph = new Map<string, ContextGraphSyncWork<SharedMemorySyncResult>>();
+  for (const item of options.work) {
+    if (!workByContextGraph.has(item.contextGraphId)) {
+      workByContextGraph.set(item.contextGraphId, item);
     }
   }
 
-  return { ...summary, continuationPasses: plan.continuationPasses() };
+  const planeProven = new Map<string, boolean>();
+  const trackers = new Map<string, SwmCatchupPassTracker<SwmSnapshotCoverage>>();
+  for (const contextGraphId of workByContextGraph.keys()) {
+    const initial = initialByContextGraph.get(contextGraphId);
+    if (!initial) {
+      throw new Error(
+        `Selected SWM continuation is missing the initial round for Context Graph: ${contextGraphId}`,
+      );
+    }
+    const progress = classifyDurableProgress(initial);
+    const tracker = new SwmCatchupPassTracker<SwmSnapshotCoverage>();
+    tracker.recordPeerRound(
+      options.providerPeerId,
+      initial.swmCoverage,
+      progress.completedWithoutFailure,
+    );
+    trackers.set(contextGraphId, tracker);
+    planeProven.set(
+      contextGraphId,
+      initial.insertedDataTriples > 0 && progress.completedWithoutFailure,
+    );
+  }
+
+  let summary = options.emptyResult();
+  const execution = await runSwmCatchupContinuations({
+    units: [...trackers].map(([contextGraphId, tracker]) => ({
+      key: contextGraphId,
+      tracker,
+      planeProven: () => planeProven.get(contextGraphId) === true,
+    })),
+    config: options.passConfig,
+    nowMs: options.nowMs,
+    runPass: async (candidates, deadlineMs) => {
+      const candidateByContextGraph = new Map(
+        candidates.map((candidate) => [candidate.key, candidate] as const),
+      );
+      const continuationWork = candidates.map((candidate) => {
+        const item = workByContextGraph.get(candidate.key);
+        if (!item) {
+          throw new Error(
+            `Selected SWM continuation received unknown Context Graph: ${candidate.key}`,
+          );
+        }
+        return {
+          ...item,
+          run: async (remainingContextGraphs: number): Promise<SharedMemorySyncResult> => {
+            // `run` is invoked only after the global scheduler grants a slot.
+            // Rechecking here closes the decision-to-admission queue race.
+            if (options.nowMs() >= deadlineMs) {
+              options.onExpiredAfterAdmission?.(item.contextGraphId);
+              return options.emptyResult();
+            }
+            const coverageBefore = candidate.start();
+            const result = await item.run(remainingContextGraphs);
+            const progress = classifyDurableProgress(result);
+            const tracker = trackers.get(item.contextGraphId)!;
+            tracker.recordPeerRound(
+              options.providerPeerId,
+              result.swmCoverage,
+              progress.completedWithoutFailure,
+            );
+            planeProven.set(
+              item.contextGraphId,
+              planeProven.get(item.contextGraphId) === true || (
+                result.insertedDataTriples > 0 && progress.completedWithoutFailure
+              ),
+            );
+            options.onContinuation?.({
+              contextGraphId: item.contextGraphId,
+              coverageBefore,
+              coverageAfter: candidate.progress(),
+            });
+            return withoutContinuationPasses(result);
+          },
+        };
+      });
+
+      const part = withoutContinuationPasses(await runOrderedContextGraphSyncs({
+        work: continuationWork,
+        priorities: options.priorities,
+        emptyResult: options.emptyResult,
+        runWithAdmission: (item, run) => {
+          // Assert that ordered work still belongs to the selected candidate
+          // set before admitting it; this also catches future adapter drift.
+          if (!candidateByContextGraph.has(item.contextGraphId)) {
+            throw new Error(
+              `Selected SWM continuation scheduled an unselected Context Graph: ${item.contextGraphId}`,
+            );
+          }
+          return options.runWithAdmission(item, run);
+        },
+        merge: options.merge,
+        markDeferred: options.markDeferred,
+        shouldContinue: () => options.nowMs() < deadlineMs,
+        ...(options.isPeerTransportFailure
+          ? { isPeerTransportFailure: options.isPeerTransportFailure }
+          : {}),
+        ...(options.onDeferred ? { onDeferred: options.onDeferred } : {}),
+      }));
+      summary = withoutContinuationPasses(options.merge(summary, part));
+      return part;
+    },
+    shouldStopAfterPass: (part) => (part.deferredBackpressure ?? 0) > 0,
+    onStop: (stop) => options.onStop?.({
+      contextGraphId: stop.key,
+      continuationPasses: stop.continuationPasses,
+      reason: stop.reason,
+    }),
+  });
+
+  if (execution.stoppedAfterPass) options.onBackpressure?.();
+  return { ...summary, continuationPasses: execution.continuationPasses };
 }
