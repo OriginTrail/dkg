@@ -75,6 +75,10 @@ const MICRO_LIMITS: VmRecoveryMicrobatchLimits = {
   maxSelectorBytes: 64 * 1024,
 };
 
+// Production exact data pages contain at most 64 rows. This soft planner
+// budget therefore keeps a microbatch near 64 non-empty data pages.
+const EXACT_PAGE_FAIRNESS_LEAVES = 4_096n;
+
 function planAll(
   targets: readonly SizedTarget[],
   limits: VmRecoveryMicrobatchLimits,
@@ -109,6 +113,52 @@ describe('VM recovery microbatch planner — adversarial boundaries', () => {
     expect(plan.estimatedBytes).toBe(BigInt(MAX_EXACT_SYNC_ASSETS) * 1_024n);
     expect(plan.estimatedLeaves).toBe(BigInt(MAX_EXACT_SYNC_ASSETS) * 8n);
     expect(plan.completeFootprints).toBe(true);
+  });
+
+  it('packs ten 100-triple KAs up to the executor asset-count cap', () => {
+    const targets = Array.from({ length: 20 }, (_, id) => sizedTarget(id, 8_192n, 100n));
+    const plan = planVmRecoveryMicrobatch(targets, {
+      ...MICRO_LIMITS,
+      targetLeaves: EXACT_PAGE_FAIRNESS_LEAVES,
+    }, selectorBytesFor);
+
+    expect(plan.targets.map(({ id }) => id)).toEqual(
+      Array.from({ length: MAX_EXACT_SYNC_ASSETS }, (_, id) => id),
+    );
+    expect(plan.estimatedLeaves).toBe(1_000n);
+  });
+
+  it('caps 500-triple KAs at eight before exceeding the 4,096-leaf window', () => {
+    const targets = Array.from({ length: 10 }, (_, id) => sizedTarget(id, 32_768n, 500n));
+    const plan = planVmRecoveryMicrobatch(targets, {
+      ...MICRO_LIMITS,
+      targetLeaves: EXACT_PAGE_FAIRNESS_LEAVES,
+    }, selectorBytesFor);
+
+    expect(plan.targets.map(({ id }) => id)).toEqual(
+      Array.from({ length: 8 }, (_, id) => id),
+    );
+    expect(plan.estimatedLeaves).toBe(4_000n);
+  });
+
+  it('admits a KA over the 4,096-leaf fairness window only as a singleton', () => {
+    const targets = [
+      sizedTarget(0, 512_000n, 5_000n),
+      sizedTarget(1, 8_192n, 100n),
+      sizedTarget(2, 8_192n, 100n),
+    ];
+    const limits = {
+      ...MICRO_LIMITS,
+      targetLeaves: EXACT_PAGE_FAIRNESS_LEAVES,
+    };
+
+    expect(planAll(targets, limits).map((batch) => batch.map(({ id }) => id)))
+      .toEqual([[0], [1, 2]]);
+    expect(planVmRecoveryMicrobatch(targets, limits, selectorBytesFor)).toMatchObject({
+      targets: [targets[0]],
+      estimatedLeaves: 5_000n,
+      completeFootprints: true,
+    });
   });
 
   it('splits mixed sizes deterministically by stable prefix, bytes, and leaves', () => {
@@ -290,7 +340,11 @@ interface RecoveryInternals {
   ): Promise<PendingOrdinalRecoveryResult>;
 }
 
-function recoveryTarget(localCgId: string, ordinal: number): RecoveryTarget {
+function recoveryTarget(
+  localCgId: string,
+  ordinal: number,
+  footprint?: Readonly<{ byteSize: bigint; merkleLeafCount: bigint }>,
+): RecoveryTarget {
   return {
     localCgId,
     onChainCgId: '1',
@@ -301,8 +355,8 @@ function recoveryTarget(localCgId: string, ordinal: number): RecoveryTarget {
     reason: 'no-swm',
     recoveryFootprint: {
       kind: 'public-v10',
-      byteSize: 1_024n,
-      merkleLeafCount: 8n,
+      byteSize: footprint?.byteSize ?? 1_024n,
+      merkleLeafCount: footprint?.merkleLeafCount ?? 8n,
       assertionVersion: '1',
       anchor: { kind: 'pinned-finalized', blockHash: '0x01' },
     },
@@ -319,6 +373,9 @@ async function createRecoveryHarness(options: {
   localCgId: string;
   peers: readonly string[];
   targetCount: number;
+  footprintForOrdinal?: (
+    ordinal: number,
+  ) => Readonly<{ byteSize: bigint; merkleLeafCount: bigint }>;
   onFetch: (
     peerId: string,
     targets: readonly RecoveryTarget[],
@@ -350,7 +407,11 @@ async function createRecoveryHarness(options: {
 
   const targets = Array.from(
     { length: options.targetCount },
-    (_, ordinal) => recoveryTarget(options.localCgId, ordinal),
+    (_, ordinal) => recoveryTarget(
+      options.localCgId,
+      ordinal,
+      options.footprintForOrdinal?.(ordinal),
+    ),
   );
   const targetsByUal = new Map(targets.map((target) => [target.ual, target]));
   const fetched: ExactFetch[] = [];
@@ -513,6 +574,54 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       { peerId: holder, uals: unknownTargets.slice(1).map(({ ual }) => ual) },
     ]);
     expect(harness.fetched[1]!.uals.length).toBeGreaterThan(1);
+  });
+
+  it('requests ten 100-triple KAs as one probe followed by one nine-asset batch', async () => {
+    const holder = '12D3KooWExactCountSmallHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-count-small';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchExactCountSmall',
+      localCgId,
+      peers: [holder],
+      targetCount: 10,
+      footprintForOrdinal: () => ({ byteSize: 8_192n, merkleLeafCount: 100n }),
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+
+    const result = await harness.internals.recoverVmReconcileBatch(
+      localCgId, 1n, harness.targets, 100, () => true,
+    );
+
+    expect(harness.fetched.map(({ uals }) => uals.length)).toEqual([1, 9]);
+    expect(result.attemptedOrdinals).toEqual(harness.targets.map(({ ordinal }) => ordinal));
+  });
+
+  it('requests ten 500-triple KAs as one probe, eight assets, then one asset', async () => {
+    const holder = '12D3KooWExactCountMediumHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/exact-count-medium';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchExactCountMedium',
+      localCgId,
+      peers: [holder],
+      targetCount: 10,
+      footprintForOrdinal: () => ({ byteSize: 32_768n, merkleLeafCount: 500n }),
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+
+    const result = await harness.internals.recoverVmReconcileBatch(
+      localCgId, 1n, harness.targets, 100, () => true,
+    );
+
+    expect(harness.fetched.map(({ uals }) => uals.length)).toEqual([1, 8, 1]);
+    expect(result.attemptedOrdinals).toEqual(harness.targets.map(({ ordinal }) => ordinal));
   });
 
   it('commits found members but rotates unresolved members without false absence', async () => {
