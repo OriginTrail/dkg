@@ -1634,6 +1634,21 @@ export class FinalizationHandler {
         }
       }
       if (!trustedAssertionEvidence) {
+        const recoveredEvidence = await this.recoverReceiptBackedGraphScopedEvidence({
+          contextGraphId,
+          scope,
+          head: workspaceHead!,
+          merkleRoot,
+          publisherAddress,
+          kaId,
+          subGraphName,
+        }, ctx);
+        if (recoveredEvidence) {
+          return this.reconcileGraphScopedKC({
+            ...input,
+            trustedAssertionEvidence: recoveredEvidence,
+          }, ctx);
+        }
         this.log.info(
           ctx,
           `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
@@ -1757,6 +1772,124 @@ export class FinalizationHandler {
       `Chain-reconcile: promoted exact graph-scoped SWM assertion to VM for ${ual} (ka=${kaId})`,
     );
     return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'promoted';
+  }
+
+  /**
+   * Durable sync accepts only structural peer metadata and independently
+   * verifies its receipt claim. Consequently an exact VM fetch can leave the
+   * graph present with a chain-valid transaction hash while intentionally
+   * omitting peer-controlled ACL, publisher-peer, status, and attribution
+   * fields. Re-verify that stored receipt against canonical chain state, then
+   * combine it with the local durable SWM head so the normal trusted-evidence
+   * materializer can reconstruct those fields without trusting the peer.
+   *
+   * This bounded recovery currently applies only to assertion version 1. An
+   * update receipt requires the separate update-verification contract and must
+   * continue to fail closed until that evidence is threaded explicitly.
+   */
+  private async recoverReceiptBackedGraphScopedEvidence(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    head: KnowledgeAssetWorkspaceHead;
+    merkleRoot: Uint8Array;
+    publisherAddress: string;
+    kaId: bigint;
+    subGraphName?: string;
+  }, ctx: OperationContext): Promise<TrustedGraphScopedAssertionEvidence | undefined> {
+    const resolver = this.chain?.resolveCanonicalFinalizationReceipt;
+    const rootCountReader = this.chain?.getMerkleRootCount;
+    if (
+      !this.chain
+      || this.chain.chainId === 'none'
+      || !resolver
+      || !rootCountReader
+      || input.scope.assertionVersion !== '1'
+    ) return undefined;
+
+    let metaGraph: string;
+    let safeUal: string;
+    try {
+      metaGraph = assertSafeIri(contextGraphMetaUri(input.contextGraphId));
+      safeUal = assertSafeIri(input.scope.ual);
+    } catch {
+      return undefined;
+    }
+    const candidate = await this.store.query(
+      `SELECT ?tx ?kind WHERE {
+        GRAPH <${metaGraph}> {
+          <${safeUal}> <${DKG_NS}transactionHash> ?tx ;
+            <${DKG_NS}confirmationKind> ?kind .
+        }
+      } LIMIT 2`,
+      { source: 'agent.finalization.recoverReceiptBackedEvidence' },
+    );
+    if (candidate.type !== 'bindings' || candidate.bindings.length !== 1) return undefined;
+    const transactionHash = stripOptionalLiteral(candidate.bindings[0]?.['tx']);
+    const confirmationKind = stripOptionalLiteral(candidate.bindings[0]?.['kind']);
+    if (
+      confirmationKind !== 'transaction'
+      || !transactionHash
+      || !/^0x[0-9a-fA-F]{64}$/.test(transactionHash)
+    ) return undefined;
+
+    try {
+      const [resolution, rootCount] = await Promise.all([
+        resolver.call(this.chain, transactionHash),
+        rootCountReader.call(this.chain, input.kaId),
+      ]);
+      if (resolution.status !== 'confirmed' || rootCount !== 1n) return undefined;
+      const { receipt } = resolution;
+      if (
+        receipt.txHash.toLowerCase() !== transactionHash.toLowerCase()
+        || receipt.kaId !== input.kaId
+        || receipt.batchId !== input.kaId
+        || receipt.startKAId !== input.kaId
+        || receipt.endKAId !== input.kaId
+        || !equalBytes(receipt.merkleRoot, input.merkleRoot)
+        || !ethers.isAddress(input.publisherAddress)
+        || !ethers.isAddress(receipt.publisherAddress)
+        || ethers.getAddress(receipt.publisherAddress) !== ethers.getAddress(input.publisherAddress)
+        || !Number.isSafeInteger(receipt.blockNumber)
+        || receipt.blockNumber < 0
+        || !Number.isSafeInteger(receipt.txIndex)
+        || receipt.txIndex < 0
+        || !/^0x[0-9a-fA-F]{64}$/.test(receipt.blockHash)
+      ) return undefined;
+
+      const access = resolveGraphScopedAccessEnvelope(input.head);
+      this.log.info(
+        ctx,
+        `Chain-reconcile: recovered canonical transaction provenance for ${input.scope.ual}`,
+      );
+      return {
+        assertionVersion: input.scope.assertionVersion,
+        ...(input.head.publicQuadsDigest
+          ? { publicQuadsDigest: input.head.publicQuadsDigest }
+          : {}),
+        publicTripleCount: input.head.publicTripleCount,
+        ...(input.head.privateMerkleRoot
+          ? { privateMerkleRoot: input.head.privateMerkleRoot }
+          : {}),
+        privateTripleCount: input.head.privateTripleCount,
+        publisherPeerId: input.head.publisherPeerId,
+        publisherAddress: receipt.publisherAddress,
+        transactionHash: receipt.txHash,
+        blockNumber: receipt.blockNumber,
+        blockHash: receipt.blockHash,
+        txIndex: receipt.txIndex,
+        ...(receipt.authorAddress ? { authorAddress: receipt.authorAddress } : {}),
+        accessPolicy: access.accessPolicy,
+        allowedPeers: access.allowedPeers,
+        ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
+      };
+    } catch (error) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: canonical transaction provenance is not yet available for `
+          + `${input.scope.ual}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return undefined;
+    }
   }
 
   /**

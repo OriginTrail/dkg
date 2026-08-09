@@ -2255,6 +2255,97 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
+  it('repairs peer-materialized VM metadata by revalidating its receipt claim', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    for (const predicate of [
+      'http://dkg.io/ontology/accessPolicy',
+      'http://dkg.io/ontology/publisherPeerId',
+      'http://www.w3.org/ns/prov#wasAttributedTo',
+    ]) {
+      await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
+    }
+
+    let receiptReads = 0;
+    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      getMerkleRootCount: async () => 1n,
+      resolveCanonicalFinalizationReceipt: async (transactionHash) => {
+        receiptReads += 1;
+        expect(transactionHash).toBe(message.txHash);
+        return canonicalReceipt(message);
+      },
+    }));
+    const internals = repairHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(repairHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 200,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('already-confirmed');
+
+    expect(receiptReads).toBe(1);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    expect(await store.countQuads(swmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/accessPolicy> "ownerOnly" ;
+          <http://dkg.io/ontology/publisherPeerId> "12D3KooWPublisher" ;
+          <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
+          <http://dkg.io/ontology/materializedVersion> "123:4" ;
+          <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
+  it('does not repair peer-materialized VM metadata from a non-unique on-chain root', async () => {
+    const { message, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await store.deleteByPattern({
+      graph: metaGraph,
+      subject: UAL,
+      predicate: 'http://dkg.io/ontology/accessPolicy',
+    });
+
+    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      getMerkleRootCount: async () => 2n,
+      resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+    }));
+    const internals = repairHandler as unknown as {
+      verifyChainCgBinding: (kaId: bigint, cgId: string) => Promise<boolean>;
+    };
+    internals.verifyChainCgBinding = async () => true;
+
+    await expect(repairHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId: '42',
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 200,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> {
+        <${UAL}> <http://dkg.io/ontology/accessPolicy> ?policy .
+      } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
   it('verifies chain binding and exact private VM metadata without deleting unverified SWM', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph();
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
