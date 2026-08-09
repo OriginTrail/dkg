@@ -1,15 +1,16 @@
-import {
-  bindProvenOxigraphGenerationV1,
-  type OxigraphSupervisorOperationContextV1,
-} from './oxigraph-supervisor-operation-context.js';
+import type { OxigraphSupervisorChildV1 } from './oxigraph-supervisor-child.js';
+import type { OxigraphSupervisorGenerationV1 } from './oxigraph-supervisor-generation.js';
 import type {
   OxigraphSupervisorShutdownOperationsV1,
 } from './oxigraph-supervisor-shutdown-operations.js';
-import { sleepOxigraphSupervisorV1 } from './oxigraph-supervisor-lifecycle.js';
 
 interface StartOxigraphSupervisorOptionsV1 {
-  readonly context: OxigraphSupervisorOperationContextV1;
   readonly shutdown: OxigraphSupervisorShutdownOperationsV1;
+  readonly child: Pick<OxigraphSupervisorChildV1, 'stderrTail'>;
+  readonly generation: OxigraphSupervisorGenerationV1;
+  readonly bind: string;
+  readonly readyTimeoutMs: number;
+  readonly log: (message: string) => void;
   readonly binaryPath: string;
   readonly location: string;
   readonly queryTimeoutS?: number;
@@ -21,49 +22,30 @@ export async function startOxigraphSupervisorV1(
   options: StartOxigraphSupervisorOptionsV1,
 ): Promise<void> {
   const {
-    context,
     shutdown,
+    child,
+    generation,
+    bind,
+    readyTimeoutMs,
+    log,
     binaryPath,
     location,
     queryTimeoutS,
     launchSummary,
   } = options;
-  const { child, probes, bind, readyTimeoutMs, readyIntervalMs, log } = context;
   log(
     queryTimeoutS !== undefined
       ? `Starting Oxigraph server on ${bind} (location: ${location}, query timeout: ${queryTimeoutS}s)…`
       : `Starting Oxigraph server on ${bind} (location: ${location})…`,
   );
   if (launchSummary) log(launchSummary);
-  child.spawn();
-
-  const deadline = Date.now() + readyTimeoutMs;
-  let attempt = 0;
-  let childDied = false;
-  while (Date.now() < deadline) {
-    attempt += 1;
-    if (!child.alive()) {
-      childDied = true;
-      break;
-    }
-    const listenerPid = await probes.probeReady();
-    if (listenerPid !== null) {
-      if (child.alive()) {
-        const generation = bindProvenOxigraphGenerationV1(
-          context,
-          child.current()!,
-          listenerPid,
-        );
-        log(
-          `Oxigraph server ready on ${bind} after ${attempt} probe(s) ` +
-            `(generation ${generation}).`,
-        );
-        return;
-      }
-      childDied = true;
-      break;
-    }
-    await sleepOxigraphSupervisorV1(readyIntervalMs);
+  const result = await generation.spawnAndProve();
+  if (result.status === 'ready') {
+    log(
+      `Oxigraph server ready on ${bind} after ${result.attempts} probe(s) ` +
+        `(generation ${result.generation}).`,
+    );
+    return;
   }
 
   shutdown.beginTermination();
@@ -72,7 +54,7 @@ export async function startOxigraphSupervisorV1(
     ? ` Last server output:\n${child.stderrTail().trim()}`
     : '';
   throw new Error(
-    childDied
+    result.status === 'child-exited'
       ? `Oxigraph server exited during startup on ${bind} ` +
         `(binary: ${binaryPath}, location: ${location}). ` +
         `The port may already be in use by another process.${stderrHint}`

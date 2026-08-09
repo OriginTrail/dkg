@@ -49,6 +49,7 @@ describe('managed Oxigraph supervisor module boundary', () => {
     const supervisor = source('oxigraph-server-supervisor.ts');
     expect(imports(supervisor)).toEqual(expect.arrayContaining([
       './oxigraph-supervisor-state.js',
+      './oxigraph-supervisor-generation.js',
       './oxigraph-supervisor-recovery-operations.js',
       './oxigraph-supervisor-shutdown-operations.js',
       './oxigraph-supervisor-handoff-operations.js',
@@ -66,7 +67,16 @@ describe('managed Oxigraph supervisor module boundary', () => {
       'oxigraph-supervisor-handoff-operations.ts',
       'oxigraph-supervisor-startup-operations.ts',
     ]) {
-      expect(imports(source(name))).not.toContain('./oxigraph-server-contract.js');
+      const operation = source(name);
+      const text = operation.getFullText();
+      expect(imports(operation)).not.toContain('./oxigraph-server-contract.js');
+      expect(imports(operation)).not.toContain('./oxigraph-supervisor-operation-context.js');
+      expect(text).not.toMatch(/\.spawn\(|\.probeReady\(|\.current\(\)!/u);
     }
+
+    const generation = source('oxigraph-supervisor-generation.ts').getFullText();
+    expect(generation).toMatch(/\.spawn\(/u);
+    expect(generation).toMatch(/\.probeReady\(/u);
+    expect(generation).toMatch(/bindReadyGeneration\(/u);
   });
 });

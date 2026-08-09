@@ -1,30 +1,44 @@
 import {
   parseOxigraphGenerationV1,
-  sleepOxigraphSupervisorV1,
 } from './oxigraph-supervisor-lifecycle.js';
-import {
-  bindProvenOxigraphGenerationV1,
-  type OxigraphSupervisorOperationContextV1,
-} from './oxigraph-supervisor-operation-context.js';
+import type { OxigraphSupervisorChildV1 } from './oxigraph-supervisor-child.js';
+import type { OxigraphSupervisorGenerationV1 } from './oxigraph-supervisor-generation.js';
+import type { OxigraphSupervisorTimersV1 } from './oxigraph-supervisor-lifecycle.js';
+import type { OxigraphSupervisorOwnershipControllerV1 } from './oxigraph-supervisor-ownership.js';
+import type { OxigraphSupervisorReviveBackoffV1 } from './oxigraph-supervisor-revive.js';
+import type { OxigraphSupervisorStateV1 } from './oxigraph-supervisor-state.js';
+
+interface OxigraphSupervisorRecoveryDependenciesV1 {
+  readonly state: OxigraphSupervisorStateV1;
+  readonly ownership: OxigraphSupervisorOwnershipControllerV1;
+  readonly child: Pick<OxigraphSupervisorChildV1, 'signal'>;
+  readonly generation: OxigraphSupervisorGenerationV1;
+  readonly timers: Pick<OxigraphSupervisorTimersV1, 'armRevive' | 'clearRevive'>;
+  readonly reviveBackoff: Pick<OxigraphSupervisorReviveBackoffV1, 'next'>;
+  readonly bind: string;
+  readonly log: (message: string) => void;
+  readonly markStoreDown: () => void;
+  readonly runExclusive: <T>(section: () => Promise<T>) => Promise<T>;
+}
 
 /** Automatic revive and caller-driven recovery for one supervisor state owner. */
 export class OxigraphSupervisorRecoveryOperationsV1 {
-  readonly #context: OxigraphSupervisorOperationContextV1;
+  readonly #dependencies: OxigraphSupervisorRecoveryDependenciesV1;
   #inFlightRecovery: { expected: string; promise: Promise<string> } | null = null;
 
-  constructor(context: OxigraphSupervisorOperationContextV1) {
-    this.#context = context;
+  constructor(dependencies: OxigraphSupervisorRecoveryDependenciesV1) {
+    this.#dependencies = dependencies;
   }
 
   scheduleRevive(reason: string): void {
-    const { state, reviveBackoff, log, timers } = this.#context;
+    const { state, reviveBackoff, log, timers } = this.#dependencies;
     if (state.terminating() || state.lifecycle() === 'closed') return;
     const { attempt, delayMs } = reviveBackoff.next();
     log(`[oxigraph] ${reason}; restart #${attempt} in ${delayMs}ms`);
     state.transition('reviving');
     timers.armRevive(delayMs, () => {
       if (state.terminating() || state.lifecycle() === 'closed') return;
-      void this.#context.runExclusive(() => this.reviveLocked()).catch((error: unknown) => {
+      void this.#dependencies.runExclusive(() => this.reviveLocked()).catch((error: unknown) => {
         log(`[oxigraph] restart attempt failed: ${(error as Error).message}`);
       });
     });
@@ -35,38 +49,26 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
       state,
       ownership,
       child,
-      probes,
+      generation,
       bind,
-      readyTimeoutMs,
-      readyIntervalMs,
       log,
       markStoreDown,
-    } = this.#context;
+    } = this.#dependencies;
     if (state.terminating() || state.lifecycle() === 'closed' || state.lifecycle() === 'ready') {
       return;
     }
     ownership.invalidate('child-revive');
     markStoreDown();
     child.signal('SIGKILL');
-    child.spawn();
-
-    const reviveDeadline = Date.now() + readyTimeoutMs;
-    while (Date.now() < reviveDeadline) {
-      if (state.terminating()) return;
-      if (!child.alive()) break;
-      const listenerPid = await probes.probeReady();
-      if (listenerPid !== null && child.alive()) {
-        const generation = bindProvenOxigraphGenerationV1(
-          this.#context,
-          child.current()!,
-          listenerPid,
-        );
-        log(`[oxigraph] server restarted and healthy on ${bind} (generation ${generation}).`);
-        return;
-      }
-      await sleepOxigraphSupervisorV1(readyIntervalMs);
+    const result = await generation.spawnAndProve();
+    if (result.status === 'ready') {
+      log(
+        `[oxigraph] server restarted and healthy on ${bind} ` +
+          `(generation ${result.generation}).`,
+      );
+      return;
     }
-    if (state.terminating()) return;
+    if (result.status === 'terminated' || state.terminating()) return;
     child.signal('SIGKILL');
     this.scheduleRevive(`respawned server did not become ready on ${bind}`);
   }
@@ -78,7 +80,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
     } catch (error) {
       return Promise.reject(error as Error);
     }
-    const snapshot = this.#context.ownership.snapshot();
+    const snapshot = this.#dependencies.ownership.snapshot();
     if (snapshot.terminal) {
       return Promise.reject(new Error(
         `Managed Oxigraph ownership is terminal (${snapshot.lastInvalidation}); ` +
@@ -96,7 +98,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
     if (snapshot.ready) return Promise.resolve(snapshot.childGeneration);
     const existing = this.#inFlightRecovery;
     if (existing !== null && existing.expected === expectedGeneration) return existing.promise;
-    const promise = this.#context.runExclusive(
+    const promise = this.#dependencies.runExclusive(
       () => this.#recoverLocked(expectedGeneration),
     ).finally(() => {
       if (this.#inFlightRecovery?.promise === promise) this.#inFlightRecovery = null;
@@ -106,7 +108,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
   }
 
   async #recoverLocked(expectedGeneration: string): Promise<string> {
-    const { state, ownership, timers, bind } = this.#context;
+    const { state, ownership, timers, bind } = this.#dependencies;
     if (state.terminating() || state.lifecycle() === 'closed') {
       throw new Error(
         `Managed Oxigraph supervisor is shutting down; generation ${expectedGeneration} ` +

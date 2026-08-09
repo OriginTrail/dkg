@@ -1,38 +1,50 @@
-import { performance } from 'node:perf_hooks';
-
 import type { ManagedOxigraphSupervisorHandoffV1 } from '@origintrail-official/dkg-storage';
 
 import {
   boundedOxigraphPhaseDelayMsV1,
-  sleepOxigraphSupervisorV1,
 } from './oxigraph-supervisor-lifecycle.js';
-import {
-  bindProvenOxigraphGenerationV1,
-  type OxigraphSupervisorOperationContextV1,
-} from './oxigraph-supervisor-operation-context.js';
+import type { OxigraphSupervisorChildV1 } from './oxigraph-supervisor-child.js';
+import type { OxigraphSupervisorGenerationV1 } from './oxigraph-supervisor-generation.js';
+import type { OxigraphSupervisorTimersV1 } from './oxigraph-supervisor-lifecycle.js';
+import type { OxigraphSupervisorOwnershipControllerV1 } from './oxigraph-supervisor-ownership.js';
 import type {
   OxigraphSupervisorRecoveryOperationsV1,
 } from './oxigraph-supervisor-recovery-operations.js';
 import type {
   OxigraphSupervisorShutdownOperationsV1,
 } from './oxigraph-supervisor-shutdown-operations.js';
+import type { OxigraphSupervisorStateV1 } from './oxigraph-supervisor-state.js';
 
 interface OxigraphSupervisorHandoffDependenciesV1 {
-  readonly context: OxigraphSupervisorOperationContextV1;
+  readonly state: OxigraphSupervisorStateV1;
+  readonly ownership: OxigraphSupervisorOwnershipControllerV1;
+  readonly child: Pick<
+    OxigraphSupervisorChildV1,
+    'current' | 'markHandoffRetiring' | 'awaitExit' | 'detach' | 'signal'
+  >;
+  readonly generation: OxigraphSupervisorGenerationV1;
+  readonly timers: Pick<
+    OxigraphSupervisorTimersV1,
+    'armHandoffAbandon' | 'clearHandoffAbandon' | 'clearRevive'
+  >;
   readonly recovery: OxigraphSupervisorRecoveryOperationsV1;
   readonly shutdown: OxigraphSupervisorShutdownOperationsV1;
   readonly abandonMs: number;
+  readonly bind: string;
+  readonly log: (message: string) => void;
+  readonly markStoreDown: () => void;
+  readonly runExclusive: <T>(section: () => Promise<T>) => Promise<T>;
 }
 
 /** Two-phase clean-generation handoff and its abandoned-handoff backstop. */
 export class OxigraphSupervisorHandoffOperationsV1 {
-  readonly #context: OxigraphSupervisorOperationContextV1;
+  readonly #dependencies: OxigraphSupervisorHandoffDependenciesV1;
   readonly #recovery: OxigraphSupervisorRecoveryOperationsV1;
   readonly #shutdown: OxigraphSupervisorShutdownOperationsV1;
   readonly #abandonMs: number;
 
   constructor(dependencies: OxigraphSupervisorHandoffDependenciesV1) {
-    this.#context = dependencies.context;
+    this.#dependencies = dependencies;
     this.#recovery = dependencies.recovery;
     this.#shutdown = dependencies.shutdown;
     this.#abandonMs = dependencies.abandonMs;
@@ -41,14 +53,14 @@ export class OxigraphSupervisorHandoffOperationsV1 {
   publicView(): ManagedOxigraphSupervisorHandoffV1 {
     return Object.freeze({
       stopAndProveOwnedChildDead: (absoluteDeadlineMs?: number) =>
-        this.#context.runExclusive(() => this.#retireOwnedChildLocked(absoluteDeadlineMs)),
+        this.#dependencies.runExclusive(() => this.#retireOwnedChildLocked(absoluteDeadlineMs)),
       startAndProveCleanGeneration: (absoluteDeadlineMs?: number) =>
-        this.#context.runExclusive(() => this.#startCleanGenerationLocked(absoluteDeadlineMs)),
+        this.#dependencies.runExclusive(() => this.#startCleanGenerationLocked(absoluteDeadlineMs)),
     });
   }
 
   #armAbandonBackstop(): void {
-    const { state, timers, bind, log, runExclusive } = this.#context;
+    const { state, timers, bind, log, runExclusive } = this.#dependencies;
     timers.armHandoffAbandon(this.#abandonMs, () => {
       if (state.handoffPhase() !== 'retired'
         || state.terminating()
@@ -66,7 +78,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
 
   async #retireOwnedChildLocked(absoluteDeadlineMs?: number): Promise<void> {
     boundedOxigraphPhaseDelayMsV1(1, absoluteDeadlineMs);
-    const { state, ownership, timers, markStoreDown, child, bind, log } = this.#context;
+    const { state, ownership, timers, markStoreDown, child, bind, log } = this.#dependencies;
     if (state.terminating() || state.lifecycle() === 'closed') {
       throw new Error(
         'Managed Oxigraph supervisor is shutting down; the owned child cannot be retired',
@@ -114,12 +126,10 @@ export class OxigraphSupervisorHandoffOperationsV1 {
       ownership,
       timers,
       child,
-      probes,
+      generation,
       bind,
-      readyTimeoutMs,
-      readyIntervalMs,
       log,
-    } = this.#context;
+    } = this.#dependencies;
     if (state.terminating() || state.lifecycle() === 'closed') {
       throw new Error(
         'Managed Oxigraph supervisor is shutting down; no clean generation can be bound',
@@ -141,27 +151,11 @@ export class OxigraphSupervisorHandoffOperationsV1 {
     state.transition('recovering');
     timers.clearHandoffAbandon();
     try {
-      child.spawn();
-      const deadline = Math.min(
-        performance.now() + readyTimeoutMs,
-        absoluteDeadlineMs ?? Number.POSITIVE_INFINITY,
-      );
-      while (performance.now() < deadline) {
-        if (state.terminating() || !child.alive()) break;
-        const listenerPid = await probes.probeReady(absoluteDeadlineMs);
-        if (listenerPid !== null && child.alive()) {
-          const generation = bindProvenOxigraphGenerationV1(
-            this.#context,
-            child.current()!,
-            listenerPid,
-          );
-          state.setHandoffPhase('none');
-          log(`[oxigraph] clean child generation ${generation} bound on ${bind}.`);
-          return;
-        }
-        await sleepOxigraphSupervisorV1(
-          boundedOxigraphPhaseDelayMsV1(readyIntervalMs, deadline),
-        );
+      const result = await generation.spawnAndProve(absoluteDeadlineMs);
+      if (result.status === 'ready') {
+        state.setHandoffPhase('none');
+        log(`[oxigraph] clean child generation ${result.generation} bound on ${bind}.`);
+        return;
       }
       throw new Error(
         `Managed Oxigraph could not prove a clean child generation on ${bind} ` +

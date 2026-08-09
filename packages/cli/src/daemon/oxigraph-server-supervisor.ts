@@ -24,14 +24,12 @@ import type {
 } from './oxigraph-server-contract.js';
 import { OxigraphSupervisorChildV1 } from './oxigraph-supervisor-child.js';
 import { OxigraphSupervisorHandoffOperationsV1 } from './oxigraph-supervisor-handoff-operations.js';
+import { OxigraphSupervisorGenerationV1 } from './oxigraph-supervisor-generation.js';
 import {
   normalizePositiveOxigraphIntegerV1,
   OxigraphSupervisorTimersV1,
   SerializedOxigraphLifecycleV1,
 } from './oxigraph-supervisor-lifecycle.js';
-import type {
-  OxigraphSupervisorOperationContextV1,
-} from './oxigraph-supervisor-operation-context.js';
 import {
   createOxigraphServerOwnershipViewV1,
   createOxigraphSupervisorOwnershipV1,
@@ -138,33 +136,61 @@ export async function createOxigraphServerSupervisorV1(
     currentChild: () => child.current(),
     childAlive: () => child.alive(),
   });
-  const context: OxigraphSupervisorOperationContextV1 = Object.freeze({
+  const generation = new OxigraphSupervisorGenerationV1({
+    state,
+    ownership,
+    child,
+    probes,
+    reviveBackoff,
+    readyTimeoutMs,
+    readyIntervalMs,
+  });
+
+  recovery = new OxigraphSupervisorRecoveryOperationsV1({
+    state,
+    ownership,
+    child,
+    generation,
+    timers,
+    reviveBackoff,
+    bind,
+    log,
+    markStoreDown,
+    runExclusive,
+  });
+  const shutdown = new OxigraphSupervisorShutdownOperationsV1({
     state,
     ownership,
     child,
     probes,
     timers,
-    reviveBackoff,
     bind,
-    readyTimeoutMs,
-    readyIntervalMs,
+    log,
+    markStoreDown,
+    runExclusive,
+  });
+  const handoff = new OxigraphSupervisorHandoffOperationsV1({
+    state,
+    ownership,
+    child,
+    generation,
+    timers,
+    recovery,
+    shutdown,
+    abandonMs: handoffAbandonMs,
+    bind,
     log,
     markStoreDown,
     runExclusive,
   });
 
-  recovery = new OxigraphSupervisorRecoveryOperationsV1(context);
-  const shutdown = new OxigraphSupervisorShutdownOperationsV1(context);
-  const handoff = new OxigraphSupervisorHandoffOperationsV1({
-    context,
-    recovery,
-    shutdown,
-    abandonMs: handoffAbandonMs,
-  });
-
   await runExclusive(() => startOxigraphSupervisorV1({
-    context,
     shutdown,
+    child,
+    generation,
+    bind,
+    readyTimeoutMs,
+    log,
     binaryPath: opts.binaryPath,
     location: opts.location,
     queryTimeoutS,
