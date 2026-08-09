@@ -1190,7 +1190,16 @@ describe('system-record owned subjects and verification closure', () => {
         + new TextEncoder().encode('shared-sidecar').byteLength
         + new TextEncoder().encode('activation-leaf').byteLength,
       closureReferences: 2,
+      closurePhysicalBytes:
+        new TextEncoder().encode('shared-closure').byteLength + transitionBytes.byteLength,
+      closureReferencedBytes:
+        new TextEncoder().encode('shared-closure').byteLength + transitionBytes.byteLength,
       sidecarReferences: 2,
+      sidecarPhysicalBytes:
+        transitionBytes.byteLength + new TextEncoder().encode('shared-sidecar').byteLength,
+      sidecarReferencedBytes:
+        transitionBytes.byteLength + new TextEncoder().encode('shared-sidecar').byteLength,
+      activationBundleBytes: new TextEncoder().encode('shared-closure').byteLength,
       activationInventoryLeaves: 1,
     });
 
