@@ -100,7 +100,6 @@ describe('cold historical Context Graph name binding', () => {
     const fixture = selectedFixture();
     const subscription = fixture.agent.subscribedContextGraphs.get(LOCAL_ID)!;
     subscription.subscribed = false;
-    subscription.syncAdmission = 'none';
     subscription.coreHosted = true;
 
     await expect(
