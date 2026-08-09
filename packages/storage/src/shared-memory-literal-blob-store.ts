@@ -20,7 +20,10 @@ import {
   supportsTripleStoreCapability,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
-import { normalizeStructuredMutation } from './bounded-structured-mutation.js';
+import {
+  normalizeReplaceSubjectPredicatesInputForObjectRewrite,
+  normalizeStructuredMutation,
+} from './bounded-structured-mutation.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
 export const SHARED_MEMORY_GRAPH_SUFFIX = '/_shared_memory';
@@ -200,16 +203,24 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    const normalized = normalizeStructuredMutation(mutation);
-    if (normalized.kind !== 'replace-subject-predicates') {
-      await this.inner.structuredMutation(normalized, options);
+    if (mutation.kind !== 'replace-subject-predicates') {
+      await this.inner.structuredMutation(normalizeStructuredMutation(mutation), options);
       return;
     }
+
+    // Validate graph/subject/predicate scope and RDF syntax before writing any
+    // blob. The canonical operand budget is intentionally enforced only after
+    // large literals have been replaced by their content-addressed references.
+    const scoped = normalizeReplaceSubjectPredicatesInputForObjectRewrite(mutation.input);
     const replacementQuads = await Promise.all(
-      normalized.input.replacementQuads.map((quad) => this.externalizeInsertQuad(quad)),
+      scoped.replacementQuads.map((quad) => this.externalizeInsertQuad(quad)),
     );
+    const normalized = normalizeStructuredMutation({
+      kind: mutation.kind,
+      input: { ...scoped, replacementQuads },
+    });
     await this.inner.structuredMutation(
-      { ...normalized, input: { ...normalized.input, replacementQuads } },
+      normalized,
       options,
     );
   }

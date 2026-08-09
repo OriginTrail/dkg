@@ -349,8 +349,9 @@ export function normalizeReplaceProjectionFromGraphInput(
   };
 }
 
-export function normalizeReplaceSubjectPredicatesInput(
+function normalizeReplaceSubjectPredicatesInputInternal(
   input: ReplaceSubjectPredicatesInput,
+  enforceOperandBudget: boolean,
 ): ReplaceSubjectPredicatesInput {
   const graphUri = absoluteIri(input.graphUri, 'replaceSubjectPredicates.graphUri');
   const subject = absoluteIri(input.subject, 'replaceSubjectPredicates.subject');
@@ -390,18 +391,37 @@ export function normalizeReplaceSubjectPredicatesInput(
     );
     return { ...quad, predicate, object };
   });
-  assertOperandBudget('replaceSubjectPredicates', [
-    graphUri,
-    subject,
-    ...predicates,
-    ...replacementQuads.flatMap((quad) => [
-      quad.subject,
-      quad.predicate,
-      quad.object,
-      quad.graph,
-    ]),
-  ]);
+  if (enforceOperandBudget) {
+    assertOperandBudget('replaceSubjectPredicates', [
+      graphUri,
+      subject,
+      ...predicates,
+      ...replacementQuads.flatMap((quad) => [
+        quad.subject,
+        quad.predicate,
+        quad.object,
+        quad.graph,
+      ]),
+    ]);
+  }
   return { graphUri, subject, predicates, replacementQuads };
+}
+
+export function normalizeReplaceSubjectPredicatesInput(
+  input: ReplaceSubjectPredicatesInput,
+): ReplaceSubjectPredicatesInput {
+  return normalizeReplaceSubjectPredicatesInputInternal(input, true);
+}
+
+/**
+ * Validate and canonicalize a predicate replacement before a storage decorator
+ * rewrites its RDF objects. The final, rewritten mutation must still pass the
+ * normal bounded validator before it reaches an adapter.
+ */
+export function normalizeReplaceSubjectPredicatesInputForObjectRewrite(
+  input: ReplaceSubjectPredicatesInput,
+): ReplaceSubjectPredicatesInput {
+  return normalizeReplaceSubjectPredicatesInputInternal(input, false);
 }
 
 export function buildReplaceSubjectPredicatesUpdate(

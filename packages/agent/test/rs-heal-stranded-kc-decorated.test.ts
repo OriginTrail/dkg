@@ -156,11 +156,47 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(supportsTripleStoreCapability(wrapped, 'structuredMutation')).toBe(false);
     expect(supportsCopySubjectProjection(wrapped)).toBe(true);
     expect(supportsReplaceSubjectPredicatesAtomically(wrapped)).toBe(true);
+
+    const legacyMeta = contextGraphMetaUri(TEST_CG);
+    await wrapped.insert([
+      {
+        subject: `did:dkg:context-graph:${TEST_CG}`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
+        object: `"${TEST_ONCHAIN}"`,
+        graph: ONTOLOGY_GRAPH,
+      },
+      ...metaQuads(TEST_UAL, legacyMeta),
+      ...publicTriples().map((triple) => ({ ...triple, graph: contextGraphDataUri(TEST_CG) })),
+    ]);
+    await writeMaterializedVersion(wrapped, legacyMeta, TEST_UAL, {
+      blockNumber: 100,
+      txIndex: 0,
+    });
+
     await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
-      { store: wrapped, rsHealCursorByCg: new Map() } as never,
+      {
+        store: wrapped,
+        rsHealCursorByCg: new Map(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
       TEST_CG,
       { subscribed: true, synced: true, onChainId: TEST_ONCHAIN } as never,
-    )).resolves.toEqual({ status: 'skipped', reason: 'no-work' });
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
+    const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
+    const dataPresent = await wrapped.query(
+      `ASK { GRAPH <${scopedData}> { <${ROOT}> <urn:p:name> "strand" } }`,
+    );
+    const metadataPresent = await wrapped.query(
+      `ASK { GRAPH <${scopedMeta}> { <${TEST_UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
+    );
+    const completionPresent = await wrapped.query(
+      `ASK { GRAPH <${scopedMeta}> { <${TEST_UAL}> <${DKG}materializedVersion> ?version } }`,
+    );
+    expect(dataPresent).toEqual({ type: 'boolean', value: true });
+    expect(metadataPresent).toEqual({ type: 'boolean', value: true });
+    expect(completionPresent).toEqual({ type: 'boolean', value: true });
 
     await wrapped.close();
   });

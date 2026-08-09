@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   EXTERNAL_LITERAL_REF_DATATYPE,
   OxigraphStore,
@@ -11,8 +11,10 @@ import {
   type QueryOptions,
   type QueryResult,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '../src/index.js';
+import { BOUNDED_MUTATION_MAX_OPERAND_BYTES } from '../src/bounded-structured-mutation.js';
 
 const SWM_GRAPH = 'did:dkg:context-graph:test/_shared_memory';
 const NON_SWM_GRAPH = 'did:dkg:context-graph:test';
@@ -331,6 +333,46 @@ describe('SharedMemoryLiteralBlobStore', () => {
       `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
     );
     expect(hydrated.type === 'bindings' ? hydrated.bindings : []).toEqual([{ o: largeLiteral }]);
+  });
+
+  it('externalizes an over-budget replacement literal before validating the rewritten mutation', async () => {
+    const blobDir = await tempBlobDir();
+    const inner = new OxigraphStore();
+    const mutationSpy = vi.spyOn(inner, 'structuredMutation');
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const subject = 'http://ex.org/over-budget-predicate-replacement';
+    const largeLiteral = `"${'x'.repeat(BOUNDED_MUTATION_MAX_OPERAND_BYTES + 1)}"`;
+
+    await store.structuredMutation({ kind: 'replace-subject-predicates', input: {
+      graphUri: SWM_GRAPH,
+      subject,
+      predicates: ['http://schema.org/value'],
+      replacementQuads: [quad(subject, largeLiteral, SWM_GRAPH)],
+    } });
+
+    expect(mutationSpy).toHaveBeenCalledTimes(1);
+    const forwarded = mutationSpy.mock.calls[0][0] as StructuredMutation;
+    expect(forwarded.kind).toBe('replace-subject-predicates');
+    if (forwarded.kind !== 'replace-subject-predicates') {
+      throw new Error(`unexpected forwarded mutation kind: ${forwarded.kind}`);
+    }
+    const hash = sha256Term(largeLiteral);
+    expect(forwarded.input.replacementQuads[0].object).toBe(externalRef(hash));
+    expect(await readFile(blobPath(blobDir, hash), 'utf8')).toBe(largeLiteral);
+
+    const hydrated = await store.query(
+      `CONSTRUCT { <${subject}> <http://schema.org/value> ?o }
+       WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(hydrated.type).toBe('quads');
+    if (hydrated.type === 'quads') {
+      expect(hydrated.quads).toEqual([{
+        subject,
+        predicate: 'http://schema.org/value',
+        object: largeLiteral,
+        graph: '',
+      }]);
+    }
   });
 });
 
