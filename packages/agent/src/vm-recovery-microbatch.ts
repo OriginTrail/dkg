@@ -32,6 +32,7 @@ export interface VmRecoveryFootprintBridgeTarget {
 }
 
 export interface VmRecoveryFootprintBridgeReader {
+  isContextGraphActiveOnChain?(contextGraphId: bigint): Promise<boolean>;
   getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
   getKnowledgeAssetUpdateContext?(
     kaId: bigint,
@@ -58,9 +59,10 @@ export interface VmRecoveryFootprintBridgeOptions {
  * This is intentionally weaker than the pinned finalized inventory scanner:
  * the access-policy and update-context calls are latest-state reads and are
  * not root-atomic. Consequently they get an explicit `latest-bounded` anchor
- * and can only influence soft packing. Any absent capability, non-public
- * policy, failed/zero scalar read, abort, or stale lifecycle leaves the target
- * unknown so it retains the legacy singleton request shape.
+ * and can only influence soft packing. Positive CG liveness is required before
+ * consulting the default-zero policy getter. Any absent capability, inactive
+ * or non-public policy, failed/zero scalar read, abort, or stale lifecycle
+ * leaves the target unknown so it retains the legacy singleton request shape.
  */
 export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBridgeTarget>(
   targets: readonly T[],
@@ -72,11 +74,25 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   if (
     !Number.isSafeInteger(options.maxContextReads)
     || options.maxContextReads <= 0
+    || onChainCgId <= 0n
     || targets.length === 0
     || options.signal?.aborted
     || !options.isCurrent()
+    || typeof reader.isContextGraphActiveOnChain !== 'function'
     || typeof reader.getContextGraphAccessPolicy !== 'function'
     || typeof reader.getKnowledgeAssetUpdateContext !== 'function'
+  ) return original;
+
+  let active: boolean;
+  try {
+    active = await reader.isContextGraphActiveOnChain(onChainCgId);
+  } catch {
+    return original;
+  }
+  if (
+    active !== true
+    || options.signal?.aborted
+    || !options.isCurrent()
   ) return original;
 
   let accessPolicy: number;
@@ -85,11 +101,9 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   } catch {
     return original;
   }
-  if (
-    accessPolicy !== 0
-    || options.signal?.aborted
-    || !options.isCurrent()
-  ) return original;
+  if (accessPolicy !== 0 || options.signal?.aborted || !options.isCurrent()) {
+    return original;
+  }
 
   const unknownEntries = targets
     .map((target, index) => ({ target, index }))
