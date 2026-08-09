@@ -80,6 +80,7 @@ export type AgentProfileReconcileBlockReasonV1 =
   | 'inventory-transport'
   | 'activation-leaf-limit'
   | 'unsupported-row-state'
+  | 'receiver-verification-failed'
   | 'apply-root-collision'
   | 'apply-capacity-exhausted'
   | 'apply-deferred'
@@ -370,31 +371,29 @@ export async function createAgentProfileReconcilerV1(
         return result('blocked', 'records', 0, 0, outcomes, 'unsupported-row-state');
       }
       advances += 1;
-      let outcome: SystemRecordApplyOutcomeV1;
+      let preparation: Awaited<ReturnType<typeof awaitAbortSafePreparation>>;
       try {
-        const preparation = await awaitAbortSafePreparation(
+        preparation = await awaitAbortSafePreparation(
           Promise.resolve().then(() => prepareActive(row, runtime.signal)),
           runtime.signal,
         );
-        if (preparation.status === 'aborted') {
-          return runtime.stop('records', outcomes);
-        }
-        if (
-          runtime.signal.aborted
-          || runtime.deadlineMs - readNow(runtime.nowMs)
-            < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
-        ) {
-          return runtime.stop('records', outcomes);
-        }
-        // Do not race this promise. Dispatch may already have reached the atomic
-        // materializer and its returned promise is the physical settlement boundary.
-        outcome = await preparation.prepared.apply(runtime.admittedContext, runtime.signal);
-      } catch (error) {
-        if (outcomes.length > 0 && runtime.signal.aborted) {
-          return runtime.stop('records', outcomes);
-        }
-        throw error;
+      } catch {
+        if (runtime.signal.aborted) return runtime.stop('records', outcomes);
+        return result('blocked', 'records', 0, 0, outcomes, 'receiver-verification-failed');
       }
+      if (preparation.status === 'aborted') {
+        return runtime.stop('records', outcomes);
+      }
+      if (
+        runtime.signal.aborted
+        || runtime.deadlineMs - readNow(runtime.nowMs)
+          < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
+      ) {
+        return runtime.stop('records', outcomes);
+      }
+      // Do not race this promise. Dispatch may already have reached the atomic
+      // materializer and its returned promise is the physical settlement boundary.
+      const outcome = await preparation.prepared.apply(runtime.admittedContext, runtime.signal);
       outcomes.push(Object.freeze({ ...outcome }));
       if (isSettledOutcome(outcome)) {
         pendingRows.shift();

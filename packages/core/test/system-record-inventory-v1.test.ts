@@ -428,6 +428,16 @@ describe('system-record immutable B+tree objects', () => {
       maxWireBytes: 2 * 1024 * 1024,
       deadlineMs: Date.now() + 3_000,
     })).rejects.toThrow();
+
+    const sentinel = new Error('validation loader database closed');
+    const loaderFailure = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(loaderFailure.advance(async () => {
+      throw sentinel;
+    }, {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).rejects.toBe(sentinel);
   });
 
   it('latches traversal admission before invoking a reentrant clock', async () => {

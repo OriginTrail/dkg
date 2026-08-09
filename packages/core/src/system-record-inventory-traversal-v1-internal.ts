@@ -113,6 +113,8 @@ export interface SystemRecordInventoryRowTraversalFailureV1 {
     | 'transport'
     | 'invalid-slice';
   readonly message: string;
+  /** Original loader failure when the row traversal classifies a transport error. */
+  readonly cause?: unknown;
 }
 
 export interface SystemRecordInventoryRowTraversalV1 {
@@ -128,6 +130,45 @@ export interface SystemRecordInventoryRowTraversalV1 {
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
   ): Promise<SystemRecordInventoryRowTraversalSliceResultV1>;
+}
+
+interface SystemRecordInventoryTraversalStepResultBaseV1 {
+  readonly requests: number;
+  readonly wireBytes: number;
+  readonly validatedRows: number;
+  readonly validatedLeaves: number;
+}
+
+type SystemRecordInventoryTraversalStepResultV1 =
+  | Readonly<SystemRecordInventoryTraversalStepResultBaseV1 & {
+      readonly status: 'paused';
+    }>
+  | Readonly<SystemRecordInventoryTraversalStepResultBaseV1 & {
+      readonly status: 'complete';
+      readonly result: ValidatedSystemRecordInventoryTreeV1;
+    }>
+  | Readonly<SystemRecordInventoryTraversalStepResultBaseV1 & {
+      readonly status: 'rejected';
+      readonly rejection: SystemRecordInventoryRejectedLoadV1['rejection'];
+    }>
+  | Readonly<SystemRecordInventoryTraversalStepResultBaseV1 & {
+      readonly status: 'failed';
+      readonly failure: SystemRecordInventoryRowTraversalFailureV1;
+    }>;
+
+interface SystemRecordInventoryTraversalStepperV1 {
+  advance(
+    load: (
+      digest: Digest32V1,
+      expectedKind: 'inventory-internal' | 'inventory-leaf',
+      signal: AbortSignal | undefined,
+      path: readonly number[],
+    ) => Promise<
+      SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
+    >,
+    slice: SystemRecordInventoryTraversalSliceV1,
+    emitRow?: (row: SystemRecordInventoryRowV1) => void,
+  ): Promise<SystemRecordInventoryTraversalStepResultV1>;
 }
 
 interface SystemRecordInventoryTraversalWorkBaseV1 {
@@ -160,7 +201,7 @@ type SystemRecordInventoryTraversalWorkV1 =
 export function createSystemRecordInventoryTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryTraversalV1 {
-  const traversal = createSystemRecordInventoryTraversalEngineV1(descriptor, false);
+  const traversal = createSystemRecordInventoryTraversalStepperV1(descriptor);
   return Object.freeze({ advance });
 
   async function advance(
@@ -181,7 +222,15 @@ export function createSystemRecordInventoryTraversalV1(
       ),
       slice,
     );
-    if (advanced.status === 'failed') throw new Error(advanced.failure.message);
+    if (advanced.status === 'failed') {
+      if (
+        advanced.failure.reason === 'transport'
+        && advanced.failure.cause !== undefined
+      ) {
+        throw advanced.failure.cause;
+      }
+      throw new Error(advanced.failure.message);
+    }
     if (advanced.status === 'complete') {
       return Object.freeze({
         status: advanced.status,
@@ -210,13 +259,32 @@ export function createSystemRecordInventoryTraversalV1(
 export function createSystemRecordInventoryRowTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryRowTraversalV1 {
-  return createSystemRecordInventoryTraversalEngineV1(descriptor, true);
+  const traversal = createSystemRecordInventoryTraversalStepperV1(descriptor);
+  return Object.freeze({ advance });
+
+  async function advance(
+    load: (
+      digest: Digest32V1,
+      expectedKind: 'inventory-internal' | 'inventory-leaf',
+      signal: AbortSignal | undefined,
+      path: readonly number[],
+    ) => Promise<
+      SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
+    >,
+    slice: SystemRecordInventoryTraversalSliceV1,
+  ): Promise<SystemRecordInventoryRowTraversalSliceResultV1> {
+    const rows: SystemRecordInventoryRowV1[] = [];
+    const advanced = await traversal.advance(load, slice, (row) => rows.push(row));
+    return Object.freeze({
+      ...advanced,
+      rows: Object.freeze(rows),
+    }) as SystemRecordInventoryRowTraversalSliceResultV1;
+  }
 }
 
-function createSystemRecordInventoryTraversalEngineV1(
+function createSystemRecordInventoryTraversalStepperV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
-  emitRows: boolean,
-): SystemRecordInventoryRowTraversalV1 {
+): SystemRecordInventoryTraversalStepperV1 {
   const pinned = validateRootDescriptor(descriptor);
   const expectedRows = Number(parseCanonicalDecimalU64(pinned.totalRows));
   const seen = new Set<string>();
@@ -255,7 +323,8 @@ function createSystemRecordInventoryTraversalEngineV1(
       SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
-  ): Promise<SystemRecordInventoryRowTraversalSliceResultV1> {
+    emitRow?: (row: SystemRecordInventoryRowV1) => void,
+  ): Promise<SystemRecordInventoryTraversalStepResultV1> {
     if (advancing) throw new Error('inventory traversal already has an active slice');
     if (completed !== undefined) {
       return Object.freeze({
@@ -264,13 +333,11 @@ function createSystemRecordInventoryTraversalEngineV1(
         wireBytes: 0,
         validatedRows: rows,
         validatedLeaves: leaves,
-        rows: Object.freeze([]),
         result: completedResult(),
       });
     }
     let requests = 0;
     let wireBytes = 0;
-    const sliceRows: SystemRecordInventoryRowV1[] = [];
     let admittedSignal: AbortSignal | undefined;
     advancing = true;
     try {
@@ -354,7 +421,7 @@ function createSystemRecordInventoryTraversalEngineV1(
         }
         if (loaded === undefined) {
           if (advanceRootProbe(work)) {
-            return pausedSliceResult(requests, wireBytes, sliceRows);
+            return pausedSliceResult(requests, wireBytes);
           }
           throw new InventoryTraversalNotFoundError(work.digest);
         }
@@ -389,7 +456,7 @@ function createSystemRecordInventoryTraversalEngineV1(
             throw new Error('inventory loader returned an invalid rejection');
           }
           if (rejected.rejection === 'not-found' && advanceRootProbe(work)) {
-            return pausedSliceResult(requests, wireBytes, sliceRows);
+            return pausedSliceResult(requests, wireBytes);
           }
           return Object.freeze({
             status: 'rejected',
@@ -397,7 +464,6 @@ function createSystemRecordInventoryTraversalEngineV1(
             wireBytes,
             validatedRows: rows,
             validatedLeaves: leaves,
-            rows: Object.freeze([...sliceRows]),
             rejection: rejected.rejection,
           });
         }
@@ -481,7 +547,7 @@ function createSystemRecordInventoryTraversalEngineV1(
           rows += leaf.rows.length;
           for (const encoded of leaf.rows) {
             const decoded = decodeInventoryRowBase64UrlV1(pinned.networkId, encoded);
-            if (emitRows) sliceRows.push(decoded);
+            emitRow?.(decoded);
           }
           if (
             leaves > SYSTEM_RECORD_MAX_INVENTORY_LEAVES ||
@@ -523,7 +589,6 @@ function createSystemRecordInventoryTraversalEngineV1(
           wireBytes,
           validatedRows: rows,
           validatedLeaves: leaves,
-          rows: Object.freeze([...sliceRows]),
         });
       }
       if (rows !== expectedRows)
@@ -541,20 +606,22 @@ function createSystemRecordInventoryTraversalEngineV1(
         wireBytes,
         validatedRows: rows,
         validatedLeaves: leaves,
-        rows: Object.freeze([...sliceRows]),
         result: completedResult(),
       });
     } catch (error) {
+      const reason = traversalFailureReason(error, admittedSignal);
       return Object.freeze({
         status: 'failed',
         requests,
         wireBytes,
         validatedRows: rows,
         validatedLeaves: leaves,
-        rows: Object.freeze([...sliceRows]),
         failure: Object.freeze({
-          reason: traversalFailureReason(error, admittedSignal),
+          reason,
           message: error instanceof Error ? error.message : 'inventory traversal failed',
+          ...(reason === 'transport' && error instanceof InventoryTraversalTransportError
+            ? { cause: error.cause }
+            : {}),
         }),
       });
     } finally {
@@ -574,15 +641,13 @@ function createSystemRecordInventoryTraversalEngineV1(
   function pausedSliceResult(
     requests: number,
     wireBytes: number,
-    sliceRows: readonly SystemRecordInventoryRowV1[],
-  ): SystemRecordInventoryRowTraversalSliceResultV1 {
+  ): SystemRecordInventoryTraversalStepResultV1 {
     return Object.freeze({
       status: 'paused',
       requests,
       wireBytes,
       validatedRows: rows,
       validatedLeaves: leaves,
-      rows: Object.freeze([...sliceRows]),
     });
   }
 

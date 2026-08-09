@@ -469,6 +469,60 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(apply).toHaveBeenCalledTimes(1);
   });
 
+  it('returns prior settlements when later receiver verification fails', async () => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const rows = TEST_PEER_IDS.slice(0, 2).map((peerId): SystemRecordInventoryRowV1 => ({
+      stableKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, peerId),
+      peerId,
+      authoritySequence: headEnvelope.object.authoritySequence,
+      version: headEnvelope.object.version,
+      headDigest: headEnvelope.objectDigest,
+      tombstone: false,
+      quarantined: false,
+    }));
+    const inventory = buildSystemRecordInventoryTreeV1(NETWORK, rows);
+    const rootEnvelope = await signRootDescriptor(fixture, inventory.descriptor);
+    const apply = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '9',
+      appliedStateDigest: `0x${'ff'.repeat(32)}`,
+    }));
+    const prepareActive = vi.fn()
+      .mockResolvedValueOnce(Object.freeze({ apply }))
+      .mockRejectedValueOnce(new Error('missing exact profile closure'));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: async (request) => {
+        const stored = inventory.objects.get(request.objectDigest)!;
+        return Object.freeze({
+          outcome: 'ok' as const,
+          objectKind: stored.objectKind,
+          canonicalBytes: stored.canonicalBytes,
+          wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
+        });
+      },
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'receiver-verification-failed',
+      processedRows: 1,
+      pendingRows: 1,
+      outcomes: [{ outcome: 'applied' }],
+    });
+    expect(prepareActive).toHaveBeenCalledTimes(2);
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(reconciler.stats()).toMatchObject({ processedRows: 1, pendingRows: 1 });
+  });
+
   it('releases admission when close aborts a stalled predispatch receiver', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();
