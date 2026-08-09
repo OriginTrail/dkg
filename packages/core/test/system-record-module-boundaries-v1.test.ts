@@ -54,6 +54,17 @@ function expectNoDependencyPath(name: string, forbidden: readonly string[]): voi
   for (const dependency of forbidden) expect(reachable).not.toContain(dependency);
 }
 
+function functionSource(name: string, functionName: string): string {
+  const text = source(name);
+  const parsed = ts.createSourceFile(name, text, ts.ScriptTarget.Latest, true);
+  const declaration = parsed.statements.find(
+    (statement): statement is ts.FunctionDeclaration =>
+      ts.isFunctionDeclaration(statement) && statement.name?.text === functionName,
+  );
+  if (declaration === undefined) throw new Error(`${functionName} is not a top-level function`);
+  return declaration.getText(parsed);
+}
+
 describe('System Record V1 module ownership', () => {
   it('keeps the supported object and inventory facades explicit', () => {
     for (const facade of ['system-record-objects-v1.ts', 'system-record-inventory-v1.ts']) {
@@ -210,6 +221,25 @@ describe('System Record V1 module ownership', () => {
     );
     expect(source('system-record-verification-closure-v1-internal.ts')).toMatch(
       /function mintAgentProfileVerifiedAuthoritySummaryV1/u,
+    );
+  });
+
+  it('keeps verification closure and cache preflight as named phase orchestrators', () => {
+    const closure = functionSource(
+      'system-record-verification-closure-v1-internal.ts',
+      'buildAgentProfileVerificationClosureV1',
+    );
+    expect(closure).toMatch(
+      /collectVerificationClosureV1[\s\S]*validateCollectedClosureAuthorityV1[\s\S]*projectVerificationClosureV1/u,
+    );
+    expect(closure).not.toContain('mintAgentProfileVerifiedAuthoritySummaryV1');
+
+    const cache = functionSource(
+      'system-record-cache-accounting-v1-internal.ts',
+      'preflightSystemRecordCacheAccountingV1',
+    );
+    expect(cache).toMatch(
+      /normalizeCachePreflightInputV1[\s\S]*collectCacheAccountingRowV1[\s\S]*assertLiveCacheAccountingBoundsV1[\s\S]*assertActivationCacheAccountingBoundsV1[\s\S]*projectCacheAccountingResultV1/u,
     );
   });
 
