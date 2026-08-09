@@ -2,7 +2,7 @@
 
 import { createHash } from 'node:crypto';
 import { dirname, resolve, sep } from 'node:path';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 import {
@@ -13,32 +13,24 @@ import ts from 'typescript';
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STORAGE_PACKAGE_NAME = '@origintrail-official/dkg-storage';
-const REVIEWED_NON_STORE_MARKER = 'dkg-raw-channel-non-store';
-// Reviewed dynamic read call sites are sealed per package. A new package, call,
-// or changed query expression fails the gate and prints the exact inventory
-// that needs review before this baseline may be deliberately advanced.
-const DYNAMIC_QUERY_BASELINE = Object.freeze({
-  agent: Object.freeze({
-    count: 149,
-    sha256: '7f0c5415793ae19d2547ea18e651537716a93a165e69321bc82d050c8903939e',
+const DYNAMIC_QUERY_INVENTORY_PATH = resolve(
+  REPOSITORY_ROOT,
+  'scripts/managed-store-dynamic-query-inventory.json',
+);
+const WRITE_INVENTORY = process.argv.includes('--write-inventory');
+const DYNAMIC_QUERY_REASON = 'Typed dynamic query; runtime store admission enforces read-only form.';
+const REVIEWED_NON_STORE_CALLS = Object.freeze([
+  Object.freeze({
+    package: 'agent',
+    path: 'packages/agent/src/generic-sql-source.ts',
+    symbol: 'query',
+    method: 'query',
+    receiver: 'request',
+    expression: 'sql',
+    occurrence: 1,
+    reason: 'Optional mssql Request.query API; not an RDF TripleStore channel.',
   }),
-  cli: Object.freeze({
-    count: 16,
-    sha256: '53295425b84f6e3e8c31e46be5bd4c02bb0635e573eec7e68ade2cbdf44f9b46',
-  }),
-  publisher: Object.freeze({
-    count: 110,
-    sha256: '76eb399cb8d4b0abbb9916cd5f86eead37044bc1dc78cbd1858f885218fd6207',
-  }),
-  query: Object.freeze({
-    count: 3,
-    sha256: 'b42b47da1be2ee11825f4aff29ad57341c862558f9a048a85708237514bd3d2f',
-  }),
-  'random-sampling': Object.freeze({
-    count: 9,
-    sha256: 'f17b2ab6570a946515879aeee70555702f506f68f2579bb1c188ca40ac9f0439',
-  }),
-});
+]);
 const TRIPLE_STORE_DECLARATION = /\/packages\/storage\/(?:src\/triple-store\.ts|dist\/triple-store\.d\.ts)$/u;
 
 function normalized(path) {
@@ -237,10 +229,186 @@ function resolveRawStoreCall(expression, checker, seen = new Set()) {
   return null;
 }
 
-function hasReviewedNonStoreMarker(sourceFile, node) {
-  const start = node.getStart(sourceFile);
-  return sourceFile.text.slice(Math.max(0, start - 240), start)
-    .includes(REVIEWED_NON_STORE_MARKER);
+function declarationName(node) {
+  const name = node?.name;
+  if (ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name)) {
+    return name.text;
+  }
+  return null;
+}
+
+function reviewedNonStoreCallKey(record) {
+  return [
+    record.package,
+    record.path,
+    record.symbol,
+    record.method,
+    record.receiver,
+    record.expression,
+    record.occurrence,
+  ].join('\0');
+}
+
+function reviewedNonStoreCallBaseKey(record) {
+  return [
+    record.package,
+    record.path,
+    record.symbol,
+    record.method,
+    record.receiver,
+    record.expression,
+  ].join('\0');
+}
+
+function addReviewedNonStoreOccurrence(record, occurrences) {
+  const baseKey = reviewedNonStoreCallBaseKey(record);
+  const occurrence = (occurrences.get(baseKey) ?? 0) + 1;
+  occurrences.set(baseKey, occurrence);
+  return Object.freeze({ ...record, occurrence });
+}
+
+const REVIEWED_NON_STORE_CALLS_BY_KEY = new Map(
+  REVIEWED_NON_STORE_CALLS.map((record) => [reviewedNonStoreCallKey(record), record]),
+);
+
+function untypedRawCallRecord(packageName, sourcePath, sourceFile, node, access) {
+  const normalizedText = (value) => value?.getText(sourceFile).replace(/\s+/gu, ' ').trim()
+    ?? '<missing>';
+  return Object.freeze({
+    package: packageName,
+    path: sourcePath,
+    symbol: enclosingSymbol(node),
+    method: access.method,
+    receiver: normalizedText(access.receiver),
+    expression: normalizedText(node.arguments[0]),
+  });
+}
+
+function enclosingSymbol(node) {
+  for (let current = node.parent; current; current = current.parent) {
+    if (
+      ts.isMethodDeclaration(current)
+      || ts.isFunctionDeclaration(current)
+      || ts.isGetAccessorDeclaration(current)
+      || ts.isSetAccessorDeclaration(current)
+    ) {
+      const member = declarationName(current) ?? '<anonymous>';
+      const owner = current.parent && ts.isClassDeclaration(current.parent)
+        ? declarationName(current.parent)
+        : null;
+      return owner ? `${owner}.${member}` : member;
+    }
+    if (
+      (ts.isArrowFunction(current) || ts.isFunctionExpression(current))
+      && ts.isVariableDeclaration(current.parent)
+    ) {
+      return declarationName(current.parent) ?? '<anonymous>';
+    }
+  }
+  return '<module>';
+}
+
+function reviewedDynamicQueryInventory(records) {
+  const occurrences = new Map();
+  return [...records]
+    .sort((left, right) => (
+      left.path.localeCompare(right.path)
+      || left.symbol.localeCompare(right.symbol)
+      || left.expressionSha256.localeCompare(right.expressionSha256)
+      || left.line - right.line
+    ))
+    .map(({ line: _line, expression, ...record }) => {
+      const identity = `${record.package}\0${record.path}\0${record.symbol}\0${record.expressionSha256}`;
+      const occurrence = (occurrences.get(identity) ?? 0) + 1;
+      occurrences.set(identity, occurrence);
+      return Object.freeze({ ...record, expression, occurrence });
+    });
+}
+
+function dynamicQueryRecordKey(record) {
+  const fields = ['expression', 'expressionSha256', 'occurrence', 'package', 'path', 'symbol'];
+  const actualFields = Object.keys(record).sort();
+  if (
+    actualFields.length !== fields.length
+    || actualFields.some((field, index) => field !== fields[index])
+    || typeof record.package !== 'string'
+    || typeof record.path !== 'string'
+    || typeof record.symbol !== 'string'
+    || typeof record.expression !== 'string'
+    || typeof record.expressionSha256 !== 'string'
+    || !Number.isSafeInteger(record.occurrence)
+    || record.occurrence < 1
+  ) {
+    throw new Error('dynamic query inventory record has an invalid shape');
+  }
+  return [
+    record.package,
+    record.path,
+    record.symbol,
+    record.expression,
+    record.expressionSha256,
+    record.occurrence,
+  ].join('\0');
+}
+
+function diffDynamicQueryInventory(expected, observed) {
+  const counts = (records) => {
+    const result = new Map();
+    for (const record of records) {
+      const key = dynamicQueryRecordKey(record);
+      const current = result.get(key);
+      result.set(key, {
+        count: (current?.count ?? 0) + 1,
+        record,
+      });
+    }
+    return result;
+  };
+  const expectedCounts = counts(expected);
+  const observedCounts = counts(observed);
+  const missing = [];
+  const added = [];
+  for (const [key, expectedEntry] of expectedCounts) {
+    const observedCount = observedCounts.get(key)?.count ?? 0;
+    for (let index = observedCount; index < expectedEntry.count; index++) {
+      missing.push(expectedEntry.record);
+    }
+  }
+  for (const [key, observedEntry] of observedCounts) {
+    const expectedCount = expectedCounts.get(key)?.count ?? 0;
+    for (let index = expectedCount; index < observedEntry.count; index++) {
+      added.push(observedEntry.record);
+    }
+  }
+  return { missing, added };
+}
+
+function dynamicQueryInventoryLabel(record) {
+  return `${record.package}:${record.path}#${record.symbol}[${record.occurrence}] `
+    + `${record.expressionSha256} - ${DYNAMIC_QUERY_REASON}`
+    + ` - ${record.expression}`;
+}
+
+function loadDynamicQueryInventory() {
+  const parsed = JSON.parse(readFileSync(DYNAMIC_QUERY_INVENTORY_PATH, 'utf8'));
+  if (parsed?.version !== 2 || !Array.isArray(parsed.records)) {
+    throw new Error('dynamic query inventory must contain version 2 records');
+  }
+  return parsed.records;
+}
+
+function serializeDynamicQueryInventory(records) {
+  return `${JSON.stringify({ version: 2, records }, null, 2)}\n`;
+}
+
+function writeDynamicQueryInventoryIfClean(records, violations, writer = writeFileSync) {
+  if (violations.length > 0) return false;
+  writer(
+    DYNAMIC_QUERY_INVENTORY_PATH,
+    serializeDynamicQueryInventory(records),
+    'utf8',
+  );
+  return true;
 }
 
 function selfTestStaticSparql() {
@@ -337,6 +505,93 @@ function selfTestRawStoreAliasResolution() {
   }
 }
 
+function selfTestReviewedNonStoreCalls() {
+  const candidate = {
+    package: 'agent',
+    path: 'packages/agent/src/example.ts',
+    symbol: 'readSql',
+    method: 'query',
+    receiver: 'request',
+    expression: 'sql',
+  };
+  const reviewed = { ...candidate, occurrence: 1 };
+  const allowlist = new Map([[reviewedNonStoreCallKey(reviewed), reviewed]]);
+  if (!allowlist.has(reviewedNonStoreCallKey(reviewed))) {
+    throw new Error('reviewed non-store self-test rejected an exact non-store call');
+  }
+  const untypedStoreAlias = { ...reviewed, receiver: 'rawStore' };
+  if (allowlist.has(reviewedNonStoreCallKey(untypedStoreAlias))) {
+    throw new Error('reviewed non-store self-test admitted an untyped store alias');
+  }
+  const occurrences = new Map();
+  const first = addReviewedNonStoreOccurrence(candidate, occurrences);
+  const duplicate = addReviewedNonStoreOccurrence(candidate, occurrences);
+  if (!allowlist.has(reviewedNonStoreCallKey(first))) {
+    throw new Error('reviewed non-store self-test rejected the first allowed occurrence');
+  }
+  if (allowlist.has(reviewedNonStoreCallKey(duplicate))) {
+    throw new Error('reviewed non-store self-test admitted a duplicate allowed occurrence');
+  }
+}
+
+function selfTestDynamicQueryInventoryDiff() {
+  const base = Object.freeze({
+    package: 'agent',
+    path: 'packages/agent/src/example.ts',
+    symbol: 'Example.read',
+    expression: 'sparql',
+    expressionSha256: 'hash-a',
+    occurrence: 1,
+  });
+  const changed = { ...base, expression: 'otherSparql', expressionSha256: 'hash-b' };
+  const moved = { ...base, path: 'packages/agent/src/moved.ts' };
+  const unchanged = diffDynamicQueryInventory([base], [base]);
+  if (unchanged.missing.length !== 0 || unchanged.added.length !== 0) {
+    throw new Error('dynamic query inventory self-test rejected an unchanged record');
+  }
+  const reordered = {
+    occurrence: base.occurrence,
+    expression: base.expression,
+    expressionSha256: base.expressionSha256,
+    symbol: base.symbol,
+    path: base.path,
+    package: base.package,
+  };
+  const reorderedDiff = diffDynamicQueryInventory([base], [reordered]);
+  if (reorderedDiff.missing.length !== 0 || reorderedDiff.added.length !== 0) {
+    throw new Error('dynamic query inventory self-test treated property order as identity');
+  }
+  for (const candidate of [changed, moved]) {
+    const diff = diffDynamicQueryInventory([base], [candidate]);
+    if (diff.missing.length !== 1 || diff.added.length !== 1) {
+      throw new Error('dynamic query inventory self-test missed a move/expression change');
+    }
+  }
+  const added = diffDynamicQueryInventory([base], [base, { ...base, occurrence: 2 }]);
+  const removed = diffDynamicQueryInventory([base, { ...base, occurrence: 2 }], [base]);
+  if (added.added.length !== 1 || removed.missing.length !== 1) {
+    throw new Error('dynamic query inventory self-test missed an addition/removal');
+  }
+  const serialized = serializeDynamicQueryInventory([base]);
+  const roundTripped = JSON.parse(serialized);
+  if (roundTripped.version !== 2
+    || serializeDynamicQueryInventory(roundTripped.records) !== serialized) {
+    throw new Error('dynamic query inventory self-test lost deterministic round-trip output');
+  }
+  let writes = 0;
+  const countWrite = () => { writes += 1; };
+  if (writeDynamicQueryInventoryIfClean([base], ['scan failed'], countWrite) || writes !== 0) {
+    throw new Error('dynamic query inventory self-test rewrote a failed scan');
+  }
+  if (!writeDynamicQueryInventoryIfClean([base], [], countWrite) || writes !== 1) {
+    throw new Error('dynamic query inventory self-test did not write a clean scan exactly once');
+  }
+  const label = dynamicQueryInventoryLabel(base);
+  if (!label.includes(DYNAMIC_QUERY_REASON) || !label.endsWith(' - sparql')) {
+    throw new Error('dynamic query inventory self-test lost review diagnostics');
+  }
+}
+
 function scanPackage(name, configPath) {
   const program = loadProgram(configPath);
   const checker = program.getTypeChecker();
@@ -346,7 +601,9 @@ function scanPackage(name, configPath) {
   let recognizedCalls = 0;
   let staticallyAnalyzedQueries = 0;
   let dynamicQueries = 0;
-  const dynamicQueryFingerprints = [];
+  const dynamicQueryRecords = [];
+  const reviewedNonStoreCalls = new Set();
+  const reviewedNonStoreOccurrences = new Map();
   let scannedFiles = 0;
 
   for (const sourceFile of program.getSourceFiles()) {
@@ -371,13 +628,22 @@ function scanPackage(name, configPath) {
             ts.forEachChild(node, visit);
             return;
           }
-          if (untypedCandidate && hasReviewedNonStoreMarker(sourceFile, node)) {
-            ts.forEachChild(node, visit);
-            return;
+          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+          const sourcePath = fileName.slice(REPOSITORY_ROOT.length + 1);
+          const location = `${sourcePath}:${line}`;
+          if (untypedCandidate) {
+            const record = addReviewedNonStoreOccurrence(
+              untypedRawCallRecord(name, sourcePath, sourceFile, node, access),
+              reviewedNonStoreOccurrences,
+            );
+            const key = reviewedNonStoreCallKey(record);
+            if (REVIEWED_NON_STORE_CALLS_BY_KEY.has(key)) {
+              reviewedNonStoreCalls.add(key);
+              ts.forEachChild(node, visit);
+              return;
+            }
           }
           recognizedCalls += 1;
-          const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
-          const location = `${fileName.slice(REPOSITORY_ROOT.length + 1)}:${line}`;
           if (access.method === 'update') {
             violations.push(`${location}: ${untypedCandidate ? 'untyped raw-channel candidate' : 'raw TripleStore'}.update()`);
           } else {
@@ -397,8 +663,14 @@ function scanPackage(name, configPath) {
               const argument = node.arguments[0];
               const argumentText = argument?.getText(sourceFile).replace(/\s+/gu, ' ').trim()
                 ?? '<missing>';
-              const sourcePath = fileName.slice(REPOSITORY_ROOT.length + 1);
-              dynamicQueryFingerprints.push(`${sourcePath} ${argumentText}`);
+              dynamicQueryRecords.push({
+                package: name,
+                path: sourcePath,
+                symbol: enclosingSymbol(node),
+                expression: argumentText,
+                expressionSha256: createHash('sha256').update(argumentText).digest('hex'),
+                line,
+              });
             }
           }
         }
@@ -416,7 +688,8 @@ function scanPackage(name, configPath) {
     recognizedCalls,
     staticallyAnalyzedQueries,
     dynamicQueries,
-    dynamicQueryFingerprints,
+    dynamicQueryRecords,
+    reviewedNonStoreCalls,
     scannedFiles,
     violations,
   };
@@ -424,35 +697,47 @@ function scanPackage(name, configPath) {
 
 selfTestStaticSparql();
 selfTestRawStoreAliasResolution();
+selfTestReviewedNonStoreCalls();
+selfTestDynamicQueryInventoryDiff();
 const packageConfigs = workspaceStorageConsumers();
 const results = packageConfigs.map(([name, config]) => scanPackage(name, config));
 const violations = results.flatMap((result) => result.violations);
-let dynamicQueryCount = 0;
-for (const result of results) {
-  const fingerprints = [...result.dynamicQueryFingerprints].sort();
-  const observed = {
-    count: fingerprints.length,
-    sha256: createHash('sha256').update(fingerprints.join('\n')).digest('hex'),
-  };
-  dynamicQueryCount += observed.count;
-  const expected = DYNAMIC_QUERY_BASELINE[result.name];
-  if (
-    expected?.count !== observed.count
-    || expected?.sha256 !== observed.sha256
-  ) {
+const observedReviewedNonStoreCalls = new Set(
+  results.flatMap((result) => [...result.reviewedNonStoreCalls]),
+);
+for (const [key, record] of REVIEWED_NON_STORE_CALLS_BY_KEY) {
+  if (!observedReviewedNonStoreCalls.has(key)) {
     violations.push(
-      `${result.name}: dynamic TripleStore.query() baseline changed: `
-      + `expected ${expected?.count ?? 0}/${expected?.sha256 ?? '<unset>'}, `
-      + `received ${observed.count}/${observed.sha256}`,
+      `reviewed non-store call missing: ${record.package}:${record.path}#${record.symbol} `
+      + `${record.receiver}.${record.method}(${record.expression}) - ${record.reason}`,
     );
-    for (const fingerprint of fingerprints) {
-      violations.push(`dynamic query review required: ${fingerprint}`);
-    }
   }
 }
-for (const name of Object.keys(DYNAMIC_QUERY_BASELINE)) {
-  if (!results.some((result) => result.name === name)) {
-    violations.push(`${name}: dynamic query baseline names a package outside the derived scope`);
+const observedInventory = reviewedDynamicQueryInventory(
+  results.flatMap((result) => result.dynamicQueryRecords),
+);
+
+if (WRITE_INVENTORY) {
+  if (writeDynamicQueryInventoryIfClean(observedInventory, violations)) {
+    console.log(
+      `[managed-store-raw-channels] wrote ${observedInventory.length} reviewed record(s) `
+      + `to ${DYNAMIC_QUERY_INVENTORY_PATH}`,
+    );
+  } else {
+    console.error(
+      '[managed-store-raw-channels] refusing to rewrite the inventory because the scan failed',
+    );
+  }
+} else {
+  const expectedInventory = loadDynamicQueryInventory();
+  const inventoryDiff = diffDynamicQueryInventory(expectedInventory, observedInventory);
+  for (const record of inventoryDiff.missing) {
+    violations.push(`reviewed dynamic query missing: ${dynamicQueryInventoryLabel(record)}`);
+  }
+  for (const record of inventoryDiff.added) {
+    violations.push(
+      `dynamic query review required: ${dynamicQueryInventoryLabel(record)}`,
+    );
   }
 }
 for (const result of results) {
@@ -467,11 +752,11 @@ if (violations.length > 0) {
   console.error('[managed-store-raw-channels] FAILED');
   for (const violation of violations) console.error(`  - ${violation}`);
   process.exitCode = 1;
-} else {
+} else if (!WRITE_INVENTORY) {
   console.log(
     '[managed-store-raw-channels] PASS: no first-party raw update() or statically mutating '
     + 'query() calls; '
-    + `${dynamicQueryCount} dynamic query call site(s) match the reviewed per-package baseline `
+    + `${observedInventory.length} dynamic query call site(s) match the explicit reviewed inventory `
     + '(runtime ownership guard remains authoritative)',
   );
 }

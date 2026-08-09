@@ -9,6 +9,7 @@
 import {
   analyzeSparqlOperation,
   classifySparqlOperation,
+  recognizedReadOnlySparqlForm,
 } from '@origintrail-official/dkg-core';
 import type { QueryResult } from './query-engine.js';
 
@@ -238,6 +239,7 @@ export interface SparqlGuardResult {
 export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
   const analysis = analyzeSparqlOperation(sparql);
   const operation = analysis.operation;
+  if (recognizedReadOnlySparqlForm(analysis) !== null) return { safe: true };
 
   if (operation.kind !== 'read') {
     return {
@@ -256,5 +258,9 @@ export function validateReadOnlySparql(sparql: string): SparqlGuardResult {
     };
   }
 
-  return { safe: true };
+  return {
+    safe: false,
+    reason: `Query is not recognized as read-only. ` +
+      `Mutations must go through the publish/update protocol.`,
+  };
 }

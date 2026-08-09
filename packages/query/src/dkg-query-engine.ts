@@ -43,9 +43,9 @@ import {
 } from './sparql-guard.js';
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
-  isSparqlKeyword,
-  isSparqlKeywordStart as isKeywordStart,
-  isSparqlWordContinuation as isWordContinuation,
+  readNextSparqlCodeToken,
+  readSparqlPrefixName,
+  type SparqlPrefixName,
   readSparqlVariable,
   skipSparqlStringLiteral as scanSparqlStringLiteral,
   skipSparqlIriRef,
@@ -55,9 +55,7 @@ import {
 import {
   callerGraphValuesAreAuthorized,
   collectPrefixDeclarations,
-  readSparqlPrefixName,
   resolveSparqlPrefixedName,
-  type SparqlPrefixName,
 } from './sparql-graph-scope.js';
 
 /**
@@ -1518,36 +1516,12 @@ async function listGraphFamily(
 }
 
 function hasCallerDatasetClause(sparql: string): boolean {
-  const n = sparql.length;
   let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'FROM')) {
-        return true;
-      }
-      i = j;
-      continue;
-    }
-    i++;
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'word' && token.word === 'FROM') return true;
   }
-
   return false;
 }
 
@@ -1671,66 +1645,56 @@ function hasTopLevelDefaultGraphPattern(sparql: string, braceStart: number): boo
   let depth = 0;
   let i = braceStart + 1;
 
-  while (i < braceEnd) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < braceEnd && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
+    i = token.end;
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth = Math.max(0, depth - 1);
-      i++;
       continue;
     }
-    if (depth !== 0 || /\s/.test(ch) || ch === '.' || ch === ';' || ch === ',') {
-      i++;
+    if (depth !== 0) continue;
+    if (token.kind === 'iri' || token.kind === 'prefixedName' || token.kind === 'variable') {
+      return true;
+    }
+    if (token.kind === 'char') {
+      if (token.value === '[') return true;
       continue;
     }
-    if (ch === '<') return !!skipSparqlIriRef(sparql, i);
-    if (ch === '?' || ch === '$' || ch === '[') return true;
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < braceEnd && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    if (token.kind === 'word') {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const target = readGraphTarget(sparql, operandStart, prefixes);
-        i = target && target.end <= braceEnd ? target.end : j;
+        i = target && target.end <= braceEnd ? target.end : token.end;
         continue;
       }
-      if (isSparqlKeyword(sparql, i, j, 'FILTER') || isSparqlKeyword(sparql, i, j, 'BIND')) {
-        const exprStart = skipSparqlSpaceAndLineComments(sparql, j);
+      if (token.word === 'FILTER' || token.word === 'BIND') {
+        const exprStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         if (sparql[exprStart] === '(') {
           const exprEnd = skipBalancedParentheses(sparql, exprStart, braceEnd);
-          i = exprEnd ?? j;
+          i = exprEnd ?? token.end;
           continue;
         }
       }
-      if (isSparqlKeyword(sparql, i, j, 'VALUES')) {
-        i = skipValuesClause(sparql, j, braceEnd);
+      if (token.word === 'VALUES') {
+        i = skipValuesClause(sparql, token.end, braceEnd);
         continue;
       }
       if (
-        isSparqlKeyword(sparql, i, j, 'OPTIONAL') ||
-        isSparqlKeyword(sparql, i, j, 'MINUS') ||
-        isSparqlKeyword(sparql, i, j, 'SERVICE') ||
-        isSparqlKeyword(sparql, i, j, 'UNION') ||
-        isSparqlKeyword(sparql, i, j, 'SELECT')
+        token.word === 'OPTIONAL' ||
+        token.word === 'MINUS' ||
+        token.word === 'SERVICE' ||
+        token.word === 'UNION' ||
+        token.word === 'SELECT'
       ) {
-        i = j;
+        i = token.end;
         continue;
       }
       return true;
     }
-    i++;
   }
 
   return false;
@@ -1747,46 +1711,27 @@ function assertGraphVariablesAreTopLevel(sparql: string, braceStart: number): vo
   let depth = 0;
   let i = braceStart + 1;
 
-  while (i < braceEnd) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < braceEnd && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      i = iriEnd && iriEnd <= braceEnd ? iriEnd : i + 1;
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
+    i = token.end;
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth = Math.max(0, depth - 1);
-      i++;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < braceEnd && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+    if (token.kind === 'word') {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         if (operandStart < braceEnd && readSparqlVariable(sparql, operandStart) && depth !== 0) {
           throw new ScopedQueryViolationError(
             'GRAPH variables must appear at the top level of scoped local queries',
           );
         }
       }
-      i = j;
-      continue;
     }
-    i++;
   }
 }
 
@@ -1795,47 +1740,27 @@ function hasNestedSelectWithGraphVariable(sparql: string): boolean {
   let i = 0;
   let braceDepth = 0;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'char' && token.value === '{') {
       braceDepth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       braceDepth = Math.max(0, braceDepth - 1);
-      i++;
       continue;
     }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'SELECT') && braceDepth > 0) {
-        const end = findNestedSelectEnd(sparql, j, braceDepth);
-        if (rangeContainsGraphVariable(sparql, j, end === -1 ? n : end)) {
+    if (token.kind === 'word') {
+      if (token.word === 'SELECT' && braceDepth > 0) {
+        const end = findNestedSelectEnd(sparql, token.end, braceDepth);
+        if (rangeContainsGraphVariable(sparql, token.end, end === -1 ? n : end)) {
           return true;
         }
-        i = end === -1 ? j : end + 1;
+        i = end === -1 ? token.end : end + 1;
         continue;
       }
-      i = j;
-      continue;
     }
-    i++;
   }
 
   return false;
@@ -1846,34 +1771,18 @@ function findNestedSelectEnd(sparql: string, start: number, startingDepth: numbe
   let depth = startingDepth;
   let i = start;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth--;
-      if (depth < startingDepth) return i;
+      if (depth < startingDepth) return token.start;
       if (depth < 0) return -1;
-      i++;
-      continue;
     }
-    i++;
   }
 
   return -1;
@@ -1883,35 +1792,17 @@ function rangeContainsGraphVariable(sparql: string, start: number, end: number):
   const n = Math.min(sparql.length, end);
   let i = start;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      i = iriEnd && iriEnd <= n ? iriEnd : i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+  for (let token = readNextSparqlCodeToken(sparql, i, n); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, n)) {
+    i = token.end;
+    if (token.kind === 'word') {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         if (operandStart < n && readSparqlVariable(sparql, operandStart)) {
           return true;
         }
       }
-      i = j;
-      continue;
     }
-    i++;
   }
 
   return false;
@@ -1920,29 +1811,14 @@ function rangeContainsGraphVariable(sparql: string, start: number, end: number):
 function collectExplicitGraphIris(sparql: string): string[] {
   const iris: string[] = [];
   const prefixes = collectPrefixDeclarations(sparql);
-  const n = sparql.length;
   let i = 0;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'word') {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const target = readGraphTarget(sparql, operandStart, prefixes);
         if (!target) {
           throw new ScopedQueryViolationError(
@@ -1953,76 +1829,33 @@ function collectExplicitGraphIris(sparql: string): string[] {
         i = target.end;
         continue;
       }
-      i = j;
-      continue;
     }
-    i++;
   }
 
   return iris;
 }
 
 function hasGraphClause(sparql: string): boolean {
-  const n = sparql.length;
   let i = 0;
-
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        return true;
-      }
-      i = j;
-      continue;
-    }
-    i++;
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'word' && token.word === 'GRAPH') return true;
   }
-
   return false;
 }
 
 function collectGraphVariables(sparql: string): string[] {
   const variables: string[] = [];
   const seen = new Set<string>();
-  const n = sparql.length;
   let i = 0;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      const word = sparql.slice(i, j);
-      if (isSparqlKeyword(sparql, i, j, 'GRAPH')) {
-        const operandStart = skipSparqlSpaceAndLineComments(sparql, j);
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'word') {
+      if (token.word === 'GRAPH') {
+        const operandStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const variable = readSparqlVariable(sparql, operandStart);
         if (variable && !seen.has(variable)) {
           seen.add(variable);
@@ -2031,10 +1864,7 @@ function collectGraphVariables(sparql: string): string[] {
         i = operandStart + (variable?.length ?? 0);
         continue;
       }
-      i = j;
-      continue;
     }
-    i++;
   }
 
   return variables;
@@ -2045,27 +1875,15 @@ function skipBalancedParentheses(sparql: string, start: number, limit = sparql.l
   let depth = 1;
   let i = start + 1;
 
-  while (i < limit) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < limit && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const iriEnd = skipSparqlIriRef(sparql, i);
-      i = iriEnd && iriEnd <= limit ? iriEnd : i + 1;
-      continue;
-    }
-    if (ch === '(') depth++;
-    else if (ch === ')') {
+  for (let token = readNextSparqlCodeToken(sparql, i, limit); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, limit)) {
+    i = token.end;
+    if (token.kind !== 'char') continue;
+    if (token.value === '(') depth++;
+    else if (token.value === ')') {
       depth--;
-      if (depth === 0) return i + 1;
+      if (depth === 0) return token.end;
     }
-    i++;
   }
 
   return null;
@@ -2073,22 +1891,15 @@ function skipBalancedParentheses(sparql: string, start: number, limit = sparql.l
 
 function skipValuesClause(sparql: string, start: number, limit: number): number {
   let i = start;
-  while (i < limit) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < limit && sparql[i] !== '\n') i++;
-      continue;
+  for (let token = readNextSparqlCodeToken(sparql, i, limit); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, limit)) {
+    i = token.end;
+    if (token.kind !== 'char') continue;
+    if (token.value === '{') {
+      const end = findMatchingCloseBrace(sparql, token.start);
+      return end === -1 || end > limit ? token.start : end + 1;
     }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
-      const end = findMatchingCloseBrace(sparql, i);
-      return end === -1 || end > limit ? i : end + 1;
-    }
-    if (ch === '.') return i + 1;
-    i++;
+    if (token.value === '.') return token.end;
   }
   return i;
 }
@@ -2155,87 +1966,22 @@ export function skipSparqlStringLiteral(src: string, i: number): number {
  * identifiers like `WHEREVER` / `aWHERE` do NOT match).
  */
 function findExplicitWhereTokenIdx(sparql: string): number {
-  const n = sparql.length;
-  const isWordStart = (c: string): boolean =>
-    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c === '_';
-  const isWordCont = (c: string): boolean =>
-    (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
-    (c >= '0' && c <= '9') || c === '_';
-  const isIriStartFirstByte = (c: string): boolean => {
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    return c === '#' || c === '_' || c === '/' || c === '.';
-  };
-  const isIriStart = (idx: number): boolean => {
-    const next = sparql[idx + 1];
-    if (next === undefined) return false;
-    if (!isIriStartFirstByte(next)) return false;
-    for (let j = idx + 1; j < n; j++) {
-      const c = sparql[j];
-      if (c === '>') return true;
-      if (
-        c === '<' || c === '"' || c === '{' || c === '}' ||
-        c === '|' || c === '\\' || c === '^' || c === '`' ||
-        /\s/.test(c)
-      ) return false;
-    }
-    return false;
-  };
-
   let i = 0;
   let braceDepth = 0;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      if (isIriStart(i)) {
-        const end = sparql.indexOf('>', i + 1);
-        if (end === -1) return -1;
-        i = end + 1;
-        continue;
-      }
-      i++;
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'char' && token.value === '{') {
       braceDepth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       braceDepth = Math.max(0, braceDepth - 1);
-      i++;
       continue;
     }
-    if (isWordStart(ch)) {
-      // Word boundary check: previous char (if any) must NOT be a
-      // word-continuation byte. The outer lexer already skipped
-      // comments/strings/IRIs, so a non-word predecessor means we're
-      // at a real keyword start.
-      const prev = i > 0 ? sparql[i - 1] : '';
-      if (prev && isWordCont(prev)) {
-        // Mid-identifier — skip the rest of the word.
-        let j = i + 1;
-        while (j < n && isWordCont(sparql[j])) j++;
-        i = j;
-        continue;
-      }
-      let j = i + 1;
-      while (j < n && isWordCont(sparql[j])) j++;
-      const word = sparql.substring(i, j);
-      if (braceDepth === 0 && word.length === 5 && word.toUpperCase() === 'WHERE') {
-        return i;
-      }
-      i = j;
-      continue;
+    if (token.kind === 'word' && braceDepth === 0 && token.word === 'WHERE') {
+      return token.start;
     }
-    i++;
   }
   return -1;
 }
@@ -2352,78 +2098,20 @@ function findWhereBraceStart(sparql: string): number {
   // IRI branch here just means we treat `<` as a comparison and
   // advance one byte, which is the safe behaviour for the brace
   // scan we actually care about.
-  const isIriStartFirstByte = (c: string): boolean => {
-    // ASCII letter? (covers every absolute IRI scheme — `http:`,
-    // `urn:`, `did:`, `file:`, `mailto:`, `tag:`, `data:`, …).
-    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) return true;
-    // `#fragment` (SPARQL allows fragment-only relative IRIREFs
-    // when the base IRI is set by the query environment), `_blah`
-    // (legacy blank-node-as-IRI), `/path` (path-only relative),
-    // `.something` (path-relative). Everything else is a comparison
-    // operator context.
-    return c === '#' || c === '_' || c === '/' || c === '.';
-  };
-  const isIriStart = (idx: number): boolean => {
-    const next = sparql[idx + 1];
-    if (next === undefined) return false;
-    if (!isIriStartFirstByte(next)) return false;
-    for (let j = idx + 1; j < n; j++) {
-      const c = sparql[j];
-      if (c === '>') return true;
-      // Any IRIREF-forbidden character before `>` proves this `<`
-      // is a comparison, not the start of an IRI.
-      if (
-        c === '<' ||
-        c === '"' ||
-        c === '{' ||
-        c === '}' ||
-        c === '|' ||
-        c === '\\' ||
-        c === '^' ||
-        c === '`' ||
-        /\s/.test(c)
-      ) {
-        return false;
-      }
-    }
-    return false;
-  };
-
-  const n = sparql.length;
   const opens: number[] = [];
   let depth = 0;
   let i = 0;
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '<') {
-      if (isIriStart(i)) {
-        const end = sparql.indexOf('>', i + 1);
-        if (end === -1) return -1;
-        i = end + 1;
-        continue;
-      }
-      // Comparison operator — advance one byte and keep scanning.
-      i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      // dkg-query-engine.ts:848).
-      // Centralised triple-quoted-aware skip — see skipSparqlStringLiteral.
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '{') {
-      if (depth === 0) opens.push(i);
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind !== 'char') continue;
+    if (token.value === '{') {
+      if (depth === 0) opens.push(token.start);
       depth++;
-    } else if (ch === '}') {
+    } else if (token.value === '}') {
       depth--;
       if (depth < 0) return -1;
     }
-    i++;
   }
   if (depth !== 0 || opens.length === 0) return -1;
   return opens[opens.length - 1];
@@ -2651,32 +2339,13 @@ function wrapWithGraphValues(sparql: string, graphUris: string[]): string | null
 function isDedupSafeBasicGraphPattern(inner: string): boolean {
   const forbidden = ['OPTIONAL', 'MINUS', 'SERVICE', 'VALUES', 'BIND', 'SELECT', 'GRAPH', 'EXISTS'];
   let i = 0;
-  while (i < inner.length) {
-    const ch = inner[i];
-    if (ch === '#') {
-      while (i < inner.length && inner[i] !== '\n') i++;
-      continue;
+  for (let token = readNextSparqlCodeToken(inner, i); token !== null;
+    token = readNextSparqlCodeToken(inner, i)) {
+    i = token.end;
+    if (token.kind === 'char' && (token.value === '{' || token.value === '}')) {
+      return false;
     }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(inner, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(inner, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '{' || ch === '}') return false;
-    if (isKeywordStart(inner, i)) {
-      let end = i + 1;
-      while (end < inner.length && isWordContinuation(inner[end])) end++;
-      if (forbidden.some((keyword) => isSparqlKeyword(inner, i, end, keyword))) {
-        return false;
-      }
-      i = end;
-      continue;
-    }
-    i++;
+    if (token.kind === 'word' && forbidden.includes(token.word)) return false;
   }
   return true;
 }
@@ -2691,36 +2360,17 @@ function isDedupSafeBasicGraphPattern(inner: string): boolean {
 function collectQueryVariables(sparql: string): string[] {
   const variables: string[] = [];
   const seen = new Set<string>();
-  const n = sparql.length;
   let i = 0;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (ch === '?' || ch === '$') {
-      const variable = readSparqlVariable(sparql, i);
-      if (variable) {
-        if (!seen.has(variable)) {
-          seen.add(variable);
-          variables.push(variable);
-        }
-        i += variable.length;
-        continue;
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'variable') {
+      if (!seen.has(token.variable)) {
+        seen.add(token.variable);
+        variables.push(token.variable);
       }
     }
-    i++;
   }
 
   return variables;

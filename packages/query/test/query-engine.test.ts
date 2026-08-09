@@ -1359,6 +1359,21 @@ describe('DKGQueryEngine', () => {
     )).resolves.toMatchObject({ bindings: expect.any(Array) });
   });
 
+  it('ignores GRAPH text in a comment adjacent to a prefixed name', async () => {
+    await store.insert([
+      q(ENTITY, 'http://example.com/name', '"AdjacentComment"'),
+    ]);
+
+    const result = await engine.query(
+      `PREFIX ex: <http://example.com/>
+       SELECT ?name WHERE { ?s ex:name ?name# GRAPH <did:dkg:context-graph:forbidden>
+       . }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toContainEqual({ name: '"AdjacentComment"' });
+  });
+
   it('allows scoped queries with hyphenated graph/from prefix labels', async () => {
     await store.insert([
       q(ENTITY, 'http://example.com/name', '"HyphenatedPrefixPredicate"'),
@@ -1386,6 +1401,16 @@ describe('DKGQueryEngine', () => {
     await expect(
       engine.query(
         `SELECT ?name WHERE { GRAPH <${otherGraph}> { ?s <http://schema.org/name> ?name } }`,
+        { contextGraphId: CONTEXT_GRAPH },
+      ),
+    ).rejects.toThrow(/Scoped query violation: GRAPH <did:dkg:context-graph:other-agent-registry> is outside the allowed graph set/i);
+  });
+
+  it('rejects a disallowed explicit GRAPH immediately after a dot separator', async () => {
+    const otherGraph = 'did:dkg:context-graph:other-agent-registry';
+    await expect(
+      engine.query(
+        `SELECT ?name WHERE { ?s ?p ?o.GRAPH <${otherGraph}> { ?x ?y ?name } }`,
         { contextGraphId: CONTEXT_GRAPH },
       ),
     ).rejects.toThrow(/Scoped query violation: GRAPH <did:dkg:context-graph:other-agent-registry> is outside the allowed graph set/i);
@@ -1820,6 +1845,21 @@ describe('DKGQueryEngine', () => {
         { contextGraphId: CONTEXT_GRAPH },
       ),
     ).rejects.toThrow(/Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i);
+  });
+
+  it('rejects prefixed-name default patterns mixed with a GRAPH variable', async () => {
+    await expect(
+      engine.query(
+        `PREFIX ex: <urn:guard:>
+         SELECT ?g ?o WHERE {
+           ex:subject ex:predicate ex:object .
+           GRAPH ?g { ?s ex:predicate ?o }
+         }`,
+        { contextGraphId: CONTEXT_GRAPH },
+      ),
+    ).rejects.toThrow(
+      /Scoped query violation: GRAPH variables cannot be mixed with default-graph triple patterns/i,
+    );
   });
 
   it('constrains GRAPH variables with non-ASCII names to the scoped context graph data graph', async () => {
@@ -2368,11 +2408,14 @@ describe('validateReadOnlySparql', () => {
   });
 
   it('gives read-then-update text no recognized read-only form', () => {
-    const analysis = analyzeSparqlOperation(
-      'SELECT ?s WHERE { GRAPH <urn:g> { ?s ?p ?o } }; DROP ALL',
-    );
+    const sparql = 'SELECT ?s WHERE { GRAPH <urn:g> { ?s ?p ?o } }; DROP ALL';
+    const analysis = analyzeSparqlOperation(sparql);
 
     expect(recognizedReadOnlySparqlForm(analysis)).toBeNull();
+    expect(validateReadOnlySparql(sparql)).toMatchObject({
+      safe: false,
+      reason: expect.stringContaining('mutating keyword "DROP"'),
+    });
   });
 
   it('allows BASE declaration before SELECT', () => {

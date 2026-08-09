@@ -1,48 +1,26 @@
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
-  isSparqlKeyword,
-  isSparqlKeywordStart as isKeywordStart,
-  isSparqlWordContinuation as isWordContinuation,
+  readNextSparqlCodeToken,
+  readSparqlPrefixName,
+  type SparqlPrefixName,
   readSparqlVariable,
   skipSparqlIriRef,
   skipSparqlSpaceAndLineComments,
-  skipSparqlStringLiteral,
 } from './sparql-utils.js';
-
-export interface SparqlPrefixName {
-  prefix: string;
-  local: string;
-  length: number;
-}
 
 export function collectPrefixDeclarations(sparql: string): Map<string, string> {
   const prefixes = new Map<string, string>();
-  const n = sparql.length;
   let i = 0;
 
-  while (i < n) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < n && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      const end = skipSparqlIriRef(sparql, i);
-      i = end ?? i + 1;
-      continue;
-    }
-    if (isKeywordStart(sparql, i)) {
-      let j = i + 1;
-      while (j < n && isWordContinuation(sparql[j])) j++;
-      if (isSparqlKeyword(sparql, i, j, 'PREFIX')) {
-        const prefixStart = skipSparqlSpaceAndLineComments(sparql, j);
+  for (let token = readNextSparqlCodeToken(sparql, i); token !== null;
+    token = readNextSparqlCodeToken(sparql, i)) {
+    i = token.end;
+    if (token.kind === 'word') {
+      if (token.word === 'PREFIX') {
+        const prefixStart = skipSparqlSpaceAndLineComments(sparql, token.end);
         const prefix = readSparqlPrefixName(sparql, prefixStart);
         if (!prefix || prefix.local.length > 0) {
-          i = j;
+          i = token.end;
           continue;
         }
         const iriStart = skipSparqlSpaceAndLineComments(
@@ -56,31 +34,10 @@ export function collectPrefixDeclarations(sparql: string): Map<string, string> {
           continue;
         }
       }
-      i = j;
-      continue;
     }
-    i++;
   }
 
   return prefixes;
-}
-
-export function readSparqlPrefixName(
-  sparql: string,
-  start: number,
-): SparqlPrefixName | null {
-  let colon = start;
-  while (colon < sparql.length && isSparqlPrefixLabelChar(sparql[colon])) colon++;
-  if (sparql[colon] !== ':') return null;
-
-  let end = colon + 1;
-  while (end < sparql.length && isSparqlPrefixedLocalChar(sparql[end])) end++;
-
-  return {
-    prefix: sparql.slice(start, colon),
-    local: sparql.slice(colon + 1, end),
-    length: end - start,
-  };
 }
 
 export function resolveSparqlPrefixedName(
@@ -118,46 +75,26 @@ function readTopLevelStaticGraphValues(
   let depth = 0;
   let i = braceStart + 1;
 
-  while (i < braceEnd) {
-    const ch = sparql[i];
-    if (ch === '#') {
-      while (i < braceEnd && sparql[i] !== '\n') i++;
-      continue;
-    }
-    if (ch === '"' || ch === "'") {
-      i = skipSparqlStringLiteral(sparql, i);
-      continue;
-    }
-    if (ch === '<') {
-      i = skipSparqlIriRef(sparql, i) ?? i + 1;
-      continue;
-    }
-    if (ch === '{') {
+  for (let token = readNextSparqlCodeToken(sparql, i, braceEnd); token !== null;
+    token = readNextSparqlCodeToken(sparql, i, braceEnd)) {
+    i = token.end;
+    if (token.kind === 'char' && token.value === '{') {
       depth++;
-      i++;
       continue;
     }
-    if (ch === '}') {
+    if (token.kind === 'char' && token.value === '}') {
       depth = Math.max(0, depth - 1);
-      i++;
       continue;
     }
-    if (depth !== 0 || !isKeywordStart(sparql, i)) {
-      i++;
+    if (depth !== 0 || token.kind !== 'word') continue;
+
+    if (token.word !== 'VALUES') {
       continue;
     }
 
-    let keywordEnd = i + 1;
-    while (keywordEnd < braceEnd && isWordContinuation(sparql[keywordEnd])) keywordEnd++;
-    if (!isSparqlKeyword(sparql, i, keywordEnd, 'VALUES')) {
-      i = keywordEnd;
-      continue;
-    }
-
-    const variableStart = skipSparqlSpaceAndLineComments(sparql, keywordEnd);
+    const variableStart = skipSparqlSpaceAndLineComments(sparql, token.end);
     const candidate = readSparqlVariable(sparql, variableStart);
     if (candidate !== variable) {
-      i = keywordEnd;
       continue;
     }
     const valuesStart = skipSparqlSpaceAndLineComments(
@@ -201,25 +138,4 @@ function parseStaticGraphValues(
     i += prefixedName.length;
   }
   return values;
-}
-
-function isSparqlPrefixLabelChar(ch: string | undefined): ch is string {
-  return !!ch && (
-    (ch >= 'A' && ch <= 'Z') ||
-    (ch >= 'a' && ch <= 'z') ||
-    (ch >= '0' && ch <= '9') ||
-    ch === '_' ||
-    ch === '-'
-  );
-}
-
-function isSparqlPrefixedLocalChar(ch: string | undefined): ch is string {
-  return !!ch &&
-    !/\s/.test(ch) &&
-    ch !== '{' &&
-    ch !== '}' &&
-    ch !== '(' &&
-    ch !== ')' &&
-    ch !== ';' &&
-    ch !== ',';
 }
