@@ -137,11 +137,12 @@ jobs:
         run: pnpm typecheck:live:system-record-managed-ownership
 
       - name: Typecheck barrier type contracts (issue 2179)
-        # The type-level pins in store-control-barrier-contract-v1.test.ts
-        # (expectTypeOf + @ts-expect-error) only PROVE anything under a
-        # compiler. The package tsconfig includes only src/ and vitest does
-        # not typecheck, so without this lane every type assertion in that
-        # file is decorative — a check that cannot fail.
+        # Compiles the runtime spec's expectTypeOf assertions
+        # (store-control-barrier-contract-v1.test.ts) and the compile-only
+        # negative contracts (store-control-barrier-contract-v1.typetest.ts,
+        # which vitest never executes). Type assertions only PROVE anything
+        # under a compiler: the package tsconfig includes only src/ and vitest
+        # does not typecheck, so without this lane they are decorative.
         run: pnpm --filter @origintrail-official/dkg-storage run typecheck:type-contracts
 
       - name: Storage unit conformance

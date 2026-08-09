@@ -451,60 +451,44 @@ export async function releaseSystemRecordLaneControllerV1(
 }
 
 /**
- * Typed-only controller deps: the managed path's shape, and the CANONICAL
- * home of the typed-barrier rationale (call sites carry one-line pointers
- * here, not copies).
+ * Typed-only controller deps — the CANONICAL home of the #2179 rationale;
+ * everywhere else carries at most a one-line pointer here.
  *
- * There is NO string `barrier` member — not deprecated, not optional,
- * structurally absent — so first-party composition cannot regress onto the
- * purpose-string contract by any edit short of changing this interface,
- * which is the loudest possible place for that change. The string contract
- * is unsound for coalescing (a runtime purpose string cannot bind the result
- * type shared by coalesced callers) and survives only on the public
- * compatibility entry point until its breaking-version removal. The
- * compile-time can't-forget guard that `SystemRecordLaneControllerDepsV1.
- * barrier` provides for external composers is provided here by `typedBarrier`
- * being required. A type-contract pin fails the typecheck lane if a string
- * member is ever re-added to a typed-only shape.
+ * The purpose-string barrier contract is unsound: coalescing is keyed by a
+ * runtime string while each caller picks a static result type, so a later
+ * same-purpose caller receives the first promise under its own type. This
+ * shape therefore has NO string `barrier` member — structurally absent, not
+ * deprecated — so first-party composition cannot regress onto that contract
+ * without editing this interface, and a type-contract pin fails the
+ * typecheck lane if a string member is ever re-added. `typedBarrier` being
+ * required is the same can't-forget guard that `barrier`'s required-ness
+ * gives external composers on the legacy shape, which keeps the string
+ * contract alive only until its breaking-version removal.
  */
 export interface SystemRecordLaneControllerTypedDepsV1
   extends SystemRecordLaneControllerSharedDepsV1 {
   readonly typedBarrier: SystemRecordLaneTypedBarrierV1;
 }
 
-/**
- * The ONE controller constructor. Accepts either the typed-only deps (the
- * managed path — no string member exists on that shape) or the legacy-capable
- * public deps, and normalizes the difference internally: a supplied
- * `typedBarrier` is used as-is; otherwise the string `barrier` is wrapped,
- * preserving the purpose-string contract for external composers until its
- * breaking-version removal. One entry point, one singleton lifecycle — the
- * shape split lives in the TYPES, not in parallel factories.
- *
- * ORDER MATTERS on the duplicate-registration guard: it runs before ANY
- * caller-supplied dependency property is read. Deps come from composers and
- * may carry accessors; a second registration must be refused with
- * {@link SystemRecordControllerRegistrationError} before composer code gets a
- * chance to run (or throw something else) from a property read.
- */
-/**
- * The barrier-mode split, stated once and PROVEN by narrowing rather than
- * asserted by a cast: `'barrier' in deps` discriminates the union, so the
- * compiler itself proves the legacy branch has a string `barrier` to wrap
- * and the typed-only branch has a required `typedBarrier`. A future deps
- * change that breaks either premise fails to typecheck here instead of
- * surviving inside an `as`.
- */
+/** Typed deps pass through; legacy deps wrap `barrier`. Proven by `in`-narrowing, no cast. */
 function normalizeControllerBarrierV1(
   deps: SystemRecordLaneControllerDepsV1 | SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneTypedBarrierV1 {
   if (!('barrier' in deps)) return deps.typedBarrier;
-  // Legacy-capable shape: a supplied typed member always wins; the string
-  // barrier is wrapped only when it is all the composer has.
   return deps.typedBarrier ??
     ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
 }
 
+/**
+ * The one controller constructor: accepts the typed-only or the
+ * legacy-capable deps shape (see {@link SystemRecordLaneControllerTypedDepsV1}
+ * for why the shapes differ) and normalizes the barrier internally.
+ *
+ * The duplicate-registration guard runs before ANY caller-supplied dependency
+ * property is read: deps may carry accessors, and a second registration must
+ * be refused with {@link SystemRecordControllerRegistrationError} before
+ * composer code can run from a property read.
+ */
 export function createSystemRecordLaneControllerV1(
   deps: SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneControllerV1;
@@ -514,9 +498,6 @@ export function createSystemRecordLaneControllerV1(
 export function createSystemRecordLaneControllerV1(
   deps: SystemRecordLaneControllerDepsV1 | SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneControllerV1 {
-  // Guard FIRST, before the normalizer or any other deps read — deps come
-  // from composers and may carry accessors; see the registration-invariant
-  // tests.
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
   const typedBarrier = normalizeControllerBarrierV1(deps);
