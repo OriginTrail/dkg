@@ -16,11 +16,16 @@ export type SystemRecordRemoteFetchOutcomeV1 =
   | 'remote-busy'
   | 'remote-error';
 
+export interface SystemRecordExactRequestV1 {
+  readonly request: SystemRecordRequestHeaderV1;
+  readonly key: string;
+}
+
 export function createSystemRecordExactRequestV1(
   networkId: NetworkIdV1,
   lookup: SystemRecordExactArtifactLookupV1,
   requestId: string,
-): SystemRecordRequestHeaderV1 {
+): SystemRecordExactRequestV1 {
   const common = {
     wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
     requestId,
@@ -28,44 +33,46 @@ export function createSystemRecordExactRequestV1(
     networkId,
     payloadBytes: '0' as const,
   };
-  return lookup.type === 'inventory-object'
-    ? Object.freeze({
-      ...common,
-      operation: 'get-inventory-object',
-      rootDescriptorDigest: lookup.rootDescriptorDigest,
-      path: Object.freeze([...lookup.path]),
-      objectKind: lookup.objectKind,
-      objectDigest: lookup.objectDigest,
-    })
-    : lookup.objectKind === 'profile-bundle'
-      ? Object.freeze({
+  if (lookup.type === 'inventory-object') {
+    const path = Object.freeze([...lookup.path]);
+    return Object.freeze({
+      request: Object.freeze({
+        ...common,
+        operation: 'get-inventory-object',
+        rootDescriptorDigest: lookup.rootDescriptorDigest,
+        path,
+        objectKind: lookup.objectKind,
+        objectDigest: lookup.objectDigest,
+      }),
+      key: JSON.stringify([
+        'get-inventory-object',
+        lookup.rootDescriptorDigest,
+        path,
+        lookup.objectKind,
+        lookup.objectDigest,
+      ]),
+    });
+  }
+  if (lookup.objectKind === 'profile-bundle') {
+    return Object.freeze({
+      request: Object.freeze({
         ...common,
         operation: 'get-bundle',
         objectKind: lookup.objectKind,
         objectDigest: lookup.objectDigest,
-      })
-      : Object.freeze({
-        ...common,
-        operation: 'get-control-object',
-        objectKind: lookup.objectKind,
-        objectDigest: lookup.objectDigest,
-      });
-}
-
-export function systemRecordExactRequestKeyV1(request: SystemRecordRequestHeaderV1): string {
-  if (request.operation === 'get-root') {
-    throw new Error('root discovery is not an exact-fetch coordinate');
+      }),
+      key: JSON.stringify(['get-bundle', lookup.objectKind, lookup.objectDigest]),
+    });
   }
-  const coordinate = request.operation === 'get-inventory-object'
-    ? [
-      request.operation,
-      request.rootDescriptorDigest,
-      request.path,
-      request.objectKind,
-      request.objectDigest,
-    ]
-    : [request.operation, request.objectKind, request.objectDigest];
-  return JSON.stringify(coordinate);
+  return Object.freeze({
+    request: Object.freeze({
+      ...common,
+      operation: 'get-control-object',
+      objectKind: lookup.objectKind,
+      objectDigest: lookup.objectDigest,
+    }),
+    key: JSON.stringify(['get-control-object', lookup.objectKind, lookup.objectDigest]),
+  });
 }
 
 export function systemRecordExactResponseOutcomeV1(

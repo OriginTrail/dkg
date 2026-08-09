@@ -32,30 +32,22 @@ import {
 } from './requester-transfer-v1-internal.js';
 import {
   createSystemRecordExactRequestV1,
-  systemRecordExactRequestKeyV1,
 } from './requester-wire-v1-internal.js';
 import { raceSystemRecordAbortV1 } from './transport-v1.js';
-
-interface FetchWaiterV1 {
-  readonly signal: AbortSignal;
-  readonly resolve: (result: SystemRecordExactFetchResultV1) => void;
-  readonly reject: (reason?: unknown) => void;
-  readonly onAbort: () => void;
-}
-
-interface FetchEntryV1 {
-  readonly key: string;
-  readonly controller: AbortController;
-  readonly waiters: Set<FetchWaiterV1>;
-  leaseCount: number;
-  abortReason?: SystemRecordRequesterResetReasonV1;
-  settled: boolean;
-  retained?: SystemRecordRetainedSourceV1;
-}
 
 type SystemRecordRequesterSettlementV1 =
   | SystemRecordRetainTransferResultV1
   | Exclude<SystemRecordExactFetchResultV1, Readonly<{ outcome: 'ok' }>>;
+
+interface FetchEntryV1 {
+  readonly key: string;
+  readonly controller: AbortController;
+  readonly transfer: Promise<SystemRecordRequesterSettlementV1>;
+  observerCount: number;
+  leaseCount: number;
+  abortReason?: SystemRecordRequesterResetReasonV1;
+  retained?: SystemRecordRetainedSourceV1;
+}
 
 /**
  * One default-unused exact requester. Same-coordinate calls share one transfer,
@@ -100,15 +92,15 @@ export function createSystemRecordRequesterV1(
   ): Promise<SystemRecordExactFetchResultV1> {
     signal.throwIfAborted();
     if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
-    const request = createSystemRecordExactRequestV1(options.networkId, lookup, requestId());
-    const key = systemRecordExactRequestKeyV1(request);
+    const exact = createSystemRecordExactRequestV1(options.networkId, lookup, requestId());
+    const { key, request } = exact;
     let entry = entries.get(key);
     if (entry !== undefined) {
-      if (!entry.settled && entry.controller.signal.aborted) {
+      if (entry.controller.signal.aborted) {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       // The first observer owns the transfer; the frozen limit counts followers.
-      if (entry.waiters.size + entry.leaseCount >= maxWaitersPerDigest + 1) {
+      if (entry.observerCount + entry.leaseCount >= maxWaitersPerDigest + 1) {
         return Object.freeze({ outcome: 'waiter-limit', wireBytes: 0 });
       }
       joined += 1;
@@ -124,46 +116,57 @@ export function createSystemRecordRequesterV1(
       streamPermit.release();
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
+    let resolveTransfer!: (result: SystemRecordRequesterSettlementV1) => void;
+    let rejectTransfer!: (reason?: unknown) => void;
+    const transfer = new Promise<SystemRecordRequesterSettlementV1>((resolve, reject) => {
+      resolveTransfer = resolve;
+      rejectTransfer = reject;
+    });
     entry = {
       key,
       controller: new AbortController(),
-      waiters: new Set(),
+      transfer,
+      observerCount: 0,
       leaseCount: 0,
-      settled: false,
     };
     entries.set(key, entry);
     started += 1;
     activeStream = 1;
     peakActiveStream = 1;
-    void run(entry, request, openExchange, streamPermit, frameReservation);
+    void run(entry, request, openExchange, streamPermit, frameReservation).then(
+      resolveTransfer,
+      rejectTransfer,
+    );
     return subscribe(entry, signal);
   }
 
-  function subscribe(
+  async function subscribe(
     entry: FetchEntryV1,
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1> {
-    return new Promise<SystemRecordExactFetchResultV1>((resolve, reject) => {
-      const waiter: FetchWaiterV1 = {
-        signal,
-        resolve,
-        reject,
-        onAbort: () => {
-          if (!entry.waiters.delete(waiter)) return;
-          waitingCallers -= 1;
-          reject(signal.reason);
-          abortIfUnobserved(entry);
-        },
-      };
-      entry.waiters.add(waiter);
-      waitingCallers += 1;
-      signal.addEventListener('abort', waiter.onAbort, { once: true });
-      if (signal.aborted) {
-        waiter.onAbort();
-        return;
-      }
-      if (entry.settled && entry.retained !== undefined) deliverLease(entry, waiter);
-    });
+    signal.throwIfAborted();
+    entry.observerCount += 1;
+    waitingCallers += 1;
+    let observing = true;
+    const releaseObserver = () => {
+      if (!observing) return;
+      observing = false;
+      entry.observerCount -= 1;
+      waitingCallers -= 1;
+      abortIfUnobserved(entry);
+    };
+    signal.addEventListener('abort', releaseObserver, { once: true });
+    if (signal.aborted) {
+      releaseObserver();
+      signal.throwIfAborted();
+    }
+    try {
+      const shared = await raceSystemRecordAbortV1(entry.transfer, signal);
+      return shared.outcome === 'ok' ? deliverLease(entry, shared.retained) : shared;
+    } finally {
+      signal.removeEventListener('abort', releaseObserver);
+      releaseObserver();
+    }
   }
 
   async function run(
@@ -172,7 +175,7 @@ export function createSystemRecordRequesterV1(
     openExchange: (signal: AbortSignal) => Promise<SystemRecordRequesterExchangeV1>,
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
-  ): Promise<void> {
+  ): Promise<SystemRecordRequesterSettlementV1> {
     let exchange: SystemRecordRequesterExchangeV1 | undefined;
     let wireBytes = 0;
     const timeout = setTimeout(
@@ -237,51 +240,31 @@ export function createSystemRecordRequesterV1(
       activeStream = 0;
       completed += 1;
     }
-    settle(entry, shared);
+    if (shared.outcome !== 'ok' && entries.get(entry.key) === entry) entries.delete(entry.key);
+    return shared;
   }
 
-  function settle(entry: FetchEntryV1, shared: SystemRecordRequesterSettlementV1): void {
-    entry.settled = true;
-    if (shared.outcome === 'ok') {
-      for (const waiter of [...entry.waiters]) deliverLease(entry, waiter);
-      abortIfUnobserved(entry);
-      return;
-    }
-    entries.delete(entry.key);
-    for (const waiter of [...entry.waiters]) {
-      if (!entry.waiters.delete(waiter)) continue;
-      waiter.signal.removeEventListener('abort', waiter.onAbort);
-      waitingCallers -= 1;
-      waiter.resolve(shared);
-    }
-  }
-
-  function deliverLease(entry: FetchEntryV1, waiter: FetchWaiterV1): void {
-    const retained = entry.retained;
-    if (retained === undefined || !entry.waiters.delete(waiter)) return;
-    waiter.signal.removeEventListener('abort', waiter.onAbort);
-    waitingCallers -= 1;
+  function deliverLease(
+    entry: FetchEntryV1,
+    retained: SystemRecordRetainedSourceV1,
+  ): SystemRecordExactFetchResultV1 {
     const payloadBytes = retained.artifact.canonicalBytes.byteLength;
     const reservation = options.byteAdmission.tryReserve(payloadBytes);
     if (reservation === null) {
-      waiter.resolve(Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes }));
-      releaseRetainedIfUnobserved(entry);
-      return;
+      return Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes });
     }
     let artifact: ReturnType<typeof cloneSystemRecordArtifactV1>;
     try {
       artifact = cloneSystemRecordArtifactV1(retained.artifact);
     } catch {
       reservation.release();
-      waiter.resolve(Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes }));
-      releaseRetainedIfUnobserved(entry);
-      return;
+      return Object.freeze({ outcome: 'capacity', wireBytes: retained.wireBytes });
     }
     entry.leaseCount += 1;
     activeLeases += 1;
     retainedPayloadBytes += payloadBytes;
     let released = false;
-    waiter.resolve(Object.freeze({
+    return Object.freeze({
       outcome: 'ok',
       lease: Object.freeze({
         artifact,
@@ -296,20 +279,21 @@ export function createSystemRecordRequesterV1(
           releaseRetainedIfUnobserved(entry);
         },
       }),
-    }));
+    });
   }
 
   function abortIfUnobserved(entry: FetchEntryV1): void {
-    if (entry.waiters.size !== 0 || entry.leaseCount !== 0) return;
-    if (!entry.settled) {
+    if (entry.observerCount !== 0 || entry.leaseCount !== 0) return;
+    if (entries.get(entry.key) !== entry) return;
+    if (entry.retained === undefined) {
       abortEntry(entry, 'cancelled', new Error('system-record requester has no callers'));
     }
     releaseRetainedIfUnobserved(entry);
   }
 
   function releaseRetainedIfUnobserved(entry: FetchEntryV1): void {
-    if (entry.waiters.size !== 0 || entry.leaseCount !== 0 || entry.retained === undefined) return;
-    entries.delete(entry.key);
+    if (entry.observerCount !== 0 || entry.leaseCount !== 0 || entry.retained === undefined) return;
+    if (entries.get(entry.key) === entry) entries.delete(entry.key);
     retainedPayloadBytes -= entry.retained.artifact.canonicalBytes.byteLength;
     entry.retained.reservation.release();
     entry.retained.decodePermit.release();
@@ -336,7 +320,7 @@ export function createSystemRecordRequesterV1(
     if (closed) return;
     closed = true;
     for (const entry of entries.values()) {
-      if (!entry.settled) {
+      if (entry.retained === undefined) {
         abortEntry(entry, 'closed', new Error('system-record requester closed'));
       }
     }

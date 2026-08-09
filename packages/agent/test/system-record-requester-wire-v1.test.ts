@@ -15,7 +15,7 @@ const DIGEST_B = `0x${'bb'.repeat(32)}` as Digest32V1;
 
 describe('system-record exact requester wire mapping V1', () => {
   it('writes profile bundle lookups as get-bundle requests', () => {
-    const request = writtenRequest({
+    const { key, request } = writtenRequest({
       type: 'object',
       objectKind: 'profile-bundle',
       objectDigest: DIGEST_A,
@@ -26,10 +26,11 @@ describe('system-record exact requester wire mapping V1', () => {
       objectKind: 'profile-bundle',
       objectDigest: DIGEST_A,
     });
+    expect(key).toBe(JSON.stringify(['get-bundle', 'profile-bundle', DIGEST_A]));
   });
 
   it('writes non-bundle exact lookups as get-control-object requests', () => {
-    const request = writtenRequest({
+    const { key, request } = writtenRequest({
       type: 'object',
       objectKind: 'owned-subject-table',
       objectDigest: DIGEST_A,
@@ -40,10 +41,15 @@ describe('system-record exact requester wire mapping V1', () => {
       objectKind: 'owned-subject-table',
       objectDigest: DIGEST_A,
     });
+    expect(key).toBe(JSON.stringify([
+      'get-control-object',
+      'owned-subject-table',
+      DIGEST_A,
+    ]));
   });
 
   it('preserves the complete coordinate in get-inventory-object requests', () => {
-    const request = writtenRequest({
+    const { key, request } = writtenRequest({
       type: 'inventory-object',
       rootDescriptorDigest: DIGEST_A,
       path: [1, 7],
@@ -58,11 +64,18 @@ describe('system-record exact requester wire mapping V1', () => {
       objectKind: 'inventory-leaf',
       objectDigest: DIGEST_B,
     });
+    expect(key).toBe(JSON.stringify([
+      'get-inventory-object',
+      DIGEST_A,
+      [1, 7],
+      'inventory-leaf',
+      DIGEST_B,
+    ]));
   });
 
   it('snapshots and freezes mutable inventory paths before asynchronous transfer', () => {
     const path = [1, 7];
-    const request = createSystemRecordExactRequestV1(NETWORK, {
+    const { request } = createSystemRecordExactRequestV1(NETWORK, {
       type: 'inventory-object',
       rootDescriptorDigest: DIGEST_A,
       path,
@@ -81,5 +94,8 @@ describe('system-record exact requester wire mapping V1', () => {
 
 function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {
   const mapped = createSystemRecordExactRequestV1(NETWORK, lookup, REQUEST_ID);
-  return decodeSystemRecordRequestFrameV1(encodeSystemRecordRequestFrameV1(mapped));
+  return Object.freeze({
+    key: mapped.key,
+    request: decodeSystemRecordRequestFrameV1(encodeSystemRecordRequestFrameV1(mapped.request)),
+  });
 }

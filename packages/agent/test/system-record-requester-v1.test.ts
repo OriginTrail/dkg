@@ -279,19 +279,46 @@ describe('system-record requester V1', () => {
     expect(exchange.reset).toHaveBeenCalledWith('cancelled');
   });
 
+  it('releases stream and frame ownership when the only caller leaves during open', async () => {
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const opening = Promise.withResolvers<void>();
+    const openExchange = vi.fn(async () => {
+      opening.resolve();
+      return new Promise<SystemRecordRequesterExchangeV1>(() => {});
+    });
+    const requester = createRequester({ bytes, stream });
+    const controller = new AbortController();
+    const result = requester.fetch(LOOKUP, openExchange, controller.signal);
+    await opening.promise;
+    controller.abort(new Error('caller left during open'));
+
+    await expect(result).rejects.toThrow('caller left during open');
+    await vi.waitFor(() => expect(requester.stats()).toMatchObject({
+      completed: 1,
+      pendingDigests: 0,
+      waitingCallers: 0,
+      activeStream: 0,
+    }));
+    expect(stream.active()).toBe(false);
+    expect(bytes.reservations).toHaveLength(1);
+    expect(bytes.reservations[0]?.released).toBe(true);
+  });
+
   it('does not attach an immediate retry to a cancelled single-flight', async () => {
     const exchange = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
     const requester = createRequester();
     const controller = new AbortController();
     const first = requester.fetch(LOOKUP, async () => exchange.value, controller.signal);
     await exchange.requestWritten.promise;
+    const firstRejection = expect(first).rejects.toThrow('caller left');
     controller.abort(new Error('caller left'));
 
     const unopened = vi.fn(async () => fixtureExchange().value);
     const retry = requester.fetch(LOOKUP, unopened, new AbortController().signal);
     await expect(retry).resolves.toEqual({ outcome: 'busy', wireBytes: 0 });
     expect(unopened).not.toHaveBeenCalled();
-    await expect(first).rejects.toThrow('caller left');
+    await firstRejection;
     await vi.waitFor(() => expect(requester.stats().pendingDigests).toBe(0));
   });
 
