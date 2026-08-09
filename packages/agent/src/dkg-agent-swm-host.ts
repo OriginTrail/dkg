@@ -351,14 +351,15 @@ async function applyRsHealMaterialization(
 
   // Clear completion before the first data chunk. A crash between chunks then
   // remains retryable instead of exposing a partial projection as complete.
-  await operations.replacePredicates(plan.completionReset);
   if (!operations.canApply()) return;
+  await operations.replacePredicates(plan.completionReset);
 
   for (const chunk of dataCopyChunks) {
-    await operations.copyProjection(chunk);
     if (!operations.canApply()) return;
+    await operations.copyProjection(chunk);
   }
 
+  if (!operations.canApply()) return;
   await operations.copyProjection(plan.metadataCopy);
   if (!operations.canApply()) return;
   await operations.replacePredicates(plan.completionStamp);

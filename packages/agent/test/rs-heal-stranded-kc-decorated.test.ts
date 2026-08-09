@@ -555,6 +555,46 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     expect(mutations).toEqual([]);
   });
 
+  it('does not clear completion when the heal stops being current before its first write', async () => {
+    const cg = 'stale-before-write';
+    const onChainId = '23';
+    const ual = 'did:dkg:hardhat:31337/0xstale/42';
+    const root = 'urn:entity:stale';
+    const mutations: StructuredMutation[] = [];
+    const fakeStore = {
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes('SELECT ?ual ?b')) {
+          return { type: 'bindings' as const, bindings: [{ ual, b: String(KA_ID) }] };
+        }
+        if (sparql.includes('SELECT ?root')) {
+          return { type: 'bindings' as const, bindings: [{ root }] };
+        }
+        if (sparql.includes('ASK')) return { type: 'boolean' as const, value: true };
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+      structuredMutation: vi.fn(async (mutation: StructuredMutation) => {
+        mutations.push(mutation);
+      }),
+    } as unknown as TripleStore;
+    let currentChecks = 0;
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+      // Nine checks cover candidate discovery and root preflight. The tenth is
+      // the first materialization write boundary and must fail closed.
+      () => ++currentChecks <= 9,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    expect(currentChecks).toBeGreaterThanOrEqual(10);
+    expect(mutations).toEqual([]);
+  });
+
   it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {
     // Guard the #1549 warm-index behaviour at the call site: a regression reverting
     // either INSERT to a plain `store.update(sparql)` would still relocate the KC
