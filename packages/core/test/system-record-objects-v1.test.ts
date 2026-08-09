@@ -1138,7 +1138,7 @@ describe('system-record owned subjects and verification closure', () => {
     })).toThrow(/aggregate cache accounting exceeds/);
   });
 
-  it('preserves shared physical accounting across closure, sidecar, and inventory paths', () => {
+  it('preserves shared physical accounting across closure, sidecar, and inventory paths', async () => {
     const metadata = createSystemRecordCacheMetadataV1(new Uint8Array());
     const reference = (
       objectKind: 'profile-bundle' | 'conflict-evidence' | 'inventory-leaf',
@@ -1159,6 +1159,14 @@ describe('system-record owned subjects and verification closure', () => {
       SYSTEM_RECORD_DIGEST_DOMAINS_V1.conflictEvidence,
       'shared-sidecar',
     );
+    const fixture = await authorityFixture();
+    const transition = authorityTransition(fixture, activeHead(fixture));
+    const transitionBytes = fakeEnvelopeBytes(transition);
+    const sharedControl = createSystemRecordCacheReferenceV1(
+      'authority-transition',
+      computeAgentProfileAuthorityTransitionDigestV1(transition),
+      transitionBytes,
+    );
     const inventoryLeaf = reference(
       'inventory-leaf',
       SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf,
@@ -1166,16 +1174,21 @@ describe('system-record owned subjects and verification closure', () => {
     );
     const result = preflightSystemRecordCacheAccountingV1({
       mode: 'activation',
-      rows: [0, 1].map(() => ({
-        closure: [sharedClosure],
-        sidecar: [sharedSidecar],
+      rows: [{
+        closure: [sharedClosure, sharedControl],
+        sidecar: [sharedControl, sharedSidecar],
         metadata,
         sidecarMetadata: metadata,
-      })),
+      }],
       inventoryLeaves: [inventoryLeaf],
     });
     expect(result).toMatchObject({
-      cohortPhysicalObjects: 3,
+      cohortPhysicalObjects: 4,
+      cohortPhysicalBytes:
+        new TextEncoder().encode('shared-closure').byteLength
+        + transitionBytes.byteLength
+        + new TextEncoder().encode('shared-sidecar').byteLength
+        + new TextEncoder().encode('activation-leaf').byteLength,
       closureReferences: 2,
       sidecarReferences: 2,
       activationInventoryLeaves: 1,
