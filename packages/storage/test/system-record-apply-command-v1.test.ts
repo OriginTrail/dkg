@@ -105,10 +105,10 @@ describe('system-record conditional apply command V1', () => {
   it('performs zero writes when a foreign root claim races the inspected transition', async () => {
     endpoint = await startOxigraphSparqlEndpoint();
     const { ready } = makeAuthenticActiveReplacementFixtureV1('authoritative');
-    const legacySubject = ready.nextSubjects[0];
+    const legacySubject = ready.plan.next.ownedSubjectTable[0];
     endpoint.store.update(`INSERT DATA {
-      ${ready.previousReservedQuads.map(renderQuad).join('\n')}
-      GRAPH <${ready.projectionGraph}> {
+      ${ready.plan.prior.reservedQuads.map(renderQuad).join('\n')}
+      GRAPH <${ready.plan.projectionGraph}> {
         <${legacySubject}> <urn:test:legacy> "must-survive-root-race" .
       }
     }`);
@@ -116,7 +116,7 @@ describe('system-record conditional apply command V1', () => {
     // Build from the authentic collision-free derivation first. The foreign
     // ownership row appears only after that pre-read-derived command exists.
     const update = buildSystemRecordConditionalApplyUpdateV1(ready);
-    const guard = ready.rootClaimGuards[0];
+    const guard = ready.plan.rootClaimGuards[0];
     if (guard === undefined) throw new Error('fixture emitted no root-claim guard');
     endpoint.store.update(`INSERT DATA { GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}> {
       <${guard.claimSubject}> <${SYSTEM_RECORD_V1_PREDICATES.claimedBy}>
@@ -133,10 +133,10 @@ describe('system-record conditional apply command V1', () => {
 
     expect(snapshotStore(endpoint)).toEqual(before);
     const ask = (pattern: string): boolean => endpoint!.store.query(`ASK { ${pattern} }`) as boolean;
-    expect(ask(`GRAPH <${ready.projectionGraph}> { <${legacySubject}> ` +
+    expect(ask(`GRAPH <${ready.plan.projectionGraph}> { <${legacySubject}> ` +
       '<urn:test:legacy> "must-survive-root-race" }')).toBe(true);
-    const projection = ready.nextProjectionQuads[0];
-    expect(ask(`GRAPH <${ready.projectionGraph}> { <${projection.subject}> ` +
+    const projection = ready.plan.next.projectionQuads[0];
+    expect(ask(`GRAPH <${ready.plan.projectionGraph}> { <${projection.subject}> ` +
       `<${projection.predicate}> ${renderObject(projection.object)} }`)).toBe(false);
     expect(ask(`GRAPH <${SYSTEM_RECORD_V1_STATE_GRAPH}> { <${guard.claimSubject}> ` +
       `<${SYSTEM_RECORD_V1_PREDICATES.claimedBy}> <${guard.recordSubject}> }`)).toBe(false);
