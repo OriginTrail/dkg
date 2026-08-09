@@ -258,6 +258,73 @@ export function recordReadLeg(home: string, args: {
   return signed;
 }
 
+/**
+ * Record an INFERENCE leg. Same tab/hash-chain/signing/settlement path as
+ * recordReadLeg — deliberately, so inference settles through the exact spine
+ * proven on-chain for reads. The only differences are the meter (token counts,
+ * not read-U) and the evidence (the buyer-ratified receipt binding). The cost is
+ * already integer µTRAC from the inference policy, so it is passed directly.
+ *
+ * Everything in the signed preimage is integer (Bo's rule): inputTokens,
+ * outputTokens, costMicroTrac are integers; the evidence carries digests
+ * (strings) and the token COUNTS, never floats.
+ */
+export function recordInferenceLeg(home: string, args: {
+  principal: string;
+  inputTokens: number;
+  outputTokens: number;
+  costMicroTrac: number;      // integer µTRAC, from inferenceCostMicroTrac
+  policyDigest: string;
+  evidence: Record<string, unknown>;  // buildInferenceEvidence(...) output
+  requesterKeyRef?: string;
+}) {
+  replay(home);
+  if (debitGate) {
+    const g = debitGate(home, args.principal, Date.now());
+    if (!g.ok) throw new Error(g.code ?? "E_TAB_EXPIRED");
+  }
+  const t = entry(home, args.principal);
+  const cost = Math.max(0, Math.round(args.costMicroTrac));
+  const before = t.balance;
+  const after = before - cost;
+  if (after < 0) throw new Error("E_INSUFFICIENT_FUNDS");
+
+  const evDigest = sha256(canonicalize(args.evidence));
+  const leg = {
+    legType: "inference" as const,
+    // Derived from the evidence rather than restated, so the leg's schema stamp
+    // can never drift from the contract the evidence was actually built under.
+    schemaVersion: (args.evidence?.schemaVersion as string) ?? "receipt-v0.5",
+    domain: LEG_DOMAIN,
+    legId: sha256(`${args.principal}:${t.sequence + 1}:${evDigest}:${Date.now()}`).slice(0, 32),
+    sequence: t.sequence + 1,
+    previousLegHash: t.lastHash,
+    counterparty: { providerKeyId: providerKeyId(home) },
+    requester: { principal: args.principal, keyRef: args.requesterKeyRef ?? null },
+    meter: {
+      policyVersion: "inference-policy/v1",
+      inputTokens: Math.round(args.inputTokens),
+      outputTokens: Math.round(args.outputTokens),
+      policyDigest: args.policyDigest,
+    },
+    // The full buyer-ratified binding: request/prompt/response bytes digests,
+    // input & billable-output token-ID-sequence digests+counts, model digests,
+    // and the emitted-only/special-token rules.
+    evidence: { ...args.evidence, snapshot: new Date().toISOString() },
+    pricing: { costMicroTrac: cost, unit: "mockTRAC-u" },
+    tab: { before, after },
+    settlement: { status: "pending-countersignature" as const },
+  };
+  const preimage = Buffer.concat([Buffer.from(LEG_DOMAIN + "\n"), Buffer.from(canonicalize(leg))]);
+  const providerSignature = edSign(null, preimage, createPrivateKey(providerKeys(home).privatePem)).toString("base64");
+  const signed = { ...leg, providerSignature };
+  const hash = sha256(canonicalize(signed));
+
+  durableAppend(home, { kind: "debit", principal: args.principal, hash, leg: signed });
+  t.balance = after; t.sequence = leg.sequence; t.lastHash = hash; t.seen.add(leg.legId);
+  return signed;
+}
+
 /** Failed query: base fee only, receipt marked error (never debits in shadow). */
 export function noteFailedRead(home: string, args: { principal?: string; sparql: string }) {
   if (!args.principal) return;

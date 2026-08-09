@@ -10,7 +10,7 @@ import { authoriseMeteredRead, type MeteredReadRequest } from "./metered-read.js
 import { recordInferenceLeg } from "./ledger.js";
 import {
   verifyInferenceRecount, buildInferenceEvidence, inferenceCostMicroTrac,
-  inferencePolicyDigest, type ModelBinding, type RecountTokenizer,
+  inferencePolicyDigest, type ModelBinding, type RecountTokenizer, type StopBoundary,
 } from "./inference-meter.js";
 import { isExempt, type MeterConfig } from "./read-meter.js";
 
@@ -23,6 +23,8 @@ export interface ModelResult {
   model: ModelBinding;
   /** canonical request (messages, tools, sampler, seed, stops, max-tokens). */
   requestCanonical: unknown;
+  finishReason: string;
+  stopBoundary: StopBoundary;
 }
 
 export type InferenceOutcome =
@@ -58,6 +60,9 @@ export function meterInference(args: {
   model: ModelResult;
   tokenizer: RecountTokenizer;
   specialTokenIds: number[];
+  /** the deployment the node observed before serving; drift fails closed. */
+  expectedBackendManifestDigest?: string;
+  expectedTokenizerBundleDigest?: string;
   requesterKeyRef?: string;
   now?: number;
 }): InferenceOutcome {
@@ -83,26 +88,9 @@ export function meterInference(args: {
   if (!auth.ok) return { ok: false, status: auth.status, code: auth.code, detail: auth.detail };
 
   // 2. Provider SELF-verifies the recount contract before signing. The buyer
-  //    will repeat this independently before countersigning; a provider that
-  //    cannot pass its own recount must not produce a leg.
-  const rc = verifyInferenceRecount({
-    tokenizer: args.tokenizer,
-    renderedPrompt: args.model.renderedPrompt,
-    inputTokenIds: args.model.inputTokenIds,
-    deliveredCompletion: args.model.deliveredCompletion,
-    outputTokenIds: args.model.outputTokenIds,
-    evidence: buildInferenceEvidence({
-      requestCanonical: args.model.requestCanonical,
-      renderedPrompt: args.model.renderedPrompt,
-      inputTokenIds: args.model.inputTokenIds,
-      deliveredCompletion: args.model.deliveredCompletion,
-      outputTokenIds: args.model.outputTokenIds,
-      model: args.model.model,
-    }),
-    specialTokenIds: args.specialTokenIds,
-  });
-  if (!rc.ok) return { ok: false, status: 422, code: rc.code, detail: rc.detail };
-
+  //    will repeat this independently — with HIS OWN tokenizer bundle, not this
+  //    node's — before countersigning; a provider that cannot pass its own
+  //    recount must not produce a leg.
   const evidence = buildInferenceEvidence({
     requestCanonical: args.model.requestCanonical,
     renderedPrompt: args.model.renderedPrompt,
@@ -110,7 +98,21 @@ export function meterInference(args: {
     deliveredCompletion: args.model.deliveredCompletion,
     outputTokenIds: args.model.outputTokenIds,
     model: args.model.model,
+    finishReason: args.model.finishReason,
+    stopBoundary: args.model.stopBoundary,
   });
+  const rc = verifyInferenceRecount({
+    tokenizer: args.tokenizer,
+    renderedPrompt: args.model.renderedPrompt,
+    deliveredCompletion: args.model.deliveredCompletion,
+    evidence,
+    specialTokenIds: args.specialTokenIds,
+    // The node pins the deployment it believes served this call; a restart or
+    // config change between /manifest and /serve fails closed here.
+    expectedBackendManifestDigest: args.expectedBackendManifestDigest,
+    expectedTokenizerBundleDigest: args.expectedTokenizerBundleDigest,
+  });
+  if (!rc.ok) return { ok: false, status: 422, code: rc.code, detail: rc.detail };
   const cost = inferenceCostMicroTrac(rc.inputTokens, rc.outputTokens);
   const billable = !isExempt(auth.principal, args.cfg);
 
@@ -124,7 +126,7 @@ export function meterInference(args: {
     return {
       ok: true, status: 200, principal: auth.principal, billed: false, costMicroTrac: 0,
       leg: {
-        legType: "inference-shadow", schemaVersion: "receipt-v0.4",
+        legType: "inference-shadow", schemaVersion: evidence.schemaVersion,
         meter: { inputTokens: rc.inputTokens, outputTokens: rc.outputTokens, policyDigest: inferencePolicyDigest() },
         pricing: { wouldHaveCostMicroTrac: cost, unit: "mockTRAC-u" },
         evidence,

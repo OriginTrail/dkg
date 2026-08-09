@@ -16,6 +16,7 @@ process.env.DKG_HOME = home;
 mkdirSync(join(home, "metering"), { recursive: true });
 
 const OB = await import(join(dist, "metering/odysseus-backend.js"));
+const IM = await import(join(dist, "metering/inference-meter.js"));
 const MI = await import(join(dist, "metering/metered-inference.js"));
 const L = await import(join(dist, "metering/ledger.js"));
 const D = await import(join(dist, "metering/deposit-rail.js"));
@@ -36,7 +37,9 @@ const idOf = (w) => { const i = VOCAB.indexOf(w); return i >= 0 ? i : VOCAB.push
 const encode = (t) => [...t.matchAll(/ |[^ ]+/g)].map((m) => idOf(m[0]));
 const CHAIN = 8453;
 const sched = createHash("sha256").update(L.canonicalize(RM.COEFFICIENTS_CANONICAL)).digest("hex");
-const MODEL = { modelId: "Qwen/Qwen2.5-1.5B-Instruct", weightsDigest: "sha256:w", tokenizerDigest: "sha256:t", chatTemplateDigest: "sha256:c" };
+const BUNDLE_DIGEST = "sha256:bundle-v1";
+let instanceId = "inst-1";
+const manifestOf = () => ({ instanceId, weightsDigest: "sha256:w", tokenizerBundleDigest: BUNDLE_DIGEST, engineBuild: "stub-build", samplerConfig: { temperature: "0" }, chatTemplateDigest: "sha256:c" });
 
 // ── a mock sidecar. `mode` lets a gate make it misbehave. ──
 let mode = "honest";
@@ -44,6 +47,10 @@ const server = createServer(async (req, res) => {
   let b = ""; for await (const c of req) b += c;
   const body = JSON.parse(b || "{}");
   const j = (s, o) => { res.writeHead(s, { "content-type": "application/json" }); res.end(JSON.stringify(o)); };
+  if (req.url === "/manifest") {
+    const m = manifestOf();
+    return j(200, { ...m, manifestDigest: IM.backendManifestDigest(m) });
+  }
   if (req.url === "/serve") {
     if (mode === "500") return j(500, { error: "cuda oom" });
     const prompt = "the cat", completion = "sat on mat";
@@ -51,15 +58,32 @@ const server = createServer(async (req, res) => {
     // In "padded" mode the sidecar GENERATES a non-canonical sequence (an extra
     // token) while delivering the same bytes — the attack the recount must catch.
     const generated = mode === "padded" ? [...outIds, outIds[outIds.length - 1]] : outIds;
-    return j(200, { renderedPrompt: prompt, deliveredCompletion: completion, inputTokenIds: encode(prompt), outputTokenIds: generated });
+    // In "drift" mode the deployment changes between /manifest and /serve — the
+    // restart/config-swap Bo asked us to detect.
+    const served = mode === "drift" ? IM.backendManifestDigest({ ...manifestOf(), instanceId: "inst-CHANGED" }) : IM.backendManifestDigest(manifestOf());
+    return j(200, {
+      renderedPrompt: prompt, deliveredCompletion: completion, inputTokenIds: encode(prompt), outputTokenIds: generated,
+      finishReason: "stop", manifestDigest: served,
+      tokenizerBundleFiles: ["tokenizer.json", "tokenizer_config.json"],
+      tokenizerEngine: "stub", tokenizerEngineVersion: "1.0.0",
+    });
   }
-  if (req.url === "/encode") return j(200, { ids: encode(String(body.text ?? "")) }); // always CANONICAL
+  // /encode is ALWAYS canonical here — in "splitbrain" mode it answers under a
+  // different tokenizer than /serve generated with.
+  if (req.url === "/encode") {
+    const t = String(body.text ?? "");
+    return j(200, { ids: mode === "splitbrain" ? encode(t).map((n) => n + 100) : encode(t) });
+  }
+  if (req.url === "/decode") {
+    const ids = (body.ids ?? []).map(Number);
+    return j(200, { text: mode === "lossy" ? "SOMETHING ELSE" : ids.map((id) => VOCAB[id] ?? "").join("") });
+  }
   return j(404, { error: "no route" });
 });
 await new Promise((r) => server.listen(0, "127.0.0.1", r));
 const baseUrl = `http://127.0.0.1:${server.address().port}`;
 
-const backend = OB.makeOdysseusBackend({ baseUrl, model: MODEL, specialTokenIds: [151645] });
+const backend = OB.makeOdysseusBackend({ baseUrl, modelId: "Qwen/Qwen2.5-1.5B-Instruct", specialTokenIds: [151645], expectedTokenizerBundleDigest: BUNDLE_DIGEST });
 
 // ── funded, enforced tab so a good call actually bills ──
 const evm = Wallet.createRandom(), session = generateKeyPairSync("ed25519");
@@ -93,6 +117,8 @@ const meter = async () => {
     request: { delegation: signDeleg(), bindingProof: proof, revocationCheckpoint: { observedAt: Date.now() - 1000, maxCheckpointAgeMs: 60_000 } },
     state: state(), scheduleDigest: sched, priceVectorDigest: sched, nodeClass: "dkg-edge-mainnet", settlementId: "settle-main",
     model: served.model, tokenizer: served.tokenizer, specialTokenIds: served.specialTokenIds,
+    expectedBackendManifestDigest: served.backendManifestDigest,
+    expectedTokenizerBundleDigest: served.tokenizerBundleDigest,
   });
 };
 
@@ -135,6 +161,43 @@ console.log("\nreplay tokenizer fails loud on an unexpected input:");
   let threw = null; try { served.tokenizer.encode("a string the recount would never ask for"); } catch (e) { threw = String(e.message); }
   ok("replay tokenizer throws E_TOKENIZER_REPLAY_MISS on unknown text", threw === "E_TOKENIZER_REPLAY_MISS", String(threw));
   ok("it DOES answer the two strings the recount re-encodes", JSON.stringify(served.tokenizer.encode("the cat")) === JSON.stringify(encode("the cat")));
+}
+
+console.log("\ndeployment provenance (Bo's blocker 1571496d):");
+{
+  mode = "honest";
+  const served = await backend.serve({ messages: [{ role: "user", content: "the cat" }], principal: BUYER });
+  ok("the leg binds the backend manifest digest", typeof served.model.model.backendManifestDigest === "string" && served.model.model.backendManifestDigest.startsWith("sha256:"));
+  ok("the leg binds the tokenizer BUNDLE (digest + file list + engine version)",
+    served.model.model.tokenizer.bundleDigest === BUNDLE_DIGEST && served.model.model.tokenizer.bundleFiles.length === 2 && served.model.model.tokenizer.engineVersion === "1.0.0");
+  ok("the leg records finish reason + stop boundary", served.model.finishReason === "stop" && served.model.stopBoundary.kind === "eos");
+}
+{
+  mode = "drift";
+  let threw = null; try { await backend.serve({ messages: [{ role: "user", content: "x" }], principal: BUYER }); } catch (e) { threw = String(e.message); }
+  ok("a deployment that CHANGES between /manifest and /serve is refused (E_BACKEND_DRIFT)", threw === "E_BACKEND_DRIFT", String(threw));
+}
+{
+  // the node pins the bundle it expects; a sidecar serving a different one fails closed
+  const other = OB.makeOdysseusBackend({ baseUrl, modelId: "m", specialTokenIds: [], expectedTokenizerBundleDigest: "sha256:a-different-bundle" });
+  mode = "honest";
+  let threw = null; try { await other.serve({ messages: [{ role: "user", content: "x" }], principal: BUYER }); } catch (e) { threw = String(e.message); }
+  ok("a sidecar whose tokenizer bundle ≠ the pinned one is refused (E_TOKENIZER_BUNDLE_DRIFT)", threw === "E_TOKENIZER_BUNDLE_DRIFT", String(threw));
+}
+{
+  // split brain: /encode answers under a different tokenizer than /serve used.
+  // The PROVIDER-side check catches it here because the claimed generation no
+  // longer matches /encode's canonical sequence; the buyer catches it
+  // independently via the bundle digest (see buyer-local harness).
+  mode = "splitbrain";
+  const r = await meter();
+  ok("a split-brain /serve vs /encode is REJECTED, nothing billed", r.ok === false && r.status === 422, JSON.stringify(r));
+}
+{
+  // a sidecar whose /decode cannot reproduce the bytes → unbillable, not approximated
+  mode = "lossy";
+  const r = await meter();
+  ok("a sidecar that cannot round-trip its own decode is REJECTED (E_RECOUNT_ROUND_TRIP)", r.ok === false && r.code === "E_RECOUNT_ROUND_TRIP", JSON.stringify(r));
 }
 
 server.close();

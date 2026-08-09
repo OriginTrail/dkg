@@ -38,7 +38,12 @@ export interface InferenceBackend {
     stops?: unknown;
     maxTokens?: unknown;
     principal: string;
-  }): Promise<{ model: ModelResult; tokenizer: RecountTokenizer; specialTokenIds: number[] }>;
+  }): Promise<{
+    model: ModelResult; tokenizer: RecountTokenizer; specialTokenIds: number[];
+    /** the deployment observed before serving; bound into the leg. */
+    backendManifestDigest?: string;
+    tokenizerBundleDigest?: string;
+  }>;
 }
 
 let backend: InferenceBackend | null = null;
@@ -90,7 +95,7 @@ export async function handleMeteredInferRoutes(ctx: RequestContext): Promise<voi
   // is never conflated with a metering/auth failure. We do not bill on a failed
   // generation.
   const state = capState(home, body.delegation.capabilityId);
-  let served: { model: ModelResult; tokenizer: RecountTokenizer; specialTokenIds: number[] };
+  let served: Awaited<ReturnType<InferenceBackend["serve"]>>;
   try {
     served = await backend.serve({
       delegation: body.delegation,
@@ -118,6 +123,8 @@ export async function handleMeteredInferRoutes(ctx: RequestContext): Promise<voi
     model: served.model,
     tokenizer: served.tokenizer,
     specialTokenIds: served.specialTokenIds,
+    expectedBackendManifestDigest: served.backendManifestDigest,
+    expectedTokenizerBundleDigest: served.tokenizerBundleDigest,
     requesterKeyRef: body.delegation.sessionPublicKeyPem ? "sha256:" + sha256(body.delegation.sessionPublicKeyPem) : undefined,
   });
   if (!outcome.ok) return jsonResponse(res, outcome.status, { error: outcome.code, detail: outcome.detail });

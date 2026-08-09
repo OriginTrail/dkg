@@ -17,6 +17,7 @@ process.env.DKG_HOME = home;
 mkdirSync(join(home, "metering"), { recursive: true });
 
 const R = await import(join(dist, "routes/metered-infer.js"));
+const IM = await import(join(dist, "metering/inference-meter.js"));
 const L = await import(join(dist, "metering/ledger.js"));
 const D = await import(join(dist, "metering/deposit-rail.js"));
 const C = await import(join(dist, "metering/capability.js"));
@@ -34,7 +35,11 @@ L.setDebitGate((h, p, now) => D.debitAllowed(h, p, now));
 const VOCAB = ["", "the", "cat", "sat", "on", "mat", " "];
 const idOf = (w) => { const i = VOCAB.indexOf(w); return i >= 0 ? i : VOCAB.push(w) - 1; };
 const tokenizer = { encode: (t) => [...t.matchAll(/ |[^ ]+/g)].map((m) => idOf(m[0])), decode: (ids) => ids.map((id) => VOCAB[id] ?? "").join("") };
-const MODEL = { modelId: "stub", weightsDigest: "sha256:w", tokenizerDigest: "sha256:t", chatTemplateDigest: "sha256:c" };
+const MANIFEST = { instanceId: "inst-1", weightsDigest: "sha256:w", tokenizerBundleDigest: "sha256:bundle", engineBuild: "stub", samplerConfig: { temperature: "0" }, chatTemplateDigest: "sha256:c" };
+const MODEL = { modelId: "stub", weightsDigest: "sha256:w", tokenizerDigest: "sha256:bundle", chatTemplateDigest: "sha256:c",
+  tokenizer: { bundleDigest: "sha256:bundle", bundleFiles: ["tokenizer.json"], engine: "stub", engineVersion: "1.0.0" },
+  backendManifestDigest: "PLACEHOLDER" };
+MODEL.backendManifestDigest = IM.backendManifestDigest(MANIFEST);
 const CHAIN = 8453;
 const sched = createHash("sha256").update(L.canonicalize(RM.COEFFICIENTS_CANONICAL)).digest("hex");
 
@@ -90,7 +95,12 @@ const body = (over = {}) => ({
 const goodBackend = {
   async serve() {
     const prompt = "the cat", completion = "sat on mat";
-    return { model: { renderedPrompt: prompt, inputTokenIds: tokenizer.encode(prompt), deliveredCompletion: completion, outputTokenIds: tokenizer.encode(completion), model: MODEL, requestCanonical: { messages: [{ role: "user", content: prompt }] } }, tokenizer, specialTokenIds: [1000] };
+    return {
+      model: { renderedPrompt: prompt, inputTokenIds: tokenizer.encode(prompt), deliveredCompletion: completion, outputTokenIds: tokenizer.encode(completion), model: MODEL, requestCanonical: { messages: [{ role: "user", content: prompt }] }, finishReason: "stop", stopBoundary: { kind: "eos" } },
+      tokenizer, specialTokenIds: [1000],
+      backendManifestDigest: MODEL.backendManifestDigest,
+      tokenizerBundleDigest: MODEL.tokenizer.bundleDigest,
+    };
   },
 };
 
