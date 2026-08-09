@@ -105,7 +105,7 @@ export function createAgentProfileReceiverV1(
   options: CreateAgentProfileReceiverOptionsV1,
 ): AgentProfileReceiverV1 {
   const networkId = options.networkId;
-  const artifacts = options.artifacts;
+  const resolveArtifact = options.artifacts.resolve.bind(options.artifacts);
   const verifyCurrentBundle = options.verifyCurrentBundle;
   const consumeCandidate = options.consumeCandidate;
   const nowMs = options.nowMs;
@@ -138,7 +138,7 @@ export function createAgentProfileReceiverV1(
         nowMs: receiverNowMs(nowMs?.() ?? Date.now()),
         resolve: async (reference) => {
           signal.throwIfAborted();
-          const artifact = await artifacts.resolve({
+          const artifact = await resolveArtifact({
             type: 'object',
             objectKind: reference.objectKind,
             objectDigest: reference.digest,
@@ -194,20 +194,23 @@ export function createAgentProfileReceiverV1(
       }
       const verifiedAuthoritySummary = closure.authoritySummary;
 
-      const subjectTableArtifact = await artifacts.resolve({
+      const resolvedSubjectTableArtifact = await resolveArtifact({
         type: 'object',
         objectKind: 'owned-subject-table',
         objectDigest: head.ownedSubjectTableDigest,
       }, signal);
       signal.throwIfAborted();
-      if (subjectTableArtifact === null
-        || subjectTableArtifact.objectKind !== 'owned-subject-table'
+      if (resolvedSubjectTableArtifact === null) {
+        throw new Error('active profile receiver is missing its exact owned-subject table');
+      }
+      const subjectTableArtifact = cloneSystemRecordArtifactV1(resolvedSubjectTableArtifact);
+      if (subjectTableArtifact.objectKind !== 'owned-subject-table'
         || subjectTableArtifact.objectDigest !== head.ownedSubjectTableDigest) {
         throw new Error('active profile receiver is missing its exact owned-subject table');
       }
       const ownedSubjectTable = parseCanonicalOwnedSubjectTableObjectV1(
         head.rootSubject,
-        cloneSystemRecordArtifactV1(subjectTableArtifact).canonicalBytes,
+        subjectTableArtifact.canonicalBytes,
       );
       if (computeOwnedSubjectTableDigestV1(head.rootSubject, ownedSubjectTable)
           !== head.ownedSubjectTableDigest

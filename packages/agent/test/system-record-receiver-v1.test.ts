@@ -227,9 +227,11 @@ describe('agent-profile system-record active receiver', () => {
       stateRevision: '3',
       appliedStateDigest: `0x${'e'.repeat(64)}`,
     }));
+    const resolveArtifact = vi.fn(fixture.store.resolve.bind(fixture.store));
+    const repository = { resolve: resolveArtifact };
     const mutable = {
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: repository,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle,
       consumeCandidate,
@@ -241,6 +243,9 @@ describe('agent-profile system-record active receiver', () => {
     mutable.consumeCandidate = vi.fn(() => {
       throw new Error('mutated materializer was observed');
     });
+    repository.resolve = vi.fn(() => {
+      throw new Error('mutated repository was observed');
+    });
 
     await expect(receiver.receiveActive(
       fixture.row,
@@ -248,6 +253,7 @@ describe('agent-profile system-record active receiver', () => {
     )).resolves.toMatchObject({ outcome: 'applied', stateRevision: '3' });
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
     expect(consumeCandidate).toHaveBeenCalledTimes(1);
+    expect(resolveArtifact).toHaveBeenCalled();
   });
 });
 
