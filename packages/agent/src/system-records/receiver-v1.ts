@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  decodeCanonicalGraphlessProjectionV1,
   decodeOpaqueKaBundleV1,
+  parseCanonicalGraphlessProjectionLinesV1,
 } from '@origintrail-official/dkg-core';
 import {
+  assertAgentProfileProjectionIdentityV1,
+  assertAgentProfileProjectionSchemaV1,
   buildAgentProfileVerificationClosureV1,
   copyBoundedSystemRecordBytesV1,
   computeOwnedSubjectTableDigestV1,
@@ -262,7 +264,7 @@ async function buildVerifiedActiveCandidateFactsV1(
   );
   const decodedBundle = decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes);
   const canonicalProjectionBytes = Uint8Array.from(decodedBundle.projectionBytes);
-  const projectionQuads = Object.freeze(decodeCanonicalGraphlessProjectionV1(
+  const projectionQuads = Object.freeze(parseCanonicalGraphlessProjectionLinesV1(
     canonicalProjectionBytes,
   ).map(({ subject, predicate, object }) => Object.freeze({
     subject,
@@ -270,6 +272,12 @@ async function buildVerifiedActiveCandidateFactsV1(
     object,
     graph: '',
   })));
+  if (BigInt(canonicalProjectionBytes.byteLength) !== BigInt(head.projectionBytes)) {
+    throw new Error('profile bundle projection byte count does not bind the verified head');
+  }
+  if (BigInt(projectionQuads.length) !== BigInt(head.projectionQuads)) {
+    throw new Error('profile bundle projection quad count does not bind the verified head');
+  }
   const resolvedSubjectTableArtifact = await resolveArtifact({
     type: 'object',
     objectKind: 'owned-subject-table',
@@ -294,6 +302,12 @@ async function buildVerifiedActiveCandidateFactsV1(
     || BigInt(ownedSubjectTable.length) !== BigInt(head.ownedSubjectCount)) {
     throw new Error('active profile owned-subject table does not bind the verified head');
   }
+  assertAgentProfileProjectionSchemaV1(
+    head.rootSubject,
+    ownedSubjectTable,
+    projectionQuads,
+  );
+  assertAgentProfileProjectionIdentityV1(head, projectionQuads);
 
   return Object.freeze({
     head,

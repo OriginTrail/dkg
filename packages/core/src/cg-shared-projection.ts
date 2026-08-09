@@ -111,10 +111,12 @@ export function encodeCanonicalCgSharedPublicRootProjectionV1(
 }
 
 /**
- * Decode exact canonical V10 projection bytes under the same bounded rules as
- * cg-shared-v1 verification. The wire representation has no graph component.
+ * Parse exact canonical V10 projection lines under the same bounded syntactic
+ * rules as cg-shared-v1 verification. The wire representation has no graph
+ * component. This provides no authority, digest, signed-count, seal, or
+ * projection-schema proof; callers must establish those bindings separately.
  */
-export function decodeCanonicalGraphlessProjectionV1(
+export function parseCanonicalGraphlessProjectionLinesV1(
   projectionBytes: Uint8Array,
   limits: CgSharedProjectionVerificationLimitsV1 =
     DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,

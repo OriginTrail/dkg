@@ -17,7 +17,7 @@ import {
   CgSharedProjectionError,
   assertVerifiedCgSharedProjectionForTransferV1,
   assertVerifiedCgSharedProjectionV1,
-  decodeCanonicalGraphlessProjectionV1,
+  parseCanonicalGraphlessProjectionLinesV1,
   readVerifiedCgSharedProjectionBytesV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedCgSharedProjectionV1,
@@ -76,8 +76,8 @@ const FULLY_WITHHELD =
   + `<${COMMITMENT}> <http://dkg.io/ontology/privateDataHash> "034349e1ac2b108ba81720c55dff02bcae22762921f5c8354db83e687015872c"^^<http://www.w3.org/2001/XMLSchema#hexBinary> .\n`;
 
 describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
-  it('decodes exact canonical bytes into graphless triples', () => {
-    expect(decodeCanonicalGraphlessProjectionV1(UTF8.encode(PUBLIC))).toEqual([
+  it('parses exact canonical lines into graphless triples', () => {
+    expect(parseCanonicalGraphlessProjectionLinesV1(UTF8.encode(PUBLIC))).toEqual([
       {
         subject: 'https://example.org/alice',
         predicate: 'https://schema.org/age',
@@ -89,7 +89,7 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
         object: '"Alice"',
       },
     ]);
-    expect(decodeCanonicalGraphlessProjectionV1(UTF8.encode(
+    expect(parseCanonicalGraphlessProjectionLinesV1(UTF8.encode(
       '<https://example.org/s> <https://example.org/p> <https://example.org/o> .\n',
     ))).toEqual([{
       subject: 'https://example.org/s',
@@ -121,7 +121,7 @@ describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
     },
   ])('rejects $name before returning triples', ({ bytes, code }) => {
     expectFailure(
-      () => decodeCanonicalGraphlessProjectionV1(bytes),
+      () => parseCanonicalGraphlessProjectionLinesV1(bytes),
       code as CgSharedProjectionErrorCode,
     );
   });

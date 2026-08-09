@@ -28,7 +28,11 @@ import {
   DEFAULT_MONOTONIC_APPLY_TIMING,
   preparedFixtureApply,
   publishedReceiverFixture as publishedFixture,
+  publishedReceiverFixtureWithHeadPatch,
   publishedReceiverFixtureWithProjectionBytes,
+  RECEIVER_CANONICAL_PROJECTION_FAILURE_CASES,
+  RECEIVER_HEAD_COUNT_MISMATCH_CASES,
+  RECEIVER_PROFILE_PROJECTION_FAILURE_CASES,
   rotatedPublishedReceiverFixture as rotatedPublishedFixture,
 } from './support/agent-profile-receiver-v1-fixture.js';
 
@@ -230,6 +234,56 @@ describe('agent-profile system-record active receiver', () => {
     expect(nowMs).toHaveBeenCalledTimes(3);
     expect(admittedDeadlineMs).toBe(5_060);
     expect(admittedDeadlineMs).not.toBe(validUntilUnixMs);
+  });
+
+  it('preserves an authenticated existing deadline when it is tighter', async () => {
+    const fixture = await publishedFixture();
+    const validUntilUnixMs = Date.parse(fixture.envelope.object.validUntil);
+    const nowMs = vi.fn()
+      .mockReturnValueOnce(validUntilUnixMs - 100)
+      .mockReturnValueOnce(validUntilUnixMs - 80)
+      .mockReturnValue(validUntilUnixMs - 60);
+    const apply = vi.fn(() => ({
+      outcome: 'applied' as const,
+      stateRevision: '6',
+      appliedStateDigest: `0x${'8'.repeat(64)}`,
+    }));
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply: () => Object.freeze({
+        existingMonotonicDeadlineMs: 5_025,
+        monotonicNowMs: 5_000,
+        apply,
+      }),
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .resolves.toMatchObject({ outcome: 'applied' });
+    expect(apply).toHaveBeenCalledOnce();
+    expect(apply).toHaveBeenCalledWith(5_025);
+  });
+
+  it('rejects an already-expired authenticated monotonic deadline', async () => {
+    const fixture = await publishedFixture();
+    const apply = vi.fn();
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply: () => Object.freeze({
+        existingMonotonicDeadlineMs: 5_000,
+        monotonicNowMs: 5_000,
+        apply,
+      }),
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .rejects.toThrow(/monotonic apply admission is expired/);
+    expect(apply).not.toHaveBeenCalled();
   });
 
   it('invokes the prepared lifecycle apply entry exactly once', async () => {
@@ -476,56 +530,72 @@ describe('agent-profile system-record active receiver', () => {
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
 
-  it.each([
-    {
-      label: 'graphful projection',
-      transform: (projectionBytes: Uint8Array) => new TextEncoder().encode(
-        new TextDecoder().decode(projectionBytes).replace(
-          ' .\n',
-          ' <https://example.org/untrusted-graph> .\n',
-        ),
-      ),
-      error: /projection-iri/,
-    },
-    {
-      label: 'noncanonical projection order',
-      transform: (projectionBytes: Uint8Array) => new TextEncoder().encode(
-        `${new TextDecoder().decode(projectionBytes)
-          .split('\n').filter(Boolean).reverse().join('\n')}\n`,
-      ),
-      error: /projection-order/,
-    },
-    {
-      label: 'invalid UTF-8 projection',
-      transform: (projectionBytes: Uint8Array) => {
-        const altered = Uint8Array.from(projectionBytes);
-        const literalStart = altered.indexOf(0x22);
-        if (literalStart < 0) throw new Error('fixture projection has no literal');
-        altered[literalStart + 1] = 0xff;
-        return altered;
-      },
-      error: /projection-utf8/,
-    },
-  ])('rejects a signed $label after boolean bundle verification', async ({
-    transform,
-    error,
-  }) => {
-    const fixture = await publishedReceiverFixtureWithProjectionBytes(transform);
-    const verifyCurrentBundle = vi.fn(() => true);
-    const prepareCandidateApply = vi.fn();
-    const receiver = createAgentProfileReceiverV1({
-      networkId: NETWORK,
-      artifacts: fixture.artifacts,
-      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-      verifyCurrentBundle,
-      prepareCandidateApply,
-    });
+  it.each(RECEIVER_HEAD_COUNT_MISMATCH_CASES)(
+    'rejects when signed $field does not match the retained projection',
+    async ({ patch, error }) => {
+      const fixture = await publishedReceiverFixtureWithHeadPatch(patch);
+      const verifyCurrentBundle = vi.fn(() => true);
+      const prepareCandidateApply = vi.fn();
+      const receiver = createAgentProfileReceiverV1({
+        networkId: NETWORK,
+        artifacts: fixture.artifacts,
+        nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+        verifyCurrentBundle,
+        prepareCandidateApply,
+      });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
-      .rejects.toThrow(error);
-    expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
-    expect(prepareCandidateApply).not.toHaveBeenCalled();
-  });
+      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+        .rejects.toThrow(error);
+      expect(verifyCurrentBundle).toHaveBeenCalledOnce();
+      expect(prepareCandidateApply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(RECEIVER_CANONICAL_PROJECTION_FAILURE_CASES)(
+    'rejects a signed $label after boolean bundle verification', async ({
+      transform,
+      error,
+    }) => {
+      const fixture = await publishedReceiverFixtureWithProjectionBytes(transform);
+      const verifyCurrentBundle = vi.fn(() => true);
+      const prepareCandidateApply = vi.fn();
+      const receiver = createAgentProfileReceiverV1({
+        networkId: NETWORK,
+        artifacts: fixture.artifacts,
+        nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+        verifyCurrentBundle,
+        prepareCandidateApply,
+      });
+
+      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+        .rejects.toThrow(error);
+      expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
+      expect(prepareCandidateApply).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(RECEIVER_PROFILE_PROJECTION_FAILURE_CASES)(
+    'rejects a signed $label before lifecycle preparation', async ({
+      transform,
+      error,
+    }) => {
+      const fixture = await publishedReceiverFixtureWithProjectionBytes(transform);
+      const verifyCurrentBundle = vi.fn(() => true);
+      const prepareCandidateApply = vi.fn();
+      const receiver = createAgentProfileReceiverV1({
+        networkId: NETWORK,
+        artifacts: fixture.artifacts,
+        nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+        verifyCurrentBundle,
+        prepareCandidateApply,
+      });
+
+      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+        .rejects.toThrow(error);
+      expect(verifyCurrentBundle).toHaveBeenCalledOnce();
+      expect(prepareCandidateApply).not.toHaveBeenCalled();
+    },
+  );
 
   it('isolates signed bundle bytes from mutations by the injected verifier', async () => {
     const fixture = await publishedFixture();
