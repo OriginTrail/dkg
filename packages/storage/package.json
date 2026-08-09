@@ -4,6 +4,16 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./internal/managed-oxigraph-ownership-v1": {
+      "types": "./dist/managed-oxigraph-ownership-v1-internal.d.ts",
+      "default": "./dist/managed-oxigraph-ownership-v1-internal.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",

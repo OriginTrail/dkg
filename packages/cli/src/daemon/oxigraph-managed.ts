@@ -33,7 +33,9 @@
  * can mint and which dies the instant the child does.
  */
 import { join } from 'node:path';
-import { attachManagedOxigraphLeaseV1 } from '@origintrail-official/dkg-storage';
+// Internal entry point, not the public barrel: the ownership authority is
+// daemon plumbing, deliberately off the package's public API surface (#2165).
+import { attachManagedOxigraphLeaseV1 } from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
 import { ensureOxigraphBinary } from './oxigraph-binary.js';
 import {
   startOxigraphServer,

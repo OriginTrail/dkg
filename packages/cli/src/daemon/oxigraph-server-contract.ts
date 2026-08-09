@@ -3,7 +3,7 @@ import type {
   ManagedOxigraphOwnershipLeaseV1,
   ManagedOxigraphOwnershipSnapshotV1,
   ManagedOxigraphSupervisorHandoffV1,
-} from '@origintrail-official/dkg-storage';
+} from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
 import type { OxigraphMemoryLimits } from './oxigraph-launch-strategy.js';
 import type { CgroupOomSnapshot } from './oxigraph-memory.js';
 

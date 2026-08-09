@@ -19,10 +19,12 @@ import { delimiter, join } from 'node:path';
 
 import {
   SparqlHttpStore,
-  extractManagedOxigraphHandoffV1,
-  extractManagedOxigraphLeaseV1,
   type SparqlHttpStoreOptions,
 } from '@origintrail-official/dkg-storage';
+import {
+  extractManagedOxigraphHandoffV1,
+  extractManagedOxigraphLeaseV1,
+} from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
 
 import {
   planManagedOxigraph,

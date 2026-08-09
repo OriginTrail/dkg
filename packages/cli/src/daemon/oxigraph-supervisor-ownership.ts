@@ -1,6 +1,6 @@
 import {
   createManagedOxigraphOwnershipControllerV1,
-} from '@origintrail-official/dkg-storage';
+} from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
 import type {
   OxigraphServerOwnershipV1,
 } from './oxigraph-server-contract.js';

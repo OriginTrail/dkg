@@ -22,12 +22,16 @@ import { tmpdir } from 'node:os';
 import {
   SYSTEM_RECORD_V1_SHADOW_AGENTS_GRAPH,
   SYSTEM_RECORD_V1_STATE_GRAPH,
-  attachManagedOxigraphLeaseV1,
-  createManagedOxigraphOwnershipControllerV1,
   createTripleStore,
-  type ManagedOxigraphSupervisorHandoffV1,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+// The gate exercises the daemon-internal ownership authority on purpose, so it
+// uses the internal entry point the daemon itself uses (#2165).
+import {
+  attachManagedOxigraphLeaseV1,
+  createManagedOxigraphOwnershipControllerV1,
+  type ManagedOxigraphSupervisorHandoffV1,
+} from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
 // Relative source import: the CLI package does not export this subpath, and the
 // gate must use the SAME pinned-asset table production uses rather than
 // restating a version or checksum that could silently drift from it.

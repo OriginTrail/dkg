@@ -194,6 +194,35 @@ jobs:
           pnpm --filter @origintrail-official/dkg exec vitest run \
             test/oxigraph-managed.test.ts
 
+      - name: Packed-tarball exports surface (issue 2165)
+        # The property #2165 adds is RESOLUTION: the ownership authority is off
+        # the public barrel and deep `dist/*` imports stop resolving, while the
+        # daemon's documented internal entry point keeps working. Resolution is
+        # a property of the PACKED ARTIFACT, not the source tree — this repo
+        # has shipped a release where packaging silently dropped tarball files
+        # — so this packs, extracts into a scratch node_modules, and probes
+        # with import.meta.resolve (which exercises the exports map without
+        # executing the module graph, so registry-absent workspace deps cannot
+        # masquerade as resolution verdicts).
+        #
+        # The final stanza deletes the exports map from the EXTRACTED copy and
+        # requires the probe to FAIL: a probe that cannot fail proves nothing.
+        run: |
+          set -eu
+          scratch="$(mktemp -d)"
+          (cd packages/storage && npm pack --pack-destination "$scratch")
+          pkgdir="$scratch/node_modules/@origintrail-official/dkg-storage"
+          mkdir -p "$pkgdir"
+          tar -xzf "$scratch"/origintrail-official-dkg-storage-*.tgz -C "$pkgdir" --strip-components=1
+          cp devnet/issue-2052-managed-ownership/pack-probe.mjs "$scratch/probe.mjs"
+          node "$scratch/probe.mjs"
+          node -e "const f=process.argv[1];const fs=require('fs');const p=JSON.parse(fs.readFileSync(f,'utf8'));delete p.exports;fs.writeFileSync(f,JSON.stringify(p))" "$pkgdir/package.json"
+          if node "$scratch/probe.mjs" >/dev/null 2>&1; then
+            echo 'MUTANT SURVIVED: probe still passes without the exports map'
+            exit 1
+          fi
+          echo 'mutant killed: probe fails without the exports map'
+
       - name: Run live managed-ownership gate
         # Downloads and checksum-verifies the pinned v0.5.8 binary, then runs
         # the predecessor matrix against a real server.
