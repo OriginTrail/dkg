@@ -24,10 +24,9 @@ import {
 } from './store-chain-capability.js';
 import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 import {
+  captureStructuredMutationEffects,
   normalizeStructuredMutation,
   structuredMutationGuardedGraphs,
-  structuredMutationMightMutate,
-  structuredMutationTouchedGraphs,
 } from './bounded-structured-mutation.js';
 
 /**
@@ -460,6 +459,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
 
   async structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
     const normalized = normalizeStructuredMutation(mutation);
+    const effects = captureStructuredMutationEffects(normalized);
     const operation = this.inner.structuredMutation;
     if (!operation) {
       throw new UnsupportedTripleStoreCapabilityError('structuredMutation', 'ChangelogStore');
@@ -477,8 +477,8 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
         }
         throw error;
       }
-      if (structuredMutationMightMutate(normalized)) {
-        await this.markPostMutation(structuredMutationTouchedGraphs(normalized), options);
+      if (effects) {
+        await this.markPostMutation(effects.touchedGraphs, options);
       }
     });
   }

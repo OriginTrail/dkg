@@ -680,3 +680,17 @@ export function structuredMutationTouchedGraphs(mutation: StructuredMutation): r
 export function structuredMutationMightMutate(mutation: StructuredMutation): boolean {
   return mutation.kind !== 'delete-subjects' || mutation.input.subjects.length > 0;
 }
+
+/** Immutable graph-scoped effects captured before a structured mutation is dispatched. */
+export interface StructuredMutationEffects {
+  readonly touchedGraphs: readonly string[];
+}
+
+/** Capture canonical effects without executing or probing a store capability. */
+export function captureStructuredMutationEffects(
+  mutation: StructuredMutation,
+): StructuredMutationEffects | undefined {
+  if (!structuredMutationMightMutate(mutation)) return undefined;
+  const touchedGraphs = Object.freeze([...structuredMutationTouchedGraphs(mutation)]);
+  return Object.freeze({ touchedGraphs });
+}
