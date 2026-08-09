@@ -769,6 +769,7 @@ export interface ContextGraphSubscriptionStore {
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
   loadSelectedVmReconcileCursor?(
+    deploymentId: string,
     contextGraphId: string,
     onChainContextGraphId: string,
   ): Promise<SelectedVmReconcileCursorRecord | null>;
@@ -780,9 +781,11 @@ export interface ContextGraphSubscriptionStore {
  *
  * This is deliberately not a ContextGraph subscription record: selection
  * grants neither membership nor Core custody. The local and numeric chain ids
- * jointly identify the cursor so a recreated/rebound CG always starts at zero.
+ * jointly identify the cursor inside one exact chain deployment. A chain/HUB
+ * redeploy therefore cannot reuse progress from an unrelated VM inventory.
  */
 export interface SelectedVmReconcileCursorRecord {
+  deploymentId: string;
   contextGraphId: string;
   onChainContextGraphId: string;
   nameHash: string;

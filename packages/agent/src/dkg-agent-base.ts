@@ -1026,9 +1026,10 @@ export class DKGAgentBase {
   protected readonly reconcileCursors = new Map<string, CursorState>();
   /**
    * RFC-64 selected-only VM progress is separate from membership subscriptions.
-   * Each entry is fenced by both the numeric chain binding and a monotonically
-   * increasing process-local generation; its watermark is persisted in a
-   * dedicated non-subscription record when the configured store supports it.
+   * Each entry is fenced by the exact chain deployment, numeric chain binding,
+   * and a monotonically increasing process-local generation; its watermark is
+   * persisted in a dedicated non-subscription record when the configured store
+   * supports it.
    */
   protected readonly selectedVmReconcileCursors = new Map<string, {
     record: SelectedVmReconcileCursorRecord;

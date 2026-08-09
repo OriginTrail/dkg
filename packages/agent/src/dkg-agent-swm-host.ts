@@ -505,11 +505,29 @@ type VmReconcileSelectedCursorState = {
 };
 type VmReconcileSelectedTarget = VmReconcileTargetBase & {
   kind: 'rfc64-selected';
+  deploymentId: string;
   nameHash: string;
   bindingGeneration: number;
   selectedState: VmReconcileSelectedCursorState;
 };
 type VmReconcileTarget = VmReconcileSubscriptionTarget | VmReconcileSelectedTarget;
+
+function requireVmReconcileDeploymentId(value: unknown): string {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new TypeError(
+      'Selected VM reconciliation requires a non-empty chain deploymentId',
+    );
+  }
+  return value.trim();
+}
+
+function vmReconcileDeploymentMatches(value: unknown, expected: string): boolean {
+  try {
+    return requireVmReconcileDeploymentId(value) === expected;
+  } catch {
+    return false;
+  }
+}
 
 type VmReconcileExecution = {
   identityCursor: CursorState;
@@ -3316,18 +3334,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     if (!this.vmReconcileEnabled()) throw new VmReconcileUnavailableError();
 
+    const deploymentId = requireVmReconcileDeploymentId(this.chain.deploymentId);
     const onChainId = resolved.toString();
     let selectedState = this.selectedVmReconcileCursors.get(localCgId);
     if (
-      selectedState?.record.onChainContextGraphId !== onChainId
+      selectedState?.record.deploymentId !== deploymentId
+      || selectedState.record.onChainContextGraphId !== onChainId
       || selectedState.record.nameHash !== nameHash
     ) {
       let watermark = 0;
       try {
         const persisted = await this.config.contextGraphSubscriptionStore
-          ?.loadSelectedVmReconcileCursor?.(localCgId, onChainId);
+          ?.loadSelectedVmReconcileCursor?.(deploymentId, localCgId, onChainId);
         if (
-          persisted?.contextGraphId === localCgId
+          persisted?.deploymentId === deploymentId
+          && persisted.contextGraphId === localCgId
           && persisted.onChainContextGraphId === onChainId
           && persisted.nameHash === nameHash
           && Number.isSafeInteger(persisted.watermark)
@@ -3342,6 +3363,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       selectedState = {
         record: {
+          deploymentId,
           contextGraphId: localCgId,
           onChainContextGraphId: onChainId,
           nameHash,
@@ -3354,6 +3376,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     return {
       kind: 'rfc64-selected',
+      deploymentId,
       onChainId,
       onChainCgId: resolved,
       nameHash,
@@ -3378,9 +3401,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (target.kind === 'rfc64-selected') {
       const current = this.selectedVmReconcileCursors.get(localCgId);
       return this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)
+        && vmReconcileDeploymentMatches(this.chain.deploymentId, target.deploymentId)
         && current === target.selectedState
         && current.cursor === expectedCursor
         && current.bindingGeneration === target.bindingGeneration
+        && current.record.deploymentId === target.deploymentId
         && current.record.onChainContextGraphId === target.onChainId
         && current.record.nameHash === target.nameHash;
     }
@@ -3515,6 +3540,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const previous = target.cursor.watermark;
     if (target.kind === 'rfc64-selected') {
       const nextRecord: SelectedVmReconcileCursorRecord = {
+        deploymentId: target.deploymentId,
         contextGraphId: localCgId,
         onChainContextGraphId: target.onChainId,
         nameHash: target.nameHash,

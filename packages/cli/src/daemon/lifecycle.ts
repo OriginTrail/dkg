@@ -1923,12 +1923,18 @@ export async function runDaemonInner(
       deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
         dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
-      loadSelectedVmReconcileCursor: async (contextGraphId, onChainContextGraphId) => {
+      loadSelectedVmReconcileCursor: async (
+        deploymentId,
+        contextGraphId,
+        onChainContextGraphId,
+      ) => {
         const row = dashDb.getSelectedVmReconcileCursor(
+          deploymentId,
           contextGraphId,
           onChainContextGraphId,
         );
         return row ? {
+          deploymentId: row.deployment_id,
           contextGraphId: row.context_graph_id,
           onChainContextGraphId: row.on_chain_context_graph_id,
           nameHash: row.name_hash,
@@ -1937,6 +1943,7 @@ export async function runDaemonInner(
       },
       saveSelectedVmReconcileCursor: async (record) => {
         dashDb.upsertSelectedVmReconcileCursor({
+          deployment_id: record.deploymentId,
           context_graph_id: record.contextGraphId,
           on_chain_context_graph_id: record.onChainContextGraphId,
           name_hash: record.nameHash,

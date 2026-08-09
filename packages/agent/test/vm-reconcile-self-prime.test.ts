@@ -308,6 +308,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(reconcileOrdinal).toHaveBeenCalledOnce();
     expect(flush).toHaveBeenCalledOnce();
     expect(savedSelectedCursor).toHaveBeenCalledWith({
+      deploymentId: chain.deploymentId,
       contextGraphId: selected,
       onChainContextGraphId: '298',
       nameHash: (internals as any).contextGraphNameCommitment(selected),
@@ -332,6 +333,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
   it('hydrates a selected VM cursor after restart and resets it for a new numeric binding', async () => {
     const selected = 'rfc64-selected-vm-restart';
     const durableCursors = new Map<string, {
+      deploymentId: string;
       contextGraphId: string;
       onChainContextGraphId: string;
       nameHash: string;
@@ -340,15 +342,22 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     const store = {
       loadAll: async () => [],
       save: async () => undefined,
-      loadSelectedVmReconcileCursor: async (contextGraphId: string, onChainId: string) =>
-        durableCursors.get(`${contextGraphId}\0${onChainId}`) ?? null,
+      loadSelectedVmReconcileCursor: async (
+        deploymentId: string,
+        contextGraphId: string,
+        onChainId: string,
+      ) => durableCursors.get(`${deploymentId}\0${contextGraphId}\0${onChainId}`) ?? null,
       saveSelectedVmReconcileCursor: async (record: {
+        deploymentId: string;
         contextGraphId: string;
         onChainContextGraphId: string;
         nameHash: string;
         watermark: number;
       }) => {
-        durableCursors.set(`${record.contextGraphId}\0${record.onChainContextGraphId}`, record);
+        durableCursors.set(
+          `${record.deploymentId}\0${record.contextGraphId}\0${record.onChainContextGraphId}`,
+          record,
+        );
       },
     };
     const configure = (internals: AgentInternals): void => {
@@ -371,7 +380,9 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     vi.spyOn(firstChain, 'resolveContextGraphIdByNameHash').mockResolvedValue(298n);
     const firstTarget = await (internals as any).resolveVmReconcileTarget(selected);
     await (internals as any).persistVmReconcileWatermark(selected, 7, firstTarget);
-    expect(durableCursors.get(`${selected}\0${'298'}`)).toMatchObject({ watermark: 7 });
+    expect(durableCursors.get(
+      `${firstChain.deploymentId}\0${selected}\0${'298'}`,
+    )).toMatchObject({ watermark: 7 });
 
     await agent.stop();
     agent = null;
@@ -415,6 +426,86 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     )).toBe(true);
     expect(resolveOnChainId).toHaveBeenCalledTimes(2);
     expect(internals.subscribedContextGraphs.size).toBe(0);
+  });
+
+  it('starts from zero after a chain redeploy reuses the same local name and numeric id', async () => {
+    const selected = 'rfc64-selected-vm-redeploy';
+    const chain = new MockChainAdapter('mock:deployment-b');
+    agent = await DKGAgent.create({
+      name: 'Rfc64SelectedVmRedeployFence',
+      chainAdapter: chain,
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const nameHash = (internals as any).contextGraphNameCommitment(selected) as string;
+    const oldRecord = {
+      deploymentId: 'mock:deployment-a',
+      contextGraphId: selected,
+      onChainContextGraphId: '298',
+      nameHash,
+      watermark: 41,
+    };
+    const durableCursors = new Map([
+      [`${oldRecord.deploymentId}\0${selected}\0${oldRecord.onChainContextGraphId}`, oldRecord],
+    ]);
+    const loadSelectedVmReconcileCursor = vi.fn(async (
+      deploymentId: string,
+      contextGraphId: string,
+      onChainId: string,
+    ) => durableCursors.get(`${deploymentId}\0${contextGraphId}\0${onChainId}`) ?? null);
+    const saveSelectedVmReconcileCursor = vi.fn(async (record: {
+      deploymentId: string;
+      contextGraphId: string;
+      onChainContextGraphId: string;
+      nameHash: string;
+      watermark: number;
+    }) => {
+      durableCursors.set(
+        `${record.deploymentId}\0${record.contextGraphId}\0${record.onChainContextGraphId}`,
+        record,
+      );
+    });
+    const config = (internals as any).config;
+    config.syncContextGraphs = [selected];
+    config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{
+        policyEnvelope: { payload: { accessPolicy: 0, contextGraphId: selected } },
+        targets: [],
+      }],
+    };
+    config.contextGraphSubscriptionStore = {
+      loadAll: async () => [],
+      save: async () => undefined,
+      loadSelectedVmReconcileCursor,
+      saveSelectedVmReconcileCursor,
+    };
+    vi.spyOn(chain, 'resolveContextGraphIdByNameHash').mockResolvedValue(298n);
+
+    const target = await (internals as any).resolveVmReconcileTarget(selected);
+
+    expect(loadSelectedVmReconcileCursor).toHaveBeenCalledWith(
+      'mock:deployment-b',
+      selected,
+      '298',
+    );
+    expect(target).toMatchObject({
+      kind: 'rfc64-selected',
+      deploymentId: 'mock:deployment-b',
+      onChainId: '298',
+      nameHash,
+      cursor: { watermark: 0 },
+    });
+    await (internals as any).persistVmReconcileWatermark(selected, 3, target);
+    expect(saveSelectedVmReconcileCursor).toHaveBeenCalledWith({
+      deploymentId: 'mock:deployment-b',
+      contextGraphId: selected,
+      onChainContextGraphId: '298',
+      nameHash,
+      watermark: 3,
+    });
+    expect(durableCursors.get(
+      `mock:deployment-a\0${selected}\0${'298'}`,
+    )).toMatchObject({ watermark: 41 });
   });
 
   it('fails selected target revalidation when the chain name-hash binding changes', async () => {
