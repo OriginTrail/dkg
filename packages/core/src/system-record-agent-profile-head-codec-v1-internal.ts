@@ -282,5 +282,3 @@ export function validateAgentProfileHeadObjectV1(value: unknown): AgentProfileHe
     state === 'active' ? { ...head, graphScopedAuthorSeal } : { ...head },
   ) as unknown as AgentProfileHeadObjectV1;
 }
-
-

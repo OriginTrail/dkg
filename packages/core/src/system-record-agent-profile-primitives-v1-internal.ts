@@ -93,6 +93,7 @@ export function assertSystemRecordPeerBindingV1(
 }
 
 export function agentRootAddressV1(value: unknown): EvmAddressV1 | undefined {
+  if (typeof value !== 'string') return undefined;
   const address = matchAgentProfileRootAddressV1(value);
   if (address === null) return undefined;
   try {

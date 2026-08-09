@@ -279,5 +279,3 @@ export function validateForkResolution(value: unknown): AgentProfileForkResoluti
     evidenceHeadDigests,
   }) as unknown as AgentProfileForkResolutionV1;
 }
-
-

@@ -241,4 +241,3 @@ export function validateConflictEvidence(value: unknown): AgentProfileConflictEv
     entries: Object.freeze(entries),
   }) as unknown as AgentProfileConflictEvidenceV1;
 }
-
