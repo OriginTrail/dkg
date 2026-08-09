@@ -293,15 +293,6 @@ for (const internal of [
   );
 }
 
-const authoritySummaryInternal = await import(
-  '../dist/system-record-authority-summary-v1-internal.js'
-);
-assert.equal(
-  'mintAgentProfileVerifiedAuthoritySummaryV1' in authoritySummaryInternal,
-  false,
-  'deep-imported callers must not be able to mint verified authority summaries',
-);
-
 const verificationClosureInternal = await import(
   '../dist/system-record-verification-closure-v1-internal.js'
 );

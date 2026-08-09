@@ -33,7 +33,7 @@ import {
 import {
   isAgentProfileVerifiedAuthoritySummaryV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
-} from './system-record-authority-summary-v1-internal.js';
+} from './system-record-verification-closure-v1-internal.js';
 import type {
   AgentProfileAppliedTransitionV1,
   SystemRecordAuthorityDecisionV1,

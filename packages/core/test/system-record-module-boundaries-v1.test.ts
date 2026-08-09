@@ -1,9 +1,54 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
+
+import * as ts from 'typescript';
 
 import { describe, expect, it } from 'vitest';
 
 const source = (name: string): string =>
   readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8');
+
+const systemRecordModules = new Set(
+  readdirSync(new URL('../src', import.meta.url))
+    .filter((name) => name.startsWith('system-record-') && name.endsWith('.ts')),
+);
+
+function directDependencies(name: string): ReadonlySet<string> {
+  const parsed = ts.createSourceFile(name, source(name), ts.ScriptTarget.Latest, true);
+  const dependencies = new Set<string>();
+  for (const statement of parsed.statements) {
+    if (
+      (ts.isImportDeclaration(statement) || ts.isExportDeclaration(statement))
+      && statement.moduleSpecifier !== undefined
+      && ts.isStringLiteral(statement.moduleSpecifier)
+      && statement.moduleSpecifier.text.startsWith('./')
+    ) {
+      const dependency = statement.moduleSpecifier.text.slice(2).replace(/\.js$/u, '.ts');
+      if (systemRecordModules.has(dependency)) dependencies.add(dependency);
+    }
+  }
+  return dependencies;
+}
+
+const dependencyGraph = new Map(
+  [...systemRecordModules].map((name) => [name, directDependencies(name)]),
+);
+
+function transitiveDependencies(name: string): ReadonlySet<string> {
+  const visited = new Set<string>();
+  const pending = [...(dependencyGraph.get(name) ?? [])];
+  while (pending.length > 0) {
+    const dependency = pending.pop();
+    if (dependency === undefined || visited.has(dependency)) continue;
+    visited.add(dependency);
+    pending.push(...(dependencyGraph.get(dependency) ?? []));
+  }
+  return visited;
+}
+
+function expectNoDependencyPath(name: string, forbidden: readonly string[]): void {
+  const reachable = transitiveDependencies(name);
+  for (const dependency of forbidden) expect(reachable).not.toContain(dependency);
+}
 
 describe('System Record V1 module ownership', () => {
   it('keeps the supported object and inventory facades explicit', () => {
@@ -35,7 +80,6 @@ describe('System Record V1 module ownership', () => {
       'system-record-agent-profile-evidence-codecs-v1-internal.ts',
       'system-record-owned-subject-codecs-v1-internal.ts',
       'system-record-signatures-v1-internal.ts',
-      'system-record-authority-summary-v1-internal.ts',
       'system-record-authority-verification-v1-internal.ts',
       'system-record-authority-v1-internal.ts',
       'system-record-verification-closure-v1-internal.ts',
@@ -47,7 +91,7 @@ describe('System Record V1 module ownership', () => {
       'system-record-inventory-cow-update-v1-internal.ts',
       'system-record-inventory-cow-v1-internal.ts',
     ]) {
-      expect(source(unit)).not.toMatch(/system-record-(objects|inventory)-v1/u);
+      expectNoDependencyPath(unit, ['system-record-objects-v1.ts', 'system-record-inventory-v1.ts']);
     }
   });
 
@@ -60,9 +104,12 @@ describe('System Record V1 module ownership', () => {
       'system-record-inventory-cow-update-v1-internal.ts',
       'system-record-inventory-cow-v1-internal.ts',
     ]) {
-      expect(source(unit)).not.toMatch(
-        /system-record-(objects-v1|authority-v1|verification-closure-v1|cache-accounting-v1)/u,
-      );
+      expectNoDependencyPath(unit, [
+        'system-record-objects-v1.ts',
+        'system-record-authority-v1-internal.ts',
+        'system-record-verification-closure-v1-internal.ts',
+        'system-record-cache-accounting-v1-internal.ts',
+      ]);
     }
   });
 
@@ -71,9 +118,18 @@ describe('System Record V1 module ownership', () => {
     const context = source('system-record-inventory-cow-context-v1-internal.ts');
     const update = source('system-record-inventory-cow-update-v1-internal.ts');
 
-    expect(build).not.toMatch(/system-record-inventory-cow-(context-|update-)?v1-internal/u);
-    expect(context).not.toMatch(/system-record-inventory-cow-(update-)?v1-internal/u);
-    expect(update).not.toMatch(/system-record-inventory-cow-v1-internal/u);
+    expectNoDependencyPath('system-record-inventory-cow-build-v1-internal.ts', [
+      'system-record-inventory-cow-context-v1-internal.ts',
+      'system-record-inventory-cow-update-v1-internal.ts',
+      'system-record-inventory-cow-v1-internal.ts',
+    ]);
+    expectNoDependencyPath('system-record-inventory-cow-context-v1-internal.ts', [
+      'system-record-inventory-cow-update-v1-internal.ts',
+      'system-record-inventory-cow-v1-internal.ts',
+    ]);
+    expectNoDependencyPath('system-record-inventory-cow-update-v1-internal.ts', [
+      'system-record-inventory-cow-v1-internal.ts',
+    ]);
     expect(build.split('\n').length).toBeLessThan(1_000);
     expect(context.split('\n').length).toBeLessThan(1_000);
     expect(update.split('\n').length).toBeLessThan(1_000);
@@ -87,27 +143,33 @@ describe('System Record V1 module ownership', () => {
       'system-record-agent-profile-evidence-codecs-v1-internal.ts',
       'system-record-owned-subject-codecs-v1-internal.ts',
     ]) {
-      expect(source(unit)).not.toMatch(/system-record-signatures-v1-internal/u);
+      expectNoDependencyPath(unit, ['system-record-signatures-v1-internal.ts']);
     }
   });
 
   it('keeps closure verification below authority policy and summary minting private', () => {
-    expect(source('system-record-verification-closure-v1-internal.ts')).not.toMatch(
-      /system-record-authority-v1-internal/u,
+    expectNoDependencyPath('system-record-verification-closure-v1-internal.ts', [
+      'system-record-authority-v1-internal.ts',
+    ]);
+    expectNoDependencyPath('system-record-authority-verification-v1-internal.ts', [
+      'system-record-verification-closure-v1-internal.ts',
+    ]);
+    expect(directDependencies('system-record-authority-v1-internal.ts')).toContain(
+      'system-record-verification-closure-v1-internal.ts',
     );
-    expect(source('system-record-authority-verification-v1-internal.ts')).not.toMatch(
-      /system-record-(authority-summary|verification-closure)-v1-internal/u,
-    );
-    expect(source('system-record-authority-summary-v1-internal.ts')).not.toMatch(
-      /mintAgentProfileVerifiedAuthoritySummaryV1/u,
+    expect(source('system-record-verification-closure-v1-internal.ts')).toMatch(
+      /function mintAgentProfileVerifiedAuthoritySummaryV1/u,
     );
   });
 
   it('keeps wire and applied-state codecs off authority and closure implementations', () => {
     for (const unit of ['system-record-wire-v1.ts', 'system-record-applied-state-v1.ts']) {
-      expect(source(unit)).not.toMatch(
-        /system-record-(objects-v1|authority-v1-internal|verification-closure-v1|cache-accounting-v1)/u,
-      );
+      expectNoDependencyPath(unit, [
+        'system-record-objects-v1.ts',
+        'system-record-authority-v1-internal.ts',
+        'system-record-verification-closure-v1-internal.ts',
+        'system-record-cache-accounting-v1-internal.ts',
+      ]);
     }
   });
 });
