@@ -215,7 +215,7 @@ export interface VmRecoveryMicrobatchLimits {
   maxAssets: number;
   /** Soft byte target for one exact-recovery request. */
   targetBytes: bigint;
-  /** Soft Merkle-leaf target for one exact-recovery request. */
+  /** Soft Merkle-leaf/page-fairness target for one exact-recovery request. */
   targetLeaves: bigint;
   /** Fixed retained/metadata overhead charged for each asset. */
   fixedBytesPerAsset: bigint;
@@ -340,8 +340,9 @@ function nonNegativeBigint(value: unknown): bigint | undefined {
  * A target with neither chain cost hint is deliberately isolated. When one
  * dimension is unavailable the known dimension still controls packing, while
  * the caller-supplied executor capability remains the hard resource guard.
- * The first target is always admitted, even when it exceeds a soft budget, so
- * an individually-large KA cannot deadlock the recovery queue.
+ * The first target is always admitted, even when it exceeds a soft byte or
+ * leaf/page-fairness budget, so an individually-large KA cannot deadlock the
+ * recovery queue.
  *
  * This planner is transport-neutral: the existing exact-sync executor supplies
  * its ten-asset and selector-byte caps; a future streaming executor can supply

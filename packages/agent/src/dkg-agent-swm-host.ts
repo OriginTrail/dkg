@@ -536,6 +536,13 @@ type VmReconcileOrdinalOptions = {
  */
 const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
 
+// Exact VM data responses are page-only and capped at 64 rows per page. Keep
+// one recovery microbatch near 64 non-empty pages so a single large graph does
+// not monopolize the global sync admission. This is a soft scheduling/fairness
+// cap, not a wire or correctness limit: an individually larger KA is still
+// admitted alone and remains bounded by the exact executor's hard guards.
+const VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES = 4_096n;
+
 const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   // Executor capability: the current exact-sync envelope accepts at most ten.
   maxAssets: MAX_EXACT_SYNC_ASSETS,
@@ -543,7 +550,7 @@ const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   // still admitted alone while the exact executor's own hard byte/quad guards
   // remain authoritative.
   targetBytes: 24n * 1024n * 1024n,
-  targetLeaves: 250_000n,
+  targetLeaves: VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES,
   fixedBytesPerAsset: 64n * 1024n,
   bytesPerLeafOverhead: 128n,
   byteSizeMultiplierBps: 11_500n,
