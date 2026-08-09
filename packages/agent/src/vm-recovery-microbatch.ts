@@ -328,6 +328,7 @@ interface VmRecoveryPeerState {
   used: boolean;
   unavailable: boolean;
   provenHolder: boolean;
+  provenHolderReuseSpent: boolean;
   readonly ualDispositions: Map<string, VmRecoveryUalDisposition>;
 }
 
@@ -350,6 +351,7 @@ export class VmRecoveryProviderPolicy {
         used: false,
         unavailable: false,
         provenHolder: false,
+        provenHolderReuseSpent: false,
         ualDispositions: new Map(),
       };
       this.#peers.set(peerId, state);
@@ -358,12 +360,14 @@ export class VmRecoveryProviderPolicy {
   }
 
   isProvenHolder(peerId: string): boolean {
-    return this.#peers.get(peerId)?.provenHolder === true;
+    const state = this.#peers.get(peerId);
+    return state?.provenHolder === true && !state.provenHolderReuseSpent;
   }
 
   canAttempt(peerId: string): boolean {
     const state = this.#peers.get(peerId);
-    return state?.unavailable !== true && (state?.used !== true || state.provenHolder);
+    return state?.unavailable !== true
+      && (state?.used !== true || (state.provenHolder && !state.provenHolderReuseSpent));
   }
 
   tryConsider(peerId: string, maxPeers: number): boolean {
@@ -383,6 +387,18 @@ export class VmRecoveryProviderPolicy {
     state.provenHolder = false;
   }
 
+  /**
+   * Spend the one holder-affinity reuse available in this recovery slice.
+   * A successful post-probe request must not re-arm the same peer until the
+   * caller creates a fresh policy for the next slice.
+   */
+  consumeProvenHolderReuse(peerId: string): boolean {
+    const state = this.#state(peerId);
+    if (!state.provenHolder || state.provenHolderReuseSpent) return false;
+    state.provenHolderReuseSpent = true;
+    return true;
+  }
+
   recordBatch(
     peerId: string,
     aggregateDisposition: VmRecoveryUalDisposition,
@@ -392,7 +408,8 @@ export class VmRecoveryProviderPolicy {
     for (const [ual, disposition] of perUalDispositions) {
       state.ualDispositions.set(ual, disposition);
     }
-    state.provenHolder = aggregateDisposition === 'found'
+    state.provenHolder = !state.provenHolderReuseSpent
+      && aggregateDisposition === 'found'
       && perUalDispositions.size > 0
       && [...perUalDispositions.values()].every((disposition) => disposition === 'found');
   }

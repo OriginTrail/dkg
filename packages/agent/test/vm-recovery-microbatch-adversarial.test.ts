@@ -14,11 +14,10 @@
  * or a successful VM reconciliation.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKG_GOSSIP_MAX_MESSAGE_BYTES } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
-import type { PendingOrdinalRecoveryResult } from '../src/chain-reconciler.js';
+import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
 import {
   MAX_EXACT_SYNC_ASSETS,
   MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
@@ -32,6 +31,7 @@ import {
   type VmRecoveryMicrobatchLimits,
   type VmRecoveryUalDisposition,
 } from '../src/vm-recovery-microbatch.js';
+import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface SizedTarget extends VmRecoveryTargetFootprint {
   readonly id: number;
@@ -315,9 +315,27 @@ describe('VM recovery microbatch planner — adversarial boundaries', () => {
     expect(policy.isProvenHolder(peerId)).toBe(false);
     expect(policy.canAttempt(peerId)).toBe(false);
   });
+
+  it('spends proven-holder affinity once and cannot re-arm it in the same slice', () => {
+    const peerId = '12D3KooWOneReusePerSlice';
+    const policy = new VmRecoveryProviderPolicy();
+    policy.recordAttempt(peerId);
+    policy.recordBatch(peerId, 'found', dispositions(['ual-0', 'found']));
+
+    expect(policy.consumeProvenHolderReuse(peerId)).toBe(true);
+    expect(policy.consumeProvenHolderReuse(peerId)).toBe(false);
+    expect(policy.canAttempt(peerId)).toBe(false);
+
+    policy.recordBatch(peerId, 'found', dispositions(
+      ['ual-1', 'found'],
+      ['ual-2', 'found'],
+    ));
+    expect(policy.isProvenHolder(peerId)).toBe(false);
+    expect(policy.canAttempt(peerId)).toBe(false);
+  });
 });
 
-interface RecoveryTarget {
+interface RecoveryTarget extends OrdinalRecoveryTarget {
   readonly localCgId: string;
   readonly onChainCgId: string;
   readonly ordinal: number;
@@ -326,18 +344,6 @@ interface RecoveryTarget {
   readonly kaId: string;
   readonly reason: 'no-swm';
   readonly recoveryFootprint: VmRecoveryChainFootprint;
-}
-
-interface RecoveryInternals {
-  preferredSyncPeers: Map<string, string>;
-  recoverVmReconcileBatch(
-    localCgId: string,
-    onChainCgId: bigint,
-    targets: readonly RecoveryTarget[],
-    headBlock: number | undefined,
-    isTargetCurrent: () => boolean,
-    signal?: AbortSignal,
-  ): Promise<PendingOrdinalRecoveryResult>;
 }
 
 function recoveryTarget(
@@ -363,11 +369,6 @@ function recoveryTarget(
   };
 }
 
-interface ExactFetch {
-  readonly peerId: string;
-  readonly uals: readonly string[];
-}
-
 async function createRecoveryHarness(options: {
   name: string;
   localCgId: string;
@@ -383,112 +384,14 @@ async function createRecoveryHarness(options: {
     signal?: AbortSignal,
   ) => 'found' | 'clean-absent' | 'incomplete';
 }) {
-  const chainAdapter = new MockChainAdapter();
-  const { contextGraphId } = await chainAdapter.createOnChainContextGraph({
-    accessPolicy: 0,
-    publishPolicy: 1,
-  });
-  if (contextGraphId !== 1n) {
-    throw new Error(`unexpected mock context graph id ${contextGraphId}`);
-  }
-  const agent = await DKGAgent.create({
-    name: options.name,
-    chainAdapter,
-  });
-  const internals = agent as unknown as RecoveryInternals & Record<string, any>;
-  const connected = options.peers.map((peerId) => ({ toString: () => peerId }));
-  internals.node = {
-    peerId: `12D3KooW${options.name}Local`,
-    libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
-  };
-  internals.preferredSyncPeers.set(options.localCgId, options.peers[0]!);
-  internals.resolveCuratorPeerIdsForCg = async () => ({
-    peerIds: [...options.peers],
-    curatorIsLocal: false,
-    legacyTripleResolved: false,
-  });
-  internals.ensurePeerConnected = async () => undefined;
-  internals.selectCatchupPeers = (peers: Array<{ toString(): string }>) => peers;
-  internals.waitForSyncProtocol = async () => true;
-  internals.ensurePeerAdmittedForRecovery = async () => true;
-
-  const targets = Array.from(
-    { length: options.targetCount },
-    (_, ordinal) => recoveryTarget(
+  return createVmRecoveryHostHarness({
+    ...options,
+    targetForOrdinal: (ordinal) => recoveryTarget(
       options.localCgId,
       ordinal,
       options.footprintForOrdinal?.(ordinal),
     ),
-  );
-  const targetsByUal = new Map(targets.map((target) => [target.ual, target]));
-  const fetched: ExactFetch[] = [];
-  const recovered = new Set<number>();
-  let activeFetches = 0;
-  let maxActiveFetches = 0;
-
-  internals.readVmReconcileRecoveryFootprint = async () => ({
-    byteSize: 1_024n,
-    merkleLeafCount: 8n,
   });
-  internals.syncExactKnowledgeAssetsFromPeerDetailed = async (
-    peerId: string,
-    _contextGraphId: string,
-    uals: string[],
-    requestOptions?: { signal?: AbortSignal },
-  ) => {
-    activeFetches += 1;
-    maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
-    const requested = uals.map((ual) => {
-      const target = targetsByUal.get(ual);
-      if (!target) throw new Error(`unexpected UAL ${ual}`);
-      return target;
-    });
-    fetched.push({ peerId, uals: [...uals] });
-    const disposition = options.onFetch(
-      peerId,
-      requested,
-      recovered,
-      requestOptions?.signal,
-    );
-    activeFetches -= 1;
-    return {
-      result: {
-        fetchedDataTriples: disposition === 'found' ? requested.length : 0,
-        fetchedMetaTriples: disposition === 'found' ? requested.length * 8 : 0,
-        insertedTriples: disposition === 'found' ? requested.length * 9 : 0,
-        failedPeers: disposition === 'incomplete' ? 1 : 0,
-        failedPhases: 0,
-        deferredBackpressure: 0,
-      },
-      disposition,
-    };
-  };
-  internals.reconcileChainOrdinal = async (
-    _localCgId: string,
-    _onChainCgId: bigint,
-    ordinal: number,
-    _headBlock: number | undefined,
-    reconcileOptions?: { recoveryFootprint?: VmRecoveryChainFootprint },
-  ) => recovered.has(ordinal)
-    ? { status: 'reconciled', blockNumber: 100 }
-    : {
-        status: 'pending',
-        recovery: {
-          ...targets[ordinal]!,
-          recoveryFootprint: reconcileOptions?.recoveryFootprint,
-        },
-      };
-
-  return {
-    agent,
-    chainAdapter,
-    contextGraphId,
-    internals,
-    targets,
-    fetched,
-    recovered,
-    maxActiveFetches: () => maxActiveFetches,
-  };
 }
 
 describe('VM recovery microbatch host — adversarial integration', () => {
@@ -528,6 +431,72 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       harness.targets.map(() => ({ status: 'reconciled', blockNumber: 100 })),
     );
     expect(harness.maxActiveFetches()).toBe(1);
+  });
+
+  it('allows only one post-probe microbatch from a proven holder in one slice', async () => {
+    const holder = '12D3KooWBoundedReuseHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/bounded-reuse';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchBoundedReuse',
+      localCgId,
+      peers: [holder],
+      targetCount: 25,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+
+    const result = await harness.run();
+
+    expect(harness.fetched.map(({ uals }) => uals.length)).toEqual([1, 10]);
+    expect(result.attemptedOrdinals).toEqual(
+      Array.from({ length: 11 }, (_, ordinal) => ordinal),
+    );
+    expect(result.outcomes.size).toBe(11);
+    expect(result.continuationOrdinal).toBe(11);
+  });
+
+  it('settles every UAL in a clean-absent microbatch into backoff', async () => {
+    const holder = '12D3KooWCleanAbsentBatchHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/clean-absent-batch';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchCleanAbsentSettlement',
+      localCgId,
+      peers: [holder],
+      targetCount: 3,
+      onFetch: (_peerId, requested, recovered) => {
+        if (requested.length === 1 && requested[0]!.ordinal === 0) {
+          recovered.add(0);
+          return 'found';
+        }
+        return 'clean-absent';
+      },
+    });
+    agents.push(harness.agent);
+    const before = harness.internals.vmReconcileRotationNow();
+
+    const result = await harness.run();
+
+    expect(harness.fetched).toEqual([
+      { peerId: holder, uals: [harness.targets[0]!.ual] },
+      { peerId: holder, uals: harness.targets.slice(1).map(({ ual }) => ual) },
+    ]);
+    expect(result.attemptedOrdinals).toEqual([0, 1, 2]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    for (const target of harness.targets.slice(1)) {
+      expect(result.outcomes.get(target.ordinal)?.status).toBe('pending');
+      const record = harness.internals.vmReconcileRotationState.get(
+        harness.internals.vmReconcileRotationSlotKey(target),
+      );
+      expect(record).toMatchObject({
+        phase: 'backoff',
+        backoffKind: 'clean-absence',
+      });
+      expect(record?.cleanAbsentPeerIds).toEqual(new Set([holder]));
+      expect(record?.nextRetryAt).toBeGreaterThan(before);
+    }
   });
 
   it('enriches unknown targets through the production host before batching', async () => {
@@ -602,8 +571,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       ...target,
       recoveryFootprint: { kind: 'unknown' },
     }));
-    const internals = harness.internals as unknown as Record<string, any>;
-    internals.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
+    harness.internals.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
     const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
     const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
     const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext');
@@ -651,7 +619,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.attemptedOrdinals).toEqual(harness.targets.map(({ ordinal }) => ordinal));
   });
 
-  it('requests ten 500-triple KAs as one probe, eight assets, then one asset', async () => {
+  it('requests one 500-triple probe and one eight-asset batch, then yields', async () => {
     const holder = '12D3KooWExactCountMediumHolder';
     const localCgId = '0x0000000000000000000000000000000000000001/exact-count-medium';
     const harness = await createRecoveryHarness({
@@ -671,8 +639,11 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       localCgId, 1n, harness.targets, 100, () => true,
     );
 
-    expect(harness.fetched.map(({ uals }) => uals.length)).toEqual([1, 8, 1]);
-    expect(result.attemptedOrdinals).toEqual(harness.targets.map(({ ordinal }) => ordinal));
+    expect(harness.fetched.map(({ uals }) => uals.length)).toEqual([1, 8]);
+    expect(result.attemptedOrdinals).toEqual(
+      harness.targets.slice(0, 9).map(({ ordinal }) => ordinal),
+    );
+    expect(result.continuationOrdinal).toBe(9);
   });
 
   it('commits found members but rotates unresolved members without false absence', async () => {
