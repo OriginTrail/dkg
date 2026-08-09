@@ -269,18 +269,14 @@ type SystemRecordLaneSessionDepsV1 = Pick<
   SystemRecordLaneControllerDepsV1,
   'lease' | 'handoff' | 'executor' | 'setAdmissionActive'
 > & {
-  readonly runBarrier: SystemRecordLaneSessionBarrierV1;
+  readonly runEnableBarrier: (
+    transition: () => Promise<SystemRecordLaneBarrierResultsV1['enable']>,
+  ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
+  readonly runVoidBarrier: <K extends Exclude<SystemRecordLaneBarrierKindV1, 'enable'>>(
+    kind: K,
+    transition: () => Promise<void>,
+  ) => Promise<void>;
 };
-
-interface SystemRecordLaneSessionBarrierResultsV1
-  extends Omit<SystemRecordLaneBarrierResultsV1, 'enable'> {
-  readonly enable: SystemRecordMaterializationEpochRotationSnapshotV1;
-}
-
-type SystemRecordLaneSessionBarrierV1 = <K extends SystemRecordLaneBarrierKindV1>(
-  kind: K,
-  transition: () => Promise<SystemRecordLaneBarrierResultsV1[K]>,
-) => Promise<SystemRecordLaneSessionBarrierResultsV1[K]>;
 
 /** Raised when an incompatible activation descriptor is offered to a live session. */
 export class SystemRecordLaneActivationConflictError extends Error {
@@ -439,18 +435,16 @@ export function createSystemRecordLaneControllerV1(
 
   const publicBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
     ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
-  const runBarrier: SystemRecordLaneSessionBarrierV1 = async (kind, transition) => {
-    const result = await publicBarrier(kind, transition);
-    return (kind === 'enable'
-      ? snapshotSystemRecordMaterializationEpochRotationV1(result)
-      : result) as SystemRecordLaneSessionBarrierResultsV1[typeof kind];
-  };
   const session = new SystemRecordLaneSession({
     lease: deps.lease,
     handoff: deps.handoff,
     executor: deps.executor,
     setAdmissionActive: deps.setAdmissionActive,
-    runBarrier,
+    runEnableBarrier: async (transition) =>
+      snapshotSystemRecordMaterializationEpochRotationV1(
+        await publicBarrier('enable', transition),
+      ),
+    runVoidBarrier: (kind, transition) => publicBarrier(kind, transition),
   });
   const controller: SystemRecordLaneControllerV1 = Object.freeze({
     open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
@@ -808,7 +802,7 @@ class SystemRecordLaneSession {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      rotationSnapshot = await this.deps.runBarrier('enable', async () => {
+      rotationSnapshot = await this.deps.runEnableBarrier(async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
@@ -988,7 +982,7 @@ class SystemRecordLaneSession {
 
     const work = (async () => {
       try {
-        await this.deps.runBarrier('disable', () => {
+        await this.deps.runVoidBarrier('disable', () => {
           // Keep the callback promise separately from the barrier's public
           // promise. A transition timeout reports to this caller while the
           // callback remains the exclusive physical owner.
@@ -1187,7 +1181,7 @@ class SystemRecordLaneSession {
         if (recoveryAlreadySettled) {
           entry.physicalSucceeded = true;
         } else {
-          await this.deps.runBarrier('shutdown', () => {
+          await this.deps.runVoidBarrier('shutdown', () => {
             // Keep the callback promise separately from the barrier's public
             // promise. The scheduler may reject the latter at its transition
             // timeout while deliberately leaving this callback and its seal
@@ -1487,7 +1481,7 @@ class SystemRecordLaneSession {
     entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }>,
   ): Promise<void> {
     try {
-      await this.deps.runBarrier('recovery', () => {
+      await this.deps.runVoidBarrier('recovery', () => {
         const physicalWork = (async () => {
           try {
             const result = await this.recoverInsideBarrier(entry.recovery, 'resume');

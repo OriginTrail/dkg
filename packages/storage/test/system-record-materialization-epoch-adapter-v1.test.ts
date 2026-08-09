@@ -115,6 +115,17 @@ describe('sparql-http managed epoch handoff', () => {
     expect(requests).toHaveLength(beforeForgedApply);
 
     await second.close('shutdown');
+    const barrierKeys = resultBarrier.mock.calls.map((call) => call[1]);
+    expect(barrierKeys.map((key) => key.purpose)).toEqual([
+      'system-record.enable',
+      'system-record.disable',
+      'system-record.enable',
+      'system-record.shutdown',
+    ]);
+    expect(barrierKeys[0]).toBe(barrierKeys[2]);
+    expect(barrierKeys[1]).not.toBe(barrierKeys[0]);
+    expect(barrierKeys[3]).not.toBe(barrierKeys[0]);
+    expect(barrierKeys[3]).not.toBe(barrierKeys[1]);
     await store.close();
   });
 });

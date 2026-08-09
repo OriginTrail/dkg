@@ -465,15 +465,8 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * with nothing tagged queued there is nothing for it to block.
    */
   private taggedQueuedCount = 0;
-  /**
-   * Running total of per-store `taggedInflight`, maintained at the same two
-   * choke points that mutate it.
-   *
-   * Exists so the barrier quiescence check is O(1). It previously summed
-   * `storeStates` on every completion — `pump()` runs from each one — which
-   * made a hot path scale with the number of tracked stores.
-   */
-  private taggedInflightTotal = 0;
+  /** Actual unattributable work the barrier must wait for, maintained at start/finish. */
+  private untaggedInflightCount = 0;
   /**
    * Held `run()` calls per lane. A held call has been ADMITTED — it is
    * admitted-but-not-running work exactly like a queued one — so it counts
@@ -637,11 +630,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
 
   /** Inflight work carrying no store identity, so unattributable to any store. */
   private untaggedInflight(): number {
-    return Math.max(
-      0,
-      this.ackInflight + this.healthInflight + this.normalInflight
-        + this.backgroundInflight - this.countTaggedInflight(),
-    );
+    return this.untaggedInflightCount;
   }
 
   get snapshot(): StorePrioritySchedulerSnapshot {
@@ -861,6 +850,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
   private start(entry: QueueEntry<unknown>): void {
     this.cleanupQueuedEntry(entry);
     if (entry.admission !== undefined) this.acquireRunningAdmission(entry);
+    else this.untaggedInflightCount += 1;
     this.increment(entry.priority);
     const startedAt = this.now();
     this.pressureStart(entry.pressureTicket);
@@ -898,12 +888,15 @@ export class StorePriorityScheduler extends ObservableScheduler {
         // already gone when a waiting barrier and the blocked entries behind an
         // exclusive are re-evaluated in the same turn.
         if (entry.admission !== undefined) this.releaseRunningAdmission(entry);
+        else {
+          if (this.untaggedInflightCount <= 0) {
+            throw new Error('store scheduler untagged-inflight accounting underflow');
+          }
+          this.untaggedInflightCount -= 1;
+        }
         this.decrement(entry.priority);
-        // Evaluated only after BOTH counters are settled. Barrier readiness
-        // derives untagged inflight as `total - tagged`, so pumping between the
-        // two updates would make a finishing tagged entry look like a phantom
-        // untagged one and stall the transition. Untagged completions must pump
-        // too — the gate now waits on them.
+        // Evaluated only after admission and inflight state are settled.
+        // Untagged completions must pump too — the gate waits on them directly.
         this.barrierCoordinator.pump();
         this.observeDepths();
         this.drain();
@@ -1179,25 +1172,20 @@ export class StorePriorityScheduler extends ObservableScheduler {
   }
 
   /**
-   * The ONLY place either tagged-inflight counter moves.
-   *
-   * The per-store count answers "is THIS store quiesced"; the total keeps
-   * that question O(1). They are two views of one fact, so they are written
-   * together — maintaining them at separate sites is precisely how a running
-   * total drifts from what it summarises.
+   * The only place the canonical per-store tagged-inflight counter moves.
    */
   private adjustTaggedInflight(state: StoreAdmissionState, delta: 1 | -1): void {
     const storeInflight = state.taggedInflight + delta;
-    const totalInflight = this.taggedInflightTotal + delta;
-    if (storeInflight < 0 || totalInflight < 0) {
+    if (storeInflight < 0) {
       throw new Error('store scheduler tagged-inflight accounting underflow');
     }
     state.taggedInflight = storeInflight;
-    this.taggedInflightTotal = totalInflight;
   }
 
   private countTaggedInflight(): number {
-    return this.taggedInflightTotal;
+    let total = 0;
+    for (const state of this.storeStates.values()) total += state.taggedInflight;
+    return total;
   }
 
   private countGenerationsInflight(): number {
