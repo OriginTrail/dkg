@@ -5173,6 +5173,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
         maxContextReads: MAX_EXACT_SYNC_ASSETS,
         signal,
         isCurrent: isRecoveryCurrent,
+        resolveLiveAccessPolicy: (contextGraphId) =>
+          this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
       },
     );
     if (!isRecoveryCurrent()) return noRecovery();

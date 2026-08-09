@@ -256,4 +256,55 @@ describe('classic VM recovery footprint bridge', () => {
     expect(missingCapability).toEqual(targets);
     expect(invalidId).toEqual(targets);
   });
+
+  it('accepts a bounded host trust anchor without rereading raw liveness or policy', async () => {
+    const resolveLiveAccessPolicy = vi.fn(async () => 0 as const);
+    const rawLiveness = vi.fn();
+    const rawPolicy = vi.fn();
+    const enriched = await enrichVmRecoveryFootprints(
+      [unknownTarget(1)],
+      14n,
+      {
+        isContextGraphActiveOnChain: rawLiveness,
+        getContextGraphAccessPolicy: rawPolicy,
+        getKnowledgeAssetUpdateContext: async () => ({
+          merkleRootsCount: 2n,
+          byteSize: 1_000n,
+          merkleLeafCount: 10,
+        }),
+      },
+      {
+        maxContextReads: 10,
+        isCurrent: () => true,
+        resolveLiveAccessPolicy,
+      },
+    );
+
+    expect(resolveLiveAccessPolicy).toHaveBeenCalledOnce();
+    expect(resolveLiveAccessPolicy).toHaveBeenCalledWith(14n);
+    expect(rawLiveness).not.toHaveBeenCalled();
+    expect(rawPolicy).not.toHaveBeenCalled();
+    expect(enriched[0]!.recoveryFootprint).toMatchObject({ kind: 'public-v10' });
+  });
+
+  it('returns unknown immediately when a caller aborts a hung authority read', async () => {
+    const controller = new AbortController();
+    const updateContext = vi.fn();
+    const targets = [unknownTarget(1)];
+    const pending = enrichVmRecoveryFootprints(
+      targets,
+      14n,
+      { getKnowledgeAssetUpdateContext: updateContext },
+      {
+        maxContextReads: 10,
+        signal: controller.signal,
+        isCurrent: () => true,
+        resolveLiveAccessPolicy: () => new Promise<0 | 1 | null>(() => undefined),
+      },
+    );
+
+    controller.abort();
+    await expect(pending).resolves.toEqual(targets);
+    expect(updateContext).not.toHaveBeenCalled();
+  });
 });

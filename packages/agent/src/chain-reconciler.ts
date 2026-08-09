@@ -60,7 +60,7 @@ export interface OrdinalRecoveryTarget {
   merkleRoot: string;
   kaId: string;
   reason: 'no-swm' | 'verified-vm-metadata-pending';
-  /** Optional finalized, public-policy-proven exact-transfer cost hint. */
+  /** Optional public/live-proven soft exact-transfer cost hint with explicit provenance. */
   recoveryFootprint?: VmRecoveryChainFootprint;
 }
 
