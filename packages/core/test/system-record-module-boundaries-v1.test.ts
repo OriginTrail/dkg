@@ -84,6 +84,7 @@ describe('System Record V1 module ownership', () => {
       'system-record-agent-profile-evidence-codecs-v1-internal.ts',
       'system-record-owned-subject-codecs-v1-internal.ts',
       'system-record-signed-envelope-codecs-v1-internal.ts',
+      'system-record-signature-policy-v1-internal.ts',
       'system-record-signatures-v1-internal.ts',
       'system-record-authority-verification-v1-internal.ts',
       'system-record-authority-v1-internal.ts',
@@ -184,8 +185,17 @@ describe('System Record V1 module ownership', () => {
       .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
     expect(directDependencies('system-record-signatures-v1-internal.ts'))
       .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
+    expect(directDependencies('system-record-signed-envelope-codecs-v1-internal.ts'))
+      .toContain('system-record-signature-policy-v1-internal.ts');
+    expect(directDependencies('system-record-signatures-v1-internal.ts'))
+      .toContain('system-record-signature-policy-v1-internal.ts');
     expect(source('system-record-signed-envelope-codecs-v1-internal.ts'))
-      .not.toMatch(/@noble\/ed25519/u);
+      .not.toMatch(/@noble\/|Signature\.fromBytes|signature message/u);
+    expect(source('system-record-signature-policy-v1-internal.ts'))
+      .not.toMatch(/@noble\/ed25519|verifyEd25519/u);
+    expect(source('system-record-signatures-v1-internal.ts')).toMatch(/@noble\/ed25519/u);
+    expect(source('system-record-signed-envelope-codecs-v1-internal.ts'))
+      .not.toMatch(/concatSystemRecordBytesV1|systemRecordHexToBytesV1/u);
   });
 
   it('keeps closure verification below authority policy and summary minting private', () => {

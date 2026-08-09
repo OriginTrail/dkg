@@ -10,9 +10,11 @@ import {
 } from './system-record-agent-profile-control-codecs-v1-internal.js';
 import { type AgentProfileHeadObjectV1 } from './system-record-agent-profile-head-codec-v1-internal.js';
 import {
+  concatSystemRecordBytesV1,
   copyBoundedSystemRecordBytesV1,
   decodeUnpaddedBase64UrlV1,
   failSystemRecordObjectV1 as fail,
+  systemRecordHexToBytesV1,
 } from './system-record-codec-primitives-v1.js';
 import {
   SYSTEM_RECORD_ED25519_PUBLIC_KEY_BYTES,
@@ -20,25 +22,27 @@ import {
   SYSTEM_RECORD_OBJECT_CAPS_V1,
 } from './system-record-limits-v1.js';
 import {
-  assertCanonicalEip191SignatureV1,
-  buildSystemRecordSignatureMessageV1,
-  concatSystemRecordBytesV1,
-  systemRecordHexToBytesV1,
   validateDispatchedSignedEnvelopeV1,
 } from './system-record-signed-envelope-codecs-v1-internal.js';
+import {
+  assertCanonicalEip191SignatureV1,
+  buildSystemRecordSignatureMessageV1,
+} from './system-record-signature-policy-v1-internal.js';
 
 export {
-  assertCanonicalEip191SignatureV1,
   assertSignedAgentProfileAuthorityTransitionEnvelopeV1,
   assertSignedAgentProfileForkResolutionEnvelopeV1,
   assertSignedAgentProfileHeadEnvelopeV1,
-  buildSystemRecordSignatureMessageV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
   computeSignedSystemRecordEnvelopeDigestV1,
   parseCanonicalSignedAgentProfileAuthorityTransitionEnvelopeV1,
   parseCanonicalSignedAgentProfileForkResolutionEnvelopeV1,
   parseCanonicalSignedAgentProfileHeadEnvelopeV1,
 } from './system-record-signed-envelope-codecs-v1-internal.js';
+export {
+  assertCanonicalEip191SignatureV1,
+  buildSystemRecordSignatureMessageV1,
+} from './system-record-signature-policy-v1-internal.js';
 
 const UTF8 = new TextEncoder();
 
