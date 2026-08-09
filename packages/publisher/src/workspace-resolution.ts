@@ -1,4 +1,4 @@
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -318,6 +318,7 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
   assertionVersion: string | number | bigint;
   shareOperationId: string;
   subGraphName?: string;
+  queryOptions?: QueryOptions;
 }): Promise<void> {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
@@ -332,7 +333,7 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     scope,
     subGraphName,
   );
-  await params.store.deleteByPattern({ graph: metaGraph, subject });
+  await params.store.deleteByPattern({ graph: metaGraph, subject }, params.queryOptions);
   const rows: Quad[] = [
     { subject, predicate: `${DKG}contentScopeVersion`, object: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), graph: metaGraph },
     { subject, predicate: `${DKG}kaUal`, object: scope.ual, graph: metaGraph },
@@ -340,7 +341,7 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     { subject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
     { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: metaGraph },
   ];
-  await params.store.insert(rows);
+  await params.store.insert(rows, params.queryOptions);
 }
 
 export async function resolveWorkspaceSelection(params: {

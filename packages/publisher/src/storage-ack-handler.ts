@@ -951,6 +951,10 @@ export class StorageACKHandler {
         assertionVersion: graphPublish.scope.assertionVersion,
         shareOperationId: operationId,
         subGraphName: graphPublish.subGraphName,
+        queryOptions: ackStoreOptions(
+          'storage-ack.persistGraphScoped.workspaceHead',
+          signal,
+        ),
       });
       await this.store.flush?.(
         ackStoreOptions('storage-ack.persistGraphScoped.flush', signal),

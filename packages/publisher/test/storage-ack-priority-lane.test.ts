@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import {
   decodeStorageACK,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   isStorageACKDecline,
   STORAGE_ACK_DECLINE_CODES,
   TypedEventBus,
@@ -71,6 +72,27 @@ function inlineStagingPublishIntent(): Uint8Array {
     tokenAmountStr: '1000',
     merkleLeafCount: swmMerkleLeafCount,
     stagingQuads,
+  });
+}
+
+function graphScopedPublishIntent(): Uint8Array {
+  return encodePublishIntent({
+    merkleRoot,
+    contextGraphId,
+    publisherPeerId: 'publisher-0',
+    publicByteSize: 300,
+    isPrivate: false,
+    kaCount: 1,
+    rootEntities: [],
+    epochs: 1,
+    tokenAmountStr: '1000',
+    merkleLeafCount: swmMerkleLeafCount,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+    kaUal: 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7',
+    assertionVersion: '1',
+    publicTripleCount: swmQuads.length,
+    privateTripleCount: 0,
+    accessPolicy: 'public',
   });
 }
 
@@ -278,5 +300,28 @@ describe('StorageACKHandler priority store lane', () => {
     expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
     expect(new Set(signals).size).toBe(1);
     expect(signals[0]?.aborted).toBe(false);
+  });
+
+  it('keeps graph-scoped workspace-head persistence in the ACK lane', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
+    const events: string[] = [];
+    const store = new PriorityLaneStore(scheduler, events);
+    const handler = createHandler(store, { ackHandlerDeadlineMs: 1_000 });
+
+    const response = await handler.handler(graphScopedPublishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(false);
+    expect(store.writeCalls.map((call) => call.source)).toEqual([
+      'storage-ack.persistGraphScoped.deleteOperationMeta',
+      'storage-ack.persistGraphScoped.insertOperationMeta',
+      'storage-ack.persistGraphScoped.workspaceHead',
+      'storage-ack.persistGraphScoped.workspaceHead',
+      'storage-ack.persistGraphScoped.flush',
+    ]);
+    expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
+    const signals = store.writeCalls.map((call) => call.signal);
+    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    expect(new Set(signals).size).toBe(1);
   });
 });
