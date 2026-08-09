@@ -36,16 +36,13 @@ interface SignableSystemRecordDescriptorV1<T extends SignableSystemRecordObjectV
   readonly maxJsonDepth: number;
   readonly validate: (value: unknown) => T;
   readonly digest: (object: T) => Digest32V1;
-  readonly requiredRoles: (object: T) => readonly SystemRecordSignatureRoleV1[];
-  readonly issuerForRole: (
-    object: T,
-    role: Exclude<SystemRecordSignatureRoleV1, 'peer'>,
-  ) => string;
-  readonly signatureMessageTuple: (
-    object: T,
-    objectDigest: Digest32V1,
-    role: SystemRecordSignatureRoleV1,
-  ) => CanonicalJsonValue;
+  readonly bindRoles: (object: T) => readonly SignableSystemRecordRolePolicyV1[];
+}
+
+interface SignableSystemRecordRolePolicyV1 {
+  readonly role: SystemRecordSignatureRoleV1;
+  readonly issuer?: string;
+  readonly signatureMessageTuple: (objectDigest: Digest32V1) => CanonicalJsonValue;
 }
 
 export interface BoundSignableSystemRecordPolicyV1 {
@@ -70,10 +67,6 @@ export interface SignableSystemRecordStaticPolicyV1 {
   readonly maxJsonDepth: number;
 }
 
-const HEAD_ROLES = Object.freeze(['peer', 'current-evm'] as const);
-const TRANSITION_CO_SIGNED_ROLES = Object.freeze(['peer', 'prior-evm', 'next-evm'] as const);
-const TRANSITION_EXPIRED_ROLES = Object.freeze(['peer', 'next-evm'] as const);
-
 const SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1 = Object.freeze({
   'agent-profile-head': defineDescriptor<AgentProfileHeadObjectV1>({
     kind: 'head',
@@ -82,19 +75,16 @@ const SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1 = Object.freeze({
     maxJsonDepth: SYSTEM_RECORD_MAX_SIGNED_HEAD_JSON_DEPTH,
     validate: validateAgentProfileHeadObjectV1,
     digest: computeAgentProfileHeadObjectDigestV1,
-    requiredRoles: () => HEAD_ROLES,
-    issuerForRole: (object, role) => {
-      if (role === 'current-evm') return object.evmIssuer;
-      return invalidRole(role, object.objectType);
-    },
-    signatureMessageTuple: (object, objectDigest, role) => {
-      if (role !== 'peer' && role !== 'current-evm') return invalidRole(role, object.objectType);
-      return [
+    bindRoles: (object) => Object.freeze([
+      defineRolePolicy('peer', (objectDigest) => [
         object.objectType, objectDigest, object.networkId, recordKey(object),
         object.authoritySequence, object.version,
-        ...(role === 'peer' ? [] : ['current-evm', object.evmIssuer]),
-      ];
-    },
+      ]),
+      defineRolePolicy('current-evm', (objectDigest) => [
+        object.objectType, objectDigest, object.networkId, recordKey(object),
+        object.authoritySequence, object.version, 'current-evm', object.evmIssuer,
+      ], object.evmIssuer),
+    ]),
   }),
   'authority-transition': defineDescriptor<AgentProfileAuthorityTransitionV1>({
     kind: 'transition',
@@ -103,27 +93,25 @@ const SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1 = Object.freeze({
     maxJsonDepth: SYSTEM_RECORD_MAX_SIGNED_CONTROL_JSON_DEPTH,
     validate: validateAuthorityTransition,
     digest: computeAgentProfileAuthorityTransitionDigestV1,
-    requiredRoles: (object) => object.mode === 'co-signed'
-      ? TRANSITION_CO_SIGNED_ROLES
-      : TRANSITION_EXPIRED_ROLES,
-    issuerForRole: (object, role) => {
-      if (role === 'prior-evm') return object.priorEvmIssuer;
-      if (role === 'next-evm') return object.nextEvmIssuer;
-      return invalidRole(role, object.objectType);
-    },
-    signatureMessageTuple: (object, objectDigest, role) => {
-      if (role !== 'peer' && role !== 'prior-evm' && role !== 'next-evm') {
-        return invalidRole(role, object.objectType);
-      }
-      return [
+    bindRoles: (object) => Object.freeze([
+      defineRolePolicy('peer', (objectDigest) => [
         object.objectType, objectDigest, object.networkId, recordKey(object),
         object.priorAuthoritySequence, object.nextAuthoritySequence,
-        object.priorHeadDigest, role,
-        ...(role === 'peer' ? [] : [
-          role === 'prior-evm' ? object.priorEvmIssuer : object.nextEvmIssuer,
-        ]),
-      ];
-    },
+        object.priorHeadDigest, 'peer',
+      ]),
+      ...(object.mode === 'co-signed' ? [
+        defineRolePolicy('prior-evm', (objectDigest) => [
+          object.objectType, objectDigest, object.networkId, recordKey(object),
+          object.priorAuthoritySequence, object.nextAuthoritySequence,
+          object.priorHeadDigest, 'prior-evm', object.priorEvmIssuer,
+        ], object.priorEvmIssuer),
+      ] : []),
+      defineRolePolicy('next-evm', (objectDigest) => [
+        object.objectType, objectDigest, object.networkId, recordKey(object),
+        object.priorAuthoritySequence, object.nextAuthoritySequence,
+        object.priorHeadDigest, 'next-evm', object.nextEvmIssuer,
+      ], object.nextEvmIssuer),
+    ]),
   }),
   'fork-resolution': defineDescriptor<AgentProfileForkResolutionV1>({
     kind: 'fork',
@@ -132,19 +120,17 @@ const SIGNABLE_SYSTEM_RECORD_DESCRIPTORS_V1 = Object.freeze({
     maxJsonDepth: SYSTEM_RECORD_MAX_SIGNED_CONTROL_JSON_DEPTH,
     validate: validateForkResolution,
     digest: computeAgentProfileForkResolutionDigestV1,
-    requiredRoles: () => HEAD_ROLES,
-    issuerForRole: (object, role) => {
-      if (role === 'current-evm') return object.evmIssuer;
-      return invalidRole(role, object.objectType);
-    },
-    signatureMessageTuple: (object, objectDigest, role) => {
-      if (role !== 'peer' && role !== 'current-evm') return invalidRole(role, object.objectType);
-      return [
+    bindRoles: (object) => Object.freeze([
+      defineRolePolicy('peer', (objectDigest) => [
         object.objectType, objectDigest, object.networkId, recordKey(object),
-        object.authoritySequence, object.forkedVersion, object.resolutionVersion, role,
-        ...(role === 'peer' ? [] : [object.evmIssuer]),
-      ];
-    },
+        object.authoritySequence, object.forkedVersion, object.resolutionVersion, 'peer',
+      ]),
+      defineRolePolicy('current-evm', (objectDigest) => [
+        object.objectType, objectDigest, object.networkId, recordKey(object),
+        object.authoritySequence, object.forkedVersion, object.resolutionVersion,
+        'current-evm', object.evmIssuer,
+      ], object.evmIssuer),
+    ]),
   }),
 });
 
@@ -190,21 +176,40 @@ function bindDescriptor<T extends SignableSystemRecordObjectV1>(
   value: unknown,
 ): BoundSignableSystemRecordPolicyV1 {
   const object = descriptor.validate(value);
+  const rolePolicies = Object.freeze([...descriptor.bindRoles(object)]);
   return Object.freeze({
     kind: descriptor.kind,
     objectKind: descriptor.objectKind,
     maxJsonDepth: descriptor.maxJsonDepth,
     object,
     objectDigest: descriptor.digest(object),
-    requiredRoles: Object.freeze([...descriptor.requiredRoles(object)]),
-    issuerForRole: (role: Exclude<SystemRecordSignatureRoleV1, 'peer'>) =>
-      descriptor.issuerForRole(object, role),
+    requiredRoles: Object.freeze(rolePolicies.map(({ role }) => role)),
+    issuerForRole: (role: Exclude<SystemRecordSignatureRoleV1, 'peer'>) => {
+      const issuer = rolePolicy(rolePolicies, role, object.objectType).issuer;
+      return issuer ?? invalidRole(role, object.objectType);
+    },
     signatureMessageTuple: (
       objectDigest: Digest32V1,
       role: SystemRecordSignatureRoleV1,
-    ) =>
-      descriptor.signatureMessageTuple(object, objectDigest, role),
+    ) => rolePolicy(rolePolicies, role, object.objectType).signatureMessageTuple(objectDigest),
   });
+}
+
+function defineRolePolicy(
+  role: SystemRecordSignatureRoleV1,
+  signatureMessageTuple: (objectDigest: Digest32V1) => CanonicalJsonValue,
+  issuer?: string,
+): SignableSystemRecordRolePolicyV1 {
+  return Object.freeze({ role, issuer, signatureMessageTuple });
+}
+
+function rolePolicy(
+  policies: readonly SignableSystemRecordRolePolicyV1[],
+  role: SystemRecordSignatureRoleV1,
+  objectType: string,
+): SignableSystemRecordRolePolicyV1 {
+  return policies.find((candidate) => candidate.role === role)
+    ?? invalidRole(role, objectType);
 }
 
 function recordKey(
