@@ -192,19 +192,20 @@ export async function createAgentProfileReconcilerV1(
       advances += 1;
       let attemptedAmbiguousRootKind: 'inventory-internal' | 'inventory-leaf' | undefined;
       const slice = await traversal.advance(
-        async (objectDigest, expectedKind, loadSignal, path) => loadInventoryObject(
-          Object.freeze({
-            rootDescriptorDigest: rootEnvelope.objectDigest,
-            objectDigest,
-            expectedKind: expectedKind ?? rootProbeKind,
-            path,
-          }),
-          loadSignal ?? controller.signal,
-        ).then((loaded) => {
+        async (objectDigest, expectedKind, loadSignal, path) => {
           const requestedKind = expectedKind ?? rootProbeKind;
           if (expectedKind === undefined && rootKindIsAmbiguous) {
             attemptedAmbiguousRootKind = requestedKind;
           }
+          const loaded = await loadInventoryObject(
+            Object.freeze({
+              rootDescriptorDigest: rootEnvelope.objectDigest,
+              objectDigest,
+              expectedKind: requestedKind,
+              path,
+            }),
+            loadSignal ?? controller.signal,
+          );
           if (loaded?.outcome === 'ok' && loaded.objectKind !== requestedKind) {
             return Object.freeze({
               outcome: 'rejected' as const,
@@ -213,7 +214,7 @@ export async function createAgentProfileReconcilerV1(
             });
           }
           return loaded;
-        }),
+        },
         {
           signal: controller.signal,
           maxRequests: 1,
@@ -256,7 +257,7 @@ export async function createAgentProfileReconcilerV1(
           slice.requests,
           slice.wireBytes,
           [],
-          `inventory-${slice.rejection}` as AgentProfileReconcileBlockReasonV1,
+          inventoryBlockReason(slice.rejection),
         );
       }
       if (slice.status === 'complete') inventoryComplete = true;
@@ -298,7 +299,7 @@ export async function createAgentProfileReconcilerV1(
         }
         throw error;
       }
-      outcomes.push(Object.freeze({ ...outcome }) as SystemRecordApplyOutcomeV1);
+      outcomes.push(Object.freeze({ ...outcome }));
       if (isSettledOutcome(outcome)) {
         pendingRows.shift();
         processedRows += 1;
@@ -384,7 +385,25 @@ function isSettledOutcome(
 function applyBlockReason(
   outcome: Exclude<SystemRecordApplyOutcomeV1, { outcome: 'applied' | 'already-applied' | 'stale' }>,
 ): AgentProfileReconcileBlockReasonV1 {
-  return `apply-${outcome.outcome}` as AgentProfileReconcileBlockReasonV1;
+  switch (outcome.outcome) {
+    case 'root-collision': return 'apply-root-collision';
+    case 'capacity-exhausted': return 'apply-capacity-exhausted';
+    case 'deferred': return 'apply-deferred';
+    case 'indeterminate': return 'apply-indeterminate';
+    case 'capability-lost': return 'apply-capability-lost';
+  }
+}
+
+function inventoryBlockReason(
+  rejection: SystemRecordInventoryRejectedLoadV1['rejection'] | undefined,
+): AgentProfileReconcileBlockReasonV1 {
+  switch (rejection) {
+    case 'not-found': return 'inventory-not-found';
+    case 'invalid-response': return 'inventory-invalid-response';
+    case 'busy': return 'inventory-busy';
+    case 'transport': return 'inventory-transport';
+    case undefined: throw new Error('rejected inventory slice omitted its reason');
+  }
 }
 
 function readNow(now: () => number): number {
