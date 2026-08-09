@@ -315,8 +315,8 @@ describe('StorageACKHandler priority store lane', () => {
     expect(store.writeCalls.map((call) => call.source)).toEqual([
       'storage-ack.persistGraphScoped.deleteOperationMeta',
       'storage-ack.persistGraphScoped.insertOperationMeta',
-      'storage-ack.persistGraphScoped.workspaceHead',
-      'storage-ack.persistGraphScoped.workspaceHead',
+      'storage-ack.persistGraphScoped.workspaceHead.deleteByPattern',
+      'storage-ack.persistGraphScoped.workspaceHead.insert',
       'storage-ack.persistGraphScoped.flush',
     ]);
     expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
