@@ -107,7 +107,7 @@ export async function createOxigraphServerSupervisorV1(
     io,
     launchStrategy,
     log,
-    maySpawn: () => !state.terminating() && state.lifecycle() !== 'closed',
+    maySpawn: () => state.maySpawnChild(),
   });
   const probes = new OxigraphSupervisorProbesV1({
     host,
@@ -143,9 +143,9 @@ export async function createOxigraphServerSupervisorV1(
     runExclusive,
   });
   child.registerCurrentExitHandler((exited, code, signal) => {
-    if (state.terminating()) return;
+    if (!state.mayHandleChildExit()) return;
     if (!child.consumeHandoffRetiring(exited)) ownership.invalidate('child-exit');
-    if (state.lifecycle() !== 'ready') return;
+    if (!state.shouldReviveExitedChild()) return;
     markStoreDown();
     const oomNote = child.classifyOomExit(exited, code, signal)
       ? ', OOM-killed by cgroup memory cap (or host OOM)'

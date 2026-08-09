@@ -32,12 +32,11 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
 
   scheduleRevive(reason: string): void {
     const { state, reviveBackoff, log, timers } = this.#dependencies;
-    if (state.terminating() || state.lifecycle() === 'closed') return;
+    if (!state.tryBeginRevive()) return;
     const { attempt, delayMs } = reviveBackoff.next();
     log(`[oxigraph] ${reason}; restart #${attempt} in ${delayMs}ms`);
-    state.beginRevive();
     timers.armRevive(delayMs, () => {
-      if (state.terminating() || state.lifecycle() === 'closed') return;
+      if (!state.mayRunRevive()) return;
       void this.#dependencies.runExclusive(() => this.reviveLocked()).catch((error: unknown) => {
         log(`[oxigraph] restart attempt failed: ${(error as Error).message}`);
       });
@@ -54,9 +53,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
       log,
       markStoreDown,
     } = this.#dependencies;
-    if (state.terminating() || state.lifecycle() === 'closed' || state.lifecycle() === 'ready') {
-      return;
-    }
+    if (!state.mayRunRevive()) return;
     ownership.invalidate('child-revive');
     markStoreDown();
     child.signal('SIGKILL');
@@ -68,7 +65,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
       );
       return;
     }
-    if (result.status === 'terminated' || state.terminating()) return;
+    if (result.status === 'terminated' || !state.mayRunRevive()) return;
     child.signal('SIGKILL');
     this.scheduleRevive(`respawned server did not become ready on ${bind}`);
   }
@@ -109,12 +106,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
 
   async #recoverLocked(expectedGeneration: string): Promise<string> {
     const { state, ownership, timers, bind } = this.#dependencies;
-    if (state.terminating() || state.lifecycle() === 'closed') {
-      throw new Error(
-        `Managed Oxigraph supervisor is shutting down; generation ${expectedGeneration} ` +
-          'cannot be recovered',
-      );
-    }
+    state.assertRecoveryRequestAllowed();
     const before = ownership.snapshot();
     if (before.terminal) {
       throw new Error(
@@ -124,12 +116,6 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
     }
     if (before.childGeneration !== expectedGeneration || before.ready) {
       return before.childGeneration;
-    }
-    if (state.handoffPhase() === 'retired') {
-      throw new Error(
-        `Managed Oxigraph is mid clean-generation handoff; generation ` +
-          `${expectedGeneration} cannot be recovered until the replacement binds`,
-      );
     }
     state.beginRecovery();
     timers.clearRevive();

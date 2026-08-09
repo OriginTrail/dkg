@@ -8,7 +8,10 @@ import type { OxigraphSupervisorReviveBackoffV1 } from './oxigraph-supervisor-re
 import type { OxigraphSupervisorStateV1 } from './oxigraph-supervisor-state.js';
 
 interface OxigraphSupervisorGenerationOptionsV1 {
-  readonly state: Pick<OxigraphSupervisorStateV1, 'terminating' | 'bindReadyGeneration'>;
+  readonly state: Pick<
+    OxigraphSupervisorStateV1,
+    'mayContinueGenerationProbe' | 'bindReadyGeneration'
+  >;
   readonly ownership: Pick<OxigraphSupervisorOwnershipControllerV1, 'bindReadyGeneration'>;
   readonly child: Pick<
     OxigraphSupervisorChildV1,
@@ -43,7 +46,7 @@ export class OxigraphSupervisorGenerationV1 {
     );
     let attempts = 0;
     while (performance.now() < deadline) {
-      if (state.terminating()) return { status: 'terminated', attempts };
+      if (!state.mayContinueGenerationProbe()) return { status: 'terminated', attempts };
       if (!child.alive()) return { status: 'child-exited', attempts };
       attempts += 1;
       const listenerPid = await probes.probeReady(absoluteDeadlineMs);
