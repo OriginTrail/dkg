@@ -59,12 +59,15 @@ export function isSystemRecordMaterializationEpochRotationV1(
   value: unknown,
 ): value is SystemRecordMaterializationEpochRotationV1 {
   if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
-  const keys = Reflect.ownKeys(value);
-  return keys.length === 2
-    && keys.includes('epoch')
-    && keys.includes('childGeneration')
-    && typeof (value as Record<string, unknown>).epoch === 'string'
-    && typeof (value as Record<string, unknown>).childGeneration === 'string';
+  // STRUCTURAL, not exact-shape. `rotateMaterializationEpoch` is declared as
+  // `Promise<void | { epoch: string; childGeneration: string }>`, and
+  // TypeScript satisfies that with any object carrying those two fields — so
+  // an implementation returning them alongside its own diagnostics is
+  // CONFORMING. An exact `keys.length === 2` check rejected that and failed
+  // the lane closed on a legitimate rotation, which is a stricter contract
+  // than the one the type publishes.
+  const record = value as Record<string, unknown>;
+  return typeof record.epoch === 'string' && typeof record.childGeneration === 'string';
 }
 
 const denseArray = (value: unknown, max: number, label: string): readonly unknown[] => {

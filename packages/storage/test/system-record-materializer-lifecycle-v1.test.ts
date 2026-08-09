@@ -789,6 +789,23 @@ describe('system-record lane session lifecycle V1', () => {
       });
     }
 
+    it('ACCEPTS an epoch binding that carries extra metadata', async () => {
+      // `rotateMaterializationEpoch` is declared as `Promise<void | { epoch:
+      // string; childGeneration: string }>`, and TypeScript satisfies that with
+      // any object carrying those two fields. An implementation returning them
+      // alongside its own diagnostics is conforming, so rejecting it would fail
+      // the lane closed on a legitimate rotation — a stricter contract than the
+      // type publishes.
+      handoff.rotateMaterializationEpoch = (async () => ({
+        epoch: '7',
+        childGeneration: '1',
+        rotatedInMs: 12,
+      })) as unknown as RecordingHandoff['rotateMaterializationEpoch'];
+
+      const session = await build().open(ACTIVATION);
+      expect(session.state).toBe('enabled');
+    });
+
     it('refuses to enable on terminal ownership', async () => {
       ownership.invalidate('port-release-unproven');
       await expect(build().open(ACTIVATION)).rejects.toThrow(/terminal/);
