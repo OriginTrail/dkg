@@ -436,6 +436,8 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, fixture.subscription)).toBeUndefined();
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
     expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
+    expect(fixture.agent.forceClearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
+    expect(fixture.agent.clearVmReconcileStateForContextGraph).not.toHaveBeenCalled();
   });
 
   it('clears a reverse candidate and cursor when the subscription gains an authoritative id', () => {
@@ -467,6 +469,8 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.contextGraphBindingState.size).toBe(0);
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
     expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
+    expect(fixture.agent.forceClearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
+    expect(fixture.agent.clearVmReconcileStateForContextGraph).not.toHaveBeenCalled();
   });
 
   it('clears a reverse candidate and cursor when admission is removed and never revives it', () => {
@@ -495,6 +499,8 @@ describe('cold current-state Context Graph name binding', () => {
       .toBeUndefined();
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
     expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
+    expect(fixture.agent.forceClearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
+    expect(fixture.agent.clearVmReconcileStateForContextGraph).not.toHaveBeenCalled();
 
     fixture.agent.setContextGraphSubscription(
       LOCAL_ID,
@@ -505,6 +511,25 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.contextGraphBindingState.currentBindingFor(LOCAL_ID, reused))
       .toBeUndefined();
     expect(fixture.agent.contextGraphBindingState.size).toBe(0);
+  });
+
+  it('uses ordinary VM cleanup when admission is removed without a reverse candidate', () => {
+    const fixture = selectedFixture();
+    fixture.agent.reconcileCursors.set(LOCAL_ID, {
+      watermark: 3,
+      ahead: new Map(),
+      scanOrdinal: 4,
+    });
+
+    fixture.agent.setContextGraphSubscription(
+      LOCAL_ID,
+      { ...fixture.subscription, subscribed: false, coreHosted: false },
+      { persist: false },
+    );
+
+    expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
+    expect(fixture.agent.forceClearVmReconcileStateForContextGraph).not.toHaveBeenCalled();
+    expect(fixture.agent.clearVmReconcileStateForContextGraph).toHaveBeenCalledOnce();
   });
 
   it('uses a reverse candidate only to schedule a live KACG nudge, then revalidates the VM target', async () => {

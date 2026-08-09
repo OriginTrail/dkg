@@ -7434,7 +7434,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
-    const bindingEffects = this.contextGraphBindingState.applySubscriptionTransition(
+    const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
       contextGraphId,
       previous,
       canonicalNext,
@@ -7448,9 +7448,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    if (bindingEffects.vmStateReset === 'force') {
+    // VM cleanup policy belongs to the lifecycle consumer, not to the binding
+    // registry. Invalidating a reverse candidate must also invalidate any work
+    // captured against it; otherwise only an inactive subscription needs the
+    // ordinary cursor cleanup.
+    if (bindingFacts.reverseCandidateCleared) {
       this.forceClearVmReconcileStateForContextGraph(contextGraphId);
-    } else if (bindingEffects.vmStateReset === 'inactive') {
+    } else if (!bindingFacts.admitted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     // On-demand member subscriptions deliberately keep their live state and
