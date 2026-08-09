@@ -9,11 +9,12 @@
  * path. The fix is to repeat the walk — bounded, and only while it is provably
  * getting somewhere.
  *
- * This module is ONLY the decision. It runs no I/O, reads no clock and holds no
- * state, so the rule that decides how much extra network and store work a node
- * may spend exists in one place and is tested in one place. Both drivers — the
- * CLI worker's `runCatchup` and the in-agent `runCatchupOverPeers` — call it, so
- * they cannot drift apart.
+ * The pure decision and its state ledger live here beside the small executor
+ * that owns their deadline/decision/pass-count lifecycle. The executor runs no
+ * transport or store I/O itself; callers inject the actual round runner. The
+ * CLI worker, in-agent foreground catch-up and selected RFC-64 provider path
+ * therefore share the same continuation mechanics without sharing their
+ * different transport shapes.
  *
  * It is deliberately NOT a new mechanism: the repo already runs a bounded round
  * loop with a clean-completion stop on this exact lane for post-approval curator
@@ -118,6 +119,20 @@ export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
 
   private readonly peerProgressHighWater = new Map<string, number>();
 
+  /**
+   * Progress that is exact but precedes snapshot coverage, such as a retained
+   * metadata prefix. Kept separate so callers never have to manufacture a
+   * `SwmSnapshotCoverage` record for work that has not reached the snapshot
+   * plane yet.
+   */
+  private readonly auxiliaryProgressHighWater = new Map<string, number>();
+
+  /** Responder-prefix generation paired with each auxiliary high-water mark. */
+  private readonly auxiliaryProgressGeneration = new Map<string, number>();
+
+  /** Peers with exact retained work that can advance in another bounded pass. */
+  private readonly auxiliaryCapablePeers = new Set<string>();
+
   private coverageHighWaterMark = 0;
 
   private completedContinuationPasses = 0;
@@ -141,23 +156,65 @@ export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
     if (completedWithoutFailure) this.lastCoverageByPeer.delete(peerId);
   }
 
+  /**
+   * Record exact pre-snapshot progress for a peer.
+   *
+   * `progress === undefined` clears current capability but deliberately keeps
+   * the high-water mark: progress must remain monotone when a metadata prefix
+   * completes and the same round begins reporting snapshot coverage.
+   */
+  recordPeerAuxiliaryProgress(
+    peerId: string,
+    progress: number | undefined,
+    generation = 0,
+  ): void {
+    // An allocated accumulator at offset zero has retained no responder row
+    // and proves no useful retry capability. Treat it exactly like absence so
+    // a zero-byte transport failure does not earn another full timeout.
+    if (progress === undefined || progress === 0) {
+      this.auxiliaryCapablePeers.delete(peerId);
+      return;
+    }
+    if (!Number.isSafeInteger(progress) || progress < 0) {
+      throw new Error(`Invalid SWM auxiliary continuation progress for ${peerId}: ${progress}`);
+    }
+    if (!Number.isSafeInteger(generation) || generation < 0) {
+      throw new Error(`Invalid SWM auxiliary continuation generation for ${peerId}: ${generation}`);
+    }
+    const previousGeneration = this.auxiliaryProgressGeneration.get(peerId);
+    if (previousGeneration !== undefined && previousGeneration !== generation) {
+      // A responder session restarted at offset zero. Its replacement prefix is
+      // a new exact baseline, not a regression against the discarded prefix.
+      // Remove the old generation before recording the new one and reset the
+      // decision baseline to the progress that remains on other peers/planes.
+      this.auxiliaryProgressHighWater.delete(peerId);
+      this.auxiliaryCapablePeers.delete(peerId);
+      this.coverageHighWaterMark = this.progress();
+    }
+    this.auxiliaryProgressGeneration.set(peerId, generation);
+    this.auxiliaryCapablePeers.add(peerId);
+    const seen = this.auxiliaryProgressHighWater.get(peerId) ?? 0;
+    if (progress > seen) this.auxiliaryProgressHighWater.set(peerId, progress);
+  }
+
   capablePeers(): string[] {
-    const capable: string[] = [];
+    const capable = new Set(this.auxiliaryCapablePeers);
     for (const [peerId, coverage] of this.lastCoverageByPeer) {
       if (
         coverage.manifestComplete
         && coverage.snapshotsTotal > 0
         && coverage.snapshotsResolved < coverage.snapshotsTotal
       ) {
-        capable.push(peerId);
+        capable.add(peerId);
       }
     }
-    return capable;
+    return [...capable];
   }
 
   progress(): number {
     let total = 0;
     for (const resolved of this.peerProgressHighWater.values()) total += resolved;
+    for (const auxiliary of this.auxiliaryProgressHighWater.values()) total += auxiliary;
     return total;
   }
 
@@ -187,6 +244,172 @@ export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage> {
     this.completedContinuationPasses += 1;
     return before;
   }
+}
+
+export interface SwmCatchupContinuationUnit<
+  Key,
+  TCoverage extends CatchupPassCoverage,
+> {
+  readonly key: Key;
+  readonly tracker: SwmCatchupPassTracker<TCoverage>;
+  readonly planeProven: () => boolean;
+}
+
+/** The pass state exposed only inside an executor-owned started-work callback. */
+export interface SwmCatchupStartedContinuation<Key> {
+  readonly key: Key;
+  readonly peers: readonly string[];
+  readonly progressBefore: number;
+  readonly progress: () => number;
+  readonly continuationPass: number;
+}
+
+export type SwmCatchupStartedResult<Result> =
+  | { readonly started: true; readonly result: Result }
+  | { readonly started: false; readonly reason: 'budget-exhausted' };
+
+/**
+ * One continuation candidate selected by the shared pass executor.
+ *
+ * `runStarted` is deliberately invoked only when an adapter is actually about
+ * to do I/O. It owns the deadline recheck and pass transition atomically, so a
+ * caller cannot perform transport work while forgetting the diagnostic count.
+ * Selected-provider work may wait in the global scheduler after the policy
+ * decision; if its budget expires there, the callback is never invoked and the
+ * result explicitly says that no pass started.
+ */
+export interface SwmCatchupContinuationCandidate<Key> {
+  readonly key: Key;
+  readonly peers: readonly string[];
+  readonly runStarted: <Result>(
+    run: (started: SwmCatchupStartedContinuation<Key>) => Promise<Result>,
+  ) => Promise<SwmCatchupStartedResult<Result>>;
+}
+
+export interface SwmCatchupContinuationStop<Key> {
+  readonly key: Key;
+  readonly continuationPasses: number;
+  readonly reason: CatchupPassDecisionReason;
+}
+
+export interface RunSwmCatchupContinuationsOptions<
+  Key,
+  TCoverage extends CatchupPassCoverage,
+  PassResult,
+> {
+  readonly units: readonly SwmCatchupContinuationUnit<Key, TCoverage>[];
+  readonly config: CatchupPassConfig;
+  readonly nowMs: () => number;
+  readonly runPass: (
+    candidates: readonly SwmCatchupContinuationCandidate<Key>[],
+    deadlineMs: number,
+  ) => Promise<PassResult>;
+  /** Stop after the admitted pass, for example when global backpressure fired. */
+  readonly shouldStopAfterPass?: (result: PassResult) => boolean;
+  readonly onStop?: (stop: SwmCatchupContinuationStop<Key>) => void | Promise<void>;
+}
+
+export interface SwmCatchupContinuationSummary {
+  readonly continuationPasses: number;
+  readonly deadlineMs: number;
+  readonly stoppedAfterPass: boolean;
+}
+
+/**
+ * Canonical bounded SWM continuation executor.
+ *
+ * Policy selection, the one absolute continuation deadline and pass-count
+ * ownership live here. Callers provide only the unit-specific round runner:
+ * the CLI and foreground agent walk capable peers, while RFC-64 selected sync
+ * schedules incomplete Context Graphs through the existing global admission
+ * queue. This keeps those transport shapes distinct without letting their
+ * retry semantics drift.
+ */
+export async function runSwmCatchupContinuations<
+  Key,
+  TCoverage extends CatchupPassCoverage,
+  PassResult,
+>(
+  options: RunSwmCatchupContinuationsOptions<Key, TCoverage, PassResult>,
+): Promise<SwmCatchupContinuationSummary> {
+  const deadlineMs = options.nowMs() + options.config.budgetMs;
+  const stopped = new Set<Key>();
+  let stoppedAfterPass = false;
+
+  for (;;) {
+    let startsThisPass = 0;
+    const candidates: SwmCatchupContinuationCandidate<Key>[] = [];
+    for (const unit of options.units) {
+      if (stopped.has(unit.key)) continue;
+      const decision = unit.tracker.decide({
+        nowMs: options.nowMs(),
+        deadlineMs,
+        maxPasses: options.config.maxPasses,
+        planeProven: unit.planeProven(),
+      });
+      if (!decision.continue) {
+        stopped.add(unit.key);
+        await options.onStop?.({
+          key: unit.key,
+          continuationPasses: unit.tracker.continuationPasses(),
+          reason: decision.reason,
+        });
+        continue;
+      }
+
+      let started = false;
+      candidates.push({
+        key: unit.key,
+        peers: decision.peers,
+        runStarted: async (run) => {
+          if (started) {
+            throw new Error('SWM continuation candidate was started more than once');
+          }
+          // The decision above can precede a global scheduler wait. Keep the
+          // deadline check beside the state transition so an adapter cannot
+          // accidentally count or execute work that expired in that queue.
+          if (options.nowMs() >= deadlineMs) {
+            return { started: false, reason: 'budget-exhausted' } as const;
+          }
+          started = true;
+          startsThisPass += 1;
+          const progressBefore = unit.tracker.startContinuationPass();
+          const result = await run({
+            key: unit.key,
+            peers: decision.peers,
+            progressBefore,
+            progress: () => unit.tracker.progress(),
+            continuationPass: unit.tracker.continuationPasses(),
+          });
+          return { started: true, result } as const;
+        },
+      });
+    }
+    if (candidates.length === 0) break;
+
+    const passResult = await options.runPass(candidates, deadlineMs);
+    if (options.shouldStopAfterPass?.(passResult)) {
+      stoppedAfterPass = true;
+      break;
+    }
+    // A queued selected-provider batch can cross the absolute deadline before
+    // any candidate starts. Re-enter the decision cycle exactly once so every
+    // active unit publishes `budget-exhausted` through the normal onStop path;
+    // a genuine runner decline while budget remains still terminates directly.
+    if (startsThisPass === 0) {
+      if (options.nowMs() >= deadlineMs) continue;
+      break;
+    }
+  }
+
+  return {
+    continuationPasses: options.units.reduce(
+      (total, unit) => total + unit.tracker.continuationPasses(),
+      0,
+    ),
+    deadlineMs,
+    stoppedAfterPass,
+  };
 }
 
 /**

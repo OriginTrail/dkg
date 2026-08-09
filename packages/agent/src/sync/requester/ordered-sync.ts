@@ -46,6 +46,8 @@ export interface OrderedContextGraphSyncOptions<Result> {
     work: () => Promise<Result>,
   ) => Promise<Result>;
   merge: (summary: Result, part: Result) => Result;
+  /** Observe a completed item and its own result before the batch continues. */
+  onResult?: (item: ContextGraphSyncWork<Result>, result: Result) => void;
   markDeferred: (summary: Result) => Result;
   markSkipped?: (
     summary: Result,
@@ -106,6 +108,7 @@ export async function runOrderedContextGraphSyncs<Result>(
         item,
         () => item.run(remaining),
       );
+      options.onResult?.(item, part);
       summary = options.merge(summary, part);
       if (options.isPeerTransportFailure?.(part)) {
         consecutivePeerTransportFailures += 1;

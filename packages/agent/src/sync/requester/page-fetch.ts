@@ -9,7 +9,11 @@ import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
-import { getSyncCheckpointKey, type SyncCheckpointStore } from '../checkpoint/state.js';
+import {
+  getSyncCheckpointKey,
+  type SyncCheckpointScope,
+  type SyncCheckpointStore,
+} from '../checkpoint/state.js';
 import {
   createDurableDataSyncSessionId,
   createSyncResponderSessionId,
@@ -17,6 +21,7 @@ import {
 } from '../durable-session.js';
 import {
   createRequesterPhaseTelemetry,
+  estimateQuadHeapBytes,
 } from '../memory-telemetry.js';
 import {
   SYNC_PAGE_SIZE,
@@ -89,6 +94,22 @@ function forgetUnfinishedSyncResponderSession(
   checkpointStore.clearResponderSession?.(checkpointKey);
 }
 
+/**
+ * Delete both halves of a requester checkpoint.
+ *
+ * The responder token has a process-local compatibility cache in addition to
+ * the injected store. Callers that own final verification/storage therefore
+ * use this helper when the paired offset is no longer resumable; deleting only
+ * the store entry would strand a never-reused scoped token in that cache.
+ */
+export function deleteSyncPageCheckpoint(
+  checkpointStore: SyncCheckpointStore,
+  checkpointKey: string,
+): void {
+  unfinishedSyncResponderSessions.delete(checkpointKey);
+  checkpointStore.delete(checkpointKey);
+}
+
 function isSyncResponderSessionInvalidError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message.toLowerCase();
@@ -127,8 +148,10 @@ export interface SyncPageResult {
 export class SyncPageAccumulationLimitError extends Error {
   readonly code = 'SYNC_PAGE_ACCUMULATION_LIMIT' as const;
 
+  responderSessionStartedFresh?: boolean;
+
   constructor(
-    readonly dimension: 'bytes' | 'quads',
+    readonly dimension: 'bytes' | 'quads' | 'heap-bytes',
     readonly actual: number,
     readonly limit: number,
   ) {
@@ -192,9 +215,13 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Isolates an internal requester whose retained prefix is not shareable. */
+  requesterScope?: SyncCheckpointScope;
   /** Optional cumulative ceilings for proof-sensitive narrow fetches. */
   maxAcceptedBytes?: number;
   maxAcceptedQuads?: number;
+  /** Retained V8 heap estimate; checked before each parsed page is appended. */
+  maxAcceptedHeapBytesEstimate?: number;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   /**
    * Per-attempt send hook. `DKGAgent`'s production adapter sends raw
@@ -273,8 +300,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    requesterScope,
     maxAcceptedBytes,
     maxAcceptedQuads,
+    maxAcceptedHeapBytesEstimate,
     parseAndFilter,
     send,
     logWarn,
@@ -289,7 +318,17 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const assetKey = assetUals ? exactAssetFilterKey(assetUals) : undefined;
-  const checkpointKey = getSyncCheckpointKey(remotePeerId, contextGraphId, includeSharedMemory, phase, snapshotRef, sinceBatchId, recovery, assetKey);
+  const checkpointKey = getSyncCheckpointKey(
+    remotePeerId,
+    contextGraphId,
+    includeSharedMemory,
+    phase,
+    snapshotRef,
+    sinceBatchId,
+    recovery,
+    assetKey,
+    requesterScope,
+  );
   if (forceFreshSession) {
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
@@ -317,6 +356,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   }
   const resumedFromOffset = offset;
   let bytesReceived = 0;
+  let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
   let timedOut = false;
   // Start with the throughput-oriented page size, but reduce it within the
@@ -464,6 +504,23 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
             maxAcceptedQuads,
           );
         }
+        const parsedHeapBytesEstimate = parsed.quads.reduce(
+          (total, quad) => total + estimateQuadHeapBytes(quad),
+          0,
+        );
+        const nextAcceptedHeapBytesEstimate =
+          acceptedHeapBytesEstimate + parsedHeapBytesEstimate;
+        if (
+          maxAcceptedHeapBytesEstimate !== undefined
+          && nextAcceptedHeapBytesEstimate > maxAcceptedHeapBytesEstimate
+        ) {
+          throw new SyncPageAccumulationLimitError(
+            'heap-bytes',
+            nextAcceptedHeapBytesEstimate,
+            maxAcceptedHeapBytesEstimate,
+          );
+        }
+        acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
       } catch (error) {
         markSyncPeerResponded(error);
         throw error;
@@ -511,6 +568,9 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
+    if (err instanceof SyncPageAccumulationLimitError) {
+      err.responderSessionStartedFresh = responderSessionStartedFresh;
+    }
     const denied = (err as Error & { syncDenied?: boolean }).syncDenied === true;
     if (usesPageSession && err instanceof SyncPageAccumulationLimitError) {
       // The exact response proved that this responder ignored (or violated)

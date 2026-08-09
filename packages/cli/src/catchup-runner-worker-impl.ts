@@ -8,6 +8,7 @@ import {
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
   resolveSwmCatchupPassConfig,
+  runSwmCatchupContinuations,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
   selectSwmSnapshotCoverage,
@@ -633,7 +634,10 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // waves and the opening width is unobservable. The comparison is what
   // actually decides: narrow the opening wave only when the authority IS the
   // peer that wave would contact.
-  const runWalk = async (walkPeers: string[], pass: CatchupPassContext): Promise<void> => {
+  const runWalk = async (
+    walkPeers: readonly string[],
+    pass: CatchupPassContext,
+  ): Promise<void> => {
   const isPlaneAuthority = (peerId: string): boolean => (
     peerId === prepared.authoritativePeerId
     || authoritativeSharedMemoryPeerIds.has(peerId)
@@ -697,15 +701,15 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // retaining the operator kill switches.
   const passConfig = resolveSwmCatchupPassConfig();
   if (request.includeSharedMemory) {
-    const passDeadlineMs = catchupPassNowMs() + passConfig.budgetMs;
-    for (;;) {
-      const decision = passTracker.decide({
-        nowMs: catchupPassNowMs(),
-        deadlineMs: passDeadlineMs,
-        maxPasses: passConfig.maxPasses,
-        planeProven: catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
-      });
-      if (!decision.continue) {
+    const execution = await runSwmCatchupContinuations({
+      units: [{
+        key: request.contextGraphId,
+        tracker: passTracker,
+        planeProven: () => catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
+      }],
+      config: passConfig,
+      nowMs: catchupPassNowMs,
+      onStop: async (stop) => {
         // Published ONLY on the decision that stops the loop, so `'continue'` is
         // structurally unrepresentable in this field rather than merely
         // unreachable-by-inspection. Assigning on every decision left the field
@@ -715,39 +719,45 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         // is `''`, which is falsy and omits the clause), so it would have degraded
         // quietly instead of rendering malformed text; this makes the defensive
         // entry provably dead rather than load-bearing.
-        diagnostics.sharedMemory.continuationStopReason = decision.reason;
+        diagnostics.sharedMemory.continuationStopReason = stop.reason;
         // Logged even when no extra pass ran. "Why did it stop" is the question a
         // partial catch-up raises, and the answer is otherwise only reconstructable
         // from counters — `no-capable-peers` after a converged walk and after an
         // abandoned one look identical in the numbers.
         await logPassLine(`Catch-up SWM pass loop for "${request.contextGraphId}" `
-          + `stopped after ${1 + passTracker.continuationPasses()} pass(es): ${decision.reason}; `
+          + `stopped after ${1 + stop.continuationPasses} pass(es): ${stop.reason}; `
           + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
-        break;
-      }
-      const lastPassCoverage = passTracker.startContinuationPass();
-      const passStartedMs = catchupPassNowMs();
-      await runWalk(decision.peers, { sharedMemoryOnly: true, deadlineMs: passDeadlineMs });
-      // Progress BEFORE and AFTER on one line: a pass whose elapsed time is large
-      // and whose progress did not move is the signature of a job that is not
-      // converging, and that is not visible from either number alone.
-      //
-      // Labelled "summed across peers" because that is exactly what it is — a
-      // total over every peer's own high-water, spanning peers with different
-      // manifests. It sits beside `describeCoverage`, which is ONE whole record
-      // from ONE peer, and whose own doc warns that counts printed without their
-      // peer invite being read as a fleet total. Two different quantities on one
-      // line need the more surprising one named, or the reader will assume both
-      // describe the record at the end of the sentence.
-      await logPassLine(`Catch-up SWM pass ${1 + passTracker.continuationPasses()} for `
-        + `"${request.contextGraphId}": ${decision.peers.length} capable peer(s), progress `
-        + `${lastPassCoverage} -> ${passTracker.progress()} resolved `
-        + 'summed across peers, '
-        + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
-        + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
-    }
-    if (passTracker.continuationPasses() > 0) {
-      diagnostics.sharedMemory.continuationPasses = passTracker.continuationPasses();
+      },
+      runPass: async ([candidate], deadlineMs) => {
+        if (!candidate) return;
+        await candidate.runStarted(async (pass) => {
+          const passStartedMs = catchupPassNowMs();
+          await runWalk(pass.peers, {
+            sharedMemoryOnly: true,
+            deadlineMs,
+          });
+          // Progress BEFORE and AFTER on one line: a pass whose elapsed time is large
+          // and whose progress did not move is the signature of a job that is not
+          // converging, and that is not visible from either number alone.
+          //
+          // Labelled "summed across peers" because that is exactly what it is — a
+          // total over every peer's own high-water, spanning peers with different
+          // manifests. It sits beside `describeCoverage`, which is ONE whole record
+          // from ONE peer, and whose own doc warns that counts printed without their
+          // peer invite being read as a fleet total. Two different quantities on one
+          // line need the more surprising one named, or the reader will assume both
+          // describe the record at the end of the sentence.
+          await logPassLine(`Catch-up SWM pass ${1 + pass.continuationPass} for `
+            + `"${request.contextGraphId}": ${pass.peers.length} capable peer(s), progress `
+            + `${pass.progressBefore} -> ${pass.progress()} resolved `
+            + 'summed across peers, '
+            + `${Math.round(catchupPassNowMs() - passStartedMs)}ms; `
+            + `${describeCoverage(diagnostics.sharedMemory.swmCoverage)}`);
+        });
+      },
+    });
+    if (execution.continuationPasses > 0) {
+      diagnostics.sharedMemory.continuationPasses = execution.continuationPasses;
     }
   }
 

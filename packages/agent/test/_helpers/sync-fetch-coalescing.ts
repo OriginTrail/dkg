@@ -2,6 +2,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 
 import type { DKGAgent } from '../../src/index.js';
 import type { SyncPhase } from '../../src/sync/auth/request-build.js';
+import type { SyncCheckpointScope } from '../../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../../src/sync/requester/page-fetch.js';
 
 export interface LifecycleFetchCall {
@@ -18,6 +19,9 @@ export interface LifecycleFetchCall {
   recovery?: boolean;
   forceFreshSession?: boolean;
   assetUals?: string[];
+  requesterScope?: SyncCheckpointScope;
+  maxAcceptedQuads?: number;
+  maxAcceptedHeapBytesEstimate?: number;
 }
 
 export function stubLifecycleFetch(
@@ -38,6 +42,9 @@ export function stubLifecycleFetch(
     recovery?: boolean,
     forceFreshSession?: boolean,
     assetUals?: string[],
+    requesterScope?: SyncCheckpointScope,
+    maxAcceptedQuads?: number,
+    maxAcceptedHeapBytesEstimate?: number,
   ) => handler({
     ctx,
     remotePeerId,
@@ -52,5 +59,8 @@ export function stubLifecycleFetch(
     recovery,
     forceFreshSession,
     assetUals,
+    requesterScope,
+    maxAcceptedQuads,
+    maxAcceptedHeapBytesEstimate,
   });
 }

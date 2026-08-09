@@ -1,10 +1,15 @@
 import { createOperationContext, PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-official/dkg-core';
 import {
   classifyDurableProgress,
-  type DurableProgressSummary,
 } from '../durable-progress.js';
+import {
+  classifySharedMemoryFreshness,
+  type SharedMemoryFreshnessSummary,
+} from '../shared-memory-freshness.js';
 
-type SyncProgressSummary = DurableProgressSummary & { insertedTriples: number };
+type SyncProgressSummary = SharedMemoryFreshnessSummary & {
+  insertedTriples: number;
+};
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
@@ -93,6 +98,7 @@ interface SyncResultAccounting {
 
 function classifySyncResult(
   result: SyncFromPeerResult,
+  phase: 'durable' | 'shared',
   complete?: boolean,
 ): SyncResultAccounting {
   if (typeof result === 'number') {
@@ -109,7 +115,9 @@ function classifySyncResult(
     };
   }
 
-  const progress = classifyDurableProgress(result, { complete });
+  const progress = phase === 'shared'
+    ? classifySharedMemoryFreshness(result, { complete })
+    : classifyDurableProgress(result, { complete });
   // `failedPeers` is folded across every Context Graph in this lane. It says
   // at least one round never got a response; it does not mean the peer failed
   // to answer every round. Preserve any response evidence from sibling CGs so
@@ -179,7 +187,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       && typeof result.complete === 'boolean'
         ? result.complete
         : undefined;
-    const accounting = classifySyncResult(result, complete);
+    const accounting = classifySyncResult(result, phase, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
     sawFailedPhase = sawFailedPhase || accounting.failed;
