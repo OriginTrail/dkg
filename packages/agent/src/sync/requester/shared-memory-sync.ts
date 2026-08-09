@@ -4,14 +4,12 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
-import type { SyncCheckpointScope } from '../checkpoint/state.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import {
-  SyncPageAccumulationLimitError,
+  type SyncPageFetchOptions,
   type SyncPageResult,
 } from './page-fetch.js';
-import { estimateQuadHeapBytes } from '../memory-telemetry.js';
 import {
   canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
@@ -19,7 +17,6 @@ import {
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
-import type { SelectedSwmMetaRetentionLease } from '../selected-swm-meta-budget.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -149,25 +146,30 @@ export interface SharedMemorySyncSummary {
   snapshotPhaseBytesReceived: number;
 }
 
+export interface SharedMemoryMetadataFetchRequest {
+  readonly ctx: OperationContext;
+  readonly remotePeerId: string;
+  readonly contextGraphId: string;
+  readonly graphUri: string;
+  readonly deadline: number;
+}
+
+export interface SharedMemoryMetadataFetchOutcome {
+  readonly result: SyncPageResult;
+  /** True when this exact invocation retained a resumable metadata prefix. */
+  readonly continuationYielded: boolean;
+}
+
 /**
- * Exact metadata prefix retained only for one selected-provider invocation.
+ * Strategy boundary for metadata retrieval.
  *
- * The responder offset is meaningful only together with these quads and its
- * responder-session checkpoint. The lifecycle therefore owns this state in
- * memory, reuses it across bounded selected passes, and deletes the checkpoint
- * before the invocation returns. It is intentionally not restart-persistent:
- * persisting an offset without the byte-identical prefix would skip metadata.
+ * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
+ * injects a strategy that owns its exceptional retained-prefix/session state;
+ * the canonical SWM pipeline only consumes the resulting page and yield bit.
  */
-export interface SharedMemoryMetaContinuationState {
-  quads: Quad[];
-  bytesEstimate: number;
-  nextOffset: number;
-  checkpointKey: string;
-  requesterScope: SyncCheckpointScope;
-  /** Incremented whenever the responder restarts this prefix from offset zero. */
-  generation: number;
-  completed: boolean;
-  retentionLease: SelectedSwmMetaRetentionLease;
+export interface SharedMemoryMetadataFetcher {
+  fetch(request: SharedMemoryMetadataFetchRequest): Promise<SharedMemoryMetadataFetchOutcome>;
+  release(contextGraphId: string): void;
 }
 
 /**
@@ -232,10 +234,7 @@ interface SharedMemorySyncContext {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
-    requesterScope?: SyncCheckpointScope,
-    maxAcceptedQuads?: number,
-    maxAcceptedHeapBytesEstimate?: number,
+    options?: SyncPageFetchOptions,
   ) => Promise<SyncPageResult>;
   processSharedMemoryBatch: (
     wsDataQuads: Quad[],
@@ -271,8 +270,8 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   stopOnBackoffWorthyFailure?: boolean;
-  /** Selected-provider-only metadata state, scoped to this outer invocation. */
-  metaContinuationByContextGraph?: Map<string, SharedMemoryMetaContinuationState>;
+  /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
+  metadataFetcher?: SharedMemoryMetadataFetcher;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -311,7 +310,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
     stopOnBackoffWorthyFailure = false,
-    metaContinuationByContextGraph,
+    metadataFetcher,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -342,13 +341,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     metadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
-  };
-  const releaseMetaContinuation = (
-    contextGraphId: string,
-    state = metaContinuationByContextGraph?.get(contextGraphId),
-  ) => {
-    metaContinuationByContextGraph?.delete(contextGraphId);
-    state?.retentionLease.release();
   };
 
   const recordPhaseOutcome = (
@@ -460,112 +452,16 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
       const fetchStartedAt = Date.now();
-      const retainedMeta = metaContinuationByContextGraph?.get(pid);
-      let wsMetaResult: SyncPageResult;
-      if (retainedMeta?.completed) {
-        // The previous bounded pass fetched a complete responder snapshot but
-        // failed later (aggregate data, verification, snapshots or storage).
-        // Reuse that exact manifest instead of paying O(manifest) again.
-        wsMetaResult = {
-          quads: retainedMeta.quads,
-          bytesReceived: 0,
-          resumedFromOffset: retainedMeta.nextOffset,
-          nextOffset: retainedMeta.nextOffset,
-          checkpointKey: retainedMeta.checkpointKey,
-          completed: true,
-          timedOut: false,
-        };
-      } else {
-        // Keep the ordinary call shape byte-for-byte compatible. The extra
-        // requester-only scope exists solely for selected continuation and must
-        // never leak into the ordinary sinceBatchId position.
-        const fetchRetainedMeta = async (
-          state: SharedMemoryMetaContinuationState,
-          allowFreshRestartRetry: boolean,
-        ): Promise<SyncPageResult> => {
-          // Reserve process-wide capacity synchronously before yielding to the
-          // transport. Two overlapping selected invocations can therefore
-          // never both accumulate against the same free global allowance.
-          const reservation = state.retentionLease.reserve();
-          try {
-            const fetchedMeta = await fetchSyncPages(
-              ctx,
-              remotePeerId,
-              pid,
-              true,
-              'meta',
-              wsMetaGraph,
-              deadline,
-              undefined,
-              state.requesterScope,
-              reservation.maxRows,
-              reservation.maxBytesEstimate,
-            );
-            const resumesRetainedPrefix = fetchedMeta.resumedFromOffset === state.nextOffset;
-            const restartedFromZero = fetchedMeta.resumedFromOffset === 0;
-            if (!resumesRetainedPrefix && !restartedFromZero) {
-              // OFFSET is not a proof. A tail from an unrelated responder
-              // snapshot cannot be spliced onto this prefix; reset both pieces
-              // and fail this round closed so the next pass starts at zero.
-              deleteCheckpoint(fetchedMeta.checkpointKey);
-              releaseMetaContinuation(pid, state);
-              throw new Error(
-                `SWM metadata continuation offset mismatch for "${pid}": retained=${state.nextOffset}, resumed=${fetchedMeta.resumedFromOffset}`,
-              );
-            }
-            const fetchedBytesEstimate = fetchedMeta.quads.reduce(
-              (total, quad) => total + estimateQuadHeapBytes(quad),
-              0,
-            );
-            const nextRows = resumesRetainedPrefix
-              ? state.quads.length + fetchedMeta.quads.length
-              : fetchedMeta.quads.length;
-            const nextBytesEstimate = resumesRetainedPrefix
-              ? state.bytesEstimate + fetchedBytesEstimate
-              : fetchedBytesEstimate;
-            // The reservation is consumed as part of this atomic replacement.
-            // Other in-flight reservations remain charged during the recheck.
-            reservation.commitReplace(nextRows, nextBytesEstimate);
-            if (resumesRetainedPrefix) {
-              // Append only the new tail. Spreading the entire retained prefix
-              // every pass creates O(total-prefix) transient copies.
-              for (const quad of fetchedMeta.quads) state.quads.push(quad);
-            } else {
-              state.quads = fetchedMeta.quads;
-              if (state.nextOffset > 0) state.generation += 1;
-            }
-            state.bytesEstimate = nextBytesEstimate;
-            state.nextOffset = fetchedMeta.nextOffset;
-            state.checkpointKey = fetchedMeta.checkpointKey;
-            state.completed = fetchedMeta.completed;
-            return { ...fetchedMeta, quads: state.quads };
-          } catch (error) {
-            reservation.release();
-            if (
-              allowFreshRestartRetry
-              && error instanceof SyncPageAccumulationLimitError
-              && error.responderSessionStartedFresh === true
-              && state.nextOffset > 0
-            ) {
-              // The responder discarded the old immutable row-list. An append
-              // allowance near its cap cannot accept the replacement prefix.
-              // Drop the now-useless old generation and retry once with the
-              // full bounded allowance instead of deadlocking every pass.
-              deleteCheckpoint(state.checkpointKey);
-              state.retentionLease.replace(0, 0);
-              state.quads = [];
-              state.bytesEstimate = 0;
-              state.nextOffset = 0;
-              state.completed = false;
-              state.generation += 1;
-              return fetchRetainedMeta(state, false);
-            }
-            throw error;
-          }
-        };
-        const fetchedMeta = retainedMeta
-          ? await fetchRetainedMeta(retainedMeta, true)
-          : await fetchSyncPages(
+      const metadataOutcome = metadataFetcher
+        ? await metadataFetcher.fetch({
+          ctx,
+          remotePeerId,
+          contextGraphId: pid,
+          graphUri: wsMetaGraph,
+          deadline,
+        })
+        : {
+          result: await fetchSyncPages(
             ctx,
             remotePeerId,
             pid,
@@ -573,12 +469,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             'meta',
             wsMetaGraph,
             deadline,
-          );
-        wsMetaResult = fetchedMeta;
-      }
+          ),
+          continuationYielded: false,
+        };
+      const wsMetaResult = metadataOutcome.result;
       manifestComplete = wsMetaResult.completed;
       peerRespondedForContextGraph = true;
-      if (retainedMeta && !retainedMeta.completed) {
+      if (metadataOutcome.continuationYielded) {
         // Retain first, checkpoint second. A non-zero cursor is safe only while
         // the exact prefix it skips remains available to the same invocation.
         summary.bytesReceived += wsMetaResult.bytesReceived;
@@ -586,12 +483,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.metadataContinuationYields += 1;
         recordPhaseOutcome(wsMetaResult);
         break;
-      }
-      if (retainedMeta?.completed) {
-        // No tail remains to resume. If a later phase fails, the complete
-        // manifest stays in memory; after a crash the next selected invocation
-        // starts clean instead of resuming without the prefix.
-        deleteCheckpoint(retainedMeta.checkpointKey);
       }
       if (wsMetaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
@@ -635,7 +526,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           && wsDataResult.completed
           && !wsDataResult.timedOut
         ) {
-          releaseMetaContinuation(pid);
+          metadataFetcher?.release(pid);
         }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
@@ -1165,7 +1056,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
-      releaseMetaContinuation(pid);
+      metadataFetcher?.release(pid);
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -1406,7 +1297,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         'snapshot',
         '',
         params.deadline,
-        snapshot.ref,
+        { snapshotRef: snapshot.ref },
       );
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;

@@ -19,7 +19,10 @@ import {
   classifySharedMemoryFreshness,
 } from '../src/sync/shared-memory-freshness.js';
 import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
-import { SyncPageAccumulationLimitError } from '../src/sync/requester/page-fetch.js';
+import {
+  SyncPageAccumulationLimitError,
+  type SyncPageFetchOptions,
+} from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 
 const PEER = '12D3KooWSelectedCompleteSwmProvider';
@@ -278,15 +281,7 @@ interface SelectedSwmLifecycleAgentFixture {
     phase: string,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    signal?: AbortSignal,
-    recovery?: boolean,
-    forceFreshSession?: boolean,
-    assetUals?: string[],
-    requesterScope?: `selected-swm-meta:${string}`,
-    maxAcceptedQuads?: number,
-    maxAcceptedHeapBytesEstimate?: number,
+    options?: SyncPageFetchOptions,
   ) => Promise<{
     quads: Quad[];
     bytesReceived: number;
@@ -407,16 +402,15 @@ function createSelectedSwmLifecycleHarness(
       phase,
       _graphUri,
       _deadline,
-      snapshotRef,
-      sinceBatchId,
-      _signal,
-      _recovery,
-      _forceFreshSession,
-      _assetUals,
-      requesterScope,
-      maxAcceptedQuads,
-      maxAcceptedHeapBytesEstimate,
+      fetchOptions = {},
     ) => {
+      const {
+        snapshotRef,
+        sinceBatchId,
+        requesterScope,
+        maxAcceptedQuads,
+        maxAcceptedHeapBytesEstimate,
+      } = fetchOptions;
       if (phase === 'snapshot') {
         snapshotFetches.push(snapshotRef ?? 'missing-ref');
         throw new Error('all snapshot fixtures should be cache hits');
@@ -1185,6 +1179,75 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       });
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
+      await harness.close();
+    }
+  });
+
+  it('resolves a completed metadata continuation while a later snapshot yield remains active', async () => {
+    const publicCg = 'selected-metadata-complete-snapshot-incomplete';
+    const manifest = snapshotManifest(publicCg, 2);
+    const firstPrefix = manifest.meta.slice(0, 3);
+    const finalSuffix = manifest.meta.slice(3);
+    let wallNow = 1_000;
+    const previousMaxPasses = process.env.DKG_SWM_CATCHUP_MAX_PASSES;
+    process.env.DKG_SWM_CATCHUP_MAX_PASSES = '2';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      metaPages: [
+        {
+          quads: firstPrefix,
+          resumedFromOffset: 0,
+          nextOffset: firstPrefix.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: finalSuffix,
+          resumedFromOffset: firstPrefix.length,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      onSnapshotRead: ({ publicAdmission, snapshotRead }) => {
+        if (publicAdmission === 2 && snapshotRead === 1) wallNow += 120_000;
+      },
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(summary.continuationPasses).toBe(1);
+      expect(summary.metadataContinuationYields).toBe(1);
+      expect(summary.timedOutPhases).toBe(1);
+      expect(summary.resolvedMetadataContinuationYields).toBe(1);
+      expect(summary.snapshotPlaneIncomplete).toBe(1);
+      expect(summary.failedPhases).toBe(1);
+      expect(summary.resolvedSnapshotPlaneIncomplete).toBe(0);
+      const freshness = classifySharedMemoryFreshness(summary);
+      expect(freshness.timedOut).toBe(false);
+      expect(freshness.backoffWorthyFailure).toBe(false);
+      expect(freshness.phaseFailed).toBe(true);
+    } finally {
+      if (previousMaxPasses === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_MAX_PASSES;
+      } else {
+        process.env.DKG_SWM_CATCHUP_MAX_PASSES = previousMaxPasses;
+      }
       await harness.close();
     }
   });

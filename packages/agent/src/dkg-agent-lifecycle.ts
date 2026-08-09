@@ -251,6 +251,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
+  type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
 import {
@@ -261,7 +262,6 @@ import {
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
-  getSyncCheckpointKey,
   type SyncCheckpointScope,
 } from './sync/checkpoint/state.js';
 import {
@@ -290,8 +290,8 @@ import {
   runSharedMemorySync,
   selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
-  type SharedMemoryMetaContinuationState,
 } from './sync/requester/shared-memory-sync.js';
+import { createSelectedSwmMetaFetcher } from './sync/selected-swm-meta-fetcher.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -5209,12 +5209,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           phase,
           graphUri,
           fetchContext.deadline,
-          snapshotRef,
-          sinceBatchId,
-          fetchContext.signal,
-          undefined,
-          onVerifiedFullSnapshot !== undefined,
-          exactAssetUals,
+          {
+            snapshotRef,
+            sinceBatchId,
+            signal: fetchContext.signal,
+            forceFreshSession: onVerifiedFullSnapshot !== undefined,
+            assetUals: exactAssetUals,
+          },
         );
       },
       sinceBatchIdFor,
@@ -5743,24 +5744,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    signal?: AbortSignal,
-    // R9/R10 — member SWM recovery marker. Forks the checkpoint namespace (R10)
-    // and the request envelope auth mode (R9). Only the recovery driver sets it.
-    recovery?: boolean,
-    // Authoritative snapshot callers must rotate the responder session even
-    // when an unfinished offset-zero requester session is still cached.
-    forceFreshSession?: boolean,
-    // Exact VM recovery filter. Kept in the checkpoint, coalescing, wire, and
-    // responder-session identities so offsets can never cross asset batches.
-    assetUals?: string[],
-    // Internal requester namespace for state whose retained prefix is not
-    // available to ordinary coalesced callers.
-    requesterScope?: SyncCheckpointScope,
-    maxAcceptedQuads?: number,
-    maxAcceptedHeapBytesEstimate?: number,
+    options: SyncPageFetchOptions = {},
   ): Promise<SyncPageResult> {
+    const {
+      snapshotRef,
+      sinceBatchId,
+      signal,
+      // R9/R10 — member SWM recovery marker. Forks the checkpoint namespace
+      // and request-envelope auth mode. Only the recovery driver sets it.
+      recovery,
+      // Authoritative snapshot callers rotate the responder session even when
+      // an unfinished offset-zero requester session remains cached.
+      forceFreshSession,
+      // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
+      // responder-session identities so offsets never cross asset batches.
+      assetUals,
+      // Internal namespace for state whose retained prefix is unavailable to
+      // ordinary coalesced callers.
+      requesterScope,
+      maxAcceptedQuads,
+      maxAcceptedHeapBytesEstimate,
+    } = options;
     const exactAccumulationLimits = assetUals === undefined
       ? undefined
       : exactSyncPhaseAccumulationLimits(assetUals);
@@ -6112,7 +6116,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           remainingContextGraphs: remaining,
         }),
         fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
-          this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
+          this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, {
+            snapshotRef,
+            recovery: true,
+          }),
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
@@ -6162,9 +6169,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const selectedSwmEnabled = Boolean(
       options?.selectedSwmPriority && publicContextGraphIds.length > 0,
     );
-    const selectedMetaContinuations = selectedSwmEnabled
-      ? new Map<string, SharedMemoryMetaContinuationState>()
-      : undefined;
     // This scope is unique even when two selected calls overlap on the same
     // peer/CG through different top-level single-flight keys. Their in-memory
     // prefixes must never share a responder cursor or pooled fetch session.
@@ -6184,6 +6188,28 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           maxPrefixBytesEstimate: budget.maxSnapshotBytesEstimate,
         });
       })()
+      : undefined;
+    const selectedMetaFetcher = selectedSwmEnabled
+      ? createSelectedSwmMetaFetcher({
+        remotePeerId,
+        requesterScope: selectedMetaRequesterScope!,
+        retentionBudget: selectedMetaRetentionBudget!,
+        deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+        fetchPage: (request) => this.fetchSyncPages(
+          request.ctx,
+          request.remotePeerId,
+          request.contextGraphId,
+          true,
+          'meta',
+          request.graphUri,
+          request.deadline,
+          {
+            requesterScope: request.requesterScope,
+            maxAcceptedQuads: request.maxAcceptedQuads,
+            maxAcceptedHeapBytesEstimate: request.maxAcceptedHeapBytesEstimate,
+          },
+        ),
+      })
       : undefined;
     const singleFlightKey = sharedMemorySyncSingleFlightKey({
       remotePeerId,
@@ -6209,32 +6235,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         contextGraphId: string,
         remainingContextGraphs: number,
       ): Promise<SharedMemorySyncResult> => {
-        if (selectedMetaContinuations && !selectedMetaContinuations.has(contextGraphId)) {
-          const checkpointKey = getSyncCheckpointKey(
-            remotePeerId,
-            contextGraphId,
-            true,
-            'meta',
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            selectedMetaRequesterScope,
-          );
-          // The prefix is invocation-local. A checkpoint left by a crashed
-          // process cannot be resumed after that prefix disappeared.
-          this.syncCheckpoints.delete(checkpointKey);
-          selectedMetaContinuations.set(contextGraphId, {
-            quads: [],
-            bytesEstimate: 0,
-            nextOffset: 0,
-            checkpointKey,
-            requesterScope: selectedMetaRequesterScope!,
-            generation: 0,
-            completed: false,
-            retentionLease: selectedMetaRetentionBudget!.lease(),
-          });
-        }
         const result = await runSharedMemorySync({
           ctx,
           remotePeerId,
@@ -6250,10 +6250,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             phase,
             graphUri,
             deadline,
-            snapshotRef,
-            requesterScope,
-            maxAcceptedQuads,
-            maxAcceptedHeapBytesEstimate,
+            fetchOptions,
           ) => this.fetchSyncPages(
             ctx2,
             peerId,
@@ -6262,15 +6259,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             phase,
             graphUri,
             deadline,
-            snapshotRef,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            undefined,
-            requesterScope,
-            maxAcceptedQuads,
-            maxAcceptedHeapBytesEstimate,
+            fetchOptions,
           ),
           processSharedMemoryBatch: (wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(
@@ -6283,7 +6272,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
           getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
           stopOnBackoffWorthyFailure,
-          metaContinuationByContextGraph: selectedMetaContinuations,
+          metadataFetcher: selectedMetaFetcher?.strategy,
           ensureContextGraph: async (contextGraphId) => {
             const graphManager = new GraphManager(this.store);
             await graphManager.ensureContextGraph(contextGraphId);
@@ -6432,10 +6421,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               work: item,
               initialResult: result,
               metadataContinuationProgress: () => (
-                selectedMetaContinuations?.get(item.contextGraphId)?.nextOffset
+                selectedMetaFetcher?.progress(item.contextGraphId)
               ),
               metadataContinuationGeneration: () => (
-                selectedMetaContinuations?.get(item.contextGraphId)?.generation
+                selectedMetaFetcher?.generation(item.contextGraphId)
+              ),
+              metadataContinuationCompleted: () => (
+                selectedMetaFetcher?.completed(item.contextGraphId) ?? false
               ),
             });
           }
@@ -6551,11 +6543,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }).finally(() => {
       // Never leave a non-zero persisted cursor after its in-memory prefix has
       // gone out of scope. A later invocation must start at offset zero.
-      for (const state of selectedMetaContinuations?.values() ?? []) {
-        deleteSyncPageCheckpoint(this.syncCheckpoints, state.checkpointKey);
-        state.retentionLease.release();
-      }
-      selectedMetaContinuations?.clear();
+      selectedMetaFetcher?.cleanup();
     });
   }
 
@@ -6589,7 +6577,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             remainingContextGraphs: remaining,
           }),
           fetchSyncPages: (ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef) =>
-            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, snapshotRef, undefined, undefined, true),
+            this.fetchSyncPages(ctx2, peerId, cgId, includeSharedMemory, phase, graphUri, deadline, {
+              snapshotRef,
+              recovery: true,
+            }),
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,

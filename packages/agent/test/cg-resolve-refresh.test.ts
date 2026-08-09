@@ -8,7 +8,10 @@ import {
   hasAuthoritativePrivateMetaDefinition,
 } from '../src/context-graph-private-meta-proof.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  fetchSyncPages,
+  type SyncPageFetchOptions,
+} from '../src/sync/requester/page-fetch.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 
 const CURATOR_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -507,7 +510,7 @@ describe('refreshMetaFromCurator', () => {
         const peerId = args[1] as string;
         fetchPeer = peerId;
         fetchDeadline = args[6] as number;
-        forceFreshSession = args[11] as boolean | undefined;
+        forceFreshSession = (args[7] as SyncPageFetchOptions | undefined)?.forceFreshSession;
         return {
           quads: inserted,
           checkpointKey: 'trusted-meta-checkpoint',

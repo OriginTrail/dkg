@@ -31,6 +31,8 @@ export interface SelectedSwmContinuationUnit {
   readonly metadataContinuationProgress?: () => number | undefined;
   /** Generation of that prefix; changes when the responder restarts at zero. */
   readonly metadataContinuationGeneration?: () => number | undefined;
+  /** Metadata-phase completion, independent of later data/snapshot/store work. */
+  readonly metadataContinuationCompleted?: () => boolean;
 }
 
 export interface SelectedSwmContinuationStop {
@@ -138,9 +140,10 @@ export async function runSelectedSwmContinuations(
         unit.initialResult.insertedDataTriples > 0 && progress.completedWithoutFailure,
       recoverableIncomplete: freshness.recoverableSnapshotYieldFailures,
       recoverableMetadataYields: freshness.recoverableMetadataContinuationYields,
-      metadataCompleted:
+      metadataCompleted: unit.metadataContinuationCompleted?.() ?? (
         unit.metadataContinuationProgress?.() === undefined
-        && progress.completedWithoutFailure,
+        && progress.completedWithoutFailure
+      ),
       completed: freshness.snapshotPlaneComplete,
     });
   }
@@ -191,8 +194,10 @@ export async function runSelectedSwmContinuations(
               state.recoverableIncomplete += freshness.recoverableSnapshotYieldFailures;
               state.recoverableMetadataYields += freshness.recoverableMetadataContinuationYields;
               state.metadataCompleted = state.metadataCompleted || (
-                state.unit.metadataContinuationProgress?.() === undefined
-                && progress.completedWithoutFailure
+                state.unit.metadataContinuationCompleted?.() ?? (
+                  state.unit.metadataContinuationProgress?.() === undefined
+                  && progress.completedWithoutFailure
+                )
               );
               state.completed = freshness.snapshotPlaneComplete;
               state.planeProven = state.planeProven || (

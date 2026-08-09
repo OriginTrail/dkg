@@ -243,15 +243,16 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
     args.phase ?? 'data',
     args.graphUri ?? 'did:dkg:context-graph:coalesced-cg',
     args.deadline ?? DEFAULT_DEADLINE,
-    args.snapshotRef,
-    args.sinceBatchId,
-    args.signal,
-    args.recovery,
-    undefined,
-    args.assetUals,
-    args.requesterScope,
-    args.maxAcceptedQuads,
-    args.maxAcceptedHeapBytesEstimate,
+    {
+      snapshotRef: args.snapshotRef,
+      sinceBatchId: args.sinceBatchId,
+      signal: args.signal,
+      recovery: args.recovery,
+      assetUals: args.assetUals,
+      requesterScope: args.requesterScope,
+      maxAcceptedQuads: args.maxAcceptedQuads,
+      maxAcceptedHeapBytesEstimate: args.maxAcceptedHeapBytesEstimate,
+    },
   );
 }
 

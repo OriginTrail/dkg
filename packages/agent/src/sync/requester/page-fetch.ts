@@ -145,6 +145,25 @@ export interface SyncPageResult {
   timedOut: boolean;
 }
 
+/**
+ * Optional modifiers for one Agent-owned page fetch.
+ *
+ * Keep these named: checkpoint identity, cancellation, recovery semantics and
+ * accumulation ceilings are independent concerns. A positional tail made it
+ * too easy for a new modifier to occupy an older modifier's slot.
+ */
+export interface SyncPageFetchOptions {
+  readonly snapshotRef?: string;
+  readonly sinceBatchId?: string;
+  readonly signal?: AbortSignal;
+  readonly recovery?: boolean;
+  readonly forceFreshSession?: boolean;
+  readonly assetUals?: string[];
+  readonly requesterScope?: SyncCheckpointScope;
+  readonly maxAcceptedQuads?: number;
+  readonly maxAcceptedHeapBytesEstimate?: number;
+}
+
 export class SyncPageAccumulationLimitError extends Error {
   readonly code = 'SYNC_PAGE_ACCUMULATION_LIMIT' as const;
 
