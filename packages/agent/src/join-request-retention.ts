@@ -71,15 +71,27 @@ export async function pruneTerminalJoinRequestRecords(
   const overflow = Math.max(0, total - cap);
   if (overflow === 0) return;
 
-  const plannedDelete = Math.min(overflow, BOUNDED_MUTATION_MAX_PRUNE_DELETE);
-  await tryPruneRankedSubjects(store, {
-    graphUri: metaGraph,
-    subjectPrefix: JOIN_REQUEST_SUBJECT_PREFIX,
-    eligibilityPredicate: REQUEST_STATUS,
-    eligibleObjects: ['approved', 'rejected'],
-    primaryRankPredicate: DECISION_TIMESTAMP,
-    secondaryRankPredicate: REQUEST_TIMESTAMP,
-    retainNewest: cap,
-    maxDelete: plannedDelete,
-  }, { priority: 'background', source: 'join.moderationRetention.prune' });
+  // Drain the pre-counted overflow in independently scheduled batches. Each
+  // mutation rechecks terminal eligibility atomically, and releasing the store
+  // scheduler between batches prevents a large historical backlog from holding
+  // one unbounded mutation permit.
+  let remainingOverflow = overflow;
+  while (remainingOverflow > 0) {
+    const batchSize = Math.min(
+      remainingOverflow,
+      BOUNDED_MUTATION_MAX_PRUNE_DELETE,
+    );
+    const supported = await tryPruneRankedSubjects(store, {
+      graphUri: metaGraph,
+      subjectPrefix: JOIN_REQUEST_SUBJECT_PREFIX,
+      eligibilityPredicate: REQUEST_STATUS,
+      eligibleObjects: ['approved', 'rejected'],
+      primaryRankPredicate: DECISION_TIMESTAMP,
+      secondaryRankPredicate: REQUEST_TIMESTAMP,
+      retainNewest: cap,
+      maxDelete: batchSize,
+    }, { priority: 'background', source: 'join.moderationRetention.prune' });
+    if (!supported) return;
+    remainingOverflow -= batchSize;
+  }
 }
