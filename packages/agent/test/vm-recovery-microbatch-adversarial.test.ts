@@ -26,11 +26,11 @@ import {
 import {
   planVmRecoveryMicrobatch,
   VmRecoveryProviderPolicy,
-  type VmRecoveryChainFootprint,
   type VmRecoveryTargetFootprint,
   type VmRecoveryMicrobatchLimits,
   type VmRecoveryUalDisposition,
 } from '../src/vm-recovery-microbatch.js';
+import type { VmRecoveryChainFootprint } from '../src/vm-recovery-types.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface SizedTarget extends VmRecoveryTargetFootprint {

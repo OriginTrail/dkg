@@ -255,10 +255,10 @@ import {
   enrichVmRecoveryFootprints,
   planVmRecoveryMicrobatch,
   VmRecoveryProviderPolicy,
-  type VmRecoveryChainFootprint,
   type VmRecoveryTargetFootprint,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-microbatch.js';
+import type { VmRecoveryChainFootprint } from './vm-recovery-types.js';
 import {
   encodeExactAssetUals,
   MAX_EXACT_SYNC_ASSETS,

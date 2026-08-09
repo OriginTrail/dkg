@@ -34,7 +34,7 @@ import {
   VmReconcileQueueFullError,
   type VmReconcileSource,
 } from './vm-reconcile-service.js';
-import type { VmRecoveryChainFootprint } from './vm-recovery-microbatch.js';
+import type { VmRecoveryChainFootprint } from './vm-recovery-types.js';
 
 /**
  * Outcome of attempting to reconcile a single per-CG registration ordinal.

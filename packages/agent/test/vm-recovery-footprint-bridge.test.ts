@@ -1,10 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   enrichVmRecoveryFootprints,
-  type VmRecoveryChainFootprint,
   type VmRecoveryFootprintBridge,
   type VmRecoveryUpdateContext,
 } from '../src/vm-recovery-microbatch.js';
+import type { VmRecoveryChainFootprint } from '../src/vm-recovery-types.js';
 
 interface Target {
   readonly kaId: string;
