@@ -56,6 +56,7 @@ import {
   type PendingOrdinalRecoveryResult,
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
+import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -2058,80 +2059,30 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     targetCount: number;
     found: (peerId: string, ordinal: number) => boolean;
   }) {
-    const created = await DKGAgent.create({
-      name: options.name,
-      chainAdapter: new MockChainAdapter(),
-    });
-    const internals = created as unknown as AgentInternals;
-    const connected = options.peers.map((peerId) => ({ toString: () => peerId }));
-    (internals as any).node = {
-      peerId: `12D3KooW${options.name}Local`,
-      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
-    };
-    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
-      peerIds: options.peers,
-      curatorIsLocal: false,
-      legacyTripleResolved: false,
-    });
-    (internals as any).ensurePeerConnected = async () => undefined;
-    (internals as any).selectCatchupPeers = (
-      peers: Array<{ toString(): string }>,
-    ) => peers;
-    (internals as any).waitForSyncProtocol = async () => true;
-    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
-
-    const fetches: Array<{ peerId: string; ordinal: number }> = [];
-    const recovered = new Set<number>();
-    let activeFetches = 0;
-    let maxActiveFetches = 0;
-    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (
-      peerId: string,
-      _cg: string,
-      uals: string[],
-    ) => {
-      activeFetches += 1;
-      maxActiveFetches = Math.max(maxActiveFetches, activeFetches);
-      const ordinal = Number(uals[0]!.split('/').at(-1));
-      fetches.push({ peerId, ordinal });
-      const wasFound = options.found(peerId, ordinal);
-      if (wasFound) recovered.add(ordinal);
-      activeFetches -= 1;
-      return {
-        result: {
-          fetchedDataTriples: wasFound ? 1 : 0,
-          fetchedMetaTriples: wasFound ? 8 : 0,
-          insertedTriples: wasFound ? 9 : 0,
-          failedPeers: 0,
-          failedPhases: 0,
-          deferredBackpressure: 0,
-        },
-        disposition: wasFound ? 'found' as const : 'clean-absent' as const,
-      };
-    };
-    const targets = Array.from({ length: options.targetCount }, (_, ordinal) =>
-      vmRecoveryTarget(options.localCgId, ordinal, String(ordinal)));
-    (internals as any).reconcileChainOrdinal = async (
-      _localCgId: string,
-      _onChainCgId: bigint,
-      ordinal: number,
-    ) => recovered.has(ordinal)
-      ? { status: 'reconciled', blockNumber: 100 }
-      : { status: 'pending', recovery: targets[ordinal] };
-
-    return {
-      agent: created,
-      internals,
-      targets,
-      fetches,
-      recovered,
-      maxActiveFetches: () => maxActiveFetches,
-      run: () => internals.recoverVmReconcileBatch(
+    const harness = await createVmRecoveryHostHarness({
+      ...options,
+      targetForOrdinal: (ordinal) => vmRecoveryTarget(
         options.localCgId,
-        1n,
-        targets,
-        100,
-        () => true,
+        ordinal,
+        String(ordinal),
       ),
+      onFetch: (peerId, targets, recovered) => {
+        let allFound = true;
+        for (const target of targets) {
+          if (options.found(peerId, target.ordinal)) recovered.add(target.ordinal);
+          else allFound = false;
+        }
+        return allFound ? 'found' : 'clean-absent';
+      },
+    });
+    return {
+      ...harness,
+      get fetches(): Array<{ peerId: string; ordinal: number }> {
+        return harness.fetched.flatMap(({ peerId, uals }) => uals.map((ual) => ({
+          peerId,
+          ordinal: Number(ual.split('/').at(-1)),
+        })));
+      },
     };
   }
 
@@ -2792,7 +2743,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.continuationOrdinal).toBe(2);
   });
 
-  it('reuses a proven holder sequentially across the bounded recovery slice', async () => {
+  it('rotates after spending one proven-holder reuse in the recovery slice', async () => {
     const holder = '12D3KooWExactProvenAHolder';
     const fallback = '12D3KooWExactProvenZFallback';
     const localCgId = '0x0000000000000000000000000000000000000001/proven-holder';
@@ -2801,15 +2752,17 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       localCgId,
       peers: [holder, fallback],
       targetCount: 4,
-      found: (peerId) => peerId === holder,
+      found: () => true,
     });
     agent = harness.agent;
     const result = await harness.run();
 
-    expect(harness.fetches).toEqual(harness.targets.map((target) => ({
-      peerId: holder,
-      ordinal: target.ordinal,
-    })));
+    expect(harness.fetches).toEqual([
+      { peerId: holder, ordinal: 0 },
+      { peerId: holder, ordinal: 1 },
+      { peerId: fallback, ordinal: 2 },
+      { peerId: fallback, ordinal: 3 },
+    ]);
     expect(harness.maxActiveFetches()).toBe(1);
     expect(result.attemptedOrdinals).toEqual(
       harness.targets.map((target) => target.ordinal),

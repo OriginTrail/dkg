@@ -5186,6 +5186,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // by authoritative size hints. Unknown footprints stay singleton; the
       // exact-sync protocol's ten-UAL cap remains the hard upper bound.
       if (providerPolicy.isProvenHolder(peerId)) {
+        // Holder affinity is a one-use lease for this recovery slice. Consume
+        // it before planning so a successful post-probe microbatch cannot
+        // re-arm the same peer and monopolize later bounded work.
+        providerPolicy.consumeProvenHolderReuse(peerId);
         const compatible: BatchAttempt[] = [];
         for (let candidateIndex = eligibleIndex; candidateIndex < eligible.length; candidateIndex += 1) {
           const candidateEntry = eligible[candidateIndex]!;
