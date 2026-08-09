@@ -72,9 +72,9 @@ import {
   type SystemRecordApplyOutcomeV1,
   type SystemRecordChildHandoffV1,
   type SystemRecordLaneControllerV1,
+  type SystemRecordLaneBarrierResultsV1,
   type SystemRecordLaneExecutionBindingV1,
 } from '../system-record-materializer-v1.js';
-import type { SystemRecordMaterializationEpochRotationV1 } from '../system-record-materialization-epoch-contract-v1.js';
 import {
   createStoreControlBarrierKeyV1,
   type StoreControlBarrierKeyV1,
@@ -97,16 +97,17 @@ import {
   composeAbortSignals,
 } from '../abortable-store-work-lifecycle.js';
 
-const SYSTEM_RECORD_ENABLE_BARRIER_V1 =
-  createStoreControlBarrierKeyV1<void | SystemRecordMaterializationEpochRotationV1>(
+const SYSTEM_RECORD_BARRIER_KEYS_V1: {
+  readonly [K in keyof SystemRecordLaneBarrierResultsV1]:
+    StoreControlBarrierKeyV1<SystemRecordLaneBarrierResultsV1[K]>;
+} = Object.freeze({
+  enable: createStoreControlBarrierKeyV1<SystemRecordLaneBarrierResultsV1['enable']>(
     'system-record.enable',
-  );
-const SYSTEM_RECORD_DISABLE_BARRIER_V1 =
-  createStoreControlBarrierKeyV1<void>('system-record.disable');
-const SYSTEM_RECORD_SHUTDOWN_BARRIER_V1 =
-  createStoreControlBarrierKeyV1<void>('system-record.shutdown');
-const SYSTEM_RECORD_RECOVERY_BARRIER_V1 =
-  createStoreControlBarrierKeyV1<void>('system-record.recovery');
+  ),
+  disable: createStoreControlBarrierKeyV1<void>('system-record.disable'),
+  shutdown: createStoreControlBarrierKeyV1<void>('system-record.shutdown'),
+  recovery: createStoreControlBarrierKeyV1<void>('system-record.recovery'),
+});
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -793,12 +794,8 @@ export class SparqlHttpStore implements TripleStore {
               transition,
               barrierGeneration(),
             ),
-          typedBarriers: {
-            enable: (transition) => runTypedBarrier(SYSTEM_RECORD_ENABLE_BARRIER_V1, transition),
-            disable: (transition) => runTypedBarrier(SYSTEM_RECORD_DISABLE_BARRIER_V1, transition),
-            shutdown: (transition) => runTypedBarrier(SYSTEM_RECORD_SHUTDOWN_BARRIER_V1, transition),
-            recovery: (transition) => runTypedBarrier(SYSTEM_RECORD_RECOVERY_BARRIER_V1, transition),
-          },
+          typedBarrier: (kind, transition) =>
+            runTypedBarrier(SYSTEM_RECORD_BARRIER_KEYS_V1[kind], transition),
           setAdmissionActive: (active) => { this.systemRecordAdmissionActive = active; },
         });
         this.systemRecordLane = owner;

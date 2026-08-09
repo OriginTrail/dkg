@@ -48,11 +48,11 @@ interface BarrierEntry {
   seal: StoreGenerationSeal;
 }
 
-interface StoreControlBarrierRequestV1 {
+interface StoreControlBarrierRequestV1<T> {
   readonly storeId: object;
   readonly coalescingIdentity: unknown;
   readonly purpose: string;
-  readonly transition: () => Promise<unknown>;
+  readonly transition: () => Promise<T>;
   readonly generation?: string;
   readonly timeoutMs?: number;
 }
@@ -137,7 +137,7 @@ export class StoreControlBarrierCoordinator {
   }
 
   /** Enqueue one already-normalized control transition. */
-  enqueue(request: StoreControlBarrierRequestV1): Promise<unknown> {
+  enqueue<T>(request: StoreControlBarrierRequestV1<T>): Promise<T> {
     const {
       storeId,
       coalescingIdentity,
@@ -154,7 +154,9 @@ export class StoreControlBarrierCoordinator {
     if (existing !== undefined) {
       this.coalescedTotal += 1;
       this.host.observeDepths();
-      return existing.promise;
+      // The scheduler binds `coalescingIdentity` to T for typed keys. Its
+      // deprecated string path owns the only compatibility cast.
+      return existing.promise as Promise<T>;
     }
     let resolve!: (value: unknown) => void;
     let reject!: (reason?: unknown) => void;
@@ -193,7 +195,7 @@ export class StoreControlBarrierCoordinator {
     this.barriers.push(barrier);
     this.host.observeDepths();
     this.pump();
-    return promise;
+    return promise as Promise<T>;
   }
 
   /**

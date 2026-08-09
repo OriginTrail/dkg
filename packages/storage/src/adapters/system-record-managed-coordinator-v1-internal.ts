@@ -10,7 +10,7 @@ import {
   type SystemRecordLaneBarrierV1,
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneExecutionBindingV1,
-  type SystemRecordLaneTypedBarriersV1,
+  type SystemRecordLaneTypedBarrierV1,
 } from '../system-record-materializer-v1.js';
 import { resolveOwnedSystemRecordRuntimeV1 } from '../system-record-runtime-v1-internal.js';
 
@@ -28,7 +28,7 @@ export interface ManagedSystemRecordCoordinatorOptionsV1 {
     childGeneration: string,
   ) => Promise<SystemRecordApplyOutcomeV1>;
   readonly barrier: SystemRecordLaneBarrierV1;
-  readonly typedBarriers?: SystemRecordLaneTypedBarriersV1;
+  readonly typedBarrier?: SystemRecordLaneTypedBarrierV1;
   readonly setAdmissionActive: (active: boolean) => void;
 }
 
@@ -54,7 +54,7 @@ export function createManagedSystemRecordCoordinatorV1(
         atomicExecutor.execute(proof, binding, registerRecovery),
     },
     barrier: options.barrier,
-    typedBarriers: options.typedBarriers,
+    typedBarrier: options.typedBarrier,
     setAdmissionActive: options.setAdmissionActive,
   });
 }

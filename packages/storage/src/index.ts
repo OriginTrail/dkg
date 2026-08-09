@@ -78,7 +78,9 @@ export {
   type SystemRecordLaneControllerV1,
   type SystemRecordLaneSessionV1,
   type SystemRecordLaneStateV1,
-  type SystemRecordLaneTypedBarriersV1,
+  type SystemRecordLaneBarrierKindV1,
+  type SystemRecordLaneBarrierResultsV1,
+  type SystemRecordLaneTypedBarrierV1,
   type SystemRecordTransactionExecutorV1,
 } from './system-record-materializer-v1.js';
 export {

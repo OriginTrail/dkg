@@ -1099,7 +1099,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     timeoutMs?: number,
   ): Promise<T> {
     // Legacy compatibility boundary: runtime purpose strings cannot bind T.
-    return this.barrierCoordinator.enqueue({
+    return this.barrierCoordinator.enqueue<unknown>({
       storeId,
       coalescingIdentity: purpose,
       purpose,
@@ -1126,7 +1126,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
       transition,
       generation,
       timeoutMs,
-    }) as Promise<T>;
+    });
   }
 
   private isSealed(storeId: object): boolean {
