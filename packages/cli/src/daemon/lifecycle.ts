@@ -1916,6 +1916,27 @@ export async function runDaemonInner(
       deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
         dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
+      loadSelectedVmReconcileCursor: async (contextGraphId, onChainContextGraphId) => {
+        const row = dashDb.getSelectedVmReconcileCursor(
+          contextGraphId,
+          onChainContextGraphId,
+        );
+        return row ? {
+          contextGraphId: row.context_graph_id,
+          onChainContextGraphId: row.on_chain_context_graph_id,
+          nameHash: row.name_hash,
+          watermark: row.watermark,
+        } : null;
+      },
+      saveSelectedVmReconcileCursor: async (record) => {
+        dashDb.upsertSelectedVmReconcileCursor({
+          context_graph_id: record.contextGraphId,
+          on_chain_context_graph_id: record.onChainContextGraphId,
+          name_hash: record.nameHash,
+          watermark: record.watermark,
+          updated_at: Date.now(),
+        });
+      },
     },
     contextGraphMembershipStore: {
       loadAll: async () => dashDb.listContextGraphMembers().map((row) => {

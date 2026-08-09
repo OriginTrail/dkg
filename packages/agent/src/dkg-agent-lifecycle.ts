@@ -559,14 +559,10 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  captureContextGraphBindingGeneration,
-  clearContextGraphBindingGeneration,
-  isContextGraphBindingGenerationCurrent,
-} from './context-graph-binding-generation.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
+const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 type InFlightSyncPageFetch = {
   promise: Promise<SyncPageResult>;
   controller: AbortController;
@@ -1337,6 +1333,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
        * bypassed is worth more than one that merely type-checks.
        */
       source?: SyncAdmissionSource;
+      /** Admit the selected graph-complete RFC-64 SWM transfer into its reserved slot. */
+      selectedSwmPriority?: boolean;
     } = {},
     /**
      * Nothing may follow `admission`. Typed `never[]` so a TypeScript caller passing
@@ -1367,12 +1365,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       || typeof (admission as { aborted?: unknown }).aborted === 'boolean') {
       throw new TypeError(
         'runContextGraphSyncWithBackpressure takes a single `admission` object '
-        + '({ priorityOverride, operationSignal, source }). The positional '
+        + '({ priorityOverride, operationSignal, source, selectedSwmPriority }). The positional '
         + 'priority/signal arguments used before issue #2006 are no longer accepted, '
         + 'because ignoring them would silently drop the caller\'s cancellation.',
       );
     }
-    const { priorityOverride, operationSignal } = admission;
+    const { priorityOverride, operationSignal, selectedSwmPriority } = admission;
     const source = normalizeSyncAdmissionSource(admission.source);
     const priority = priorityOverride
       ?? contextGraphPriority(this.config.syncContextGraphPriorities, contextGraphId);
@@ -1450,6 +1448,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           priority,
           priorityClass: syncPriorityClass(priority),
           source,
+          selectedSwmPriority,
           signal: admissionBoundary.signal,
           logInfo: (opCtx, message) => this.log.info(opCtx, message),
         },
@@ -3985,6 +3984,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return 'not-started';
     }
     const sharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
+    const prioritySharedMemorySyncPlans = new Map<string, Promise<SharedMemorySyncContextGraphPlan>>();
+    const automaticPeerSweep = source === 'on-connect' || source === 'reconcile';
+    const remotePeerIsCompleteSwmProvider = this.config.rfc64PublicCatalogBootstrap
+      ?.acceptedPublicPolicies.some(
+        ({ completeSwmProviders = [] }) => completeSwmProviders.includes(remotePeer),
+      ) ?? false;
     const getSharedMemorySyncPlan = (peerId: string): Promise<SharedMemorySyncContextGraphPlan> => {
       let plan = sharedMemorySyncPlans.get(peerId);
       if (!plan) {
@@ -3992,8 +3997,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           peerId,
           this.config.syncContextGraphs ?? [],
           createOperationContext('sync'),
+          { completeProviderOnly: automaticPeerSweep },
         );
         sharedMemorySyncPlans.set(peerId, plan);
+      }
+      return plan;
+    };
+    const getPrioritySharedMemorySyncPlan = (
+      peerId: string,
+    ): Promise<SharedMemorySyncContextGraphPlan> => {
+      let plan = prioritySharedMemorySyncPlans.get(peerId);
+      if (!plan) {
+        plan = this.planSharedMemorySyncContextGraphs(
+          peerId,
+          this.config.syncContextGraphs ?? [],
+          createOperationContext('sync'),
+          { requireCompleteProviderMatch: true },
+        );
+        prioritySharedMemorySyncPlans.set(peerId, plan);
       }
       return plan;
     };
@@ -4011,8 +4032,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           configValue: this.config.syncSystemContextGraphsOnConnect,
           envValue: process.env.DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT,
         },
-      ),
+      ).filter((contextGraphId) => {
+        const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
+          contextGraphId,
+        );
+        // For an RFC-64 selected public CG, VM/durable inventory is chain/core
+        // territory. An Edge that was pinned as the complete SWM source must
+        // not start a duplicate durable pull before its useful SWM transfer;
+        // unrelated Edge peers should do neither plane in the automatic sweep.
+        return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
+      }),
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
+      ...(automaticPeerSweep && remotePeerIsCompleteSwmProvider
+        ? {
+          getPrioritySharedMemorySyncContextGraphs: async (peerId: string) => (
+            await getPrioritySharedMemorySyncPlan(peerId)
+          ).eligibleContextGraphIds,
+        }
+        : {}),
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
         peerId,
         contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...(this.config.syncContextGraphs ?? [])],
@@ -4023,10 +4060,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
+      syncSharedMemoryFromPeer: async (peerId, contextGraphIds, syncOptions) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
         stopOnBackoffWorthyFailure: true,
         source,
         sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
+        ...(syncOptions?.selectedPriority
+          ? {
+            priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
+            selectedSwmPriority: true,
+          }
+          : {}),
       }),
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => this.log.info(ctx, message),
@@ -4055,6 +4098,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string | undefined,
     contextGraphIds: readonly string[],
     ctx: OperationContext,
+    options: {
+      completeProviderOnly?: boolean;
+      requireCompleteProviderMatch?: boolean;
+    } = {},
   ): Promise<SharedMemorySyncContextGraphPlan> {
     // M2 (curator-leader convergence): a PRIVATE CG converges by REPLACE-recovering the
     // current state from its CURATOR (the authoritative SWM replica), never the
@@ -4096,7 +4143,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     for (const contextGraphId of contextGraphIds) {
-      if (!(await this.canUseSharedMemoryForContextGraph(contextGraphId))) {
+      const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
+        contextGraphId,
+      );
+      if (
+        completeSwmProviders.length === 0
+        && !(await this.canUseSharedMemoryForContextGraph(contextGraphId))
+      ) {
         this.log.warn(ctx, `Skipping SWM sync for unauthorized or unconfirmed context graph "${contextGraphId}"`);
         continue;
       }
@@ -4163,6 +4216,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           privateRecoverFromCurator.push(contextGraphId);
           eligibleContextGraphIds.push(contextGraphId);
         }
+        continue;
+      }
+      if (
+        options.requireCompleteProviderMatch
+        && (
+          remotePeerId === undefined
+          || !completeSwmProviders.includes(remotePeerId)
+        )
+      ) {
+        continue;
+      }
+      if (
+        options.completeProviderOnly
+        && remotePeerId !== undefined
+        && completeSwmProviders.length > 0
+        && !completeSwmProviders.includes(remotePeerId)
+      ) {
+        this.log.debug(
+          ctx,
+          `SWM sync: skipping "${contextGraphId}" from ${remotePeerId.slice(-8)} — RFC-64 complete provider selected`,
+        );
         continue;
       }
       publicContextGraphIds.push(contextGraphId);
@@ -5098,14 +5172,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return Promise.reject(shutdownError());
         }
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
-        let bindingGeneration = captureContextGraphBindingGeneration(
-          this.contextGraphBindingGenerations,
-          asset.contextGraphId,
-        );
+        let bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
         const bindingIsCurrent = () => (
           this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
-          && isContextGraphBindingGenerationCurrent(
-            this.contextGraphBindingGenerations,
+          && this.contextGraphBindingState.isGenerationCurrent(
             asset.contextGraphId,
             bindingGeneration,
           )
@@ -5170,10 +5240,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               subscription,
               verifiedOnChainId,
             );
-            bindingGeneration = captureContextGraphBindingGeneration(
-              this.contextGraphBindingGenerations,
-              asset.contextGraphId,
-            );
+            bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
             assertLifecycleCurrent();
           }
           if (operationSignal?.aborted) {
@@ -5939,6 +6006,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
        * and it clamps in the CLI bridge, while `acquire` re-clamps regardless.
        */
       source?: SyncAdmissionSource;
+      /** Internal marker for the selected graph-complete RFC-64 SWM admission. */
+      selectedSwmPriority?: boolean;
     },
   ): Promise<SharedMemorySyncResult> {
     const ctx = createOperationContext('sync');
@@ -6163,7 +6232,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           item.lane,
           item.operationId,
           run,
-          { priorityOverride: options?.priority, source: options?.source },
+          {
+            priorityOverride: options?.priority,
+            source: options?.source,
+            selectedSwmPriority: options?.selectedSwmPriority,
+          },
         ),
         merge: mergeSharedMemorySyncResults,
         markDeferred: (summary) => ({
@@ -7360,6 +7433,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    const bindingEffects = this.contextGraphBindingState.applySubscriptionTransition(
+      contextGraphId,
+      previous,
+      canonicalNext,
+      nextWireId,
+    );
     if (
       previousWireId !== nextWireId
       && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
@@ -7368,7 +7447,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
+    if (bindingEffects.vmStateReset === 'force') {
+      this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    } else if (bindingEffects.vmStateReset === 'inactive') {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     // On-demand member subscriptions deliberately keep their live state and
@@ -7601,7 +7682,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.
-    clearContextGraphBindingGeneration(this.contextGraphBindingGenerations, contextGraphId);
+    this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
   }
 
@@ -7700,10 +7781,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
-    const expectedBindingGeneration = captureContextGraphBindingGeneration(
-      this.contextGraphBindingGenerations,
-      contextGraphId,
-    );
+    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
     const sub = subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
@@ -7730,8 +7808,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ||
         current !== expectedLiveSub
         || (!current?.subscribed && !current?.coreHosted)
-        || !isContextGraphBindingGenerationCurrent(
-          this.contextGraphBindingGenerations,
+        || !this.contextGraphBindingState.isGenerationCurrent(
           contextGraphId,
           expectedBindingGeneration,
         )

@@ -703,6 +703,14 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       && typeof agent.readRfc64PublicCatalogBootstrapStatusV1 === 'function'
         ? agent.readRfc64PublicCatalogBootstrapStatusV1()
         : null;
+    const rfc64CompleteSwmProviders = rfc64PublicCatalogActivation.enabled
+      ? (rfc64PublicCatalogActivation.bootstrap?.acceptedPublicPolicies ?? [])
+        .filter((accepted) => (accepted.completeSwmProviders?.length ?? 0) > 0)
+        .map((accepted) => ({
+          contextGraphId: accepted.policyEnvelope.payload.contextGraphId,
+          providers: accepted.completeSwmProviders,
+        }))
+      : [];
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
       closed: false,
@@ -807,6 +815,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         enabled: rfc64PublicCatalogActivation.enabled,
         selectedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
         autoPublishEnabled: rfc64PublicCatalogActivation.autoPublish !== undefined,
+        completeSwmProviders: rfc64CompleteSwmProviders,
         service: rfc64PublicCatalogService,
         bootstrap: rfc64PublicCatalogBootstrap,
       },

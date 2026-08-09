@@ -8,6 +8,7 @@ import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection,
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import type { SyncPageResult } from './page-fetch.js';
 import {
+  canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
@@ -487,6 +488,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // otherwise abort the whole CG fanout. A parse failure here must degrade to
       // "no materialization this round" — never take down the sync.
       const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
+      let verifiedMetaForInsert = processed.verifiedMeta;
       // Whether the descriptor map is an AUTHORITATIVE statement about this
       // round's metadata, i.e. whether "this ref has no descriptor" may be read
       // as "this ref has nothing to materialize".
@@ -501,7 +503,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let descriptorsAuthoritative = true;
       if (snapshotMaterializer && publicSnapshotStore && wsMetaResult.completed) {
         try {
-          for (const descriptor of parseGraphScopedSwmRecoveryDescriptors({
+          const descriptors = parseGraphScopedSwmRecoveryDescriptors({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,
             // Without the subgraph admission context every KA under a
@@ -511,7 +513,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // graph — not just for the subgraph KA that triggered it.
             ...(registeredSubGraphNames ? { registeredSubGraphNames } : {}),
             ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
-          })) {
+          });
+          verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({
+            metaQuads: processed.verifiedMeta,
+            descriptors,
+          });
+          for (const descriptor of descriptors) {
             const ref = descriptor.publicSnapshotRef;
             if (!ref) continue; // no immutable snapshot for this KA
             const list = snapshotDescriptorsByRef.get(ref) ?? [];
@@ -935,7 +942,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += validWsQuads.length;
         summary.insertedDataTriples += validWsQuads.length;
       }
-      if (processed.verifiedMeta.length > 0) {
+      if (verifiedMetaForInsert.length > 0) {
         // Still written in full — an RDF store is a set, so rewriting the rows
         // the per-KA path already wrote is a no-op, and the rows for KAs that
         // were NOT materialized still have to land.
@@ -960,8 +967,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // insert is the plausible source): a re-filter drops both copies and
         // undercounts by one. Valid because every per-KA row is filtered through
         // `verifiedMetaKeys`, so the ledger is always a subset of these keys.
-        await storeInsert(processed.verifiedMeta);
-        const newlyCountedMeta = processed.verifiedMeta.length - perKaInsertedMetaKeys.size;
+        await storeInsert(verifiedMetaForInsert);
+        const newlyCountedMeta = verifiedMetaForInsert.length - perKaInsertedMetaKeys.size;
         summary.insertedTriples += newlyCountedMeta;
         summary.insertedMetaTriples += newlyCountedMeta;
       }
@@ -974,7 +981,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       hydrateOwnership();
       const storeDurationMs = Date.now() - storeStartedAt;
 
-      logInfo(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${processed.verifiedMeta.length} meta triples`);
+      logInfo(ctx, `SWM sync for "${pid}": ${validWsQuads.length} data + ${verifiedMetaForInsert.length} meta triples`);
       if (fetchDurationMs + verifyDurationMs + snapshotDurationMs + storeDurationMs > 100) {
         logDebug(
           ctx,

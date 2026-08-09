@@ -869,4 +869,15 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     if (!raw || raw === ethers.ZeroHash) return null;
     return raw.toLowerCase();
   }
+
+  /**
+   * Cold-start inverse name binding. The dedicated EVM resolver owns both the
+   * bounded current-slot lane and the deploy-anchored exact-topic fallback.
+   */
+  async resolveContextGraphIdByNameHash(
+    nameHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<bigint | null> {
+    return this.getContextGraphNameHashResolver().resolve(nameHash, options.signal);
+  }
 }

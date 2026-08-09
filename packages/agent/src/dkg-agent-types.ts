@@ -768,6 +768,25 @@ export interface ContextGraphSubscriptionStore {
   saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+  loadSelectedVmReconcileCursor?(
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): Promise<SelectedVmReconcileCursorRecord | null>;
+  saveSelectedVmReconcileCursor?(record: SelectedVmReconcileCursorRecord): Promise<void>;
+}
+
+/**
+ * Restart-durable VM progress for an operator-selected RFC-64 public CG.
+ *
+ * This is deliberately not a ContextGraph subscription record: selection
+ * grants neither membership nor Core custody. The local and numeric chain ids
+ * jointly identify the cursor so a recreated/rebound CG always starts at zero.
+ */
+export interface SelectedVmReconcileCursorRecord {
+  contextGraphId: string;
+  onChainContextGraphId: string;
+  nameHash: string;
+  watermark: number;
 }
 
 /** Restart-durable, generation-gated record of one authoritative no-match scan. */
@@ -1271,6 +1290,13 @@ export interface Rfc64PublicCatalogBootstrapPolicyV1 {
   readonly policyEnvelope: UnsignedContextGraphPolicyEnvelopeV1;
   /** Author catalogs under the policy graph/era. */
   readonly targets: readonly Rfc64PublicCatalogBootstrapTargetV1[];
+  /**
+   * Operator-pinned peers that each serve a complete public-SWM snapshot for
+   * this exact accepted policy generation.  Unlike a catalog target provider,
+   * one of these peers may settle the graph-wide SWM catch-up plane by itself.
+   * Omission preserves the ordinary multi-provider union walk.
+   */
+  readonly completeSwmProviders?: readonly string[];
 }
 
 /**

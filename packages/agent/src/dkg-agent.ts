@@ -458,6 +458,7 @@ export type {
   ContextGraphDiscoveryOptions,
   ContextGraphSubscriptionRecord,
   ContextGraphSubscriptionStore,
+  SelectedVmReconcileCursorRecord,
   ContextGraphWritePreflightProbe,
   ContextGraphMemberPrincipalType,
   ContextGraphMemberStatus,

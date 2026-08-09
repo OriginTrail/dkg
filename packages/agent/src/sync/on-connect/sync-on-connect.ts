@@ -23,10 +23,16 @@ interface SyncOnConnectContext {
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
+  /** Selected graph-complete SWM scope that must run before unrelated history. */
+  getPrioritySharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
-  syncSharedMemoryFromPeer: (peerId: string, contextGraphIds: string[]) => Promise<SyncFromPeerResult>;
+  syncSharedMemoryFromPeer: (
+    peerId: string,
+    contextGraphIds: string[],
+    options?: { selectedPriority?: boolean },
+  ) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
@@ -139,6 +145,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     getSharedMemorySyncContextGraphs,
+    getPrioritySharedMemorySyncContextGraphs,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
@@ -245,6 +252,36 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       return 'skipped-no-sync';
     }
 
+    const prioritySharedMemoryContextGraphIds = syncSharedMemoryOnConnect
+      && getPrioritySharedMemorySyncContextGraphs
+        ? [...new Set(await runNonTransportStep(() => Promise.resolve(
+          getPrioritySharedMemorySyncContextGraphs(remotePeer),
+        )))]
+        : [];
+    if (prioritySharedMemoryContextGraphIds.length > 0) {
+      logInfo(
+        ctx,
+        `Prioritizing ${prioritySharedMemoryContextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+      );
+      const priorityWsSynced = await syncSharedMemoryFromPeer(
+        remotePeer,
+        prioritySharedMemoryContextGraphIds,
+        { selectedPriority: true },
+      );
+      const prioritySharedAccounting = recordSyncAccounting(priorityWsSynced, 'shared');
+      logInfo(
+        ctx,
+        `Synced ${prioritySharedAccounting.insertedTriples} priority shared memory triples from peer ${shortPeer}`,
+      );
+      if (prioritySharedAccounting.deferredByBackpressure) {
+        logInfo(
+          ctx,
+          `Priority shared-memory sync from peer ${shortPeer} deferred by local admission pressure`,
+        );
+        return finishSyncAccounting();
+      }
+    }
+
     const durableContextGraphIds = getDurableSyncContextGraphs?.() ?? [
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
       SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
@@ -311,9 +348,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     }
 
     durableSyncCompleted = true;
-    const wsContextGraphIds = getSharedMemorySyncContextGraphs
+    const allWsContextGraphIds = getSharedMemorySyncContextGraphs
       ? await runNonTransportStep(() => Promise.resolve(getSharedMemorySyncContextGraphs(remotePeer)))
       : getSyncContextGraphs() ?? [];
+    const prioritySharedMemoryContextGraphIdSet = new Set(prioritySharedMemoryContextGraphIds);
+    const wsContextGraphIds = allWsContextGraphIds.filter(
+      (contextGraphId) => !prioritySharedMemoryContextGraphIdSet.has(contextGraphId),
+    );
     if (syncSharedMemoryOnConnect && wsContextGraphIds.length > 0) {
       const wsSynced = await syncSharedMemoryFromPeer(remotePeer, wsContextGraphIds);
       const sharedAccounting = recordSyncAccounting(wsSynced, 'shared');

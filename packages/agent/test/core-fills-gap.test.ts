@@ -664,7 +664,9 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
 
   it('reclaims binding generations when subscription records are deleted', async () => {
     const internals = await boot();
-    const generations = (internals as any).contextGraphBindingGenerations as Map<string, number>;
+    const bindingState = (internals as any).contextGraphBindingState as {
+      generationCount: number;
+    };
 
     for (let index = 0; index < 32; index += 1) {
       const localCgId = `deleted-binding-${index}`;
@@ -674,7 +676,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       expect((internals as any).deleteContextGraphSubscription(localCgId)).toBe(true);
     }
 
-    expect(generations.size).toBe(0);
+    expect(bindingState.generationCount).toBe(0);
 
     const reusedCgId = 'deleted-binding-reused';
     const oldSubscription = { subscribed: true };
@@ -682,9 +684,22 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     (internals as any).bindSubscriptionOnChainId(reusedCgId, oldSubscription, '100');
     const oldGeneration = (internals as any).captureContextGraphBindingGeneration(reusedCgId);
     (internals as any).deleteContextGraphSubscription(reusedCgId);
+    expect((internals as any).isContextGraphBindingGenerationCurrent(
+      reusedCgId,
+      oldGeneration,
+    )).toBe(false);
     const replacement = { subscribed: true };
     internals.subscribedContextGraphs.set(reusedCgId, replacement);
     (internals as any).bindSubscriptionOnChainId(reusedCgId, replacement, '101');
+    const replacementGeneration = (internals as any).captureContextGraphBindingGeneration(
+      reusedCgId,
+    );
+
+    expect(replacementGeneration).not.toBe(oldGeneration);
+    expect((internals as any).isContextGraphBindingGenerationCurrent(
+      reusedCgId,
+      oldGeneration,
+    )).toBe(false);
 
     expect(
       internals.subscribedContextGraphs.get(reusedCgId) === oldSubscription

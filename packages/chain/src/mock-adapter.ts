@@ -1474,6 +1474,26 @@ export class MockChainAdapter implements ChainAdapter {
     return cg.nameHash ?? null;
   }
 
+  /** Offline-development parity for the EVM current-state name-hash reverse lookup. */
+  async resolveContextGraphIdByNameHash(nameHash: string): Promise<bigint | null> {
+    if (!ethers.isHexString(nameHash, 32)) {
+      throw new TypeError('resolveContextGraphIdByNameHash requires a bytes32 nameHash');
+    }
+    const normalized = nameHash.toLowerCase();
+    if (normalized === ethers.ZeroHash) return null;
+    const matches = [...this.contextGraphs.entries()]
+      .filter(([, cg]) => cg.nameHash === normalized)
+      .map(([id]) => id);
+    if (matches.length === 0) return null;
+    if (matches.length !== 1) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ambiguous ${normalized}; ` +
+        `getNameHash commits it to ${matches.length} numeric ids`,
+      );
+    }
+    return matches[0];
+  }
+
   // --- V10 Publish (KnowledgeAssetsV10 → KnowledgeCollectionStorage) ---
 
   async getKnowledgeAssetsLifecycleAddress(): Promise<string> {

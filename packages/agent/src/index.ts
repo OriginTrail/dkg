@@ -229,6 +229,7 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
   type PeerHealth,
   type CclPublishedEvaluationRecord,

@@ -57,19 +57,18 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 /**
  * SCOPE OF THESE TESTS — read before trusting a green run.
  *
- * Every case below hands the worker an `authoritativePeerId` through the stubbed
- * `prepareCatchup` boundary. **No production resolver route currently produces
- * one.** `resolveCuratorSyncPeer` was changed in `e7f46dca2` so that nothing
- * earns `metadata` provenance, because a curator-to-peer binding read out of
- * accumulated `<cg>/_meta` identifies the graph that HOLDS the rows, not the
- * writer that SUPPLIED them — and ordinary durable-meta catch-up lets a
- * contacted peer write those very rows.
+ * Most older cases below hand the worker an `authoritativePeerId` through the
+ * stubbed `prepareCatchup` boundary. No production metadata resolver currently
+ * produces that durable/VM authority: `resolveCuratorSyncPeer` was changed in
+ * `e7f46dca2` because a curator-to-peer binding read out of accumulated
+ * `<cg>/_meta` identifies the graph that HOLDS the rows, not the writer that
+ * SUPPLIED them. RFC-64 now has a separate production route for explicit,
+ * operator-pinned graph-complete SWM providers; the focused test below covers
+ * that resolver-to-worker bridge and keeps its authority separate from VM.
  *
- * So these tests verify that the worker HANDLES an authority correctly IF it is
- * given one. They do NOT verify that the early stop or the per-plane narrowing
- * happens in the shipped build — it cannot, and byte volume is at the pre-fix
- * level until #2018 lands a trusted binding. Read as end-to-end evidence for the
- * fan-out reduction they would be claiming something untrue.
+ * Therefore the injected metadata-authority cases remain worker-contract tests,
+ * while the RFC-64 SWM case is production-wiring evidence for SWM selection.
+ * Do not read the former as proof that VM authority resolution is already live.
  *
  * They are kept rather than deleted because #2018 re-enables exactly this
  * machinery, and deleting them would remove the contract it has to satisfy. When
@@ -142,6 +141,48 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.sharedMemorySynced).toBe(1);
     expect(result.denied).toBe(false);
     expect(finalizeCalls).toEqual([['cg-one-payload', 1, 1]]);
+  });
+
+  it('uses distinct RFC-64 SWM and metadata VM authorities without fallback fan-out', async () => {
+    const peerIds = ['peer-swm', 'peer-curator', 'peer-a', 'peer-b'];
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-plane-authorities', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(args[0] as string);
+            return durableResult();
+          case 'syncSharedMemory':
+            sharedCalls.push(args[0] as string);
+            return sharedResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(durableCalls).toEqual(['peer-curator']);
+    expect(sharedCalls).toEqual(['peer-swm']);
+    expect(result.peersTried).toBe(2);
+    expect(result.peersNotAttempted).toBe(2);
+    expect(result.diagnostics?.durable.authorityUnanswered).toBe(false);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(false);
   });
 
   it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {
