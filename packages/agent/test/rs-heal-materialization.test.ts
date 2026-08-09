@@ -3,7 +3,7 @@ import type { StructuredMutation, TripleStore } from '@origintrail-official/dkg-
 import {
   applyRsHealMaterialization,
   supportsRsHealMaterialization,
-  type RsHealMaterializationPlan,
+  type RsHealMaterializationInput,
 } from '../src/rs-heal-materialization.js';
 
 const SOURCE = 'urn:test:rs-heal:source';
@@ -11,39 +11,17 @@ const TARGET = 'urn:test:rs-heal:target';
 const META = 'urn:test:rs-heal:meta';
 const UAL = 'urn:test:rs-heal:ual';
 
-function plan(): RsHealMaterializationPlan {
+function input(): RsHealMaterializationInput {
   return {
-    dataCopy: {
-      sourceGraphUris: [SOURCE],
-      targetGraphUri: TARGET,
-      roots: ['urn:test:rs-heal:root'],
-      descendantSuffix: '/',
-      excludedPredicates: [],
-    },
-    metadataCopy: {
-      sourceGraphUris: [SOURCE],
-      targetGraphUri: META,
-      roots: [UAL],
-      descendantSuffix: '/',
-      excludedPredicates: [],
-    },
-    completionReset: {
-      graphUri: META,
-      subject: UAL,
-      predicates: ['urn:test:rs-heal:version'],
-      replacementQuads: [],
-    },
-    completionStamp: {
-      graphUri: META,
-      subject: UAL,
-      predicates: ['urn:test:rs-heal:version'],
-      replacementQuads: [{
-        graph: META,
-        subject: UAL,
-        predicate: 'urn:test:rs-heal:version',
-        object: '"1:0"',
-      }],
-    },
+    sourceDataGraphUris: [SOURCE],
+    targetDataGraphUri: TARGET,
+    sourceMetadataGraphUri: SOURCE,
+    targetMetadataGraphUri: META,
+    ual: UAL,
+    roots: ['urn:test:rs-heal:root'],
+    version: { blockNumber: 1, txIndex: 0 },
+    materializedVersionPredicate: 'urn:test:rs-heal:version',
+    dataExcludedPredicates: [],
   };
 }
 
@@ -57,7 +35,7 @@ describe('RS-heal materialization executor', () => {
     } as unknown as TripleStore;
 
     expect(supportsRsHealMaterialization(store)).toBe(true);
-    await applyRsHealMaterialization(store, plan(), () => true);
+    await applyRsHealMaterialization(store, input(), () => true);
 
     expect(seen.map(({ mutation }) => mutation.kind)).toEqual([
       'replace-subject-predicates',
@@ -71,6 +49,53 @@ describe('RS-heal materialization executor', () => {
       'agent.swm.rsHeal.materialize.copy',
       'agent.swm.rsHeal.materialize.marker',
     ]);
+    expect(seen.map(({ options }) => (options as { priority: string }).priority))
+      .toEqual(['background', 'background', 'background', 'background']);
+    expect(seen.map(({ mutation }) => mutation)).toEqual([
+      {
+        kind: 'replace-subject-predicates',
+        input: {
+          graphUri: META,
+          subject: UAL,
+          predicates: ['urn:test:rs-heal:version'],
+          replacementQuads: [],
+        },
+      },
+      {
+        kind: 'copy-subject-projection',
+        input: {
+          sourceGraphUris: [SOURCE],
+          targetGraphUri: TARGET,
+          roots: ['urn:test:rs-heal:root'],
+          descendantSuffix: '/.well-known/genid/',
+          excludedPredicates: [],
+        },
+      },
+      {
+        kind: 'copy-subject-projection',
+        input: {
+          sourceGraphUris: [SOURCE],
+          targetGraphUri: META,
+          roots: [UAL],
+          descendantSuffix: '/',
+          excludedPredicates: ['urn:test:rs-heal:version'],
+        },
+      },
+      {
+        kind: 'replace-subject-predicates',
+        input: {
+          graphUri: META,
+          subject: UAL,
+          predicates: ['urn:test:rs-heal:version'],
+          replacementQuads: [{
+            graph: META,
+            subject: UAL,
+            predicate: 'urn:test:rs-heal:version',
+            object: '"1:0"',
+          }],
+        },
+      },
+    ]);
   });
 
   it('stops before metadata and completion after currentness changes', async () => {
@@ -83,7 +108,7 @@ describe('RS-heal materialization executor', () => {
       }),
     } as unknown as TripleStore;
 
-    await applyRsHealMaterialization(store, plan(), () => current);
+    await applyRsHealMaterialization(store, input(), () => current);
     expect(seen.map(({ kind }) => kind)).toEqual([
       'replace-subject-predicates',
       'copy-subject-projection',
@@ -93,7 +118,7 @@ describe('RS-heal materialization executor', () => {
   it('performs no writes when stale before the first boundary', async () => {
     const structuredMutation = vi.fn(async () => undefined);
     const store = { structuredMutation } as unknown as TripleStore;
-    await applyRsHealMaterialization(store, plan(), () => false);
+    await applyRsHealMaterialization(store, input(), () => false);
     expect(structuredMutation).not.toHaveBeenCalled();
   });
 });

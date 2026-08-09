@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -254,14 +254,7 @@ import {
   applyRsHealMaterialization,
   supportsRsHealMaterialization,
 } from './rs-heal-materialization.js';
-
-function rsHealStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
-  return {
-    priority: 'background',
-    source: `agent.swm.rsHeal.${operation}`,
-    ...(signal ? { signal } : {}),
-  };
-}
+import { rsHealStoreOptions } from './rs-heal-store-options.js';
 
 function isStoreSchedulerBusyError(err: unknown): boolean {
   return err instanceof StoreSchedulerBusyError || (
@@ -3508,37 +3501,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // preserved while large multi-root KCs are split below both 4 MiB
             // structured-mutation limits.
             await applyRsHealMaterialization(this.store, {
-              dataCopy: {
-                sourceGraphUris: [rootData, vmGraph],
-                targetGraphUri: scopedData,
-                roots,
-                descendantSuffix: '/.well-known/genid/',
-                excludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
-              },
-              metadataCopy: {
-                sourceGraphUris: [legacyMeta],
-                targetGraphUri: scopedMeta,
-                roots: [ual],
-                descendantSuffix: '/',
-                excludedPredicates: [`${DKG}materializedVersion`],
-              },
-              completionReset: {
-                graphUri: scopedMeta,
-                subject: ual,
-                predicates: [`${DKG}materializedVersion`],
-                replacementQuads: [],
-              },
-              completionStamp: {
-                graphUri: scopedMeta,
-                subject: ual,
-                predicates: [`${DKG}materializedVersion`],
-                replacementQuads: [{
-                  subject: ual,
-                  predicate: `${DKG}materializedVersion`,
-                  object: `"${version.blockNumber}:${version.txIndex}"`,
-                  graph: scopedMeta,
-                }],
-              },
+              sourceDataGraphUris: [rootData, vmGraph],
+              targetDataGraphUri: scopedData,
+              sourceMetadataGraphUri: legacyMeta,
+              targetMetadataGraphUri: scopedMeta,
+              ual,
+              roots,
+              version,
+              materializedVersionPredicate: `${DKG}materializedVersion`,
+              dataExcludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
             }, canApply, signal);
 
             if (canApply()) {
