@@ -18,6 +18,7 @@ import { DEFAULT_APPROVAL_POLICY, buildEvmDeploymentId } from './chain-adapter.j
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
 } from './chain-adapter.js';
@@ -42,6 +43,7 @@ import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fenc
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
+import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 
 export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
@@ -1450,6 +1452,22 @@ export class EVMChainAdapterBase {
       ...opts,
       rpcUsageConsumer: opts?.rpcUsageConsumer ?? label,
     });
+  }
+
+  /** Canonical KAS update-context ABI read shared by storage and publish mixins. */
+  protected async readKnowledgeAssetUpdateContext(
+    contract: Contract,
+    kaId: bigint,
+    options: ChainReadOptions = {},
+  ): Promise<KnowledgeAssetUpdateContext> {
+    const rawContext = await this.readContractWithOptions(
+      contract,
+      'kas.getKnowledgeAssetUpdateContext',
+      'getKnowledgeAssetUpdateContext',
+      [kaId],
+      { signal: options.signal },
+    );
+    return decodeKnowledgeAssetUpdateContext(rawContext, kaId);
   }
 
   /**
