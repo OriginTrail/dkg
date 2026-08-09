@@ -288,21 +288,25 @@ function enclosingSymbol(node) {
   return '<module>';
 }
 
-function reviewedDynamicQueryRecords(records) {
+function reviewedDynamicQueryInventory(records) {
   const occurrences = new Map();
-  return [...records]
+  const expressionsByRecord = new Map();
+  const inventory = [...records]
     .sort((left, right) => (
       left.path.localeCompare(right.path)
       || left.symbol.localeCompare(right.symbol)
-      || left.expression.localeCompare(right.expression)
+      || left.expressionSha256.localeCompare(right.expressionSha256)
       || left.line - right.line
     ))
-    .map(({ line: _line, ...record }) => {
-      const identity = `${record.package}\0${record.path}\0${record.symbol}\0${record.expression}`;
+    .map(({ line: _line, expression, ...record }) => {
+      const identity = `${record.package}\0${record.path}\0${record.symbol}\0${record.expressionSha256}`;
       const occurrence = (occurrences.get(identity) ?? 0) + 1;
       occurrences.set(identity, occurrence);
-      return Object.freeze({ ...record, occurrence });
+      const compact = Object.freeze({ ...record, occurrence });
+      expressionsByRecord.set(JSON.stringify(compact), expression);
+      return compact;
     });
+  return { inventory, expressionsByRecord };
 }
 
 function diffDynamicQueryInventory(expected, observed) {
@@ -331,15 +335,23 @@ function diffDynamicQueryInventory(expected, observed) {
   return { missing, added };
 }
 
-function dynamicQueryInventoryLabel(record) {
+function dynamicQueryInventoryLabel(record, expression) {
   return `${record.package}:${record.path}#${record.symbol}[${record.occurrence}] `
-    + `${record.expressionSha256} ${record.expression}`;
+    + `${record.expressionSha256} - ${DYNAMIC_QUERY_REASON}`
+    + (expression === undefined ? '' : ` - ${expression}`);
 }
 
 function loadDynamicQueryInventory() {
   const parsed = JSON.parse(readFileSync(DYNAMIC_QUERY_INVENTORY_PATH, 'utf8'));
-  if (!Array.isArray(parsed)) throw new Error('dynamic query inventory must be a JSON array');
-  return parsed;
+  if (parsed?.version !== 1 || !Array.isArray(parsed.records)) {
+    throw new Error('dynamic query inventory must contain version 1 records');
+  }
+  return parsed.records;
+}
+
+function serializeDynamicQueryInventory(records) {
+  const lines = records.map((record) => `    ${JSON.stringify(record)}`);
+  return `{\n  "version": 1,\n  "records": [\n${lines.join(',\n')}\n  ]\n}\n`;
 }
 
 function selfTestStaticSparql() {
@@ -460,12 +472,10 @@ function selfTestDynamicQueryInventoryDiff() {
     package: 'agent',
     path: 'packages/agent/src/example.ts',
     symbol: 'Example.read',
-    expression: 'sparql',
     expressionSha256: 'hash-a',
-    reason: DYNAMIC_QUERY_REASON,
     occurrence: 1,
   });
-  const changed = { ...base, expression: 'otherSparql', expressionSha256: 'hash-b' };
+  const changed = { ...base, expressionSha256: 'hash-b' };
   const moved = { ...base, path: 'packages/agent/src/moved.ts' };
   const unchanged = diffDynamicQueryInventory([base], [base]);
   if (unchanged.missing.length !== 0 || unchanged.added.length !== 0) {
@@ -481,6 +491,10 @@ function selfTestDynamicQueryInventoryDiff() {
   const removed = diffDynamicQueryInventory([base, { ...base, occurrence: 2 }], [base]);
   if (added.added.length !== 1 || removed.missing.length !== 1) {
     throw new Error('dynamic query inventory self-test missed an addition/removal');
+  }
+  const label = dynamicQueryInventoryLabel(base, 'sparql');
+  if (!label.includes(DYNAMIC_QUERY_REASON) || !label.endsWith(' - sparql')) {
+    throw new Error('dynamic query inventory self-test lost review diagnostics');
   }
 }
 
@@ -557,7 +571,6 @@ function scanPackage(name, configPath) {
                 symbol: enclosingSymbol(node),
                 expression: argumentText,
                 expressionSha256: createHash('sha256').update(argumentText).digest('hex'),
-                reason: DYNAMIC_QUERY_REASON,
                 line,
               });
             }
@@ -602,14 +615,15 @@ for (const [key, record] of REVIEWED_NON_STORE_CALLS_BY_KEY) {
     );
   }
 }
-const observedInventory = reviewedDynamicQueryRecords(
+const observed = reviewedDynamicQueryInventory(
   results.flatMap((result) => result.dynamicQueryRecords),
 );
+const observedInventory = observed.inventory;
 
 if (WRITE_INVENTORY) {
   writeFileSync(
     DYNAMIC_QUERY_INVENTORY_PATH,
-    `${JSON.stringify(observedInventory, null, 2)}\n`,
+    serializeDynamicQueryInventory(observedInventory),
     'utf8',
   );
   console.log(
@@ -623,7 +637,12 @@ if (WRITE_INVENTORY) {
     violations.push(`reviewed dynamic query missing: ${dynamicQueryInventoryLabel(record)}`);
   }
   for (const record of inventoryDiff.added) {
-    violations.push(`dynamic query review required: ${dynamicQueryInventoryLabel(record)}`);
+    violations.push(
+      `dynamic query review required: ${dynamicQueryInventoryLabel(
+        record,
+        observed.expressionsByRecord.get(JSON.stringify(record)),
+      )}`,
+    );
   }
 }
 for (const result of results) {
