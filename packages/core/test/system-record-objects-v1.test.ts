@@ -1224,6 +1224,84 @@ describe('system-record owned subjects and verification closure', () => {
     expect(descriptorReference.cacheDigest).not.toBe(descriptorReference.digest);
   });
 
+  it('derives the established semantic and cache identity for every object kind', async () => {
+    const fixture = await authorityFixture();
+    const head = activeHead(fixture);
+    const transition = authorityTransition(fixture, head);
+    const resolution = forkResolution(fixture, head);
+    const signedCases = [
+      {
+        objectKind: 'agent-profile-head' as const,
+        semanticDigest: computeAgentProfileHeadObjectDigestV1(head),
+        canonicalBytes: fakeEnvelopeBytes(head),
+      },
+      {
+        objectKind: 'authority-transition' as const,
+        semanticDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+        canonicalBytes: fakeEnvelopeBytes(transition),
+      },
+      {
+        objectKind: 'fork-resolution' as const,
+        semanticDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+        canonicalBytes: fakeEnvelopeBytes(resolution),
+      },
+    ];
+    for (const artifact of signedCases) {
+      const reference = createSystemRecordCacheReferenceV1(
+        artifact.objectKind,
+        artifact.semanticDigest,
+        artifact.canonicalBytes,
+      );
+      expect(reference.digest).toBe(artifact.semanticDigest);
+      expect(reference.cacheDigest).toBe(digestSystemRecordBytesV1(
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedEnvelope,
+        artifact.canonicalBytes,
+      ));
+    }
+
+    const descriptor = {
+      objectType: 'root-descriptor', kind: 'agents', networkId: NETWORK,
+      epoch: '0', version: '0', treeRootDigest: DIGEST_A, totalRows: '0',
+    } as const;
+    const descriptorDigest = computeSystemRecordRootDescriptorDigestV1(descriptor);
+    const descriptorBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1({
+      object: descriptor,
+      objectDigest: descriptorDigest,
+      providerPeerId: fixture.peerId,
+      signatureSuite: 'ed25519-v1',
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const descriptorReference = createSystemRecordCacheReferenceV1(
+      'root-descriptor',
+      descriptorDigest,
+      descriptorBytes,
+    );
+    expect(descriptorReference).toMatchObject({
+      digest: descriptorDigest,
+      cacheDigest: digestSystemRecordBytesV1(
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedRootDescriptorEnvelope,
+        descriptorBytes,
+      ),
+    });
+
+    const byteCases = [
+      ['inventory-internal', SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryInternal],
+      ['inventory-leaf', SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf],
+      ['conflict-evidence', SYSTEM_RECORD_DIGEST_DOMAINS_V1.conflictEvidence],
+      ['owned-subject-table', SYSTEM_RECORD_DIGEST_DOMAINS_V1.ownedSubjectTable],
+      ['profile-bundle', SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle],
+    ] as const;
+    for (const [objectKind, domain] of byteCases) {
+      const canonicalBytes = new TextEncoder().encode(`identity-${objectKind}`);
+      const digest = digestSystemRecordBytesV1(domain, canonicalBytes);
+      expect(createSystemRecordCacheReferenceV1(
+        objectKind,
+        digest,
+        canonicalBytes,
+      )).toMatchObject({ digest, cacheDigest: digest });
+    }
+  });
+
   it('derives a complete raw-artifact closure and fails closed on a missing dependency', async () => {
     const fixture = await authorityFixture();
     const bundle = new TextEncoder().encode('canonical-profile-bundle');

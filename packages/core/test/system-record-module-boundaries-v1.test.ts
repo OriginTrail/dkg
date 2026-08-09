@@ -5,7 +5,7 @@ import * as ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { SYSTEM_RECORD_OBJECT_CAPS_V1 } from '../src/system-record-limits-v1.js';
 import {
-  SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1,
+  SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1,
 } from '../src/system-record-object-identity-descriptors-v1-internal.js';
 
 const source = (name: string): string =>
@@ -83,6 +83,7 @@ describe('System Record V1 module ownership', () => {
       'system-record-agent-profile-control-codecs-v1-internal.ts',
       'system-record-agent-profile-evidence-codecs-v1-internal.ts',
       'system-record-owned-subject-codecs-v1-internal.ts',
+      'system-record-signed-envelope-codecs-v1-internal.ts',
       'system-record-signatures-v1-internal.ts',
       'system-record-authority-verification-v1-internal.ts',
       'system-record-authority-v1-internal.ts',
@@ -130,12 +131,12 @@ describe('System Record V1 module ownership', () => {
       .not.toMatch(/@libp2p\/|@noble\/ed25519/u);
   });
 
-  it('owns one exhaustive internal identity descriptor for every object kind', () => {
-    expect(Object.keys(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1).sort())
+  it('owns one exhaustive internal identity deriver for every object kind', () => {
+    expect(Object.keys(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1).sort())
       .toEqual(Object.keys(SYSTEM_RECORD_OBJECT_CAPS_V1).sort());
-    expect(Object.isFrozen(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1)).toBe(true);
-    for (const descriptor of Object.values(SYSTEM_RECORD_OBJECT_IDENTITY_DESCRIPTORS_V1)) {
-      expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(Object.isFrozen(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1)).toBe(true);
+    for (const derive of Object.values(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1)) {
+      expect(derive).toBeTypeOf('function');
     }
     expect(source('system-record-inventory-v1.ts'))
       .not.toContain('system-record-object-identity-descriptors-v1-internal');
@@ -173,6 +174,18 @@ describe('System Record V1 module ownership', () => {
     ]) {
       expectNoDependencyPath(unit, ['system-record-signatures-v1-internal.ts']);
     }
+  });
+
+  it('keeps cache identity below profile signature verification', () => {
+    expectNoDependencyPath('system-record-object-identity-descriptors-v1-internal.ts', [
+      'system-record-signatures-v1-internal.ts',
+    ]);
+    expect(directDependencies('system-record-object-identity-descriptors-v1-internal.ts'))
+      .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
+    expect(directDependencies('system-record-signatures-v1-internal.ts'))
+      .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
+    expect(source('system-record-signed-envelope-codecs-v1-internal.ts'))
+      .not.toMatch(/@noble\/ed25519/u);
   });
 
   it('keeps closure verification below authority policy and summary minting private', () => {
