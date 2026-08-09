@@ -4322,6 +4322,47 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ].filter((peerId) => !record.attemptedPeerIds.has(peerId));
   }
 
+  /**
+   * Select one physical peer for an exact-VM target. A peer that returned an
+   * exact hit in this slice is preferred and may be reused sequentially; all
+   * other peers remain one-use-per-slice. Unavailable peers and the global
+   * considered-peer cap remain authoritative for both classes.
+   */
+  selectVmReconcileExactCandidate(
+    this: DKGAgent,
+    record: VmReconcileRotationRecord | undefined,
+    fallbackCandidatePeerIds: readonly string[],
+    policy: {
+      provenHolderPeerIds: ReadonlySet<string>;
+      usedPeerIds: ReadonlySet<string>;
+      unavailablePeerIds: ReadonlySet<string>;
+      consideredPeerIds: Set<string>;
+    },
+  ): string | undefined {
+    const uncreditedCandidateOrder = record
+      ? this.vmReconcileUncreditedCandidateOrder(record)
+      : [...fallbackCandidatePeerIds];
+    const candidateOrder = [
+      ...uncreditedCandidateOrder.filter((peerId) =>
+        policy.provenHolderPeerIds.has(peerId)),
+      ...uncreditedCandidateOrder.filter((peerId) =>
+        !policy.provenHolderPeerIds.has(peerId)),
+    ];
+    for (const peerId of candidateOrder) {
+      if (
+        (policy.usedPeerIds.has(peerId) && !policy.provenHolderPeerIds.has(peerId))
+        || policy.unavailablePeerIds.has(peerId)
+      ) continue;
+      if (
+        !policy.consideredPeerIds.has(peerId)
+        && policy.consideredPeerIds.size >= DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX
+      ) return undefined;
+      policy.consideredPeerIds.add(peerId);
+      return peerId;
+    }
+    return undefined;
+  }
+
   findVmReconcileRotationReplacement(
     this: DKGAgent,
     requestingCgId?: string,
@@ -5014,25 +5055,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // uncredited, but consume this target's turn so another missing KA gets
       // the next physical peer slot in the same bounded pass.
       let peerId: string | undefined;
-      const uncreditedCandidateOrder = installedRecord
-        ? this.vmReconcileUncreditedCandidateOrder(installedRecord)
-        : orderedPeerIds;
-      const candidateOrder = [
-        ...uncreditedCandidateOrder.filter((candidatePeerId) =>
-          provenHolderPeerIds.has(candidatePeerId)),
-        ...uncreditedCandidateOrder.filter((candidatePeerId) =>
-          !provenHolderPeerIds.has(candidatePeerId)),
-      ];
-      for (const candidatePeerId of candidateOrder) {
-        if (
-          (usedPeerIds.has(candidatePeerId) && !provenHolderPeerIds.has(candidatePeerId))
-          || unavailablePeerIds.has(candidatePeerId)
-        ) continue;
-        if (
-          !consideredPeerIds.has(candidatePeerId)
-          && consideredPeerIds.size >= DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX
-        ) break;
-        consideredPeerIds.add(candidatePeerId);
+      const candidatePeerId = this.selectVmReconcileExactCandidate(
+        installedRecord,
+        orderedPeerIds,
+        { provenHolderPeerIds, usedPeerIds, unavailablePeerIds, consideredPeerIds },
+      );
+      if (candidatePeerId) {
         attemptedOrdinals.add(target.ordinal);
         if (installedRecord) {
           installedRecord.lastAttemptedPeerId = candidatePeerId;
@@ -5065,24 +5093,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isRecoveryCurrent()) return noRecovery();
         if (!connectedPeer || !protocolReady) {
           unavailablePeerIds.add(candidatePeerId);
-          break;
+        } else {
+          // Network boundary: a merely-connected peer is not necessarily
+          // admitted to this DKG network. Never send an authenticated exact
+          // request to an unverified or rejected peer.
+          const peerAdmitted = await this.ensurePeerAdmittedForRecovery(
+            candidatePeerId,
+            ctx,
+            'VM exact fetch',
+            signal,
+          );
+          if (!isRecoveryCurrent()) return noRecovery();
+          if (!peerAdmitted) unavailablePeerIds.add(candidatePeerId);
+          else peerId = candidatePeerId;
         }
-        // Network boundary: a merely-connected peer is not necessarily
-        // admitted to this DKG network. Never send an authenticated exact
-        // request to an unverified or rejected peer.
-        const peerAdmitted = await this.ensurePeerAdmittedForRecovery(
-          candidatePeerId,
-          ctx,
-          'VM exact fetch',
-          signal,
-        );
-        if (!isRecoveryCurrent()) return noRecovery();
-        if (!peerAdmitted) {
-          unavailablePeerIds.add(candidatePeerId);
-          break;
-        }
-        peerId = candidatePeerId;
-        break;
       }
       if (!peerId) {
         if (installedRecord) {
