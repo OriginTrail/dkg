@@ -33,9 +33,10 @@ describe('RS-heal materialization executor', () => {
         seen.push({ mutation, options });
       }),
     } as unknown as TripleStore;
+    const signal = new AbortController().signal;
 
     expect(supportsRsHealMaterialization(store)).toBe(true);
-    await applyRsHealMaterialization(store, input(), () => true);
+    await applyRsHealMaterialization(store, input(), () => true, signal);
 
     expect(seen.map(({ mutation }) => mutation.kind)).toEqual([
       'replace-subject-predicates',
@@ -51,6 +52,8 @@ describe('RS-heal materialization executor', () => {
     ]);
     expect(seen.map(({ options }) => (options as { priority: string }).priority))
       .toEqual(['background', 'background', 'background', 'background']);
+    expect(seen.map(({ options }) => (options as { signal?: AbortSignal }).signal))
+      .toEqual([signal, signal, signal, signal]);
     expect(seen.map(({ mutation }) => mutation)).toEqual([
       {
         kind: 'replace-subject-predicates',
