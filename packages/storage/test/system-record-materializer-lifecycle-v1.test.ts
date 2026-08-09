@@ -755,20 +755,28 @@ describe('system-record lane session lifecycle V1', () => {
       expect(handoff.calls).toEqual([]);
     });
 
-    it('fails managed mutations closed when the epoch binding is MALFORMED', async () => {
-      // The result is captured inside the result-free barrier, then validated
-      // by the canonical epoch-rotation guard. A rotation that returns
-      // something plausible-but-wrong must fail CLOSED, not be read as "no
-      // binding" and quietly enable.
-      handoff.rotateMaterializationEpoch = (async () => ({
-        epoch: 1,
-        childGeneration: null,
-      })) as unknown as RecordingHandoff['rotateMaterializationEpoch'];
+    // The result is captured inside the result-free barrier, then validated by
+    // the canonical epoch-rotation guard.
+    //
+    // Parameterized deliberately. The behaviour this change introduced is
+    // rejecting a non-`undefined` FALSEY result: the previous `!rotated` logic
+    // read `null` as "no binding" and fell through to enable. A truthy-but-wrong
+    // object was ALREADY rejected beforehand, so a case using only that shape
+    // pins the old behaviour and proves nothing about the new guard.
+    for (const [label, malformed] of [
+      ['null', null],
+      ['a non-object', 0],
+      ['a truthy object with wrong field types', { epoch: 1, childGeneration: null }],
+    ] as const) {
+      it(`fails managed mutations closed when the epoch binding is ${label}`, async () => {
+        handoff.rotateMaterializationEpoch = (async () =>
+          malformed) as unknown as RecordingHandoff['rotateMaterializationEpoch'];
 
-      await expect(build().open(ACTIVATION)).rejects.toThrow(
-        /materialization epoch binding/,
-      );
-    });
+        await expect(build().open(ACTIVATION)).rejects.toThrow(
+          /materialization epoch binding/,
+        );
+      });
+    }
 
     it('refuses to enable on terminal ownership', async () => {
       ownership.invalidate('port-release-unproven');
