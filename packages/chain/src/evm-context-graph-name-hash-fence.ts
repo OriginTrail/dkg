@@ -8,12 +8,19 @@
 
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 
-import { RPC_READ_STALL_TIMEOUT_MS } from './evm-adapter-constants.js';
+import {
+  CG_REGISTRY_MAX_SCAN_PAGES,
+  RPC_READ_STALL_TIMEOUT_MS,
+} from './evm-adapter-constants.js';
 import { withTimeout } from './evm-adapter-rpc.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
-import type {
-  ContextGraphNameHashSlotIndexAnchor,
-  ContextGraphNameHashSlotIndexScope,
+import {
+  CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
+  ContextGraphNameHashSlotIndex,
+  type ContextGraphNameHashSlot,
+  type ContextGraphNameHashSlotIndexAnchor,
+  type ContextGraphNameHashSlotIndexResult,
+  type ContextGraphNameHashSlotIndexScope,
 } from './context-graph-name-hash-resolver.js';
 
 export interface EvmContextGraphNameHashFenceDependencies {
@@ -102,33 +109,13 @@ export interface ContextGraphNameHashHistoricalScan {
   readonly anchor: () => Promise<ContextGraphNameHashAnchoredHistoricalScan>;
 }
 
-/** Domain-shaped chain reader consumed by both reverse-resolution lanes. */
-export interface EvmContextGraphNameHashReader {
-  initialize(): Promise<void>;
+/** High-level chain source; temporal fencing remains an implementation detail. */
+export interface EvmContextGraphNameHashSource {
+  resolve(
+    normalizedNameHash: string,
+    onIndexCommit: () => void,
+  ): Promise<bigint | null>;
   invalidate(): void;
-  captureScope(): Promise<ContextGraphNameHashSlotIndexScope>;
-  captureScopeToken(): Promise<ContextGraphNameHashScopeToken>;
-  assertScopeCurrent(
-    token: ContextGraphNameHashScopeToken,
-    lane: 'current-slot resolution' | 'historical scan',
-  ): Promise<void>;
-  captureAnchor(): Promise<ContextGraphNameHashSlotIndexAnchor>;
-  loadAnchorHash(blockNumber: number): Promise<string | null>;
-  loadProviderHighWaters(): Promise<ContextGraphNameHashProviderHighWaters>;
-  readCurrentNameHash(
-    contextGraphId: bigint,
-    signal?: AbortSignal,
-    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
-  ): Promise<string | null>;
-  prepareHistoricalScan(): Promise<ContextGraphNameHashHistoricalScan>;
-  loadHistoricalRegistryHighWaterAtHead(
-    providers: readonly JsonRpcProvider[],
-    head: number,
-  ): Promise<bigint>;
-  assertHistoricalHeadCurrent(
-    anchor: Pick<ContextGraphNameHashHistoricalHeadAnchor<unknown>, 'head' | 'headHash'>,
-    usedProviders: ReadonlySet<JsonRpcProvider>,
-  ): Promise<void>;
 }
 
 function sameScope(
@@ -159,19 +146,129 @@ function waitForContextGraphSlotRead<T>(
   });
 }
 
-export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashReader {
+export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSource {
   private bindingEpoch = 0;
+
+  private readonly slotIndex = new ContextGraphNameHashSlotIndex();
 
   constructor(
     private readonly dependencies: EvmContextGraphNameHashFenceDependencies,
   ) {}
 
-  initialize(): Promise<void> {
+  private initialize(): Promise<void> {
     return this.dependencies.initialize();
   }
 
   invalidate(): void {
     this.bindingEpoch += 1;
+    this.slotIndex.clear();
+  }
+
+  /**
+   * Resolve through one cohesive chain-read boundary. The current and
+   * historical lanes are private implementation details so callers cannot
+   * accidentally omit or reorder a scope, high-water, or canonical-head
+   * fence.
+   */
+  async resolve(
+    normalizedNameHash: string,
+    onIndexCommit: () => void,
+  ): Promise<bigint | null> {
+    await this.initialize();
+    const current = await this.resolveCurrentSlots(normalizedNameHash, onIndexCommit);
+    return current.mode === 'historical'
+      ? this.resolveHistorical(normalizedNameHash)
+      : current.id;
+  }
+
+  /** Entire current-slot fence choreography, kept behind the chain source. */
+  private async resolveCurrentSlots(
+    normalizedNameHash: string,
+    onIndexCommit: () => void,
+  ): Promise<ContextGraphNameHashSlotIndexResult> {
+    const scopeToken = await this.captureScopeToken();
+    const result = await this.slotIndex.resolve(
+      normalizedNameHash,
+      {
+        captureScope: () => this.captureScope(),
+        captureAnchor: () => this.captureAnchor(),
+        loadAnchorHash: (blockNumber) => this.loadAnchorHash(blockNumber),
+        loadHighWaterSnapshot: () => this.loadProviderHighWaters(),
+        loadRange: (firstId, lastId, snapshot) =>
+          this.loadSlots(firstId, lastId, snapshot),
+        onCommit: onIndexCommit,
+      },
+    );
+    if (result.mode === 'historical') return result;
+
+    const verification = await this.loadProviderHighWaters();
+    if (verification.latestId !== result.highWater) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: Context Graph registry advanced from ` +
+        `${result.highWater.toString()} to ${verification.latestId.toString()} ` +
+        'during current-slot resolution',
+      );
+    }
+    if (result.id !== null) {
+      const currentHash = await this.readCurrentNameHash(
+        result.id,
+        undefined,
+        verification.providerHighWaters,
+      );
+      if (currentHash !== normalizedNameHash) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: indexed slot ${result.id.toString()} ` +
+          `currently commits ${currentHash ?? ethers.ZeroHash}, expected ` +
+          normalizedNameHash,
+        );
+      }
+    }
+
+    await this.assertScopeCurrent(scopeToken, 'current-slot resolution');
+    return result;
+  }
+
+  /** Fixed-concurrency staged range loader for the bounded current lane. */
+  private async loadSlots(
+    firstId: bigint,
+    lastId: bigint,
+    highWaterSnapshot: ContextGraphNameHashProviderHighWaters,
+  ): Promise<readonly ContextGraphNameHashSlot[]> {
+    const scanController = new AbortController();
+    const slots: ContextGraphNameHashSlot[] = [];
+    let nextId = firstId;
+    let failed = false;
+    let firstFailure: unknown;
+    const worker = async (): Promise<void> => {
+      while (!failed) {
+        const contextGraphId = nextId;
+        if (contextGraphId > lastId) return;
+        nextId += 1n;
+        try {
+          const currentHash = await this.readCurrentNameHash(
+            contextGraphId,
+            scanController.signal,
+            highWaterSnapshot.providerHighWaters,
+          );
+          slots.push({ id: contextGraphId, nameHash: currentHash });
+        } catch (cause) {
+          if (!failed) {
+            failed = true;
+            firstFailure = cause;
+            scanController.abort(cause);
+          }
+          return;
+        }
+      }
+    };
+
+    const workerCount = Math.min(
+      CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
+      Number(lastId - firstId + 1n),
+    );
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+    if (failed) throw firstFailure;
+    return slots;
   }
 
   async captureScope(): Promise<ContextGraphNameHashSlotIndexScope> {
@@ -290,6 +387,105 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashRead
       );
     }
     return observed.values().next().value ?? null;
+  }
+
+  /** Entire historical fence choreography, kept behind the chain source. */
+  private async resolveHistorical(normalizedNameHash: string): Promise<bigint | null> {
+    const scopeToken = await this.captureScopeToken();
+    const scan = await this.prepareHistoricalScan();
+    const { fromBlock, head, pageSize } = scan;
+    const pages = fromBlock > head
+      ? 0
+      : Math.ceil((head - fromBlock + 1) / pageSize);
+    if (pages > CG_REGISTRY_MAX_SCAN_PAGES) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: historical ContextGraphCreated scan ` +
+        `would need ${pages} eth_getLogs calls over blocks ` +
+        `[${fromBlock}, ${head}] at a ${pageSize}-block window ` +
+        `(budget ${CG_REGISTRY_MAX_SCAN_PAGES} pages).`,
+      );
+    }
+
+    const anchoredScan = await scan.anchor();
+    const { headAnchor } = anchoredScan;
+    const scannedRegistryHighWater = await this.loadHistoricalRegistryHighWaterAtHead(
+      headAnchor.scanProviders.map(({ provider }) => provider),
+      head,
+    );
+    const assertHistoricalRegistryCurrent = async (): Promise<void> => {
+      const currentBoundary = await this.loadProviderHighWaters();
+      if (currentBoundary.latestId !== scannedRegistryHighWater) {
+        throw new Error(
+          `resolveContextGraphIdByNameHash: registry high-water changed from ` +
+          `${scannedRegistryHighWater.toString()} to ` +
+          `${currentBoundary.latestId.toString()} during historical scan`,
+        );
+      }
+    };
+
+    const usedProviders = new Set<JsonRpcProvider>([
+      headAnchor.scanProviders[0]!.provider,
+    ]);
+    const assertScanCurrent = async (): Promise<void> => {
+      await this.assertScopeCurrent(scopeToken, 'historical scan');
+      await this.assertHistoricalHeadCurrent(headAnchor, usedProviders);
+    };
+
+    if (fromBlock > head) {
+      await assertScanCurrent();
+      await assertHistoricalRegistryCurrent();
+      await assertScanCurrent();
+      return null;
+    }
+
+    const ids = new Set<bigint>();
+    let preferred: JsonRpcProvider | undefined;
+    for (let lo = fromBlock; lo <= head; lo += pageSize) {
+      const hi = Math.min(lo + pageSize - 1, head);
+      const page = await anchoredScan.readContextGraphCreatedPage(
+        normalizedNameHash,
+        lo,
+        hi,
+        preferred,
+      );
+      preferred = page.provider;
+      usedProviders.add(page.provider);
+      for (const id of page.ids) {
+        if (id <= 0n) {
+          throw new Error(
+            `resolveContextGraphIdByNameHash: invalid Context Graph id ` +
+            `${id.toString()} for ${normalizedNameHash}`,
+          );
+        }
+        ids.add(id);
+      }
+    }
+
+    await assertScanCurrent();
+    if (ids.size === 0) {
+      await assertHistoricalRegistryCurrent();
+      await assertScanCurrent();
+      return null;
+    }
+    if (ids.size !== 1) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ambiguous ${normalizedNameHash}; ` +
+        `ContextGraphCreated committed it to ${ids.size} numeric ids`,
+      );
+    }
+
+    const id = ids.values().next().value as bigint;
+    const currentHash = await this.readCurrentNameHash(id);
+    if (currentHash !== normalizedNameHash) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: slot ${id.toString()} currently commits ` +
+        `${currentHash ?? ethers.ZeroHash}, expected ${normalizedNameHash}`,
+      );
+    }
+    await assertScanCurrent();
+    await assertHistoricalRegistryCurrent();
+    await assertScanCurrent();
+    return id;
   }
 
   /** Build one exact-topic historical scan session behind a domain boundary. */

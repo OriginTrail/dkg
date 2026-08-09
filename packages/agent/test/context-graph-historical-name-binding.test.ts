@@ -1,14 +1,48 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { ContextGraphRegistryMethods } from '../src/dkg-agent-cg-registry.js';
-import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
-import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { DKGAgent } from '../src/dkg-agent.js';
 import { projectContextGraphSubscriptionPersistence } from '../src/context-graph-subscription-policy.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const LOCAL_ID = 'selected-public-cg';
 const NAME_HASH = `0x${'ab'.repeat(32)}`;
+
+type BindingAgentMethods = Pick<DKGAgent,
+  | 'bindSubscriptionOnChainId'
+  | 'bindSubscriptionReverseNameHashOnChainId'
+  | 'clearSubscriptionReverseNameHashBinding'
+  | 'resolveContextGraphNameHashBindingTarget'
+  | 'resolveCurrentNameHashContextGraphBinding'
+  | 'resolveContextGraphOnChainIdBinding'
+  | 'getContextGraphOnChainId'
+  | 'resolveContextGraphNumericIdForPolicy'
+  | 'persistVmReconcileWatermark'
+  | 'selfPrimeSubscriptionOnChainId'
+  | 'resolveVmReconcileTarget'
+  | 'setContextGraphSubscription'
+  | 'handleKARegisteredNudge'
+  | 'resolveOnChainParticipantAgents'
+  | 'ensureContextGraphLocal'
+  | 'persistJoinApprovalStateStrict'
+  | 'normalizeMembershipPrincipal'
+  | 'enqueueContextGraphMembershipPersistWrite'
+  | 'enqueueContextGraphSubscriptionPersistWrite'
+>;
+
+/**
+ * Build test state on the real composed DKGAgent prototype. Production mixin
+ * wiring therefore has one owner (`applyMixins`); scenarios override only the
+ * state/collaborators they exercise and remain type-checked against the public
+ * method graph.
+ */
+function createBindingAgentHarness<TState extends object>(
+  state: TState,
+): TState & BindingAgentMethods {
+  return Object.assign(
+    Object.create(DKGAgent.prototype) as BindingAgentMethods,
+    state,
+  );
+}
 
 function selectedFixture(resolved: bigint | null = 42n) {
   const query = vi.fn<TripleStore['query']>(async () => ({
@@ -30,89 +64,45 @@ function selectedFixture(resolved: bigint | null = 42n) {
     syncMode: 'always-on',
     onChainHash: NAME_HASH,
   };
-  const agent: any = {
+  const reconcileCursors = new Map<string, {
+    watermark: number;
+    ahead: Map<unknown, unknown>;
+    scanOrdinal: number;
+  }>();
+  const chain: {
+    resolveContextGraphIdByNameHash: typeof resolveContextGraphIdByNameHash;
+    getContextGraphParticipantAgents?: (contextGraphId: bigint) => Promise<string[]>;
+  } = { resolveContextGraphIdByNameHash };
+  const agent = createBindingAgentHarness({
     store: { query } as unknown as TripleStore,
-    chain: { resolveContextGraphIdByNameHash },
+    chain,
     subscribedContextGraphs: new Map([[LOCAL_ID, subscription]]),
     wireIdToLocalCgId: new Map([[NAME_HASH, LOCAL_ID]]),
-    config: { syncContextGraphs: [] },
+    config: { syncContextGraphs: [] } as Record<string, unknown>,
     contextGraphWireId: (id: string) => id.toLowerCase(),
     contextGraphNameCommitment: (id: string) => id === LOCAL_ID ? NAME_HASH : id.toLowerCase(),
     localCgIdForWireId: (id: string) => id.toLowerCase() === NAME_HASH ? LOCAL_ID : id,
     invalidateListContextGraphsCache: vi.fn(),
     contextGraphBindingState: new ContextGraphBindingState(),
-    reconcileCursors: new Map(),
+    reconcileCursors,
     persistContextGraphSubscriptionStrict: vi.fn(async () => undefined),
     emitReplication: vi.fn(),
     forceClearVmReconcileStateForContextGraph: vi.fn((localId: string) => {
-      agent.reconcileCursors.delete(localId);
+      reconcileCursors.delete(localId);
     }),
     clearVmReconcileStateForContextGraph: vi.fn((localId: string) => {
-      agent.reconcileCursors.delete(localId);
+      reconcileCursors.delete(localId);
     }),
     log: { info: vi.fn(), warn: vi.fn() },
-  };
-  agent.bindSubscriptionOnChainId = (
-    localId: string,
-    sub: typeof subscription,
-    onChainId: string,
-  ) => SwmHostModeMethods.prototype.bindSubscriptionOnChainId.call(
-    agent,
-    localId,
-    sub,
-    onChainId,
-  );
-  agent.bindSubscriptionReverseNameHashOnChainId = (
-    localId: string,
-    sub: typeof subscription,
-    onChainId: string,
-    nameHash: string,
-  ) => SwmHostModeMethods.prototype.bindSubscriptionReverseNameHashOnChainId.call(
-    agent,
-    localId,
-    sub,
-    onChainId,
-    nameHash,
-  );
-  agent.clearSubscriptionReverseNameHashBinding = (localId: string) =>
-    SwmHostModeMethods.prototype.clearSubscriptionReverseNameHashBinding.call(
-      agent,
-      localId,
-    );
-  agent.resolveContextGraphNameHashBindingTarget = (requestedId: string) =>
-    ContextGraphResolveMethods.prototype.resolveContextGraphNameHashBindingTarget.call(
-      agent,
-      requestedId,
-    );
-  agent.resolveCurrentNameHashContextGraphBinding = (
-    requestedId: string,
-    options?: { signal?: AbortSignal },
-  ) => ContextGraphResolveMethods.prototype.resolveCurrentNameHashContextGraphBinding.call(
-    agent,
-    requestedId,
-    options,
-  );
-  agent.resolveContextGraphOnChainIdBinding = (
-    requestedId: string,
-    options?: { signal?: AbortSignal; source?: string },
-  ) => ContextGraphRegistryMethods.prototype.resolveContextGraphOnChainIdBinding.call(
-    agent,
-    requestedId,
-    options,
-  );
-  agent.getContextGraphOnChainId = (
-    requestedId: string,
-    options?: { signal?: AbortSignal; source?: string },
-  ) => ContextGraphRegistryMethods.prototype.getContextGraphOnChainId.call(
-    agent,
-    requestedId,
-    options,
-  );
-  agent.resolveContextGraphNumericIdForPolicy = (requestedId: string) =>
-    ContextGraphResolveMethods.prototype.resolveContextGraphNumericIdForPolicy.call(
-      agent,
-      requestedId,
-    );
+    vmReconcileEnabled: () => false,
+    vmReconcileLifecycleGeneration: 0,
+    vmReconcileRotationClosed: false,
+    resolveLocalCgIdByOnChainId: (_onChainId: string) => null as string | null,
+    vmReconcileDispatcher: { triggerLive: vi.fn() },
+    onChainParticipantAgentsCache: new Map(),
+    contextGraphExists: vi.fn(async () => false),
+    subscribeToContextGraph: vi.fn(),
+  });
   return {
     agent,
     query,
@@ -126,11 +116,7 @@ function getOnChainId(
   requestedId: string,
   options?: { signal?: AbortSignal },
 ): Promise<string | null> {
-  return ContextGraphRegistryMethods.prototype.getContextGraphOnChainId.call(
-    fixture.agent,
-    requestedId,
-    options,
-  );
+  return fixture.agent.getContextGraphOnChainId(requestedId, options);
 }
 
 describe('cold current-state Context Graph name binding', () => {
@@ -302,8 +288,7 @@ describe('cold current-state Context Graph name binding', () => {
       watermarkBefore: 0,
     };
 
-    await SwmHostModeMethods.prototype.persistVmReconcileWatermark.call(
-      reverseFixture.agent,
+    await reverseFixture.agent.persistVmReconcileWatermark(
       LOCAL_ID,
       5,
       reverseTarget,
@@ -332,8 +317,7 @@ describe('cold current-state Context Graph name binding', () => {
       watermarkBefore: 0,
     };
 
-    await SwmHostModeMethods.prototype.persistVmReconcileWatermark.call(
-      authoritativeFixture.agent,
+    await authoritativeFixture.agent.persistVmReconcileWatermark(
       LOCAL_ID,
       5,
       authoritativeTarget,
@@ -352,8 +336,7 @@ describe('cold current-state Context Graph name binding', () => {
     const fixture = selectedFixture();
     fixture.agent.vmReconcileEnabled = () => true;
 
-    await expect(SwmHostModeMethods.prototype.selfPrimeSubscriptionOnChainId.call(
-      fixture.agent,
+    await expect(fixture.agent.selfPrimeSubscriptionOnChainId(
       LOCAL_ID,
       fixture.subscription,
     )).resolves.toBe('42');
@@ -369,8 +352,7 @@ describe('cold current-state Context Graph name binding', () => {
       nameHash: NAME_HASH,
     });
 
-    await expect(SwmHostModeMethods.prototype.resolveVmReconcileTarget.call(
-      fixture.agent,
+    await expect(fixture.agent.resolveVmReconcileTarget(
       LOCAL_ID,
     )).resolves.toMatchObject({ onChainId: '42', onChainCgId: 42n });
     expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledTimes(2);
@@ -378,8 +360,7 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.resolveContextGraphIdByNameHash.mockRejectedValueOnce(
       new Error('ambiguous name hash: getNameHash commits it to 2 numeric ids'),
     );
-    await expect(SwmHostModeMethods.prototype.resolveVmReconcileTarget.call(
-      fixture.agent,
+    await expect(fixture.agent.resolveVmReconcileTarget(
       LOCAL_ID,
     )).rejects.toThrow(/ambiguous.*2 numeric ids/i);
     expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledTimes(3);
@@ -443,8 +424,7 @@ describe('cold current-state Context Graph name binding', () => {
     const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
     const nextHash = `0x${'ef'.repeat(32)}`;
 
-    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
-      fixture.agent,
+    fixture.agent.setContextGraphSubscription(
       LOCAL_ID,
       { ...fixture.subscription, onChainHash: nextHash },
       { persist: false },
@@ -470,8 +450,7 @@ describe('cold current-state Context Graph name binding', () => {
     });
     const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
 
-    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
-      fixture.agent,
+    fixture.agent.setContextGraphSubscription(
       LOCAL_ID,
       { ...fixture.subscription, onChainId: '42' },
       { persist: false },
@@ -502,8 +481,7 @@ describe('cold current-state Context Graph name binding', () => {
     });
     const generation = fixture.agent.contextGraphBindingState.capture(LOCAL_ID);
 
-    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
-      fixture.agent,
+    fixture.agent.setContextGraphSubscription(
       LOCAL_ID,
       { ...fixture.subscription, subscribed: false, coreHosted: false },
       { persist: false },
@@ -515,8 +493,7 @@ describe('cold current-state Context Graph name binding', () => {
     expect(fixture.agent.reconcileCursors.has(LOCAL_ID)).toBe(false);
     expect(fixture.agent.contextGraphBindingState.capture(LOCAL_ID)).toBe(generation + 1);
 
-    LifecycleSyncMethods.prototype.setContextGraphSubscription.call(
-      fixture.agent,
+    fixture.agent.setContextGraphSubscription(
       LOCAL_ID,
       { ...deactivated, subscribed: true },
       { persist: false },
@@ -542,8 +519,7 @@ describe('cold current-state Context Graph name binding', () => {
     const triggerLive = vi.fn();
     fixture.agent.vmReconcileDispatcher = { triggerLive };
 
-    await expect(SwmHostModeMethods.prototype.handleKARegisteredNudge.call(
-      fixture.agent,
+    await expect(fixture.agent.handleKARegisteredNudge(
       '42',
       99n,
       {},
@@ -551,8 +527,7 @@ describe('cold current-state Context Graph name binding', () => {
     expect(triggerLive).toHaveBeenCalledWith(LOCAL_ID);
     expect(fixture.resolveContextGraphIdByNameHash).not.toHaveBeenCalled();
 
-    await expect(SwmHostModeMethods.prototype.resolveVmReconcileTarget.call(
-      fixture.agent,
+    await expect(fixture.agent.resolveVmReconcileTarget(
       LOCAL_ID,
     )).resolves.toMatchObject({
       bindingKind: 'reverse-name-hash',
@@ -567,7 +542,7 @@ describe('cold current-state Context Graph name binding', () => {
     const getParticipants = vi.fn(async () => ['did:dkg:agent:alice']);
     fixture.agent.chain.getContextGraphParticipantAgents = getParticipants;
     fixture.agent.onChainParticipantAgentsCache = new Map();
-    fixture.agent.log = { warn: vi.fn() };
+    fixture.agent.log = { info: vi.fn(), warn: vi.fn() };
     fixture.agent.contextGraphBindingState.bindReverseCandidate(
       LOCAL_ID,
       fixture.subscription,
@@ -575,8 +550,7 @@ describe('cold current-state Context Graph name binding', () => {
       NAME_HASH,
     );
 
-    await expect(ContextGraphResolveMethods.prototype.resolveOnChainParticipantAgents.call(
-      fixture.agent,
+    await expect(fixture.agent.resolveOnChainParticipantAgents(
       LOCAL_ID,
     )).resolves.toEqual(['did:dkg:agent:alice']);
     expect(fixture.resolveContextGraphIdByNameHash).toHaveBeenCalledTimes(1);
@@ -586,8 +560,7 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.resolveContextGraphIdByNameHash.mockRejectedValueOnce(
       new Error('ambiguous name hash: getNameHash commits it to 2 numeric ids'),
     );
-    await expect(ContextGraphResolveMethods.prototype.resolveOnChainParticipantAgents.call(
-      fixture.agent,
+    await expect(fixture.agent.resolveOnChainParticipantAgents(
       LOCAL_ID,
     )).resolves.toBeNull();
     expect(getParticipants).toHaveBeenCalledTimes(1);
@@ -611,10 +584,9 @@ describe('cold current-state Context Graph name binding', () => {
     const getParticipants = vi.fn(async () => ['did:dkg:agent:wrong']);
     fixture.agent.chain.getContextGraphParticipantAgents = getParticipants;
     fixture.agent.onChainParticipantAgentsCache = new Map();
-    fixture.agent.log = { warn: vi.fn() };
+    fixture.agent.log = { info: vi.fn(), warn: vi.fn() };
 
-    await expect(ContextGraphResolveMethods.prototype.resolveOnChainParticipantAgents.call(
-      fixture.agent,
+    await expect(fixture.agent.resolveOnChainParticipantAgents(
       numericLocalId,
     )).resolves.toBeNull();
     expect(getParticipants).not.toHaveBeenCalled();
@@ -630,8 +602,7 @@ describe('cold current-state Context Graph name binding', () => {
     );
     fixture.subscription.lastReconciledOrdinal = 17;
 
-    SwmHostModeMethods.prototype.bindSubscriptionOnChainId.call(
-      fixture.agent,
+    fixture.agent.bindSubscriptionOnChainId(
       LOCAL_ID,
       fixture.subscription,
       '42',
@@ -662,8 +633,7 @@ describe('cold current-state Context Graph name binding', () => {
     fixture.agent.subscribeToContextGraph = vi.fn();
     fixture.agent.setContextGraphSubscription = vi.fn();
 
-    await ContextGraphRegistryMethods.prototype.ensureContextGraphLocal.call(
-      fixture.agent,
+    await fixture.agent.ensureContextGraphLocal(
       { id: LOCAL_ID, name: 'Selected public CG' },
     );
 
@@ -705,8 +675,7 @@ describe('cold current-state Context Graph name binding', () => {
       work: () => Promise<void>,
     ) => work();
 
-    await LifecycleSyncMethods.prototype.persistJoinApprovalStateStrict.call(
-      fixture.agent,
+    await fixture.agent.persistJoinApprovalStateStrict(
       LOCAL_ID,
       {
         contextGraphId: LOCAL_ID,

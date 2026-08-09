@@ -79,7 +79,7 @@ describe('Context Graph name-hash historical ABI path', () => {
     const currentSlotReads: bigint[] = [];
 
     const resolver = new EvmContextGraphNameHashResolver({
-      reader: new EvmContextGraphNameHashFence({
+      source: new EvmContextGraphNameHashFence({
         initialize: async () => {},
         requireContextGraphStorage: () => contextGraphStorage,
         providers: () => [provider],
