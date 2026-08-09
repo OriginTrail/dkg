@@ -11,6 +11,9 @@ const publicCatalogActivation = await import(
 const agentProfileProducer = await import(
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-v1.js'
 );
+const systemRecordRequester = await import(
+  '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js'
+);
 const require = createRequire(import.meta.url);
 const packageManifest = require('@origintrail-official/dkg-agent/package.json');
 const expectedRfc64PolicyCells = [
@@ -32,6 +35,8 @@ const publicSystemRecordSpecifiers = [
   '@origintrail-official/dkg-agent/dist/system-records/artifact-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/in-memory-agent-profile-publication-store-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/provider-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/requester-api-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/transport-v1.js',
 ];
 
@@ -147,6 +152,9 @@ if (
 }
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogControlsV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose catalog-control normalization');
+}
+if (typeof systemRecordRequester.createSystemRecordRequesterV1 !== 'function') {
+  throw new Error('published System Record requester subpath did not expose its factory');
 }
 
 const digestAuthor = '0x1111111111111111111111111111111111111111';

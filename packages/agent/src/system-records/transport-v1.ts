@@ -149,8 +149,8 @@ export function createSystemRecordProviderPermitGateV1(): SystemRecordProviderPe
   });
 }
 
-export interface SystemRecordProviderFrameReservationV1 {
-  /** Return unused capacity while preserving the exact retained frame bytes. */
+export interface SystemRecordByteReservationV1 {
+  /** Return unused capacity while preserving the exact retained bytes. */
   shrinkTo(bytes: number): void;
   release(): void;
 }
@@ -159,9 +159,12 @@ export interface SystemRecordProviderFrameReservationV1 {
  * Supplied by the one lifecycle-owned runtime accountant. This module never
  * constructs a private accountant or queues for capacity.
  */
-export interface SystemRecordProviderFrameAdmissionV1 {
-  tryReserve(bytes: number): SystemRecordProviderFrameReservationV1 | null;
+export interface SystemRecordByteAdmissionV1 {
+  tryReserve(bytes: number): SystemRecordByteReservationV1 | null;
 }
+
+export type SystemRecordProviderFrameReservationV1 = SystemRecordByteReservationV1;
+export type SystemRecordProviderFrameAdmissionV1 = SystemRecordByteAdmissionV1;
 
 /** Shared abort race for bounded System Record requester/provider exchanges. */
 export function raceSystemRecordAbortV1<T>(

@@ -10,6 +10,10 @@ import type {
   SystemRecordArtifactLookupV1,
   SystemRecordArtifactV1,
 } from './artifact-v1.js';
+import type {
+  SystemRecordByteAdmissionV1,
+  SystemRecordByteReservationV1,
+} from './transport-v1.js';
 
 type SystemRecordExactControlObjectKindV1 = Exclude<
   SystemRecordObjectKindV1,
@@ -37,15 +41,9 @@ export type SystemRecordRequesterResetReasonV1 =
   | 'cancelled'
   | 'closed';
 
-export interface SystemRecordRequesterByteReservationV1 {
-  shrinkTo(bytes: number): void;
-  release(): void;
-}
-
 /** Supplied by the one lifecycle-owned aggregate accountant; it never queues. */
-export interface SystemRecordRequesterByteAdmissionV1 {
-  tryReserve(bytes: number): SystemRecordRequesterByteReservationV1 | null;
-}
+export type SystemRecordRequesterByteReservationV1 = SystemRecordByteReservationV1;
+export type SystemRecordRequesterByteAdmissionV1 = SystemRecordByteAdmissionV1;
 
 export interface SystemRecordRequesterPermitV1 {
   release(): void;

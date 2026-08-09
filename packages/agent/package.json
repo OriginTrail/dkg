@@ -34,6 +34,8 @@
     "./dist/system-records/artifact-v1.js": "./dist/system-records/artifact-v1.js",
     "./dist/system-records/in-memory-agent-profile-publication-store-v1.js": "./dist/system-records/in-memory-agent-profile-publication-store-v1.js",
     "./dist/system-records/provider-v1.js": "./dist/system-records/provider-v1.js",
+    "./dist/system-records/requester-api-v1.js": "./dist/system-records/requester-api-v1.js",
+    "./dist/system-records/requester-v1.js": "./dist/system-records/requester-v1.js",
     "./dist/system-records/transport-v1.js": "./dist/system-records/transport-v1.js",
     "./dist/system-records/*": null,
     "./dist/rfc64/control-envelope-signer-v1.js": null,
