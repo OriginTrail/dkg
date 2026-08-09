@@ -81,10 +81,15 @@ export interface SystemRecordInventoryTraversalV1 {
 interface SystemRecordInventoryRowTraversalSliceResultBaseV1 {
   readonly requests: number;
   readonly wireBytes: number;
-  readonly validatedRows: number;
-  readonly validatedLeaves: number;
+  /** Cumulative traversal progress through this physical slice. */
+  readonly progress: SystemRecordInventoryRowTraversalProgressV1;
   /** Canonical rows whose traversal work completed in this physical slice. */
-  readonly rows: readonly SystemRecordInventoryRowV1[];
+  readonly sliceRows: readonly SystemRecordInventoryRowV1[];
+}
+
+export interface SystemRecordInventoryRowTraversalProgressV1 {
+  readonly totalValidatedRows: number;
+  readonly totalValidatedLeaves: number;
 }
 
 export type SystemRecordInventoryRowTraversalSliceResultV1 =
@@ -158,11 +163,63 @@ type SystemRecordInventoryTraversalWorkV1 =
   | SystemRecordInventoryTraversalRootProbeWorkV1
   | SystemRecordInventoryTraversalNodeWorkV1;
 
+type SystemRecordInventoryObjectKindV1 = 'inventory-internal' | 'inventory-leaf';
+
+interface SystemRecordInventoryTraversalLoadStrategyV1<
+  ExpectedKind extends SystemRecordInventoryObjectKindV1 | undefined,
+> {
+  expectedLoadKind(
+    work: SystemRecordInventoryTraversalWorkV1,
+    probedKind: SystemRecordInventoryObjectKindV1,
+  ): ExpectedKind;
+  advanceRootProbeOnNotFound(work: SystemRecordInventoryTraversalWorkV1): boolean;
+}
+
+interface SystemRecordInventoryTraversalStepperV1<
+  ExpectedKind extends SystemRecordInventoryObjectKindV1 | undefined,
+> {
+  advance(
+    load: (
+      digest: Digest32V1,
+      expectedKind: ExpectedKind,
+      signal: AbortSignal | undefined,
+      path: readonly number[],
+    ) => Promise<
+      SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
+    >,
+    slice: SystemRecordInventoryTraversalSliceV1,
+  ): Promise<SystemRecordInventoryRowTraversalSliceResultV1>;
+}
+
+const VALIDATION_TRAVERSAL_LOAD_STRATEGY_V1 = Object.freeze({
+  expectedLoadKind(
+    work: SystemRecordInventoryTraversalWorkV1,
+    probedKind: SystemRecordInventoryObjectKindV1,
+  ): SystemRecordInventoryObjectKindV1 | undefined {
+    return work.workType === 'root-probe' ? undefined : probedKind;
+  },
+  advanceRootProbeOnNotFound: () => false,
+}) satisfies SystemRecordInventoryTraversalLoadStrategyV1<
+  SystemRecordInventoryObjectKindV1 | undefined
+>;
+
+const EXACT_KIND_TRAVERSAL_LOAD_STRATEGY_V1 = Object.freeze({
+  expectedLoadKind: (
+    _work: SystemRecordInventoryTraversalWorkV1,
+    probedKind: SystemRecordInventoryObjectKindV1,
+  ): SystemRecordInventoryObjectKindV1 => probedKind,
+  advanceRootProbeOnNotFound: (work: SystemRecordInventoryTraversalWorkV1) =>
+    work.workType === 'root-probe',
+}) satisfies SystemRecordInventoryTraversalLoadStrategyV1<SystemRecordInventoryObjectKindV1>;
+
 /** Preserve the original validation-only V1 contract and rejection behavior. */
 export function createSystemRecordInventoryTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryTraversalV1 {
-  const traversal = createSystemRecordInventoryTraversalStepperV1(descriptor, false);
+  const traversal = createSystemRecordInventoryTraversalStepperV1(
+    descriptor,
+    VALIDATION_TRAVERSAL_LOAD_STRATEGY_V1,
+  );
   return Object.freeze({ advance });
 
   async function advance(
@@ -176,14 +233,7 @@ export function createSystemRecordInventoryTraversalV1(
     slice: SystemRecordInventoryTraversalSliceV1,
   ): Promise<SystemRecordInventoryTraversalSliceResultV1> {
     const admittedSignal = slice.signal;
-    const advanced = await traversal.advance(
-      (digest, expectedKind, signal, path) => load(
-        digest,
-        path.length === 0 ? undefined : expectedKind,
-        signal,
-      ),
-      slice,
-    );
+    const advanced = await traversal.advance(load, slice);
     if (advanced.status === 'failed') {
       if (advanced.failure.reason === 'aborted' && admittedSignal?.aborted) {
         throw admittedSignal.reason ?? new Error('inventory traversal aborted');
@@ -224,13 +274,18 @@ export function createSystemRecordInventoryTraversalV1(
 export function createSystemRecordInventoryRowTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryRowTraversalV1 {
-  return createSystemRecordInventoryTraversalStepperV1(descriptor, true);
+  return createSystemRecordInventoryTraversalStepperV1(
+    descriptor,
+    EXACT_KIND_TRAVERSAL_LOAD_STRATEGY_V1,
+  );
 }
 
-function createSystemRecordInventoryTraversalStepperV1(
+function createSystemRecordInventoryTraversalStepperV1<
+  ExpectedKind extends SystemRecordInventoryObjectKindV1 | undefined,
+>(
   descriptor: SystemRecordRootDescriptorObjectV1,
-  probeExactRootKinds: boolean,
-): SystemRecordInventoryRowTraversalV1 {
+  loadStrategy: SystemRecordInventoryTraversalLoadStrategyV1<ExpectedKind>,
+): SystemRecordInventoryTraversalStepperV1<ExpectedKind> {
   const pinned = validateRootDescriptor(descriptor);
   const expectedRows = Number(parseCanonicalDecimalU64(pinned.totalRows));
   const seen = new Set<string>();
@@ -262,7 +317,7 @@ function createSystemRecordInventoryTraversalStepperV1(
   async function advance(
     load: (
       digest: Digest32V1,
-      expectedKind: 'inventory-internal' | 'inventory-leaf',
+      expectedKind: ExpectedKind,
       signal: AbortSignal | undefined,
       path: readonly number[],
     ) => Promise<
@@ -276,9 +331,8 @@ function createSystemRecordInventoryTraversalStepperV1(
         status: 'complete',
         requests: 0,
         wireBytes: 0,
-        validatedRows: rows,
-        validatedLeaves: leaves,
-        rows: Object.freeze([]),
+        progress: traversalProgress(),
+        sliceRows: Object.freeze([]),
         result: completedResult(),
       });
     }
@@ -328,11 +382,12 @@ function createSystemRecordInventoryTraversalStepperV1(
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) break;
         const work = pending[pending.length - 1];
-        const expectedKind = work.workType === 'root-probe'
+        const probedKind = work.workType === 'root-probe'
           ? work.expectedKinds[0]!
           : work.expectedKind;
+        const expectedKind = loadStrategy.expectedLoadKind(work, probedKind);
         const maximumNextBytes = framedObjectMaximum(
-          expectedKind,
+          probedKind,
         );
         if (requests >= maxRequests || wireBytes + maximumNextBytes > maxWireBytes) break;
         if (work.depth > SYSTEM_RECORD_MAX_TREE_HEIGHT)
@@ -367,7 +422,7 @@ function createSystemRecordInventoryTraversalStepperV1(
           throw new InventoryTraversalTransportError(error);
         }
         if (loaded === undefined) {
-          if (probeExactRootKinds && advanceRootProbe(work)) {
+          if (loadStrategy.advanceRootProbeOnNotFound(work) && advanceRootProbe(work)) {
             return pausedSliceResult(requests, wireBytes, sliceRows);
           }
           throw new InventoryTraversalNotFoundError(work.digest);
@@ -403,7 +458,7 @@ function createSystemRecordInventoryTraversalStepperV1(
             throw new Error('inventory loader returned an invalid rejection');
           }
           if (
-            probeExactRootKinds
+            loadStrategy.advanceRootProbeOnNotFound(work)
             && rejected.rejection === 'not-found'
             && advanceRootProbe(work)
           ) {
@@ -413,9 +468,8 @@ function createSystemRecordInventoryTraversalStepperV1(
             status: 'rejected',
             requests,
             wireBytes,
-            validatedRows: rows,
-            validatedLeaves: leaves,
-            rows: Object.freeze([...sliceRows]),
+            progress: traversalProgress(),
+            sliceRows: Object.freeze([...sliceRows]),
             rejection: rejected.rejection,
           });
         }
@@ -446,7 +500,7 @@ function createSystemRecordInventoryTraversalStepperV1(
         }
         const kindMatches = work.workType === 'root-probe'
           ? work.expectedKinds.includes(artifact.objectKind)
-          : artifact.objectKind === expectedKind;
+          : artifact.objectKind === probedKind;
         if (!kindMatches) {
           throw new Error('inventory child kind mismatch');
         }
@@ -539,9 +593,8 @@ function createSystemRecordInventoryTraversalStepperV1(
           status: 'paused',
           requests,
           wireBytes,
-          validatedRows: rows,
-          validatedLeaves: leaves,
-          rows: Object.freeze([...sliceRows]),
+          progress: traversalProgress(),
+          sliceRows: Object.freeze([...sliceRows]),
         });
       }
       if (rows !== expectedRows)
@@ -557,9 +610,8 @@ function createSystemRecordInventoryTraversalStepperV1(
         status: 'complete',
         requests,
         wireBytes,
-        validatedRows: rows,
-        validatedLeaves: leaves,
-        rows: Object.freeze([...sliceRows]),
+        progress: traversalProgress(),
+        sliceRows: Object.freeze([...sliceRows]),
         result: completedResult(),
       });
     } catch (error) {
@@ -568,9 +620,8 @@ function createSystemRecordInventoryTraversalStepperV1(
         status: 'failed',
         requests,
         wireBytes,
-        validatedRows: rows,
-        validatedLeaves: leaves,
-        rows: Object.freeze([...sliceRows]),
+        progress: traversalProgress(),
+        sliceRows: Object.freeze([...sliceRows]),
         failure: Object.freeze({
           reason,
           message: error instanceof Error ? error.message : 'inventory traversal failed',
@@ -602,9 +653,15 @@ function createSystemRecordInventoryTraversalStepperV1(
       status: 'paused',
       requests,
       wireBytes,
-      validatedRows: rows,
-      validatedLeaves: leaves,
-      rows: Object.freeze([...sliceRows]),
+      progress: traversalProgress(),
+      sliceRows: Object.freeze([...sliceRows]),
+    });
+  }
+
+  function traversalProgress(): SystemRecordInventoryRowTraversalProgressV1 {
+    return Object.freeze({
+      totalValidatedRows: rows,
+      totalValidatedLeaves: leaves,
     });
   }
 

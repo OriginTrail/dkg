@@ -6,6 +6,7 @@
  */
 export {
   createSystemRecordInventoryRowTraversalV1,
+  type SystemRecordInventoryRowTraversalProgressV1,
   type SystemRecordInventoryRowTraversalFailureV1,
   type SystemRecordInventoryRowTraversalSliceResultV1,
   type SystemRecordInventoryRowTraversalV1,

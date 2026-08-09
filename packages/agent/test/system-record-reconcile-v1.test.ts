@@ -416,6 +416,29 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(consumeCandidate).toHaveBeenCalledTimes(2);
   });
 
+  it('consumes a stale row as a settled outcome', async () => {
+    const fixture = await publishedFixture();
+    const consumeCandidate = vi.fn(async () => ({ outcome: 'stale' as const }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiver(fixture.store, consumeCandidate),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      phase: 'complete',
+      processedRows: 1,
+      pendingRows: 0,
+      outcomes: [{ outcome: 'stale' }],
+    });
+    expect(consumeCandidate).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       outcome: { outcome: 'root-collision' as const },

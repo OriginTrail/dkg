@@ -180,6 +180,7 @@ describe('system-record immutable B+tree objects', () => {
     let slices = 0;
     let totalWireBytes = 0;
     let discoveredLeaves = 0;
+    let sawCumulativeProgressBeyondSlice = false;
     const requestedPaths: number[][] = [];
     const discoveredRows: SystemRecordInventoryRowV1[] = [];
     const digestByPath = new Map<string, typeof snapshot.descriptor.treeRootDigest>();
@@ -210,15 +211,19 @@ describe('system-record immutable B+tree objects', () => {
       });
       slices += 1;
       totalWireBytes += result.wireBytes;
-      discoveredRows.push(...result.rows);
-      expect(Object.isFrozen(result.rows)).toBe(true);
-      expect(result.validatedRows).toBe(discoveredRows.length);
-      expect(result.validatedLeaves).toBe(discoveredLeaves);
+      discoveredRows.push(...result.sliceRows);
+      expect(Object.isFrozen(result.sliceRows)).toBe(true);
+      expect(result.progress.totalValidatedRows).toBe(discoveredRows.length);
+      expect(result.progress.totalValidatedLeaves).toBe(discoveredLeaves);
+      if (result.progress.totalValidatedRows > result.sliceRows.length) {
+        sawCumulativeProgressBeyondSlice = true;
+      }
       expect(result.requests).toBeLessThanOrEqual(1);
       expect(result.wireBytes).toBeLessThanOrEqual(2 * 1024 * 1024);
       if (result.status === 'complete') break;
     }
     expect(slices).toBeGreaterThan(1);
+    expect(sawCumulativeProgressBeyondSlice).toBe(true);
     expect(totalWireBytes).toBe([...snapshot.objects.values()].reduce(
       (sum, stored) => sum + loadedInventoryObject(stored).wireBytes,
       0,
@@ -238,7 +243,8 @@ describe('system-record immutable B+tree objects', () => {
       deadlineMs: Date.now() + 3_000,
     })).resolves.toEqual({
       status: 'rejected', requests: 1, wireBytes: 8_196,
-      validatedRows: 0, validatedLeaves: 0, rows: [], rejection: 'busy',
+      progress: { totalValidatedRows: 0, totalValidatedLeaves: 0 },
+      sliceRows: [], rejection: 'busy',
     });
 
     const zeroByteReset = createSystemRecordInventoryRowTraversalV1(snapshot.descriptor);
@@ -250,7 +256,8 @@ describe('system-record immutable B+tree objects', () => {
       deadlineMs: Date.now() + 3_000,
     })).resolves.toEqual({
       status: 'rejected', requests: 1, wireBytes: 0,
-      validatedRows: 0, validatedLeaves: 0, rows: [], rejection: 'transport',
+      progress: { totalValidatedRows: 0, totalValidatedLeaves: 0 },
+      sliceRows: [], rejection: 'transport',
     });
 
     const aborted = createSystemRecordInventoryRowTraversalV1(snapshot.descriptor);
@@ -292,7 +299,7 @@ describe('system-record immutable B+tree objects', () => {
       maxRequests: 1,
       maxWireBytes: 2 * 1024 * 1024,
       deadlineMs: Date.now() + 3_000,
-    })).resolves.toMatchObject({ status: 'paused', requests: 1, rows: [] });
+    })).resolves.toMatchObject({ status: 'paused', requests: 1, sliceRows: [] });
     const interruptedController = new AbortController();
     let childRequests = 0;
     const interruptedResult = await interrupted.advance(async (digest) => {
@@ -316,9 +323,10 @@ describe('system-record immutable B+tree objects', () => {
         message: expect.stringMatching(/abort-after-validated-leaf/),
       },
     });
-    expect(interruptedResult.rows.length).toBeGreaterThan(0);
-    expect(interruptedResult.rows).toHaveLength(interruptedResult.validatedRows);
-    const resumedRows = [...interruptedResult.rows];
+    expect(interruptedResult.sliceRows.length).toBeGreaterThan(0);
+    expect(interruptedResult.sliceRows)
+      .toHaveLength(interruptedResult.progress.totalValidatedRows);
+    const resumedRows = [...interruptedResult.sliceRows];
     while (true) {
       const resumed = await interrupted.advance(async (digest) => (
         loadedInventoryObject(snapshot.objects.get(digest)!)
@@ -327,7 +335,7 @@ describe('system-record immutable B+tree objects', () => {
         maxWireBytes: 2 * 1024 * 1024,
         deadlineMs: Date.now() + 3_000,
       });
-      resumedRows.push(...resumed.rows);
+      resumedRows.push(...resumed.sliceRows);
       if (resumed.status === 'complete') break;
     }
     expect(resumedRows).toHaveLength(513);
@@ -361,7 +369,7 @@ describe('system-record immutable B+tree objects', () => {
       status: 'failed',
       requests: 1,
       wireBytes: 0,
-      rows: [],
+      sliceRows: [],
       failure: { reason: 'transport' },
     });
     if (transportResult.status !== 'failed') throw new Error('expected failed row traversal');
@@ -437,7 +445,8 @@ describe('system-record immutable B+tree objects', () => {
     expect(completed.status).toBe('complete');
     expect(expectedKinds).toEqual([undefined]);
     expect(completed).not.toHaveProperty('rows');
-    expect(completed).not.toHaveProperty('validatedRows');
+    expect(completed).not.toHaveProperty('progress');
+    expect(completed).not.toHaveProperty('sliceRows');
     expect(completed).not.toHaveProperty('failure');
 
     const malformed = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
@@ -694,7 +703,7 @@ describe('system-record immutable B+tree objects', () => {
       loadedInventoryObject(snapshot.objects.get(digest)!)
     ), slice);
     expect(first.status).toBe('complete');
-    expect(first.rows).toEqual([row(PEER_A)]);
+    expect(first.sliceRows).toEqual([row(PEER_A)]);
     (first.result!.objectDigests as Set<string>).clear();
     const repeated = await completed.advance(async () => {
       throw new Error('completed traversal must not load again');
@@ -720,7 +729,10 @@ describe('system-record immutable B+tree objects', () => {
       });
     } while (result.status === 'paused');
 
-    expect(result).toMatchObject({ status: 'complete', validatedRows: 256 });
+    expect(result).toMatchObject({
+      status: 'complete',
+      progress: { totalValidatedRows: 256 },
+    });
     expect(requestedKinds).toEqual([
       'inventory-leaf',
       'inventory-leaf',
@@ -752,7 +764,10 @@ describe('system-record immutable B+tree objects', () => {
         deadlineMs: Date.now() + 3_000,
       });
     } while (probedResult.status === 'paused');
-    expect(probedResult).toMatchObject({ status: 'complete', validatedRows: 256 });
+    expect(probedResult).toMatchObject({
+      status: 'complete',
+      progress: { totalValidatedRows: 256 },
+    });
     expect(probedKinds).toEqual([
       'inventory-leaf',
       'inventory-internal',

@@ -43,9 +43,11 @@ describe('agent-profile System Record interrupted inventory retention', () => {
         status: 'failed' as const,
         requests: 1,
         wireBytes: 512,
-        validatedRows: 1,
-        validatedLeaves: 1,
-        rows: Object.freeze([row]),
+        progress: Object.freeze({
+          totalValidatedRows: 1,
+          totalValidatedLeaves: 1,
+        }),
+        sliceRows: Object.freeze([row]),
         failure: Object.freeze({
           reason: 'aborted' as const,
           message: abortReason.message,

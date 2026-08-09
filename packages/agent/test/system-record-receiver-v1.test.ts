@@ -418,6 +418,26 @@ describe('agent-profile system-record active receiver', () => {
     expect(apply).toHaveBeenCalledTimes(1);
   });
 
+  it('rejects a prepared apply when the verified active head expires before dispatch', async () => {
+    const fixture = await publishedFixture();
+    let nowMs = PRODUCER_FIXTURE_NOW_MS;
+    const consumeCandidate = vi.fn(async () => ({ outcome: 'stale' as const }));
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => nowMs,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      consumeCandidate,
+    });
+    const signal = new AbortController().signal;
+    const prepared = await receiver.prepareActive(fixture.row, signal);
+
+    nowMs = Date.parse(fixture.envelope.object.validUntil);
+    await expect(prepared.apply(ADMITTED_CONTEXT, signal))
+      .rejects.toThrow(/expired agent-profile head/);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+  });
+
   it('hands every derived owned subject to the materializer candidate', async () => {
     const fixture = await publishedFixture(true);
     const prepareCandidateApply = vi.fn((

@@ -310,7 +310,7 @@ export async function createAgentProfileReconcilerV1(
     if (slice.status === 'failed') {
       if (slice.failure.reason === 'invalid-slice') throw new Error(slice.failure.message);
       if (slice.failure.reason === 'aborted' || slice.failure.reason === 'deadline') {
-        pendingRows = [...slice.rows];
+        pendingRows = [...slice.sliceRows];
         return runtime.stop(
           currentPhase(),
           [],
@@ -327,7 +327,9 @@ export async function createAgentProfileReconcilerV1(
         inventoryFailureBlockReason(slice.failure.reason),
       );
     }
-    if (slice.validatedLeaves > SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES) {
+    if (
+      slice.progress.totalValidatedLeaves > SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES
+    ) {
       return result(
         'blocked',
         'inventory',
@@ -340,7 +342,7 @@ export async function createAgentProfileReconcilerV1(
     // Inventory authenticates availability only. Each row carries independent signed
     // authority, so apply a validated leaf before fetching its siblings and retain no
     // more than one decoded leaf; only full traversal can mark the continuation complete.
-    pendingRows = [...slice.rows];
+    pendingRows = [...slice.sliceRows];
     if (slice.status === 'rejected') {
       return result(
         'blocked',
