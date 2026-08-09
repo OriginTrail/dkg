@@ -943,6 +943,10 @@ export class StorageACKHandler {
         metadata,
         ackStoreOptions('storage-ack.persistGraphScoped.insertOperationMeta', signal),
       );
+      // The current-head pointer is a delete/insert pair. Once that commit tail
+      // starts it must finish (including flush), even if the ACK deadline has
+      // already returned a decline; aborting between the two loses the last
+      // complete pointer. It remains isolated in the reserved ACK lane.
       await storeKnowledgeAssetWorkspaceHead({
         store: this.store,
         graphManager: this.graphManager,
@@ -951,13 +955,10 @@ export class StorageACKHandler {
         assertionVersion: graphPublish.scope.assertionVersion,
         shareOperationId: operationId,
         subGraphName: graphPublish.subGraphName,
-        queryOptions: ackStoreOptions(
-          'storage-ack.persistGraphScoped.workspaceHead',
-          signal,
-        ),
+        queryOptions: ackStoreOptions('storage-ack.persistGraphScoped.workspaceHead'),
       });
       await this.store.flush?.(
-        ackStoreOptions('storage-ack.persistGraphScoped.flush', signal),
+        ackStoreOptions('storage-ack.persistGraphScoped.flush'),
       );
     }, signal);
     return result.ok ? { ok: true } : result;

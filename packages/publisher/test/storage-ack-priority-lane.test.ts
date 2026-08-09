@@ -25,6 +25,7 @@ const swmGraph = `did:dkg:context-graph:${contextGraphId}/_shared_memory`;
 const coreWallet = ethers.Wallet.createRandom();
 const fakePeerId = { toString: () => 'publisher-peer' } as any;
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 function makeQuad(s: string, p: string, o: string, g = swmGraph): Quad {
   return { subject: s, predicate: p, object: o, graph: g };
@@ -115,7 +116,10 @@ class PriorityLaneStore implements TripleStore {
   constructor(
     private readonly scheduler: StorePriorityScheduler,
     private readonly events: string[],
-    private readonly options: { hangAck?: boolean } = {},
+    private readonly options: {
+      hangAck?: boolean;
+      workspaceHeadDeleteDelayMs?: number;
+    } = {},
   ) {}
 
   releaseBackgroundWork(): void {
@@ -175,6 +179,12 @@ class PriorityLaneStore implements TripleStore {
   async deleteByPattern(_pattern: Partial<Quad>, options?: QueryOptions): Promise<number> {
     return this.scheduler.run(options?.priority, options?.source ?? 'test.deleteByPattern', async () => {
       this.recordWrite('deleteByPattern', options);
+      if (
+        options?.source?.endsWith('workspaceHead.deleteByPattern')
+        && this.options.workspaceHeadDeleteDelayMs
+      ) {
+        await wait(this.options.workspaceHeadDeleteDelayMs);
+      }
       return 0;
     }, options?.signal);
   }
@@ -320,8 +330,36 @@ describe('StorageACKHandler priority store lane', () => {
       'storage-ack.persistGraphScoped.flush',
     ]);
     expect(store.writeCalls.every((call) => call.priority === 'ack')).toBe(true);
-    const signals = store.writeCalls.map((call) => call.signal);
-    expect(signals.every((signal) => signal instanceof AbortSignal)).toBe(true);
-    expect(new Set(signals).size).toBe(1);
+    const abortableSignals = store.writeCalls.slice(0, 2).map((call) => call.signal);
+    expect(abortableSignals.every((signal) => signal instanceof AbortSignal)).toBe(true);
+    expect(new Set(abortableSignals).size).toBe(1);
+    expect(store.writeCalls.slice(2).every((call) => call.signal === undefined)).toBe(true);
+  });
+
+  it('finishes the workspace-head commit tail after the ACK deadline fires', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 2, ackReservedSlots: 1 });
+    const events: string[] = [];
+    const store = new PriorityLaneStore(scheduler, events, {
+      workspaceHeadDeleteDelayMs: 75,
+    });
+    const handler = createHandler(store, { ackHandlerDeadlineMs: 25 });
+
+    const response = await handler.handler(graphScopedPublishIntent(), fakePeerId);
+    const decoded = decodeStorageACK(response);
+
+    expect(isStorageACKDecline(decoded)).toBe(true);
+    expect(decoded.declineCode).toBe(STORAGE_ACK_DECLINE_CODES.CORE_TEMPORARILY_UNAVAILABLE);
+    await wait(125);
+
+    const commitTail = store.writeCalls.filter((call) =>
+      call.source?.includes('persistGraphScoped.workspaceHead')
+      || call.source === 'storage-ack.persistGraphScoped.flush');
+    expect(commitTail.map((call) => call.source)).toEqual([
+      'storage-ack.persistGraphScoped.workspaceHead.deleteByPattern',
+      'storage-ack.persistGraphScoped.workspaceHead.insert',
+      'storage-ack.persistGraphScoped.flush',
+    ]);
+    expect(commitTail.every((call) => call.priority === 'ack')).toBe(true);
+    expect(commitTail.every((call) => call.signal === undefined)).toBe(true);
   });
 });
