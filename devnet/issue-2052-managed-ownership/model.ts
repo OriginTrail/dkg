@@ -8,9 +8,9 @@
  */
 
 export const MANAGED_OWNERSHIP_RAW_SCHEMA_VERSION =
-  'dkg-system-record-managed-ownership-result-v1' as const;
+  'dkg-system-record-managed-ownership-result-v2' as const;
 export const MANAGED_OWNERSHIP_VERDICT_SCHEMA_VERSION =
-  'dkg-system-record-managed-ownership-verdict-v1' as const;
+  'dkg-system-record-managed-ownership-verdict-v2' as const;
 
 /**
  * A pinned manifest entry: an inventory row, NOT a result.
@@ -36,12 +36,22 @@ export interface PinnedPredecessorV1 {
  * `hasGraph`, undeletable by generic mutation including an unscoped
  * `deleteByPattern`, and the seed must be intact afterwards.
  */
+export interface RawChannelConformanceV1 {
+  readonly updateRefusalCode: string | null;
+  readonly queryMutationRefusalCode: string | null;
+  readonly queryUnknownRefusalCode: string | null;
+  readonly mutationQuadCount: number;
+  readonly recognizedReadServed: boolean;
+}
+
 export interface CurrentBinaryConformanceV1 {
   readonly enumeratedReservedGraphs: readonly string[];
   readonly servedReservedGraphs: readonly string[];
   readonly deletedReservedGraphsOnCleanup: readonly string[];
   readonly seededQuadCount: number;
   readonly expectedQuadCount: number;
+  /** Live proof that an authentic ownership lease closes both raw write routes. */
+  readonly rawChannels: RawChannelConformanceV1;
   readonly failures: readonly string[];
 }
 
@@ -327,6 +337,36 @@ export function evaluateManagedOwnership(
       name: 'currentBinaryConformsToReservedStatePolicy',
       pass: (raw.currentBinaryConformance?.failures.length ?? 1) === 0,
       detail: raw.currentBinaryConformance?.failures.join('; ') || undefined,
+    },
+    {
+      name: 'leasedRawUpdateRefused',
+      pass: raw.currentBinaryConformance?.rawChannels.updateRefusalCode
+        === 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+      detail: raw.currentBinaryConformance?.rawChannels.updateRefusalCode ?? 'missing refusal',
+    },
+    {
+      name: 'leasedQueryMutationRefused',
+      pass: raw.currentBinaryConformance?.rawChannels.queryMutationRefusalCode
+        === 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+      detail: raw.currentBinaryConformance?.rawChannels.queryMutationRefusalCode ?? 'missing refusal',
+    },
+    {
+      name: 'leasedQueryUnknownSyntaxRefused',
+      pass: raw.currentBinaryConformance?.rawChannels.queryUnknownRefusalCode
+        === 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE',
+      detail: raw.currentBinaryConformance?.rawChannels.queryUnknownRefusalCode ?? 'missing refusal',
+    },
+    {
+      name: 'rawChannelsMutatedNoLiveData',
+      pass: raw.currentBinaryConformance?.rawChannels.mutationQuadCount === 0,
+      detail: `${raw.currentBinaryConformance?.rawChannels.mutationQuadCount ?? 'missing'} quads`,
+    },
+    {
+      name: 'recognizedReadSurvivesRawChannelContraction',
+      pass: raw.currentBinaryConformance?.rawChannels.recognizedReadServed === true,
+      detail: raw.currentBinaryConformance?.rawChannels.recognizedReadServed
+        ? undefined
+        : 'prefixed ASK did not succeed',
     },
   ];
 

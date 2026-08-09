@@ -675,6 +675,7 @@ async function createMssqlClient(
         }
         request.input(name, value);
       }
+      // dkg-raw-channel-non-store: optional mssql Request, not an RDF TripleStore.
       const result = await request.query(sql);
       return result.recordset ?? [];
     },
