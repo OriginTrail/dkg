@@ -138,7 +138,32 @@ describe('RFC-64 finalized VM chain scanner', () => {
     expect(Object.isFrozen(scanner)).toBe(true);
     expect(Object.isFrozen(inventory)).toBe(true);
     expect(Object.isFrozen(inventory.rows)).toBe(true);
-    expect(snapshotFinalizedVmChainInventoryV1(structuredClone(inventory))).toEqual(inventory);
+    const enrichedRoundTrip = snapshotFinalizedVmChainInventoryV1(structuredClone(inventory));
+    expect(enrichedRoundTrip).toEqual(inventory);
+    expect(enrichedRoundTrip.rows.every((row) => (
+      Object.hasOwn(row, 'onChainByteSize')
+      && Object.hasOwn(row, 'merkleLeafCount')
+    ))).toBe(true);
+    const legacyInventory = structuredClone(inventory) as unknown as {
+      rows: Array<Record<string, unknown>>;
+    };
+    for (const row of legacyInventory.rows) {
+      delete row.onChainByteSize;
+      delete row.merkleLeafCount;
+    }
+    const legacyRoundTrip = snapshotFinalizedVmChainInventoryV1(legacyInventory);
+    expect(legacyRoundTrip.rows.every((row) => (
+      !Object.hasOwn(row, 'onChainByteSize')
+      && !Object.hasOwn(row, 'merkleLeafCount')
+    ))).toBe(true);
+    for (const missingField of ['onChainByteSize', 'merkleLeafCount'] as const) {
+      const partial = structuredClone(inventory) as unknown as {
+        rows: Array<Record<string, unknown>>;
+      };
+      delete partial.rows[0]![missingField];
+      expect(() => snapshotFinalizedVmChainInventoryV1(partial))
+        .toThrow(FinalizedVmChainInventoryValidationErrorV1);
+    }
     expect(snapshotFinalizedVmChainInventoryV1(
       structuredClone(inventory),
       { maxRows: 2 },

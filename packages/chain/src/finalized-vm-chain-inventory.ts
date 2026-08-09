@@ -33,7 +33,7 @@ const INVENTORY_KEYS = Object.freeze([
   'networkId',
   'rows',
 ] as const);
-const CANDIDATE_KEYS = Object.freeze([
+const LEGACY_CANDIDATE_KEYS = Object.freeze([
   'assertionRoot',
   'assertionVersion',
   'attestedAuthorAddress',
@@ -44,11 +44,14 @@ const CANDIDATE_KEYS = Object.freeze([
   'finalizedBlockNumber',
   'kaId',
   'knowledgeAssetStorageAddress',
-  'merkleLeafCount',
-  'onChainByteSize',
   'ordinal',
   'publisherAddress',
   'ual',
+] as const);
+const FOOTPRINT_CANDIDATE_KEYS = Object.freeze([
+  ...LEGACY_CANDIDATE_KEYS,
+  'merkleLeafCount',
+  'onChainByteSize',
 ] as const);
 /** Chain-authenticated assertion identity before subgraph placement is joined. */
 export interface FinalizedVmChainCandidateV1 {
@@ -68,10 +71,12 @@ export interface FinalizedVmChainCandidateV1 {
    * It is an exact public-payload transfer hint only after the caller has
    * independently established public CG access policy. A zero size or leaf
    * count remains an unknown/singleton planning input, never a free asset.
+   * This field and `merkleLeafCount` are present together on enriched scanner
+   * rows and absent together on legacy V1 rows.
    */
-  readonly onChainByteSize: DecimalU256V1;
+  readonly onChainByteSize?: DecimalU256V1;
   /** Current public-tree leaf count from the same pinned update context. */
-  readonly merkleLeafCount: number;
+  readonly merkleLeafCount?: number;
   readonly finalizedBlockNumber: BlockNumberV1;
   readonly finalizedBlockHash: Digest32V1;
 }
@@ -183,7 +188,7 @@ function snapshotInventoryCandidate(
   index: number,
   inventory: Readonly<FinalizedVmChainInventoryHeaderSnapshotV1>,
 ): Readonly<FinalizedVmChainCandidateV1> {
-  const record = snapshotExactDataRecord(input, CANDIDATE_KEYS);
+  const { record, hasRecoveryFootprint } = snapshotCandidateRecord(input);
   assertCanonicalChainId(record.chainId, `finalized VM candidate ${index} chainId`);
   assertCanonicalNonzeroEvmAddress(record.contractAddress, `finalized VM candidate ${index} contract`);
   assertCanonicalNonzeroEvmAddress(
@@ -206,18 +211,28 @@ function snapshotInventoryCandidate(
     `finalized VM candidate ${index} assertion version`,
   );
   assertCanonicalDigest(record.assertionRoot, `finalized VM candidate ${index} assertion root`);
-  assertCanonicalDecimalU256(
-    record.onChainByteSize,
-    `finalized VM candidate ${index} on-chain byte size`,
-  );
-  const merkleLeafCount = record.merkleLeafCount;
-  if (
-    typeof merkleLeafCount !== 'number'
-    || !Number.isSafeInteger(merkleLeafCount)
-    || merkleLeafCount < 0
-    || merkleLeafCount > 0xffff_ffff
-  ) {
-    throw new Error(`finalized VM candidate ${index} Merkle leaf count is not uint32`);
+  let recoveryFootprint: Readonly<{
+    onChainByteSize: DecimalU256V1;
+    merkleLeafCount: number;
+  }> | undefined;
+  if (hasRecoveryFootprint) {
+    assertCanonicalDecimalU256(
+      record.onChainByteSize,
+      `finalized VM candidate ${index} on-chain byte size`,
+    );
+    const merkleLeafCount = record.merkleLeafCount;
+    if (
+      typeof merkleLeafCount !== 'number'
+      || !Number.isSafeInteger(merkleLeafCount)
+      || merkleLeafCount < 0
+      || merkleLeafCount > 0xffff_ffff
+    ) {
+      throw new Error(`finalized VM candidate ${index} Merkle leaf count is not uint32`);
+    }
+    recoveryFootprint = Object.freeze({
+      onChainByteSize: record.onChainByteSize,
+      merkleLeafCount,
+    });
   }
   assertCanonicalDecimalU64(
     record.finalizedBlockNumber,
@@ -254,11 +269,34 @@ function snapshotInventoryCandidate(
     publisherAddress: record.publisherAddress,
     assertionVersion: record.assertionVersion,
     assertionRoot: record.assertionRoot,
-    onChainByteSize: record.onChainByteSize,
-    merkleLeafCount,
+    ...(recoveryFootprint ?? {}),
     finalizedBlockNumber: record.finalizedBlockNumber,
     finalizedBlockHash: record.finalizedBlockHash,
   } satisfies FinalizedVmChainCandidateV1);
+}
+
+function snapshotCandidateRecord(input: unknown): Readonly<{
+  record: Record<string, unknown>;
+  hasRecoveryFootprint: boolean;
+}> {
+  try {
+    return Object.freeze({
+      record: snapshotExactDataRecord(input, FOOTPRINT_CANDIDATE_KEYS),
+      hasRecoveryFootprint: true,
+    });
+  } catch (footprintShapeCause) {
+    try {
+      return Object.freeze({
+        record: snapshotExactDataRecord(input, LEGACY_CANDIDATE_KEYS),
+        hasRecoveryFootprint: false,
+      });
+    } catch (legacyShapeCause) {
+      throw new Error(
+        'candidate must use the exact legacy shape or include the complete recovery footprint pair',
+        { cause: Object.freeze({ footprintShapeCause, legacyShapeCause }) },
+      );
+    }
+  }
 }
 
 function assertNullableInventoryAddress(
