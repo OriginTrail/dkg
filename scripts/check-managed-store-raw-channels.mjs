@@ -290,8 +290,7 @@ function enclosingSymbol(node) {
 
 function reviewedDynamicQueryInventory(records) {
   const occurrences = new Map();
-  const expressionsByRecord = new Map();
-  const inventory = [...records]
+  return [...records]
     .sort((left, right) => (
       left.path.localeCompare(right.path)
       || left.symbol.localeCompare(right.symbol)
@@ -302,15 +301,12 @@ function reviewedDynamicQueryInventory(records) {
       const identity = `${record.package}\0${record.path}\0${record.symbol}\0${record.expressionSha256}`;
       const occurrence = (occurrences.get(identity) ?? 0) + 1;
       occurrences.set(identity, occurrence);
-      const compact = Object.freeze({ ...record, occurrence });
-      expressionsByRecord.set(dynamicQueryRecordKey(compact), expression);
-      return compact;
+      return Object.freeze({ ...record, expression, occurrence });
     });
-  return { inventory, expressionsByRecord };
 }
 
 function dynamicQueryRecordKey(record) {
-  const fields = ['expressionSha256', 'occurrence', 'package', 'path', 'symbol'];
+  const fields = ['expression', 'expressionSha256', 'occurrence', 'package', 'path', 'symbol'];
   const actualFields = Object.keys(record).sort();
   if (
     actualFields.length !== fields.length
@@ -318,6 +314,7 @@ function dynamicQueryRecordKey(record) {
     || typeof record.package !== 'string'
     || typeof record.path !== 'string'
     || typeof record.symbol !== 'string'
+    || typeof record.expression !== 'string'
     || typeof record.expressionSha256 !== 'string'
     || !Number.isSafeInteger(record.occurrence)
     || record.occurrence < 1
@@ -328,6 +325,7 @@ function dynamicQueryRecordKey(record) {
     record.package,
     record.path,
     record.symbol,
+    record.expression,
     record.expressionSha256,
     record.occurrence,
   ].join('\0');
@@ -365,23 +363,23 @@ function diffDynamicQueryInventory(expected, observed) {
   return { missing, added };
 }
 
-function dynamicQueryInventoryLabel(record, expression) {
+function dynamicQueryInventoryLabel(record) {
   return `${record.package}:${record.path}#${record.symbol}[${record.occurrence}] `
     + `${record.expressionSha256} - ${DYNAMIC_QUERY_REASON}`
-    + (expression === undefined ? '' : ` - ${expression}`);
+    + ` - ${record.expression}`;
 }
 
 function loadDynamicQueryInventory() {
   const parsed = JSON.parse(readFileSync(DYNAMIC_QUERY_INVENTORY_PATH, 'utf8'));
-  if (parsed?.version !== 1 || !Array.isArray(parsed.records)) {
-    throw new Error('dynamic query inventory must contain version 1 records');
+  if (parsed?.version !== 2 || !Array.isArray(parsed.records)) {
+    throw new Error('dynamic query inventory must contain version 2 records');
   }
   return parsed.records;
 }
 
 function serializeDynamicQueryInventory(records) {
   const lines = records.map((record) => `    ${JSON.stringify(record)}`);
-  return `{\n  "version": 1,\n  "records": [\n${lines.join(',\n')}\n  ]\n}\n`;
+  return `{\n  "version": 2,\n  "records": [\n${lines.join(',\n')}\n  ]\n}\n`;
 }
 
 function selfTestStaticSparql() {
@@ -502,10 +500,11 @@ function selfTestDynamicQueryInventoryDiff() {
     package: 'agent',
     path: 'packages/agent/src/example.ts',
     symbol: 'Example.read',
+    expression: 'sparql',
     expressionSha256: 'hash-a',
     occurrence: 1,
   });
-  const changed = { ...base, expressionSha256: 'hash-b' };
+  const changed = { ...base, expression: 'otherSparql', expressionSha256: 'hash-b' };
   const moved = { ...base, path: 'packages/agent/src/moved.ts' };
   const unchanged = diffDynamicQueryInventory([base], [base]);
   if (unchanged.missing.length !== 0 || unchanged.added.length !== 0) {
@@ -513,6 +512,7 @@ function selfTestDynamicQueryInventoryDiff() {
   }
   const reordered = {
     occurrence: base.occurrence,
+    expression: base.expression,
     expressionSha256: base.expressionSha256,
     symbol: base.symbol,
     path: base.path,
@@ -533,7 +533,13 @@ function selfTestDynamicQueryInventoryDiff() {
   if (added.added.length !== 1 || removed.missing.length !== 1) {
     throw new Error('dynamic query inventory self-test missed an addition/removal');
   }
-  const label = dynamicQueryInventoryLabel(base, 'sparql');
+  const serialized = serializeDynamicQueryInventory([base]);
+  const roundTripped = JSON.parse(serialized);
+  if (roundTripped.version !== 2
+    || serializeDynamicQueryInventory(roundTripped.records) !== serialized) {
+    throw new Error('dynamic query inventory self-test lost deterministic round-trip output');
+  }
+  const label = dynamicQueryInventoryLabel(base);
   if (!label.includes(DYNAMIC_QUERY_REASON) || !label.endsWith(' - sparql')) {
     throw new Error('dynamic query inventory self-test lost review diagnostics');
   }
@@ -656,10 +662,9 @@ for (const [key, record] of REVIEWED_NON_STORE_CALLS_BY_KEY) {
     );
   }
 }
-const observed = reviewedDynamicQueryInventory(
+const observedInventory = reviewedDynamicQueryInventory(
   results.flatMap((result) => result.dynamicQueryRecords),
 );
-const observedInventory = observed.inventory;
 
 if (WRITE_INVENTORY) {
   writeFileSync(
@@ -679,10 +684,7 @@ if (WRITE_INVENTORY) {
   }
   for (const record of inventoryDiff.added) {
     violations.push(
-      `dynamic query review required: ${dynamicQueryInventoryLabel(
-        record,
-        observed.expressionsByRecord.get(dynamicQueryRecordKey(record)),
-      )}`,
+      `dynamic query review required: ${dynamicQueryInventoryLabel(record)}`,
     );
   }
 }
