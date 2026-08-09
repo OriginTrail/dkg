@@ -51,21 +51,22 @@ export interface SystemRecordLaneOutcomePolicyV1 {
  * Forwards a lane controller from an inner store, applying `policy` to every
  * apply outcome.
  *
- * One instance per wrapper: it holds that wrapper's memo. Call
- * {@link SystemRecordLaneForwarderV1.forward} with the result of probing the
- * inner store — the probe stays at the call site because only the wrapper knows
- * how to reach its own inner.
+ * One instance per wrapper: it holds that wrapper's memo and the callback that
+ * probes the inner store. Keeping the probe inside this boundary makes "probe
+ * on every forward" structural instead of call-site discipline.
  */
 export class SystemRecordLaneForwarderV1 {
   private memo: SystemRecordLaneControllerV1 | null | undefined;
   /** The inner controller the memo wraps, so a replacement is not masked. */
   private memoizedInner: SystemRecordLaneControllerV1 | null | undefined;
 
-  constructor(private readonly policy: SystemRecordLaneOutcomePolicyV1) {}
+  constructor(
+    private readonly probe: () => SystemRecordLaneControllerV1 | undefined,
+    private readonly policy: SystemRecordLaneOutcomePolicyV1,
+  ) {}
 
-  forward(
-    inner: SystemRecordLaneControllerV1 | undefined,
-  ): SystemRecordLaneControllerV1 | undefined {
+  forward(): SystemRecordLaneControllerV1 | undefined {
+    const inner = this.probe();
     if (!inner) {
       // Absence is NEVER latched: the adapter reports undefined during any
       // window in which the managed child is not the proven-ready listener.

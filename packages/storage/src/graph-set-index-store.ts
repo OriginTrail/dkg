@@ -238,9 +238,7 @@ export class GraphSetIndexStore implements TripleStore {
     // Probe the inner store on EVERY call; the shared forwarder owns the memo
     // and the identity keying, so absence is never latched and a replacement
     // controller is wrapped afresh.
-    return this.systemRecordLaneForwarder.forward(
-      this.inner.getSystemRecordLaneControllerV1?.(),
-    );
+    return this.systemRecordLaneForwarder.forward();
   }
 
   private readonly inner: TripleStore;
@@ -258,16 +256,19 @@ export class GraphSetIndexStore implements TripleStore {
    * CONTENT rather than membership, so its policy treats that one
    * differently; the disagreement is correct, not drift.
    */
-  private readonly systemRecordLaneForwarder = new SystemRecordLaneForwarderV1({
-    onOutcome: (outcome) => {
-      if (outcome.outcome === 'applied') {
-        this.bumpMutation();
-        this.scheduleFullRefresh('system-record.applied');
-      } else if (outcome.outcome === 'indeterminate') {
-        this.scheduleFullRefresh('system-record.indeterminate');
-      }
+  private readonly systemRecordLaneForwarder = new SystemRecordLaneForwarderV1(
+    () => this.inner.getSystemRecordLaneControllerV1?.(),
+    {
+      onOutcome: (outcome) => {
+        if (outcome.outcome === 'applied') {
+          this.bumpMutation();
+          this.scheduleFullRefresh('system-record.applied');
+        } else if (outcome.outcome === 'indeterminate') {
+          this.scheduleFullRefresh('system-record.indeterminate');
+        }
+      },
     },
-  });
+  );
   private readonly enabled: boolean;
   private readonly revalidateMs: number;
   private readonly revalidateFailureBackoffMs: number;

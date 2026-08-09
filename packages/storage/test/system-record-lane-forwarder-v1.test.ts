@@ -36,20 +36,23 @@ function controllerFixture(generation: string, outcome = APPLIED) {
 describe('SystemRecordLaneForwarderV1', () => {
   it('recovers after transient absence and re-wraps a replacement controller', async () => {
     const policy = { onOutcome: vi.fn() };
-    const forwarder = new SystemRecordLaneForwarderV1(policy);
     const first = controllerFixture('generation-a');
     const replacement = controllerFixture('generation-b');
+    let advertised: SystemRecordLaneControllerV1 | undefined = first.controller;
+    const forwarder = new SystemRecordLaneForwarderV1(() => advertised, policy);
 
-    const firstFacade = forwarder.forward(first.controller);
+    const firstFacade = forwarder.forward();
     expect(firstFacade).toBeDefined();
-    expect(forwarder.forward(first.controller)).toBe(firstFacade);
+    expect(forwarder.forward()).toBe(firstFacade);
 
-    expect(forwarder.forward(undefined)).toBeUndefined();
+    advertised = undefined;
+    expect(forwarder.forward()).toBeUndefined();
 
-    const replacementFacade = forwarder.forward(replacement.controller);
+    advertised = replacement.controller;
+    const replacementFacade = forwarder.forward();
     expect(replacementFacade).toBeDefined();
     expect(replacementFacade).not.toBe(firstFacade);
-    expect(forwarder.forward(replacement.controller)).toBe(replacementFacade);
+    expect(forwarder.forward()).toBe(replacementFacade);
 
     const session = await replacementFacade!.open(ACTIVATION);
     expect(first.controller.open).not.toHaveBeenCalled();
@@ -58,12 +61,31 @@ describe('SystemRecordLaneForwarderV1', () => {
     expect(session.activationGeneration).toBe('generation-b');
   });
 
+  it('re-wraps a controller replacement without an intervening absence', async () => {
+    const first = controllerFixture('generation-a');
+    const replacement = controllerFixture('generation-b');
+    let advertised = first.controller;
+    const forwarder = new SystemRecordLaneForwarderV1(
+      () => advertised,
+      { onOutcome: vi.fn() },
+    );
+
+    const firstFacade = forwarder.forward();
+    advertised = replacement.controller;
+    const replacementFacade = forwarder.forward();
+
+    expect(replacementFacade).not.toBe(firstFacade);
+    await replacementFacade!.open(ACTIVATION);
+    expect(first.controller.open).not.toHaveBeenCalled();
+    expect(replacement.controller.open).toHaveBeenCalledOnce();
+  });
+
   it('passes sessions and outcomes through while invoking the wrapper policy', async () => {
     const policy = { onOutcome: vi.fn() };
-    const forwarder = new SystemRecordLaneForwarderV1(policy);
     const inner = controllerFixture('generation-a');
+    const forwarder = new SystemRecordLaneForwarderV1(() => inner.controller, policy);
 
-    const session = await forwarder.forward(inner.controller)!.open(ACTIVATION);
+    const session = await forwarder.forward()!.open(ACTIVATION);
     expect(session.state).toBe('enabled');
     await expect(session.applyVerified({ proof: true })).resolves.toBe(APPLIED);
     expect(inner.session.applyVerified).toHaveBeenCalledWith({ proof: true });

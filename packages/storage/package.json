@@ -12,7 +12,9 @@
     "./internal/system-record-lane-forwarder-v1": {
       "types": "./dist/system-record-lane-forwarder-v1-internal.d.ts",
       "default": "./dist/system-record-lane-forwarder-v1-internal.js"
-    }
+    },
+    "./dist/*": "./dist/*",
+    "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",

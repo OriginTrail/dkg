@@ -446,16 +446,19 @@ export function createListContextGraphsCacheInvalidatingStore(
     }
     return result;
   };
-  const systemRecordLaneForwarder = new SystemRecordLaneForwarderV1({
-    onOutcome: (outcome) => {
-      if (outcome.outcome === 'applied' || outcome.outcome === 'root-collision') {
-        invalidate();
-        markProjectionDirty?.();
-      } else if (outcome.outcome === 'indeterminate') {
-        markProjectionDirty?.();
-      }
+  const systemRecordLaneForwarder = new SystemRecordLaneForwarderV1(
+    () => innerStore.getSystemRecordLaneControllerV1?.(),
+    {
+      onOutcome: (outcome) => {
+        if (outcome.outcome === 'applied' || outcome.outcome === 'root-collision') {
+          invalidate();
+          markProjectionDirty?.();
+        } else if (outcome.outcome === 'indeterminate') {
+          markProjectionDirty?.();
+        }
+      },
     },
-  });
+  );
   const wrapper: TripleStore & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
@@ -486,9 +489,7 @@ export function createListContextGraphsCacheInvalidatingStore(
       // `root-collision` durably quarantines and rewrites state, so it
       // changes what a reader should observe even though it adds and
       // removes no named graph. This cache tracks readable CONTENT.
-      return systemRecordLaneForwarder.forward(
-        innerStore.getSystemRecordLaneControllerV1?.(),
-      );
+      return systemRecordLaneForwarder.forward();
     },
 
     insert(quads, options) {
