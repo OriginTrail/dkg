@@ -2,96 +2,92 @@
 
 import type { KnowledgeAssetUpdateContext } from './chain-adapter.js';
 
-type UpdateContextField = keyof KnowledgeAssetUpdateContext;
-
-type RawKnowledgeAssetUpdateContext = {
-  [K in UpdateContextField]?: unknown;
-} & readonly unknown[];
-
-const UPDATE_CONTEXT_FIELDS = {
-  merkleRootsCount: 0,
-  minted: 1,
-  byteSize: 2,
-  endEpoch: 3,
-  tokenAmount: 4,
-  isImmutable: 5,
-  merkleLeafCount: 6,
-} as const satisfies Record<UpdateContextField, number>;
-
-function asRawUpdateContext(value: unknown): RawKnowledgeAssetUpdateContext {
-  if ((typeof value !== 'object' && !Array.isArray(value)) || value === null) {
-    return [] as unknown as RawKnowledgeAssetUpdateContext;
+function normalizeTuple(value: unknown, kaId: bigint): unknown[] {
+  if (value === null || typeof value !== 'object') {
+    throw new Error(`Invalid update context tuple for KA ${kaId}`);
   }
-  return value as RawKnowledgeAssetUpdateContext;
+  const length = Reflect.get(value, 'length');
+  if (!Number.isSafeInteger(length) || length < 0) {
+    throw new Error(`Invalid update context tuple for KA ${kaId}`);
+  }
+  return Array.from(value as ArrayLike<unknown>);
 }
 
-function requireUpdateContextField(
-  context: RawKnowledgeAssetUpdateContext,
-  name: UpdateContextField,
-  kaId: bigint,
-): unknown {
-  const value = context[name] ?? context[UPDATE_CONTEXT_FIELDS[name]];
+function decodeUint(value: unknown, name: string, kaId: bigint): bigint {
   if (value === undefined) {
     throw new Error(`Missing ${name} in update context for KA ${kaId}`);
   }
-  return value;
+  if (
+    typeof value !== 'bigint' &&
+    typeof value !== 'number' &&
+    typeof value !== 'string'
+  ) {
+    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
+  }
+  if (
+    (typeof value === 'number' && !Number.isSafeInteger(value)) ||
+    (typeof value === 'string' && value.trim() === '')
+  ) {
+    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
+  }
+  try {
+    const decoded = BigInt(value);
+    if (decoded < 0n) {
+      throw new Error('negative uint');
+    }
+    return decoded;
+  } catch {
+    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
+  }
 }
 
-function decodeBigIntField(
-  context: RawKnowledgeAssetUpdateContext,
-  name: Exclude<UpdateContextField, 'isImmutable' | 'merkleLeafCount'>,
-  kaId: bigint,
-): bigint {
-  return BigInt(requireUpdateContextField(context, name, kaId) as
-    string | number | bigint | boolean);
-}
-
-function decodeBooleanField(
-  context: RawKnowledgeAssetUpdateContext,
-  name: 'isImmutable',
-  kaId: bigint,
-): boolean {
-  const value = requireUpdateContextField(context, name, kaId);
+function decodeBoolean(value: unknown, name: string, kaId: bigint): boolean {
+  if (value === undefined) {
+    throw new Error(`Missing ${name} in update context for KA ${kaId}`);
+  }
   if (typeof value !== 'boolean') {
     throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
   }
   return value;
 }
 
-function decodeSafeNumberField(
-  context: RawKnowledgeAssetUpdateContext,
-  name: 'merkleLeafCount',
-  kaId: bigint,
-): number {
-  const value = Number(BigInt(requireUpdateContextField(context, name, kaId) as
-    string | number | bigint | boolean));
-  if (!Number.isSafeInteger(value) || value < 0) {
+function decodeSafeNumber(value: unknown, name: string, kaId: bigint): number {
+  const decoded = decodeUint(value, name, kaId);
+  if (decoded > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
   }
-  return value;
+  return Number(decoded);
 }
 
 /**
  * Decode the sole ABI boundary for
  * `DKGKnowledgeAssets.getKnowledgeAssetUpdateContext(uint256)`.
  *
- * Ethers Results expose both named properties and positional tuple entries;
- * named values take precedence while positional values keep older fixtures
- * and ABI decoders compatible.
+ * Ethers Results are array-like and always carry the ABI tuple positions.
+ * Normalize those positions once and deliberately ignore optional named
+ * properties so a fixture property cannot override the contract wire shape.
  */
 export function decodeKnowledgeAssetUpdateContext(
   value: unknown,
   kaId: bigint,
 ): KnowledgeAssetUpdateContext {
-  const context = asRawUpdateContext(value);
+  const [
+    merkleRootsCount,
+    minted,
+    byteSize,
+    endEpoch,
+    tokenAmount,
+    isImmutable,
+    merkleLeafCount,
+  ] = normalizeTuple(value, kaId);
   return {
-    merkleRootsCount: decodeBigIntField(context, 'merkleRootsCount', kaId),
-    minted: decodeBigIntField(context, 'minted', kaId),
-    byteSize: decodeBigIntField(context, 'byteSize', kaId),
-    endEpoch: decodeBigIntField(context, 'endEpoch', kaId),
-    tokenAmount: decodeBigIntField(context, 'tokenAmount', kaId),
-    isImmutable: decodeBooleanField(context, 'isImmutable', kaId),
-    merkleLeafCount: decodeSafeNumberField(context, 'merkleLeafCount', kaId),
+    merkleRootsCount: decodeUint(merkleRootsCount, 'merkleRootsCount', kaId),
+    minted: decodeUint(minted, 'minted', kaId),
+    byteSize: decodeUint(byteSize, 'byteSize', kaId),
+    endEpoch: decodeUint(endEpoch, 'endEpoch', kaId),
+    tokenAmount: decodeUint(tokenAmount, 'tokenAmount', kaId),
+    isImmutable: decodeBoolean(isImmutable, 'isImmutable', kaId),
+    merkleLeafCount: decodeSafeNumber(merkleLeafCount, 'merkleLeafCount', kaId),
   };
 }
 
@@ -103,10 +99,19 @@ export function decodeKnowledgeAssetMerkleRootCount(
   value: unknown,
   kaId: bigint,
 ): bigint {
-  const context = asRawUpdateContext(value);
-  const rawCount = context.merkleRootsCount ?? context[UPDATE_CONTEXT_FIELDS.merkleRootsCount];
+  const rawCount = value !== null && typeof value === 'object'
+    ? (
+      Number.isSafeInteger(Reflect.get(value, 'length'))
+        ? Reflect.get(value, '0')
+        : Reflect.get(value, 'merkleRootsCount')
+    )
+    : undefined;
   if (rawCount === undefined) {
     throw new Error(`Missing Merkle-root count for KA ${kaId}`);
   }
-  return BigInt(rawCount as string | number | bigint | boolean);
+  try {
+    return decodeUint(rawCount, 'Merkle-root count', kaId);
+  } catch {
+    throw new Error(`Invalid Merkle-root count for KA ${kaId}`);
+  }
 }

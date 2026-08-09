@@ -32,7 +32,6 @@ import {
 } from './publisher-plan.js';
 import { errorMessage } from './evm-adapter-errors.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
-import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & { signer: Wallet; address: string };
 
@@ -721,10 +720,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     let endEpoch = 0n;
     if (kas) {
       try {
-        const rawContext = await this.readContract(
-          kas, 'kas.getKnowledgeAssetUpdateContext', 'getKnowledgeAssetUpdateContext', params.kaId,
-        );
-        const context = decodeKnowledgeAssetUpdateContext(rawContext, params.kaId);
+        const context = await this.readKnowledgeAssetUpdateContext(kas, params.kaId);
         currentByteSize = context.byteSize;
         endEpoch = context.endEpoch;
       } catch (err) {

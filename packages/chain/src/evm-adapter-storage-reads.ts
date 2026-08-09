@@ -14,7 +14,6 @@ import { Contract, ethers } from 'ethers';
 import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
 import {
   decodeKnowledgeAssetMerkleRootCount,
-  decodeKnowledgeAssetUpdateContext,
 } from './evm-knowledge-asset-update-context.js';
 
 export class StorageReadMethods extends EVMChainAdapterBase {
@@ -52,14 +51,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   ): Promise<KnowledgeAssetUpdateContext> {
     await this.init();
     const kas = this.requireKCStorage();
-    const context = await this.readContractWithOptions(
-      kas,
-      'kas.getKnowledgeAssetUpdateContext',
-      'getKnowledgeAssetUpdateContext',
-      [kaId],
-      { signal: options.signal },
-    );
-    return decodeKnowledgeAssetUpdateContext(context, kaId);
+    return this.readKnowledgeAssetUpdateContext(kas, kaId, options);
   }
 
   async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
