@@ -130,14 +130,12 @@ export interface StoreAdmissionV1 {
 
 import {
   StoreControlBarrierCoordinator,
-  type StoreBarrierHostV1,
-} from './store-control-barrier-v1-internal.js';
-import {
   StoreControlBarrierTimeoutError,
+  type StoreBarrierHostV1,
   type StoreControlBarrierBlockers,
   type StoreControlBarrierPhase,
   type StoreGenerationSeal,
-} from './store-barrier-contract-v1-internal.js';
+} from './store-control-barrier-v1-internal.js';
 // Re-exported: these were declared here before the barrier subsystem moved out,
 // and they are part of the package's published surface.
 export {
@@ -302,8 +300,6 @@ export const STORE_ADMISSION_SHARED_BYPASS_LIMIT = 8;
  * re-read on each selection under exactly the load that makes it matter.
  */
 export const STORE_ADMISSION_EXCLUSIVE_WAIT_BOUND_MS = 250;
-
-/** Seal generation recorded for a barrier that drains ALL tagged work. */
 
 /**
  * Default bound on a whole control transition, wait plus execution.
@@ -614,11 +610,14 @@ export class StorePriorityScheduler extends ObservableScheduler {
       now: () => this.now(),
       sealStoreGeneration: (storeId, generation) =>
         this.sealStoreGeneration(storeId, generation),
-      untaggedInflight: () => this.untaggedInflight(),
-      taggedInflightForStore: (storeId) =>
-        this.storeStates.get(storeId)?.taggedInflight ?? 0,
-      generationsInflight: () => this.countGenerationsInflight(),
-      heldRunCount: () => this.heldRunCount,
+      quiescence: (storeId) => ({
+        untaggedInflight: this.untaggedInflight(),
+        taggedInflightForStore: this.storeStates.get(storeId)?.taggedInflight ?? 0,
+      }),
+      blockerDiagnostics: () => ({
+        generationsInflight: this.countGenerationsInflight(),
+        heldRuns: this.heldRunCount,
+      }),
       occupiedSlots: () => this.barrierOccupiedSlots,
       observeDepths: () => this.observeDepths(),
     };

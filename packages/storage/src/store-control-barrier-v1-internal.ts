@@ -23,8 +23,59 @@
  * not drift.
  */
 
-import type { StoreControlBarrierBlockers, StoreGenerationSeal } from './store-barrier-contract-v1-internal.js';
-import { StoreControlBarrierTimeoutError } from './store-barrier-contract-v1-internal.js';
+export type StoreControlBarrierPhase = 'wait' | 'transition';
+
+/** What a control barrier was still waiting on when it gave up. */
+export interface StoreControlBarrierBlockers {
+  /** Inflight work carrying no store identity, so it cannot be ruled out. */
+  untaggedInflight: number;
+  taggedInflightForStore: number;
+  generationsInflight: number;
+  heldRuns: number;
+}
+
+/**
+ * A control transition that did not complete within its bound.
+ *
+ * The quiescence gate traded one failure mode for another: a transition that
+ * issues store work through the scheduler no longer produces a burst of
+ * transport errors, it produces a circular wait — the transition waits for work
+ * to drain, and that work waits for the transition. Silent and indefinite is a
+ * worse operational outcome than loud and wrong, so the wait is bounded and
+ * reports exactly what it was blocked on.
+ */
+export class StoreControlBarrierTimeoutError extends Error {
+  readonly code = 'STORE_CONTROL_BARRIER_TIMEOUT' as const;
+
+  constructor(
+    readonly phase: StoreControlBarrierPhase,
+    readonly purpose: string,
+    readonly elapsedMs: number,
+    readonly blockedBy: StoreControlBarrierBlockers,
+  ) {
+    super(
+      `Store control barrier "${purpose || 'unknown'}" timed out after ${elapsedMs} ms in the `
+      + `${phase} phase (untagged inflight ${blockedBy.untaggedInflight}, tagged inflight for this `
+      + `store ${blockedBy.taggedInflightForStore}, held runs ${blockedBy.heldRuns}). The usual `
+      + 'cause is a transition that issues store work through the scheduler: a barrier owns the '
+      + 'store exclusively, so work issued from inside one waits for the barrier waiting for it.',
+    );
+    this.name = 'StoreControlBarrierTimeoutError';
+  }
+}
+
+/** Handle returned by {@link StorePriorityScheduler.sealStoreGeneration}. */
+export interface StoreGenerationSeal {
+  readonly storeId: object;
+  readonly generation: string;
+  /**
+   * Commit the transition: release the seal, release every held `run()`, and
+   * wake selection. Idempotent — a control path that commits in a `finally`
+   * after an early `commit()` must not double-release.
+   */
+  commit(): void;
+}
+
 
 /** Label carried on a seal when the caller does not name a generation. */
 const BARRIER_ANY_GENERATION = '*';
@@ -56,16 +107,32 @@ export interface StoreBarrierHostV1 {
   now(): number;
   /** Seals the store for the barrier's duration; the seal is committed here. */
   sealStoreGeneration(storeId: object, generation: string): StoreGenerationSeal;
-  /** Inflight work carrying no store identity, so unattributable to any store. */
-  untaggedInflight(): number;
-  /** Inflight work tagged for this store, across every domain and generation. */
-  taggedInflightForStore(storeId: object): number;
-  /** Diagnostics only — reported when the bound expires. */
-  generationsInflight(): number;
-  heldRunCount(): number;
+  /**
+   * What is still executing that could be touching `storeId` — the quiescence
+   * question, asked as one question.
+   *
+   * On the hot path: `pump()` calls this from every completion, so it must stay
+   * cheap. Deliberately excludes the diagnostic counters, which are O(stores)
+   * and only needed when the bound expires.
+   */
+  quiescence(storeId: object): StoreBarrierQuiescenceV1;
+  /** Diagnostics for an expired bound only. Never called while deciding readiness. */
+  blockerDiagnostics(): StoreBarrierDiagnosticsV1;
   /** Slots held by barrier-related work, for the occupied-slot-time metric. */
   occupiedSlots(): number;
   observeDepths(): void;
+}
+
+export interface StoreBarrierQuiescenceV1 {
+  /** Inflight work carrying no store identity, so unattributable to any store. */
+  readonly untaggedInflight: number;
+  /** Inflight work tagged for this store, across every domain and generation. */
+  readonly taggedInflightForStore: number;
+}
+
+export interface StoreBarrierDiagnosticsV1 {
+  readonly generationsInflight: number;
+  readonly heldRuns: number;
 }
 
 export interface StoreBarrierMetricsV1 {
@@ -214,8 +281,10 @@ export class StoreControlBarrierCoordinator {
    * provably not this store's.
    */
   private isReady(barrier: BarrierEntry): boolean {
-    if (this.host.untaggedInflight() > 0) return false;
-    return this.host.taggedInflightForStore(barrier.storeId) === 0;
+    const { untaggedInflight, taggedInflightForStore } = this.host.quiescence(
+      barrier.storeId,
+    );
+    return untaggedInflight === 0 && taggedInflightForStore === 0;
   }
 
   /**
@@ -254,10 +323,8 @@ export class StoreControlBarrierCoordinator {
 
   private describeBlockers(barrier: BarrierEntry): StoreControlBarrierBlockers {
     return {
-      untaggedInflight: this.host.untaggedInflight(),
-      taggedInflightForStore: this.host.taggedInflightForStore(barrier.storeId),
-      generationsInflight: this.host.generationsInflight(),
-      heldRuns: this.host.heldRunCount(),
+      ...this.host.quiescence(barrier.storeId),
+      ...this.host.blockerDiagnostics(),
     };
   }
 
