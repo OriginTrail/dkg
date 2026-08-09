@@ -24,7 +24,7 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import {
   createSystemRecordInventoryRowTraversalV1,
-} from '@origintrail-official/dkg-core/dist/system-record-inventory-traversal-v1-internal.js';
+} from '@origintrail-official/dkg-core/system-record-inventory-row-traversal-v1';
 import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
 import type {

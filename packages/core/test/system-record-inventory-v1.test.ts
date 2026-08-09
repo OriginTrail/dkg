@@ -31,7 +31,7 @@ import {
 } from '../src/system-record-inventory-v1.js';
 import {
   createSystemRecordInventoryRowTraversalV1,
-} from '../src/system-record-inventory-traversal-v1-internal.js';
+} from '../src/system-record-inventory-row-traversal-v1.js';
 import {
   SYSTEM_RECORD_MAX_EVIDENCE_ROW_BYTES,
   SYSTEM_RECORD_MAX_INVENTORY_RECORDS,
@@ -459,6 +459,41 @@ describe('system-record immutable B+tree objects', () => {
       maxWireBytes: 2 * 1024 * 1024,
       deadlineMs: Date.now() + 3_000,
     })).rejects.toBe(sentinel);
+
+    const ambiguous = createSystemRecordInventoryTraversalV1(Object.freeze({
+      ...snapshot.descriptor,
+      totalRows: '256',
+    }));
+    await expect(ambiguous.advance(async (_digest, expectedKind) => {
+      expect(expectedKind).toBeUndefined();
+      return Object.freeze({
+        outcome: 'rejected' as const,
+        wireBytes: 6,
+        rejection: 'not-found' as const,
+      });
+    }, {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).resolves.toMatchObject({
+      status: 'rejected',
+      requests: 1,
+      wireBytes: 6,
+      rejection: 'not-found',
+    });
+
+    const abortReason = new Error('public traversal caller aborted');
+    const abortController = new AbortController();
+    abortController.abort(abortReason);
+    const aborted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(aborted.advance(async () => {
+      throw new Error('pre-aborted traversal must not load');
+    }, {
+      signal: abortController.signal,
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).rejects.toBe(abortReason);
   });
 
   it('latches traversal admission before invoking a reentrant clock', async () => {

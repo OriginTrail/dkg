@@ -20,6 +20,11 @@
       "import": "./dist/system-record-v1.js",
       "default": "./dist/system-record-v1.js"
     },
+    "./system-record-inventory-row-traversal-v1": {
+      "types": "./dist/system-record-inventory-row-traversal-v1.d.ts",
+      "import": "./dist/system-record-inventory-row-traversal-v1.js",
+      "default": "./dist/system-record-inventory-row-traversal-v1.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 
 const api = await import('@origintrail-official/dkg-core/system-record-v1');
+const rowTraversalApi = await import(
+  '@origintrail-official/dkg-core/system-record-inventory-row-traversal-v1'
+);
+
+assert.equal(typeof rowTraversalApi.createSystemRecordInventoryRowTraversalV1, 'function');
+assert.equal('createSystemRecordInventoryRowTraversalV1' in api, false);
 
 const expectedRuntimeExports = Object.freeze([
   'AGENT_PROFILE_LINK_PREDICATES_V1',

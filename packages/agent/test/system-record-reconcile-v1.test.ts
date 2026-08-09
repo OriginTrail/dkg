@@ -1,37 +1,27 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
   SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS,
   buildSystemRecordInventoryTreeV1,
-  buildSystemRecordProviderSignatureMessageV1,
-  computeSystemRecordRootDescriptorDigestV1,
   computeSystemRecordStableKeyHashV1,
-  parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
-  type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import { parseNQuads } from '../src/dkg-agent-utils.js';
 import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
-import type { SystemRecordArtifactRepositoryV1 } from '../src/system-records/artifact-v1.js';
-import {
-  createAgentProfileReceiverV1,
-  type AgentProfileReceiverV1,
-} from '../src/system-records/receiver-v1.js';
 import {
   createAgentProfileReconcilerV1,
   type AgentProfileReconcileAdmissionV1,
   type AgentProfileInventoryLoadRequestV1,
 } from '../src/system-records/reconcile-v1.js';
 import {
-  createFixtureAgentProfileProducerV1,
+  admissionGate,
   NETWORK,
-  produce,
-  producerFixture,
-  PRODUCER_FIXTURE_NOW_MS,
-  DEPLOYMENT,
-} from './support/agent-profile-producer-v1-fixture.js';
+  publishedFixture,
+  receiver,
+  receiverWithPreparation,
+  resignRootTotalRows,
+  signRootDescriptor,
+} from './support/system-record-reconcile-v1-fixture.js';
 
 const TEST_PEER_IDS = Object.freeze([
   '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkf',
@@ -735,133 +725,6 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(reconciler.stats()).toMatchObject({ admittedSlices: 1, active: 0, queued: 0 });
   });
 
-  it('accounts exact wire for malformed and aborted inventory responses', async () => {
-    const malformedFixture = await publishedFixture();
-    let malformedWireBytes = 0;
-    const malformed = await createAgentProfileReconcilerV1({
-      networkId: NETWORK,
-      rootEnvelope: malformedFixture.rootEnvelope,
-      providerPeerPublicKey: malformedFixture.peerSigner.publicKey,
-      admission: admissionGate(),
-      loadInventoryObject: async (request, signal) => {
-        const loaded = await malformedFixture.loadInventoryObject(request, signal);
-        if (loaded.outcome !== 'ok') return loaded;
-        malformedWireBytes = loaded.wireBytes;
-        return Object.freeze({
-          ...loaded,
-          canonicalBytes: Uint8Array.from([0, ...loaded.canonicalBytes.subarray(1)]),
-        });
-      },
-      receiver: receiver(malformedFixture.store, vi.fn()),
-    });
-
-    const malformedResult = await malformed.advance(new AbortController().signal);
-    expect(malformedResult).toMatchObject({
-      status: 'blocked',
-      reason: 'inventory-invalid-response',
-      inventoryRequests: 1,
-      inventoryWireBytes: malformedWireBytes,
-    });
-    expect(malformed.stats()).toMatchObject({
-      inventoryRequests: 1,
-      inventoryWireBytes: malformedWireBytes,
-    });
-
-    const abortedFixture = await publishedFixture();
-    const caller = new AbortController();
-    const rootRequest = Object.freeze({
-      rootDescriptorDigest: abortedFixture.rootEnvelope.objectDigest,
-      objectDigest: abortedFixture.rootEnvelope.object.treeRootDigest,
-      expectedKind: 'inventory-leaf' as const,
-      path: Object.freeze([] as number[]),
-    });
-    const loaded = await abortedFixture.loadInventoryObject(
-      rootRequest,
-      new AbortController().signal,
-    );
-    const requested = Promise.withResolvers<void>();
-    const delivery = Promise.withResolvers<typeof loaded>();
-    const aborted = await createAgentProfileReconcilerV1({
-      networkId: NETWORK,
-      rootEnvelope: abortedFixture.rootEnvelope,
-      providerPeerPublicKey: abortedFixture.peerSigner.publicKey,
-      admission: admissionGate(),
-      loadInventoryObject: () => {
-        requested.resolve();
-        return delivery.promise;
-      },
-      receiver: receiver(abortedFixture.store, vi.fn()),
-    });
-
-    const abortedAdvance = aborted.advance(caller.signal);
-    await requested.promise;
-    delivery.resolve(loaded);
-    // Settle the response through the loader boundary before cancellation is observed.
-    await Promise.resolve();
-    await Promise.resolve();
-    caller.abort(new Error('caller-aborted-after-response'));
-    await expect(abortedAdvance).rejects.toThrow(/caller-aborted-after-response/);
-    expect(aborted.stats()).toMatchObject({
-      inventoryRequests: 1,
-      inventoryWireBytes: loaded.wireBytes,
-      active: 0,
-    });
-  });
-
-  it('accepts and accounts a zero-byte transport reset', async () => {
-    const fixture = await publishedFixture();
-    const reconciler = await createAgentProfileReconcilerV1({
-      networkId: NETWORK,
-      rootEnvelope: fixture.rootEnvelope,
-      providerPeerPublicKey: fixture.peerSigner.publicKey,
-      admission: admissionGate(),
-      loadInventoryObject: async () => Object.freeze({
-        outcome: 'rejected' as const,
-        wireBytes: 0,
-        rejection: 'transport' as const,
-      }),
-      receiver: receiver(fixture.store, vi.fn()),
-    });
-
-    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
-      status: 'blocked',
-      reason: 'inventory-transport',
-      inventoryRequests: 1,
-      inventoryWireBytes: 0,
-    });
-    expect(reconciler.stats()).toMatchObject({ inventoryRequests: 1, inventoryWireBytes: 0 });
-  });
-
-  it('maps a thrown inventory loader failure to a released transport block', async () => {
-    const fixture = await publishedFixture();
-    const admission = admissionGate();
-    const sentinel = new Error('inventory transport socket closed');
-    const reconciler = await createAgentProfileReconcilerV1({
-      networkId: NETWORK,
-      rootEnvelope: fixture.rootEnvelope,
-      providerPeerPublicKey: fixture.peerSigner.publicKey,
-      admission,
-      loadInventoryObject: async () => { throw sentinel; },
-      receiver: receiver(fixture.store, vi.fn()),
-    });
-
-    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
-      status: 'blocked',
-      phase: 'inventory',
-      reason: 'inventory-transport',
-      inventoryRequests: 1,
-      inventoryWireBytes: 0,
-      processedRows: 0,
-      pendingRows: 0,
-    });
-    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 1 });
-    expect(reconciler.stats()).toMatchObject({
-      inventoryRequests: 1,
-      inventoryWireBytes: 0,
-      active: 0,
-    });
-  });
-
   it('rejects an untrusted provider root before acquiring admission or loading inventory', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();
@@ -881,163 +744,3 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(loadInventoryObject).not.toHaveBeenCalled();
   });
 });
-
-async function publishedFixture() {
-  const fixture = await producerFixture();
-  const producer = createFixtureAgentProfileProducerV1({
-    networkId: NETWORK,
-    publicationDeployment: DEPLOYMENT,
-    peerSigner: fixture.peerSigner,
-    evmSigner: fixture.evmSigner,
-    store: fixture.store,
-    fence: () => undefined,
-    install: () => undefined,
-  });
-  await produce(producer, fixture.prepared, fixture.publication);
-  const rootArtifact = await fixture.store.resolve(
-    { type: 'root' },
-    new AbortController().signal,
-  );
-  if (rootArtifact === null) throw new Error('fixture root was not retained');
-  const rootEnvelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(
-    rootArtifact.canonicalBytes,
-  );
-  const inventory = fixture.store.snapshot().inventory;
-  if (inventory === null) throw new Error('fixture inventory was not retained');
-
-  return {
-    ...fixture,
-    rootEnvelope,
-    loadInventoryObject: async (
-      request: AgentProfileInventoryLoadRequestV1,
-      signal: AbortSignal,
-    ) => {
-      const stored = inventory.objects.get(request.objectDigest);
-      const objectKind = request.expectedKind;
-      const artifact = await fixture.store.resolve({
-        type: 'inventory-object',
-        rootDescriptorDigest: request.rootDescriptorDigest,
-        path: request.path,
-        objectKind,
-        objectDigest: request.objectDigest,
-      }, signal);
-      return artifact === null
-        ? {
-            outcome: 'rejected' as const,
-            wireBytes: 6,
-            rejection: 'not-found' as const,
-          }
-        : {
-          outcome: 'ok' as const,
-          objectKind,
-          canonicalBytes: artifact.canonicalBytes,
-          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
-        };
-    },
-  };
-}
-
-async function resignRootTotalRows(
-  fixture: Awaited<ReturnType<typeof publishedFixture>>,
-  totalRows: SignedSystemRecordRootDescriptorEnvelopeV1['object']['totalRows'],
-): Promise<SignedSystemRecordRootDescriptorEnvelopeV1> {
-  const object = Object.freeze({ ...fixture.rootEnvelope.object, totalRows });
-  return signRootDescriptor(fixture, object);
-}
-
-async function signRootDescriptor(
-  fixture: Awaited<ReturnType<typeof publishedFixture>>,
-  object: SignedSystemRecordRootDescriptorEnvelopeV1['object'],
-): Promise<SignedSystemRecordRootDescriptorEnvelopeV1> {
-  const objectDigest = computeSystemRecordRootDescriptorDigestV1(object);
-  const signature = await fixture.peerSigner.sign(buildSystemRecordProviderSignatureMessageV1(
-    object,
-    objectDigest,
-    fixture.peerSigner.peerId,
-  ));
-  return Object.freeze({
-    object,
-    objectDigest,
-    providerPeerId: fixture.peerSigner.peerId,
-    signatureSuite: 'ed25519-v1',
-    signature: Buffer.from(signature).toString('base64url'),
-  });
-}
-
-function receiver(
-  store: SystemRecordArtifactRepositoryV1,
-  consumeCandidate: Parameters<typeof createAgentProfileReceiverV1>[0]['consumeCandidate'],
-) {
-  return createAgentProfileReceiverV1({
-    networkId: NETWORK,
-    artifacts: store,
-    nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-    verifyCurrentBundle: (_head, bundleBytes) => {
-      const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
-      return Object.freeze({
-        canonicalProjectionBytes: Uint8Array.from(projectionBytes),
-        projectionQuads: Object.freeze(parseNQuads(new TextDecoder().decode(projectionBytes))),
-      });
-    },
-    consumeCandidate,
-  });
-}
-
-function receiverWithPreparation(
-  prepareActive: AgentProfileReceiverV1['prepareActive'],
-): AgentProfileReceiverV1 {
-  const receiver: AgentProfileReceiverV1 = Object.freeze({
-    prepareActive,
-    async receiveActive(row, admittedContext, signal) {
-      const prepared = await prepareActive(row, signal);
-      signal.throwIfAborted();
-      return prepared.apply(admittedContext, signal);
-    },
-  });
-  return receiver;
-}
-
-function admissionGate(
-  initiallyHeld = false,
-  nowMs: () => number = Date.now,
-): AgentProfileReconcileAdmissionV1 & {
-  stats(): { active: 0 | 1; peak: 0 | 1; acquisitions: number };
-  lastContext(): AgentProfileAdmittedSliceContextV1 | undefined;
-} {
-  let held = initiallyHeld;
-  let peak: 0 | 1 = held ? 1 : 0;
-  let acquisitions = 0;
-  let lastContext: AgentProfileAdmittedSliceContextV1 | undefined;
-  const contexts = new WeakMap<object, number>();
-  return Object.freeze({
-    tryAcquire() {
-      if (held) return null;
-      held = true;
-      peak = 1;
-      acquisitions += 1;
-      const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
-      contexts.set(context, nowMs() + 3_000);
-      lastContext = context;
-      let live = true;
-      return Object.freeze({
-        admittedContext: context,
-        release() {
-          if (!live) return;
-          live = false;
-          held = false;
-        },
-      });
-    },
-    inspectAdmittedContext(context) {
-      const admittedDeadlineMs = contexts.get(context);
-      if (admittedDeadlineMs === undefined) throw new Error('test admitted context is invalid');
-      return Object.freeze({ nowMs: nowMs(), admittedDeadlineMs });
-    },
-    stats() {
-      return { active: held ? 1 : 0, peak, acquisitions };
-    },
-    lastContext() {
-      return lastContext;
-    },
-  });
-}

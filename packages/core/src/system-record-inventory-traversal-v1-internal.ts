@@ -162,7 +162,7 @@ type SystemRecordInventoryTraversalWorkV1 =
 export function createSystemRecordInventoryTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryTraversalV1 {
-  const traversal = createSystemRecordInventoryTraversalStepperV1(descriptor);
+  const traversal = createSystemRecordInventoryTraversalStepperV1(descriptor, false);
   return Object.freeze({ advance });
 
   async function advance(
@@ -175,6 +175,7 @@ export function createSystemRecordInventoryTraversalV1(
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
   ): Promise<SystemRecordInventoryTraversalSliceResultV1> {
+    const admittedSignal = slice.signal;
     const advanced = await traversal.advance(
       (digest, expectedKind, signal, path) => load(
         digest,
@@ -184,6 +185,9 @@ export function createSystemRecordInventoryTraversalV1(
       slice,
     );
     if (advanced.status === 'failed') {
+      if (advanced.failure.reason === 'aborted' && admittedSignal?.aborted) {
+        throw admittedSignal.reason ?? new Error('inventory traversal aborted');
+      }
       if (
         advanced.failure.reason === 'transport'
         && advanced.failure.cause !== undefined
@@ -216,15 +220,16 @@ export function createSystemRecordInventoryTraversalV1(
   }
 }
 
-/** @internal Agent-owned bridge for bounded, lossless row reconciliation. */
+/** Create a bounded row-producing traversal for reconciliation consumers. */
 export function createSystemRecordInventoryRowTraversalV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
 ): SystemRecordInventoryRowTraversalV1 {
-  return createSystemRecordInventoryTraversalStepperV1(descriptor);
+  return createSystemRecordInventoryTraversalStepperV1(descriptor, true);
 }
 
 function createSystemRecordInventoryTraversalStepperV1(
   descriptor: SystemRecordRootDescriptorObjectV1,
+  probeExactRootKinds: boolean,
 ): SystemRecordInventoryRowTraversalV1 {
   const pinned = validateRootDescriptor(descriptor);
   const expectedRows = Number(parseCanonicalDecimalU64(pinned.totalRows));
@@ -362,7 +367,7 @@ function createSystemRecordInventoryTraversalStepperV1(
           throw new InventoryTraversalTransportError(error);
         }
         if (loaded === undefined) {
-          if (advanceRootProbe(work)) {
+          if (probeExactRootKinds && advanceRootProbe(work)) {
             return pausedSliceResult(requests, wireBytes, sliceRows);
           }
           throw new InventoryTraversalNotFoundError(work.digest);
@@ -397,7 +402,11 @@ function createSystemRecordInventoryTraversalStepperV1(
           ) {
             throw new Error('inventory loader returned an invalid rejection');
           }
-          if (rejected.rejection === 'not-found' && advanceRootProbe(work)) {
+          if (
+            probeExactRootKinds
+            && rejected.rejection === 'not-found'
+            && advanceRootProbe(work)
+          ) {
             return pausedSliceResult(requests, wireBytes, sliceRows);
           }
           return Object.freeze({
