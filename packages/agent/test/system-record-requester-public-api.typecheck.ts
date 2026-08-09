@@ -6,7 +6,7 @@ import type {
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterExchangeV1,
   SystemRecordRequesterV1,
-} from '@origintrail-official/dkg-agent/dist/system-records/requester-api-v1.js';
+} from '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js';
 import { createSystemRecordRequesterV1 } from '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js';
 
 declare const byteAdmission: SystemRecordRequesterByteAdmissionV1;

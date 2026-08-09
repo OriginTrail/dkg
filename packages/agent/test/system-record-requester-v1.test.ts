@@ -15,13 +15,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type {
   CreateSystemRecordRequesterOptionsV1,
-  SystemRecordRequesterAdmissionV1,
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterExchangeV1,
 } from '../src/system-records/requester-api-v1.js';
 import {
   createSystemRecordRequesterV1,
 } from '../src/system-records/requester-v1.js';
+import { createSystemRecordPermitGateV1 } from '../src/system-records/transport-v1.js';
 
 const NETWORK = 'base:84532' as const;
 const PAYLOAD = Uint8Array.of(1, 2, 3);
@@ -770,22 +770,8 @@ function errorResponse(
 }
 
 function permitAdmission() {
-  let active = false;
-  const value: SystemRecordRequesterAdmissionV1 = {
-    tryAcquire() {
-      if (active) return null;
-      active = true;
-      let released = false;
-      return Object.freeze({
-        release() {
-          if (released) return;
-          released = true;
-          active = false;
-        },
-      });
-    },
-  };
-  return { value, active: () => active };
+  const value = createSystemRecordPermitGateV1();
+  return { value, active: () => value.active === 1 };
 }
 
 function byteAdmission() {

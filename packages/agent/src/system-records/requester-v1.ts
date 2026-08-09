@@ -36,6 +36,21 @@ import {
 } from './requester-wire-v1-internal.js';
 import { raceSystemRecordAbortV1 } from './transport-v1.js';
 
+export type {
+  CreateSystemRecordRequesterOptionsV1,
+  SystemRecordExactArtifactLookupV1,
+  SystemRecordExactFetchLeaseV1,
+  SystemRecordExactFetchResultV1,
+  SystemRecordRequesterAdmissionV1,
+  SystemRecordRequesterByteAdmissionV1,
+  SystemRecordRequesterByteReservationV1,
+  SystemRecordRequesterExchangeV1,
+  SystemRecordRequesterPermitV1,
+  SystemRecordRequesterResetReasonV1,
+  SystemRecordRequesterStatsV1,
+  SystemRecordRequesterV1,
+} from './requester-api-v1.js';
+
 type SystemRecordRequesterFailureV1 = Exclude<
   SystemRecordExactFetchResultV1,
   Readonly<{ outcome: 'ok' }>
@@ -63,78 +78,98 @@ interface SettledFetchPhaseV1 {
 
 type FetchPhaseV1 = PendingFetchPhaseV1 | RetainedFetchPhaseV1 | SettledFetchPhaseV1;
 
-interface FetchEntryAccountingV1 {
-  observerDelta(delta: 1 | -1): void;
-  leaseDelta(delta: 1 | -1): void;
-  retainedBytesDelta(delta: number): void;
-  remove(entry: FetchEntryV1): void;
+interface FetchEntryV1 {
+  readonly key: string;
+  phase: FetchPhaseV1;
+  observerCount: number;
+  leaseCount: number;
 }
 
-class FetchEntryV1 {
-  readonly key: string;
-  #phase: FetchPhaseV1;
-  #observerCount = 0;
-  #leaseCount = 0;
-  readonly #accounting: FetchEntryAccountingV1;
+class ExactFetchRegistryV1 {
+  readonly #entries = new Map<string, FetchEntryV1>();
+  readonly #byteAdmission: SystemRecordRequesterByteAdmissionV1;
+  #waitingCallers = 0;
+  #activeLeases = 0;
+  #retainedPayloadBytes = 0;
 
-  constructor(
-    key: string,
-    pending: PendingFetchPhaseV1,
-    accounting: FetchEntryAccountingV1,
-  ) {
-    this.key = key;
-    this.#phase = pending;
-    this.#accounting = accounting;
+  constructor(byteAdmission: SystemRecordRequesterByteAdmissionV1) {
+    this.#byteAdmission = byteAdmission;
   }
 
-  get participantCount(): number {
-    return this.#observerCount + this.#leaseCount;
+  get size(): number {
+    return this.#entries.size;
   }
 
-  get pendingAborted(): boolean {
-    return this.#phase.state === 'pending' && this.#phase.controller.signal.aborted;
+  get waitingCallers(): number {
+    return this.#waitingCallers;
   }
 
-  snapshot(): FetchPhaseV1 {
-    return this.#phase;
+  get activeLeases(): number {
+    return this.#activeLeases;
   }
 
-  addObserver(): void {
-    this.#observerCount += 1;
-    this.#accounting.observerDelta(1);
+  get retainedPayloadBytes(): number {
+    return this.#retainedPayloadBytes;
   }
 
-  releaseObserver(): void {
-    if (this.#observerCount < 1) throw new Error('System Record observer underflow');
-    this.#observerCount -= 1;
-    this.#accounting.observerDelta(-1);
-    this.#disposeIfIdle();
+  get(key: string): FetchEntryV1 | undefined {
+    return this.#entries.get(key);
   }
 
-  retainSource(source: SystemRecordRetainedSourceV1): void {
-    if (this.#phase.state !== 'pending') {
+  create(key: string, pending: PendingFetchPhaseV1): FetchEntryV1 {
+    const entry: FetchEntryV1 = { key, phase: pending, observerCount: 0, leaseCount: 0 };
+    this.#entries.set(key, entry);
+    return entry;
+  }
+
+  snapshot(entry: FetchEntryV1): FetchPhaseV1 {
+    return entry.phase;
+  }
+
+  pendingAborted(entry: FetchEntryV1): boolean {
+    return entry.phase.state === 'pending' && entry.phase.controller.signal.aborted;
+  }
+
+  participantCount(entry: FetchEntryV1): number {
+    return entry.observerCount + entry.leaseCount;
+  }
+
+  addObserver(entry: FetchEntryV1): void {
+    entry.observerCount += 1;
+    this.#waitingCallers += 1;
+  }
+
+  releaseObserver(entry: FetchEntryV1): void {
+    if (entry.observerCount < 1) throw new Error('System Record observer underflow');
+    entry.observerCount -= 1;
+    this.#waitingCallers -= 1;
+    this.#disposeIfIdle(entry);
+  }
+
+  retainSource(entry: FetchEntryV1, source: SystemRecordRetainedSourceV1): void {
+    if (entry.phase.state !== 'pending') {
       source.release();
       throw new Error('System Record source retained outside the pending phase');
     }
-    this.#phase = Object.freeze({ state: 'retained', source });
-    this.#accounting.retainedBytesDelta(source.artifact.canonicalBytes.byteLength);
+    entry.phase = Object.freeze({ state: 'retained', source });
+    this.#retainedPayloadBytes += source.artifact.canonicalBytes.byteLength;
   }
 
-  settleFailure(): void {
-    if (this.#phase.state !== 'pending') return;
-    this.#phase = Object.freeze({ state: 'failed' });
-    this.#accounting.remove(this);
+  settleFailure(entry: FetchEntryV1): void {
+    if (entry.phase.state !== 'pending') return;
+    entry.phase = Object.freeze({ state: 'failed' });
+    this.#remove(entry);
   }
 
   deliverLease(
+    entry: FetchEntryV1,
     source: SystemRecordRetainedSourceV1,
-    byteAdmission: SystemRecordRequesterByteAdmissionV1,
   ): SystemRecordExactFetchResultV1 {
-    if (this.#phase.state !== 'retained' || this.#phase.source !== source) {
+    if (entry.phase.state !== 'retained' || entry.phase.source !== source) {
       throw new Error('System Record lease source is not retained by its entry');
     }
     const payloadBytes = source.artifact.canonicalBytes.byteLength;
-    const reservation = byteAdmission.tryReserve(payloadBytes);
+    const reservation = this.#byteAdmission.tryReserve(payloadBytes);
     if (reservation === null) {
       return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
     }
@@ -145,9 +180,9 @@ class FetchEntryV1 {
       reservation.release();
       return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
     }
-    this.#leaseCount += 1;
-    this.#accounting.leaseDelta(1);
-    this.#accounting.retainedBytesDelta(payloadBytes);
+    entry.leaseCount += 1;
+    this.#activeLeases += 1;
+    this.#retainedPayloadBytes += payloadBytes;
     let released = false;
     return Object.freeze({
       outcome: 'ok',
@@ -157,39 +192,49 @@ class FetchEntryV1 {
         release: () => {
           if (released) return;
           released = true;
-          this.#leaseCount -= 1;
-          this.#accounting.leaseDelta(-1);
-          this.#accounting.retainedBytesDelta(-payloadBytes);
+          entry.leaseCount -= 1;
+          this.#activeLeases -= 1;
+          this.#retainedPayloadBytes -= payloadBytes;
           reservation.release();
-          this.#disposeIfIdle();
+          this.#disposeIfIdle(entry);
         },
       }),
     });
   }
 
-  abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void {
-    const phase = this.#phase;
+  abort(
+    entry: FetchEntryV1,
+    reason: SystemRecordRequesterResetReasonV1,
+    error: Error,
+  ): void {
+    const phase = entry.phase;
     if (phase.state !== 'pending' || phase.controller.signal.aborted) return;
     phase.abortReason = reason;
     phase.controller.abort(error);
   }
 
   close(): void {
-    this.abort('closed', new Error('system-record requester closed'));
+    for (const entry of this.#entries.values()) {
+      this.abort(entry, 'closed', new Error('system-record requester closed'));
+    }
   }
 
-  #disposeIfIdle(): void {
-    if (this.#observerCount !== 0 || this.#leaseCount !== 0) return;
-    const phase = this.#phase;
+  #disposeIfIdle(entry: FetchEntryV1): void {
+    if (entry.observerCount !== 0 || entry.leaseCount !== 0) return;
+    const phase = entry.phase;
     if (phase.state === 'pending') {
-      this.abort('cancelled', new Error('system-record requester has no callers'));
+      this.abort(entry, 'cancelled', new Error('system-record requester has no callers'));
       return;
     }
     if (phase.state !== 'retained') return;
-    this.#phase = Object.freeze({ state: 'disposed' });
-    this.#accounting.remove(this);
-    this.#accounting.retainedBytesDelta(-phase.source.artifact.canonicalBytes.byteLength);
+    entry.phase = Object.freeze({ state: 'disposed' });
+    this.#remove(entry);
+    this.#retainedPayloadBytes -= phase.source.artifact.canonicalBytes.byteLength;
     phase.source.release();
+  }
+
+  #remove(entry: FetchEntryV1): void {
+    if (this.#entries.get(entry.key) === entry) this.#entries.delete(entry.key);
   }
 }
 
@@ -216,30 +261,13 @@ export function createSystemRecordRequesterV1(
     SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
     'maxWaitersPerDigest',
   );
-  const entries = new Map<string, FetchEntryV1>();
+  const registry = new ExactFetchRegistryV1(options.byteAdmission);
   let started = 0;
   let joined = 0;
   let completed = 0;
-  let waitingCallers = 0;
-  let activeLeases = 0;
   let activeStream: 0 | 1 = 0;
   let peakActiveStream: 0 | 1 = 0;
-  let retainedPayloadBytes = 0;
   let closed = false;
-  const entryAccounting: FetchEntryAccountingV1 = {
-    observerDelta(delta) {
-      waitingCallers += delta;
-    },
-    leaseDelta(delta) {
-      activeLeases += delta;
-    },
-    retainedBytesDelta(delta) {
-      retainedPayloadBytes += delta;
-    },
-    remove(entry) {
-      if (entries.get(entry.key) === entry) entries.delete(entry.key);
-    },
-  };
 
   return Object.freeze({ fetch, stats, close });
 
@@ -251,19 +279,19 @@ export function createSystemRecordRequesterV1(
     if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
     const exact = createSystemRecordExactRequestV1(options.networkId, lookup, requestId());
     const { key, request } = exact;
-    let entry = entries.get(key);
+    let entry = registry.get(key);
     if (entry !== undefined) {
-      if (entry.pendingAborted) {
+      if (registry.pendingAborted(entry)) {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       // The first observer owns the transfer; the frozen limit counts followers.
-      if (entry.participantCount >= maxWaitersPerDigest + 1) {
+      if (registry.participantCount(entry) >= maxWaitersPerDigest + 1) {
         return Object.freeze({ outcome: 'waiter-limit', wireBytes: 0 });
       }
       joined += 1;
       return subscribe(entry, signal);
     }
-    if (entries.size >= maxPendingDigests) {
+    if (registry.size >= maxPendingDigests) {
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
     const streamPermit = options.streamAdmission.tryAcquire();
@@ -279,16 +307,14 @@ export function createSystemRecordRequesterV1(
       resolveTransfer = resolve;
       rejectTransfer = reject;
     });
-    entry = new FetchEntryV1(
+    entry = registry.create(
       key,
       {
         state: 'pending',
         controller: new AbortController(),
         transfer,
       },
-      entryAccounting,
     );
-    entries.set(key, entry);
     started += 1;
     activeStream = 1;
     peakActiveStream = 1;
@@ -303,12 +329,12 @@ export function createSystemRecordRequesterV1(
     entry: FetchEntryV1,
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1> {
-    entry.addObserver();
+    registry.addObserver(entry);
     let observing = true;
     const releaseObserver = () => {
       if (!observing) return;
       observing = false;
-      entry.releaseObserver();
+      registry.releaseObserver(entry);
     };
     signal.addEventListener('abort', releaseObserver, { once: true });
     if (signal.aborted) {
@@ -316,16 +342,16 @@ export function createSystemRecordRequesterV1(
       signal.throwIfAborted();
     }
     try {
-      const phase = entry.snapshot();
+      const phase = registry.snapshot(entry);
       if (phase.state === 'retained') {
-        return entry.deliverLease(phase.source, options.byteAdmission);
+        return registry.deliverLease(entry, phase.source);
       }
       if (phase.state !== 'pending') {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       const shared = await raceSystemRecordAbortV1(phase.transfer, signal);
       return shared.state === 'retained'
-        ? entry.deliverLease(shared.source, options.byteAdmission)
+        ? registry.deliverLease(entry, shared.source)
         : shared.result;
     } finally {
       signal.removeEventListener('abort', releaseObserver);
@@ -339,14 +365,15 @@ export function createSystemRecordRequesterV1(
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
   ): Promise<SystemRecordRequesterSettlementV1> {
-    const pending = entry.snapshot();
+    const pending = registry.snapshot(entry);
     if (pending.state !== 'pending') {
       throw new Error('System Record transfer started outside the pending phase');
     }
     let exchange: SystemRecordRequesterExchangeV1 | undefined;
     let wireBytes = 0;
     const timeout = setTimeout(
-      () => entry.abort(
+      () => registry.abort(
+        entry,
         'deadline',
         new Error('system-record requester deadline exceeded'),
       ),
@@ -374,7 +401,7 @@ export function createSystemRecordRequesterV1(
         byteAdmission: options.byteAdmission,
       });
       if (retained.outcome === 'ok') {
-        entry.retainSource(retained.retained);
+        registry.retainSource(entry, retained.retained);
         settlement = Object.freeze({ state: 'retained', source: retained.retained });
       } else {
         settlement = Object.freeze({ state: 'failed', result: retained });
@@ -412,7 +439,7 @@ export function createSystemRecordRequesterV1(
       activeStream = 0;
       completed += 1;
     }
-    if (settlement.state === 'failed') entry.settleFailure();
+    if (settlement.state === 'failed') registry.settleFailure(entry);
     return settlement;
   }
 
@@ -421,13 +448,13 @@ export function createSystemRecordRequesterV1(
       started,
       joined,
       completed,
-      pendingDigests: entries.size,
-      waitingCallers,
-      activeLeases,
+      pendingDigests: registry.size,
+      waitingCallers: registry.waitingCallers,
+      activeLeases: registry.activeLeases,
       activeStream,
       peakActiveStream,
       queuedStreams: 0,
-      retainedPayloadBytes,
+      retainedPayloadBytes: registry.retainedPayloadBytes,
       closed,
     });
   }
@@ -435,9 +462,7 @@ export function createSystemRecordRequesterV1(
   function close(): void {
     if (closed) return;
     closed = true;
-    for (const entry of entries.values()) {
-      entry.close();
-    }
+    registry.close();
   }
 }
 

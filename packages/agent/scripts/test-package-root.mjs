@@ -22,25 +22,25 @@ const expectedRfc64PolicyCells = [
   'private-open',
   'private-curated',
 ];
-const internalAgentProfilePhaseSpecifiers = [
+const internalAgentSpecifiers = [
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-api-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-artifacts-v1-internal.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-preparation-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-signing-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-inventory-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-commit-v1.js',
+  '@origintrail-official/dkg-agent/dist/system-records/requester-api-v1.js',
 ];
 const publicSystemRecordSpecifiers = [
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/artifact-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/in-memory-agent-profile-publication-store-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/provider-v1.js',
-  '@origintrail-official/dkg-agent/dist/system-records/requester-api-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/transport-v1.js',
 ];
 
-for (const specifier of internalAgentProfilePhaseSpecifiers) {
+for (const specifier of internalAgentSpecifiers) {
   let resolved = false;
   try {
     await import(specifier);
@@ -48,7 +48,7 @@ for (const specifier of internalAgentProfilePhaseSpecifiers) {
   } catch (error) {
     if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
   }
-  if (resolved) throw new Error(`published package exposed internal phase ${specifier}`);
+  if (resolved) throw new Error(`published package exposed internal module ${specifier}`);
 }
 
 for (const specifier of publicSystemRecordSpecifiers) {

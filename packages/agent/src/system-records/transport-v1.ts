@@ -118,20 +118,23 @@ export function createSystemRecordProviderTokenBucketV1(
   });
 }
 
-export interface SystemRecordProviderPermitV1 {
+export interface SystemRecordPermitV1 {
   release(): void;
 }
 
-export interface SystemRecordProviderPermitGateV1 {
-  tryAcquire(): SystemRecordProviderPermitV1 | null;
+export interface SystemRecordPermitAdmissionV1 {
+  tryAcquire(): SystemRecordPermitV1 | null;
+}
+
+export interface SystemRecordPermitGateV1 extends SystemRecordPermitAdmissionV1 {
   readonly active: 0 | 1;
 }
 
-/** One nonqueued provider permit. Absence is an immediate reset, never a waiter. */
-export function createSystemRecordProviderPermitGateV1(): SystemRecordProviderPermitGateV1 {
+/** One nonqueued permit. Absence is an immediate refusal, never a waiter. */
+export function createSystemRecordPermitGateV1(): SystemRecordPermitGateV1 {
   let held = false;
   return Object.freeze({
-    tryAcquire(): SystemRecordProviderPermitV1 | null {
+    tryAcquire(): SystemRecordPermitV1 | null {
       if (held) return null;
       held = true;
       let released = false;
@@ -147,6 +150,14 @@ export function createSystemRecordProviderPermitGateV1(): SystemRecordProviderPe
       return held ? 1 : 0;
     },
   });
+}
+
+export type SystemRecordProviderPermitV1 = SystemRecordPermitV1;
+export type SystemRecordProviderPermitGateV1 = SystemRecordPermitGateV1;
+
+/** Compatibility facade for the canonical nonqueued System Record permit gate. */
+export function createSystemRecordProviderPermitGateV1(): SystemRecordProviderPermitGateV1 {
+  return createSystemRecordPermitGateV1();
 }
 
 export interface SystemRecordByteReservationV1 {

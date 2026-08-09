@@ -13,6 +13,8 @@ import type {
 import type {
   SystemRecordByteAdmissionV1,
   SystemRecordByteReservationV1,
+  SystemRecordPermitAdmissionV1,
+  SystemRecordPermitV1,
 } from './transport-v1.js';
 
 type SystemRecordExactControlObjectKindV1 = Exclude<
@@ -45,14 +47,9 @@ export type SystemRecordRequesterResetReasonV1 =
 export type SystemRecordRequesterByteReservationV1 = SystemRecordByteReservationV1;
 export type SystemRecordRequesterByteAdmissionV1 = SystemRecordByteAdmissionV1;
 
-export interface SystemRecordRequesterPermitV1 {
-  release(): void;
-}
-
+export type SystemRecordRequesterPermitV1 = SystemRecordPermitV1;
 /** Shared process-wide, nonqueued requester or decoder admission. */
-export interface SystemRecordRequesterAdmissionV1 {
-  tryAcquire(): SystemRecordRequesterPermitV1 | null;
-}
+export type SystemRecordRequesterAdmissionV1 = SystemRecordPermitAdmissionV1;
 
 export interface SystemRecordExactFetchLeaseV1 {
   readonly artifact: SystemRecordArtifactV1;
