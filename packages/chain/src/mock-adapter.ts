@@ -31,6 +31,7 @@ import type {
   PcaContracts,
   PcaRpcMethod,
   VerifyACKIdentityResult,
+  KnowledgeAssetUpdateContext,
 } from './chain-adapter.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import {
@@ -52,6 +53,95 @@ interface MockBatch {
   merkleRoot: Uint8Array;
   kaCount: number;
   publisherAddress: string;
+}
+
+interface MockKnowledgeCollection {
+  merkleRoot: Uint8Array;
+  kaCount: number;
+  updateContext: KnowledgeAssetUpdateContext;
+  /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
+  publisherAddress: string;
+  /**
+   * Verified author identity from the V10.1 author attestation, mirrored
+   * from the EIP-712 EOA-recovered (or EIP-1271-verified) address. Empty
+   * string for legacy V8 / V9 publishes that pre-date author attestation
+   * — `getLatestMerkleRootAuthor` returns the zero address in that case
+   * to match on-chain behaviour for un-attested writes.
+   */
+  authorAddress: string;
+  /** On-chain context graph id (0n when the mock V8 path didn't carry one). */
+  cgId: bigint;
+  /** Mock Chronos epoch where this KC became active. */
+  startEpoch: bigint;
+  /**
+   * OT-RFC-49 — curated `_catalog` commitment (REPLACED the ciphertext-chunks
+   * pair). `bytes32(0)` + 0 when omitted (default for legacy and public-CG
+   * entries; matches the Solidity default-zero mapping).
+   */
+  catalogRoot: Uint8Array;
+  catalogLeafCount: number;
+}
+
+function createLegacyUpdateContext(
+  knowledgeAssetsCount: number,
+  currentEpoch: bigint,
+): KnowledgeAssetUpdateContext {
+  return {
+    merkleRootsCount: 1n,
+    minted: BigInt(knowledgeAssetsCount),
+    byteSize: 0n,
+    endEpoch: currentEpoch + 1n,
+    tokenAmount: 0n,
+    isImmutable: false,
+    merkleLeafCount: 0,
+  };
+}
+
+function createV10UpdateContext(
+  params: Pick<V10PublishParams,
+    'byteSize' | 'epochs' | 'tokenAmount' | 'isImmutable' | 'merkleLeafCount'>,
+  currentEpoch: bigint,
+): KnowledgeAssetUpdateContext {
+  return {
+    merkleRootsCount: 1n,
+    minted: 1n,
+    byteSize: params.byteSize,
+    endEpoch: currentEpoch + BigInt(params.epochs),
+    tokenAmount: params.tokenAmount,
+    isImmutable: params.isImmutable,
+    merkleLeafCount: params.merkleLeafCount,
+  };
+}
+
+function createFixtureUpdateContext(input: {
+  chunkCount: number;
+  merkleLeafCount?: number;
+  byteSize?: bigint;
+  startEpoch?: bigint;
+  endEpoch?: bigint;
+  tokenAmount?: bigint;
+}, currentEpoch: bigint): KnowledgeAssetUpdateContext {
+  const startEpoch = input.startEpoch ?? currentEpoch;
+  return {
+    merkleRootsCount: 1n,
+    minted: 1n,
+    byteSize: input.byteSize ?? 0n,
+    endEpoch: input.endEpoch ?? (startEpoch + 1n),
+    tokenAmount: input.tokenAmount ?? 1n,
+    isImmutable: false,
+    merkleLeafCount: input.merkleLeafCount ?? input.chunkCount,
+  };
+}
+
+function applyV10UpdateContext(
+  context: KnowledgeAssetUpdateContext,
+  params: Pick<V10UpdateKAParams,
+    'newByteSize' | 'newMerkleLeafCount' | 'boundNewTokenAmount' | 'newTokenAmount'>,
+): void {
+  context.byteSize = params.newByteSize;
+  context.merkleLeafCount = params.newMerkleLeafCount;
+  context.tokenAmount = params.boundNewTokenAmount ?? params.newTokenAmount ?? context.tokenAmount;
+  context.merkleRootsCount += 1n;
 }
 
 /**
@@ -76,39 +166,7 @@ export class MockChainAdapter implements ChainAdapter {
   private namespaceNextId = new Map<string, bigint>();
   private namespaceOwner = new Map<string, string>();
   private batches = new Map<bigint, MockBatch>();
-  private collections = new Map<bigint, {
-    merkleRoot: Uint8Array;
-    kaCount: number;
-    /** V10 flat-KC merkle leaf count (sorted + deduped). 0 for legacy V8 entries. */
-    merkleLeafCount: number;
-    /** Number of committed Merkle roots, including the initial publish. */
-    merkleRootCount: bigint;
-    /** Publisher EOA from `createKnowledgeAssets`; default to mock signer for V8 paths. */
-    publisherAddress: string;
-    /**
-     * Verified author identity from the V10.1 author attestation, mirrored
-     * from the EIP-712 EOA-recovered (or EIP-1271-verified) address. Empty
-     * string for legacy V8 / V9 publishes that pre-date author attestation
-     * — `getLatestMerkleRootAuthor` returns the zero address in that case
-     * to match on-chain behaviour for un-attested writes.
-     */
-    authorAddress: string;
-    /** On-chain context graph id (0n when the mock V8 path didn't carry one). */
-    cgId: bigint;
-    /** Mock Chronos epoch where this KC became active. */
-    startEpoch: bigint;
-    /** Exclusive mock Chronos epoch where this KC expires. */
-    endEpoch: bigint;
-    /** Token amount paid for the KC lifetime. Used to model per-epoch CG value. */
-    tokenAmount: bigint;
-    /**
-     * OT-RFC-49 — curated `_catalog` commitment (REPLACED the ciphertext-chunks
-     * pair). `bytes32(0)` + 0 when omitted (default for legacy and public-CG
-     * entries; matches the Solidity default-zero mapping).
-     */
-    catalogRoot: Uint8Array;
-    catalogLeafCount: number;
-  }>();
+  private collections = new Map<bigint, MockKnowledgeCollection>();
   private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
@@ -425,8 +483,7 @@ export class MockChainAdapter implements ChainAdapter {
     const collection = this.collections.get(params.kaId);
     if (collection) {
       collection.merkleRoot = params.newMerkleRoot;
-      collection.merkleLeafCount = params.newMerkleLeafCount;
-      collection.merkleRootCount += 1n;
+      applyV10UpdateContext(collection.updateContext, params);
     }
     const hintedPublisherAddress = params.publisherAddress
       ? ethers.getAddress(params.publisherAddress)
@@ -443,7 +500,7 @@ export class MockChainAdapter implements ChainAdapter {
       publisherAddress,
       txHash,
       txIndex,
-      merkleRootCount: collection?.merkleRootCount?.toString(),
+      merkleRootCount: collection?.updateContext.merkleRootsCount.toString(),
     });
 
     return {
@@ -479,15 +536,12 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsCount,
-      merkleLeafCount: 0,
-      merkleRootCount: 1n,
+      updateContext: createLegacyUpdateContext(params.knowledgeAssetsCount, this.rsEpoch),
       publisherAddress: this.signerAddress,
       // Legacy V8 path — no attestation, mirror the on-chain `address(0)`.
       authorAddress: ethers.ZeroAddress,
       cgId: 0n,
       startEpoch: this.rsEpoch,
-      endEpoch: this.rsEpoch + 1n,
-      tokenAmount: 0n,
       catalogRoot: new Uint8Array(32),
       catalogLeafCount: 0,
     });
@@ -1597,14 +1651,11 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(kaId, {
       merkleRoot: params.merkleRoot,
       kaCount: params.knowledgeAssetsAmount,
-      merkleLeafCount: params.merkleLeafCount,
-      merkleRootCount: 1n,
+      updateContext: createV10UpdateContext(params, this.rsEpoch),
       publisherAddress,
       authorAddress: ethers.getAddress(params.author.address),
       cgId: params.contextGraphId,
       startEpoch: this.rsEpoch,
-      endEpoch: this.rsEpoch + BigInt(params.epochs),
-      tokenAmount: params.tokenAmount,
       catalogRoot: params.catalogRoot && params.catalogRoot.length === 32
         ? params.catalogRoot
         : new Uint8Array(32),
@@ -1794,6 +1845,7 @@ export class MockChainAdapter implements ChainAdapter {
     knowledgeAssetStorageContract?: string;
     chunks: Array<{ chunkId: bigint; chunk: string }>;
     merkleLeafCount?: number;
+    byteSize?: bigint;
     publisherAddress?: string;
     startEpoch?: bigint;
     endEpoch?: bigint;
@@ -1810,8 +1862,14 @@ export class MockChainAdapter implements ChainAdapter {
     this.collections.set(input.kaId, {
       merkleRoot: fromHex(input.merkleRootHex),
       kaCount: input.chunks.length,
-      merkleLeafCount: input.merkleLeafCount ?? input.chunks.length,
-      merkleRootCount: 1n,
+      updateContext: createFixtureUpdateContext({
+        chunkCount: input.chunks.length,
+        merkleLeafCount: input.merkleLeafCount,
+        byteSize: input.byteSize,
+        startEpoch: input.startEpoch,
+        endEpoch: input.endEpoch,
+        tokenAmount: input.tokenAmount,
+      }, this.rsEpoch),
       publisherAddress: input.publisherAddress ?? this.signerAddress,
       // `__registerKC` is a Random-Sampling test bridge that bypasses the
       // V10 publish path entirely; no attestation is signed, so mirror
@@ -1819,8 +1877,6 @@ export class MockChainAdapter implements ChainAdapter {
       authorAddress: ethers.ZeroAddress,
       cgId: input.contextGraphId,
       startEpoch: input.startEpoch ?? this.rsEpoch,
-      endEpoch: input.endEpoch ?? ((input.startEpoch ?? this.rsEpoch) + 1n),
-      tokenAmount: input.tokenAmount ?? 1n,
       catalogRoot: new Uint8Array(32),
       catalogLeafCount: 0,
     });
@@ -1889,10 +1945,13 @@ export class MockChainAdapter implements ChainAdapter {
       const collection = this.collections.get(kaId);
       if (!collection) return false;
       if (collection.cgId <= 0n) return false;
-      if (this.rsEpoch < collection.startEpoch || this.rsEpoch >= collection.endEpoch) return false;
-      const lifetime = collection.endEpoch - collection.startEpoch;
+      if (
+        this.rsEpoch < collection.startEpoch ||
+        this.rsEpoch >= collection.updateContext.endEpoch
+      ) return false;
+      const lifetime = collection.updateContext.endEpoch - collection.startEpoch;
       if (lifetime <= 0n) return false;
-      return collection.tokenAmount / lifetime > 0n;
+      return collection.updateContext.tokenAmount / lifetime > 0n;
     });
     if (kcEntries.length === 0) {
       throw new NoEligibleContextGraphError();
@@ -1921,7 +1980,9 @@ export class MockChainAdapter implements ChainAdapter {
       proofingPeriodDurationInBlocks: MockChainAdapter.RS_MOCK_PERIOD_DURATION_IN_BLOCKS,
       solved: false,
       isCurated: false,
-      challengeLeafCount: BigInt(challengeCollection?.merkleLeafCount ?? chunkIds.length),
+      challengeLeafCount: BigInt(
+        challengeCollection?.updateContext.merkleLeafCount ?? chunkIds.length,
+      ),
       challengeRoot: fromHex(kcEntry.merkleRootHex),
     };
     this.rsChallenges.set(identityId, challenge);
@@ -2027,15 +2088,19 @@ export class MockChainAdapter implements ChainAdapter {
   }
 
   async getMerkleRootCount(kaId: bigint): Promise<bigint> {
+    return (await this.getKnowledgeAssetUpdateContext(kaId)).merkleRootsCount;
+  }
+
+  async getKnowledgeAssetUpdateContext(kaId: bigint): Promise<KnowledgeAssetUpdateContext> {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.merkleRootCount;
+    return { ...entry.updateContext };
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {
     const entry = this.collections.get(kaId);
     if (!entry) throw new Error(`Mock: unknown kaId ${kaId}`);
-    return entry.merkleLeafCount;
+    return entry.updateContext.merkleLeafCount;
   }
 
   async getCatalogRoot(kaId: bigint): Promise<Uint8Array> {

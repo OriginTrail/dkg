@@ -955,6 +955,35 @@ export interface ChainReadOptions {
 }
 
 /**
+ * Scalar KA state returned by
+ * `DKGKnowledgeAssets.getKnowledgeAssetUpdateContext(uint256)`.
+ *
+ * Unlike the legacy metadata getter, this view does not copy the unbounded
+ * Merkle-root and burn-history arrays. Recovery planners can therefore obtain
+ * the current version and transfer-size inputs with one constant-cost,
+ * cancellable RPC read.
+ */
+export interface KnowledgeAssetUpdateContext {
+  merkleRootsCount: bigint;
+  minted: bigint;
+  /**
+   * Contract/economic `byteSize`. This equals the full canonical public
+   * N-Quads footprint only for a chain-confirmed public CG (`accessPolicy=0`).
+   * Private CGs record the public `_catalog` footprint here, so recovery code
+   * must not use this value as an encrypted/member-payload transfer estimate.
+   */
+  byteSize: bigint;
+  endEpoch: bigint;
+  tokenAmount: bigint;
+  isImmutable: boolean;
+  /**
+   * Current post-sort-and-dedupe public-tree leaf count. It is not a private
+   * ciphertext/member-payload wire-size surrogate.
+   */
+  merkleLeafCount: number;
+}
+
+/**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
  * V9 introduces publisher-namespaced UALs: did:dkg:{chainId}/{publisherAddress}/{localKAId}
@@ -1615,6 +1644,18 @@ export interface ChainAdapter {
 
   /** Number of committed roots for the KA (initial publish is version one). */
   getMerkleRootCount?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
+
+  /**
+   * Constant-cost scalar update context for a KA. Consumers that need version
+   * plus sizing data should prefer this over separate root-count and leaf-count
+   * reads so one RPC supplies the complete recovery descriptor. Sizing hints
+   * remain bound to `merkleRootsCount`; callers that separately read the root
+   * must reject the hints if the version changes between reads.
+   */
+  getKnowledgeAssetUpdateContext?(
+    kaId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<KnowledgeAssetUpdateContext>;
 
   /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain

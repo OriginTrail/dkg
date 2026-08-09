@@ -100,6 +100,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'resolvePinnedPublisherSigner', // EVM signer-pool authorization/funding helper; mock has no wallet pool
   'selectFundedSignerOrThrow', // strict funding diagnostic used by EVM publish planning
   'quoteRequiredPublishTokenAmount', // shared protected AskStorage quote behind EVM reads/planning
+  // Protected EVM contract-read boundary shared by storage and publish mixins.
+  // The public ChainAdapter method remains `getKnowledgeAssetUpdateContext`,
+  // which MockChainAdapter implements and the parity suite still requires.
+  'readKnowledgeAssetUpdateContext',
   'resolveFundedPublisherPublishPlan', // protected EVM pool/PCA planning state machine
   'publisherConvictionPlanReader', // protected typed bridge from publish planning to the conviction mixin
   // Dispatcher Phase 3/4 selector seam + RS send plumbing — TS-protected
