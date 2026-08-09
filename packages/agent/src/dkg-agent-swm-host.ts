@@ -526,6 +526,11 @@ function normalizeHostModeReconcileBatchSize(value: number | undefined): number 
   return Math.max(1, Math.floor(value));
 }
 
+/** VM-only effective id; non-VM policy consumers must use the typed resolver. */
+function vmEffectiveOnChainId(sub: ContextGraphSub | undefined): string | undefined {
+  return sub?.onChainId ?? sub?.reverseNameHashOnChainId;
+}
+
 /**
  * Strip surrounding quotes from a SPARQL SELECT binding value — mirrors
  * `ka-extractor.ts:stripQuotes` verbatim so the RS-heal resolves the SAME
@@ -2417,12 +2422,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
    * we zero the watermark and drop the in-memory cursor; the reset is persisted
    * together with the new id, keeping it restart-safe.
    */
-  bindSubscriptionOnChainId(this: DKGAgent, localCgId: string, sub: ContextGraphSub, newOnChainId: string): void {
-    const prev = sub.onChainId;
-    if (prev === newOnChainId) return;
+  bindSubscriptionOnChainId(
+    this: DKGAgent,
+    localCgId: string,
+    sub: ContextGraphSub,
+    newOnChainId: string,
+  ): void {
+    const prev = vmEffectiveOnChainId(sub);
+    delete sub.reverseNameHashOnChainId;
+    if (sub.onChainId === newOnChainId) return;
     bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
     sub.onChainId = newOnChainId;
-    if (!prev) return;
+    if (!prev || prev === newOnChainId) return;
     // The bound on-chain id actually CHANGED (repair / recreate / re-register).
     // Any prior reconcile progress refers to the OLD chain graph and must be
     // dropped, otherwise the sweep resumes at the wrong ordinal and skips
@@ -2439,6 +2450,36 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.info(
         createOperationContext('system'),
         `VM reconcile: on-chain id for "${localCgId}" changed ${prev}->${newOnChainId}; reset reconcile watermark + cursor to 0`,
+      );
+    }
+  }
+
+  /**
+   * Install a reverse-derived VM candidate without promoting it to the shared
+   * authoritative `onChainId` field. The candidate is process-local and every
+   * VM use revalidates it against the current complete name-hash inventory.
+   */
+  bindSubscriptionReverseNameHashOnChainId(
+    this: DKGAgent,
+    localCgId: string,
+    sub: ContextGraphSub,
+    newOnChainId: string,
+  ): void {
+    if (sub.onChainId) return;
+    const prev = sub.reverseNameHashOnChainId;
+    if (prev === newOnChainId) return;
+    bumpBindingGeneration(this.contextGraphBindingGenerations, localCgId);
+    sub.reverseNameHashOnChainId = newOnChainId;
+    if (!prev) return;
+    const hadProgress =
+      (sub.lastReconciledOrdinal ?? 0) > 0 || this.reconcileCursors.has(localCgId);
+    sub.lastReconciledOrdinal = 0;
+    this.forceClearVmReconcileStateForContextGraph(localCgId);
+    if (hadProgress) {
+      this.log.info(
+        createOperationContext('system'),
+        `VM reconcile: reverse-derived on-chain id for "${localCgId}" changed ` +
+        `${prev}->${newOnChainId}; reset reconcile watermark + cursor to 0`,
       );
     }
   }
@@ -2720,7 +2761,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // GH #1098 — self-prime onChainId for a pre-subscribed PUBLIC member CG
         // (subscribed BEFORE its first publish, so unbound) before the skip-gate
         // below would pass it over. Shared with the live KACG nudge.
-        if (sub.subscribed && !sub.onChainId) {
+        if (sub.subscribed && !vmEffectiveOnChainId(sub)) {
           await this.selfPrimeSubscriptionOnChainId(
             localCgId,
             sub,
@@ -2731,7 +2772,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           if (!isLifecycleCurrent()) return;
         }
         // Member subscriptions AND Phase D core-hosted public CGs get swept.
-        if ((!sub.subscribed && !sub.coreHosted) || !sub.onChainId) continue;
+        if ((!sub.subscribed && !sub.coreHosted) || !vmEffectiveOnChainId(sub)) continue;
         eligible.push(localCgId);
       }
 
@@ -2790,17 +2831,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const isSubscriptionCurrent = () => isCurrent()
       && this.subscribedContextGraphs.get(localCgId) === sub
       && sub.subscribed
-      && !sub.onChainId
+      && !vmEffectiveOnChainId(sub)
       && isBindingGenerationCurrent(
         this.contextGraphBindingGenerations,
         localCgId,
         bindingGeneration,
       );
     if (!isSubscriptionCurrent()) return null;
-    let resolved: string | null = null;
+    let resolved: {
+      onChainId: string;
+      provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
+    } | null = null;
     try {
       resolved = await raceVmReconcileAbort(
-        this.getContextGraphOnChainId(localCgId, {
+        this.resolveContextGraphOnChainIdBinding(localCgId, {
           signal,
           source: 'agent.vmReconcile.resolveOnChainId',
         }),
@@ -2812,23 +2856,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!isSubscriptionCurrent() || !resolved) return null;
     if (targetOnChainId !== undefined) {
       let resolvedNum: bigint | null = null;
-      try { resolvedNum = BigInt(resolved); } catch { return null; }
+      try { resolvedNum = BigInt(resolved.onChainId); } catch { return null; }
       if (resolvedNum !== targetOnChainId) return null;
     }
     if (!isSubscriptionCurrent()) return null;
-    try {
-      await this.persistContextGraphSubscriptionStrict(
-        localCgId,
-        { ...sub, onChainId: resolved },
-        undefined,
-        isSubscriptionCurrent,
-      );
-    } catch {
-      return null;
+    if (resolved.provenance !== 'reverse-name-hash') {
+      try {
+        await this.persistContextGraphSubscriptionStrict(
+          localCgId,
+          { ...sub, onChainId: resolved.onChainId },
+          undefined,
+          isSubscriptionCurrent,
+        );
+      } catch {
+        return null;
+      }
     }
     if (!isSubscriptionCurrent()) return null;
-    this.bindSubscriptionOnChainId(localCgId, sub, resolved);
-    return resolved;
+    if (resolved.provenance === 'reverse-name-hash') {
+      this.bindSubscriptionReverseNameHashOnChainId(localCgId, sub, resolved.onChainId);
+    } else {
+      this.bindSubscriptionOnChainId(localCgId, sub, resolved.onChainId);
+    }
+    return resolved.onChainId;
   }
 
   /**
@@ -2967,7 +3017,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       const isTargetCurrent = () => isLifecycleCurrent()
         && this.subscribedContextGraphs.get(localCgId) === target.sub
-        && target.sub.onChainId === target.onChainId
+        && vmEffectiveOnChainId(target.sub) === target.onChainId
         && isBindingGenerationCurrent(
           this.contextGraphBindingGenerations,
           localCgId,
@@ -3071,7 +3121,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
-    if (!sub.onChainId && sub.subscribed) {
+    // A cold reverse-name-hash candidate is intentionally process-local because
+    // the contract permits a later slot to commit the same hash. Re-run the
+    // complete resolver before every VM use; it throws on ambiguity or drift.
+    if (sub.reverseNameHashOnChainId) {
+      const revalidated = await this.resolveCurrentNameHashContextGraphBinding(localCgId, {
+        signal,
+      });
+      if (!isCurrent()) throw new VmReconcileQueueClosedError();
+      sub = this.subscribedContextGraphs.get(localCgId);
+      if (
+        !sub?.reverseNameHashOnChainId
+        || revalidated?.provenance !== 'reverse-name-hash'
+        || revalidated.onChainId !== sub.reverseNameHashOnChainId
+      ) {
+        throw new ContextGraphOnChainIdUnresolvedError(localCgId);
+      }
+    }
+    if (!vmEffectiveOnChainId(sub) && sub.subscribed) {
       await this.selfPrimeSubscriptionOnChainId(
         localCgId,
         sub,
@@ -3081,7 +3148,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       );
       sub = this.subscribedContextGraphs.get(localCgId);
     }
-    if (!sub?.onChainId) {
+    const onChainId = vmEffectiveOnChainId(sub);
+    if (!sub || !onChainId) {
       throw new ContextGraphOnChainIdUnresolvedError(localCgId);
     }
     if (!this.vmReconcileEnabled()) {
@@ -3095,8 +3163,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     }
     return {
       sub,
-      onChainId: sub.onChainId,
-      onChainCgId: BigInt(sub.onChainId),
+      onChainId,
+      onChainCgId: BigInt(onChainId),
       cursor,
       bindingGeneration: captureBindingGeneration(
         this.contextGraphBindingGenerations,
@@ -3115,7 +3183,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     execution?: VmReconcileExecution,
   ): ChainReconcilerDeps {
     const capturedSub = target?.sub ?? this.subscribedContextGraphs.get(localCgId);
-    const capturedOnChainId = target?.onChainId ?? capturedSub?.onChainId;
+    const capturedOnChainId = target?.onChainId ?? vmEffectiveOnChainId(capturedSub);
     const capturedBindingGeneration = target?.bindingGeneration
       ?? captureBindingGeneration(this.contextGraphBindingGenerations, localCgId);
     const capturedCursor = execution?.identityCursor
@@ -3126,7 +3194,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return !this.vmReconcileRotationClosed
         && this.vmReconcileLifecycleGeneration === lifecycleGeneration
         && current === capturedSub
-        && current?.onChainId === capturedOnChainId
+        && vmEffectiveOnChainId(current) === capturedOnChainId
         && isBindingGenerationCurrent(
           this.contextGraphBindingGenerations,
           localCgId,
@@ -3216,7 +3284,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       sub.lastReconciledOrdinal = watermark;
       this.emitReplication({
         contextGraphId: localCgId,
-        onChainCgId: sub.onChainId,
+        onChainCgId: vmEffectiveOnChainId(sub),
         action: 'cursor-advance',
         fromWatermark: previous,
         toWatermark: watermark,
@@ -3322,11 +3390,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<RsHealPassResult> {
     try {
-      const capturedOnChainId = sub.onChainId;
+      const capturedOnChainId = vmEffectiveOnChainId(sub);
       const canApply = () => isCurrent()
         && (!(this.subscribedContextGraphs instanceof Map)
           || this.subscribedContextGraphs.get(localCgId) === sub)
-        && sub.onChainId === capturedOnChainId;
+        && vmEffectiveOnChainId(sub) === capturedOnChainId;
       if (!canApply() || !capturedOnChainId) {
         return { status: 'skipped', reason: 'not-current' };
       }
@@ -3385,7 +3453,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // 2b: enumerate one bounded page. A per-CG lexical cursor means a
       // permanently incomplete KC cannot pin the first page forever; after the
       // final page the cursor wraps and the next sweep retries earlier gaps.
-      const cursorKey = `${localCgId}\u0000${sub.onChainId}`;
+      const cursorKey = `${localCgId}\u0000${capturedOnChainId}`;
       const cursorMap = this.rsHealCursorByCg ?? new Map<string, string>();
       const cursor = cursorMap.get(cursorKey);
       const stranded = await readRsHealStrandedPage(

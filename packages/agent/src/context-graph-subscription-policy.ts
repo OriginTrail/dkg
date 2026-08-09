@@ -69,9 +69,14 @@ export function projectContextGraphSubscriptionPersistence(input: {
       synced: persistMemberIntent && sub.synced,
       sharedMemorySynced: persistMemberIntent ? sub.sharedMemorySynced : false,
       metaSynced: persistMemberIntent ? sub.metaSynced : false,
+      // A reverse-name-hash result lives in a separate process-local field: the
+      // storage contract does not enforce name-hash uniqueness, so neither the
+      // candidate nor its binding-specific ordinal may survive restart.
       onChainId: sub.onChainId,
       onChainHash: sub.onChainHash,
-      lastReconciledOrdinal: sub.lastReconciledOrdinal,
+      lastReconciledOrdinal: sub.reverseNameHashOnChainId
+        ? undefined
+        : sub.lastReconciledOrdinal,
       coreHosted: sub.coreHosted,
       syncScoped: persistMemberIntent && input.syncScoped,
     },

@@ -1474,7 +1474,7 @@ export class MockChainAdapter implements ChainAdapter {
     return cg.nameHash ?? null;
   }
 
-  /** Offline-development parity for the EVM exact name-hash reverse lookup. */
+  /** Offline-development parity for the EVM current-state name-hash reverse lookup. */
   async resolveContextGraphIdByNameHash(nameHash: string): Promise<bigint | null> {
     if (!ethers.isHexString(nameHash, 32)) {
       throw new TypeError('resolveContextGraphIdByNameHash requires a bytes32 nameHash');
@@ -1488,7 +1488,7 @@ export class MockChainAdapter implements ChainAdapter {
     if (matches.length !== 1) {
       throw new Error(
         `resolveContextGraphIdByNameHash: ambiguous ${normalized}; ` +
-        `ContextGraphCreated committed it to ${matches.length} numeric ids`,
+        `getNameHash commits it to ${matches.length} numeric ids`,
       );
     }
     return matches[0];

@@ -418,55 +418,24 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     contextGraphId: string,
     options: { signal?: AbortSignal; source?: string } = {},
   ): Promise<string | null> {
-    const directSubscription = this.subscribedContextGraphs.get(contextGraphId);
-    const subscribed = directSubscription?.onChainId;
-    if (subscribed) return subscribed;
+    const binding = await this.resolveContextGraphOnChainIdBinding(contextGraphId, options);
+    return binding?.onChainId ?? null;
+  }
 
-    // Registered CG events carry only the curator-committed name hash. Resolve
-    // the cleartext subscription through the in-memory reverse index before
-    // consulting RDF state; this mapping is populated and persisted by the
-    // chain-event lifecycle path.
-    const mappedLocalId = this.localCgIdForWireId(
-      this.contextGraphWireId(contextGraphId),
+  /** Resolve an id together with the provenance required by the binding owner. */
+  async resolveContextGraphOnChainIdBinding(
+    this: DKGAgent,
+    contextGraphId: string,
+    options: { signal?: AbortSignal; source?: string } = {},
+  ): Promise<{
+    onChainId: string;
+    provenance: 'authoritative' | 'reverse-name-hash' | 'ontology';
+  } | null> {
+    const currentBinding = await this.resolveCurrentNameHashContextGraphBinding(
+      contextGraphId,
+      { signal: options.signal },
     );
-    const mappedSubscription = this.subscribedContextGraphs.get(mappedLocalId);
-    const mapped = mappedSubscription?.onChainId;
-    if (mapped) return mapped;
-
-    // A cold node may select a CG long after ContextGraphCreated fell outside
-    // the live event poller's bounded lookback. Resolve the exact indexed
-    // nameHash from chain before consulting the legacy ontology projection.
-    // Scope this expensive historical operation to a locally admitted
-    // subscription (explicit Edge selection or Core-hosted record): an
-    // arbitrary remote id must never trigger a chain crawl.
-    const localSubscription = directSubscription ?? mappedSubscription;
-    const resolveHistorical = this.chain?.resolveContextGraphIdByNameHash;
-    const locallyAdmitted = localSubscription !== undefined && (
-      localSubscription.subscribed === true
-      || localSubscription.coreHosted === true
-    );
-    if (locallyAdmitted && typeof resolveHistorical === 'function') {
-      // A direct subscription key is the original local identifier, including
-      // its spelling/case when a legitimate cleartext id happens to look like
-      // a bytes32 wire hash. Only use mappedLocalId when admission was found
-      // through the reverse wire-id index.
-      const localIdForCommitment = directSubscription !== undefined
-        ? contextGraphId
-        : mappedLocalId;
-      const wireId = localSubscription.onChainHash
-        ? this.contextGraphWireId(localSubscription.onChainHash)
-        : this.contextGraphNameCommitment(localIdForCommitment);
-      const resolved = options.signal === undefined
-        ? await resolveHistorical.call(this.chain, wireId)
-        : await resolveHistorical.call(this.chain, wireId, { signal: options.signal });
-      if (resolved !== null) {
-        const boundLocalId = this.bindOnChainContextGraphIdFromNameHash(
-          wireId,
-          resolved.toString(),
-        );
-        if (boundLocalId !== null) return resolved.toString();
-      }
-    }
+    if (currentBinding !== undefined) return currentBinding;
 
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
@@ -479,7 +448,9 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
     );
     if (result.type !== 'bindings' || result.bindings.length === 0) return null;
     const value = result.bindings[0]?.['id'];
-    return typeof value === 'string' ? value.replace(/^"|"$/g, '') : null;
+    return typeof value === 'string'
+      ? { onChainId: value.replace(/^"|"$/g, ''), provenance: 'ontology' }
+      : null;
   }
 
   /**
@@ -1086,12 +1057,14 @@ export class ContextGraphRegistryMethods extends DKGAgentBase {
       // `LIMIT 1` made ownership nondeterministic — any subscriber could
       // win the unordered query and look like the curator.
       this.subscribeToContextGraph(opts.id, { syncMode: 'always-on' });
+      const existing = this.subscribedContextGraphs.get(opts.id);
       this.setContextGraphSubscription(opts.id, {
+        ...existing,
         name: opts.name,
         subscribed: true,
         synced: true,
         metaSynced: true,
-        onChainId: this.subscribedContextGraphs.get(opts.id)?.onChainId,
+        syncMode: existing?.syncMode ?? 'always-on',
       });
       return;
     }

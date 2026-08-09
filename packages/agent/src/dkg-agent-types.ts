@@ -641,6 +641,16 @@ export interface ContextGraphSub {
   /** On-chain context graph ID (keccak256 hash), if known. */
   onChainId?: string;
   /**
+   * Process-local candidate obtained by reverse-enumerating the non-unique
+   * `getNameHash` slots. It deliberately does NOT inhabit `onChainId`: policy,
+   * membership, and registration consumers may trust that field without doing
+   * another chain read. Every consumer of this candidate must therefore cross
+   * the name-hash resolution boundary again, and neither it nor its VM
+   * watermark may be persisted. Authoritative create/join/event bindings clear
+   * this field and populate `onChainId` instead.
+   */
+  reverseNameHashOnChainId?: string;
+  /**
    * OT-RFC-38 / LU-6 Phase B — curator-committed wire identifier.
    * `keccak256(bytes(cleartextId))` lowercase hex (0x-prefixed). Used as
    * the SWM gossip topic key, envelope `contextGraphId`, signing-payload

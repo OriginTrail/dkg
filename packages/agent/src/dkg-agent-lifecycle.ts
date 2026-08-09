@@ -7883,7 +7883,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           metaSynced: subscription.metaSynced,
           onChainId: subscription.onChainId,
           onChainHash: subscription.onChainHash,
-          lastReconciledOrdinal: subscription.lastReconciledOrdinal,
+          // Reverse-name-hash candidates are process-local because the chain
+          // does not enforce commitment uniqueness. Their VM watermark is
+          // binding-specific and must not survive this strict join snapshot
+          // either (the common writer enforces the same projection rule).
+          lastReconciledOrdinal: subscription.reverseNameHashOnChainId
+            ? undefined
+            : subscription.lastReconciledOrdinal,
           coreHosted: subscription.coreHosted,
           syncScoped: true,
         };

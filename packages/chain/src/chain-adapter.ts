@@ -1842,15 +1842,16 @@ export interface ChainAdapter {
   ): Promise<string | null>;
 
   /**
-   * Resolve the numeric ContextGraphStorage slot committed to an exact
-   * `ContextGraphCreated.nameHash` topic.
+   * Resolve the numeric ContextGraphStorage slot whose current write-once
+   * `getNameHash` value equals `nameHash`.
    *
    * This is the cold-start inverse of {@link getContextGraphNameHash}: a node
    * that selected a CG after its creation event fell outside the live poller's
    * lookback still needs an authoritative hash -> numeric-id binding before it
    * can evaluate policy or authorize SWM. Implementations MUST fail closed on
-   * ambiguous matches and independently verify the current slot still commits
-   * to `nameHash` before returning it.
+   * ambiguous matches. Implementations may impose a fixed fast-enumeration
+   * budget and MUST switch before per-slot reads when the current high-water id
+   * exceeds it.
    */
   resolveContextGraphIdByNameHash?(
     nameHash: string,

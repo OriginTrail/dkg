@@ -38,7 +38,10 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
-import type { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
+import {
+  ContextGraphNameHashSlotIndex,
+  type ContextGraphNameHashResolver,
+} from './context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
 import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
 
@@ -918,6 +921,12 @@ export class EVMChainAdapterBase {
   /** Lazily constructed by the context-graph mixin; state must live on base. */
   protected contextGraphNameHashResolver: ContextGraphNameHashResolver | undefined;
 
+  /** Complete bounded write-once slot index shared by all reverse-hash lookups. */
+  protected readonly contextGraphNameHashSlotIndex = new ContextGraphNameHashSlotIndex();
+
+  /** Invalidates in-flight historical reverse scans across Hub/RPC rotation. */
+  protected contextGraphNameHashBindingEpoch = 0;
+
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /**
@@ -943,6 +952,8 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
+    this.contextGraphNameHashBindingEpoch += 1;
+    this.contextGraphNameHashSlotIndex.clear();
     this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
   }
