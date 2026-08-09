@@ -28,7 +28,19 @@ console.log("\nBuild attestation — proving WHICH code is serving\n");
 
 console.log("the running code digests itself:");
 const att = A.buildAttestation({ home });
-ok("it digests the metering modules actually on disk", Object.keys(att.moduleDigests).length > 5 && Object.values(att.moduleDigests).every((d) => d.startsWith("sha256:")));
+{
+  // Assert CORRECTNESS, not a module count: the attestation must cover exactly
+  // the .js files in its own directory, and every digest must reproduce from a
+  // fresh read. (A count assertion is environment-dependent — it passed in the
+  // repo and failed in the shipped bundle, which ships a subset.)
+  const dir = join(dist, "metering");
+  const onDisk = readdirSync(dir).filter((f) => f.endsWith(".js")).sort();
+  const covered = Object.keys(att.moduleDigests).sort();
+  const sameSet = onDisk.length === covered.length && onDisk.every((f, i) => f === covered[i]);
+  const allMatch = covered.every((f) => att.moduleDigests[f] === "sha256:" + createHash("sha256").update(readFileSync(join(dir, f))).digest("hex"));
+  ok("it covers exactly the modules on disk, and every digest reproduces", sameSet && allMatch && covered.length > 0,
+    `onDisk=${onDisk.length} covered=${covered.length} allMatch=${allMatch}`);
+}
 ok("it names its own module set with a single buildDigest", att.buildDigest.startsWith("sha256:"));
 ok("the buildDigest is the digest of the module set it reports",
   att.buildDigest === "sha256:" + createHash("sha256").update(L.canonicalize(att.moduleDigests)).digest("hex"));
