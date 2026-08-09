@@ -78,7 +78,8 @@ function providerKeys(home: string) {
 export const providerKeyId = (home: string) => "ed25519:" + sha256(providerKeys(home).publicPem).slice(0, 16);
 
 // ── journal ─────────────────────────────────────────────────────────────────
-interface TabState { balance: number; sequence: number; lastHash: string; seen: Set<string>; settled?: { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string }; }
+type Settlement = { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string };
+interface TabState { balance: number; sequence: number; lastHash: string; seen: Set<string>; settled?: Settlement; epoch: number; settlementHistory: Settlement[]; }
 
 // State is keyed BY DKG_HOME. A module-global map leaks balances between
 // homes — which is not a hypothetical: the isolated Stage-1 node and the
@@ -96,8 +97,33 @@ function homeTabs(home: string): Map<string, TabState> {
 
 function entry(home: string, principal: string): TabState {
   const m = homeTabs(home);
-  if (!m.has(principal)) m.set(principal, { balance: 0, sequence: 0, lastHash: "genesis", seen: new Set() });
+  if (!m.has(principal)) m.set(principal, { balance: 0, sequence: 0, lastHash: "genesis", seen: new Set(), epoch: 0, settlementHistory: [] });
   return m.get(principal)!;
+}
+
+// A credit arriving on a SETTLED tab is, by construction, a new deposit: a
+// settled tab is terminal and cannot be topped up. Roll to a fresh EPOCH so the
+// new tab gets its own settlement/refund lifecycle and its own leg chain
+// starting at sequence 1 (which the close statement's 1..closeSequence
+// completeness check requires). The prior settlement is archived, never lost.
+//
+// Buyer-found by attempting a SECOND real deposit (Hermes/Bo, 2026-08-09): the
+// sticky per-principal `settled` flag from the read run poisoned any second
+// tab — it funded but could be neither settled (settleTab short-circuits
+// alreadySettled) nor refunded (refundOnExpiry refuses settled), stranding the
+// principal's balance. Applied identically here in credit() and in replay() so
+// the in-memory and journal-derived state can never diverge.
+function applyCredit(t: TabState, amount: number) {
+  if (t.settled) {
+    t.settlementHistory.push(t.settled);
+    t.settled = undefined;
+    t.epoch += 1;
+    t.balance = amount;        // a new tab, not a top-up
+    t.sequence = 0;
+    t.lastHash = "genesis";
+  } else {
+    t.balance += amount;
+  }
 }
 
 function replay(home: string) {
@@ -110,7 +136,7 @@ function replay(home: string) {
     let rec: any;
     try { rec = JSON.parse(line); } catch { continue; }
     const t = entry(home, rec.principal);
-    if (rec.kind === "credit") { t.balance += rec.amountMicroTrac; continue; }
+    if (rec.kind === "credit") { applyCredit(t, rec.amountMicroTrac); continue; }
     // Buyer-found (Hermes/Bo, 2026-08-06), by insisting the post-restart balance
     // be verified through the API rather than read from the journal: replay
     // handled credits and debits but IGNORED refunds, so a refunded balance
@@ -148,7 +174,7 @@ export function credit(home: string, principal: string, amountMicroTrac: number,
   replay(home);
   if (!Number.isSafeInteger(amountMicroTrac) || amountMicroTrac <= 0) throw new Error("E_BAD_CREDIT");
   durableAppend(home, { kind: "credit", principal, amountMicroTrac, evidence, at: new Date().toISOString() });
-  entry(home, principal).balance += amountMicroTrac;
+  applyCredit(entry(home, principal), amountMicroTrac);
   return balance(home, principal);
 }
 
@@ -492,12 +518,16 @@ export function settleTab(home: string, principal: string, info: { withdrawalId:
   replay(home);
   const t = entry(home, principal);
   if (t.settled) return { ok: true, alreadySettled: true };
+  // ONE timestamp: the journal record and the in-memory state must carry the
+  // identical `at`, or the buyer-visible settlement receipt changes across a
+  // restart (live used a second new Date()). Found by the tab-epoch replay gate.
+  const at = new Date().toISOString();
   durableAppend(home, {
     kind: "settled", principal, withdrawalId: info.withdrawalId, txHash: info.txHash,
-    netPaidMicroTrac: info.netPaidMicroTrac, at: new Date().toISOString(),
+    netPaidMicroTrac: info.netPaidMicroTrac, at,
   });
   t.balance = 0;
-  t.settled = { ...info, at: new Date().toISOString() };
+  t.settled = { ...info, at };
   return { ok: true, alreadySettled: false };
 }
 
@@ -505,4 +535,19 @@ export function settleTab(home: string, principal: string, info: { withdrawalId:
 export function settlementOf(home: string, principal: string): { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string } | null {
   replay(home);
   return entry(home, principal).settled ?? null;
+}
+
+/** Which tab lifecycle this principal is on. 0 = first tab. Incremented each
+ *  time a new deposit opens a fresh tab after a prior settlement. */
+export function tabEpoch(home: string, principal: string): number {
+  replay(home);
+  return entry(home, principal).epoch;
+}
+
+/** Every PRIOR settlement for a principal (the current epoch's, if any, is in
+ *  settlementOf). A prior settlement is immutable audit history and is never
+ *  overwritten by opening a new tab. */
+export function settlementHistoryOf(home: string, principal: string): Settlement[] {
+  replay(home);
+  return [...entry(home, principal).settlementHistory];
 }
