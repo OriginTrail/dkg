@@ -206,13 +206,16 @@ export interface SystemRecordLaneExecutionBindingV1 {
 // The controller-barrier contract (barrier vocabulary, deps shapes, and the
 // typed/legacy normalizer) lives in its own focused module; re-exported here
 // so the materializer's public surface is unchanged.
+// Re-exported: the contract types with real consumers (the barrel and the
+// coordinator). The normalizer and the shared deps base are deliberately NOT
+// re-exported — the normalizer is constructor plumbing and the shared base is
+// not a valid factory input; both stay reachable only through the contract
+// module itself, which the package barrel does not publish.
 export {
-  normalizeControllerBarrierV1,
   type SystemRecordLaneBarrierKindV1,
   type SystemRecordLaneBarrierResultsV1,
   type SystemRecordLaneBarrierV1,
   type SystemRecordLaneControllerDepsV1,
-  type SystemRecordLaneControllerSharedDepsV1,
   type SystemRecordLaneControllerTypedDepsV1,
   type SystemRecordLaneTypedBarrierV1,
 } from './system-record-lane-controller-contract-v1.js';
