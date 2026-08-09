@@ -17,6 +17,7 @@ import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/a
 import type { SystemRecordArtifactRepositoryV1 } from '../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReceiverV1,
+  type AgentProfileActivePreparerV1,
   type AgentProfileReceiverV1,
 } from '../src/system-records/receiver-v1.js';
 import {
@@ -1055,12 +1056,11 @@ function receiver(
 }
 
 function receiverWithPreparation(
-  prepareActive: AgentProfileReceiverV1['prepareActive'],
+  prepareActive: AgentProfileActivePreparerV1['prepareActive'],
 ): AgentProfileReceiverV1 {
   const receiver: AgentProfileReceiverV1 = Object.freeze({
-    prepareActive,
-    async prepareActiveFrom(row, _artifacts, signal) {
-      return prepareActive(row, signal);
+    openPreparer() {
+      return Object.freeze({ prepareActive });
     },
     async receiveActive(row, admittedContext, signal) {
       const prepared = await prepareActive(row, signal);

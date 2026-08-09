@@ -33,6 +33,7 @@ import type {
 } from './admitted-slice-context-v1.js';
 import type {
   AgentProfilePreparedActiveV1,
+  AgentProfileActivePreparerV1,
   AgentProfileReceiverV1,
 } from './receiver-v1.js';
 import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
@@ -144,6 +145,7 @@ interface AgentProfileAdmittedSliceRuntimeV1 {
   readonly deadlineMs: number;
   readonly nowMs: () => number;
   readonly transportSlice?: AgentProfileReconcileTransportSliceV1;
+  readonly preparer: AgentProfileActivePreparerV1;
   stop(
     phase: AgentProfileReconcileSliceResultV1['phase'],
     outcomes: readonly SystemRecordApplyOutcomeV1[],
@@ -165,8 +167,7 @@ export async function createAgentProfileReconcilerV1(
   const inspectAdmittedContext = options.admission.inspectAdmittedContext.bind(options.admission);
   const transport = options.transport;
   const loadInventoryObject = options.loadInventoryObject;
-  const prepareActive = options.receiver.prepareActive.bind(options.receiver);
-  const prepareActiveFrom = options.receiver.prepareActiveFrom.bind(options.receiver);
+  const openPreparer = options.receiver.openPreparer.bind(options.receiver);
   const rootEnvelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(
     canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(options.rootEnvelope),
   );
@@ -278,7 +279,7 @@ export async function createAgentProfileReconcilerV1(
           callerSignal.throwIfAborted();
           return result('paused', phase, requests, wireBytes, outcomes);
         },
-      } satisfies Omit<AgentProfileAdmittedSliceRuntimeV1, 'transportSlice'>;
+      } satisfies Omit<AgentProfileAdmittedSliceRuntimeV1, 'transportSlice' | 'preparer'>;
       if (controller.signal.aborted) return baseRuntime.stop(currentPhase(), []);
       const transportSlice = transport?.openSlice(Object.freeze({
         signal: controller.signal,
@@ -288,13 +289,14 @@ export async function createAgentProfileReconcilerV1(
       if (transport !== undefined && transportSlice === null) {
         return result('deferred', currentPhase(), 0, 0, []);
       }
-      const runtime: AgentProfileAdmittedSliceRuntimeV1 = Object.freeze({
-        ...baseRuntime,
-        ...(transportSlice === undefined || transportSlice === null
-          ? {}
-          : { transportSlice }),
-      });
       try {
+        const runtime: AgentProfileAdmittedSliceRuntimeV1 = Object.freeze({
+          ...baseRuntime,
+          preparer: openPreparer(transportSlice ?? undefined),
+          ...(transportSlice === undefined || transportSlice === null
+            ? {}
+            : { transportSlice }),
+        });
         return await run(runtime);
       } finally {
         transportSlice?.release();
@@ -414,9 +416,7 @@ export async function createAgentProfileReconcilerV1(
       let preparation: Awaited<ReturnType<typeof awaitAbortSafePreparation>>;
       try {
         preparation = await awaitAbortSafePreparation(
-          Promise.resolve().then(() => runtime.transportSlice === undefined
-            ? prepareActive(row, runtime.signal)
-            : prepareActiveFrom(row, runtime.transportSlice, runtime.signal)),
+          Promise.resolve().then(() => runtime.preparer.prepareActive(row, runtime.signal)),
           runtime.signal,
         );
       } catch {

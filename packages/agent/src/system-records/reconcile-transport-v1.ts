@@ -11,7 +11,6 @@ import {
   SYSTEM_RECORD_NEGATIVE_MEMO_ENTRY_BASE_BYTES,
   SYSTEM_RECORD_NEGATIVE_MEMO_TTL_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
-  type Digest32V1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type {
@@ -29,6 +28,10 @@ import type {
   SystemRecordExactFetchResultV1,
   SystemRecordRequesterByteAdmissionV1,
 } from './requester-v1.js';
+import {
+  systemRecordExactLookupKeyV1,
+  toSystemRecordExactArtifactLookupV1,
+} from './requester-api-v1.js';
 
 export type AgentProfileReconcileNegativeFailureClassV1 =
   | 'timeout'
@@ -90,7 +93,7 @@ export interface CreateAgentProfileReconcileTransportOptionsV1 {
 
 interface NegativeMemoEntryV1 {
   readonly providerId: string;
-  readonly digest: Digest32V1;
+  readonly exactLookupKey: string;
   readonly failureClass: AgentProfileReconcileNegativeFailureClassV1;
   readonly expiresAtMs: number;
   readonly bytes: number;
@@ -171,26 +174,12 @@ export function createAgentProfileReconcileTransportV1(
         lookup: SystemRecordArtifactLookupV1,
         callerSignal: AbortSignal,
       ): Promise<SystemRecordArtifactV1 | null> {
-        if (lookup.type === 'root') {
-          throw new Error('agent-profile reconcile transport requires an exact artifact');
+        const exactLookup = toSystemRecordExactArtifactLookupV1(lookup);
+        if (exactLookup === null) {
+          throw new Error(lookup.type === 'root'
+            ? 'agent-profile reconcile transport requires an exact artifact'
+            : 'agent-profile reconcile transport requires exact inventory coordinates');
         }
-        if (lookup.type === 'object' && (
-          lookup.objectKind === 'root-descriptor'
-          || lookup.objectKind === 'inventory-internal'
-          || lookup.objectKind === 'inventory-leaf'
-        )) {
-          throw new Error('agent-profile reconcile transport requires exact inventory coordinates');
-        }
-        const exactLookup: SystemRecordExactArtifactLookupV1 = lookup.type === 'inventory-object'
-          ? lookup
-          : Object.freeze({
-              type: 'object',
-              objectKind: lookup.objectKind as Extract<
-                SystemRecordExactArtifactLookupV1,
-                { type: 'object' }
-              >['objectKind'],
-              objectDigest: lookup.objectDigest,
-            });
         const fetched = await resolveExact(exactLookup, callerSignal);
         if (fetched.outcome === 'ok') return fetched.lease.artifact;
         if (fetched.outcome === 'not-found' || fetched.outcome === 'unsupported') return null;
@@ -233,7 +222,7 @@ export function createAgentProfileReconcileTransportV1(
       callerSignal.throwIfAborted();
       signal.throwIfAborted();
       const providers = providerSnapshot(listProviderIds());
-      const digest = lookup.objectDigest;
+      const exactLookupKey = systemRecordExactLookupKeyV1(lookup);
       let selectedFailure: Exclude<
         SystemRecordExactFetchResultV1,
         { outcome: 'ok' }
@@ -247,7 +236,7 @@ export function createAgentProfileReconcileTransportV1(
           callerSignal.throwIfAborted();
           return Object.freeze({ outcome: 'deadline', wireBytes: 0 });
         }
-        if (hasNegative(providerId, digest, now)) continue;
+        if (hasNegative(providerId, exactLookupKey, now)) continue;
         if (sliceRequests >= SYSTEM_RECORD_MAX_SLICE_REQUESTS
           || sliceWireBytes >= SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES) {
           return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
@@ -256,74 +245,55 @@ export function createAgentProfileReconcileTransportV1(
         sliceRequests += 1;
         requests += 1;
         const attemptSignal = AbortSignal.any([signal, callerSignal]);
-        const result = await fetchExact(providerId, lookup, attemptSignal);
+        const attempt = normalizeExactAttemptV1(
+          await fetchExact(providerId, lookup, attemptSignal),
+          lookup,
+        );
         const completedAt = readNow(nowMs);
-        const attemptWireBytes = result.outcome === 'ok'
-          ? result.lease.wireBytes
-          : result.wireBytes;
-        const validWireBytes = Number.isSafeInteger(attemptWireBytes) && attemptWireBytes >= 0;
-        if (validWireBytes) {
-          sliceWireBytes += attemptWireBytes;
-          wireBytes += attemptWireBytes;
+        const accountedWireBytes = attempt.wireBytes;
+        if (accountedWireBytes !== null) {
+          sliceWireBytes += accountedWireBytes;
+          wireBytes += accountedWireBytes;
         }
         if (released || closed || signal.aborted || callerSignal.aborted) {
-          if (result.outcome === 'ok') result.lease.release();
+          attempt.releaseRejectedLease();
           signal.throwIfAborted();
           callerSignal.throwIfAborted();
           return Object.freeze({
             outcome: 'closed',
-            wireBytes: validWireBytes ? attemptWireBytes : 0,
+            wireBytes: accountedWireBytes ?? 0,
           });
         }
-        if (!validWireBytes) {
-          if (result.outcome === 'ok') result.lease.release();
-          selectedFailure = selectFailure(
-            selectedFailure,
-            Object.freeze({ outcome: 'invalid-response', wireBytes: 0 }),
-          );
-          rememberNegative(providerId, digest, 'invalid', completedAt);
+        if (accountedWireBytes === null) {
+          if (attempt.outcome !== 'failure') {
+            throw new Error('successful exact attempt omitted its accounted wire bytes');
+          }
+          attempt.releaseRejectedLease();
+          selectedFailure = selectFailure(selectedFailure, attempt.failure);
+          rememberNegative(providerId, exactLookupKey, 'invalid', completedAt);
           continue;
         }
-        if (attemptWireBytes > SYSTEM_RECORD_MAX_FRAME_BYTES) {
-          if (result.outcome === 'ok') result.lease.release();
-          rememberNegative(providerId, digest, 'invalid', completedAt);
-          if (sliceWireBytes > SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES) {
-            return Object.freeze({ outcome: 'capacity', wireBytes: attemptWireBytes });
-          }
-          selectedFailure = selectFailure(
-            selectedFailure,
-            Object.freeze({ outcome: 'invalid-response', wireBytes: attemptWireBytes }),
-          );
-          continue;
+        if (attempt.memoInvalidBeforeSliceCapacity) {
+          rememberNegative(providerId, exactLookupKey, 'invalid', completedAt);
         }
         if (sliceWireBytes > SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES) {
-          if (result.outcome === 'ok') result.lease.release();
-          return Object.freeze({ outcome: 'capacity', wireBytes: attemptWireBytes });
+          attempt.releaseRejectedLease();
+          return Object.freeze({ outcome: 'capacity', wireBytes: accountedWireBytes });
         }
         if (completedAt >= deadlineMs) {
-          if (result.outcome === 'ok') result.lease.release();
-          rememberNegative(providerId, digest, 'timeout', completedAt);
-          return Object.freeze({ outcome: 'deadline', wireBytes: attemptWireBytes });
+          attempt.releaseRejectedLease();
+          rememberNegative(providerId, exactLookupKey, 'timeout', completedAt);
+          return Object.freeze({ outcome: 'deadline', wireBytes: accountedWireBytes });
         }
-        if (result.outcome === 'ok') {
-          if (result.lease.artifact.objectKind !== lookup.objectKind
-            || result.lease.artifact.objectDigest !== lookup.objectDigest
-            || !(result.lease.artifact.canonicalBytes instanceof Uint8Array)) {
-            result.lease.release();
-            selectedFailure = selectFailure(selectedFailure, Object.freeze({
-              outcome: 'invalid-response',
-              wireBytes: attemptWireBytes,
-            }));
-            rememberNegative(providerId, digest, 'invalid', completedAt);
-            continue;
-          }
-          leases.push(result.lease);
-          return result;
+        if (attempt.outcome === 'success') {
+          leases.push(attempt.result.lease);
+          return attempt.result;
         }
-        selectedFailure = selectFailure(selectedFailure, result);
-        const failureClass = negativeFailureClass(result.outcome);
-        if (failureClass !== null) {
-          rememberNegative(providerId, digest, failureClass, completedAt);
+        attempt.releaseRejectedLease();
+        selectedFailure = selectFailure(selectedFailure, attempt.failure);
+        const failureClass = negativeFailureClass(attempt.failure.outcome);
+        if (failureClass !== null && !attempt.memoInvalidBeforeSliceCapacity) {
+          rememberNegative(providerId, exactLookupKey, failureClass, completedAt);
         }
       }
       return attempted
@@ -341,9 +311,9 @@ export function createAgentProfileReconcileTransportV1(
     }
   }
 
-  function hasNegative(providerId: string, digest: Digest32V1, now: number): boolean {
+  function hasNegative(providerId: string, exactLookupKey: string, now: number): boolean {
     for (const failureClass of ['timeout', 'absence', 'invalid'] as const) {
-      const entry = negativeMemo.get(memoKey(providerId, digest, failureClass));
+      const entry = negativeMemo.get(memoKey(providerId, exactLookupKey, failureClass));
       if (entry === undefined) continue;
       if (entry.expiresAtMs <= now) {
         deleteMemoEntry(entry, false);
@@ -357,12 +327,12 @@ export function createAgentProfileReconcileTransportV1(
 
   function rememberNegative(
     providerId: string,
-    digest: Digest32V1,
+    exactLookupKey: string,
     failureClass: AgentProfileReconcileNegativeFailureClassV1,
     observedAtMs: number,
   ): void {
     pruneExpired(observedAtMs);
-    const key = memoKey(providerId, digest, failureClass);
+    const key = memoKey(providerId, exactLookupKey, failureClass);
     if (negativeMemo.has(key)) return;
     while (negativeMemo.size >= maxNegativeEntries) {
       const oldest = negativeMemo.values().next().value as NegativeMemoEntryV1 | undefined;
@@ -379,7 +349,7 @@ export function createAgentProfileReconcileTransportV1(
     }
     const entry = Object.freeze({
       providerId,
-      digest,
+      exactLookupKey,
       failureClass,
       expiresAtMs,
       bytes,
@@ -398,7 +368,7 @@ export function createAgentProfileReconcileTransportV1(
   }
 
   function deleteMemoEntry(entry: NegativeMemoEntryV1, evicted: boolean): void {
-    const key = memoKey(entry.providerId, entry.digest, entry.failureClass);
+    const key = memoKey(entry.providerId, entry.exactLookupKey, entry.failureClass);
     if (negativeMemo.get(key) !== entry) return;
     negativeMemo.delete(key);
     negativeMemoBytes -= entry.bytes;
@@ -452,6 +422,84 @@ function providerSnapshot(input: readonly string[]): readonly string[] {
     if (providers.length === SYSTEM_RECORD_MAX_SLICE_REQUESTS) break;
   }
   return Object.freeze(providers);
+}
+
+type NormalizedExactAttemptV1 =
+  | Readonly<{
+      outcome: 'success';
+      result: Extract<SystemRecordExactFetchResultV1, { outcome: 'ok' }>;
+      wireBytes: number;
+      memoInvalidBeforeSliceCapacity: false;
+      releaseRejectedLease(): void;
+    }>
+  | Readonly<{
+      outcome: 'failure';
+      failure: Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }>;
+      /** Null means the requester returned an unaccountable byte count. */
+      wireBytes: number | null;
+      memoInvalidBeforeSliceCapacity: boolean;
+      releaseRejectedLease(): void;
+    }>;
+
+/** Normalize one provider result before the outer loop applies slice policy. */
+function normalizeExactAttemptV1(
+  result: SystemRecordExactFetchResultV1,
+  lookup: SystemRecordExactArtifactLookupV1,
+): NormalizedExactAttemptV1 {
+  const reportedWireBytes = result.outcome === 'ok'
+    ? result.lease.wireBytes
+    : result.wireBytes;
+  let released = false;
+  const releaseRejectedLease = () => {
+    if (released || result.outcome !== 'ok') return;
+    released = true;
+    result.lease.release();
+  };
+  if (!Number.isSafeInteger(reportedWireBytes) || reportedWireBytes < 0) {
+    return Object.freeze({
+      outcome: 'failure',
+      failure: Object.freeze({ outcome: 'invalid-response', wireBytes: 0 }),
+      wireBytes: null,
+      memoInvalidBeforeSliceCapacity: false,
+      releaseRejectedLease,
+    });
+  }
+  if (reportedWireBytes > SYSTEM_RECORD_MAX_FRAME_BYTES) {
+    return Object.freeze({
+      outcome: 'failure',
+      failure: Object.freeze({ outcome: 'invalid-response', wireBytes: reportedWireBytes }),
+      wireBytes: reportedWireBytes,
+      memoInvalidBeforeSliceCapacity: true,
+      releaseRejectedLease,
+    });
+  }
+  if (result.outcome !== 'ok') {
+    return Object.freeze({
+      outcome: 'failure',
+      failure: result,
+      wireBytes: reportedWireBytes,
+      memoInvalidBeforeSliceCapacity: false,
+      releaseRejectedLease,
+    });
+  }
+  if (result.lease.artifact.objectKind !== lookup.objectKind
+      || result.lease.artifact.objectDigest !== lookup.objectDigest
+      || !(result.lease.artifact.canonicalBytes instanceof Uint8Array)) {
+    return Object.freeze({
+      outcome: 'failure',
+      failure: Object.freeze({ outcome: 'invalid-response', wireBytes: reportedWireBytes }),
+      wireBytes: reportedWireBytes,
+      memoInvalidBeforeSliceCapacity: false,
+      releaseRejectedLease,
+    });
+  }
+  return Object.freeze({
+    outcome: 'success',
+    result,
+    wireBytes: reportedWireBytes,
+    memoInvalidBeforeSliceCapacity: false,
+    releaseRejectedLease,
+  });
 }
 
 function negativeFailureClass(
@@ -516,10 +564,10 @@ function inventoryRejection(
 
 function memoKey(
   providerId: string,
-  digest: Digest32V1,
+  exactLookupKey: string,
   failureClass: AgentProfileReconcileNegativeFailureClassV1,
 ): string {
-  return JSON.stringify([providerId, digest, failureClass]);
+  return JSON.stringify([providerId, exactLookupKey, failureClass]);
 }
 
 function boundedPositive(value: number, maximum: number, label: string): number {

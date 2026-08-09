@@ -374,6 +374,97 @@ describe('agent-profile reconcile exact transport V1', () => {
       wireBytes: SYSTEM_RECORD_MAX_FRAME_BYTES + 2,
     });
   });
+
+  it('scopes inventory negatives to the complete root and path coordinates', async () => {
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+    ): Promise<SystemRecordExactFetchResultV1> => lookup.type === 'inventory-object'
+      && lookup.rootDescriptorDigest === DIGEST_A
+      ? Object.freeze({ outcome: 'not-found', wireBytes: 1 })
+      : successfulFetch(lookup, 2).result);
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const first = openSlice(transport, () => 0);
+    await expect(first.loadInventoryObject(Object.freeze({
+      rootDescriptorDigest: DIGEST_A,
+      objectDigest: DIGEST_B,
+      expectedKind: 'inventory-leaf',
+      path: Object.freeze([0]),
+    }), new AbortController().signal)).resolves.toMatchObject({
+      outcome: 'rejected',
+      rejection: 'not-found',
+    });
+    first.release();
+
+    const second = openSlice(transport, () => 0);
+    await expect(second.loadInventoryObject(Object.freeze({
+      rootDescriptorDigest: DIGEST_B,
+      objectDigest: DIGEST_B,
+      expectedKind: 'inventory-leaf',
+      path: Object.freeze([1]),
+    }), new AbortController().signal)).resolves.toMatchObject({ outcome: 'ok' });
+    second.release();
+    expect(fetchExact).toHaveBeenCalledTimes(2);
+    expect(fetchExact.mock.calls[1]?.[1]).toMatchObject({
+      rootDescriptorDigest: DIGEST_B,
+      path: [1],
+    });
+  });
+
+  it.each([
+    ['not-found', 'not-found'],
+    ['unsupported', 'not-found'],
+    ['invalid-response', 'invalid-response'],
+    ['remote-busy', 'busy'],
+    ['busy', 'busy'],
+    ['capacity', 'busy'],
+    ['waiter-limit', 'busy'],
+    ['deadline', 'transport'],
+    ['remote-error', 'transport'],
+    ['transport', 'transport'],
+    ['closed', 'transport'],
+  ] as const)('maps exact inventory %s to %s rejection', async (outcome, rejection) => {
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => Object.freeze({ outcome, wireBytes: 7 }),
+      controlAdmission: byteAdmission(),
+    });
+    const slice = openSlice(transport, () => 0);
+    await expect(slice.loadInventoryObject(Object.freeze({
+      rootDescriptorDigest: DIGEST_A,
+      objectDigest: DIGEST_B,
+      expectedKind: 'inventory-leaf',
+      path: Object.freeze([0]),
+    }), new AbortController().signal)).resolves.toEqual({
+      outcome: 'rejected',
+      rejection,
+      wireBytes: 7,
+    });
+    slice.release();
+  });
+
+  it('rejects broad root and inventory lookups before opening an exact fetch', async () => {
+    const fetchExact = vi.fn();
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const slice = openSlice(transport, () => 0);
+    await expect(slice.resolve(Object.freeze({ type: 'root' }), new AbortController().signal))
+      .rejects.toThrow(/requires an exact artifact/);
+    await expect(slice.resolve(Object.freeze({
+      type: 'object',
+      objectKind: 'inventory-leaf',
+      objectDigest: DIGEST_A,
+    }), new AbortController().signal)).rejects.toThrow(/exact inventory coordinates/);
+    slice.release();
+    expect(fetchExact).not.toHaveBeenCalled();
+  });
 });
 
 function openSlice(
