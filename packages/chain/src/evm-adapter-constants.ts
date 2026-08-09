@@ -45,6 +45,21 @@ export const MAX_PROBE_AGE_MS = 30_000;
 export const RPC_READ_STALL_TIMEOUT_MS = 4_000;
 
 /**
+ * Preserve the legacy Context Graph registry scan span while using smaller,
+ * RPC-safe pages. Kept outside the adapter base so the dedicated reverse-name
+ * resolver can consume the budget without introducing a base/resolver module
+ * cycle.
+ */
+export const CG_REGISTRY_DEFAULT_PAGE_SIZE = 2_000;
+const CG_REGISTRY_LEGACY_PAGE_SIZE = 9_000;
+const CG_REGISTRY_LEGACY_MAX_SCAN_PAGES = 1_500;
+
+export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
+  (CG_REGISTRY_LEGACY_PAGE_SIZE * CG_REGISTRY_LEGACY_MAX_SCAN_PAGES) /
+  CG_REGISTRY_DEFAULT_PAGE_SIZE,
+);
+
+/**
  * TTL (ms) for the `RpcFailoverClient` endpoint-stickiness "primary re-probe"
  * cadence (Mechanism B, #1340 retry residual + #1337 policy-read fail-close).
  * Once a read/write has failed over to a backup, the client prefers that

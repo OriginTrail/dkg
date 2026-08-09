@@ -68,6 +68,13 @@ const EVM_METHODS = collectMethodNames(EVMChainAdapter);
 const MOCK_METHODS = collectMethodNames(MockChainAdapter);
 const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 
+// Normal protected prototype methods that are deliberately outside the
+// ChainAdapter API. Keeping this boundary explicit prevents production method
+// shape from being chosen merely to evade the runtime parity audit.
+const EVM_INTERNAL_METHODS = new Set<string>([
+  'getContextGraphNameHashResolver',
+]);
+
 // Methods that are *intentionally* absent from the mock or from NoChainAdapter.
 // These are not parity violations. Additions here require a code-review
 // because each one is a silent divergence from the production adapter.
@@ -347,6 +354,7 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     const missing: string[] = [];
     for (const name of EVM_METHODS) {
       if (name.startsWith('_')) continue;
+      if (EVM_INTERNAL_METHODS.has(name)) continue;
       if (MOCK_EXEMPT_FROM_EVM.has(name)) continue;
       if (!MOCK_METHODS.has(name)) missing.push(name);
     }
@@ -354,6 +362,21 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
     // mirrored on MockChainAdapter. Either add it to the mock or put it in
     // MOCK_EXEMPT_FROM_EVM with a comment explaining why.
     expect(missing).toEqual([]);
+  });
+
+  it('classifies the reverse name-hash resolver accessor as adapter-internal', () => {
+    const evm = new EVMChainAdapter({
+      rpcUrl: 'http://127.0.0.1:1',
+      hubAddress: '0x0000000000000000000000000000000000000001',
+      privateKey: '0x' + '1'.repeat(64),
+      allowNoAdminSigner: true,
+    });
+
+    expect(EVM_METHODS.has('getContextGraphNameHashResolver')).toBe(true);
+    expect(EVM_INTERNAL_METHODS.has('getContextGraphNameHashResolver')).toBe(true);
+    expect(MOCK_METHODS.has('getContextGraphNameHashResolver')).toBe(false);
+    expect(Object.hasOwn(evm, 'getContextGraphNameHashResolver')).toBe(false);
+    expect(typeof (evm as any).getContextGraphNameHashResolver).toBe('function');
   });
 
   it('method arity (declared parameter count) is within 1 of EVMChainAdapter for each shared method', () => {
@@ -537,6 +560,35 @@ describe('MockChainAdapter API parity with EVMChainAdapter [CH-8]', () => {
       accessPolicy: 1,
       publishPolicy: 0,
     })).resolves.toMatchObject({ contextGraphId: 3n });
+  });
+
+  it('mirrors exact name-hash reverse-resolution behavior', async () => {
+    const mock = new MockChainAdapter();
+    const nameHash = `0x${'ab'.repeat(32)}`;
+    const upperCaseHash = `0x${nameHash.slice(2).toUpperCase()}`;
+    const unknownHash = `0x${'cd'.repeat(32)}`;
+
+    await expect(mock.resolveContextGraphIdByNameHash('not-a-hash')).rejects.toThrow(
+      /bytes32 nameHash/,
+    );
+    await expect(mock.resolveContextGraphIdByNameHash(ethers.ZeroHash)).resolves.toBeNull();
+    await expect(mock.resolveContextGraphIdByNameHash(unknownHash)).resolves.toBeNull();
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash,
+    })).resolves.toMatchObject({ contextGraphId: 1n });
+    await expect(mock.resolveContextGraphIdByNameHash(upperCaseHash)).resolves.toBe(1n);
+
+    await expect(mock.createOnChainContextGraph({
+      accessPolicy: 0,
+      publishPolicy: 1,
+      nameHash: upperCaseHash,
+    })).resolves.toMatchObject({ contextGraphId: 2n });
+    await expect(mock.resolveContextGraphIdByNameHash(nameHash)).rejects.toThrow(
+      /ambiguous.*2 numeric ids/i,
+    );
   });
 
   it('requires explicit mock support for address-specific V10 publishing', async () => {

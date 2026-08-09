@@ -559,11 +559,6 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  captureContextGraphBindingGeneration,
-  clearContextGraphBindingGeneration,
-  isContextGraphBindingGenerationCurrent,
-} from './context-graph-binding-generation.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -5177,14 +5172,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return Promise.reject(shutdownError());
         }
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
-        let bindingGeneration = captureContextGraphBindingGeneration(
-          this.contextGraphBindingGenerations,
-          asset.contextGraphId,
-        );
+        let bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
         const bindingIsCurrent = () => (
           this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
-          && isContextGraphBindingGenerationCurrent(
-            this.contextGraphBindingGenerations,
+          && this.contextGraphBindingState.isGenerationCurrent(
             asset.contextGraphId,
             bindingGeneration,
           )
@@ -5249,10 +5240,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               subscription,
               verifiedOnChainId,
             );
-            bindingGeneration = captureContextGraphBindingGeneration(
-              this.contextGraphBindingGenerations,
-              asset.contextGraphId,
-            );
+            bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
             assertLifecycleCurrent();
           }
           if (operationSignal?.aborted) {
@@ -7445,6 +7433,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    const bindingEffects = this.contextGraphBindingState.applySubscriptionTransition(
+      contextGraphId,
+      previous,
+      canonicalNext,
+      nextWireId,
+    );
     if (
       previousWireId !== nextWireId
       && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
@@ -7453,7 +7447,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
+    if (bindingEffects.vmStateReset === 'force') {
+      this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    } else if (bindingEffects.vmStateReset === 'inactive') {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     // On-demand member subscriptions deliberately keep their live state and
@@ -7686,7 +7682,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.
-    clearContextGraphBindingGeneration(this.contextGraphBindingGenerations, contextGraphId);
+    this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
   }
 
@@ -7785,10 +7781,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
-    const expectedBindingGeneration = captureContextGraphBindingGeneration(
-      this.contextGraphBindingGenerations,
-      contextGraphId,
-    );
+    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
     const sub = subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
@@ -7815,8 +7808,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ||
         current !== expectedLiveSub
         || (!current?.subscribed && !current?.coreHosted)
-        || !isContextGraphBindingGenerationCurrent(
-          this.contextGraphBindingGenerations,
+        || !this.contextGraphBindingState.isGenerationCurrent(
           contextGraphId,
           expectedBindingGeneration,
         )
