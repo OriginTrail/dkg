@@ -179,7 +179,7 @@ interface ClosurePendingReferenceV1 {
   readonly referencedByHeadDigest?: Digest32V1;
 }
 
-interface ClosureCollectedStateV1 {
+interface ClosureTraversalStateV1 {
   readonly currentHeadDigest: Digest32V1;
   readonly pending: Map<string, ClosurePendingReferenceV1>;
   readonly artifacts: SystemRecordVerificationClosureObjectV1[];
@@ -191,6 +191,19 @@ interface ClosureCollectedStateV1 {
   canonicalBytes: number;
 }
 
+interface CollectedClosureV1 {
+  readonly currentHeadDigest: Digest32V1;
+  readonly artifacts: readonly SystemRecordVerificationClosureObjectV1[];
+  readonly parsedHeads: ReadonlyMap<Digest32V1, AgentProfileHeadObjectV1>;
+  readonly parsedTransitions: ReadonlyMap<
+    Digest32V1,
+    AgentProfileAuthorityTransitionV1
+  >;
+  readonly parsedResolutions: readonly AgentProfileForkResolutionV1[];
+  readonly rootClaimCount: number;
+  readonly canonicalBytes: number;
+}
+
 interface ClosureExecutionV1 {
   readonly nowMs: number;
   readonly resolve: AgentProfileClosureVerifierV1['resolve'];
@@ -198,9 +211,9 @@ interface ClosureExecutionV1 {
   readonly verifyCurrentBundle: AgentProfileClosureVerifierV1['verifyCurrentBundle'];
 }
 
-function createClosureCollectedStateV1(
+function createClosureTraversalStateV1(
   currentHeadDigest: Digest32V1,
-): ClosureCollectedStateV1 {
+): ClosureTraversalStateV1 {
   return {
     currentHeadDigest,
     pending: new Map(),
@@ -223,7 +236,7 @@ const CLOSURE_PURPOSE_PRIORITY_V1: Readonly<Record<ClosurePurposeV1, number>> = 
 });
 
 function enqueueClosureReferenceV1(
-  state: ClosureCollectedStateV1,
+  state: ClosureTraversalStateV1,
   objectKind: SystemRecordObjectKindV1,
   objectDigest: Digest32V1,
   purpose: ClosurePurposeV1,
@@ -265,7 +278,7 @@ type ClosureReferenceV1 = Pick<
 >;
 
 async function visitClosureObjectV1(
-  state: ClosureCollectedStateV1,
+  state: ClosureTraversalStateV1,
   context: ClosurePendingReferenceV1,
   canonicalBytes: Uint8Array,
   references: ClosureReferenceV1[],
@@ -428,13 +441,14 @@ async function visitClosureObjectV1(
 }
 
 async function collectVerificationClosureV1(
-  state: ClosureCollectedStateV1,
+  currentHeadDigest: Digest32V1,
   execution: ClosureExecutionV1,
-): Promise<void> {
+): Promise<CollectedClosureV1> {
+  const state = createClosureTraversalStateV1(currentHeadDigest);
   enqueueClosureReferenceV1(
     state,
     'agent-profile-head',
-    state.currentHeadDigest,
+    currentHeadDigest,
     'current',
   );
 
@@ -508,10 +522,20 @@ async function collectVerificationClosureV1(
       fail('system-record-closure', 'verification closure cannot fit before dependency fetch');
     }
   }
+
+  return Object.freeze({
+    currentHeadDigest,
+    artifacts: Object.freeze([...state.artifacts]),
+    parsedHeads: new Map(state.parsedHeads),
+    parsedTransitions: new Map(state.parsedTransitions),
+    parsedResolutions: Object.freeze([...state.parsedResolutions]),
+    rootClaimCount: state.rootClaims.size,
+    canonicalBytes: state.canonicalBytes,
+  });
 }
 
 function validateCollectedClosureAuthorityV1(
-  state: ClosureCollectedStateV1,
+  state: CollectedClosureV1,
   nowMs: number,
 ): void {
   for (const resolution of state.parsedResolutions) {
@@ -615,7 +639,7 @@ function validateCollectedClosureAuthorityV1(
 }
 
 function assertCompleteUniqueRootLineageV1(
-  state: ClosureCollectedStateV1,
+  state: CollectedClosureV1,
   headDigest: Digest32V1,
   head: AgentProfileHeadObjectV1,
 ): void {
@@ -654,21 +678,21 @@ function assertCompleteUniqueRootLineageV1(
 }
 
 function projectVerificationClosureV1(
-  state: ClosureCollectedStateV1,
+  state: CollectedClosureV1,
 ): SystemRecordVerificationClosureV1 {
   const authoritySummary = createVerifiedAuthoritySummaryV1(state);
-  state.artifacts.sort(compareClosureObjects);
+  const objects = Object.freeze([...state.artifacts].sort(compareClosureObjects));
   return Object.freeze({
-    objects: Object.freeze(state.artifacts),
+    objects,
     canonicalBytes: state.canonicalBytes,
-    rootClaims: state.rootClaims.size,
+    rootClaims: state.rootClaimCount,
     resolvedForkTuples: state.parsedResolutions.length,
     authoritySummary,
   });
 }
 
 function createVerifiedAuthoritySummaryV1(
-  state: ClosureCollectedStateV1,
+  state: CollectedClosureV1,
 ): AgentProfileVerifiedAuthoritySummaryV1 {
   const current = state.parsedHeads.get(state.currentHeadDigest);
   if (current === undefined) {
@@ -750,10 +774,9 @@ export async function buildAgentProfileVerificationClosureV1(
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
   });
-  const state = createClosureCollectedStateV1(currentHeadDigest);
-  await collectVerificationClosureV1(state, execution);
-  validateCollectedClosureAuthorityV1(state, nowMs);
-  return projectVerificationClosureV1(state);
+  const collected = await collectVerificationClosureV1(currentHeadDigest, execution);
+  validateCollectedClosureAuthorityV1(collected, nowMs);
+  return projectVerificationClosureV1(collected);
 }
 
 function compareClosureObjects(

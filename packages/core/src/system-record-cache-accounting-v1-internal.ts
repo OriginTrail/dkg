@@ -421,9 +421,8 @@ function accountCacheReferencesV1(
   return total;
 }
 
-function assertLiveCacheAccountingBoundsV1(
+function assertIncrementalCacheAccountingBoundsV1(
   accumulator: CacheAccountingAccumulatorV1,
-  totals?: CacheAccountingTotalsV1,
 ): void {
   if (
     accumulator.closurePhysical.size > SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_OBJECTS ||
@@ -431,10 +430,20 @@ function assertLiveCacheAccountingBoundsV1(
     accumulator.metadataBytes > SYSTEM_RECORD_MAX_CLOSURE_SIDECAR_LIVE_METADATA_BYTES ||
     accumulator.sidecars > SYSTEM_RECORD_MAX_CONFLICT_SIDECARS ||
     accumulator.sidecarReferences > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_REFERENCES ||
-    accumulator.sidecarMetadataBytes > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_METADATA_BYTES ||
-    (totals !== undefined &&
-      (totals.closurePhysicalBytes > SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_BYTES ||
-        totals.sidecarPhysicalBytes > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_AGGREGATE_BYTES))
+    accumulator.sidecarMetadataBytes > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_METADATA_BYTES
+  ) {
+    fail('system-record-closure', 'aggregate cache accounting exceeds a live V1 bound');
+  }
+}
+
+function assertFinalLiveCacheAccountingBoundsV1(
+  accumulator: CacheAccountingAccumulatorV1,
+  totals: CacheAccountingTotalsV1,
+): void {
+  assertIncrementalCacheAccountingBoundsV1(accumulator);
+  if (
+    totals.closurePhysicalBytes > SYSTEM_RECORD_MAX_ADVERTISED_CLOSURE_BYTES ||
+    totals.sidecarPhysicalBytes > SYSTEM_RECORD_MAX_CONFLICT_SIDECAR_AGGREGATE_BYTES
   ) {
     fail('system-record-closure', 'aggregate cache accounting exceeds a live V1 bound');
   }
@@ -511,7 +520,7 @@ export function preflightSystemRecordCacheAccountingV1(
   const accumulator = createCacheAccountingAccumulatorV1();
   for (const row of normalized.rows) {
     collectCacheAccountingRowV1(accumulator, row);
-    assertLiveCacheAccountingBoundsV1(accumulator);
+    assertIncrementalCacheAccountingBoundsV1(accumulator);
   }
   accountCacheReferencesV1(
     accumulator,
@@ -525,7 +534,7 @@ export function preflightSystemRecordCacheAccountingV1(
     fail('system-record-closure', 'activation inventory may contain only leaf objects');
   }
   const totals = computeCacheAccountingTotalsV1(accumulator);
-  assertLiveCacheAccountingBoundsV1(accumulator, totals);
+  assertFinalLiveCacheAccountingBoundsV1(accumulator, totals);
   assertActivationCacheAccountingBoundsV1(normalized, accumulator, totals);
   return projectCacheAccountingResultV1(normalized, accumulator, totals);
 }
