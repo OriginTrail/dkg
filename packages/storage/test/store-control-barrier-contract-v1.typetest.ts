@@ -10,6 +10,7 @@
  * no runtime, only shapes.
  */
 import type { ManagedSystemRecordCoordinatorOptionsV1 } from '../src/adapters/system-record-managed-coordinator-v1-internal.js';
+import type { SystemRecordLaneControllerTypedDepsV1 } from '../src/system-record-lane-controller-contract-v1.js';
 import type { StoreControlBarrierKeyV1 } from '../src/store-control-barrier-key-v1.js';
 import type { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 
@@ -51,6 +52,23 @@ void takeOptions({
   setAdmissionActive: () => {},
   // @ts-expect-error — a string `barrier` member does not exist on the
   // managed coordinator's options
+  barrier: null as never,
+});
+
+
+// The EXPORTED typed-only factory input carries the same structural pin as
+// the coordinator options: a complete literal, excess `barrier` as the only
+// error. If SystemRecordLaneControllerTypedDepsV1 ever grows a string
+// `barrier` member (even optional), the suppression below turns into an
+// unused directive (TS2578) and this lane fails.
+declare const takeTypedDeps: (deps: SystemRecordLaneControllerTypedDepsV1) => void;
+void takeTypedDeps({
+  lease: null as never,
+  handoff: null as never,
+  executor: null as never,
+  typedBarrier: null as never,
+  setAdmissionActive: () => {},
+  // @ts-expect-error — no string `barrier` member exists on the typed-only deps
   barrier: null as never,
 });
 
