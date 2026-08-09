@@ -1,206 +1,261 @@
 // Packed-artifact export-surface gate for @origintrail-official/dkg-storage
-// (issue #2165). Run via `pnpm --filter @origintrail-official/dkg-storage run
-// test:package-exports`; CI orchestrates, the package owns the invariant.
-//
-// Three properties, all proven against the PACKED TARBALL rather than the
-// source tree (this repo has shipped a release where packaging silently
-// dropped tarball files):
-//
-//   1. RESOLUTION — the public barrel and the documented internal entry
-//      resolve; every deep `dist/*` specifier refuses. `import.meta.resolve`
-//      (via a child probe) exercises the exports map without executing the
-//      module graph, so registry-absent workspace deps cannot masquerade as
-//      resolution verdicts.
-//   2. SURFACE — the packed barrel (`dist/index.js` + `dist/index.d.ts`)
-//      exports none of the ownership-authority symbols, and the internal
-//      entry exports all of them. Resolution alone cannot catch the primary
-//      regression (re-adding the mint to the barrel keeps every resolution
-//      probe green), which is why this check exists.
-//   3. THE GATE CAN FAIL — two mutants run on every invocation. The exports
-//      map is deleted from the extracted copy: resolution probes must fail.
-//      The mint is re-exported from the extracted barrel: the surface check
-//      must fail. A gate that cannot fail proves nothing.
+// (issue #2165). The phases below prove resolution, public/private surface,
+// and two mutation tripwires against the packed tarball rather than sources.
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, cpSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 
 const packageDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PKG = '@origintrail-official/dkg-storage';
+const INTERNAL_ENTRY = `${PKG}/internal/managed-oxigraph-ownership-v1`;
 const OWNERSHIP_MINT = 'createManagedOxigraphOwnershipControllerV1';
+const PUBLIC_ERROR = 'ManagedOxigraphBackendUnownedError';
 const INTERNAL_EXPORTS_MARKER = 'managed-ownership-exports:';
+const RESOLUTION_EXPECTATIONS = Object.freeze([
+  [PKG, true],
+  [INTERNAL_ENTRY, true],
+  [`${PKG}/dist/managed-oxigraph-ownership-v1-internal.js`, false],
+  [`${PKG}/dist/internal/managed-oxigraph-ownership-v1.js`, false],
+  [`${PKG}/dist/store-priority-scheduler.js`, false],
+  [`${PKG}/dist/managed-oxigraph-ownership-v1-internal`, false],
+  [`${PKG}/package.json`, false],
+]);
 
 const failures = [];
-const check = (ok, label) => {
+function check(ok, label) {
   console.log(`${ok ? 'ok  ' : 'FAIL'} ${label}`);
   if (!ok) failures.push(label);
-};
+}
 
-// --- pack + extract ---------------------------------------------------------
-const scratch = mkdtempSync(join(tmpdir(), 'dkg-storage-pack-'));
-const pkgdir = join(scratch, 'node_modules', '@origintrail-official', 'dkg-storage');
-try {
-  const pack = spawnSync('npm', ['pack', '--pack-destination', scratch], {
-    cwd: packageDir,
+function run(command, args, options = {}) {
+  return spawnSync(command, args, {
     shell: process.platform === 'win32',
     encoding: 'utf8',
+    ...options,
+  });
+}
+
+function packAndExtractPackage() {
+  const scratch = mkdtempSync(join(tmpdir(), 'dkg-storage-pack-'));
+  const pkgdir = join(
+    scratch,
+    'node_modules',
+    '@origintrail-official',
+    'dkg-storage',
+  );
+  const pack = run('npm', ['pack', '--pack-destination', scratch], {
+    cwd: packageDir,
   });
   if (pack.status !== 0) {
     console.error(pack.stdout, pack.stderr);
     throw new Error('npm pack failed');
   }
-  const tarball = readdirSync(scratch).find((f) => f.endsWith('.tgz'));
+
+  const tarball = readdirSync(scratch).find((file) => file.endsWith('.tgz'));
   if (!tarball) throw new Error('npm pack produced no tarball');
   mkdirSync(pkgdir, { recursive: true });
-  // Relative paths + cwd, deliberately: a Git-Bash tar on PATH mangles
-  // absolute `C:\` paths, while every tar accepts relative ones.
-  const untar = spawnSync(
+  // Relative paths plus cwd avoid Git-Bash mangling absolute Windows paths.
+  const untar = run(
     'tar',
-    ['-xzf', tarball, '-C', 'node_modules/@origintrail-official/dkg-storage', '--strip-components=1'],
-    { cwd: scratch, shell: process.platform === 'win32', encoding: 'utf8' },
+    [
+      '-xzf',
+      tarball,
+      '-C',
+      'node_modules/@origintrail-official/dkg-storage',
+      '--strip-components=1',
+    ],
+    { cwd: scratch },
   );
   if (untar.status !== 0) {
     console.error(untar.stderr);
     throw new Error('tar extraction failed');
   }
+  return { scratch, pkgdir };
+}
 
-  // --- resolution probe (child process so its parent URL sits in scratch) ---
-  //
-  // Phase 2 of the child IMPORTS the internal entry for real and enumerates
-  // its runtime exports. That is only possible because the ownership module is
-  // deliberately dependency-free (a data-less WeakMap authority); if it ever
-  // grows an import, this degrades loudly, not silently.
-  const probeSource = `const expectations = [
-  ['${PKG}', true],
-  ['${PKG}/internal/managed-oxigraph-ownership-v1', true],
-  ['${PKG}/dist/managed-oxigraph-ownership-v1-internal.js', false],
-  ['${PKG}/dist/internal/managed-oxigraph-ownership-v1.js', false],
-  ['${PKG}/dist/store-priority-scheduler.js', false],
-  ['${PKG}/dist/managed-oxigraph-ownership-v1-internal', false],
-  ['${PKG}/package.json', false],
-];
+function writeResolutionProbe(scratch) {
+  const source = `const expectations = ${JSON.stringify(RESOLUTION_EXPECTATIONS)};
 let bad = 0;
 for (const [specifier, shouldResolve] of expectations) {
   let resolved = true;
   try { import.meta.resolve(specifier); } catch { resolved = false; }
-  if (resolved !== shouldResolve) { bad += 1; console.error('resolution mismatch: ' + specifier + ' resolved=' + resolved); }
+  if (resolved !== shouldResolve) {
+    bad += 1;
+    console.error('resolution mismatch: ' + specifier + ' resolved=' + resolved);
+  }
 }
 if (process.argv[2] === 'with-internal-import') {
-  const ns = await import('${PKG}/internal/managed-oxigraph-ownership-v1');
+  const ns = await import('${INTERNAL_ENTRY}');
   console.log('${INTERNAL_EXPORTS_MARKER}' + JSON.stringify(Object.keys(ns).sort()));
 }
 process.exit(bad === 0 ? 0 : 1);
 `;
-  writeFileSync(join(scratch, 'probe.mjs'), probeSource);
-  const runProbe = (...args) => spawnSync(process.execPath, [join(scratch, 'probe.mjs'), ...args], { encoding: 'utf8' });
+  writeFileSync(join(scratch, 'probe.mjs'), source);
+}
 
-  const probe = runProbe('with-internal-import');
+function runResolutionProbe(scratch, ...args) {
+  return run(process.execPath, [join(scratch, 'probe.mjs'), ...args]);
+}
+
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//gu, '')
+    .replace(/^\s*\/\/.*$/gmu, '');
+}
+
+function exportedDeclarationNames(source) {
+  const code = stripComments(source);
+  const declared = [...code.matchAll(
+    /\bexport\s+(?:declare\s+)?(?:abstract\s+)?(?:class|const|enum|function|interface|let|type|var)\s+([A-Za-z_$][\w$]*)/gu,
+  )].map((match) => match[1]);
+  const listed = [...code.matchAll(/\bexport\s*\{([^}]*)\}/gu)].flatMap(
+    (match) => match[1]
+      .split(',')
+      .map((entry) => entry.trim().split(/\s+as\s+/u).at(-1))
+      .filter(Boolean),
+  );
+  return [...new Set([...declared, ...listed])].sort();
+}
+
+function readPackedSurfaces(pkgdir, probe) {
   const markerLine = probe.stdout
     .split(/\r?\n/u)
     .find((line) => line.startsWith(INTERNAL_EXPORTS_MARKER));
-  let ownershipValueSymbols = [];
+  let internalRuntimeExports = [];
   try {
-    ownershipValueSymbols = JSON.parse(markerLine?.slice(INTERNAL_EXPORTS_MARKER.length) ?? '[]');
+    internalRuntimeExports = JSON.parse(
+      markerLine?.slice(INTERNAL_EXPORTS_MARKER.length) ?? '[]',
+    );
   } catch {
-    // The checks below report both the failed probe and the empty surface.
+    // The explicit checks below report both the probe and surface failures.
   }
-  check(
-    probe.status === 0,
-    `resolution: exports map admits exactly the two entry points and imports the internal entry${
-      probe.status === 0 ? '' : `\n${probe.stderr}`
-    }`,
+
+  const internalDts = readFileSync(
+    join(pkgdir, 'dist', 'internal', 'managed-oxigraph-ownership-v1.d.ts'),
+    'utf8',
   );
+  return {
+    barrelJs: readFileSync(join(pkgdir, 'dist', 'index.js'), 'utf8'),
+    barrelDts: readFileSync(join(pkgdir, 'dist', 'index.d.ts'), 'utf8'),
+    internalRuntimeExports,
+    internalDeclarationExports: exportedDeclarationNames(internalDts),
+  };
+}
+
+function assertInternalSurface(surface) {
   check(
-    ownershipValueSymbols.includes(OWNERSHIP_MINT),
+    surface.internalRuntimeExports.includes(OWNERSHIP_MINT),
     'surface: internal runtime entry exposes the ownership-controller mint',
   );
-
-  // --- surface check on the packed artifact ---------------------------------
-  const barrelJs = readFileSync(join(pkgdir, 'dist', 'index.js'), 'utf8');
-  const barrelDts = readFileSync(join(pkgdir, 'dist', 'index.d.ts'), 'utf8');
-  const internalDts = readFileSync(join(pkgdir, 'dist', 'internal', 'managed-oxigraph-ownership-v1.d.ts'), 'utf8');
-  // Comments are stripped before matching so documentation may MENTION the
-  // authority without tripping the gate; an export statement always sits on a
-  // code line and always matches. (An inline trailing comment naming a symbol
-  // on a code line still trips it — that errs toward a loud false positive, a
-  // human look, and never toward a silent leak.)
-  const stripComments = (source) => source
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/^\s*\/\/.*$/gm, '');
-  const ownershipDeclarationSymbols = [
-    ...new Set(
-      [...stripComments(internalDts).matchAll(
-        /\bexport\s+(?:declare\s+)?(?:abstract\s+)?(?:class|const|enum|function|interface|let|type|var)\s+([A-Za-z_$][\w$]*)/gu,
-      )].map((match) => match[1]),
-    ),
-  ].sort();
   check(
-    ownershipDeclarationSymbols.includes(OWNERSHIP_MINT) &&
-      ownershipValueSymbols.every((name) => ownershipDeclarationSymbols.includes(name)),
-    'surface: internal declarations are the source of truth for every runtime export',
+    surface.internalDeclarationExports.includes(OWNERSHIP_MINT) &&
+      surface.internalRuntimeExports.every((name) =>
+        surface.internalDeclarationExports.includes(name)),
+    'surface: internal declarations cover every runtime export',
   );
-  const surfaceCheck = (js, dts, label, report = check) => {
-    const code = stripComments(js);
-    const decl = stripComments(dts);
-    const leakedValues = ownershipValueSymbols.filter((symbol) =>
-      new RegExp(`\\b${symbol}\\b`).test(code));
-    const leakedDeclarations = ownershipDeclarationSymbols.filter((symbol) =>
-      new RegExp(`\\b${symbol}\\b`).test(decl));
-    const linksAuthorityModule = [code, decl].some((source) =>
-      /managed-oxigraph-ownership-v1(?:-internal)?/u.test(source));
-    report(
-      leakedValues.length === 0,
-      `surface: barrel js exports no ownership value${label}${
-        leakedValues.length ? ` (leaked: ${leakedValues.join(', ')})` : ''
-      }`,
-    );
-    report(
-      leakedDeclarations.length === 0,
-      `surface: barrel d.ts names no ownership symbol${label}${
-        leakedDeclarations.length ? ` (leaked: ${leakedDeclarations.join(', ')})` : ''
-      }`,
-    );
-    report(
-      !linksAuthorityModule,
-      `surface: barrel does not re-export the ownership module${label}`,
-    );
-    return leakedValues.length === 0 &&
-      leakedDeclarations.length === 0 &&
-      !linksAuthorityModule;
-  };
-  surfaceCheck(barrelJs, barrelDts, '');
+}
 
-  // --- mutant 1: delete the exports map → resolution gate must fail ---------
+function inspectBarrelPolicy(js, dts, label, report = check) {
+  const code = stripComments(js);
+  const declarations = stripComments(dts);
+  const internalOnlyValues = [OWNERSHIP_MINT];
+  const leakedValues = internalOnlyValues.filter((symbol) =>
+    new RegExp(`\\b${symbol}\\b`, 'u').test(code));
+  const leakedDeclarations = internalOnlyValues.filter((symbol) =>
+    new RegExp(`\\b${symbol}\\b`, 'u').test(declarations));
+  const linksAuthorityModule = [code, declarations].some((source) =>
+    /managed-oxigraph-ownership-v1(?:-internal)?/u.test(source));
+  const publishesError = [code, declarations].every((source) =>
+    new RegExp(`\\b${PUBLIC_ERROR}\\b`, 'u').test(source));
+
+  report(
+    leakedValues.length === 0,
+    `surface: barrel js exports no ownership mint${label}`,
+  );
+  report(
+    leakedDeclarations.length === 0,
+    `surface: barrel d.ts names no ownership mint${label}`,
+  );
+  report(
+    !linksAuthorityModule,
+    `surface: barrel does not re-export the ownership module${label}`,
+  );
+  report(
+    publishesError,
+    `surface: barrel preserves the public unowned-backend error${label}`,
+  );
+  return leakedValues.length === 0 &&
+    leakedDeclarations.length === 0 &&
+    !linksAuthorityModule &&
+    publishesError;
+}
+
+function runMutants({ scratch, pkgdir, surface }) {
   const pkgJsonPath = join(pkgdir, 'package.json');
   const originalPkgJson = readFileSync(pkgJsonPath, 'utf8');
-  const mutated = JSON.parse(originalPkgJson);
-  delete mutated.exports;
-  writeFileSync(pkgJsonPath, JSON.stringify(mutated));
-  const mutantProbe = runProbe();
-  check(mutantProbe.status !== 0, 'mutant: without the exports map, the resolution gate fails');
+  const withoutExports = JSON.parse(originalPkgJson);
+  delete withoutExports.exports;
+  writeFileSync(pkgJsonPath, JSON.stringify(withoutExports));
+  check(
+    runResolutionProbe(scratch).status !== 0,
+    'mutant: without the exports map, the resolution gate fails',
+  );
   writeFileSync(pkgJsonPath, originalPkgJson);
-  const restoredProbe = runProbe();
-  check(restoredProbe.status === 0, 'mutant: restoring the map restores the gate');
+  check(
+    runResolutionProbe(scratch).status === 0,
+    'mutant: restoring the map restores the gate',
+  );
 
-  // --- mutant 2: re-export the mint from the barrel → surface gate must fail
-  const mutantExport = `export { ${OWNERSHIP_MINT} } from './internal/managed-oxigraph-ownership-v1.js';`;
-  const mutantJs = `${barrelJs}\n${mutantExport}\n`;
-  const mutantDts = `${barrelDts}\n${mutantExport}\n`;
+  const mutantExport =
+    `export { ${OWNERSHIP_MINT} } from './internal/managed-oxigraph-ownership-v1.js';`;
   const mutantFailures = [];
-  const mutantClean = surfaceCheck(mutantJs, mutantDts, ' in the mint mutant', (ok, label) => {
-    if (!ok) mutantFailures.push(label);
-  });
+  const mutantClean = inspectBarrelPolicy(
+    `${surface.barrelJs}\n${mutantExport}\n`,
+    `${surface.barrelDts}\n${mutantExport}\n`,
+    ' in the mint mutant',
+    (ok, label) => {
+      if (!ok) mutantFailures.push(label);
+    },
+  );
   check(
     !mutantClean && mutantFailures.length === 3,
-    'mutant: re-exporting the mint fails every applicable real surface-gate check',
+    'mutant: re-exporting the mint fails every applicable authority check',
   );
-} finally {
-  rmSync(scratch, { recursive: true, force: true, maxRetries: 5 });
 }
 
-if (failures.length > 0) {
-  console.error(`\npackage-exports gate: ${failures.length} failure(s)`);
-  process.exit(1);
+function main() {
+  const packed = packAndExtractPackage();
+  try {
+    writeResolutionProbe(packed.scratch);
+    const probe = runResolutionProbe(packed.scratch, 'with-internal-import');
+    check(
+      probe.status === 0,
+      `resolution: exports map admits only the public and internal entries${
+        probe.status === 0 ? '' : `\n${probe.stderr}`
+      }`,
+    );
+    const surface = readPackedSurfaces(packed.pkgdir, probe);
+    assertInternalSurface(surface);
+    inspectBarrelPolicy(surface.barrelJs, surface.barrelDts, '');
+    runMutants({ ...packed, surface });
+  } finally {
+    rmSync(packed.scratch, { recursive: true, force: true, maxRetries: 5 });
+  }
+
+  if (failures.length > 0) {
+    console.error(`\npackage-exports gate: ${failures.length} failure(s)`);
+    process.exit(1);
+  }
+  console.log('\npackage-exports gate: all properties held, both mutants killed');
 }
-console.log('\npackage-exports gate: all properties held, both mutants killed');
+
+main();

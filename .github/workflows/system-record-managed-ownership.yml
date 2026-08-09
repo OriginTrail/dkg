@@ -160,6 +160,7 @@ jobs:
             test/managed-backend-ownership-dispatch-v1.test.ts \
             test/managed-terminal-read-through-index-v1.test.ts \
             test/managed-warm-read-composition-v1.test.ts \
+            test/managed-oxigraph-public-error-contract-v1.test.ts \
             test/managed-read-gate-decorator-coverage-v1.test.ts \
             test/store-chain-participation-source-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \

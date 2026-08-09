@@ -61,6 +61,7 @@ export {
 // The packed artifact is gated on this staying true: see
 // `scripts/verify-pack-exports.mjs` (`pnpm run test:package-exports`), which
 // fails if any ownership symbol reappears on this barrel.
+export { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-backend-unowned-error.js';
 export {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,
