@@ -6,7 +6,10 @@ import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri, type 
 import { FileWorkspacePublicSnapshotStore, serializeWorkspacePublicSnapshotQuads, TripleStoreAsyncLiftPublisher } from '@origintrail-official/dkg-publisher';
 import { withLegacyRawLiftTestSeeder } from '../../publisher/test/_helpers/legacy-raw-lift.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import type {
+  SyncPageFetchOptions,
+  SyncPageResult,
+} from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/index.js';
 
 const CONTEXT_GRAPH = 'swm-snapshot-sync';
@@ -182,9 +185,10 @@ function installSharedMemorySyncMock(
       phase: 'data' | 'meta' | 'snapshot',
       graphUri: string,
       deadline: number,
-      snapshotRef?: string,
+      options?: SyncPageFetchOptions,
     ) => Promise<SyncPageResult>;
-  }).fetchSyncPages = async (_ctx, _remotePeerId, contextGraphId, _includeSharedMemory, phase, graphUri, _deadline, snapshotRef) => {
+  }).fetchSyncPages = async (_ctx, _remotePeerId, contextGraphId, _includeSharedMemory, phase, graphUri, _deadline, fetchOptions = {}) => {
+    const { snapshotRef } = fetchOptions;
     let quads: Quad[] = [];
     if (phase === 'snapshot') {
       quads = options.omitSnapshots || !snapshotRef

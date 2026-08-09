@@ -140,6 +140,45 @@ describe('exact sync accumulation limits', () => {
     expect(parses).toBe(2);
   });
 
+  it('tags a fresh scoped metadata accumulation error at the real requester boundary', async () => {
+    const requesterScope = 'selected-swm-meta:fresh-limit-contract' as const;
+    let sends = 0;
+    let parses = 0;
+
+    await expect(fetchSyncPages(fetchParams({
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      maxAcceptedQuads: 1,
+      parseAndFilter: async () => {
+        parses += 1;
+        return {
+          quads: [{
+            subject: `urn:fresh:${parses}`,
+            predicate: 'urn:p',
+            object: '"o"',
+            graph: 'urn:meta',
+          }],
+          totalQuads: 1,
+        };
+      },
+      send: async () => {
+        sends += 1;
+        return encoder.encode(`page-${sends}`);
+      },
+    }))).rejects.toMatchObject({
+      code: 'SYNC_PAGE_ACCUMULATION_LIMIT',
+      dimension: 'quads',
+      responderSessionStartedFresh: true,
+    });
+
+    expect(sends).toBe(2);
+    expect(parses).toBe(2);
+  });
+
   it('deletes the process-local responder token for a completed scoped requester', async () => {
     const checkpointStore = new MemorySyncCheckpointStore();
     const requesterScope = 'selected-swm-meta:cleanup-test' as const;

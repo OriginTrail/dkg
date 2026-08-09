@@ -149,7 +149,8 @@ function harness(overrides: HarnessOverrides = {}) {
       remotePeerId: 'peer-source',
       contextGraphIds: [CG],
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (_c, _p, _cg, _inc, phase, _g, _dl, snapshotRef): Promise<SyncPageResult> => {
+      fetchSyncPages: async (_c, _p, _cg, _inc, phase, _g, _dl, fetchOptions): Promise<SyncPageResult> => {
+        const snapshotRef = fetchOptions?.snapshotRef;
         if (phase === 'meta') return page(fx.meta);
         if (phase === 'snapshot') {
           events.push('snapshot-fetched');

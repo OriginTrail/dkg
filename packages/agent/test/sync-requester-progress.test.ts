@@ -1715,8 +1715,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           return pageResult(contextGraphId, phase);
         },
@@ -1905,8 +1906,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly, so `manifestComplete` is true — the
           // other half of the vacuity gate. A truncated meta phase parses no
@@ -2090,8 +2092,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly. That is not incidental: it is what
           // makes `manifestComplete` true, which is the field that turns this
