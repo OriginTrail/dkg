@@ -1,5 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+// Public recognition contract from the BARREL; authority plumbing from the
+// internal entry. The split is the boundary this test rides on: the error is
+// package API, the mint is not.
 import {
   GraphSetIndexStore,
   ManagedOxigraphBackendUnownedError,
