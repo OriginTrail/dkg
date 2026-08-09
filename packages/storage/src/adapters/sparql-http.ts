@@ -80,10 +80,6 @@ import {
   type StoreControlBarrierKeyV1,
 } from '../store-control-barrier-key-v1.js';
 import { createManagedSystemRecordCoordinatorV1 } from './system-record-managed-coordinator-v1-internal.js';
-import {
-  extractSystemRecordAtomicApplyProbeV1,
-  type SystemRecordAtomicApplyProbeV1,
-} from '../system-record-atomic-apply-probe-v1-internal.js';
 import { OwnedManagedHttpClient } from './managed-http-client.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../system-record-materialization-epoch-v1-internal.js';
 import { UnsupportedTripleStoreCapabilityError } from '../unsupported-capability-error.js';
@@ -250,7 +246,6 @@ export class SparqlHttpStore implements TripleStore {
    * symbol-keyed option, so no persisted configuration can supply one.
    */
   private readonly ownershipLease: ManagedOxigraphOwnershipLeaseV1 | null;
-  private readonly systemRecordAtomicApplyProbe: SystemRecordAtomicApplyProbeV1 | null;
   /** Supervisor half of the handoff. Absent ⇒ the lane is never advertised. */
   private readonly supervisorHandoff: ManagedOxigraphSupervisorHandoffV1 | null;
   /** Lazily built so a store that is never asked for the lane allocates nothing. */
@@ -285,10 +280,6 @@ export class SparqlHttpStore implements TripleStore {
     // `atomicUpdates` is synthesized as true by that same function, so neither
     // can gate a capability. Only an identity-checked live lease can.
     this.ownershipLease = extractManagedOxigraphLeaseV1(options);
-    this.systemRecordAtomicApplyProbe = extractSystemRecordAtomicApplyProbeV1(
-      options,
-      this.ownershipLease,
-    );
     this.supervisorHandoff = extractManagedOxigraphHandoffV1(options);
     this.now = options.now ?? monotonicNow;
     this.slowQueryThresholdMs = normalizeNonNegativeNumber(
@@ -769,7 +760,6 @@ export class SparqlHttpStore implements TripleStore {
         const owner = createManagedSystemRecordCoordinatorV1({
           lease: this.ownershipLease,
           handoff: this.buildChildHandoff(this.supervisorHandoff),
-          atomicApplyProbe: this.systemRecordAtomicApplyProbe,
           storeId: this,
           queryEndpoint: this.systemRecordQueryEndpoint,
           updateEndpoint: this.systemRecordUpdateEndpoint,

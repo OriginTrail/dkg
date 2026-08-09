@@ -3,7 +3,6 @@ import {
   createSystemRecordAtomicApplyExecutorV1,
   type SystemRecordAtomicApplyHttpClientV1,
 } from '../system-record-atomic-apply-executor-v1-internal.js';
-import type { SystemRecordAtomicApplyProbeV1 } from '../system-record-atomic-apply-probe-v1-internal.js';
 import {
   createSystemRecordLaneControllerV1,
   type SystemRecordApplyOutcomeV1,
@@ -18,7 +17,6 @@ import { resolveOwnedSystemRecordRuntimeV1 } from '../system-record-runtime-v1-i
 export interface ManagedSystemRecordCoordinatorOptionsV1 {
   readonly lease: ManagedOxigraphOwnershipLeaseV1;
   readonly handoff: SystemRecordChildHandoffV1;
-  readonly atomicApplyProbe: SystemRecordAtomicApplyProbeV1 | null;
   readonly storeId: object;
   readonly queryEndpoint: string;
   readonly updateEndpoint: string;
@@ -46,27 +44,14 @@ export function createManagedSystemRecordCoordinatorV1(
     updateEndpoint: options.updateEndpoint,
     resolveClient: options.resolveClient,
   });
-  const settlementExecutor = options.atomicApplyProbe === null
-    ? atomicExecutor
-    : Object.freeze({
-        discard: atomicExecutor.discard,
-        execute: (
-          proof: unknown,
-          binding: SystemRecordLaneExecutionBindingV1,
-          registerRecovery: Parameters<typeof atomicExecutor.execute>[2],
-        ) => {
-          options.atomicApplyProbe!.observe(binding);
-          return atomicExecutor.execute(proof, binding, registerRecovery);
-        },
-      });
   return createSystemRecordLaneControllerV1({
     lease: options.lease,
     handoff: options.handoff,
     executor: {
       applyVerified: options.applyLegacy,
-      discardVerified: (proof) => settlementExecutor.discard(proof),
+      discardVerified: (proof) => atomicExecutor.discard(proof),
       applyVerifiedSettlementBound: (proof, binding, registerRecovery) =>
-        settlementExecutor.execute(proof, binding, registerRecovery),
+        atomicExecutor.execute(proof, binding, registerRecovery),
     },
     barrier: options.barrier,
     typedBarrier: options.typedBarrier,

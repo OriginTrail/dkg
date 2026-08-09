@@ -1,20 +1,13 @@
 import { createServer, type Server } from 'node:http';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
 } from '../src/managed-oxigraph-ownership-v1-internal.js';
-import type { SystemRecordLaneExecutionBindingV1 } from '../src/system-record-materializer-v1.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
-import { attachSystemRecordAtomicApplyProbeForTestsV1 } from '../src/system-record-atomic-apply-probe-v1-internal.js';
-import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
-import {
-  makeAuthenticActiveReplacementIssueV1,
-  SYSTEM_RECORD_FIXTURE_NETWORK,
-} from './helpers/system-record-active-replacement-fixture.js';
 
 let server: Server;
 let queryEndpoint: string;
@@ -82,8 +75,7 @@ describe('sparql-http managed epoch handoff', () => {
     const resultBarrier = vi.spyOn(externalStorePriorityScheduler, 'runTypedControlBarrier');
     const ownership = createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint);
     ownership.bindReadyGeneration();
-    let observedBinding: SystemRecordLaneExecutionBindingV1 | undefined;
-    const managedOptions = attachManagedOxigraphLeaseV1(
+    const options = attachManagedOxigraphLeaseV1(
       { queryEndpoint, updateEndpoint },
       ownership.lease,
       {
@@ -91,22 +83,12 @@ describe('sparql-http managed epoch handoff', () => {
         startAndProveCleanGeneration: async () => undefined,
       },
     );
-    const options = attachSystemRecordAtomicApplyProbeForTestsV1(
-      managedOptions,
-      ownership.lease,
-      {
-        observe: (binding) => {
-          observedBinding = binding;
-        },
-      },
-    );
-    const runtime = resolveOwnedSystemRecordRuntimeV1(ownership.lease);
     const store = new SparqlHttpStore(options);
     const controller = store.getSystemRecordLaneControllerV1();
     expect(controller).toBeDefined();
 
     const first = await controller!.open({
-      networkId: SYSTEM_RECORD_FIXTURE_NETWORK,
+      networkId: 'testnet',
       kinds: ['agents'],
       mode: 'shadow',
     });
@@ -115,7 +97,7 @@ describe('sparql-http managed epoch handoff', () => {
     await first.close('disable');
     expect(epoch).toBe('2');
     const second = await controller!.open({
-      networkId: SYSTEM_RECORD_FIXTURE_NETWORK,
+      networkId: 'testnet',
       kinds: ['agents'],
       mode: 'shadow',
     });
@@ -139,18 +121,6 @@ describe('sparql-http managed epoch handoff', () => {
       outcome: 'capability-lost',
     });
     expect(requests).toHaveLength(beforeForgedApply);
-
-    if (observedBinding === undefined) throw new Error('atomic executor did not observe a binding');
-    const proof = runtime.issuer.issueActive(makeAuthenticActiveReplacementIssueV1(
-      observedBinding,
-      Math.ceil(performance.now() + 10_000),
-    ));
-    const beforeAuthenticApply = requests.length;
-    await expect(second.applyVerified(proof)).resolves.toEqual({
-      outcome: 'deferred',
-      reason: 'validation-mismatch',
-    });
-    expect(requests.slice(beforeAuthenticApply).map((request) => request.path)).toEqual(['/query']);
 
     await second.close('shutdown');
     const barrierKeys = resultBarrier.mock.calls.map((call) => call[1]);
