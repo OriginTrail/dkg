@@ -1,16 +1,16 @@
-import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
   buildSystemRecordProviderSignatureMessageV1,
   computeSystemRecordRootDescriptorDigestV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
-import { parseNQuads } from '../../src/dkg-agent-utils.js';
 import type { AgentProfileAdmittedSliceContextV1 } from '../../src/system-records/admitted-slice-context-v1.js';
 import type { SystemRecordArtifactRepositoryV1 } from '../../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReceiverV1,
+  type AgentProfileReceiverCandidateV1,
   type AgentProfileReceiverV1,
 } from '../../src/system-records/receiver-v1.js';
 import type {
@@ -111,20 +111,22 @@ export async function signRootDescriptor(
 
 export function receiver(
   store: SystemRecordArtifactRepositoryV1,
-  consumeCandidate: Parameters<typeof createAgentProfileReceiverV1>[0]['consumeCandidate'],
+  consumeCandidate: (
+    input: AgentProfileReceiverCandidateV1,
+    admittedContext: AgentProfileAdmittedSliceContextV1,
+    signal: AbortSignal,
+  ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
 ) {
   return createAgentProfileReceiverV1({
     networkId: NETWORK,
     artifacts: store,
     nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-    verifyCurrentBundle: (_head, bundleBytes) => {
-      const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
-      return Object.freeze({
-        canonicalProjectionBytes: Uint8Array.from(projectionBytes),
-        projectionQuads: Object.freeze(parseNQuads(new TextDecoder().decode(projectionBytes))),
-      });
-    },
-    consumeCandidate,
+    verifyCurrentBundle: () => true,
+    prepareCandidateApply: (candidate, admittedContext, signal) => Object.freeze({
+      existingMonotonicDeadlineMs: 10_000,
+      monotonicNowMs: 1_000,
+      apply: () => consumeCandidate(candidate, admittedContext, signal),
+    }),
   });
 }
 

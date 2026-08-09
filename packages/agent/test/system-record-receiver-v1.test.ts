@@ -332,7 +332,11 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    ))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(apply).toHaveBeenCalledTimes(1);
   });
@@ -351,7 +355,11 @@ describe('agent-profile system-record active receiver', () => {
       }) as never),
     });
 
-    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    ))
       .rejects.toThrow(/monotonic apply existing deadline is invalid/);
   });
 
