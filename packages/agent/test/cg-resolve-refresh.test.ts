@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri, type OperationContext } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad, type ReplaceProjectionFromGraphInput } from '@origintrail-official/dkg-storage';
+import {
+  OxigraphStore,
+  type Quad,
+  type ReplaceProjectionFromGraphInput,
+  type StructuredMutation,
+} from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
@@ -15,6 +20,17 @@ const CURATOR_PEER_ID = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 const RELAY_ADDR = '/ip4/178.104.54.178/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
 
 function noop(): void {}
+
+function projectionMutation(
+  apply: (input: ReplaceProjectionFromGraphInput) => void | Promise<void>,
+): (mutation: StructuredMutation) => Promise<void> {
+  return async (mutation) => {
+    if (mutation.kind !== 'replace-projection-from-graph') {
+      throw new Error(`Unexpected structured mutation: ${mutation.kind}`);
+    }
+    await apply(mutation.input);
+  };
+}
 
 function operationContext(): OperationContext {
   return { kind: 'sync', id: 'cg-refresh-test', startedAt: Date.now() } as never;
@@ -371,7 +387,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async (quads: Quad[]) => { staged = quads; },
-        replaceProjectionFromGraph: async () => undefined,
+        structuredMutation: projectionMutation(noop),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -424,7 +440,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => { targetMutated = true; },
-        replaceProjectionFromGraph: async () => { targetMutated = true; },
+        structuredMutation: projectionMutation(() => { targetMutated = true; }),
         dropGraph: async () => { targetMutated = true; },
       },
       oversizeTombstoneLog: { record: noop },
@@ -517,9 +533,9 @@ describe('refreshMetaFromCurator', () => {
       },
       store: {
         insert: async (quads: Quad[]) => { staged = quads; },
-        replaceProjectionFromGraph: async (input: ReplaceProjectionFromGraphInput) => {
+        structuredMutation: projectionMutation((input) => {
           replacementInput = input;
-        },
+        }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -685,7 +701,7 @@ describe('refreshMetaFromCurator', () => {
         insert: async (quads: Quad[]) => {
           storedSnapshots.push(quads.map((quad) => ({ ...quad, graph: metaGraph })));
         },
-        replaceProjectionFromGraph: async () => undefined,
+        structuredMutation: projectionMutation(noop),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -746,7 +762,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => { targetMutated = true; },
-        replaceProjectionFromGraph: async () => { targetMutated = true; },
+        structuredMutation: projectionMutation(() => { targetMutated = true; }),
         dropGraph: async () => { targetMutated = true; },
       },
       syncCheckpoints: new Map<string, number>(),
@@ -799,7 +815,7 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => undefined,
-        replaceProjectionFromGraph: async () => { targetUpdates += 1; },
+        structuredMutation: projectionMutation(() => { targetUpdates += 1; }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: {
@@ -977,12 +993,12 @@ describe('refreshMetaFromCurator', () => {
       }),
       store: {
         insert: async () => undefined,
-        replaceProjectionFromGraph: async () => {
+        structuredMutation: projectionMutation(() => {
           // Model ChangelogStore: inner projection committed, then the
           // post-mutation marker append failed and surfaced an exception.
           targetCommitted = true;
           throw new Error('post-mutation marker append failed');
-        },
+        }),
         dropGraph: async () => {
           signalCleanupStarted();
           await cleanupGate;
@@ -1048,7 +1064,7 @@ describe('refreshMetaFromCurator', () => {
       },
       store: {
         insert: async () => undefined,
-        replaceProjectionFromGraph: async () => { replacements += 1; },
+        structuredMutation: projectionMutation(() => { replacements += 1; }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
@@ -1122,7 +1138,7 @@ describe('refreshMetaFromCurator', () => {
       },
       store: {
         insert: async () => undefined,
-        replaceProjectionFromGraph: async () => { replacements += 1; },
+        structuredMutation: projectionMutation(() => { replacements += 1; }),
         dropGraph: async () => undefined,
       },
       oversizeTombstoneLog: { record: noop },
