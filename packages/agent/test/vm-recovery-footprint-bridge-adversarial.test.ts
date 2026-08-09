@@ -11,6 +11,7 @@ import {
   type VmRecoveryChainFootprint,
   type VmRecoveryFootprintBridgeReader,
   type VmRecoveryMicrobatchLimits,
+  type VmRecoveryUpdateContext,
 } from '../src/vm-recovery-microbatch.js';
 
 interface BridgeTarget {
@@ -35,7 +36,7 @@ function target(kaId: number, recoveryFootprint?: VmRecoveryChainFootprint): Bri
   };
 }
 
-function publicContext(kaId: bigint) {
+function publicContext(kaId: bigint): VmRecoveryUpdateContext {
   return {
     merkleRootsCount: kaId + 1n,
     byteSize: (kaId + 1n) * 1_024n,
