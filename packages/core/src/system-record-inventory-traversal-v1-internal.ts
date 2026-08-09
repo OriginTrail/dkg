@@ -13,10 +13,12 @@ import {
 import {
   computeSystemRecordInventoryInternalDigestV1,
   computeSystemRecordInventoryLeafDigestV1,
+  decodeInventoryRowBase64UrlV1,
   parseCanonicalSystemRecordInventoryInternalObjectV1,
   parseCanonicalSystemRecordInventoryLeafObjectV1,
   type SystemRecordInventoryInternalObjectV1,
   type SystemRecordInventoryLeafObjectV1,
+  type SystemRecordInventoryRowV1,
   type SystemRecordRootDescriptorObjectV1,
   validateRootDescriptor,
 } from './system-record-inventory-codecs-v1-internal.js';
@@ -56,6 +58,10 @@ export interface SystemRecordInventoryTraversalSliceResultV1 {
   readonly status: 'paused' | 'complete' | 'rejected';
   readonly requests: number;
   readonly wireBytes: number;
+  readonly validatedRows: number;
+  readonly validatedLeaves: number;
+  /** Canonical rows decoded from leaves completed during this slice only. */
+  readonly rows: readonly SystemRecordInventoryRowV1[];
   readonly rejection?: SystemRecordInventoryRejectedLoadV1['rejection'];
   readonly result?: ValidatedSystemRecordInventoryTreeV1;
 }
@@ -66,7 +72,8 @@ export interface SystemRecordInventoryTraversalV1 {
     load: (
       digest: Digest32V1,
       expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined,
-      signal?: AbortSignal,
+      signal: AbortSignal | undefined,
+      path: readonly number[],
     ) => Promise<
       SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
     >,
@@ -81,6 +88,7 @@ interface SystemRecordInventoryTraversalWorkV1 {
   readonly expectedFirst?: Digest32V1;
   readonly upperExclusive?: Digest32V1;
   readonly expectedLast?: Digest32V1;
+  readonly path: readonly number[];
 }
 
 /** Create one opaque pinned traversal; callers must explicitly admit every bounded slice. */
@@ -94,6 +102,7 @@ export function createSystemRecordInventoryTraversalV1(
     {
       digest: pinned.treeRootDigest,
       depth: 1,
+      path: Object.freeze([]),
     },
   ];
   let rows = 0;
@@ -116,7 +125,8 @@ export function createSystemRecordInventoryTraversalV1(
     load: (
       digest: Digest32V1,
       expectedKind: 'inventory-internal' | 'inventory-leaf' | undefined,
-      signal?: AbortSignal,
+      signal: AbortSignal | undefined,
+      path: readonly number[],
     ) => Promise<
       SystemRecordInventoryLoadedObjectV1 | SystemRecordInventoryRejectedLoadV1 | undefined
     >,
@@ -128,6 +138,9 @@ export function createSystemRecordInventoryTraversalV1(
         status: 'complete',
         requests: 0,
         wireBytes: 0,
+        validatedRows: rows,
+        validatedLeaves: leaves,
+        rows: Object.freeze([]),
         result: completedResult(),
       });
     }
@@ -165,6 +178,7 @@ export function createSystemRecordInventoryTraversalV1(
       }
       let requests = 0;
       let wireBytes = 0;
+      const sliceRows: SystemRecordInventoryRowV1[] = [];
       while (pending.length > 0) {
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) break;
@@ -183,7 +197,12 @@ export function createSystemRecordInventoryTraversalV1(
         const remainingMs = deadlineMs - readNow();
         if (remainingMs <= 0) break;
         const loaded = await loadInventoryObjectWithinDeadlineV1(
-          (loadSignal) => load(work.digest, work.expectedKind, loadSignal),
+          (loadSignal) => load(
+            work.digest,
+            work.expectedKind,
+            loadSignal,
+            Object.freeze([...work.path]),
+          ),
           signal,
           remainingMs,
         );
@@ -222,6 +241,9 @@ export function createSystemRecordInventoryTraversalV1(
             status: 'rejected',
             requests,
             wireBytes,
+            validatedRows: rows,
+            validatedLeaves: leaves,
+            rows: Object.freeze([...sliceRows]),
             rejection: rejected.rejection,
           }) as SystemRecordInventoryTraversalSliceResultV1;
         }
@@ -304,6 +326,8 @@ export function createSystemRecordInventoryTraversalV1(
           leafDepth = work.depth;
           leaves += 1;
           rows += leaf.rows.length;
+          sliceRows.push(...leaf.rows.map((encoded) =>
+            decodeInventoryRowBase64UrlV1(pinned.networkId, encoded)));
           if (
             leaves > SYSTEM_RECORD_MAX_INVENTORY_LEAVES ||
             rows > SYSTEM_RECORD_MAX_INVENTORY_RECORDS ||
@@ -331,12 +355,20 @@ export function createSystemRecordInventoryTraversalV1(
               ...(index === internal.entries.length - 1
                 ? { expectedLast: internal.lastKeyHash }
                 : {}),
+              path: Object.freeze([...work.path, index]),
             });
           }
         }
       }
       if (pending.length !== 0) {
-        return Object.freeze({ status: 'paused', requests, wireBytes });
+        return Object.freeze({
+          status: 'paused',
+          requests,
+          wireBytes,
+          validatedRows: rows,
+          validatedLeaves: leaves,
+          rows: Object.freeze([...sliceRows]),
+        });
       }
       if (rows !== expectedRows)
         throw new Error('inventory traversal total does not match descriptor.totalRows');
@@ -351,6 +383,9 @@ export function createSystemRecordInventoryTraversalV1(
         status: 'complete',
         requests,
         wireBytes,
+        validatedRows: rows,
+        validatedLeaves: leaves,
+        rows: Object.freeze([...sliceRows]),
         result: completedResult(),
       });
     } finally {

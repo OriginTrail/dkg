@@ -176,9 +176,15 @@ describe('system-record immutable B+tree objects', () => {
     const traversal = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     let slices = 0;
     let totalWireBytes = 0;
+    let discoveredLeaves = 0;
+    const requestedPaths: number[][] = [];
+    const discoveredRows: SystemRecordInventoryRowV1[] = [];
     while (true) {
-      const result = await traversal.advance(async (digest) => {
+      const result = await traversal.advance(async (digest, _expectedKind, _signal, path) => {
+        expect(Object.isFrozen(path)).toBe(true);
+        requestedPaths.push([...path]);
         const stored = snapshot.objects.get(digest)!;
+        if (stored.objectKind === 'inventory-leaf') discoveredLeaves += 1;
         return loadedInventoryObject(stored);
       }, {
         maxRequests: 1,
@@ -187,6 +193,10 @@ describe('system-record immutable B+tree objects', () => {
       });
       slices += 1;
       totalWireBytes += result.wireBytes;
+      discoveredRows.push(...result.rows);
+      expect(Object.isFrozen(result.rows)).toBe(true);
+      expect(result.validatedRows).toBe(discoveredRows.length);
+      expect(result.validatedLeaves).toBe(discoveredLeaves);
       expect(result.requests).toBeLessThanOrEqual(1);
       expect(result.wireBytes).toBeLessThanOrEqual(2 * 1024 * 1024);
       if (result.status === 'complete') break;
@@ -196,6 +206,11 @@ describe('system-record immutable B+tree objects', () => {
       (sum, stored) => sum + loadedInventoryObject(stored).wireBytes,
       0,
     ));
+    expect(requestedPaths[0]).toEqual([]);
+    expect(new Set(requestedPaths.map((path) => JSON.stringify(path))).size)
+      .toBe(snapshot.objects.size);
+    expect(discoveredRows).toHaveLength(513);
+    expect(new Set(discoveredRows.map(({ stableKeyHash }) => stableKeyHash)).size).toBe(513);
 
     const rejected = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(rejected.advance(async () => ({
@@ -205,7 +220,8 @@ describe('system-record immutable B+tree objects', () => {
       maxWireBytes: 2 * 1024 * 1024,
       deadlineMs: Date.now() + 3_000,
     })).resolves.toEqual({
-      status: 'rejected', requests: 1, wireBytes: 8_196, rejection: 'busy',
+      status: 'rejected', requests: 1, wireBytes: 8_196,
+      validatedRows: 0, validatedLeaves: 0, rows: [], rejection: 'busy',
     });
 
     const aborted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
