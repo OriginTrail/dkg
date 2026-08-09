@@ -98,9 +98,6 @@ export async function createOxigraphServerSupervisorV1(
     lifecycle.run(section);
   const timers = new OxigraphSupervisorTimersV1();
 
-  // Child exit callbacks are installed before the recovery owner exists, but
-  // no child is spawned until every operation owner below has been composed.
-  let recovery!: OxigraphSupervisorRecoveryOperationsV1;
   const child = new OxigraphSupervisorChildV1({
     binaryPath: opts.binaryPath,
     location: opts.location,
@@ -111,19 +108,6 @@ export async function createOxigraphServerSupervisorV1(
     launchStrategy,
     log,
     maySpawn: () => !state.terminating() && state.lifecycle() !== 'closed',
-    onCurrentExit: (exited, code, signal) => {
-      if (state.terminating()) return;
-      if (!child.consumeHandoffRetiring(exited)) ownership.invalidate('child-exit');
-      if (state.lifecycle() !== 'ready') return;
-      state.transition('reviving');
-      markStoreDown();
-      const oomNote = child.classifyOomExit(exited, code, signal)
-        ? ', OOM-killed by cgroup memory cap (or host OOM)'
-        : '';
-      recovery.scheduleRevive(
-        `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`,
-      );
-    },
   });
   const probes = new OxigraphSupervisorProbesV1({
     host,
@@ -146,7 +130,7 @@ export async function createOxigraphServerSupervisorV1(
     readyIntervalMs,
   });
 
-  recovery = new OxigraphSupervisorRecoveryOperationsV1({
+  const recovery = new OxigraphSupervisorRecoveryOperationsV1({
     state,
     ownership,
     child,
@@ -157,6 +141,18 @@ export async function createOxigraphServerSupervisorV1(
     log,
     markStoreDown,
     runExclusive,
+  });
+  child.registerCurrentExitHandler((exited, code, signal) => {
+    if (state.terminating()) return;
+    if (!child.consumeHandoffRetiring(exited)) ownership.invalidate('child-exit');
+    if (state.lifecycle() !== 'ready') return;
+    markStoreDown();
+    const oomNote = child.classifyOomExit(exited, code, signal)
+      ? ', OOM-killed by cgroup memory cap (or host OOM)'
+      : '';
+    recovery.scheduleRevive(
+      `server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'}${oomNote})`,
+    );
   });
   const shutdown = new OxigraphSupervisorShutdownOperationsV1({
     state,

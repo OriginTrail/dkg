@@ -69,7 +69,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
         `[oxigraph] no clean generation was bound within ${this.#abandonMs}ms of retiring ` +
           `the child on ${bind}; resuming ordinary supervision.`,
       );
-      state.setHandoffPhase('none');
+      state.resumeRetiredHandoff();
       void runExclusive(() => this.#recovery.reviveLocked()).catch((error: unknown) => {
         log(`[oxigraph] abandoned-handoff recovery failed: ${(error as Error).message}`);
       });
@@ -91,7 +91,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
           'the owned child cannot be retired for a clean generation',
       );
     }
-    state.transition('recovering');
+    state.beginHandoffRetirement();
     timers.clearRevive();
     ownership.invalidate('stop');
     markStoreDown();
@@ -103,7 +103,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
     if (current) child.detach(current);
     if (!(await this.#shutdown.proveManagedPortRelease(current, absoluteDeadlineMs))) {
       this.#shutdown.beginTermination();
-      state.transition('closed');
+      state.markClosed();
       log(
         `[oxigraph] FATAL: could not prove ${bind} was released after retiring the managed ` +
           'child. The supervisor is now closed and will never start another child. Writes to ' +
@@ -115,7 +115,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
           'managed-store capability is now terminal',
       );
     }
-    state.setHandoffPhase('retired');
+    state.markHandoffRetired();
     this.#armAbandonBackstop();
   }
 
@@ -148,24 +148,25 @@ export class OxigraphSupervisorHandoffOperationsV1 {
           'stopAndProveOwnedChildDead() has not completed',
       );
     }
-    state.transition('recovering');
+    state.beginCleanGeneration();
     timers.clearHandoffAbandon();
+    let generationId: string;
     try {
       const result = await generation.spawnAndProve(absoluteDeadlineMs);
       if (result.status === 'ready') {
-        state.setHandoffPhase('none');
-        log(`[oxigraph] clean child generation ${result.generation} bound on ${bind}.`);
-        return;
+        generationId = result.generation;
+      } else {
+        throw new Error(
+          `Managed Oxigraph could not prove a clean child generation on ${bind} ` +
+            'before the clean-generation recovery deadline',
+        );
       }
-      throw new Error(
-        `Managed Oxigraph could not prove a clean child generation on ${bind} ` +
-          'before the clean-generation recovery deadline',
-      );
     } catch (error) {
       child.signal('SIGKILL');
-      state.setHandoffPhase('none');
+      state.cancelCleanGeneration();
       this.#recovery.scheduleRevive(`clean-generation start failed on ${bind}`);
       throw error;
     }
+    log(`[oxigraph] clean child generation ${generationId} bound on ${bind}.`);
   }
 }
