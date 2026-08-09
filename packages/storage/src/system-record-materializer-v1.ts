@@ -390,9 +390,43 @@ export async function releaseSystemRecordLaneControllerV1(
 }
 
 /**
- * The one controller constructor: accepts the typed-only or the
+ * The typed-only CORE: builds the session from already-normalized deps and
+ * knows nothing about the legacy string-barrier shape. MODULE-PRIVATE by
+ * design — one review round rejected a second exported constructor (a second
+ * deep-importable construction surface), a later one asked that the canonical
+ * layer not reason about both input models; a private core satisfies both.
+ * Assumes the caller has already run the duplicate-registration guard.
+ */
+function buildSystemRecordLaneControllerFromTypedV1(
+  deps: SystemRecordLaneControllerTypedDepsV1,
+): SystemRecordLaneControllerV1 {
+  const session = new SystemRecordLaneSession({
+    lease: deps.lease,
+    handoff: deps.handoff,
+    executor: deps.executor,
+    setAdmissionActive: deps.setAdmissionActive,
+    runEnableBarrier: async (transition) =>
+      snapshotSystemRecordMaterializationEpochRotationV1(
+        await deps.typedBarrier('enable', transition),
+      ),
+    runVoidBarrier: (kind, transition) => deps.typedBarrier(kind, transition),
+  });
+  const controller: SystemRecordLaneControllerV1 = Object.freeze({
+    open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
+  });
+  session.owner = controller;
+  CONTROLLER_SESSIONS.set(controller, session);
+  registeredController = controller;
+  return controller;
+}
+
+/**
+ * The one EXPORTED controller constructor — a thin adapter: guard, normalize,
+ * delegate to the typed-only core. Accepts the typed-only or the
  * legacy-capable deps shape (see {@link SystemRecordLaneControllerTypedDepsV1}
- * for why the shapes differ) and normalizes the barrier internally.
+ * for why the shapes differ); the legacy shape exists only until its
+ * breaking-version removal, and no construction code below this function's
+ * body reasons about it.
  *
  * The duplicate-registration guard runs before ANY caller-supplied dependency
  * property is read: deps may carry accessors, and a second registration must
@@ -410,25 +444,13 @@ export function createSystemRecordLaneControllerV1(
 ): SystemRecordLaneControllerV1 {
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
-  const typedBarrier = normalizeControllerBarrierV1(deps);
-  const session = new SystemRecordLaneSession({
+  return buildSystemRecordLaneControllerFromTypedV1({
     lease: deps.lease,
     handoff: deps.handoff,
     executor: deps.executor,
+    typedBarrier: normalizeControllerBarrierV1(deps),
     setAdmissionActive: deps.setAdmissionActive,
-    runEnableBarrier: async (transition) =>
-      snapshotSystemRecordMaterializationEpochRotationV1(
-        await typedBarrier('enable', transition),
-      ),
-    runVoidBarrier: (kind, transition) => typedBarrier(kind, transition),
   });
-  const controller: SystemRecordLaneControllerV1 = Object.freeze({
-    open: (activation: SystemRecordLaneActivationV1) => session.open(activation),
-  });
-  session.owner = controller;
-  CONTROLLER_SESSIONS.set(controller, session);
-  registeredController = controller;
-  return controller;
 }
 
 /* ------------------------------------------------------------------ *
