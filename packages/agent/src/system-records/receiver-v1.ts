@@ -62,16 +62,18 @@ export interface AgentProfileReceiverCandidateV1 {
   readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
 }
 
-/** Expiry admission that the lifecycle-owned materializer must bind to storage. */
+/** Expiry admission for translation onto the lifecycle bridge's monotonic clock. */
 export interface AgentProfileReceiverApplyAdmissionV1 {
-  /** Absolute signed-head deadline to use as the storage admitted deadline. */
-  readonly validUntilMs: number;
+  /** Signed-head expiry as Unix wall-clock milliseconds; not a storage deadline. */
+  readonly validUntilUnixMs: number;
   /**
-   * Re-read the receiver clock and reject an expired head. The lifecycle bridge
-   * must call this after its waits, immediately before proof issuance/apply
-   * admission, so the storage operation cannot admit an already-expired head.
+   * Re-read the wall clock, reject expiry, and return the positive remaining
+   * lifetime in milliseconds. After its waits, the lifecycle bridge must first
+   * capture its monotonic clock, call this method, and clamp its existing
+   * monotonic deadline to `monotonicNow + remainingMs` immediately before proof
+   * issuance/apply admission. It must never pass validUntilUnixMs to storage.
    */
-  readonly assertFreshAtApply: () => void;
+  readonly assertFreshAtApply: () => number;
 }
 
 export interface CreateAgentProfileReceiverOptionsV1 {
@@ -97,15 +99,16 @@ export interface CreateAgentProfileReceiverOptionsV1 {
   /**
    * Lifecycle-owned bridge into the storage runtime. It mints and consumes the
    * private replacement proof inside one structured call; no proof escapes.
-   * It must bind admission.validUntilMs to the storage admitted deadline and,
-   * after any internal await, call admission.assertFreshAtApply immediately
-   * before proof issuance/apply admission.
+   * After any internal await, it must translate admission's remaining wall-clock
+   * lifetime onto its monotonic deadline immediately before proof issuance/apply
+   * admission, as specified by AgentProfileReceiverApplyAdmissionV1.
    */
   readonly consumeCandidate: (
     input: AgentProfileReceiverCandidateV1,
     signal: AbortSignal,
     admission: AgentProfileReceiverApplyAdmissionV1,
   ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
+  /** Unix wall-clock milliseconds, injectable for deterministic verification. */
   readonly nowMs?: () => number;
 }
 
@@ -164,11 +167,11 @@ export function createAgentProfileReceiverV1(
         verifyCurrentBundle,
       });
       signal.throwIfAborted();
-      const validUntilMs = Date.parse(candidate.head.validUntil);
+      const validUntilUnixMs = Date.parse(candidate.head.validUntil);
       const admission: AgentProfileReceiverApplyAdmissionV1 = Object.freeze({
-        validUntilMs,
+        validUntilUnixMs,
         assertFreshAtApply: () => assertActiveDeadlineFreshV1(
-          validUntilMs,
+          validUntilUnixMs,
           receiverNowMs(nowMs?.() ?? Date.now()),
         ),
       });
@@ -489,10 +492,12 @@ function assertActiveHeadFreshV1(head: AgentProfileActiveHeadObjectV1, nowMs: nu
   assertActiveDeadlineFreshV1(Date.parse(head.validUntil), nowMs);
 }
 
-function assertActiveDeadlineFreshV1(validUntilMs: number, nowMs: number): void {
-  if (validUntilMs <= nowMs) {
+function assertActiveDeadlineFreshV1(validUntilUnixMs: number, nowUnixMs: number): number {
+  const remainingMs = validUntilUnixMs - nowUnixMs;
+  if (remainingMs <= 0) {
     throw new Error('active profile receiver resolved an expired agent-profile head');
   }
+  return remainingMs;
 }
 
 function deriveCanonicalProjectionQuadsV1(

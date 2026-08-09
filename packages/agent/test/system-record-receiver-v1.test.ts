@@ -224,7 +224,7 @@ describe('agent-profile system-record active receiver', () => {
     expect(candidate).not.toHaveProperty('signal');
     expect(consumeCandidate.mock.calls[0]![1]).toBe(signal);
     expect(consumeCandidate.mock.calls[0]![2]).toMatchObject({
-      validUntilMs: Date.parse(fixture.envelope.object.validUntil),
+      validUntilUnixMs: Date.parse(fixture.envelope.object.validUntil),
       assertFreshAtApply: expect.any(Function),
     });
     expect(Object.isFrozen(consumeCandidate.mock.calls[0]![2])).toBe(true);
@@ -344,6 +344,49 @@ describe('agent-profile system-record active receiver', () => {
     expect(consumeCandidate).not.toHaveBeenCalled();
   });
 
+  it('returns remaining Unix lifetime for the bridge to clamp its monotonic deadline', async () => {
+    const fixture = await publishedFixture();
+    const validUntilUnixMs = Date.parse(fixture.envelope.object.validUntil);
+    const nowMs = vi.fn()
+      .mockReturnValueOnce(validUntilUnixMs - 100)
+      .mockReturnValueOnce(validUntilUnixMs - 80)
+      .mockReturnValue(validUntilUnixMs - 60);
+    const existingMonotonicDeadlineMs = 5_200;
+    const monotonicNowMs = 5_000;
+    let admittedDeadlineMs: number | undefined;
+    const consumeCandidate = vi.fn(async (
+      _candidate: AgentProfileReceiverCandidateV1,
+      _signal: AbortSignal,
+      admission: AgentProfileReceiverApplyAdmissionV1,
+    ) => {
+      expect(admission.validUntilUnixMs).toBe(validUntilUnixMs);
+      const remainingMs = admission.assertFreshAtApply();
+      expect(remainingMs).toBe(60);
+      admittedDeadlineMs = Math.min(
+        existingMonotonicDeadlineMs,
+        monotonicNowMs + remainingMs,
+      );
+      return {
+        outcome: 'applied' as const,
+        stateRevision: '6',
+        appliedStateDigest: `0x${'8'.repeat(64)}`,
+      };
+    });
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      consumeCandidate,
+    });
+
+    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      .resolves.toMatchObject({ outcome: 'applied' });
+    expect(nowMs).toHaveBeenCalledTimes(3);
+    expect(admittedDeadlineMs).toBe(5_060);
+    expect(admittedDeadlineMs).not.toBe(validUntilUnixMs);
+  });
+
   it('lets the lifecycle bridge reject expiry after its own asynchronous admission work', async () => {
     const fixture = await publishedFixture();
     const validUntilMs = Date.parse(fixture.envelope.object.validUntil);
@@ -357,7 +400,7 @@ describe('agent-profile system-record active receiver', () => {
       _signal: AbortSignal,
       admission: AgentProfileReceiverApplyAdmissionV1,
     ) => {
-      expect(admission.validUntilMs).toBe(validUntilMs);
+      expect(admission.validUntilUnixMs).toBe(validUntilMs);
       await Promise.resolve();
       admission.assertFreshAtApply();
       committed = true;
