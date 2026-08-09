@@ -2620,7 +2620,7 @@ describe('graph-scoped finalization handler', () => {
     expect(await store.countQuads(swmGraph)).toBe(2);
   });
 
-  it('repairs peer-materialized VM metadata by revalidating its receipt claim', async () => {
+  it('repairs legacy peer-materialized VM metadata without a confirmation kind', async () => {
     const { message, swmGraph, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
     await seedAuthenticatedLocalControls(message);
     await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
@@ -2629,6 +2629,7 @@ describe('graph-scoped finalization handler', () => {
     for (const predicate of [
       'http://dkg.io/ontology/accessPolicy',
       'http://dkg.io/ontology/publisherPeerId',
+      'http://dkg.io/ontology/confirmationKind',
       'http://www.w3.org/ns/prov#wasAttributedTo',
     ]) {
       await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
@@ -2666,6 +2667,7 @@ describe('graph-scoped finalization handler', () => {
       `ASK { GRAPH <${metaGraph}> {
         <${UAL}> <http://dkg.io/ontology/accessPolicy> "ownerOnly" ;
           <http://dkg.io/ontology/publisherPeerId> "12D3KooWPublisher" ;
+          <http://dkg.io/ontology/confirmationKind> "transaction" ;
           <http://dkg.io/ontology/transactionHash> "${message.txHash}" ;
           <http://dkg.io/ontology/materializedVersion> "123:4" ;
           <http://www.w3.org/ns/prov#wasAttributedTo> <did:dkg:agent:${AUTHOR}> .
@@ -2690,6 +2692,10 @@ describe('graph-scoped finalization handler', () => {
     }
     let accessPolicyReads = 0;
     const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      isContextGraphActiveOnChain: async (contextGraphId) => {
+        expect(contextGraphId).toBe(42n);
+        return true;
+      },
       getMerkleRootCount: async () => 1n,
       resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
       getContextGraphAccessPolicy: async (contextGraphId) => {
@@ -2738,6 +2744,10 @@ describe('graph-scoped finalization handler', () => {
     }
     let accessPolicyReads = 0;
     const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      isContextGraphActiveOnChain: async (contextGraphId) => {
+        expect(contextGraphId).toBe(42n);
+        return true;
+      },
       getMerkleRootCount: async () => 1n,
       resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
       getContextGraphAccessPolicy: async (contextGraphId) => {
@@ -2773,6 +2783,82 @@ describe('graph-scoped finalization handler', () => {
     await expect(store.query(
       `ASK { GRAPH <${metaGraph}> { <${UAL}> `
         + '<http://dkg.io/ontology/allowedPeer> "12D3KooWUntrustedWorkspacePeer" } }',
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it.each([
+    {
+      label: 'missing a liveness reader',
+      activeOnChain: undefined,
+      onChainCgId: '42',
+      expectedActiveReads: 0,
+    },
+    {
+      label: 'inactive',
+      activeOnChain: false,
+      onChainCgId: '42',
+      expectedActiveReads: 1,
+    },
+    {
+      label: 'non-positive',
+      activeOnChain: true,
+      onChainCgId: '0',
+      expectedActiveReads: 0,
+    },
+  ])('keeps public-policy fallback pending when the on-chain CG is $label', async ({
+    activeOnChain,
+    onChainCgId,
+    expectedActiveReads,
+  }) => {
+    const { message, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG);
+
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    for (const predicate of [
+      'http://dkg.io/ontology/accessPolicy',
+      'http://dkg.io/ontology/allowedPeer',
+      'http://dkg.io/ontology/publisherPeerId',
+    ]) {
+      await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
+    }
+    let activeReads = 0;
+    let accessPolicyReads = 0;
+    const repairHandler = new FinalizationHandler(store, legacyFinalizationChain(4, {
+      ...(activeOnChain === undefined ? {} : {
+        isContextGraphActiveOnChain: async (contextGraphId) => {
+          activeReads += 1;
+          expect(contextGraphId).toBe(42n);
+          return activeOnChain;
+        },
+      }),
+      getMerkleRootCount: async () => 1n,
+      resolveCanonicalFinalizationReceipt: async () => canonicalReceipt(message),
+      getContextGraphAccessPolicy: async () => {
+        accessPolicyReads += 1;
+        return 0;
+      },
+    }));
+    (repairHandler as unknown as {
+      verifyChainCgBinding: () => Promise<boolean>;
+    }).verifyChainCgBinding = async () => true;
+
+    await expect(repairHandler.handleChainReconciledKC({
+      contextGraphId: CG,
+      onChainCgId,
+      ual: UAL,
+      merkleRoot: message.kcMerkleRoot,
+      publisherAddress: PUBLISHER,
+      kaId: PACKED_KA_ID,
+      versionBlock: 200,
+      authorAddress: AUTHOR,
+    }, createOperationContext('system'))).resolves.toBe('verified-vm-metadata-pending');
+
+    expect(activeReads).toBe(expectedActiveReads);
+    expect(accessPolicyReads).toBe(0);
+    expect(await store.countQuads(vmGraph)).toBe(2);
+    await expect(store.query(
+      `ASK { GRAPH <${metaGraph}> { <${UAL}> `
+        + '<http://dkg.io/ontology/accessPolicy> "public" } }',
     )).resolves.toMatchObject({ type: 'boolean', value: false });
   });
 

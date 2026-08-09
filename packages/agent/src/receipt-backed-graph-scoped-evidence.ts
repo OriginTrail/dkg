@@ -2,6 +2,7 @@ import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-co
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  readGraphKnowledgeAssetReceiptProvenanceV1,
   readLocallyTrustedKnowledgeAssetControlEnvelope,
   type KnowledgeAssetWorkspaceHead,
 } from '@origintrail-official/dkg-publisher';
@@ -28,18 +29,6 @@ export interface RecoverReceiptBackedGraphScopedEvidenceInput {
   kaId: bigint;
   onChainContextGraphId: bigint;
   subGraphName?: string;
-}
-
-function stripRdfLiteral(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  if (!value.startsWith('"')) return value;
-  const lexical = /^("(?:\\.|[^"\\])*")/.exec(value)?.[1];
-  if (!lexical) return undefined;
-  try {
-    return JSON.parse(lexical) as string;
-  } catch {
-    return undefined;
-  }
 }
 
 function anchorQuads(input: RecoverReceiptBackedGraphScopedEvidenceInput): Quad[] {
@@ -94,24 +83,29 @@ export async function recoverReceiptBackedGraphScopedEvidence(
     return { status: 'unavailable', reason: 'context graph or UAL is not a safe IRI' };
   }
   const candidate = await input.store.query(
-    `SELECT ?tx ?kind WHERE {
-      GRAPH <${metaGraph}> {
-        <${safeUal}> <${DKG_NS}transactionHash> ?tx ;
-          <${DKG_NS}confirmationKind> ?kind .
-      }
-    } LIMIT 2`,
+    `SELECT ?predicate ?object WHERE {
+      GRAPH <${metaGraph}> { <${safeUal}> ?predicate ?object }
+    }`,
     { source: 'agent.finalization.recoverReceiptBackedEvidence' },
   );
-  if (candidate.type !== 'bindings' || candidate.bindings.length !== 1) {
-    return { status: 'unavailable', reason: 'exactly one receipt claim is required' };
-  }
-  const transactionHash = stripRdfLiteral(candidate.bindings[0]?.['tx']);
-  const confirmationKind = stripRdfLiteral(candidate.bindings[0]?.['kind']);
   if (
-    confirmationKind !== 'transaction'
-    || !transactionHash
-    || !ethers.isHexString(transactionHash, 32)
-  ) return { status: 'unavailable', reason: 'stored receipt claim is invalid' };
+    candidate.type !== 'bindings'
+    || candidate.bindings.some((row) => (
+      row['predicate'] === undefined || row['object'] === undefined
+    ))
+  ) {
+    return { status: 'unavailable', reason: 'stored receipt metadata is incomplete' };
+  }
+  const receiptProvenance = readGraphKnowledgeAssetReceiptProvenanceV1(
+    candidate.bindings.map((row) => ({
+      predicate: row['predicate']!,
+      object: row['object']!,
+    })),
+  );
+  if (!receiptProvenance) {
+    return { status: 'unavailable', reason: 'stored receipt claim is invalid' };
+  }
+  const { transactionHash } = receiptProvenance;
 
   try {
     const [resolution, rootCount, trustedControls] = await Promise.all([
@@ -131,10 +125,25 @@ export async function recoverReceiptBackedGraphScopedEvidence(
     let controls = trustedControls;
     if (!controls) {
       const getAccessPolicy = input.chain.getContextGraphAccessPolicy;
-      if (!getAccessPolicy) {
+      const isActiveOnChain = input.chain.isContextGraphActiveOnChain;
+      if (
+        input.onChainContextGraphId <= 0n
+        || !isActiveOnChain
+        || !getAccessPolicy
+      ) {
         return {
           status: 'unavailable',
-          reason: 'authenticated local SWM controls and on-chain access policy are unavailable',
+          reason: 'authenticated local SWM controls and active on-chain public policy are unavailable',
+        };
+      }
+      const activeOnChain = await isActiveOnChain.call(
+        input.chain,
+        input.onChainContextGraphId,
+      );
+      if (!activeOnChain) {
+        return {
+          status: 'unavailable',
+          reason: 'on-chain context graph is not active',
         };
       }
       const onChainAccessPolicy = Number(await getAccessPolicy.call(
