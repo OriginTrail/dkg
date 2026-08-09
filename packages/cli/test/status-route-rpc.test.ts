@@ -33,6 +33,7 @@ import {
 } from '@origintrail-official/dkg-chain';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { getSharedContext } from '../../chain/test/evm-test-context.js';
+import { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
   loadNetworkConfig,
   resolveRfc64PublicCatalogActivation,
@@ -229,6 +230,78 @@ describe('/api/status effective sync lifecycle switches', () => {
       }
     }
   });
+});
+
+describe('daemon subscription rehydration lifecycle', () => {
+  it('honors the environment kill-switch through real startup and leaves durable rows dormant', async () => {
+    const contextGraphId = 'persisted-user-context-graph';
+    let daemon: LiveDaemon | undefined;
+
+    try {
+      daemon = await startLiveDaemon({
+        extraConfig: {
+          chain: { type: 'mock' },
+          contextGraphSubscriptionRehydrationEnabled: true,
+        },
+        env: {
+          DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED: 'false',
+        },
+        prepareHome: async (home) => {
+          const db = new DashboardDB({ dataDir: home });
+          try {
+            db.upsertContextGraphSubscription({
+              context_graph_id: contextGraphId,
+              name: 'Persisted user Context Graph',
+              subscribed: 1,
+              synced: 1,
+              shared_memory_synced: 1,
+              meta_synced: 1,
+              sync_scoped: 1,
+              updated_at: 1_700_000_000_000,
+            });
+          } finally {
+            db.close();
+          }
+        },
+      });
+
+      const response = await fetch(`${daemon.base}/api/context-graph/subscriptions`, {
+        headers: authHeaders(daemon),
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        count: 0,
+        subscriptions: [],
+        rehydration: {
+          rehydrationEnabled: false,
+          persistedTotal: 1,
+          hostedActivated: 0,
+          activated: 0,
+          dormant: 1,
+          dormantIds: [contextGraphId],
+        },
+      });
+
+      // The daemon must only suppress live activation. The operator's durable
+      // intent remains byte-for-byte meaningful for a later enabled restart.
+      const db = new DashboardDB({ dataDir: daemon.home });
+      try {
+        expect(db.getContextGraphSubscription(contextGraphId)).toMatchObject({
+          context_graph_id: contextGraphId,
+          name: 'Persisted user Context Graph',
+          subscribed: 1,
+          synced: 1,
+          shared_memory_synced: 1,
+          meta_synced: 1,
+          sync_scoped: 1,
+        });
+      } finally {
+        db.close();
+      }
+    } finally {
+      await stopLiveDaemon(daemon);
+    }
+  }, 120_000);
 });
 
 describe('/api/info chain sanitization', () => {
