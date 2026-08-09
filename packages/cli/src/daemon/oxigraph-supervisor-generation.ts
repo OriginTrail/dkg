@@ -8,7 +8,7 @@ import type { OxigraphSupervisorReviveBackoffV1 } from './oxigraph-supervisor-re
 import type { OxigraphSupervisorStateV1 } from './oxigraph-supervisor-state.js';
 
 interface OxigraphSupervisorGenerationOptionsV1 {
-  readonly state: Pick<OxigraphSupervisorStateV1, 'terminating' | 'transition'>;
+  readonly state: Pick<OxigraphSupervisorStateV1, 'terminating' | 'bindReadyGeneration'>;
   readonly ownership: Pick<OxigraphSupervisorOwnershipControllerV1, 'bindReadyGeneration'>;
   readonly child: Pick<
     OxigraphSupervisorChildV1,
@@ -51,7 +51,7 @@ export class OxigraphSupervisorGenerationV1 {
         const current = child.current();
         if (current === null) return { status: 'child-exited', attempts };
         child.captureOomSnapshot(current, listenerPid);
-        state.transition('ready');
+        state.bindReadyGeneration();
         reviveBackoff.reset();
         return {
           status: 'ready',

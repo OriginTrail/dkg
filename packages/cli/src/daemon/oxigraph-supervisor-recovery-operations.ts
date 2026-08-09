@@ -35,7 +35,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
     if (state.terminating() || state.lifecycle() === 'closed') return;
     const { attempt, delayMs } = reviveBackoff.next();
     log(`[oxigraph] ${reason}; restart #${attempt} in ${delayMs}ms`);
-    state.transition('reviving');
+    state.beginRevive();
     timers.armRevive(delayMs, () => {
       if (state.terminating() || state.lifecycle() === 'closed') return;
       void this.#dependencies.runExclusive(() => this.reviveLocked()).catch((error: unknown) => {
@@ -131,7 +131,7 @@ export class OxigraphSupervisorRecoveryOperationsV1 {
           `${expectedGeneration} cannot be recovered until the replacement binds`,
       );
     }
-    state.transition('recovering');
+    state.beginRecovery();
     timers.clearRevive();
     await this.reviveLocked();
     const after = ownership.snapshot();

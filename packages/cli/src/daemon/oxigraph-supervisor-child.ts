@@ -17,12 +17,13 @@ interface OxigraphSupervisorChildOptionsV1 {
   launchStrategy: OxigraphLaunchStrategy;
   log: (message: string) => void;
   maySpawn: () => boolean;
-  onCurrentExit: (
-    child: ChildProcess,
-    code: number | null,
-    signal: NodeJS.Signals | null,
-  ) => void;
 }
+
+export type OxigraphSupervisorCurrentExitHandlerV1 = (
+  child: ChildProcess,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+) => void;
 
 /** Owns the one tracked child and all child-specific process evidence. */
 export class OxigraphSupervisorChildV1 {
@@ -32,6 +33,7 @@ export class OxigraphSupervisorChildV1 {
   readonly #errored = new WeakSet<ChildProcess>();
   readonly #handoffRetiring = new WeakSet<ChildProcess>();
   readonly #oomSnapshots = new WeakMap<ChildProcess, CgroupOomSnapshot>();
+  #onCurrentExit: OxigraphSupervisorCurrentExitHandlerV1 | null = null;
 
   constructor(options: OxigraphSupervisorChildOptionsV1) {
     this.#options = options;
@@ -49,9 +51,20 @@ export class OxigraphSupervisorChildV1 {
     return this.#current !== null && this.#isAlive(this.#current);
   }
 
+  registerCurrentExitHandler(handler: OxigraphSupervisorCurrentExitHandlerV1): void {
+    if (this.#onCurrentExit !== null) {
+      throw new Error('Managed Oxigraph child exit handler is already registered');
+    }
+    this.#onCurrentExit = handler;
+  }
+
   spawn(): ChildProcess {
     if (!this.#options.maySpawn()) {
       throw new Error('Refusing to spawn a managed Oxigraph child after shutdown began');
+    }
+    const onCurrentExit = this.#onCurrentExit;
+    if (onCurrentExit === null) {
+      throw new Error('Refusing to spawn a managed Oxigraph child before exit routing is registered');
     }
     const args = [
       'serve',
@@ -93,7 +106,7 @@ export class OxigraphSupervisorChildV1 {
     });
     child.once('exit', (code, signal) => {
       if (child !== this.#current) return;
-      this.#options.onCurrentExit(child, code, signal);
+      onCurrentExit(child, code, signal);
     });
     return child;
   }
