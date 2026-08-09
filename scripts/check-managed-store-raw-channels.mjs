@@ -13,6 +13,7 @@ import ts from 'typescript';
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const STORAGE_PACKAGE_NAME = '@origintrail-official/dkg-storage';
+const REVIEWED_NON_STORE_MARKER = 'dkg-raw-channel-non-store';
 // Reviewed dynamic read call sites are sealed per package. A new package, call,
 // or changed query expression fails the gate and prints the exact inventory
 // that needs review before this baseline may be deliberately advanced.
@@ -170,9 +171,76 @@ function staticSparql(expression, checker, seen = new Set()) {
 }
 
 function isTripleStoreReceiver(checker, receiver, tripleStoreType) {
+  return isTripleStoreReceiverThroughAliases(checker, receiver, tripleStoreType, new Set());
+}
+
+function isTripleStoreReceiverThroughAliases(checker, receiver, tripleStoreType, seen) {
+  if (!receiver || seen.has(receiver)) return false;
+  seen.add(receiver);
   const type = checker.getNonNullableType(checker.getTypeAtLocation(receiver));
-  if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false;
-  return checker.isTypeAssignableTo(type, tripleStoreType);
+  if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) === 0) {
+    if (checker.isTypeAssignableTo(type, tripleStoreType)) return true;
+  }
+  if (
+    ts.isParenthesizedExpression(receiver)
+    || ts.isAsExpression(receiver)
+    || ts.isTypeAssertionExpression(receiver)
+    || ts.isSatisfiesExpression(receiver)
+    || ts.isNonNullExpression(receiver)
+  ) {
+    return isTripleStoreReceiverThroughAliases(
+      checker,
+      receiver.expression,
+      tripleStoreType,
+      seen,
+    );
+  }
+  if (ts.isIdentifier(receiver)) {
+    const declaration = checker.getSymbolAtLocation(receiver)?.valueDeclaration;
+    if (declaration && ts.isVariableDeclaration(declaration) && declaration.initializer) {
+      return isTripleStoreReceiverThroughAliases(
+        checker,
+        declaration.initializer,
+        tripleStoreType,
+        seen,
+      );
+    }
+  }
+  return false;
+}
+
+function isUntypedReceiver(checker, receiver) {
+  const type = checker.getNonNullableType(checker.getTypeAtLocation(receiver));
+  return (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0;
+}
+
+function resolveRawStoreCall(expression, checker, seen = new Set()) {
+  if (!expression || seen.has(expression)) return null;
+  seen.add(expression);
+  const direct = methodAccess(expression);
+  if (direct) return direct;
+  if (!ts.isIdentifier(expression)) return null;
+  const declaration = checker.getSymbolAtLocation(expression)?.valueDeclaration;
+  if (!declaration) return null;
+  if (ts.isVariableDeclaration(declaration) && declaration.initializer) {
+    return resolveRawStoreCall(declaration.initializer, checker, seen);
+  }
+  if (ts.isBindingElement(declaration) && ts.isObjectBindingPattern(declaration.parent)) {
+    const variable = declaration.parent.parent;
+    if (!ts.isVariableDeclaration(variable) || !variable.initializer) return null;
+    const property = declaration.propertyName ?? declaration.name;
+    const method = ts.isIdentifier(property) || ts.isStringLiteral(property)
+      ? property.text
+      : null;
+    return method === null ? null : { receiver: variable.initializer, method };
+  }
+  return null;
+}
+
+function hasReviewedNonStoreMarker(sourceFile, node) {
+  const start = node.getStart(sourceFile);
+  return sourceFile.text.slice(Math.max(0, start - 240), start)
+    .includes(REVIEWED_NON_STORE_MARKER);
 }
 
 function selfTestStaticSparql() {
@@ -213,6 +281,62 @@ function selfTestStaticSparql() {
   }
 }
 
+function selfTestRawStoreAliasResolution() {
+  const fileName = '/managed-store-raw-channel-alias-fixture.ts';
+  const sourceFile = ts.createSourceFile(fileName, `
+    interface TripleStore {
+      update(sparql: string): Promise<void>;
+      query(sparql: string): Promise<unknown>;
+    }
+    declare const store: TripleStore;
+    const raw: any = store;
+    raw.update('INSERT DATA { <urn:s> <urn:p> "o" }');
+    const alias = raw;
+    alias.query('DELETE WHERE { ?s ?p ?o }');
+    const updateAlias = store.update;
+    updateAlias('DROP ALL');
+    const { query } = store;
+    query('CLEAR ALL');
+    declare const detached: any;
+    detached.update('INSERT DATA { <urn:s> <urn:p> "o" }');
+  `, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const options = { target: ts.ScriptTarget.ES2022, noLib: true, strict: true };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (candidate) => candidate === fileName ? sourceFile : undefined;
+  host.fileExists = (candidate) => candidate === fileName;
+  host.readFile = (candidate) => candidate === fileName ? sourceFile.text : undefined;
+  const program = ts.createProgram({ rootNames: [fileName], options, host });
+  const checker = program.getTypeChecker();
+  const declaration = sourceFile.statements.find((statement) => (
+    ts.isInterfaceDeclaration(statement) && statement.name.text === 'TripleStore'
+  ));
+  if (!declaration || !ts.isInterfaceDeclaration(declaration)) {
+    throw new Error('raw-store alias self-test could not find TripleStore');
+  }
+  const tripleStoreType = checker.getTypeAtLocation(declaration.name);
+  const anchored = [];
+  const detached = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const access = resolveRawStoreCall(node.expression, checker);
+      if (access && (access.method === 'update' || access.method === 'query')) {
+        if (isTripleStoreReceiver(checker, access.receiver, tripleStoreType)) {
+          anchored.push(access.method);
+        } else if (isUntypedReceiver(checker, access.receiver)) {
+          detached.push(access.method);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  if (anchored.join(',') !== 'update,query,update,query' || detached.join(',') !== 'update') {
+    throw new Error(
+      `raw-store alias self-test failed: anchored=${anchored.join(',')} detached=${detached.join(',')}`,
+    );
+  }
+}
+
 function scanPackage(name, configPath) {
   const program = loadProgram(configPath);
   const checker = program.getTypeChecker();
@@ -231,25 +355,43 @@ function scanPackage(name, configPath) {
     scannedFiles += 1;
     const visit = (node) => {
       if (ts.isCallExpression(node)) {
-        const access = methodAccess(node.expression);
+        const access = resolveRawStoreCall(node.expression, checker);
         if (
           access
           && (access.method === 'update' || access.method === 'query')
-          && isTripleStoreReceiver(checker, access.receiver, tripleStoreType)
         ) {
+          const typedTripleStore = isTripleStoreReceiver(
+            checker,
+            access.receiver,
+            tripleStoreType,
+          );
+          const untypedCandidate = !typedTripleStore
+            && isUntypedReceiver(checker, access.receiver);
+          if (!typedTripleStore && !untypedCandidate) {
+            ts.forEachChild(node, visit);
+            return;
+          }
+          if (untypedCandidate && hasReviewedNonStoreMarker(sourceFile, node)) {
+            ts.forEachChild(node, visit);
+            return;
+          }
           recognizedCalls += 1;
           const line = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
           const location = `${fileName.slice(REPOSITORY_ROOT.length + 1)}:${line}`;
           if (access.method === 'update') {
-            violations.push(`${location}: raw TripleStore.update()`);
+            violations.push(`${location}: ${untypedCandidate ? 'untyped raw-channel candidate' : 'raw TripleStore'}.update()`);
           } else {
             const sparql = staticSparql(node.arguments[0], checker);
             if (sparql !== null) {
               staticallyAnalyzedQueries += 1;
               const analysis = analyzeSparqlOperation(sparql);
               if (recognizedReadOnlySparqlForm(analysis) === null) {
-                violations.push(`${location}: non-read static TripleStore.query()`);
+                violations.push(
+                  `${location}: non-read static ${untypedCandidate ? 'untyped raw-channel candidate' : 'TripleStore'}.query()`,
+                );
               }
+            } else if (untypedCandidate) {
+              violations.push(`${location}: dynamic untyped raw-channel candidate.query()`);
             } else {
               dynamicQueries += 1;
               const argument = node.arguments[0];
@@ -281,6 +423,7 @@ function scanPackage(name, configPath) {
 }
 
 selfTestStaticSparql();
+selfTestRawStoreAliasResolution();
 const packageConfigs = workspaceStorageConsumers();
 const results = packageConfigs.map(([name, config]) => scanPackage(name, config));
 const violations = results.flatMap((result) => result.violations);
