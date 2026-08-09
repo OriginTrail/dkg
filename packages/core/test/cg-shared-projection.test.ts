@@ -17,6 +17,7 @@ import {
   CgSharedProjectionError,
   assertVerifiedCgSharedProjectionForTransferV1,
   assertVerifiedCgSharedProjectionV1,
+  decodeCanonicalGraphlessProjectionV1,
   readVerifiedCgSharedProjectionBytesV1,
   readVerifiedCgSharedProjectionMetadataV1,
   readVerifiedCgSharedProjectionV1,
@@ -75,6 +76,56 @@ const FULLY_WITHHELD =
   + `<${COMMITMENT}> <http://dkg.io/ontology/privateDataHash> "034349e1ac2b108ba81720c55dff02bcae22762921f5c8354db83e687015872c"^^<http://www.w3.org/2001/XMLSchema#hexBinary> .\n`;
 
 describe('RFC-64 canonical cg-shared-v1 projection verification', () => {
+  it('decodes exact canonical bytes into graphless triples', () => {
+    expect(decodeCanonicalGraphlessProjectionV1(UTF8.encode(PUBLIC))).toEqual([
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/age',
+        object: '"42"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        subject: 'https://example.org/alice',
+        predicate: 'https://schema.org/name',
+        object: '"Alice"',
+      },
+    ]);
+    expect(decodeCanonicalGraphlessProjectionV1(UTF8.encode(
+      '<https://example.org/s> <https://example.org/p> <https://example.org/o> .\n',
+    ))).toEqual([{
+      subject: 'https://example.org/s',
+      predicate: 'https://example.org/p',
+      object: 'https://example.org/o',
+    }]);
+  });
+
+  it.each([
+    {
+      name: 'graph term',
+      bytes: UTF8.encode('<https://example.org/s> <https://example.org/p> <https://example.org/o> <https://example.org/g> .\n'),
+      code: 'projection-iri',
+    },
+    {
+      name: 'raw byte disorder',
+      bytes: UTF8.encode(PUBLIC.split('\n').filter(Boolean).reverse().join('\n') + '\n'),
+      code: 'projection-order',
+    },
+    {
+      name: 'invalid UTF-8',
+      bytes: new Uint8Array([
+        ...UTF8.encode('<https://example.org/s> <https://example.org/p> "'),
+        0xc3,
+        0x28,
+        ...UTF8.encode('" .\n'),
+      ]),
+      code: 'projection-utf8',
+    },
+  ])('rejects $name before returning triples', ({ bytes, code }) => {
+    expectFailure(
+      () => decodeCanonicalGraphlessProjectionV1(bytes),
+      code as CgSharedProjectionErrorCode,
+    );
+  });
+
   it.each([
     {
       name: 'public',

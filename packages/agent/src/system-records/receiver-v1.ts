@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  decodeCanonicalGraphlessProjectionV1,
   decodeOpaqueKaBundleV1,
-  tripleContentV10,
 } from '@origintrail-official/dkg-core';
 import {
   buildAgentProfileVerificationClosureV1,
@@ -39,7 +39,6 @@ import {
   type SystemRecordArtifactRepositoryV1,
   type SystemRecordArtifactV1,
 } from './artifact-v1.js';
-import { parseNQuads } from '../dkg-agent-utils.js';
 
 export type SignedAgentProfileActiveHeadEnvelopeV1 = SignedAgentProfileHeadEnvelopeV1 & {
   readonly object: AgentProfileActiveHeadObjectV1;
@@ -55,34 +54,18 @@ export interface AgentProfileReceiverCandidateV1 {
   readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
 }
 
-export interface AgentProfileReceiverMonotonicApplyTimingV1 {
+export interface AgentProfileReceiverPreparedApplyV1 {
   /** Existing authenticated Storage deadline in the bridge's monotonic clock domain. */
   readonly existingMonotonicDeadlineMs: number;
   /** `Math.floor(performance.now())` captured after bridge waits. */
   readonly monotonicNowMs: number;
-}
-
-const FRESH_APPLY_OUTCOME_V1: unique symbol = Symbol('agent-profile-fresh-apply-outcome-v1');
-
-interface AgentProfileReceiverFreshApplyResultV1 {
-  readonly [FRESH_APPLY_OUTCOME_V1]: SystemRecordApplyOutcomeV1;
-}
-
-/** Receiver-owned one-shot entry into lifecycle proof issuance and atomic apply. */
-export interface AgentProfileReceiverFreshApplyCapabilityV1 {
   /**
-   * After its preparation waits, the lifecycle bridge supplies its authenticated
-   * existing deadline and freshly captured monotonic time. The receiver checks
-   * signed wall-clock freshness, clamps the monotonic deadline, and immediately
-   * invokes apply. The callback receives no Unix timestamp and must begin proof
-   * issuance/apply admission with the supplied deadline.
+   * Begin lifecycle proof issuance and atomic apply synchronously with the
+   * receiver-admitted deadline. No Unix timestamp crosses this boundary.
    */
-  readonly admitFreshApply: (
-    timing: AgentProfileReceiverMonotonicApplyTimingV1,
-    apply: (
-      admittedDeadlineMs: number,
-    ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
-  ) => Promise<AgentProfileReceiverFreshApplyResultV1>;
+  readonly apply: (
+    admittedDeadlineMs: number,
+  ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
 }
 
 export interface CreateAgentProfileReceiverOptionsV1 {
@@ -106,17 +89,16 @@ export interface CreateAgentProfileReceiverOptionsV1 {
     signal: AbortSignal,
   ) => boolean | Promise<boolean>;
   /**
-   * Lifecycle-owned bridge into the storage runtime. It mints and consumes the
-   * private replacement proof inside one structured call; no proof escapes.
-   * Its return value must come from freshApply.admitFreshApply, so the receiver
-   * owns the final freshness check and monotonic-deadline clamp.
+   * Lifecycle-owned preparation for storage apply. After all asynchronous
+   * preparation, it returns authenticated monotonic timing and the apply entry.
+   * The receiver owns final freshness, deadline clamping, and the sole call to
+   * apply; no replacement proof or prior apply outcome crosses this boundary.
    */
-  readonly consumeCandidate: (
+  readonly prepareCandidateApply: (
     input: AgentProfileReceiverCandidateV1,
     signal: AbortSignal,
-    freshApply: AgentProfileReceiverFreshApplyCapabilityV1,
-  ) => AgentProfileReceiverFreshApplyResultV1
-    | Promise<AgentProfileReceiverFreshApplyResultV1>;
+  ) => AgentProfileReceiverPreparedApplyV1
+    | Promise<AgentProfileReceiverPreparedApplyV1>;
   /** Unix wall-clock milliseconds, injectable for deterministic verification. */
   readonly nowMs?: () => number;
 }
@@ -142,7 +124,7 @@ export function createAgentProfileReceiverV1(
   const networkId = options.networkId;
   const resolveArtifact = options.artifacts.resolve.bind(options.artifacts);
   const verifyCurrentBundle = options.verifyCurrentBundle;
-  const consumeCandidate = options.consumeCandidate;
+  const prepareCandidateApply = options.prepareCandidateApply;
   const nowMs = options.nowMs;
   const verifyAuthorityEnvelope = options.verifyAuthorityEnvelope
     ?? ((envelope: SignedAgentProfileHeadEnvelopeV1
@@ -181,16 +163,29 @@ export function createAgentProfileReceiverV1(
         validUntilUnixMs,
         receiverNowMs(nowMs?.() ?? Date.now()),
       );
-      const freshApply = createFreshApplyCapabilityV1({
+      const prepared = await prepareCandidateApply(candidate, signal);
+      signal.throwIfAborted();
+      const apply = readPreparedApplyV1(prepared);
+      signal.throwIfAborted();
+      const remainingMs = assertActiveDeadlineFreshV1(
         validUntilUnixMs,
-        signal,
-        nowUnixMs: () => receiverNowMs(nowMs?.() ?? Date.now()),
-      });
-      const result = await consumeCandidate(candidate, signal, freshApply);
+        receiverNowMs(nowMs?.() ?? Date.now()),
+      );
+      const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
+      if (!Number.isSafeInteger(translatedDeadlineMs)) {
+        throw new Error('agent-profile translated apply deadline is invalid');
+      }
+      const admittedDeadlineMs = Math.min(
+        apply.existingMonotonicDeadlineMs,
+        translatedDeadlineMs,
+      );
+      if (admittedDeadlineMs <= apply.monotonicNowMs) {
+        throw new Error('agent-profile monotonic apply admission is expired');
+      }
       // Atomic apply is the point of no return. A cancellation that arrives
       // after the storage closure returns must not hide a committed outcome and
       // make the caller retry it as if nothing happened.
-      return unwrapFreshApplyResultV1(result);
+      return await apply.invoke(admittedDeadlineMs);
     },
   });
 }
@@ -267,9 +262,14 @@ async function buildVerifiedActiveCandidateFactsV1(
   );
   const decodedBundle = decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes);
   const canonicalProjectionBytes = Uint8Array.from(decodedBundle.projectionBytes);
-  const projectionQuads = Object.freeze(
-    deriveCanonicalProjectionQuadsV1(canonicalProjectionBytes),
-  );
+  const projectionQuads = Object.freeze(decodeCanonicalGraphlessProjectionV1(
+    canonicalProjectionBytes,
+  ).map(({ subject, predicate, object }) => Object.freeze({
+    subject,
+    predicate,
+    object,
+    graph: '',
+  })));
   const resolvedSubjectTableArtifact = await resolveArtifact({
     type: 'object',
     objectKind: 'owned-subject-table',
@@ -447,67 +447,24 @@ function requiredClosureArtifactV1(
   return artifact;
 }
 
-interface CreateFreshApplyCapabilityOptionsV1 {
-  readonly validUntilUnixMs: number;
-  readonly signal: AbortSignal;
-  readonly nowUnixMs: () => number;
-}
-
-function createFreshApplyCapabilityV1(
-  options: CreateFreshApplyCapabilityOptionsV1,
-): AgentProfileReceiverFreshApplyCapabilityV1 {
-  const { validUntilUnixMs, signal, nowUnixMs } = options;
-  let used = false;
-  return Object.freeze({
-    admitFreshApply: async (
-      timing: AgentProfileReceiverMonotonicApplyTimingV1,
-      apply: (
-        admittedDeadlineMs: number,
-      ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
-    ): Promise<AgentProfileReceiverFreshApplyResultV1> => {
-      if (used) throw new Error('agent-profile fresh-apply capability is one-shot');
-      used = true;
-      signal.throwIfAborted();
-      if (timing === null || typeof timing !== 'object') {
-        throw new Error('agent-profile monotonic apply timing is invalid');
-      }
-      const existingMonotonicDeadlineMs = monotonicApplyMsV1(
-        timing.existingMonotonicDeadlineMs,
-        'existing deadline',
-      );
-      const monotonicNowMs = monotonicApplyMsV1(
-        timing.monotonicNowMs,
-        'current time',
-      );
-      if (typeof apply !== 'function') {
-        throw new Error('agent-profile fresh apply callback is invalid');
-      }
-      const remainingMs = assertActiveDeadlineFreshV1(validUntilUnixMs, nowUnixMs());
-      const translatedDeadlineMs = monotonicNowMs + remainingMs;
-      if (!Number.isSafeInteger(translatedDeadlineMs)) {
-        throw new Error('agent-profile translated apply deadline is invalid');
-      }
-      const admittedDeadlineMs = Math.min(
-        existingMonotonicDeadlineMs,
-        translatedDeadlineMs,
-      );
-      if (admittedDeadlineMs <= monotonicNowMs) {
-        throw new Error('agent-profile monotonic apply admission is expired');
-      }
-      const outcome = await apply(admittedDeadlineMs);
-      return Object.freeze({ [FRESH_APPLY_OUTCOME_V1]: outcome });
-    },
-  });
-}
-
-function unwrapFreshApplyResultV1(
-  value: AgentProfileReceiverFreshApplyResultV1,
-): SystemRecordApplyOutcomeV1 {
-  if (value === null || typeof value !== 'object'
-    || !Object.prototype.hasOwnProperty.call(value, FRESH_APPLY_OUTCOME_V1)) {
-    throw new Error('lifecycle bridge did not return a fresh-apply result');
+function readPreparedApplyV1(value: AgentProfileReceiverPreparedApplyV1): {
+  readonly existingMonotonicDeadlineMs: number;
+  readonly monotonicNowMs: number;
+  readonly invoke: AgentProfileReceiverPreparedApplyV1['apply'];
+} {
+  if (value === null || typeof value !== 'object') {
+    throw new Error('lifecycle bridge did not return prepared apply state');
   }
-  return value[FRESH_APPLY_OUTCOME_V1];
+  const existingMonotonicDeadlineMs = monotonicApplyMsV1(
+    value.existingMonotonicDeadlineMs,
+    'existing deadline',
+  );
+  const monotonicNowMs = monotonicApplyMsV1(value.monotonicNowMs, 'current time');
+  const invoke = value.apply;
+  if (typeof invoke !== 'function') {
+    throw new Error('agent-profile prepared apply callback is invalid');
+  }
+  return Object.freeze({ existingMonotonicDeadlineMs, monotonicNowMs, invoke });
 }
 
 function monotonicApplyMsV1(value: number, label: string): number {
@@ -527,46 +484,6 @@ function assertActiveDeadlineFreshV1(validUntilUnixMs: number, nowUnixMs: number
     throw new Error('active profile receiver resolved an expired agent-profile head');
   }
   return remainingMs;
-}
-
-function deriveCanonicalProjectionQuadsV1(
-  canonicalProjectionBytes: Uint8Array,
-): Readonly<Quad>[] {
-  let projectionText: string;
-  try {
-    projectionText = new TextDecoder('utf-8', { fatal: true }).decode(canonicalProjectionBytes);
-  } catch {
-    throw new Error('profile bundle projection bytes are not valid UTF-8');
-  }
-  const quads = parseNQuads(projectionText).map((quad) => Object.freeze({
-    subject: quad.subject,
-    predicate: quad.predicate,
-    object: quad.object,
-    graph: quad.graph,
-  }));
-  const reconstructed = new Uint8Array(
-    quads.reduce((total, quad) => total + tripleContentV10(
-      quad.subject,
-      quad.predicate,
-      quad.object,
-    ).byteLength + 1, 0),
-  );
-  let offset = 0;
-  for (const quad of quads) {
-    if (quad.graph !== '') {
-      throw new Error('profile bundle projection must be graphless');
-    }
-    const line = tripleContentV10(quad.subject, quad.predicate, quad.object);
-    reconstructed.set(line, offset);
-    offset += line.byteLength;
-    reconstructed[offset] = 0x0a;
-    offset += 1;
-  }
-  if (reconstructed.byteLength !== canonicalProjectionBytes.byteLength
-    || reconstructed.some((byte, index) => byte !== canonicalProjectionBytes[index])) {
-    throw new Error('profile bundle projection bytes do not encode exact canonical quads');
-  }
-  return quads;
 }
 
 function receiverNowMs(value: number): number {

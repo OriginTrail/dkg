@@ -77,6 +77,13 @@ export interface CgSharedPublicRootProjectionTripleV1 {
   readonly object: string;
 }
 
+/** A graphless triple decoded from exact canonical V10 projection bytes. */
+export interface CanonicalGraphlessProjectionTripleV1 {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+}
+
 /**
  * Encode public-root triples into the exact canonical bytes consumed by the
  * cg-shared-v1 verifier: V10-canonical terms, one LF per line, and raw UTF-8
@@ -101,6 +108,26 @@ export function encodeCanonicalCgSharedPublicRootProjectionV1(
     offset += line.byteLength;
   }
   return projection;
+}
+
+/**
+ * Decode exact canonical V10 projection bytes under the same bounded rules as
+ * cg-shared-v1 verification. The wire representation has no graph component.
+ */
+export function decodeCanonicalGraphlessProjectionV1(
+  projectionBytes: Uint8Array,
+  limits: CgSharedProjectionVerificationLimitsV1 =
+    DEFAULT_CG_SHARED_PROJECTION_VERIFICATION_LIMITS_V1,
+): readonly Readonly<CanonicalGraphlessProjectionTripleV1>[] {
+  const triples = decodeCanonicalProjectionTriplesV1(
+    projectionBytes,
+    normalizeVerificationLimits(limits),
+  );
+  return Object.freeze(triples.map(({ subject, predicate, object }) => Object.freeze({
+    subject,
+    predicate,
+    object: object.startsWith('<') ? object.slice(1, -1) : object,
+  })));
 }
 
 /**
@@ -407,63 +434,22 @@ function verifyCanonicalProjectionBytes(
   readonly privateDataHash: Digest32V1;
   readonly assertionMerkleRoot: Digest32V1;
 } {
-  if (projectionBytes.byteLength === 0) {
-    fail('projection-empty', 'cg-shared-v1 projection must not be empty');
-  }
-  if (
-    projectionBytes.byteLength >= 3
-    && projectionBytes[0] === 0xef
-    && projectionBytes[1] === 0xbb
-    && projectionBytes[2] === 0xbf
-  ) {
-    fail('projection-utf8', 'cg-shared-v1 projection must not start with a UTF-8 BOM');
-  }
-  if (projectionBytes[projectionBytes.byteLength - 1] !== 0x0a) {
-    fail('projection-line-ending', 'cg-shared-v1 projection must end with one LF');
-  }
-
   const leaves: Uint8Array[] = [];
   let anchor: CanonicalProjectionTripleV1 | undefined;
   let privateHash: CanonicalProjectionTripleV1 | undefined;
-  let previousLine: Uint8Array | undefined;
-  let lineStart = 0;
-  let lineNumber = 0;
+  const triples = decodeCanonicalProjectionTriplesV1(projectionBytes, limits);
   const signedPublicTripleCount = BigInt(seal.publicTripleCount);
+  if (BigInt(triples.length) !== signedPublicTripleCount) {
+    fail(
+      'projection-public-count',
+      'canonical projection line count differs from seal publicTripleCount',
+    );
+  }
   const reservedCommitmentSubject =
     `${seal.kaUal}${CG_SHARED_PRIVATE_COMMITMENT_SUFFIX_V1}`;
-  for (let cursor = 0; cursor < projectionBytes.byteLength; cursor += 1) {
-    const byte = projectionBytes[cursor];
-    if (byte === 0x0d) {
-      fail('projection-line-ending', 'raw CR is forbidden in cg-shared-v1 bytes');
-    }
-    if (byte !== 0x0a) continue;
-    const line = projectionBytes.subarray(lineStart, cursor);
-    lineNumber += 1;
-    if (BigInt(lineNumber) > signedPublicTripleCount) {
-      fail(
-        'projection-public-count',
-        'projection contains more lines than the signed publicTripleCount',
-      );
-    }
-    if (line.byteLength === 0) {
-      fail('projection-line', `projection line ${lineNumber} is empty`);
-    }
-    if (line.byteLength > limits.maxLineBytes) {
-      fail(
-        'projection-resource-refused',
-        `projection line ${lineNumber} exceeds the local in-memory line limit`,
-      );
-    }
-    if (previousLine !== undefined) {
-      const ordering = compareBytes(previousLine, line);
-      if (ordering === 0) {
-        fail('projection-duplicate', `projection line ${lineNumber} duplicates its predecessor`);
-      }
-      if (ordering > 0) {
-        fail('projection-order', `projection line ${lineNumber} is not in raw UTF-8 order`);
-      }
-    }
-    const triple = parseCanonicalProjectionLine(line, lineNumber);
+  for (let index = 0; index < triples.length; index += 1) {
+    const triple = triples[index];
+    const lineNumber = index + 1;
     if (
       triple.subject === reservedCommitmentSubject
       && triple.predicate !== CG_SHARED_PRIVATE_ANCHOR_PREDICATE_V1
@@ -491,18 +477,6 @@ function verifyCanonicalProjectionBytes(
       );
     }
     leaves.push(triple.leaf);
-    previousLine = line;
-    lineStart = cursor + 1;
-  }
-  if (lineStart !== projectionBytes.byteLength) {
-    fail('projection-line-ending', 'projection contains bytes after its final complete line');
-  }
-
-  if (BigInt(lineNumber) !== BigInt(seal.publicTripleCount)) {
-    fail(
-      'projection-public-count',
-      'canonical projection line count differs from seal publicTripleCount',
-    );
   }
   assertPrivateCommitment(anchor, privateHash, seal);
 
@@ -520,6 +494,73 @@ function verifyCanonicalProjectionBytes(
     );
   }
   return Object.freeze({ publicRoot, privateDataHash, assertionMerkleRoot });
+}
+
+function decodeCanonicalProjectionTriplesV1(
+  projectionBytes: Uint8Array,
+  limits: Readonly<CgSharedProjectionVerificationLimitsV1>,
+): readonly CanonicalProjectionTripleV1[] {
+  if (!(projectionBytes instanceof Uint8Array)) {
+    fail('projection-input', 'canonical projection bytes must be a Uint8Array');
+  }
+  if (projectionBytes.byteLength === 0) {
+    fail('projection-empty', 'canonical projection must not be empty');
+  }
+  if (projectionBytes.byteLength > limits.maxProjectionBytes) {
+    fail('projection-resource-refused', 'projection exceeds the local in-memory byte limit');
+  }
+  if (
+    projectionBytes.byteLength >= 3
+    && projectionBytes[0] === 0xef
+    && projectionBytes[1] === 0xbb
+    && projectionBytes[2] === 0xbf
+  ) {
+    fail('projection-utf8', 'canonical projection must not start with a UTF-8 BOM');
+  }
+  if (projectionBytes[projectionBytes.byteLength - 1] !== 0x0a) {
+    fail('projection-line-ending', 'canonical projection must end with one LF');
+  }
+
+  const triples: CanonicalProjectionTripleV1[] = [];
+  let previousLine: Uint8Array | undefined;
+  let lineStart = 0;
+  for (let cursor = 0; cursor < projectionBytes.byteLength; cursor += 1) {
+    const byte = projectionBytes[cursor];
+    if (byte === 0x0d) {
+      fail('projection-line-ending', 'raw CR is forbidden in canonical projection bytes');
+    }
+    if (byte !== 0x0a) continue;
+    const line = projectionBytes.subarray(lineStart, cursor);
+    const lineNumber = triples.length + 1;
+    if (lineNumber > limits.maxPublicTriples) {
+      fail('projection-resource-refused', 'projection exceeds the local in-memory triple limit');
+    }
+    if (line.byteLength === 0) {
+      fail('projection-line', `projection line ${lineNumber} is empty`);
+    }
+    if (line.byteLength > limits.maxLineBytes) {
+      fail(
+        'projection-resource-refused',
+        `projection line ${lineNumber} exceeds the local in-memory line limit`,
+      );
+    }
+    if (previousLine !== undefined) {
+      const ordering = compareBytes(previousLine, line);
+      if (ordering === 0) {
+        fail('projection-duplicate', `projection line ${lineNumber} duplicates its predecessor`);
+      }
+      if (ordering > 0) {
+        fail('projection-order', `projection line ${lineNumber} is not in raw UTF-8 order`);
+      }
+    }
+    triples.push(parseCanonicalProjectionLine(line, lineNumber));
+    previousLine = line;
+    lineStart = cursor + 1;
+  }
+  if (lineStart !== projectionBytes.byteLength) {
+    fail('projection-line-ending', 'projection contains bytes after its final complete line');
+  }
+  return Object.freeze(triples);
 }
 
 function assertPrivateCommitment(
