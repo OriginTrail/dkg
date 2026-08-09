@@ -2,16 +2,16 @@
  * RS-heal — runs through the PRODUCTION store decorator stack.
  *
  * Regression for the review finding: `healStrandedScopedKCs` bails unless
- * `this.store.update` is a function, but the agent's store is NOT a bare
+ * the structured copy capabilities are present, but the agent's store is NOT a bare
  * adapter. `createTripleStore` wraps it in `SharedMemoryLiteralBlobStore` /
  * `GraphSetIndexStore`, and `DKGAgent.create` wraps THAT in
  * `createListContextGraphsCacheInvalidatingStore`. If any layer fails to
- * forward the (optional) `update` method, `this.store.update` is `undefined`
+ * forward the optional methods, the capability is `undefined`
  * in every normal daemon config → the guard silently returns → the heal never
  * runs and RS stays stuck. The bare-adapter gate tests cannot see this.
  *
  * This builds the production decorator order around a counted adapter and
- * proves: (1) `update` propagates to the top of the stack; (2) the heal
+ * proves: (1) the capabilities propagate to the top of the stack; (2) the heal
  * actually RELOCATES through it (byte-exact root equality — if `update` were
  * dropped the guard would no-op and scoped would stay empty); (3) the wrapper's
  * cache invalidation fires and the GraphSetIndex touched-graph maintenance keeps
@@ -130,8 +130,46 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     );
   }
 
-  it('exposes update() at the top of the decorator stack (capability propagation)', () => {
-    expect(typeof store.update).toBe('function');
+  it('exposes structured RS-heal capabilities at the top of the decorator stack', () => {
+    expect(typeof store.structuredMutation).toBe('function');
+  });
+
+  it('snapshots structured-mutation cache bookkeeping before async dispatch', async () => {
+    let release!: () => void;
+    const structuredMutation = vi.fn(() => new Promise<void>((resolve) => {
+      release = resolve;
+    }));
+    const adapter = new Proxy(new OxigraphStore(), {
+      get(target, prop, receiver) {
+        if (prop === 'structuredMutation') return structuredMutation;
+        const value = Reflect.get(target, prop, receiver);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const dirtiedGraphs: string[] = [];
+    const wrapped = createListContextGraphsCacheInvalidatingStore(
+      adapter,
+      () => undefined,
+      (_quads, targetGraph) => {
+        if (targetGraph) dirtiedGraphs.push(targetGraph);
+      },
+    );
+    const input = {
+      sourceGraphUris: ['urn:test:source'],
+      targetGraphUri: 'urn:test:target',
+      roots: ['urn:test:root'],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    };
+
+    const pending = wrapped.structuredMutation!({ kind: 'copy-subject-projection', input });
+    input.targetGraphUri = 'urn:test:mutated-after-dispatch';
+    release();
+    await pending;
+
+    expect(structuredMutation).toHaveBeenCalledTimes(1);
+    expect(dirtiedGraphs).toEqual(['urn:test:target']);
+    await wrapped.close();
   });
 
   it('forwards atomic graph-and-subject replacement through the agent decorator', async () => {
@@ -298,10 +336,11 @@ describe('healStrandedScopedKCs — through the production store decorator stack
     // Guard the #1549 warm-index behaviour at the call site: a regression reverting
     // either INSERT to a plain `store.update(sparql)` would still relocate the KC
     // (the graphsAfter/merkle assertions above stay green) but would re-dirty the
-    // graph-set index and force a full rebuild scan. Capture the update() options the
-    // heal sends through the top of the production stack and assert each INSERT
-    // declares its scoped target graph + source tag.
-    const updateCalls: Array<{ sparql: string; options?: { source?: string; touchedGraphs?: readonly string[] } }> = [];
+    // graph-set index and force a full rebuild scan. Capture the structured
+    // operations the heal sends through the top of the production stack and
+    // assert each declares its scoped target graph + source tag.
+    const copyCalls: Array<{ targetGraphUri: string; options?: QueryOptions }> = [];
+    const replaceCalls: Array<{ graphUri: string; options?: QueryOptions }> = [];
     const operationOptions: Array<{ method: string; options?: QueryOptions }> = [];
     const capturing = new Proxy(store, {
       get(target, prop, receiver) {
@@ -326,12 +365,17 @@ describe('healStrandedScopedKCs — through the production store decorator stack
             return orig.call(target, pattern, options);
           };
         }
-        if (prop === 'update') {
-          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['update']>;
-          return (sparql: string, options?: { source?: string; touchedGraphs?: readonly string[] }) => {
-            updateCalls.push({ sparql, options });
-            operationOptions.push({ method: 'update', options });
-            return orig.call(target, sparql, options);
+        if (prop === 'structuredMutation') {
+          const orig = Reflect.get(target, prop, receiver) as NonNullable<TripleStore['structuredMutation']>;
+          return (mutation: Parameters<NonNullable<TripleStore['structuredMutation']>>[0], options?: QueryOptions) => {
+            if (mutation.kind === 'copy-subject-projection') {
+              copyCalls.push({ targetGraphUri: mutation.input.targetGraphUri, options });
+            }
+            if (mutation.kind === 'replace-subject-predicates') {
+              replaceCalls.push({ graphUri: mutation.input.graphUri, options });
+            }
+            operationOptions.push({ method: `structuredMutation:${mutation.kind}`, options });
+            return orig.call(target, mutation, options);
           };
         }
         return Reflect.get(target, prop, receiver);
@@ -350,18 +394,17 @@ describe('healStrandedScopedKCs — through the production store decorator stack
 
     const scopedData = contextGraphDataUri(TEST_CG, TEST_ONCHAIN);
     const scopedMeta = contextGraphMetaUri(TEST_CG, TEST_ONCHAIN);
-    const dataInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedData));
-    const metaInsert = updateCalls.find((c) => /INSERT/i.test(c.sparql) && c.sparql.includes(scopedMeta));
-    expect(dataInsert?.options).toMatchObject({
+    const dataCopy = copyCalls.find((call) => call.targetGraphUri === scopedData);
+    const metaCopy = copyCalls.find((call) => call.targetGraphUri === scopedMeta);
+    expect(dataCopy?.options).toMatchObject({
       priority: 'background',
-      source: 'agent.swm.rsHeal.materialize',
-      touchedGraphs: [scopedData],
+      source: 'agent.swm.rsHeal.materialize.copy',
     });
-    expect(metaInsert?.options).toMatchObject({
+    expect(metaCopy?.options).toMatchObject({
       priority: 'background',
-      source: 'agent.swm.rsHeal.materialize',
-      touchedGraphs: [scopedMeta],
+      source: 'agent.swm.rsHeal.materialize.copy',
     });
+    expect(replaceCalls.filter((call) => call.graphUri === scopedMeta)).toHaveLength(2);
     expect(operationOptions.length).toBeGreaterThan(0);
     expect(operationOptions.every(({ options }) => options?.priority === 'background')).toBe(true);
     expect(operationOptions.every(({ options }) => options?.source?.startsWith('agent.swm.rsHeal.'))).toBe(true);

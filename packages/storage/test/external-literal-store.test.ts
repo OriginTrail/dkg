@@ -306,6 +306,32 @@ describe('SharedMemoryLiteralBlobStore', () => {
     );
     expect(select.type === 'bindings' ? select.bindings : []).toEqual([{ o: largeLiteral }]);
   });
+
+  it('externalizes a large literal in a predicate-only replacement', async () => {
+    const blobDir = await tempBlobDir();
+    const inner = new OxigraphStore();
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const subject = 'http://ex.org/predicate-replacement';
+    const largeLiteral = `"${'predicate-value'.repeat(8)}"`;
+
+    await store.structuredMutation({ kind: 'replace-subject-predicates', input: {
+      graphUri: SWM_GRAPH,
+      subject,
+      predicates: ['http://schema.org/value'],
+      replacementQuads: [quad(subject, largeLiteral, SWM_GRAPH)],
+    } });
+
+    const hash = sha256Term(largeLiteral);
+    expect(await readFile(blobPath(blobDir, hash), 'utf8')).toBe(largeLiteral);
+    const raw = await inner.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(raw.type === 'bindings' ? raw.bindings : []).toEqual([{ o: externalRef(hash) }]);
+    const hydrated = await store.query(
+      `SELECT ?o WHERE { GRAPH <${SWM_GRAPH}> { <${subject}> <http://schema.org/value> ?o } }`,
+    );
+    expect(hydrated.type === 'bindings' ? hydrated.bindings : []).toEqual([{ o: largeLiteral }]);
+  });
 });
 
 function quad(subject: string, object: string, graph: string): Quad {

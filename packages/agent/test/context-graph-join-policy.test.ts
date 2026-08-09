@@ -688,6 +688,35 @@ describe('context graph open enrollment policy', () => {
     }
   }, 30_000);
 
+  it('approves through the structured predicate capability without raw update()', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'private-policy-no-raw-update';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 10,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('no-raw-update-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const store = (agent as any).store as { update?: unknown };
+    const originalUpdate = store.update;
+    store.update = undefined;
+    try {
+      await expect(agent.processIncomingJoinRequest(
+        contextGraphId,
+        delegation,
+        joiner.name,
+        agent.peerId,
+      )).resolves.toMatchObject({ status: 'approved', autoApproved: true });
+      expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress))
+        .toBe('approved');
+    } finally {
+      store.update = originalUpdate;
+    }
+  }, 30_000);
+
   it('repairs an interrupted approved-status write on a signed member retry', async () => {
     const { agent, owner, policyStore } = await boot();
     const contextGraphId = 'private-policy-status-repair';
@@ -700,11 +729,13 @@ describe('context graph open enrollment policy', () => {
     }, owner.agentAddress);
     const joiner = await agent.registerAgent('status-repair-joiner', { framework: 'test' });
     const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
-    const store = (agent as any).store as { update: (sparql: string, options?: unknown) => Promise<void> };
-    const originalUpdate = store.update.bind(store);
-    vi.spyOn(store, 'update')
+    const store = (agent as any).store as {
+      structuredMutation: (mutation: unknown, options?: unknown) => Promise<void>;
+    };
+    const originalReplace = store.structuredMutation.bind(store);
+    vi.spyOn(store, 'structuredMutation')
       .mockRejectedValueOnce(new Error('simulated atomic status update failure'))
-      .mockImplementation(originalUpdate);
+      .mockImplementation(originalReplace);
 
     // Make the initial admission consume the final verified-agent ingress slot.
     // The exact signed repair retry must bypass that just-consumed slot, while

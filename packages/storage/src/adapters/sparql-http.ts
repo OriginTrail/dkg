@@ -31,6 +31,7 @@ import type {
   ConstructResult,
   AskResult,
   StorePressureSnapshot,
+  StructuredMutation,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
@@ -51,6 +52,13 @@ import {
   buildAtomicSubjectReplaceUpdate,
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
+import {
+  buildStructuredMutationUpdate,
+  normalizeStructuredMutation,
+  structuredMutationGuardedGraphs,
+  structuredMutationMightMutate,
+  structuredMutationTouchedGraphs,
+} from '../bounded-structured-mutation.js';
 import {
   assertNotReservedInternalGraphV1,
   isInternalGraphUriV1,
@@ -1209,6 +1217,31 @@ export class SparqlHttpStore implements TripleStore {
     }
     this.invalidateListGraphsCache();
     this.writeGen.recordGraphWrites([graphUri]);
+  }
+
+  async structuredMutation(
+    mutation: StructuredMutation,
+    options?: QueryOptions,
+  ): Promise<void> {
+    const normalized = normalizeStructuredMutation(mutation);
+    const touchedGraphs = structuredMutationTouchedGraphs(normalized);
+    this.assertGenericMutationScope(structuredMutationGuardedGraphs(normalized), 'structuredMutation');
+    if (normalized.kind === 'replace-subject-predicates') {
+      assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'SparqlHttpStore.structuredMutation',
+      });
+    }
+    const update = buildStructuredMutationUpdate(normalized);
+    if (!update || !structuredMutationMightMutate(normalized)) return;
+    await this.postUpdate(
+      update,
+      { ...options, source: options?.source ?? 'sparql-http.structuredMutation' },
+      'structuredMutation',
+      touchedGraphs,
+    );
+    this.invalidateListGraphsCache();
+    this.writeGen.recordGraphWrites(touchedGraphs);
   }
 
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {

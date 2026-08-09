@@ -2,6 +2,7 @@ import {
   type Quad,
   type QueryOptions,
   type QueryResult,
+  type StructuredMutation,
   type TripleStore,
 } from '../src/index.js';
 
@@ -41,6 +42,9 @@ export class CountingStore implements TripleStore {
   dropGraph(graphUri: string, options?: QueryOptions): Promise<void> { return this.inner.dropGraph(graphUri, options); }
   deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
     return this.inner.deleteBySubjectPrefix(graphUri, prefix, options);
+  }
+  structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
+    return this.inner.structuredMutation!(mutation, options);
   }
   countQuads(graphUri?: string, options?: QueryOptions): Promise<number> { return this.inner.countQuads(graphUri, options); }
   flush(options?: QueryOptions): Promise<void> { return this.inner.flush?.(options) ?? Promise.resolve(); }

@@ -104,12 +104,12 @@ async function ask(store: OxigraphStore, sparql: string): Promise<boolean> {
 }
 
 // A call-counting proxy over a real store. The prune MUST reach the store only
-// via a single server-side `update()` — never via `countQuads`/`deleteByPattern`/
+// via a single structured server-side prune — never via `countQuads`/`deleteByPattern`/
 // `deleteBySubjectPrefix`, each of which brackets its work with full-graph COUNT
 // scans on the production Blazegraph backend (the BLOCKER this rewrite fixes,
 // invisible to a plain Oxigraph assertion). The OxigraphStore backing the proxy
-// implements `update()`, so the real DELETE still runs.
-const COUNTED = ['update', 'countQuads', 'deleteByPattern', 'deleteBySubjectPrefix', 'query', 'insert', 'delete'] as const;
+// implements `structuredMutation()`, so the real DELETE still runs.
+const COUNTED = ['structuredMutation', 'update', 'countQuads', 'deleteByPattern', 'deleteBySubjectPrefix', 'query', 'insert', 'delete'] as const;
 type Counts = Record<(typeof COUNTED)[number], number>;
 
 function makeCountingStore(inner: OxigraphStore): { store: OxigraphStore; calls: Counts } {
@@ -210,7 +210,7 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     expect(new Set(live).size, 'all N distinct UALs retained').toBe(N);
   });
 
-  it('is count-free: prune reaches the store only via update(), never countQuads/deleteByPattern/deleteBySubjectPrefix', async () => {
+  it('is count-free: prune reaches the store only via the bounded capability', async () => {
     const base = new OxigraphStore();
     const agent = agentDid(0xa1);
     const priorUal = mkUal('prior');
@@ -233,33 +233,31 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
       keepUal: mkUal('current'),
     });
 
-    // The count-free contract: the single server-side UPDATE, and ZERO of the
+    // The count-free contract: one structured server-side prune, and ZERO raw
+    // updates or
     // full-graph-COUNT-bracketed delete/count helpers (the production BLOCKER).
-    expect(calls.update, 'prune issues the single server-side UPDATE').toBeGreaterThanOrEqual(1);
+    expect(calls.structuredMutation, 'prune issues one bounded operation').toBe(1);
+    expect(calls.update, 'caller does not issue raw UPDATE').toBe(0);
     expect(calls.countQuads, 'no full-graph COUNT scans').toBe(0);
     expect(calls.deleteByPattern, 'no per-pattern delete (each does 2 COUNT scans on Blazegraph)').toBe(0);
     expect(calls.deleteBySubjectPrefix, 'no prefix delete (each does 2 COUNT scans on Blazegraph)').toBe(0);
     expect(calls.query, 'no separate SELECT round-trip — one UPDATE does it all').toBe(0);
 
-    // …and the UPDATE actually evicted the superseded prior record.
-    expect(await base.countQuads(metaOf(AGENTS)), 'the prior record was deleted by the UPDATE').toBe(0);
+    // …and the capability actually evicted the superseded prior record.
+    expect(await base.countQuads(metaOf(AGENTS)), 'the prior record was deleted').toBe(0);
   });
 
-  it('(#1549) the prune declares touchedGraphs=[metaGraph] on its server-side update (index stays warm)', async () => {
-    // Call-site guard: a regression reverting to `store.update(sparql)` (dropping the
-    // hint) would still delete the record and pass the count-free test above, but it
-    // would mark the graph-set index dirty and force a full rebuild scan on the next
-    // enumeration — exactly what #1549 avoids. Assert the hint is sent.
+  it('declares the exact target graph and roots through the structured capability', async () => {
     const base = new OxigraphStore();
     const agent = agentDid(0xa1);
     await base.insert(metaQuadsFor(AGENTS, agent, mkUal('prior')));
-    const updateCalls: Array<{ sparql: string; options?: { touchedGraphs?: readonly string[] } }> = [];
+    const calls: Array<{ mutation: Parameters<NonNullable<OxigraphStore['structuredMutation']>>[0]; options?: { source?: string } }> = [];
     const capturing = new Proxy(base, {
       get(t, p, r) {
-        if (p === 'update') {
-          return (sparql: string, options?: { touchedGraphs?: readonly string[] }) => {
-            updateCalls.push({ sparql, options });
-            return base.update(sparql, options);
+        if (p === 'structuredMutation') {
+          return (mutation: Parameters<NonNullable<OxigraphStore['structuredMutation']>>[0], options?: { source?: string }) => {
+            calls.push({ mutation, options });
+            return base.structuredMutation(mutation);
           };
         }
         return Reflect.get(t, p, r);
@@ -274,9 +272,15 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
       keepUal: mkUal('prior'),
     });
 
-    const deleteUpdate = updateCalls.find((c) => /DELETE/i.test(c.sparql));
-    expect(deleteUpdate, 'the prune issues a server-side DELETE update').toBeDefined();
-    expect(deleteUpdate?.options?.touchedGraphs).toEqual([metaOf(AGENTS)]);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      mutation: { kind: 'prune-linked-record-closures', input: {
+        graphUri: metaOf(AGENTS),
+        matchObjectIris: [agent],
+        protectedRecordIri: mkUal('prior'),
+      } },
+      options: { source: 'agent-registry-meta.prune' },
+    });
   });
 
   it('(B) evicts the WHOLE record for legacy/multi-root shape (member on <ual>/n with dkg:partOf)', async () => {
@@ -384,11 +388,11 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     // the tentative publish (#1533). It must resolve + warn instead.
     const base = new OxigraphStore();
     const agent = agentDid(0xa1);
-    // insert() runs on the real base store (succeeds); update() throws — that is
-    // the engine the prune uses, so the prune fails AFTER a durable insert.
+    // insert() runs on the real base store (succeeds); the bounded prune throws,
+    // so the prune fails AFTER a durable insert.
     const pruneFailsStore = new Proxy(base, {
       get(t, p, r) {
-        if (p === 'update') return async () => { throw new Error('update boom'); };
+        if (p === 'structuredMutation') return async () => { throw new Error('prune boom'); };
         if (p === 'insert') return (quads: Quad[]) => base.insert(quads);
         return Reflect.get(t, p, r);
       },
@@ -462,7 +466,7 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
   it('(A) serializes concurrent same-agent heartbeats — collapses to exactly the newest record', async () => {
     // Two concurrent heartbeats for the SAME agent (fresh UAL each). Without the
     // per-root mutex both insert, then each prunes the OTHER's record → the agent
-    // ends with ZERO records. The store below defers every prune (`update`) past
+    // ends with ZERO records. The store below defers every bounded prune past
     // the microtask queue via setTimeout(0), so BOTH inserts deterministically
     // land before EITHER prune's DELETE — the exact interleaving that zeroes the
     // graph unserialized. The mutex serialises insert+prune, so the 2nd call (B)
@@ -476,9 +480,9 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     const raceStore = new Proxy(base, {
       get(t, p, r) {
         if (p === 'insert') return (quads: Quad[]) => base.insert(quads);
-        if (p === 'update') return async (sparql: string) => {
+        if (p === 'structuredMutation') return async (mutation: Parameters<NonNullable<OxigraphStore['structuredMutation']>>[0]) => {
           await new Promise((res) => setTimeout(res, 0)); // defer the prune past both inserts
-          return base.update(sparql);
+          return base.structuredMutation(mutation);
         };
         return Reflect.get(t, p, r);
       },
@@ -517,9 +521,9 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     const raceStore = new Proxy(base, {
       get(t, p, r) {
         if (p === 'insert') return (quads: Quad[]) => base.insert(quads);
-        if (p === 'update') return async (sparql: string) => {
+        if (p === 'structuredMutation') return async (mutation: Parameters<NonNullable<OxigraphStore['structuredMutation']>>[0]) => {
           await new Promise((res) => setTimeout(res, 0)); // defer the prune past both inserts
-          return base.update(sparql);
+          return base.structuredMutation(mutation);
         };
         return Reflect.get(t, p, r);
       },
@@ -623,12 +627,12 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     // propagate, the ACK rejects and pendingPublishes/expireTentativePublish never
     // register → the tentative publish is orphaned (#1533).
     const base = new OxigraphStore();
-    // Every store method delegates to base EXCEPT update(), which throws — that is
-    // the engine the agents/_meta prune uses, so the prune fails AFTER a durable
+    // Every store method delegates to base EXCEPT the bounded prune, which throws,
+    // so the prune fails AFTER a durable
     // insert while the rest of handlePublish runs normally.
     const pruneFailsStore = new Proxy(base, {
       get(t, p, r) {
-        if (p === 'update') return async () => { throw new Error('update boom'); };
+        if (p === 'structuredMutation') return async () => { throw new Error('prune boom'); };
         const v = Reflect.get(t, p, r);
         return typeof v === 'function' ? v.bind(base) : v;
       },

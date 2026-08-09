@@ -4,6 +4,8 @@ import {
   assertSafeRdfTerm,
 } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
+import { buildReplaceSubjectPredicatesUpdate } from './bounded-structured-mutation.js';
+import type { ReplaceSubjectPredicatesInput } from './triple-store.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -156,6 +158,12 @@ export function buildAtomicSubjectReplaceUpdate(
   const del = `DELETE WHERE { GRAPH <${target}> { <${safeSubject}> ?p ?o } }`;
   if (insertQuads.length === 0) return del;
   return `${del};\nINSERT DATA {\n${formatGraphBlock(target, insertQuads)}\n}`;
+}
+
+export function buildAtomicSubjectPredicatesReplaceUpdate(
+  input: ReplaceSubjectPredicatesInput,
+): string {
+  return buildReplaceSubjectPredicatesUpdate(input);
 }
 
 function assertReplacementPayload(graphUri: string, quads: readonly Quad[]): void {

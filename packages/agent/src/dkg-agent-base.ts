@@ -110,7 +110,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, SystemRecordLaneForwarderV1, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, SystemRecordLaneForwarderV1, createTripleStore, isExternalBackend, structuredMutationMightMutate, structuredMutationTouchedGraphs, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -575,6 +575,19 @@ export function createListContextGraphsCacheInvalidatingStore(
             // non-CG graph (e.g. the control-plane graph), so no hot-path churn.
             () => markProjectionDirty?.(undefined, graphUri),
           )
+      : undefined,
+    structuredMutation: innerStore.structuredMutation
+      ? (mutation, options) => {
+          // Capture scope before the first await so caller-side mutation cannot
+          // redirect cache invalidation after the backend has committed.
+          const targetGraphs = [...structuredMutationTouchedGraphs(mutation)];
+          const mightMutate = structuredMutationMightMutate(mutation);
+          return invalidateAfterMutation(
+            () => innerStore.structuredMutation!(mutation, options),
+            () => mightMutate,
+            () => targetGraphs.forEach((graph) => markProjectionDirty?.(undefined, graph)),
+          );
+        }
       : undefined,
     listGraphs(options) {
       return innerStore.listGraphs(options);

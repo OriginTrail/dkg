@@ -1,5 +1,9 @@
 import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { GraphManager, LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
+  tryReplaceSubjectPredicatesAtomically,
+} from '@origintrail-official/dkg-storage';
 import {
   validateSubGraphName,
   isSafeIri,
@@ -1149,27 +1153,29 @@ export async function updateMetaMerkleRoot(
   assertSafeGraphIriForSparql(ual);
 
   const rootLiteral = `"${toHex(newMerkleRoot)}"`;
+  const merkleRootPredicate = `${DKG}merkleRoot`;
+  const replaced = await tryReplaceSubjectPredicatesAtomically(store, {
+    graphUri: metaGraph,
+    subject: ual,
+    predicates: [merkleRootPredicate],
+    replacementQuads: [{
+      subject: ual,
+      predicate: merkleRootPredicate,
+      object: rootLiteral,
+      graph: metaGraph,
+    }],
+  }, { source: 'publisher.metadata.updateMerkleRoot' });
+  if (replaced) return;
 
-  // Prefer a single SPARQL DELETE/INSERT to avoid an intermediate
-  // state with no dkg:merkleRoot when update succeeds.
-  try {
-    await store.query(
-      `DELETE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?oldRoot } }
-       INSERT { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ${rootLiteral} } }
-       WHERE  { GRAPH <${metaGraph}> { OPTIONAL { <${ual}> <${DKG}merkleRoot> ?oldRoot } } }`,
-    );
-    return;
-  } catch {
-    // Some backends may not support SPARQL updates via query().
-    // Fallback preserves correctness by inserting first, then pruning old roots.
-  }
+  // Compatibility fallback for custom stores without predicate replacement.
+  // Preserve availability by inserting first, then pruning stale roots.
 
   const existing = await store.query(
     `SELECT ?root WHERE { GRAPH <${metaGraph}> { <${ual}> <${DKG}merkleRoot> ?root } }`,
   );
   await store.insert([{
     subject: ual,
-    predicate: `${DKG}merkleRoot`,
+    predicate: merkleRootPredicate,
     object: rootLiteral,
     graph: metaGraph,
   }]);
@@ -1180,7 +1186,7 @@ export async function updateMetaMerkleRoot(
     .filter((root): root is string => typeof root === 'string' && root.length > 0 && root !== rootLiteral)
     .map((root) => ({
       subject: ual,
-      predicate: `${DKG}merkleRoot`,
+      predicate: merkleRootPredicate,
       object: root,
       graph: metaGraph,
     }));

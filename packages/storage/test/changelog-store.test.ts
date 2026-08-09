@@ -23,6 +23,7 @@ import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import { UnsupportedTripleStoreCapabilityError } from '../src/unsupported-capability-error.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -212,6 +213,47 @@ describe('ChangelogStore — restart reseed & reserved-graph hiding', () => {
 });
 
 describe('ChangelogStore — opaque update handling', () => {
+  it('attributes a structured projection copy only to its target graph', async () => {
+    const source = 'http://ex.org/projection-source';
+    const target = 'http://ex.org/projection-target';
+    const root = 'http://ex.org/projection-root';
+    const base = new OxigraphStore();
+    await base.insert([q(root, source)]);
+    const log = new ChangelogStore(base);
+
+    await log.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [source],
+      targetGraphUri: target,
+      roots: [root],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } });
+
+    expect(await log.readChanges(0, 100)).toEqual([
+      { seq: 1, graph: target, op: 'upsert' },
+    ]);
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('treats a typed structured-capability refusal as mutation-free preflight', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(new SpyStore(base));
+
+    await expect(log.structuredMutation({ kind: 'copy-subject-projection', input: {
+      sourceGraphUris: [G1],
+      targetGraphUri: G2,
+      roots: ['http://ex.org/root'],
+      descendantSuffix: '/',
+      excludedPredicates: [],
+    } })).rejects.toMatchObject<Partial<UnsupportedTripleStoreCapabilityError>>({
+      name: 'UnsupportedTripleStoreCapabilityError',
+      capability: 'structuredMutation',
+    });
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
   it('an update() with touchedGraphs emits markers; without, it flags reconcile', async () => {
     const base = new OxigraphStore();
     const log = new ChangelogStore(base);

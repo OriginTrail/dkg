@@ -844,6 +844,36 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads).toHaveLength(1);
   });
 
+  it('replaceSubjectPredicates uses one atomic DELETE/INSERT WHERE operation', async () => {
+    insertedQuads.length = 0;
+    await store.structuredMutation!({ kind: 'replace-subject-predicates', input: {
+      graphUri: 'http://ex.org/g1',
+      subject: 'http://ex.org/job',
+      predicates: ['http://ex.org/status', 'http://ex.org/decidedAt'],
+      replacementQuads: [
+        {
+          subject: 'http://ex.org/job',
+          predicate: 'http://ex.org/status',
+          object: '"approved"',
+          graph: 'http://ex.org/g1',
+        },
+        {
+          subject: 'http://ex.org/job',
+          predicate: 'http://ex.org/decidedAt',
+          object: '"2"',
+          graph: 'http://ex.org/g1',
+        },
+      ],
+    } });
+
+    expect(insertedQuads).toHaveLength(1);
+    expect(insertedQuads[0]).toContain('DELETE {');
+    expect(insertedQuads[0]).toContain('INSERT {');
+    expect(insertedQuads[0]).toContain('WHERE {');
+    expect(insertedQuads[0]).not.toContain('INSERT DATA');
+    expect(insertedQuads[0]).not.toContain(';');
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });

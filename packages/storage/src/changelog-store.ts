@@ -7,12 +7,14 @@ import type {
   TripleStore,
   UpdateOptions,
   StorePressureSnapshot,
+  StructuredMutation,
 } from './triple-store.js';
 import {
   UnsupportedTripleStoreCapabilityError,
   isReplaceGraphAndSubjectCapabilityRefusal,
   isReplaceGraphCapabilityRefusal,
   isReplaceSubjectCapabilityRefusal,
+  isTripleStoreCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { assertNotReservedInternalGraphV1 } from './internal-graph-policy.js';
@@ -21,6 +23,12 @@ import {
   resolveStoreChainCapabilityV1,
 } from './store-chain-capability.js';
 import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
+import {
+  normalizeStructuredMutation,
+  structuredMutationGuardedGraphs,
+  structuredMutationMightMutate,
+  structuredMutationTouchedGraphs,
+} from './bounded-structured-mutation.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -447,6 +455,31 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
         throw error;
       }
       await this.markPostMutation([graphUri], options);
+    });
+  }
+
+  async structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
+    const normalized = normalizeStructuredMutation(mutation);
+    const operation = this.inner.structuredMutation;
+    if (!operation) {
+      throw new UnsupportedTripleStoreCapabilityError('structuredMutation', 'ChangelogStore');
+    }
+    if (!this.enabled) return operation.call(this.inner, normalized, options);
+    for (const graph of structuredMutationGuardedGraphs(normalized)) {
+      this.assertNotReserved(graph, 'structuredMutation');
+    }
+    await this.runExclusive(async () => {
+      try {
+        await operation.call(this.inner, normalized, options);
+      } catch (error) {
+        if (!isTripleStoreCapabilityRefusal(error, 'structuredMutation')) {
+          this.flagReconcile('structuredMutation(indeterminate-failure)');
+        }
+        throw error;
+      }
+      if (structuredMutationMightMutate(normalized)) {
+        await this.markPostMutation(structuredMutationTouchedGraphs(normalized), options);
+      }
     });
   }
 
