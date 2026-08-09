@@ -14,6 +14,14 @@ const REQUEST_STATUS = 'https://dkg.network/ontology#requestStatus';
 const REQUEST_TIMESTAMP = 'https://dkg.network/ontology#requestTimestamp';
 const DECISION_TIMESTAMP = 'https://dkg.network/ontology#decisionTimestamp';
 
+const TERMINAL_JOIN_REQUEST_RETENTION_POLICY = {
+  subjectPrefix: JOIN_REQUEST_SUBJECT_PREFIX,
+  eligibilityPredicate: REQUEST_STATUS,
+  eligibleObjects: ['approved', 'rejected'] as const,
+  primaryRankPredicate: DECISION_TIMESTAMP,
+  secondaryRankPredicate: REQUEST_TIMESTAMP,
+};
+
 /**
  * Terminal moderation resources are useful for curator diagnostics, but unlike
  * pending requests they do not participate in admission. Keep a generous,
@@ -29,17 +37,19 @@ function bindingInteger(value: string | undefined): number {
 }
 
 function terminalJoinRequestWhere(metaGraph: string): string {
+  const policy = TERMINAL_JOIN_REQUEST_RETENTION_POLICY;
+  const eligibleStatuses = policy.eligibleObjects.map(sparqlString);
   return `
     GRAPH <${assertSafeIri(metaGraph)}> {
-      ?request <${REQUEST_STATUS}> ?status .
-      OPTIONAL { ?request <${REQUEST_TIMESTAMP}> ?requestTimestamp }
-      OPTIONAL { ?request <${DECISION_TIMESTAMP}> ?decisionTimestamp }
-      VALUES ?status { "approved" "rejected" }
+      ?request <${policy.eligibilityPredicate}> ?status .
+      OPTIONAL { ?request <${policy.secondaryRankPredicate}> ?requestTimestamp }
+      OPTIONAL { ?request <${policy.primaryRankPredicate}> ?decisionTimestamp }
+      VALUES ?status { ${eligibleStatuses.join(' ')} }
       FILTER NOT EXISTS {
-        ?request <${REQUEST_STATUS}> ?nonTerminalStatus .
-        FILTER(?nonTerminalStatus NOT IN ("approved", "rejected"))
+        ?request <${policy.eligibilityPredicate}> ?nonTerminalStatus .
+        FILTER(?nonTerminalStatus NOT IN (${eligibleStatuses.join(', ')}))
       }
-      FILTER(STRSTARTS(STR(?request), ${sparqlString(JOIN_REQUEST_SUBJECT_PREFIX)}))
+      FILTER(STRSTARTS(STR(?request), ${sparqlString(policy.subjectPrefix)}))
     }
   `;
 }
@@ -77,17 +87,18 @@ export async function tryPruneTerminalJoinRequestRecords(
   // one unbounded mutation permit.
   let remainingOverflow = overflow;
   while (remainingOverflow > 0) {
+    const policy = TERMINAL_JOIN_REQUEST_RETENTION_POLICY;
     const batchSize = Math.min(
       remainingOverflow,
       BOUNDED_MUTATION_MAX_PRUNE_DELETE,
     );
     const supported = await tryPruneRankedSubjects(store, {
       graphUri: metaGraph,
-      subjectPrefix: JOIN_REQUEST_SUBJECT_PREFIX,
-      eligibilityPredicate: REQUEST_STATUS,
-      eligibleObjects: ['approved', 'rejected'],
-      primaryRankPredicate: DECISION_TIMESTAMP,
-      secondaryRankPredicate: REQUEST_TIMESTAMP,
+      subjectPrefix: policy.subjectPrefix,
+      eligibilityPredicate: policy.eligibilityPredicate,
+      eligibleObjects: [...policy.eligibleObjects],
+      primaryRankPredicate: policy.primaryRankPredicate,
+      secondaryRankPredicate: policy.secondaryRankPredicate,
       retainNewest: cap,
       maxDelete: batchSize,
     }, { priority: 'background', source: 'join.moderationRetention.prune' });
