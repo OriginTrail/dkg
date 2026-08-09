@@ -262,11 +262,15 @@ export interface SystemRecordLaneControllerDepsV1 {
   readonly setAdmissionActive?: (active: boolean) => void;
 }
 
-interface SystemRecordLaneSessionDepsV1 extends SystemRecordLaneControllerDepsV1 {
+type SystemRecordLaneSessionDepsV1 = Pick<
+  SystemRecordLaneControllerDepsV1,
+  'lease' | 'handoff' | 'executor' | 'setAdmissionActive'
+> & {
+  readonly runBarrier: SystemRecordLaneTypedBarrierV1;
   readonly rotateMaterializationEpoch: (
     networkId?: string,
   ) => Promise<SystemRecordMaterializationEpochRotationSnapshotV1>;
-}
+};
 
 /** Raised when an incompatible activation descriptor is offered to a live session. */
 export class SystemRecordLaneActivationConflictError extends Error {
@@ -423,8 +427,14 @@ export function createSystemRecordLaneControllerV1(
 ): SystemRecordLaneControllerV1 {
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
+  const runBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
+    ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
   const session = new SystemRecordLaneSession({
-    ...deps,
+    lease: deps.lease,
+    handoff: deps.handoff,
+    executor: deps.executor,
+    setAdmissionActive: deps.setAdmissionActive,
+    runBarrier,
     // Normalize once at the injected handoff boundary. The lifecycle below
     // consumes only domain states and never reparses the typed dependency.
     rotateMaterializationEpoch: async (networkId) =>
@@ -763,14 +773,6 @@ class SystemRecordLaneSession {
     return this.createFacade(wanted, activationSnapshot);
   }
 
-  private runBarrier<K extends SystemRecordLaneBarrierKindV1>(
-    kind: K,
-    transition: () => Promise<SystemRecordLaneBarrierResultsV1[K]>,
-  ): Promise<SystemRecordLaneBarrierResultsV1[K]> {
-    return this.deps.typedBarrier?.(kind, transition) ??
-      this.deps.barrier(`system-record.${kind}`, transition);
-  }
-
   /**
    * `disabled -> enabling -> enabled`.
    *
@@ -796,7 +798,7 @@ class SystemRecordLaneSession {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      rotationSnapshot = await this.runBarrier('enable', async () => {
+      rotationSnapshot = await this.deps.runBarrier('enable', async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
@@ -976,7 +978,7 @@ class SystemRecordLaneSession {
 
     const work = (async () => {
       try {
-        await this.runBarrier('disable', () => {
+        await this.deps.runBarrier('disable', () => {
           // Keep the callback promise separately from the barrier's public
           // promise. A transition timeout reports to this caller while the
           // callback remains the exclusive physical owner.
@@ -1175,7 +1177,7 @@ class SystemRecordLaneSession {
         if (recoveryAlreadySettled) {
           entry.physicalSucceeded = true;
         } else {
-          await this.runBarrier('shutdown', () => {
+          await this.deps.runBarrier('shutdown', () => {
             // Keep the callback promise separately from the barrier's public
             // promise. The scheduler may reject the latter at its transition
             // timeout while deliberately leaving this callback and its seal
@@ -1475,7 +1477,7 @@ class SystemRecordLaneSession {
     entry: Extract<SystemRecordLaneTransitionV1, { kind: 'recovery' }>,
   ): Promise<void> {
     try {
-      await this.runBarrier('recovery', () => {
+      await this.deps.runBarrier('recovery', () => {
         const physicalWork = (async () => {
           try {
             const result = await this.recoverInsideBarrier(entry.recovery, 'resume');

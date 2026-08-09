@@ -165,6 +165,39 @@ describe('control barrier contract survives the coordinator extraction', () => {
     expect(scheduler.snapshot.barrierCoalesced).toBe(1);
   });
 
+  it('keeps an empty legacy purpose source-compatible', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 8 });
+    await expect(
+      scheduler.runControlBarrier({}, '', async () => 'unnamed'),
+    ).resolves.toBe('unnamed');
+  });
+
+  it('keeps legacy coalescing through a transition-phase timeout', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 8 });
+    const storeId = {};
+    const physical = deferred<void>();
+    let duplicateStarted = false;
+
+    const first = scheduler.runControlBarrier(
+      storeId,
+      'restart',
+      () => physical.promise,
+      undefined,
+      10,
+    );
+    await expect(first).rejects.toMatchObject({ phase: 'transition' });
+
+    const duplicate = scheduler.runControlBarrier(storeId, 'restart', async () => {
+      duplicateStarted = true;
+    });
+    await expect(duplicate).rejects.toMatchObject({ phase: 'transition' });
+    expect(duplicateStarted).toBe(false);
+    expect(scheduler.snapshot.barrierCoalesced).toBe(1);
+
+    physical.resolve();
+    await settle();
+  });
+
   it('coalesces typed barriers only by key identity and preserves each result type', async () => {
     const scheduler = new StorePriorityScheduler({ maxConcurrent: 8 });
     const storeId = {};

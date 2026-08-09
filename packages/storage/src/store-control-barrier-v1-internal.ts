@@ -35,7 +35,7 @@ const BARRIER_ANY_GENERATION = '*';
 
 interface BarrierEntry {
   storeId: object;
-  coalescingKey: object;
+  coalescingIdentity: string | object;
   purpose: string;
   transition: () => Promise<unknown>;
   promise: Promise<unknown>;
@@ -49,13 +49,17 @@ interface BarrierEntry {
   seal: StoreGenerationSeal;
 }
 
-interface StoreControlBarrierRequestV1<T> {
+interface StoreControlBarrierBaseRequestV1<T> {
   readonly storeId: object;
-  readonly key: StoreControlBarrierKeyV1<T>;
   readonly purpose: string;
   readonly transition: () => Promise<T>;
   readonly generation?: string;
   readonly timeoutMs?: number;
+}
+
+interface StoreTypedControlBarrierRequestV1<T>
+  extends StoreControlBarrierBaseRequestV1<T> {
+  readonly key: StoreControlBarrierKeyV1<T>;
 }
 
 /**
@@ -137,11 +141,24 @@ export class StoreControlBarrierCoordinator {
     };
   }
 
-  /** Enqueue one already-normalized control transition. */
-  enqueue<T>(request: StoreControlBarrierRequestV1<T>): Promise<T> {
+  enqueueLegacy(
+    request: StoreControlBarrierBaseRequestV1<unknown>,
+  ): Promise<unknown> {
+    return this.enqueueWithIdentity(request.purpose, request);
+  }
+
+  enqueueTyped<T>(request: StoreTypedControlBarrierRequestV1<T>): Promise<T> {
+    // Sound at this boundary: the nominal key binds every caller sharing this
+    // runtime identity to one T.
+    return this.enqueueWithIdentity(request.key, request) as Promise<T>;
+  }
+
+  private enqueueWithIdentity<T>(
+    coalescingIdentity: string | object,
+    request: StoreControlBarrierBaseRequestV1<T>,
+  ): Promise<unknown> {
     const {
       storeId,
-      key,
       purpose,
       transition,
       generation,
@@ -150,15 +167,12 @@ export class StoreControlBarrierCoordinator {
     const existing = this.barriers.find(
       (barrier) =>
         barrier.storeId === storeId &&
-        barrier.coalescingKey === key,
+        barrier.coalescingIdentity === coalescingIdentity,
     );
     if (existing !== undefined) {
       this.coalescedTotal += 1;
       this.host.observeDepths();
-      // Equality proves both callers hold the same nominal result-typed key;
-      // TypeScript cannot carry that correlation through the heterogeneous
-      // pending array, so the cast remains inside this coordinator boundary.
-      return existing.promise as Promise<T>;
+      return existing.promise;
     }
     let resolve!: (value: unknown) => void;
     let reject!: (reason?: unknown) => void;
@@ -168,7 +182,7 @@ export class StoreControlBarrierCoordinator {
     });
     const barrier: BarrierEntry = {
       storeId,
-      coalescingKey: key,
+      coalescingIdentity,
       purpose,
       transition,
       promise,
@@ -197,7 +211,7 @@ export class StoreControlBarrierCoordinator {
     this.barriers.push(barrier);
     this.host.observeDepths();
     this.pump();
-    return promise as Promise<T>;
+    return promise;
   }
 
   /**
