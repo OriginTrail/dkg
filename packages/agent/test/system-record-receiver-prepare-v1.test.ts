@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
+import {
+  createAgentProfileAdmittedSliceContextAuthorityV1,
+  type AgentProfileAdmittedSliceContextV1,
+} from '../src/system-records/admitted-slice-context-v1.js';
 import {
   createAgentProfileReceiverV1,
   type AgentProfileReceiverCandidateV1,
@@ -15,9 +18,9 @@ import {
   publishedReceiverFixture as publishedFixture,
 } from './support/agent-profile-receiver-v1-fixture.js';
 
-const ADMITTED_CONTEXT = Object.freeze(
-  Object.create(null),
-) as AgentProfileAdmittedSliceContextV1;
+const ADMITTED_CONTEXT = createAgentProfileAdmittedSliceContextAuthorityV1(
+  () => 0,
+).mint(3_000);
 
 describe('agent-profile system-record prepared receiver apply', () => {
   it('rechecks freshness immediately before the materialization point of no return', async () => {
@@ -246,6 +249,55 @@ describe('agent-profile system-record prepared receiver apply', () => {
     expect(nowMs).toHaveBeenCalledTimes(2);
     expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('preserves an abort reason raised during bridge preparation', async () => {
+    const fixture = await publishedFixture();
+    const controller = new AbortController();
+    const abortReason = new Error('bridge preparation aborted');
+    const apply = vi.fn();
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply: async () => {
+        controller.abort(abortReason);
+        return Object.freeze({ ...DEFAULT_MONOTONIC_APPLY_TIMING, apply });
+      },
+    });
+
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      controller.signal,
+    )).rejects.toBe(abortReason);
+    expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('preserves materializer rejection identity after atomic dispatch', async () => {
+    const fixture = await publishedFixture();
+    const settlementFailure = new Error('materializer settlement failed');
+    const apply = vi.fn(async () => {
+      throw settlementFailure;
+    });
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply: () => Object.freeze({
+        ...DEFAULT_MONOTONIC_APPLY_TIMING,
+        apply,
+      }),
+    });
+
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    )).rejects.toBe(settlementFailure);
+    expect(apply).toHaveBeenCalledTimes(1);
   });
 
   it('dispatches a real prepared apply once and honors abort before dispatch', async () => {

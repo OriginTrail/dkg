@@ -7,12 +7,16 @@ import {
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
+import {
+  createAgentProfileAdmittedSliceContextAuthorityV1,
+  type AgentProfileAdmittedSliceContextV1,
+} from '../src/system-records/admitted-slice-context-v1.js';
 import {
   createAgentProfileReconcilerV1,
   type AgentProfileReconcileAdmissionV1,
   type AgentProfileInventoryLoadRequestV1,
 } from '../src/system-records/reconcile-v1.js';
+import { createAgentProfileReceiverV1 } from '../src/system-records/receiver-v1.js';
 import {
   admissionGate,
   NETWORK,
@@ -536,6 +540,81 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(reconciler.stats()).toMatchObject({ processedRows: 1, pendingRows: 1 });
   });
 
+  it('blocks when a verified head expires before prepared apply dispatch', async () => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const validUntilMs = Date.parse(headEnvelope.object.validUntil);
+    const nowMs = vi.fn()
+      .mockReturnValueOnce(validUntilMs - 1)
+      .mockReturnValue(validUntilMs);
+    const materialize = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '10',
+      appliedStateDigest: `0x${'aa'.repeat(32)}`,
+    }));
+    const prepareCandidateApply = vi.fn(() => Object.freeze({
+      existingMonotonicDeadlineMs: 10_000,
+      monotonicNowMs: 1_000,
+      apply: materialize,
+    }));
+    const activeReceiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply,
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: activeReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'receiver-verification-failed',
+      processedRows: 0,
+      pendingRows: 1,
+      outcomes: [],
+    });
+    expect(nowMs).toHaveBeenCalledTimes(2);
+    expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
+    expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a materializer rejection as a predispatch failure', async () => {
+    const fixture = await publishedFixture();
+    const settlementFailure = new Error('atomic materializer settlement failed');
+    const materialize = vi.fn(async () => {
+      throw settlementFailure;
+    });
+    const preparedReceiver = receiverWithPreparation(async () => Object.freeze({
+      apply: materialize,
+    }));
+    const admission = admissionGate();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: preparedReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal))
+      .rejects.toBe(settlementFailure);
+    expect(materialize).toHaveBeenCalledTimes(1);
+    expect(admission.stats().active).toBe(0);
+    expect(reconciler.stats()).toMatchObject({ processedRows: 0, pendingRows: 1 });
+  });
+
   it('releases admission when close aborts a stalled predispatch receiver', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();
@@ -687,7 +766,9 @@ describe('agent-profile System Record reconciler V1', () => {
 
   it('releases an acquired permit when the admission clock is invalid', async () => {
     const fixture = await publishedFixture();
-    const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
+    const context = createAgentProfileAdmittedSliceContextAuthorityV1(
+      () => 0,
+    ).mint(3_000);
     const release = vi.fn();
     const admission: AgentProfileReconcileAdmissionV1 = Object.freeze({
       tryAcquire: () => Object.freeze({ admittedContext: context, release }),
@@ -714,7 +795,9 @@ describe('agent-profile System Record reconciler V1', () => {
 
   it('rejects an admitted context whose original deadline changes', async () => {
     const fixture = await publishedFixture();
-    const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
+    const context = createAgentProfileAdmittedSliceContextAuthorityV1(
+      () => 0,
+    ).mint(3_000);
     const release = vi.fn();
     const loadInventoryObject = vi.fn(fixture.loadInventoryObject);
     const apply = vi.fn();
@@ -765,5 +848,25 @@ describe('agent-profile System Record reconciler V1', () => {
     })).rejects.toThrow(/provider signature is invalid/);
     expect(admission.stats().acquisitions).toBe(0);
     expect(loadInventoryObject).not.toHaveBeenCalled();
+  });
+
+  it('rejects a signed root above the activation record cap before admission or I/O', async () => {
+    const fixture = await publishedFixture();
+    const rootEnvelope = await resignRootTotalRows(fixture, '513');
+    const admission = admissionGate();
+    const loadInventoryObject = vi.fn(fixture.loadInventoryObject);
+    const prepareActive = vi.fn();
+
+    await expect(createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject,
+      receiver: receiverWithPreparation(prepareActive),
+    })).rejects.toThrow(/activation record cap/);
+    expect(admission.stats().acquisitions).toBe(0);
+    expect(loadInventoryObject).not.toHaveBeenCalled();
+    expect(prepareActive).not.toHaveBeenCalled();
   });
 });

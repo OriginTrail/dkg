@@ -6,7 +6,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
-import type { AgentProfileAdmittedSliceContextV1 } from '../../src/system-records/admitted-slice-context-v1.js';
+import {
+  createAgentProfileAdmittedSliceContextAuthorityV1,
+  type AgentProfileAdmittedSliceContextV1,
+} from '../../src/system-records/admitted-slice-context-v1.js';
 import type { SystemRecordArtifactRepositoryV1 } from '../../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReceiverV1,
@@ -155,15 +158,14 @@ export function admissionGate(
   let peak: 0 | 1 = held ? 1 : 0;
   let acquisitions = 0;
   let lastContext: AgentProfileAdmittedSliceContextV1 | undefined;
-  const contexts = new WeakMap<object, number>();
+  const contextAuthority = createAgentProfileAdmittedSliceContextAuthorityV1(nowMs);
   return Object.freeze({
     tryAcquire() {
       if (held) return null;
       held = true;
       peak = 1;
       acquisitions += 1;
-      const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
-      contexts.set(context, nowMs() + 3_000);
+      const context = contextAuthority.mint(nowMs() + 3_000);
       lastContext = context;
       let live = true;
       return Object.freeze({
@@ -171,14 +173,13 @@ export function admissionGate(
         release() {
           if (!live) return;
           live = false;
+          contextAuthority.revoke(context);
           held = false;
         },
       });
     },
     inspectAdmittedContext(context) {
-      const admittedDeadlineMs = contexts.get(context);
-      if (admittedDeadlineMs === undefined) throw new Error('test admitted context is invalid');
-      return Object.freeze({ nowMs: nowMs(), admittedDeadlineMs });
+      return contextAuthority.inspect(context);
     },
     stats() {
       return { active: held ? 1 : 0, peak, acquisitions };

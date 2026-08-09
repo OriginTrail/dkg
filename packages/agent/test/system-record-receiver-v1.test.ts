@@ -16,7 +16,10 @@ import {
   createAgentProfileReceiverV1,
   type AgentProfileReceiverCandidateV1,
 } from '../src/system-records/receiver-v1.js';
-import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
+import {
+  createAgentProfileAdmittedSliceContextAuthorityV1,
+  type AgentProfileAdmittedSliceContextV1,
+} from '../src/system-records/admitted-slice-context-v1.js';
 import {
   envelopeArtifact,
   NETWORK,
@@ -37,9 +40,9 @@ import {
   rotatedPublishedReceiverFixture as rotatedPublishedFixture,
 } from './support/agent-profile-receiver-v1-fixture.js';
 
-const ADMITTED_CONTEXT = Object.freeze(
-  Object.create(null),
-) as AgentProfileAdmittedSliceContextV1;
+const ADMITTED_CONTEXT = createAgentProfileAdmittedSliceContextAuthorityV1(
+  () => 0,
+).mint(3_000);
 
 describe('agent-profile system-record active receiver', () => {
   it('verifies the exact closure and submits one immutable active candidate', async () => {

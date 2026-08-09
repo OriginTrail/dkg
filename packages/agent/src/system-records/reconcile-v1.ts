@@ -31,9 +31,10 @@ import type {
   AgentProfileAdmittedSliceContextV1,
   AgentProfileAdmittedSliceSnapshotV1,
 } from './admitted-slice-context-v1.js';
-import type {
-  AgentProfilePreparedActiveV1,
-  AgentProfileReceiverV1,
+import {
+  AgentProfileReceiverPreDispatchErrorV1,
+  type AgentProfilePreparedActiveV1,
+  type AgentProfileReceiverV1,
 } from './receiver-v1.js';
 import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
 
@@ -397,7 +398,23 @@ export async function createAgentProfileReconcilerV1(
       }
       // Do not race this promise. Dispatch may already have reached the atomic
       // materializer and its returned promise is the physical settlement boundary.
-      const outcome = await preparation.prepared.apply(runtime.admittedContext, runtime.signal);
+      let outcome: SystemRecordApplyOutcomeV1;
+      try {
+        outcome = await preparation.prepared.apply(runtime.admittedContext, runtime.signal);
+      } catch (error) {
+        if (runtime.signal.aborted) return runtime.stop('records', outcomes);
+        if (error instanceof AgentProfileReceiverPreDispatchErrorV1) {
+          return result(
+            'blocked',
+            'records',
+            0,
+            0,
+            outcomes,
+            'receiver-verification-failed',
+          );
+        }
+        throw error;
+      }
       outcomes.push(Object.freeze({ ...outcome }));
       if (isSettledOutcome(outcome)) {
         pendingRows.shift();

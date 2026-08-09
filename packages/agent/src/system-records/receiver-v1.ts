@@ -72,6 +72,21 @@ export interface AgentProfileReceiverPreparedApplyV1 {
   ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
 }
 
+/** A receiver failure proven to have occurred before atomic apply dispatch. */
+export class AgentProfileReceiverPreDispatchErrorV1 extends Error {
+  override readonly cause: unknown;
+
+  constructor(cause: unknown) {
+    super(
+      cause instanceof Error
+        ? cause.message
+        : 'agent-profile receiver failed before apply dispatch',
+    );
+    this.name = 'AgentProfileReceiverPreDispatchErrorV1';
+    this.cause = cause;
+  }
+}
+
 export interface CreateAgentProfileReceiverOptionsV1 {
   readonly networkId: NetworkIdV1;
   readonly artifacts: SystemRecordArtifactRepositoryV1;
@@ -192,28 +207,35 @@ export function createAgentProfileReceiverV1(
           if (dispatched) throw new Error('active profile receiver apply was already dispatched');
           applySignal.throwIfAborted();
           dispatched = true;
-          const prepared = await prepareCandidateApply(
-            candidate,
-            admittedContext,
-            applySignal,
-          );
-          applySignal.throwIfAborted();
-          const apply = readPreparedApplyV1(prepared);
-          applySignal.throwIfAborted();
-          const remainingMs = assertActiveDeadlineFreshV1(
-            validUntilUnixMs,
-            receiverNowMs(nowMs?.() ?? Date.now()),
-          );
-          const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
-          if (!Number.isSafeInteger(translatedDeadlineMs)) {
-            throw new Error('agent-profile translated apply deadline is invalid');
-          }
-          const admittedDeadlineMs = Math.min(
-            apply.existingMonotonicDeadlineMs,
-            translatedDeadlineMs,
-          );
-          if (admittedDeadlineMs <= apply.monotonicNowMs) {
-            throw new Error('agent-profile monotonic apply admission is expired');
+          let apply: ReturnType<typeof readPreparedApplyV1>;
+          let admittedDeadlineMs: number;
+          try {
+            const prepared = await prepareCandidateApply(
+              candidate,
+              admittedContext,
+              applySignal,
+            );
+            applySignal.throwIfAborted();
+            apply = readPreparedApplyV1(prepared);
+            applySignal.throwIfAborted();
+            const remainingMs = assertActiveDeadlineFreshV1(
+              validUntilUnixMs,
+              receiverNowMs(nowMs?.() ?? Date.now()),
+            );
+            const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
+            if (!Number.isSafeInteger(translatedDeadlineMs)) {
+              throw new Error('agent-profile translated apply deadline is invalid');
+            }
+            admittedDeadlineMs = Math.min(
+              apply.existingMonotonicDeadlineMs,
+              translatedDeadlineMs,
+            );
+            if (admittedDeadlineMs <= apply.monotonicNowMs) {
+              throw new Error('agent-profile monotonic apply admission is expired');
+            }
+          } catch (error) {
+            if (applySignal.aborted) throw applySignal.reason ?? error;
+            throw new AgentProfileReceiverPreDispatchErrorV1(error);
           }
           // Atomic apply is the point of no return. A cancellation that arrives
           // after dispatch must not detach the operation or hide a committed outcome.
