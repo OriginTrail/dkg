@@ -71,10 +71,19 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   barrierWaitMs: number;
   /**
    * Execution-slot·milliseconds consumed by barriers while they were WAITING.
-   * Structurally 0: a waiting barrier increments no inflight counter. Kept as a
-   * live product of two measured quantities so that regressing the barrier into
-   * an ordinary queued entry (which would pin a slot for the whole drain) makes
-   * this non-zero instead of silently starving the lane it borrowed from.
+   * Structurally 0: a waiting barrier increments no inflight counter.
+   *
+   * ALWAYS 0 today, and that is a LOSS rather than the property it looks like.
+   * This was a tripwire, not a metric: a live product of two measured
+   * quantities, so that regressing the barrier into an ordinary queued entry
+   * — which would pin a slot for the whole drain — turned it non-zero instead
+   * of silently starving the lane it borrowed from.
+   *
+   * The slot counter that fed it has since been removed, so the tripwire
+   * cannot fire. Reading 0 now means "cannot report", not "nothing to
+   * report", and a dead tripwire documented as armed is worse than none.
+   * Restoring it means counting slots held by control-barrier admissions
+   * again, not reading a constant.
    */
   barrierWaitOccupiedSlotMs: number;
 }
