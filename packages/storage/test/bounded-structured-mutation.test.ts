@@ -2,10 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   BOUNDED_MUTATION_MAX_IRIS,
+  BOUNDED_MUTATION_MAX_UPDATE_BYTES,
   ChangelogStore,
   GraphSetIndexStore,
   SharedMemoryLiteralBlobStore,
+  buildCopySubjectProjectionUpdate,
   buildDeleteSubjectsUpdate,
+  chunkCopySubjectProjectionInput,
   OxigraphStore,
   OxigraphWorkerStore,
   UnsupportedTripleStoreCapabilityError,
@@ -200,6 +203,30 @@ describe('bounded structured mutation capabilities', () => {
       { s: root, p: P, o: escapeBearing },
       { s: `${root}/.well-known/genid/1`, p: P, o: '"child"' },
     ]);
+  });
+
+  it('chunks oversized subject projection roots below the encoded update budget', () => {
+    const roots = Array.from(
+      { length: 10 },
+      (_, index) => `urn:test:large-root:${index}:${'x'.repeat(500_000)}`,
+    );
+    const input = {
+      sourceGraphUris: [GRAPH],
+      targetGraphUri: OTHER_GRAPH,
+      roots,
+      descendantSuffix: '/.well-known/genid/',
+      excludedPredicates: [P],
+    };
+
+    expect(() => buildCopySubjectProjectionUpdate(input)).toThrow(/exceeds/);
+    const chunks = chunkCopySubjectProjectionInput(input);
+
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.flatMap((chunk) => chunk.roots)).toEqual(roots);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(buildCopySubjectProjectionUpdate(chunk), 'utf8'))
+        .toBeLessThanOrEqual(BOUNDED_MUTATION_MAX_UPDATE_BYTES);
+    }
   });
 
   it('dispatches a max accepted subject set as one embedded update', async () => {

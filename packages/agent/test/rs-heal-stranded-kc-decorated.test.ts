@@ -24,6 +24,7 @@ import {
   supportsTripleStoreCapability,
   type QueryOptions,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { V10MerkleTree, contextGraphDataUri, contextGraphMetaUri, contextGraphLayerUri, MemoryLayer } from '@origintrail-official/dkg-core';
@@ -356,6 +357,127 @@ describe('healStrandedScopedKCs — through the production store decorator stack
       `ASK { GRAPH <${contextGraphMetaUri(TEST_CG)}> { <${TEST_UAL}> <${DKG}batchId> "${KA_ID}"^^<${XSD}integer> } }`,
     );
     expect(legacyStill.type === 'boolean' && legacyStill.value).toBe(true);
+  });
+
+  it('relocates every root of a multi-root KC with byte-identical proof data', async () => {
+    const cg = 'multi-root-strand';
+    const onChainId = '19';
+    const controlCg = 'multi-root-control';
+    const controlOnChainId = '20';
+    const ual = 'did:dkg:hardhat:31337/0xmulti/42';
+    const controlUal = 'did:dkg:hardhat:31337/0xmulticontrol/42';
+    const roots = ['urn:entity:multi-a', 'urn:entity:multi-b'];
+    const data = roots.flatMap((root, index) => [
+      { subject: root, predicate: 'urn:p:value', object: `"${index}"` },
+      {
+        subject: `${root}/.well-known/genid/child`,
+        predicate: 'urn:p:child',
+        object: `"child-${index}"`,
+      },
+    ]);
+    const metadata = (subject: string, graph: string): Quad[] => [
+      { subject, predicate: `${RDF}type`, object: `${DKG}KnowledgeCollection`, graph },
+      { subject, predicate: `${DKG}batchId`, object: `"${KA_ID}"^^<${XSD}integer>`, graph },
+      ...roots.flatMap((root, index) => [
+        { subject: `${subject}/${index + 1}`, predicate: `${DKG}partOf`, object: subject, graph },
+        { subject: `${subject}/${index + 1}`, predicate: `${DKG}rootEntity`, object: root, graph },
+      ]),
+    ];
+    await store.insert([
+      {
+        subject: `did:dkg:context-graph:${cg}`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
+        object: `"${onChainId}"`,
+        graph: ONTOLOGY_GRAPH,
+      },
+      {
+        subject: `did:dkg:context-graph:${controlCg}`,
+        predicate: CONTEXT_GRAPH_ON_CHAIN_ID,
+        object: `"${controlOnChainId}"`,
+        graph: ONTOLOGY_GRAPH,
+      },
+      ...metadata(ual, contextGraphMetaUri(cg)),
+      ...data.map((quad) => ({ ...quad, graph: contextGraphDataUri(cg) })),
+      ...metadata(controlUal, contextGraphMetaUri(controlCg, controlOnChainId)),
+      ...data.map((quad) => ({ ...quad, graph: contextGraphDataUri(controlCg, controlOnChainId) })),
+    ]);
+    await writeMaterializedVersion(store, contextGraphMetaUri(cg), ual, {
+      blockNumber: 100,
+      txIndex: 0,
+    });
+
+    const control = await extractV10KCFromStore(store, BigInt(controlOnChainId), KA_ID);
+    await runHeal(cg, onChainId);
+    const healed = await extractV10KCFromStore(store, BigInt(onChainId), KA_ID);
+
+    expect(new V10MerkleTree(healed.leaves).root).toEqual(new V10MerkleTree(control.leaves).root);
+    for (const root of roots) {
+      const present = await store.query(
+        `ASK { GRAPH <${contextGraphDataUri(cg, onChainId)}> { <${root}> ?p ?o } }`,
+      );
+      expect(present.type === 'boolean' && present.value).toBe(true);
+    }
+  });
+
+  it('chunks an over-budget root set and stamps completion after every data chunk', async () => {
+    const cg = 'oversized-root-set';
+    const onChainId = '21';
+    const ual = 'did:dkg:hardhat:31337/0xoversized/42';
+    const roots = Array.from(
+      { length: 10 },
+      (_, index) => `urn:entity:oversized:${index}:${'x'.repeat(500_000)}`,
+    );
+    const mutations: StructuredMutation[] = [];
+    const fakeStore = {
+      query: vi.fn(async (sparql: string) => {
+        if (sparql.includes('SELECT ?ual ?b')) {
+          return { type: 'bindings' as const, bindings: [{ ual, b: String(KA_ID) }] };
+        }
+        if (sparql.includes('SELECT ?root')) {
+          return {
+            type: 'bindings' as const,
+            bindings: roots.map((root) => ({ root })),
+          };
+        }
+        if (sparql.includes('ASK')) return { type: 'boolean' as const, value: true };
+        return { type: 'bindings' as const, bindings: [] };
+      }),
+      structuredMutation: vi.fn(async (mutation: StructuredMutation) => {
+        mutations.push(mutation);
+      }),
+    } as unknown as TripleStore;
+
+    await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
+      {
+        store: fakeStore,
+        rsHealCursorByCg: new Map<string, string>(),
+        log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+      } as never,
+      cg,
+      { subscribed: true, synced: true, onChainId } as never,
+    )).resolves.toEqual({ status: 'completed', inspected: 1 });
+
+    const scopedData = contextGraphDataUri(cg, onChainId);
+    const dataCopies = mutations.filter((mutation) => mutation.kind === 'copy-subject-projection'
+      && mutation.input.targetGraphUri === scopedData);
+    expect(dataCopies.length).toBeGreaterThan(1);
+    expect(dataCopies.flatMap((mutation) => mutation.kind === 'copy-subject-projection'
+      ? mutation.input.roots
+      : [])).toEqual(roots);
+
+    const firstDataIndex = mutations.indexOf(dataCopies[0]);
+    const lastDataIndex = mutations.indexOf(dataCopies[dataCopies.length - 1]);
+    const completionResetIndex = mutations.findIndex((mutation) => (
+      mutation.kind === 'replace-subject-predicates'
+      && mutation.input.replacementQuads.length === 0
+    ));
+    const completionStampIndex = mutations.findIndex((mutation) => (
+      mutation.kind === 'replace-subject-predicates'
+      && mutation.input.replacementQuads.some((quad) => quad.predicate === `${DKG}materializedVersion`)
+    ));
+    expect(completionResetIndex).toBeGreaterThanOrEqual(0);
+    expect(completionResetIndex).toBeLessThan(firstDataIndex);
+    expect(completionStampIndex).toBeGreaterThan(lastDataIndex);
   });
 
   it('(#1549) RS-heal INSERTs declare touchedGraphs through the decorator stack', async () => {

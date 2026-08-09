@@ -95,7 +95,7 @@ import {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, createTripleStore, supportsTripleStoreCapability, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, StoreSchedulerBusyError, asChangelogReader, asGraphWriteGenSource, chunkCopySubjectProjectionInput, createTripleStore, supportsTripleStoreCapability, tryCopySubjectProjection, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type QueryOptions, type Quad, type LargeLiteralStorageConfig, type SelectResult } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -3523,23 +3523,24 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // DATA copy — MANDATORY server-side, byte-safe, read-both
             // (legacy root data UNION per-KA VM graph). Skip the post-publish
             // trustLevel stamps in BOTH branches so the recomputed leaf set stays
-            // bit-identical with the on-chain merkleLeafCount. All roots are
-            // copied in one admitted backend operation rather than one UPDATE
-            // per root.
-            await copyProjection({
+            // bit-identical with the on-chain merkleLeafCount. Root order is
+            // preserved while large multi-root KCs are split below both 4 MiB
+            // structured-mutation limits.
+            const dataCopy = {
               sourceGraphUris: [rootData, vmGraph],
               targetGraphUri: scopedData,
               roots,
               descendantSuffix: '/.well-known/genid/',
               excludedPredicates: [TRUST_LEVEL_PREDICATE, LEGACY_TRUST_LEVEL_PREDICATE],
-            });
-            if (!canApply()) return;
+            };
+            // Validate the complete chunk plan before crossing the first write
+            // boundary. An individually unrepresentable root must not clear an
+            // otherwise valid completion marker before failing.
+            const dataCopyChunks = chunkCopySubjectProjectionInput(dataCopy);
 
-            // The marker reset, metadata copy, and final stamp are separate
-            // backend operations. Remove completion first and stamp it only
-            // after the copy succeeds, so an interrupted heal remains eligible
-            // for repair on the next sweep.
-            if (!canApply()) return;
+            // Clear completion before the first chunk. A crash between chunks
+            // must leave this KC eligible for repair rather than exposing a
+            // partially refreshed projection under an older completion stamp.
             await replacePredicates({
               graphUri: scopedMeta,
               subject: ual,
@@ -3547,6 +3548,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
               replacementQuads: [],
             });
             if (!canApply()) return;
+
+            for (const chunk of dataCopyChunks) {
+              await copyProjection(chunk);
+              if (!canApply()) return;
+            }
+
+            // Metadata copy and the final stamp remain separate backend
+            // operations. Stamp completion only after every data chunk and the
+            // metadata copy succeed.
             await copyProjection({
               sourceGraphUris: [legacyMeta],
               targetGraphUri: scopedMeta,

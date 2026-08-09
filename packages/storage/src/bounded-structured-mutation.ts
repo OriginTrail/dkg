@@ -529,6 +529,70 @@ WHERE {
 }`);
 }
 
+/**
+ * Split a subject-projection copy into the largest ordered root batches that
+ * fit both structured-mutation byte limits. Each returned descriptor is
+ * independently valid and preserves the caller's root order.
+ */
+export function chunkCopySubjectProjectionInput(
+  input: CopySubjectProjectionInput,
+): CopySubjectProjectionInput[] {
+  const roots = uniqueIris(input.roots, 'copySubjectProjection.roots');
+  const first = normalizeCopySubjectProjectionInput({ ...input, roots: [roots[0]] });
+  const firstRootBytes = UTF8.encode(first.roots[0]).byteLength;
+  const fixedOperandBytes = [
+    ...first.sourceGraphUris,
+    first.targetGraphUri,
+    first.descendantSuffix,
+    ...first.excludedPredicates,
+  ].reduce((total, value) => total + UTF8.encode(value).byteLength, 0);
+  const fixedUpdateBytes = UTF8.encode(buildCopySubjectProjectionUpdate(first)).byteLength
+    - firstRootBytes
+    - 2; // `<` + `>` around the first root; separators are counted per chunk below.
+
+  const chunks: CopySubjectProjectionInput[] = [];
+  let chunkRoots: string[] = [];
+  let chunkOperandBytes = fixedOperandBytes;
+  let chunkRootTokensBytes = 0;
+
+  const flush = (): void => {
+    if (chunkRoots.length === 0) return;
+    const chunk = { ...first, roots: chunkRoots };
+    // Keep the size accounting coupled to the canonical serializer so a
+    // future template change cannot silently emit an oversized descriptor.
+    buildCopySubjectProjectionUpdate(chunk);
+    chunks.push(chunk);
+    chunkRoots = [];
+    chunkOperandBytes = fixedOperandBytes;
+    chunkRootTokensBytes = 0;
+  };
+
+  for (const root of roots) {
+    const rootBytes = UTF8.encode(root).byteLength;
+    const tokenBytes = rootBytes + 2 + (chunkRoots.length === 0 ? 0 : 1);
+    const wouldOverflow = chunkRoots.length > 0 && (
+      chunkOperandBytes + rootBytes > BOUNDED_MUTATION_MAX_OPERAND_BYTES
+      || fixedUpdateBytes + chunkRootTokensBytes + tokenBytes > BOUNDED_MUTATION_MAX_UPDATE_BYTES
+    );
+    if (wouldOverflow) flush();
+
+    const firstTokenBytes = rootBytes + 2;
+    if (
+      fixedOperandBytes + rootBytes > BOUNDED_MUTATION_MAX_OPERAND_BYTES
+      || fixedUpdateBytes + firstTokenBytes > BOUNDED_MUTATION_MAX_UPDATE_BYTES
+    ) {
+      // Reuse the canonical error text for an individually unrepresentable root.
+      buildCopySubjectProjectionUpdate({ ...first, roots: [root] });
+      throw new Error('copySubjectProjection root cannot fit the bounded mutation budget');
+    }
+    chunkRoots.push(root);
+    chunkOperandBytes += rootBytes;
+    chunkRootTokensBytes += rootBytes + 2 + (chunkRoots.length === 1 ? 0 : 1);
+  }
+  flush();
+  return chunks;
+}
+
 export function normalizeStructuredMutation(mutation: StructuredMutation): StructuredMutation {
   switch (mutation.kind) {
     case 'delete-subjects':

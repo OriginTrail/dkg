@@ -56,6 +56,7 @@ export {
   BOUNDED_MUTATION_MAX_PRUNE_DELETE,
   BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
   buildCopySubjectProjectionUpdate,
+  chunkCopySubjectProjectionInput,
   buildDeleteSubjectsUpdate,
   buildPruneLinkedRecordClosuresUpdate,
   buildPruneRankedSubjectsUpdate,
