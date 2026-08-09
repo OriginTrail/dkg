@@ -1138,6 +1138,82 @@ describe('system-record owned subjects and verification closure', () => {
     })).toThrow(/aggregate cache accounting exceeds/);
   });
 
+  it('preserves shared physical accounting across closure, sidecar, and inventory paths', async () => {
+    const metadata = createSystemRecordCacheMetadataV1(new Uint8Array());
+    const reference = (
+      objectKind: 'profile-bundle' | 'conflict-evidence' | 'inventory-leaf',
+      domain: string,
+      label: string,
+    ) => {
+      const canonicalBytes = new TextEncoder().encode(label);
+      const digest = digestSystemRecordBytesV1(domain, canonicalBytes);
+      return createSystemRecordCacheReferenceV1(objectKind, digest, canonicalBytes);
+    };
+    const sharedClosure = reference(
+      'profile-bundle',
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+      'shared-closure',
+    );
+    const sharedSidecar = reference(
+      'conflict-evidence',
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.conflictEvidence,
+      'shared-sidecar',
+    );
+    const fixture = await authorityFixture();
+    const transition = authorityTransition(fixture, activeHead(fixture));
+    const transitionBytes = fakeEnvelopeBytes(transition);
+    const sharedControl = createSystemRecordCacheReferenceV1(
+      'authority-transition',
+      computeAgentProfileAuthorityTransitionDigestV1(transition),
+      transitionBytes,
+    );
+    const inventoryLeaf = reference(
+      'inventory-leaf',
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf,
+      'activation-leaf',
+    );
+    const result = preflightSystemRecordCacheAccountingV1({
+      mode: 'activation',
+      rows: [{
+        closure: [sharedClosure, sharedControl],
+        sidecar: [sharedControl, sharedSidecar],
+        metadata,
+        sidecarMetadata: metadata,
+      }],
+      inventoryLeaves: [inventoryLeaf],
+    });
+    expect(result).toMatchObject({
+      cohortPhysicalObjects: 4,
+      cohortPhysicalBytes:
+        new TextEncoder().encode('shared-closure').byteLength
+        + transitionBytes.byteLength
+        + new TextEncoder().encode('shared-sidecar').byteLength
+        + new TextEncoder().encode('activation-leaf').byteLength,
+      closureReferences: 2,
+      closurePhysicalBytes:
+        new TextEncoder().encode('shared-closure').byteLength + transitionBytes.byteLength,
+      closureReferencedBytes:
+        new TextEncoder().encode('shared-closure').byteLength + transitionBytes.byteLength,
+      sidecarReferences: 2,
+      sidecarPhysicalBytes:
+        transitionBytes.byteLength + new TextEncoder().encode('shared-sidecar').byteLength,
+      sidecarReferencedBytes:
+        transitionBytes.byteLength + new TextEncoder().encode('shared-sidecar').byteLength,
+      activationBundleBytes: new TextEncoder().encode('shared-closure').byteLength,
+      activationInventoryLeaves: 1,
+    });
+
+    expect(() => preflightSystemRecordCacheAccountingV1({
+      mode: 'activation',
+      rows: [],
+      inventoryLeaves: Array.from({ length: 5 }, (_, index) => reference(
+        'inventory-leaf',
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf,
+        `activation-leaf-${index}`,
+      )),
+    })).toThrow(/leaf bound|closed bounds/);
+  });
+
   it.runIf(process.env.DKG_SYSTEM_RECORD_EXHAUSTIVE === '1')(
     'accepts exactly 128 MiB of activation bundles and rejects one more MiB', () => {
     const reusable = new Uint8Array(SYSTEM_RECORD_MAX_ATOMIC_BUNDLE_BYTES);
@@ -1222,6 +1298,84 @@ describe('system-record owned subjects and verification closure', () => {
       descriptorBytes,
     ));
     expect(descriptorReference.cacheDigest).not.toBe(descriptorReference.digest);
+  });
+
+  it('derives the established semantic and cache identity for every object kind', async () => {
+    const fixture = await authorityFixture();
+    const head = activeHead(fixture);
+    const transition = authorityTransition(fixture, head);
+    const resolution = forkResolution(fixture, head);
+    const signedCases = [
+      {
+        objectKind: 'agent-profile-head' as const,
+        semanticDigest: computeAgentProfileHeadObjectDigestV1(head),
+        canonicalBytes: fakeEnvelopeBytes(head),
+      },
+      {
+        objectKind: 'authority-transition' as const,
+        semanticDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+        canonicalBytes: fakeEnvelopeBytes(transition),
+      },
+      {
+        objectKind: 'fork-resolution' as const,
+        semanticDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+        canonicalBytes: fakeEnvelopeBytes(resolution),
+      },
+    ];
+    for (const artifact of signedCases) {
+      const reference = createSystemRecordCacheReferenceV1(
+        artifact.objectKind,
+        artifact.semanticDigest,
+        artifact.canonicalBytes,
+      );
+      expect(reference.digest).toBe(artifact.semanticDigest);
+      expect(reference.cacheDigest).toBe(digestSystemRecordBytesV1(
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedEnvelope,
+        artifact.canonicalBytes,
+      ));
+    }
+
+    const descriptor = {
+      objectType: 'root-descriptor', kind: 'agents', networkId: NETWORK,
+      epoch: '0', version: '0', treeRootDigest: DIGEST_A, totalRows: '0',
+    } as const;
+    const descriptorDigest = computeSystemRecordRootDescriptorDigestV1(descriptor);
+    const descriptorBytes = canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1({
+      object: descriptor,
+      objectDigest: descriptorDigest,
+      providerPeerId: fixture.peerId,
+      signatureSuite: 'ed25519-v1',
+      signature: Buffer.alloc(64).toString('base64url'),
+    });
+    const descriptorReference = createSystemRecordCacheReferenceV1(
+      'root-descriptor',
+      descriptorDigest,
+      descriptorBytes,
+    );
+    expect(descriptorReference).toMatchObject({
+      digest: descriptorDigest,
+      cacheDigest: digestSystemRecordBytesV1(
+        SYSTEM_RECORD_DIGEST_DOMAINS_V1.signedRootDescriptorEnvelope,
+        descriptorBytes,
+      ),
+    });
+
+    const byteCases = [
+      ['inventory-internal', SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryInternal],
+      ['inventory-leaf', SYSTEM_RECORD_DIGEST_DOMAINS_V1.inventoryLeaf],
+      ['conflict-evidence', SYSTEM_RECORD_DIGEST_DOMAINS_V1.conflictEvidence],
+      ['owned-subject-table', SYSTEM_RECORD_DIGEST_DOMAINS_V1.ownedSubjectTable],
+      ['profile-bundle', SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle],
+    ] as const;
+    for (const [objectKind, domain] of byteCases) {
+      const canonicalBytes = new TextEncoder().encode(`identity-${objectKind}`);
+      const digest = digestSystemRecordBytesV1(domain, canonicalBytes);
+      expect(createSystemRecordCacheReferenceV1(
+        objectKind,
+        digest,
+        canonicalBytes,
+      )).toMatchObject({ digest, cacheDigest: digest });
+    }
   });
 
   it('derives a complete raw-artifact closure and fails closed on a missing dependency', async () => {
@@ -1687,6 +1841,21 @@ describe('system-record owned subjects and verification closure', () => {
       deletionTableDigest: middle.ownedSubjectTableDigest,
       historicalRoots: [initial.rootSubject],
       lastAuthorityTransitionPriorHeadDigest: transition.priorHeadDigest,
+    });
+    expect(closure.objects.map(({ objectKind }) => objectKind).sort()).toEqual([
+      'agent-profile-head',
+      'agent-profile-head',
+      'agent-profile-head',
+      'authority-transition',
+      'owned-subject-table',
+    ]);
+    expect(closure.objects.find(
+      ({ objectKind, digest }) =>
+        objectKind === 'authority-transition' &&
+        digest === computeAgentProfileAuthorityTransitionDigestV1(transition),
+    )?.references).toContainEqual({
+      objectKind: 'agent-profile-head',
+      digest: transition.priorHeadDigest,
     });
   });
 

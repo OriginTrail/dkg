@@ -3,6 +3,10 @@ import { readdirSync, readFileSync } from 'node:fs';
 import * as ts from 'typescript';
 
 import { describe, expect, it } from 'vitest';
+import { SYSTEM_RECORD_OBJECT_CAPS_V1 } from '../src/system-record-limits-v1.js';
+import {
+  SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1,
+} from '../src/system-record-object-identity-descriptors-v1-internal.js';
 
 const source = (name: string): string =>
   readFileSync(new URL(`../src/${name}`, import.meta.url), 'utf8');
@@ -79,12 +83,16 @@ describe('System Record V1 module ownership', () => {
       'system-record-agent-profile-control-codecs-v1-internal.ts',
       'system-record-agent-profile-evidence-codecs-v1-internal.ts',
       'system-record-owned-subject-codecs-v1-internal.ts',
+      'system-record-signed-envelope-codecs-v1-internal.ts',
+      'system-record-signature-policy-v1-internal.ts',
       'system-record-signatures-v1-internal.ts',
       'system-record-authority-verification-v1-internal.ts',
       'system-record-authority-v1-internal.ts',
       'system-record-verification-closure-v1-internal.ts',
       'system-record-cache-accounting-v1-internal.ts',
+      'system-record-object-identity-descriptors-v1-internal.ts',
       'system-record-inventory-codecs-v1-internal.ts',
+      'system-record-inventory-signatures-v1-internal.ts',
       'system-record-inventory-traversal-v1-internal.ts',
       'system-record-inventory-cow-build-v1-internal.ts',
       'system-record-inventory-cow-context-v1-internal.ts',
@@ -111,6 +119,28 @@ describe('System Record V1 module ownership', () => {
         'system-record-cache-accounting-v1-internal.ts',
       ]);
     }
+  });
+
+  it('keeps inventory data codecs below provider signature verification', () => {
+    expectNoDependencyPath('system-record-inventory-codecs-v1-internal.ts', [
+      'system-record-inventory-signatures-v1-internal.ts',
+    ]);
+    expect(directDependencies('system-record-inventory-signatures-v1-internal.ts')).toContain(
+      'system-record-inventory-codecs-v1-internal.ts',
+    );
+    expect(source('system-record-inventory-codecs-v1-internal.ts'))
+      .not.toMatch(/@libp2p\/|@noble\/ed25519/u);
+  });
+
+  it('owns one exhaustive internal identity deriver for every object kind', () => {
+    expect(Object.keys(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1).sort())
+      .toEqual(Object.keys(SYSTEM_RECORD_OBJECT_CAPS_V1).sort());
+    expect(Object.isFrozen(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1)).toBe(true);
+    for (const derive of Object.values(SYSTEM_RECORD_OBJECT_IDENTITY_DERIVERS_V1)) {
+      expect(derive).toBeTypeOf('function');
+    }
+    expect(source('system-record-inventory-v1.ts'))
+      .not.toContain('system-record-object-identity-descriptors-v1-internal');
   });
 
   it('keeps COW implementation units acyclic and below the file-health boundary', () => {
@@ -147,6 +177,27 @@ describe('System Record V1 module ownership', () => {
     }
   });
 
+  it('keeps cache identity below profile signature verification', () => {
+    expectNoDependencyPath('system-record-object-identity-descriptors-v1-internal.ts', [
+      'system-record-signatures-v1-internal.ts',
+    ]);
+    expect(directDependencies('system-record-object-identity-descriptors-v1-internal.ts'))
+      .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
+    expect(directDependencies('system-record-signatures-v1-internal.ts'))
+      .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
+    expect(directDependencies('system-record-signed-envelope-codecs-v1-internal.ts'))
+      .toContain('system-record-signature-policy-v1-internal.ts');
+    expect(directDependencies('system-record-signatures-v1-internal.ts'))
+      .toContain('system-record-signature-policy-v1-internal.ts');
+    expect(source('system-record-signed-envelope-codecs-v1-internal.ts'))
+      .not.toMatch(/@noble\/|Signature\.fromBytes|signature message/u);
+    expect(source('system-record-signature-policy-v1-internal.ts'))
+      .not.toMatch(/@noble\/ed25519|verifyEd25519/u);
+    expect(source('system-record-signatures-v1-internal.ts')).toMatch(/@noble\/ed25519/u);
+    expect(source('system-record-signed-envelope-codecs-v1-internal.ts'))
+      .not.toMatch(/concatSystemRecordBytesV1|systemRecordHexToBytesV1/u);
+  });
+
   it('keeps closure verification below authority policy and summary minting private', () => {
     expectNoDependencyPath('system-record-verification-closure-v1-internal.ts', [
       'system-record-authority-v1-internal.ts',
@@ -160,6 +211,25 @@ describe('System Record V1 module ownership', () => {
     expect(source('system-record-verification-closure-v1-internal.ts')).toMatch(
       /function mintAgentProfileVerifiedAuthoritySummaryV1/u,
     );
+    expect(directDependencies('system-record-verification-closure-v1-internal.ts')).toContain(
+      'system-record-verification-closure-visitors-v1-internal.ts',
+    );
+    expect(directDependencies('system-record-verification-closure-visitors-v1-internal.ts'))
+      .toContain('system-record-signed-envelope-codecs-v1-internal.ts');
+    expectNoDependencyPath('system-record-verification-closure-visitors-v1-internal.ts', [
+      'system-record-verification-closure-v1-internal.ts',
+      'system-record-signatures-v1-internal.ts',
+    ]);
+  });
+
+  it('keeps closure and cache internal exports explicit', () => {
+    for (const unit of [
+      'system-record-verification-closure-v1-internal.ts',
+      'system-record-verification-closure-visitors-v1-internal.ts',
+      'system-record-cache-accounting-v1-internal.ts',
+    ]) {
+      expect(source(unit)).not.toMatch(/export\s+\*/u);
+    }
   });
 
   it('keeps wire and applied-state codecs off authority and closure implementations', () => {

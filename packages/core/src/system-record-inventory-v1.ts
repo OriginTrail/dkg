@@ -10,7 +10,6 @@ export {
   assertSystemRecordInventoryInternalObjectV1,
   assertSystemRecordInventoryLeafObjectV1,
   assertSystemRecordRootDescriptorObjectV1,
-  buildSystemRecordProviderSignatureMessageV1,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
   canonicalizeSystemRecordInventoryInternalObjectV1,
   canonicalizeSystemRecordInventoryLeafObjectV1,
@@ -28,7 +27,6 @@ export {
   parseCanonicalSystemRecordInventoryLeafObjectV1,
   parseCanonicalSystemRecordRootDescriptorObjectV1,
   systemRecordInventoryRowMaxEncodedBytesV1,
-  verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryInternalEntryV1,
   type SystemRecordInventoryInternalObjectV1,
@@ -37,6 +35,11 @@ export {
   type SystemRecordInventoryRowV1,
   type SystemRecordRootDescriptorObjectV1,
 } from './system-record-inventory-codecs-v1-internal.js';
+
+export {
+  buildSystemRecordProviderSignatureMessageV1,
+  verifySignedSystemRecordRootDescriptorEnvelopeV1,
+} from './system-record-inventory-signatures-v1-internal.js';
 
 export {
   createSystemRecordInventoryTraversalV1,
