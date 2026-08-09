@@ -56,6 +56,7 @@ import {
   type PendingOrdinalRecoveryResult,
 } from '../src/chain-reconciler.js';
 import { packKnowledgeAssetIdFromIdentity } from '../src/ka-identity.js';
+import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
 
 interface AgentInternals {
   createContextGraph(opts: { id: string; name: string; description?: string; private?: boolean; callerAgentAddress?: string }): Promise<void>;
@@ -2066,6 +2067,40 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     }
   });
 
+  async function createExactVmRecoveryHarness(options: {
+    name: string;
+    localCgId: string;
+    peers: string[];
+    targetCount: number;
+    found: (peerId: string, ordinal: number) => boolean;
+  }) {
+    const harness = await createVmRecoveryHostHarness({
+      ...options,
+      targetForOrdinal: (ordinal) => vmRecoveryTarget(
+        options.localCgId,
+        ordinal,
+        String(ordinal),
+      ),
+      onFetch: (peerId, targets, recovered) => {
+        let allFound = true;
+        for (const target of targets) {
+          if (options.found(peerId, target.ordinal)) recovered.add(target.ordinal);
+          else allFound = false;
+        }
+        return allFound ? 'found' : 'clean-absent';
+      },
+    });
+    return {
+      ...harness,
+      get fetches(): Array<{ peerId: string; ordinal: number }> {
+        return harness.fetched.flatMap(({ peerId, uals }) => uals.map((ual) => ({
+          peerId,
+          ordinal: Number(ual.split('/').at(-1)),
+        })));
+      },
+    };
+  }
+
   it('sweep triggers a reconcile for a core-hosted CG with NO member subscription', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'CoreFillSweep', chainAdapter: chain });
@@ -2721,6 +2756,63 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(result.outcomes.size).toBe(2);
     expect(result.attemptedOrdinals).toEqual([0, 1]);
     expect(result.continuationOrdinal).toBe(2);
+  });
+
+  it('rotates after spending one proven-holder reuse in the recovery slice', async () => {
+    const holder = '12D3KooWExactProvenAHolder';
+    const fallback = '12D3KooWExactProvenZFallback';
+    const localCgId = '0x0000000000000000000000000000000000000001/proven-holder';
+    const harness = await createExactVmRecoveryHarness({
+      name: 'ExactVmProvenHolderBurst',
+      localCgId,
+      peers: [holder, fallback],
+      targetCount: 4,
+      found: () => true,
+    });
+    agent = harness.agent;
+    const result = await harness.run();
+
+    expect(harness.fetches).toEqual([
+      { peerId: holder, ordinal: 0 },
+      { peerId: holder, ordinal: 1 },
+      { peerId: fallback, ordinal: 2 },
+      { peerId: fallback, ordinal: 3 },
+    ]);
+    expect(harness.maxActiveFetches()).toBe(1);
+    expect(result.attemptedOrdinals).toEqual(
+      harness.targets.map((target) => target.ordinal),
+    );
+    expect([...result.outcomes.values()]).toEqual(
+      harness.targets.map(() => ({ status: 'reconciled', blockNumber: 100 })),
+    );
+    expect(result.continuationOrdinal).toBeUndefined();
+  });
+
+  it('stops reusing a proven holder after a clean absence', async () => {
+    const holder = '12D3KooWExactRevocationAHolder';
+    const fallback = '12D3KooWExactRevocationZFallback';
+    const localCgId = '0x0000000000000000000000000000000000000001/revoke-holder';
+    const harness = await createExactVmRecoveryHarness({
+      name: 'ExactVmProvenHolderRevocation',
+      localCgId,
+      peers: [holder, fallback],
+      targetCount: 3,
+      found: (peerId, ordinal) => (peerId === holder && ordinal === 0)
+        || (peerId === fallback && ordinal === 2),
+    });
+    agent = harness.agent;
+    const result = await harness.run();
+
+    expect(harness.fetches).toEqual([
+      { peerId: holder, ordinal: 0 },
+      { peerId: holder, ordinal: 1 },
+      { peerId: fallback, ordinal: 2 },
+    ]);
+    expect(result.attemptedOrdinals).toEqual([0, 1, 2]);
+    expect(result.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.outcomes.get(1)?.status).toBe('pending');
+    expect(result.outcomes.get(2)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    expect(result.continuationOrdinal).toBeUndefined();
   });
 
   it('spreads unavailable-peer probes across targets within the global peer budget', async () => {
