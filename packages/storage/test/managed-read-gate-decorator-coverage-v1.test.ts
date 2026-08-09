@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChangelogStore, asChangelogReader } from '../src/changelog-store.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { asGraphWriteGenSource } from '../src/graph-write-gen.js';
-import { ManagedOxigraphBackendUnownedError } from '../src/internal/managed-oxigraph-ownership-v1.js';
+import { ManagedOxigraphBackendUnownedError } from '../src/managed-oxigraph-backend-unowned-error.js';
 import {
   CACHED_READ_GATE_V1,
   asCachedReadGateV1,

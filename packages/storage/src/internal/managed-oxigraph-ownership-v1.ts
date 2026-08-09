@@ -35,8 +35,9 @@
  * obtains the lease still cannot extend or revive it, failing (3).
  */
 
-export { ManagedOxigraphBackendUnownedError } from '../managed-oxigraph-backend-unowned-error.js';
-import { ManagedOxigraphBackendUnownedError } from '../managed-oxigraph-backend-unowned-error.js';
+// The public error contract lives in `../managed-oxigraph-backend-unowned-error.ts`
+// and is deliberately NOT re-exported here: this entry is the ownership
+// authority, and the error is barrel API. Files needing both import both.
 
 /** Opaque, non-inspectable lease handle. Compare by identity only. */
 declare const MANAGED_OXIGRAPH_LEASE_BRAND: unique symbol;

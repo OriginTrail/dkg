@@ -97,14 +97,18 @@ function packAndExtractPackage() {
 // barrel can be imported the way a consumer imports it. Node resolves
 // through realpaths, so each linked workspace package keeps resolving its own
 // dependencies from the repository root.
-function linkRuntimeDeps(scratch) {
-  const scoped = join(scratch, 'node_modules', '@origintrail-official');
-  const links = [
-    ['@origintrail-official/dkg-core', join(scoped, 'dkg-core')],
-    ['@origintrail-official/dkg-rdf-utils', join(scoped, 'dkg-rdf-utils')],
-    ['oxigraph', join(scratch, 'node_modules', 'oxigraph')],
-  ];
+function linkRuntimeDeps(scratch, pkgdir) {
+  // The packed manifest is the single source of truth for what a consumer
+  // install would bring: link exactly its dependencies, never a hand list.
+  const deps = Object.keys(
+    JSON.parse(readFileSync(join(pkgdir, 'package.json'), 'utf8')).dependencies ?? {},
+  );
+  const links = deps.map((name) => [
+    name,
+    join(scratch, 'node_modules', ...name.split('/')),
+  ]);
   for (const [name, linkPath] of links) {
+    mkdirSync(dirname(linkPath), { recursive: true });
     // pnpm links a package's deps under the DEPENDENT's node_modules, so the
     // storage package's own tree is the authoritative place to find them;
     // the repo root is the fallback for hoisted installs.
@@ -133,12 +137,17 @@ for (const [specifier, shouldResolve] of expectations) {
 }
 const barrel = await import('${PKG}');
 const internal = await import('${INTERNAL_ENTRY}');
+// The forbidden set is DERIVED: every runtime export of the authority entry
+// is internal-only, so none of them may appear on the barrel. Adding an
+// authority export automatically extends the gate.
+const leaked = Object.keys(internal)
+  .filter((name) => name !== 'default' && name in barrel);
 const verdicts = [
   [typeof barrel['${PUBLIC_ERROR}'] === 'function', 'barrel exports the public unowned-backend error'],
-  [!('${OWNERSHIP_MINT}' in barrel), 'barrel does not export the ownership mint'],
+  [leaked.length === 0, 'barrel exports no authority symbol (leaked: ' + leaked.join(',') + ')'],
   [typeof internal['${OWNERSHIP_MINT}'] === 'function', 'internal entry exports the ownership mint'],
-  [barrel['${PUBLIC_ERROR}'] === internal['${PUBLIC_ERROR}'] || !('${PUBLIC_ERROR}' in internal),
-    'one error class identity across entries'],
+  [!('${PUBLIC_ERROR}' in internal),
+    'the public error is not doubled through the authority entry'],
 ];
 for (const [ok, label] of verdicts) {
   if (!ok) { bad += 1; console.error('runtime surface: ' + label + ' — FAILED'); }
@@ -162,6 +171,8 @@ function writeTypeFixture(scratch) {
 import type { ManagedOxigraphSupervisorHandoffV1 } from '${INTERNAL_ENTRY}';
 // @ts-expect-error — the ownership mint is not on the public barrel
 import { ${OWNERSHIP_MINT} } from '${PKG}';
+// @ts-expect-error — ownership types are not on the public barrel either
+import type { ManagedOxigraphOwnershipLeaseV1 } from '${PKG}';
 const witness: [typeof ${PUBLIC_ERROR}, ManagedOxigraphSupervisorHandoffV1 | null] = [${PUBLIC_ERROR}, null];
 export default witness;
 `);
@@ -185,7 +196,7 @@ function runTypeFixture(scratch) {
 
 const { scratch, pkgdir } = packAndExtractPackage();
 try {
-  linkRuntimeDeps(scratch);
+  linkRuntimeDeps(scratch, pkgdir);
   writeProbe(scratch);
   writeTypeFixture(scratch);
 
@@ -226,6 +237,21 @@ try {
   check(runProbe(scratch).status !== 0, 'mutant: re-exporting the mint fails the runtime surface probe');
   writeFileSync(barrelPath, originalBarrel);
   check(runProbe(scratch).status === 0, 'mutant: restoring the barrel restores the gate');
+
+  // A REPRESENTATIVE non-mint authority symbol proves the derived set is what
+  // fails the gate, not a special-case on the mint's name.
+  writeFileSync(
+    barrelPath,
+    `${originalBarrel}
+export { attachManagedOxigraphLeaseV1 } from './internal/managed-oxigraph-ownership-v1.js';
+`,
+  );
+  check(
+    runProbe(scratch).status !== 0,
+    'mutant: re-exporting a non-mint authority symbol also fails the probe',
+  );
+  writeFileSync(barrelPath, originalBarrel);
+  check(runProbe(scratch).status === 0, 'mutant: restore after the non-mint mutant');
 
   // --- mutant 3: re-export the mint from the barrel d.ts → the type fixture
   // must fail (its suppression becomes an unused directive) ------------------

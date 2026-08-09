@@ -19,7 +19,7 @@ import {
   isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
-import { ManagedOxigraphBackendUnownedError } from './internal/managed-oxigraph-ownership-v1.js';
+import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-backend-unowned-error.js';
 import {
   CACHED_READ_GATE_V1,
   asCachedReadGateV1,

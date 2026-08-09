@@ -7,8 +7,8 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 // Adapter registration is a side effect of importing the module.
 import '../src/adapters/sparql-http.js';
 
+import { ManagedOxigraphBackendUnownedError } from '../src/managed-oxigraph-backend-unowned-error.js';
 import {
-  ManagedOxigraphBackendUnownedError,
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipControllerV1,

@@ -56,8 +56,8 @@ import {
   isInternalGraphUriV1,
 } from '../internal-graph-policy.js';
 import { CACHED_READ_GATE_V1 } from '../cached-read-gate-v1.js';
+import { ManagedOxigraphBackendUnownedError } from '../managed-oxigraph-backend-unowned-error.js';
 import {
-  ManagedOxigraphBackendUnownedError,
   extractManagedOxigraphHandoffV1,
   extractManagedOxigraphLeaseV1,
   managedOxigraphOwnershipEndpointsMatchV1,
