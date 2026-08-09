@@ -11,7 +11,7 @@ import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 import { createTripleStore, type Quad, type TripleStore } from '../src/triple-store.js';
 import { supportsTripleStoreCapability } from '../src/unsupported-capability-error.js';
 

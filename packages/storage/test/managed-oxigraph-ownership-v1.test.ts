@@ -8,7 +8,7 @@ import {
   isManagedOxigraphOwnershipLeaseV1,
   managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 
 const QUERY_ENDPOINT = 'http://127.0.0.1:7878/query';
 const UPDATE_ENDPOINT = 'http://127.0.0.1:7878/update';

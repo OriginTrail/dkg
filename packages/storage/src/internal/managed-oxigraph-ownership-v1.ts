@@ -35,6 +35,10 @@
  * obtains the lease still cannot extend or revive it, failing (3).
  */
 
+// The public error contract lives in `../managed-oxigraph-backend-unowned-error.ts`
+// and is deliberately NOT re-exported here: this entry is the ownership
+// authority, and the error is barrel API. Files needing both import both.
+
 /** Opaque, non-inspectable lease handle. Compare by identity only. */
 declare const MANAGED_OXIGRAPH_LEASE_BRAND: unique symbol;
 export type ManagedOxigraphOwnershipLeaseV1 = {
@@ -366,37 +370,6 @@ export function isManagedOxigraphOwnershipLiveV1(lease: unknown): boolean {
 }
 
 /**
- * Thrown when a managed store is asked to mutate a backend it cannot prove it
- * owns.
- *
- * The two cases it covers are different harms, and both are real:
- *
- * - **terminal** (`port-release-unproven`): something may be serving the bind
- *   that is not our child, so the write could land in a store we do not own.
- * - **not ready** (a child exit, or a replacement being bound): the write has
- *   nowhere correct to go, and today it is dispatched anyway and fails at the
- *   transport after opening a socket.
- *
- * Refused with ZERO I/O rather than dispatched and hoped over.
- */
-export class ManagedOxigraphBackendUnownedError extends Error {
-  readonly code = 'MANAGED_OXIGRAPH_BACKEND_UNOWNED' as const;
-
-  constructor(
-    readonly operation: string,
-    readonly terminal: boolean,
-    readonly lastInvalidation?: string,
-  ) {
-    super(
-      `${operation} refused: the managed Oxigraph child is not the proven ready listener ` +
-        `(terminal=${terminal}${lastInvalidation ? `, ${lastInvalidation}` : ''}). ` +
-        'The request was not dispatched.',
-    );
-    this.name = 'ManagedOxigraphBackendUnownedError';
-  }
-}
-
-/**
  * Read a lease's live state.
  *
  * `null` means "not a lease at all"; a snapshot with `ready === false` means
@@ -413,5 +386,3 @@ export function readManagedOxigraphOwnershipSnapshotV1(
   if (!current) return null;
   return snapshotLeaseState(current);
 }
-
-

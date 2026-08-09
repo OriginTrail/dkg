@@ -5,7 +5,7 @@ import { SparqlHttpStore } from '../src/adapters/sparql-http.js';
 import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 import { __resetSystemRecordControllerRegistrationForTests } from '../src/system-record-materializer-v1.js';
 import { externalStorePriorityScheduler } from '../src/store-priority-scheduler.js';
 

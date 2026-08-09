@@ -13,7 +13,7 @@ import {
   managedOxigraphOwnershipEndpointsMatchV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipLeaseV1,
-} from './managed-oxigraph-ownership-v1-internal.js';
+} from './internal/managed-oxigraph-ownership-v1.js';
 import {
   SYSTEM_RECORD_V1_PREDICATES,
   systemRecordEpochSubjectV1,

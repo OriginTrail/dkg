@@ -184,6 +184,7 @@ jobs:
             test/managed-backend-ownership-dispatch-v1.test.ts \
             test/managed-terminal-read-through-index-v1.test.ts \
             test/managed-warm-read-composition-v1.test.ts \
+            test/managed-oxigraph-public-error-contract-v1.test.ts \
             test/managed-read-gate-decorator-coverage-v1.test.ts \
             test/store-chain-participation-source-v1.test.ts \
             test/system-record-controller-disposal-v1.test.ts \
@@ -214,9 +215,21 @@ jobs:
       - name: CLI supervisor conformance
         run: |
           pnpm --filter @origintrail-official/dkg exec vitest run \
-            test/oxigraph-server.test.ts
+            test/oxigraph-server.test.ts \
+            test/oxigraph-server-module-boundary.test.ts
           pnpm --filter @origintrail-official/dkg exec vitest run \
             test/oxigraph-managed.test.ts
+
+      - name: Packed-tarball exports surface (issue 2165)
+        # The storage package owns this invariant; CI only orchestrates. The
+        # gate packs the real tarball, proves resolution (exports map admits
+        # exactly the public barrel and the documented internal entry), proves
+        # the SURFACE (no ownership symbol on the packed barrel; the internal
+        # entry really serves them), and mutation-checks itself both ways —
+        # map deleted → resolution gate must fail; mint re-exported from the
+        # barrel → surface gate must fail. See
+        # packages/storage/scripts/verify-pack-exports.mjs.
+        run: pnpm --filter @origintrail-official/dkg-storage run test:package-exports
 
       - name: Run live managed-ownership gate
         # Downloads and checksum-verifies the pinned v0.5.8 binary, then runs
