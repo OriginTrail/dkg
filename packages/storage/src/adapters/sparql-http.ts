@@ -65,7 +65,7 @@ import {
   type ManagedOxigraphOwnershipLeaseV1,
   type ManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphSupervisorHandoffV1,
-} from '../managed-oxigraph-ownership-v1-internal.js';
+} from '../internal/managed-oxigraph-ownership-v1.js';
 import {
   SystemRecordControllerRegistrationError,
   releaseSystemRecordLaneControllerV1,

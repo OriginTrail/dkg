@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
-import { ManagedOxigraphBackendUnownedError } from '../src/managed-oxigraph-ownership-v1-internal.js';
+import { ManagedOxigraphBackendUnownedError } from '../src/internal/managed-oxigraph-ownership-v1.js';
 import { CACHED_READ_GATE_V1 } from '../src/cached-read-gate-v1.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore } from '../src/triple-store.js';
 

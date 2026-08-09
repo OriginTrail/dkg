@@ -4,7 +4,7 @@ import {
   createManagedOxigraphOwnershipControllerV1,
   readManagedOxigraphOwnershipSnapshotV1,
   type ManagedOxigraphOwnershipControllerV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 import {
   SystemRecordControllerRegistrationError,
   SystemRecordLaneActivationConflictError,

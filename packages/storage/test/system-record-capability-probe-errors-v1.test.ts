@@ -36,7 +36,7 @@ import {
   attachManagedOxigraphLeaseV1,
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphSupervisorHandoffV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 import { SystemRecordControllerRegistrationError } from '../src/system-record-materializer-v1.js';
 import { createTripleStore, type TripleStore } from '../src/triple-store.js';
 

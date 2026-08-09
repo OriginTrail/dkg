@@ -1,4 +1,4 @@
-import type { ManagedOxigraphOwnershipLeaseV1 } from '../managed-oxigraph-ownership-v1-internal.js';
+import type { ManagedOxigraphOwnershipLeaseV1 } from '../internal/managed-oxigraph-ownership-v1.js';
 import {
   createSystemRecordAtomicApplyExecutorV1,
   type SystemRecordAtomicApplyHttpClientV1,

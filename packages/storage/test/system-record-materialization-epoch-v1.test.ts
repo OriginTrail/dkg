@@ -4,7 +4,7 @@ import { OwnedManagedHttpClient } from '../src/adapters/managed-http-client.js';
 import {
   createManagedOxigraphOwnershipControllerV1,
   type ManagedOxigraphOwnershipControllerV1,
-} from '../src/managed-oxigraph-ownership-v1-internal.js';
+} from '../src/internal/managed-oxigraph-ownership-v1.js';
 import { rotateSystemRecordMaterializationEpochV1 } from '../src/system-record-materialization-epoch-v1-internal.js';
 import { snapshotSystemRecordMaterializationEpochRotationV1 } from '../src/system-record-materialization-epoch-guard-v1-internal.js';
 import type { SystemRecordMaterializationEpochRotationV1 } from '../src/system-record-materialization-epoch-contract-v1.js';
