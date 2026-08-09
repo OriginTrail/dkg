@@ -97,6 +97,8 @@ export interface CreateAgentProfileReceiverOptionsV1 {
    * preparation, it returns authenticated monotonic timing and the apply entry.
    * The receiver owns final freshness, deadline clamping, and the sole call to
    * apply; no replacement proof or prior apply outcome crosses this boundary.
+   * Concrete lifecycle composition remains intentionally default-off; only the
+   * injected bridge can authenticate and re-inspect the opaque admitted context.
    */
   readonly prepareCandidateApply: (
     input: AgentProfileReceiverCandidateV1,

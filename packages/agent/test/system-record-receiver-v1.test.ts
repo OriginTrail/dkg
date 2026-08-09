@@ -209,7 +209,7 @@ describe('agent-profile system-record active receiver', () => {
     expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
   });
 
-  it('clamps signed wall-clock expiry onto the bridge monotonic deadline', async () => {
+  it('clamps bridge admission after waits without mixing wall and monotonic clocks', async () => {
     const fixture = await publishedFixture();
     const validUntilUnixMs = Date.parse(fixture.envelope.object.validUntil);
     const nowMs = vi.fn()
@@ -217,24 +217,32 @@ describe('agent-profile system-record active receiver', () => {
       .mockReturnValue(validUntilUnixMs - 60);
     const existingMonotonicDeadlineMs = 5_200;
     const monotonicNowMs = 5_000;
-    let admittedDeadlineMs: number | undefined;
-    const prepareCandidateApply = vi.fn((
+    const inspectAdmittedContext = vi.fn((context: AgentProfileAdmittedSliceContextV1) => {
+      expect(context).toBe(ADMITTED_CONTEXT);
+      return Object.freeze({
+        nowMs: monotonicNowMs,
+        admittedDeadlineMs: existingMonotonicDeadlineMs,
+      });
+    });
+    const issueProofAndApply = vi.fn(async (admittedDeadlineMs: number) => ({
+      outcome: 'applied' as const,
+      stateRevision: '6',
+      appliedStateDigest: `0x${'8'.repeat(64)}`,
+      admittedDeadlineMs,
+    }));
+    const prepareCandidateApply = vi.fn(async (
       _candidate: AgentProfileReceiverCandidateV1,
       admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
-    ) => Object.freeze({
-      existingMonotonicDeadlineMs,
-      monotonicNowMs,
-      apply: (deadline: number) => {
-      expect(admittedContext).toBe(ADMITTED_CONTEXT);
-        admittedDeadlineMs = deadline;
-        return {
-          outcome: 'applied' as const,
-          stateRevision: '6',
-          appliedStateDigest: `0x${'8'.repeat(64)}`,
-        };
-      },
-    }));
+    ) => {
+      await Promise.resolve();
+      const inspected = inspectAdmittedContext(admittedContext);
+      return Object.freeze({
+        existingMonotonicDeadlineMs: inspected.admittedDeadlineMs,
+        monotonicNowMs: Math.floor(inspected.nowMs),
+        apply: issueProofAndApply,
+      });
+    });
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
@@ -250,8 +258,9 @@ describe('agent-profile system-record active receiver', () => {
     ))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(nowMs).toHaveBeenCalledTimes(2);
-    expect(admittedDeadlineMs).toBe(5_060);
-    expect(admittedDeadlineMs).not.toBe(validUntilUnixMs);
+    expect(inspectAdmittedContext).toHaveBeenCalledTimes(1);
+    expect(issueProofAndApply).toHaveBeenCalledWith(5_060);
+    expect(issueProofAndApply).not.toHaveBeenCalledWith(validUntilUnixMs);
   });
 
   it('preserves an authenticated existing deadline when it is tighter', async () => {
@@ -926,7 +935,11 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
+    await expect(receiver.receiveActive(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    ))
       .rejects.toThrow(/authority verification failed/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
