@@ -171,8 +171,11 @@ export async function createOxigraphServerSupervisorV1(
     child,
     generation,
     timers,
-    recovery,
-    shutdown,
+    reviveLocked: () => recovery.reviveLocked(),
+    scheduleRevive: (reason) => recovery.scheduleRevive(reason),
+    proveManagedPortRelease: (exited, absoluteDeadlineMs) =>
+      shutdown.proveManagedPortRelease(exited, absoluteDeadlineMs),
+    beginTermination: () => shutdown.beginTermination(),
     abandonMs: handoffAbandonMs,
     bind,
     log,
@@ -181,7 +184,8 @@ export async function createOxigraphServerSupervisorV1(
   });
 
   await runExclusive(() => startOxigraphSupervisorV1({
-    shutdown,
+    beginTermination: () => shutdown.beginTermination(),
+    stopLocked: () => shutdown.stopLocked(),
     child,
     generation,
     bind,

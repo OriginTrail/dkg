@@ -1,13 +1,11 @@
 import type { OxigraphSupervisorChildV1 } from './oxigraph-supervisor-child.js';
 import type { OxigraphSupervisorGenerationV1 } from './oxigraph-supervisor-generation.js';
-import type {
-  OxigraphSupervisorShutdownOperationsV1,
-} from './oxigraph-supervisor-shutdown-operations.js';
 
 interface StartOxigraphSupervisorOptionsV1 {
-  readonly shutdown: OxigraphSupervisorShutdownOperationsV1;
+  readonly beginTermination: () => void;
+  readonly stopLocked: () => Promise<void>;
   readonly child: Pick<OxigraphSupervisorChildV1, 'stderrTail'>;
-  readonly generation: OxigraphSupervisorGenerationV1;
+  readonly generation: Pick<OxigraphSupervisorGenerationV1, 'spawnAndProve'>;
   readonly bind: string;
   readonly readyTimeoutMs: number;
   readonly log: (message: string) => void;
@@ -22,7 +20,8 @@ export async function startOxigraphSupervisorV1(
   options: StartOxigraphSupervisorOptionsV1,
 ): Promise<void> {
   const {
-    shutdown,
+    beginTermination,
+    stopLocked,
     child,
     generation,
     bind,
@@ -48,8 +47,8 @@ export async function startOxigraphSupervisorV1(
     return;
   }
 
-  shutdown.beginTermination();
-  await shutdown.stopLocked();
+  beginTermination();
+  await stopLocked();
   const stderrHint = child.stderrTail().trim()
     ? ` Last server output:\n${child.stderrTail().trim()}`
     : '';

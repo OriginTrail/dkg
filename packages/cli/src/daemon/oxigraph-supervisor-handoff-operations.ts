@@ -1,3 +1,5 @@
+import type { ChildProcess } from 'node:child_process';
+
 import type { ManagedOxigraphSupervisorHandoffV1 } from './managed-oxigraph-ownership-bridge.js';
 
 import {
@@ -7,28 +9,39 @@ import type { OxigraphSupervisorChildV1 } from './oxigraph-supervisor-child.js';
 import type { OxigraphSupervisorGenerationV1 } from './oxigraph-supervisor-generation.js';
 import type { OxigraphSupervisorTimersV1 } from './oxigraph-supervisor-lifecycle.js';
 import type { OxigraphSupervisorOwnershipControllerV1 } from './oxigraph-supervisor-ownership.js';
-import type {
-  OxigraphSupervisorRecoveryOperationsV1,
-} from './oxigraph-supervisor-recovery-operations.js';
-import type {
-  OxigraphSupervisorShutdownOperationsV1,
-} from './oxigraph-supervisor-shutdown-operations.js';
 import type { OxigraphSupervisorStateV1 } from './oxigraph-supervisor-state.js';
 
 interface OxigraphSupervisorHandoffDependenciesV1 {
-  readonly state: OxigraphSupervisorStateV1;
-  readonly ownership: OxigraphSupervisorOwnershipControllerV1;
+  readonly state: Pick<
+    OxigraphSupervisorStateV1,
+    | 'tryResumeRetiredHandoff'
+    | 'assertHandoffRetirementAllowed'
+    | 'beginHandoffRetirement'
+    | 'markClosed'
+    | 'markHandoffRetired'
+    | 'beginCleanGeneration'
+    | 'cancelCleanGeneration'
+  >;
+  readonly ownership: Pick<
+    OxigraphSupervisorOwnershipControllerV1,
+    'snapshot' | 'invalidate'
+  >;
   readonly child: Pick<
     OxigraphSupervisorChildV1,
     'current' | 'markHandoffRetiring' | 'awaitExit' | 'detach' | 'signal'
   >;
-  readonly generation: OxigraphSupervisorGenerationV1;
+  readonly generation: Pick<OxigraphSupervisorGenerationV1, 'spawnAndProve'>;
   readonly timers: Pick<
     OxigraphSupervisorTimersV1,
     'armHandoffAbandon' | 'clearHandoffAbandon' | 'clearRevive'
   >;
-  readonly recovery: OxigraphSupervisorRecoveryOperationsV1;
-  readonly shutdown: OxigraphSupervisorShutdownOperationsV1;
+  readonly reviveLocked: () => Promise<void>;
+  readonly scheduleRevive: (reason: string) => void;
+  readonly proveManagedPortRelease: (
+    exited: ChildProcess | null,
+    absoluteDeadlineMs?: number,
+  ) => Promise<boolean>;
+  readonly beginTermination: () => void;
   readonly abandonMs: number;
   readonly bind: string;
   readonly log: (message: string) => void;
@@ -39,14 +52,10 @@ interface OxigraphSupervisorHandoffDependenciesV1 {
 /** Two-phase clean-generation handoff and its abandoned-handoff backstop. */
 export class OxigraphSupervisorHandoffOperationsV1 {
   readonly #dependencies: OxigraphSupervisorHandoffDependenciesV1;
-  readonly #recovery: OxigraphSupervisorRecoveryOperationsV1;
-  readonly #shutdown: OxigraphSupervisorShutdownOperationsV1;
   readonly #abandonMs: number;
 
   constructor(dependencies: OxigraphSupervisorHandoffDependenciesV1) {
     this.#dependencies = dependencies;
-    this.#recovery = dependencies.recovery;
-    this.#shutdown = dependencies.shutdown;
     this.#abandonMs = dependencies.abandonMs;
   }
 
@@ -60,14 +69,14 @@ export class OxigraphSupervisorHandoffOperationsV1 {
   }
 
   #armAbandonBackstop(): void {
-    const { state, timers, bind, log, runExclusive } = this.#dependencies;
+    const { state, timers, bind, log, runExclusive, reviveLocked } = this.#dependencies;
     timers.armHandoffAbandon(this.#abandonMs, () => {
       if (!state.tryResumeRetiredHandoff()) return;
       log(
         `[oxigraph] no clean generation was bound within ${this.#abandonMs}ms of retiring ` +
           `the child on ${bind}; resuming ordinary supervision.`,
       );
-      void runExclusive(() => this.#recovery.reviveLocked()).catch((error: unknown) => {
+      void runExclusive(reviveLocked).catch((error: unknown) => {
         log(`[oxigraph] abandoned-handoff recovery failed: ${(error as Error).message}`);
       });
     });
@@ -94,8 +103,8 @@ export class OxigraphSupervisorHandoffOperationsV1 {
       await child.awaitExit(current, absoluteDeadlineMs);
     }
     if (current) child.detach(current);
-    if (!(await this.#shutdown.proveManagedPortRelease(current, absoluteDeadlineMs))) {
-      this.#shutdown.beginTermination();
+    if (!(await this.#dependencies.proveManagedPortRelease(current, absoluteDeadlineMs))) {
+      this.#dependencies.beginTermination();
       state.markClosed();
       log(
         `[oxigraph] FATAL: could not prove ${bind} was released after retiring the managed ` +
@@ -146,7 +155,7 @@ export class OxigraphSupervisorHandoffOperationsV1 {
     } catch (error) {
       child.signal('SIGKILL');
       state.cancelCleanGeneration();
-      this.#recovery.scheduleRevive(`clean-generation start failed on ${bind}`);
+      this.#dependencies.scheduleRevive(`clean-generation start failed on ${bind}`);
       throw error;
     }
     log(`[oxigraph] clean child generation ${generationId} bound on ${bind}.`);
