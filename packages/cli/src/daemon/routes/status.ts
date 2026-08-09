@@ -859,6 +859,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     const allConns = agent.node.libp2p.getConnections();
     const uniquePeers = new Set(allConns.map((c) => c.remotePeer.toString()));
     const chainConf = resolveChainConfig(config, network);
+    const rpcEndpointCount = chainConf?.rpcUrl
+      ? resolveRpcUrls(chainConf.rpcUrl, chainConf.rpcUrls).length
+      : 0;
     const now = Date.now();
 
     return jsonResponse(res, 200, {
@@ -874,9 +877,9 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       chain: chainConf
         ? {
             chainId: chainConf.chainId ?? null,
-            rpcUrl: chainConf.rpcUrl,
-            rpcUrls: chainConf.rpcUrls ?? [],
-            hubAddress: chainConf.hubAddress,
+            configured: Boolean(chainConf.rpcUrl && chainConf.hubAddress),
+            rpcEndpointCount,
+            hubConfigured: Boolean(chainConf.hubAddress),
           }
         : null,
       peers: uniquePeers.size,

@@ -62,6 +62,7 @@ const DISABLED_RFC64_PUBLIC_CATALOG: RequestContext['rfc64PublicCatalog'] = {
 async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
+  requestPath = '/api/status',
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -103,7 +104,7 @@ async function requestStatusWithAgent(
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   try {
     const address = server.address() as AddressInfo;
-    const response = await fetch(`http://127.0.0.1:${address.port}/api/status`);
+    const response = await fetch(`http://127.0.0.1:${address.port}${requestPath}`);
     return { status: response.status, body: await response.json() };
   } finally {
     await new Promise<void>((resolve, reject) => {
@@ -191,6 +192,39 @@ describe('/api/status + /api/chain/rpc-health (real daemon, real chain)', () => 
     for (const probe of body.rpcs) {
       expect(probe).not.toHaveProperty('rpcUrl');
     }
+  });
+});
+
+describe('/api/info chain sanitization', () => {
+  it('never serializes configured RPC endpoint credentials when API auth is disabled', async () => {
+    const credentialSentinel = 'UNIT_TEST_RPC_CREDENTIAL_MUST_NOT_LEAK';
+    const response = await requestStatusWithAgent(
+      {},
+      {
+        auth: { enabled: false },
+        chain: {
+          type: 'evm',
+          rpcUrl: `https://tenant:${credentialSentinel}@primary.invalid/v1/${credentialSentinel}`,
+          rpcUrls: [`https://backup.invalid/rpc?token=${credentialSentinel}`],
+          hubAddress: `0x${'11'.repeat(20)}`,
+          chainId: 'base:84532',
+        },
+      },
+      '/api/info',
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.auth).toBe(false);
+    expect(response.body.chain).toEqual({
+      chainId: 'base:84532',
+      configured: true,
+      rpcEndpointCount: 2,
+      hubConfigured: true,
+    });
+    expect(response.body.chain).not.toHaveProperty('rpcUrl');
+    expect(response.body.chain).not.toHaveProperty('rpcUrls');
+    expect(JSON.stringify(response.body)).not.toContain(credentialSentinel);
+    expect(JSON.stringify(response.body.chain)).not.toContain('://');
   });
 });
 
