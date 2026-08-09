@@ -113,8 +113,7 @@ export function readSparqlPrefixName(
   while (colon < sparql.length && isSparqlPrefixLabelChar(sparql[colon])) colon++;
   if (sparql[colon] !== ':') return null;
 
-  let end = colon + 1;
-  while (end < sparql.length && isSparqlPrefixedLocalChar(sparql[end])) end++;
+  const end = readSparqlPrefixedLocalEnd(sparql, colon + 1);
 
   return {
     prefix: sparql.slice(start, colon),
@@ -133,15 +132,70 @@ function isSparqlPrefixLabelChar(ch: string | undefined): ch is string {
   );
 }
 
-function isSparqlPrefixedLocalChar(ch: string | undefined): ch is string {
-  return !!ch &&
-    !/\s/.test(ch) &&
-    ch !== '{' &&
-    ch !== '}' &&
-    ch !== '(' &&
-    ch !== ')' &&
-    ch !== ';' &&
-    ch !== ',';
+const SPARQL_PN_LOCAL_ESCAPED_CHARS = new Set(
+  [..."_~.-!$&'()*+,;=/?#@%"],
+);
+
+function readSparqlPrefixedLocalEnd(sparql: string, start: number): number {
+  let cursor = start;
+  let lastTerminalEnd = start;
+  let localPosition = 0;
+
+  while (cursor < sparql.length) {
+    const ch = sparql[cursor];
+    if (
+      ch === '\\'
+      && SPARQL_PN_LOCAL_ESCAPED_CHARS.has(sparql[cursor + 1] ?? '')
+    ) {
+      cursor += 2;
+      lastTerminalEnd = cursor;
+      localPosition++;
+      continue;
+    }
+    if (
+      ch === '%'
+      && isAsciiHexDigit(sparql[cursor + 1])
+      && isAsciiHexDigit(sparql[cursor + 2])
+    ) {
+      cursor += 3;
+      lastTerminalEnd = cursor;
+      localPosition++;
+      continue;
+    }
+
+    const next = readCodePoint(sparql, cursor);
+    if (!next) break;
+    const allowed = localPosition === 0
+      ? isSparqlPnLocalInitialCodePoint(next.codePoint)
+      : isSparqlPnLocalContinuationCodePoint(next.codePoint);
+    if (!allowed) break;
+
+    cursor += next.width;
+    localPosition++;
+    // A raw dot is legal inside PN_LOCAL, but not as its terminal character.
+    if (next.codePoint !== 0x2e) lastTerminalEnd = cursor;
+  }
+
+  return lastTerminalEnd;
+}
+
+function isSparqlPnLocalInitialCodePoint(codePoint: number): boolean {
+  return isSparqlPnCharsUCodePoint(codePoint)
+    || isAsciiDigitCodePoint(codePoint)
+    || codePoint === 0x3a;
+}
+
+function isSparqlPnLocalContinuationCodePoint(codePoint: number): boolean {
+  return isSparqlPnLocalInitialCodePoint(codePoint)
+    || codePoint === 0x2d
+    || codePoint === 0x2e
+    || codePoint === 0x00b7
+    || (codePoint >= 0x0300 && codePoint <= 0x036f)
+    || (codePoint >= 0x203f && codePoint <= 0x2040);
+}
+
+function isAsciiHexDigit(ch: string | undefined): boolean {
+  return !!ch && /[0-9A-Fa-f]/.test(ch);
 }
 
 function readCodePoint(src: string, index: number): { codePoint: number; width: number } | null {

@@ -44,7 +44,6 @@ import {
 import {
   findMatchingSparqlCloseBrace as findMatchingCloseBrace,
   readNextSparqlCodeToken,
-  readStandaloneSparqlWord,
   readSparqlPrefixName,
   type SparqlPrefixName,
   readSparqlVariable,

@@ -1359,6 +1359,21 @@ describe('DKGQueryEngine', () => {
     )).resolves.toMatchObject({ bindings: expect.any(Array) });
   });
 
+  it('ignores GRAPH text in a comment adjacent to a prefixed name', async () => {
+    await store.insert([
+      q(ENTITY, 'http://example.com/name', '"AdjacentComment"'),
+    ]);
+
+    const result = await engine.query(
+      `PREFIX ex: <http://example.com/>
+       SELECT ?name WHERE { ?s ex:name ?name# GRAPH <did:dkg:context-graph:forbidden>
+       . }`,
+      { contextGraphId: CONTEXT_GRAPH },
+    );
+
+    expect(result.bindings).toContainEqual({ name: '"AdjacentComment"' });
+  });
+
   it('allows scoped queries with hyphenated graph/from prefix labels', async () => {
     await store.insert([
       q(ENTITY, 'http://example.com/name', '"HyphenatedPrefixPredicate"'),
