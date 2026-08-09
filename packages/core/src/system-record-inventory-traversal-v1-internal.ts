@@ -458,6 +458,12 @@ function createSystemRecordInventoryTraversalStepperV1<
             throw new Error('inventory loader returned an invalid rejection');
           }
           if (
+            rejected.rejection !== 'transport'
+            && (rejected.wireBytes as number) < 6
+          ) {
+            throw new Error('inventory loader returned invalid actual wire accounting');
+          }
+          if (
             loadStrategy.advanceRootProbeOnNotFound(work)
             && rejected.rejection === 'not-found'
             && advanceRootProbe(work)

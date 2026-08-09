@@ -260,6 +260,25 @@ describe('system-record immutable B+tree objects', () => {
       sliceRows: [], rejection: 'transport',
     });
 
+    const zeroByteFramedRejection = createSystemRecordInventoryRowTraversalV1(
+      snapshot.descriptor,
+    );
+    await expect(zeroByteFramedRejection.advance(async () => ({
+      outcome: 'rejected', wireBytes: 0, rejection: 'busy',
+    }), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).resolves.toMatchObject({
+      status: 'failed', requests: 1, wireBytes: 0,
+      progress: { totalValidatedRows: 0, totalValidatedLeaves: 0 },
+      sliceRows: [],
+      failure: {
+        reason: 'invalid-response',
+        message: expect.stringMatching(/wire accounting/),
+      },
+    });
+
     const aborted = createSystemRecordInventoryRowTraversalV1(snapshot.descriptor);
     const controller = new AbortController();
     const requested = Promise.withResolvers<void>();
