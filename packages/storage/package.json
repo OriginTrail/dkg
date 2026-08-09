@@ -4,6 +4,16 @@
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./internal/system-record-lane-forwarder-v1": {
+      "types": "./dist/system-record-lane-forwarder-v1-internal.d.ts",
+      "default": "./dist/system-record-lane-forwarder-v1-internal.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "vitest run",
