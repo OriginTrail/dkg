@@ -3,7 +3,10 @@
 import { dirname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { analyzeSparqlOperation } from '../packages/core/dist/sparql-operation.js';
+import {
+  analyzeSparqlOperation,
+  recognizedReadOnlySparqlForm,
+} from '../packages/core/dist/sparql-operation.js';
 import ts from 'typescript';
 
 const REPOSITORY_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -70,16 +73,95 @@ function methodAccess(expression) {
   return null;
 }
 
-function staticSparql(expression) {
-  return expression && (
-    ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)
-  ) ? expression.text : null;
+function staticSparql(expression, checker, seen = new Set()) {
+  if (!expression || seen.has(expression)) return null;
+  const path = new Set(seen);
+  path.add(expression);
+  if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) {
+    return expression.text;
+  }
+  if (
+    ts.isParenthesizedExpression(expression)
+    || ts.isAsExpression(expression)
+    || ts.isTypeAssertionExpression(expression)
+    || ts.isSatisfiesExpression(expression)
+  ) {
+    return staticSparql(expression.expression, checker, path);
+  }
+  if (
+    ts.isBinaryExpression(expression)
+    && expression.operatorToken.kind === ts.SyntaxKind.PlusToken
+  ) {
+    const left = staticSparql(expression.left, checker, path);
+    const right = staticSparql(expression.right, checker, path);
+    return left === null || right === null ? null : left + right;
+  }
+  if (ts.isTemplateExpression(expression)) {
+    let value = expression.head.text;
+    for (const span of expression.templateSpans) {
+      const substitution = staticSparql(span.expression, checker, path);
+      if (substitution === null) return null;
+      value += substitution + span.literal.text;
+    }
+    return value;
+  }
+  if (ts.isIdentifier(expression)) {
+    const declaration = checker.getSymbolAtLocation(expression)?.valueDeclaration;
+    if (
+      declaration
+      && ts.isVariableDeclaration(declaration)
+      && declaration.initializer
+      && ts.isVariableDeclarationList(declaration.parent)
+      && (declaration.parent.flags & ts.NodeFlags.Const) !== 0
+    ) {
+      return staticSparql(declaration.initializer, checker, path);
+    }
+  }
+  return null;
 }
 
 function isTripleStoreReceiver(checker, receiver, tripleStoreType) {
   const type = checker.getNonNullableType(checker.getTypeAtLocation(receiver));
   if ((type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Unknown)) !== 0) return false;
   return checker.isTypeAssignableTo(type, tripleStoreType);
+}
+
+function selfTestStaticSparql() {
+  const fileName = '/managed-store-raw-channel-fixture.ts';
+  const sourceFile = ts.createSourceFile(fileName, `
+    const graph = 'urn:test:g';
+    const variableBacked = 'DELETE WHERE { ?s <urn:p> ?o }';
+    inspect(variableBacked);
+    inspect(\`DELETE WHERE { GRAPH <\${graph}> { ?s <urn:p> ?o } }\`);
+    inspect('SELECT ?s WHERE { ?s <urn:p> ?o }' + '; DROP ALL');
+  `, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  const options = { target: ts.ScriptTarget.ES2022, noLib: true };
+  const host = ts.createCompilerHost(options);
+  host.getSourceFile = (candidate) => candidate === fileName ? sourceFile : undefined;
+  host.fileExists = (candidate) => candidate === fileName;
+  host.readFile = (candidate) => candidate === fileName ? sourceFile.text : undefined;
+  const program = ts.createProgram({ rootNames: [fileName], options, host });
+  const checker = program.getTypeChecker();
+  const resolved = [];
+  const visit = (node) => {
+    if (
+      ts.isCallExpression(node)
+      && ts.isIdentifier(node.expression)
+      && node.expression.text === 'inspect'
+    ) {
+      resolved.push(staticSparql(node.arguments[0], checker));
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  const expected = [
+    'DELETE WHERE { ?s <urn:p> ?o }',
+    'DELETE WHERE { GRAPH <urn:test:g> { ?s <urn:p> ?o } }',
+    'SELECT ?s WHERE { ?s <urn:p> ?o }; DROP ALL',
+  ];
+  if (JSON.stringify(resolved) !== JSON.stringify(expected)) {
+    throw new Error(`static SPARQL resolver self-test failed: ${JSON.stringify(resolved)}`);
+  }
 }
 
 function scanPackage(name, configPath) {
@@ -89,6 +171,8 @@ function scanPackage(name, configPath) {
   const sourceRoot = normalized(resolve(REPOSITORY_ROOT, `packages/${name}/src`));
   const violations = [];
   let recognizedCalls = 0;
+  let staticallyAnalyzedQueries = 0;
+  let dynamicQueries = 0;
   let scannedFiles = 0;
 
   for (const sourceFile of program.getSourceFiles()) {
@@ -109,12 +193,15 @@ function scanPackage(name, configPath) {
           if (access.method === 'update') {
             violations.push(`${location}: raw TripleStore.update()`);
           } else {
-            const sparql = staticSparql(node.arguments[0]);
+            const sparql = staticSparql(node.arguments[0], checker);
             if (sparql !== null) {
+              staticallyAnalyzedQueries += 1;
               const analysis = analyzeSparqlOperation(sparql);
-              if (analysis.operation.kind !== 'read' || analysis.mutatingKeyword !== null) {
+              if (recognizedReadOnlySparqlForm(analysis) === null) {
                 violations.push(`${location}: non-read static TripleStore.query()`);
               }
+            } else {
+              dynamicQueries += 1;
             }
           }
         }
@@ -127,15 +214,25 @@ function scanPackage(name, configPath) {
   if (recognizedCalls === 0) {
     violations.push(`${name}: no typed TripleStore calls were recognized; architecture gate is inert`);
   }
-  return { name, recognizedCalls, scannedFiles, violations };
+  return {
+    name,
+    recognizedCalls,
+    staticallyAnalyzedQueries,
+    dynamicQueries,
+    scannedFiles,
+    violations,
+  };
 }
 
+selfTestStaticSparql();
 const results = PACKAGE_CONFIGS.map(([name, config]) => scanPackage(name, config));
 const violations = results.flatMap((result) => result.violations);
 for (const result of results) {
   console.log(
     `[managed-store-raw-channels] ${result.name}: ` +
-    `${result.scannedFiles} files, ${result.recognizedCalls} typed call(s)`,
+    `${result.scannedFiles} files, ${result.recognizedCalls} typed call(s), ` +
+    `${result.staticallyAnalyzedQueries} static query program(s), ` +
+    `${result.dynamicQueries} runtime-guarded dynamic query call(s)`,
   );
 }
 if (violations.length > 0) {

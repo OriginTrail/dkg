@@ -188,6 +188,19 @@ export function analyzeSparqlOperation(sparql: string): SparqlOperationAnalysis 
   };
 }
 
+/**
+ * Canonical read-only admission policy for already-analyzed SPARQL.
+ * A recognized read form is safe only when no standalone executable update
+ * keyword remains elsewhere in the program (for example after a semicolon).
+ */
+export function recognizedReadOnlySparqlForm(
+  analysis: SparqlOperationAnalysis,
+): SparqlReadOnlyOperation | null {
+  return analysis.operation.kind === 'read' && analysis.mutatingKeyword === null
+    ? analysis.operation.form
+    : null;
+}
+
 export function classifySparqlOperation(sparql: string): SparqlOperationClassification {
   return analyzeSparqlOperation(sparql).operation;
 }

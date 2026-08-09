@@ -6,10 +6,12 @@ import {
   type QueryOptions as StoreQueryOptions,
 } from '@origintrail-official/dkg-storage';
 import {
+  analyzeSparqlOperation,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  recognizedReadOnlySparqlForm,
 } from '@origintrail-official/dkg-core';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 import type {
@@ -2360,6 +2362,15 @@ describe('validateReadOnlySparql', () => {
     ['language tag', 'SELECT ?s WHERE { ?s <urn:p> "value"@add }'],
   ])('allows update words used as a legal %s', (_name, sparql) => {
     expect(validateReadOnlySparql(sparql).safe).toBe(true);
+    expect(recognizedReadOnlySparqlForm(analyzeSparqlOperation(sparql))).toBe('SELECT');
+  });
+
+  it('gives read-then-update text no recognized read-only form', () => {
+    const analysis = analyzeSparqlOperation(
+      'SELECT ?s WHERE { GRAPH <urn:g> { ?s ?p ?o } }; DROP ALL',
+    );
+
+    expect(recognizedReadOnlySparqlForm(analysis)).toBeNull();
   });
 
   it('allows BASE declaration before SELECT', () => {

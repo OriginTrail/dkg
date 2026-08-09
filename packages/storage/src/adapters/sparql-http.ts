@@ -98,6 +98,7 @@ import {
   classifySparqlOperation,
   getMetrics,
   JAVA_WRITE_UTF_MAX_BYTES,
+  recognizedReadOnlySparqlForm,
 } from '@origintrail-official/dkg-core';
 import { createHash } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
@@ -156,7 +157,10 @@ interface ManagedMutationBindingV1 {
 
 type RawSparqlChannelV1 =
   | { readonly kind: 'update' }
-  | { readonly kind: 'query'; readonly analysis: ReturnType<typeof analyzeSparqlOperation> };
+  | {
+      readonly kind: 'query';
+      readonly readForm: ReturnType<typeof recognizedReadOnlySparqlForm>;
+    };
 
 export class ManagedOxigraphMutationUnavailableError extends Error {
   readonly code = 'MANAGED_OXIGRAPH_MUTATION_UNAVAILABLE' as const;
@@ -406,8 +410,7 @@ export class SparqlHttpStore implements TripleStore {
     if (this.ownershipLease === null) return;
     if (
       channel.kind === 'query'
-      && channel.analysis.operation.kind === 'read'
-      && channel.analysis.mutatingKeyword === null
+      && channel.readForm !== null
     ) return;
 
     const reason = channel.kind === 'update'
@@ -1312,7 +1315,10 @@ export class SparqlHttpStore implements TripleStore {
   async query(sparql: string, options?: SparqlHttpQueryOptions): Promise<QueryResult> {
     const analysis = analyzeSparqlOperation(sparql);
     const operation = analysis.operation;
-    this.assertRawSparqlChannelAvailable({ kind: 'query', analysis });
+    this.assertRawSparqlChannelAvailable({
+      kind: 'query',
+      readForm: recognizedReadOnlySparqlForm(analysis),
+    });
 
     return this.runStoreWork('query', options, async (lifecycleSignal) => {
       const effectiveOptions: SparqlHttpQueryOptions = {
