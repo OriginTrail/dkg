@@ -96,7 +96,7 @@ import {
   OPEN_ENROLLMENT_MAX_APPROVALS_PER_HOUR,
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, supportsTripleStoreCapability, tryReplaceSubjectAtomically, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, supportsReplaceSubjectPredicatesAtomically, tryReplaceSubjectAtomically, tryReplaceSubjectPredicatesAtomically, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig } from '@origintrail-official/dkg-storage';
 import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -1990,10 +1990,7 @@ export class JoinRequestMethods extends DKGAgentBase {
 
     // Refuse to cross the membership boundary on a custom adapter that cannot
     // atomically replace the moderation predicates after the invite commits.
-    if (
-      !supportsTripleStoreCapability(this.store, 'structuredMutation')
-      && !supportsTripleStoreCapability(this.store, 'update')
-    ) {
+    if (!supportsReplaceSubjectPredicatesAtomically(this.store)) {
       throw new Error(
         'Join approval requires atomic subject-predicate replacement support from the configured triple store.',
       );

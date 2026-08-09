@@ -30,6 +30,7 @@ export {
   tryStructuredMutation,
   tryPruneRankedSubjects,
   tryPruneLinkedRecordClosures,
+  supportsReplaceSubjectPredicatesAtomically,
   tryReplaceSubjectPredicatesAtomically,
   tryReplaceProjectionFromGraphAtomically,
   tryCopySubjectProjection,

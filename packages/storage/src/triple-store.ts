@@ -23,6 +23,7 @@ import {
 import {
   TRIPLE_STORE_CAPABILITY_SUPPORT,
   UnsupportedTripleStoreCapabilityError,
+  supportsTripleStoreCapability,
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 import { buildReplaceSubjectPredicatesUpdate } from './bounded-structured-mutation.js';
@@ -482,11 +483,23 @@ export async function tryPruneLinkedRecordClosures(
   return tryStructuredMutation(store, { kind: 'prune-linked-record-closures', input }, options);
 }
 
+/**
+ * Return whether the store can perform the atomic predicate transition used by
+ * {@link tryReplaceSubjectPredicatesAtomically}. The operation deliberately
+ * preserves the pre-capability `update()` contract for third-party stores, so
+ * callers should probe this operation rather than either transport primitive.
+ */
+export function supportsReplaceSubjectPredicatesAtomically(store: TripleStore): boolean {
+  return supportsTripleStoreCapability(store, 'structuredMutation')
+    || supportsTripleStoreCapability(store, 'update');
+}
+
 export async function tryReplaceSubjectPredicatesAtomically(
   store: TripleStore,
   input: ReplaceSubjectPredicatesInput,
   options: QueryOptions = {},
 ): Promise<boolean> {
+  if (!supportsReplaceSubjectPredicatesAtomically(store)) return false;
   if (await tryStructuredMutation(
     store,
     { kind: 'replace-subject-predicates', input },

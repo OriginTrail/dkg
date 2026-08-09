@@ -12,6 +12,7 @@ import {
   OxigraphStore,
   OxigraphWorkerStore,
   UnsupportedTripleStoreCapabilityError,
+  supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
   tryDeleteSubjects,
   type Quad,
@@ -227,6 +228,21 @@ describe('bounded structured mutation capabilities', () => {
       expect(Buffer.byteLength(buildCopySubjectProjectionUpdate(chunk), 'utf8'))
         .toBeLessThanOrEqual(BOUNDED_MUTATION_MAX_UPDATE_BYTES);
     }
+    for (let index = 0; index < chunks.length - 1; index++) {
+      expect(() => buildCopySubjectProjectionUpdate({
+        ...chunks[index],
+        roots: [...chunks[index].roots, chunks[index + 1].roots[0]],
+      })).toThrow(/exceeds/);
+    }
+  });
+
+  it('reports atomic predicate replacement support at the operation boundary', () => {
+    const updateOnly = new GraphSetIndexStore({ update: vi.fn() } as unknown as TripleStore);
+    const incapable = new GraphSetIndexStore({} as TripleStore);
+
+    expect(supportsTripleStoreCapability(updateOnly, 'structuredMutation')).toBe(false);
+    expect(supportsReplaceSubjectPredicatesAtomically(updateOnly)).toBe(true);
+    expect(supportsReplaceSubjectPredicatesAtomically(incapable)).toBe(false);
   });
 
   it('dispatches a max accepted subject set as one embedded update', async () => {

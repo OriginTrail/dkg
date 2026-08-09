@@ -24,6 +24,8 @@ export const BOUNDED_MUTATION_MAX_PREFIXES = 64;
 
 const UTF8 = new TextEncoder();
 
+class BoundedMutationBudgetError extends Error {}
+
 function unsupportedMutation(mutation: never): never {
   throw new Error(`Unsupported structured mutation kind ${String((mutation as { kind?: unknown })?.kind)}`);
 }
@@ -106,7 +108,9 @@ function assertOperandBudget(label: string, values: readonly string[]): void {
   for (const value of values) {
     bytes += UTF8.encode(value).byteLength;
     if (bytes > BOUNDED_MUTATION_MAX_OPERAND_BYTES) {
-      throw new Error(`${label} exceeds ${BOUNDED_MUTATION_MAX_OPERAND_BYTES} operand bytes`);
+      throw new BoundedMutationBudgetError(
+        `${label} exceeds ${BOUNDED_MUTATION_MAX_OPERAND_BYTES} operand bytes`,
+      );
     }
   }
 }
@@ -114,7 +118,7 @@ function assertOperandBudget(label: string, values: readonly string[]): void {
 export function assertBoundedStructuredUpdate(label: string, update: string): string {
   const bytes = UTF8.encode(update).byteLength;
   if (bytes > BOUNDED_MUTATION_MAX_UPDATE_BYTES) {
-    throw new Error(
+    throw new BoundedMutationBudgetError(
       `${label} serialized update exceeds ${BOUNDED_MUTATION_MAX_UPDATE_BYTES} UTF-8 bytes`,
     );
   }
@@ -538,58 +542,38 @@ export function chunkCopySubjectProjectionInput(
   input: CopySubjectProjectionInput,
 ): CopySubjectProjectionInput[] {
   const roots = uniqueIris(input.roots, 'copySubjectProjection.roots');
-  const first = normalizeCopySubjectProjectionInput({ ...input, roots: [roots[0]] });
-  const firstRootBytes = UTF8.encode(first.roots[0]).byteLength;
-  const fixedOperandBytes = [
-    ...first.sourceGraphUris,
-    first.targetGraphUri,
-    first.descendantSuffix,
-    ...first.excludedPredicates,
-  ].reduce((total, value) => total + UTF8.encode(value).byteLength, 0);
-  const fixedUpdateBytes = UTF8.encode(buildCopySubjectProjectionUpdate(first)).byteLength
-    - firstRootBytes
-    - 2; // `<` + `>` around the first root; separators are counted per chunk below.
-
+  const normalized = normalizeCopySubjectProjectionInput({ ...input, roots: [roots[0]] });
   const chunks: CopySubjectProjectionInput[] = [];
-  let chunkRoots: string[] = [];
-  let chunkOperandBytes = fixedOperandBytes;
-  let chunkRootTokensBytes = 0;
 
-  const flush = (): void => {
-    if (chunkRoots.length === 0) return;
-    const chunk = { ...first, roots: chunkRoots };
-    // Keep the size accounting coupled to the canonical serializer so a
-    // future template change cannot silently emit an oversized descriptor.
-    buildCopySubjectProjectionUpdate(chunk);
-    chunks.push(chunk);
-    chunkRoots = [];
-    chunkOperandBytes = fixedOperandBytes;
-    chunkRootTokensBytes = 0;
-  };
+  for (let start = 0; start < roots.length;) {
+    let low = start + 1;
+    let high = roots.length;
+    let accepted: CopySubjectProjectionInput | undefined;
 
-  for (const root of roots) {
-    const rootBytes = UTF8.encode(root).byteLength;
-    const tokenBytes = rootBytes + 2 + (chunkRoots.length === 0 ? 0 : 1);
-    const wouldOverflow = chunkRoots.length > 0 && (
-      chunkOperandBytes + rootBytes > BOUNDED_MUTATION_MAX_OPERAND_BYTES
-      || fixedUpdateBytes + chunkRootTokensBytes + tokenBytes > BOUNDED_MUTATION_MAX_UPDATE_BYTES
-    );
-    if (wouldOverflow) flush();
+    // Use the canonical normalizer and serializer as the only size model. A
+    // binary search keeps planning bounded for large root sets while still
+    // selecting the largest ordered prefix that fits both byte limits.
+    while (low <= high) {
+      const end = low + Math.floor((high - low) / 2);
+      const candidate = { ...normalized, roots: roots.slice(start, end) };
+      try {
+        buildCopySubjectProjectionUpdate(candidate);
+        accepted = candidate;
+        low = end + 1;
+      } catch (error) {
+        if (!(error instanceof BoundedMutationBudgetError)) throw error;
+        high = end - 1;
+      }
+    }
 
-    const firstTokenBytes = rootBytes + 2;
-    if (
-      fixedOperandBytes + rootBytes > BOUNDED_MUTATION_MAX_OPERAND_BYTES
-      || fixedUpdateBytes + firstTokenBytes > BOUNDED_MUTATION_MAX_UPDATE_BYTES
-    ) {
-      // Reuse the canonical error text for an individually unrepresentable root.
-      buildCopySubjectProjectionUpdate({ ...first, roots: [root] });
+    if (!accepted) {
+      // Surface the canonical limit error for an individually unrepresentable root.
+      buildCopySubjectProjectionUpdate({ ...normalized, roots: [roots[start]] });
       throw new Error('copySubjectProjection root cannot fit the bounded mutation budget');
     }
-    chunkRoots.push(root);
-    chunkOperandBytes += rootBytes;
-    chunkRootTokensBytes += rootBytes + 2 + (chunkRoots.length === 1 ? 0 : 1);
+    chunks.push(accepted);
+    start += accepted.roots.length;
   }
-  flush();
   return chunks;
 }
 
