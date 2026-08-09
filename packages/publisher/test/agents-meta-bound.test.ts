@@ -247,6 +247,45 @@ describe('agents/_meta bound at the residual load-bearing write sites (#1233)', 
     expect(await base.countQuads(metaOf(AGENTS)), 'the prior record was deleted').toBe(0);
   });
 
+  it('keeps count-free atomic pruning on an update-only store', async () => {
+    const base = new OxigraphStore();
+    const agent = agentDid(0xa1);
+    const priorUal = mkUal('update-only-prior');
+    const currentUal = mkUal('update-only-current');
+    await base.insert([
+      ...metaQuadsFor(AGENTS, agent, priorUal),
+      ...metaQuadsFor(AGENTS, agent, currentUal),
+    ]);
+
+    const { store: counted, calls } = makeCountingStore(base);
+    const updateOnly = new Proxy(counted, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') return undefined;
+        return Reflect.get(target, property, receiver);
+      },
+    }) as unknown as OxigraphStore;
+
+    await pruneSupersededAgentRegistryMeta({
+      store: updateOnly,
+      contextGraphId: AGENTS,
+      metaGraph: metaOf(AGENTS),
+      rootEntities: [agent],
+      keepUal: currentUal,
+    });
+
+    expect(calls.structuredMutation).toBe(0);
+    expect(calls.update).toBe(1);
+    expect(calls.countQuads).toBe(0);
+    expect(calls.deleteByPattern).toBe(0);
+    expect(calls.deleteBySubjectPrefix).toBe(0);
+    expect(
+      await ask(base, `ASK { GRAPH <${metaOf(AGENTS)}> { <${priorUal}> ?p ?o } }`),
+    ).toBe(false);
+    expect(
+      await ask(base, `ASK { GRAPH <${metaOf(AGENTS)}> { <${currentUal}> ?p ?o } }`),
+    ).toBe(true);
+  });
+
   it('declares the exact target graph and roots through the structured capability', async () => {
     const base = new OxigraphStore();
     const agent = agentDid(0xa1);

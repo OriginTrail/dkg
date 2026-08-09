@@ -28,6 +28,7 @@ import {
 } from './unsupported-capability-error.js';
 import {
   buildCopySubjectProjectionUpdate,
+  buildPruneLinkedRecordClosuresUpdate,
   buildReplaceProjectionFromGraphUpdate,
   buildReplaceSubjectPredicatesUpdate,
 } from './bounded-structured-mutation.js';
@@ -484,7 +485,19 @@ export async function tryPruneLinkedRecordClosures(
   input: PruneLinkedRecordClosuresInput,
   options: QueryOptions = {},
 ): Promise<boolean> {
-  return tryStructuredMutation(store, { kind: 'prune-linked-record-closures', input }, options);
+  if (await tryStructuredMutation(
+    store,
+    { kind: 'prune-linked-record-closures', input },
+    options,
+  )) {
+    return true;
+  }
+  return tryUpdateWithTouchedGraphs(
+    store,
+    buildPruneLinkedRecordClosuresUpdate(input),
+    [input.graphUri],
+    options,
+  );
 }
 
 /**

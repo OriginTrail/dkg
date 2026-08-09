@@ -303,7 +303,7 @@ export async function pruneSupersededAgentRegistryMeta(opts: {
     log.warn(
       createOperationContext('system'),
       `agents/_meta bound SKIPPED for context graph "${contextGraphId}": the triple store ` +
-        `lacks structuredMutation(); the agents-registry _meta graph will grow UNBOUNDED ` +
+        `lacks structuredMutation() and update(); the agents-registry _meta graph will grow UNBOUNDED ` +
         `on this backend (#1233). Managed production stores expose this capability; this ` +
         `indicates a legacy or misconfigured store.`,
     );
