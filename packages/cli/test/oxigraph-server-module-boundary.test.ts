@@ -20,6 +20,18 @@ function imports(file: ts.SourceFile): string[] {
     .map((node) => (node.moduleSpecifier as ts.StringLiteral).text);
 }
 
+function moduleReferences(file: ts.SourceFile): string[] {
+  return file.statements.flatMap((node) => {
+    if (ts.isImportDeclaration(node)) {
+      return [(node.moduleSpecifier as ts.StringLiteral).text];
+    }
+    if (ts.isExportDeclaration(node) && node.moduleSpecifier) {
+      return [(node.moduleSpecifier as ts.StringLiteral).text];
+    }
+    return [];
+  });
+}
+
 function daemonSourceNames(): string[] {
   return readdirSync(new URL('../src/daemon/', import.meta.url))
     .filter((name) => name.endsWith('.ts'));
@@ -35,33 +47,14 @@ describe('managed Oxigraph supervisor module boundary', () => {
     ].sort());
   });
 
-  it('routes operation dependencies through the supervisor composer', () => {
-    const operationFiles = daemonSourceNames()
-      .filter((name) => /^oxigraph-supervisor-.+-operations\.ts$/u.test(name))
+  it('keeps the Storage ownership authority behind one daemon bridge', () => {
+    const authority =
+      '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
+    const authorityImporters = daemonSourceNames()
+      .filter((name) => moduleReferences(source(name)).includes(authority))
       .sort();
-    const operationSpecifiers = operationFiles
-      .map((name) => `./${name.replace(/\.ts$/u, '.js')}`)
-      .sort();
-    const supervisor = source('oxigraph-server-supervisor.ts');
-    expect(imports(supervisor).filter((specifier) => operationSpecifiers.includes(specifier)).sort())
-      .toEqual(operationSpecifiers);
 
-    const operationImporters = daemonSourceNames()
-      .filter((name) => imports(source(name)).some((specifier) =>
-        operationSpecifiers.includes(specifier)))
-      .sort();
-    expect(operationImporters).toEqual(['oxigraph-server-supervisor.ts']);
-
-    const forbiddenOperationDependencies = new Set([
-      './oxigraph-server.js',
-      './oxigraph-server-contract.js',
-      './oxigraph-server-supervisor.js',
-    ]);
-    for (const name of operationFiles) {
-      expect(imports(source(name)).filter((specifier) =>
-        forbiddenOperationDependencies.has(specifier)))
-        .toEqual([]);
-    }
+    expect(authorityImporters).toEqual(['managed-oxigraph-ownership-bridge.ts']);
   });
 
   it('models lifecycle and handoff transitions through legal intents', () => {
