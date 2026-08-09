@@ -10,10 +10,12 @@ import {
   UnsupportedTripleStoreCapabilityError,
   supportsReplaceSubjectPredicatesAtomically,
   supportsTripleStoreCapability,
+  runStructuredMutationWithCommittedEffects,
   tryCopySubjectProjection,
   tryDeleteSubjects,
   tryReplaceProjectionFromGraphAtomically,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '../src/index.js';
 import {
@@ -47,6 +49,97 @@ async function rows(store: TripleStore, graph: string): Promise<Array<Record<str
 }
 
 describe('bounded structured mutation capabilities', () => {
+  it('reports immutable graph effects only after a potentially mutating commit', async () => {
+    let release!: () => void;
+    const inFlight = new Promise<void>((resolve) => { release = resolve; });
+    const structuredMutation = vi.fn(async () => inFlight);
+    const store = { structuredMutation } as unknown as TripleStore;
+    const onCommitted = vi.fn();
+    const mutation = {
+      kind: 'copy-subject-projection' as const,
+      input: {
+        sourceGraphUris: [GRAPH],
+        targetGraphUri: OTHER_GRAPH,
+        roots: ['urn:test:a'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    };
+
+    const pending = runStructuredMutationWithCommittedEffects(
+      store,
+      mutation,
+      undefined,
+      onCommitted,
+    );
+    mutation.input.targetGraphUri = 'urn:test:redirected';
+    expect(onCommitted).not.toHaveBeenCalled();
+    release();
+    await pending;
+
+    expect(onCommitted).toHaveBeenCalledOnce();
+    const effects = onCommitted.mock.calls[0]![0];
+    expect(effects).toEqual({ touchedGraphs: [OTHER_GRAPH] });
+    expect(Object.isFrozen(effects)).toBe(true);
+    expect(Object.isFrozen(effects.touchedGraphs)).toBe(true);
+  });
+
+  it('does not report effects for structural no-ops or failed mutations', async () => {
+    const onCommitted = vi.fn();
+    const successful = { structuredMutation: vi.fn(async () => undefined) } as unknown as TripleStore;
+    await runStructuredMutationWithCommittedEffects(successful, {
+      kind: 'delete-subjects',
+      input: { graphUri: GRAPH, subjects: [] },
+    }, undefined, onCommitted);
+    expect(onCommitted).not.toHaveBeenCalled();
+
+    const failed = {
+      structuredMutation: vi.fn(async () => { throw new Error('commit failed'); }),
+    } as unknown as TripleStore;
+    await expect(runStructuredMutationWithCommittedEffects(failed, {
+      kind: 'delete-subjects',
+      input: { graphUri: GRAPH, subjects: ['urn:test:a'] },
+    }, undefined, onCommitted)).rejects.toThrow('commit failed');
+    expect(onCommitted).not.toHaveBeenCalled();
+  });
+
+  it('reports the canonical target graph for every structured mutation kind', async () => {
+    const mutations: Array<readonly [StructuredMutation, string]> = [
+      [{ kind: 'delete-subjects', input: {
+        graphUri: GRAPH, subjects: ['urn:test:a'],
+      } }, GRAPH],
+      [{ kind: 'prune-ranked-subjects', input: {
+        graphUri: GRAPH, subjectPrefix: 'urn:test:req:', eligibilityPredicate: STATUS,
+        eligibleObjects: ['approved'], primaryRankPredicate: DECIDED_AT,
+        secondaryRankPredicate: REQUESTED_AT, retainNewest: 1, maxDelete: 1,
+      } }, GRAPH],
+      [{ kind: 'prune-linked-record-closures', input: {
+        graphUri: GRAPH, matchObjectIris: ['urn:test:agent'], linkPredicates: [P],
+        recordParentPredicate: STATUS, descendantSeparator: '/',
+      } }, GRAPH],
+      [{ kind: 'replace-subject-predicates', input: {
+        graphUri: GRAPH, subject: 'urn:test:a', predicates: [P],
+        replacementQuads: [quad('urn:test:a', P, '"replacement"')],
+      } }, GRAPH],
+      [{ kind: 'replace-projection-from-graph', input: {
+        targetGraphUri: GRAPH, stagingGraphUri: 'urn:test:staging',
+        targetSubject: 'urn:test:a', preservedTargetPredicates: [],
+        targetSubjectPrefixes: [],
+      } }, GRAPH],
+      [{ kind: 'copy-subject-projection', input: {
+        sourceGraphUris: [GRAPH], targetGraphUri: OTHER_GRAPH,
+        roots: ['urn:test:a'], descendantSuffix: '/', excludedPredicates: [],
+      } }, OTHER_GRAPH],
+    ];
+    const store = { structuredMutation: vi.fn(async () => undefined) } as unknown as TripleStore;
+
+    for (const [mutation, expectedGraph] of mutations) {
+      const onCommitted = vi.fn();
+      await runStructuredMutationWithCommittedEffects(store, mutation, undefined, onCommitted);
+      expect(onCommitted).toHaveBeenCalledWith({ touchedGraphs: [expectedGraph] });
+    }
+  });
+
   it('deletes one explicit subject set and preserves co-located rows', async () => {
     const store = new OxigraphStore();
     await store.insert([

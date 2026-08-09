@@ -12,8 +12,11 @@ import type {
   ReplaceProjectionFromGraphInput,
   ReplaceSubjectPredicatesInput,
   StructuredMutation,
+  TripleStore,
+  QueryOptions,
 } from './triple-store.js';
 import { formatRdfObjectTerm } from './rdf-term-format.js';
+import { UnsupportedTripleStoreCapabilityError } from './unsupported-capability-error.js';
 
 export const BOUNDED_MUTATION_MAX_IRIS = 100_000;
 export const BOUNDED_MUTATION_MAX_PRUNE_DELETE = 10_000;
@@ -679,4 +682,35 @@ export function structuredMutationTouchedGraphs(mutation: StructuredMutation): r
 
 export function structuredMutationMightMutate(mutation: StructuredMutation): boolean {
   return mutation.kind !== 'delete-subjects' || mutation.input.subjects.length > 0;
+}
+
+/** Graph-scoped effects reported only after a structured mutation commits successfully. */
+export interface CommittedStructuredMutationEffects {
+  readonly touchedGraphs: readonly string[];
+}
+
+/**
+ * Execute one structured mutation and report its canonical graph effects after success.
+ *
+ * Effect scope is captured before the first await so a caller cannot redirect cache
+ * invalidation by mutating an input object while the backend operation is in flight.
+ * Structurally empty operations do not report a commit effect.
+ */
+export async function runStructuredMutationWithCommittedEffects(
+  store: Pick<TripleStore, 'structuredMutation'>,
+  mutation: StructuredMutation,
+  options: QueryOptions | undefined,
+  onCommitted: (effects: CommittedStructuredMutationEffects) => void,
+): Promise<void> {
+  const execute = store.structuredMutation;
+  if (typeof execute !== 'function') {
+    throw new UnsupportedTripleStoreCapabilityError(
+      'structuredMutation',
+      'runStructuredMutationWithCommittedEffects',
+    );
+  }
+  const mightMutate = structuredMutationMightMutate(mutation);
+  const touchedGraphs = Object.freeze([...structuredMutationTouchedGraphs(mutation)]);
+  await execute.call(store, mutation, options);
+  if (mightMutate) onCommitted(Object.freeze({ touchedGraphs }));
 }

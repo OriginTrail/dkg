@@ -15,7 +15,7 @@
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CHANGELOG_GRAPH,
   OxigraphStore,
@@ -149,5 +149,68 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     // entry created, no whole-cache churn on the hot job-write path.
     proj.markDirtyForGraph('urn:dkg:publisher:control-plane');
     expect(entries.has('urn:dkg:publisher:control-plane')).toBe(false);
+  });
+
+  it('invalidates structured mutation effects after success without decoding them in Agent', async () => {
+    let release!: () => void;
+    const inFlight = new Promise<void>((resolve) => { release = resolve; });
+    const inner = {
+      structuredMutation: vi.fn(async () => inFlight),
+    } as unknown as TripleStore;
+    const invalidate = vi.fn();
+    const markProjectionDirty = vi.fn();
+    const store = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      invalidate,
+      markProjectionDirty,
+    );
+    const mutation = {
+      kind: 'copy-subject-projection' as const,
+      input: {
+        sourceGraphUris: ['urn:test:source'],
+        targetGraphUri: 'urn:test:target',
+        roots: ['urn:test:root'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    };
+
+    const pending = store.structuredMutation!(mutation);
+    mutation.input.targetGraphUri = 'urn:test:redirected';
+    expect(invalidate).not.toHaveBeenCalled();
+    release();
+    await pending;
+
+    expect(invalidate).toHaveBeenCalledOnce();
+    expect(markProjectionDirty).toHaveBeenCalledOnce();
+    expect(markProjectionDirty).toHaveBeenCalledWith(undefined, 'urn:test:target');
+  });
+
+  it('does not invalidate structured mutation failures or structural no-ops', async () => {
+    const invalidate = vi.fn();
+    const markProjectionDirty = vi.fn();
+    const inner = {
+      structuredMutation: vi.fn(async () => undefined),
+    } as unknown as TripleStore;
+    const store = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      invalidate,
+      markProjectionDirty,
+    );
+
+    await store.structuredMutation!({
+      kind: 'delete-subjects',
+      input: { graphUri: 'urn:test:target', subjects: [] },
+    });
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(markProjectionDirty).not.toHaveBeenCalled();
+
+    inner.structuredMutation = vi.fn(async () => { throw new Error('commit failed'); });
+    await expect(store.structuredMutation!({
+      kind: 'delete-subjects',
+      input: { graphUri: 'urn:test:target', subjects: ['urn:test:subject'] },
+    })).rejects.toThrow('commit failed');
+    expect(invalidate).not.toHaveBeenCalled();
+    expect(markProjectionDirty).not.toHaveBeenCalled();
   });
 });
