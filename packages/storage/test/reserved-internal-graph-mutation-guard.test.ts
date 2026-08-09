@@ -316,6 +316,8 @@ describe('reserved internal graph mutation guard', () => {
         ['update-word variable', 'SELECT ?delete WHERE { ?s ?p ?delete }'],
         ['update-word prefix label', 'PREFIX insert: <urn:test:> SELECT ?s WHERE { ?s insert:p ?o }'],
         ['update-word prefixed local name', 'PREFIX ex: <urn:test:> SELECT ?s WHERE { ?s ex:drop ?o }'],
+        ['escaped update-word prefixed local name', 'PREFIX ex: <urn:test:> SELECT ?s WHERE { ?s ex:foo\\/drop ?o }'],
+        ['update-word prefixed local name with escaped suffix', 'PREFIX ex: <urn:test:> SELECT ?s WHERE { ?s ex:drop\\/tail ?o }'],
       ])('keeps recognized %s reads available on a leased store', async (_name, sparql) => {
         const fetchSpy = stubQueryFetch();
         await expect(newLeasedStore().query(sparql)).resolves.toBeDefined();

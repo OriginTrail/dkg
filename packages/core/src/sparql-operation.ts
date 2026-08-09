@@ -159,6 +159,25 @@ function isSparqlNameAdjacent(ch: string | undefined): boolean {
   );
 }
 
+// SPARQL 1.1 PN_LOCAL_ESC. Escaped punctuation remains part of a prefixed
+// local name, so an update word beside it is not an executable keyword.
+const PN_LOCAL_ESC_CHAR = /[_~.\-!$&'()*+,;=/?#@%]/u;
+
+function isEscapedPnLocalCharAt(src: string, index: number): boolean {
+  return index >= 1
+    && src[index - 1] === '\\'
+    && PN_LOCAL_ESC_CHAR.test(src[index] ?? '');
+}
+
+function isSparqlNameAdjacentBefore(src: string, index: number): boolean {
+  return isSparqlNameAdjacent(src[index - 1]) || isEscapedPnLocalCharAt(src, index - 1);
+}
+
+function isSparqlNameAdjacentAfter(src: string, index: number): boolean {
+  return isSparqlNameAdjacent(src[index])
+    || (src[index] === '\\' && PN_LOCAL_ESC_CHAR.test(src[index + 1] ?? ''));
+}
+
 function isSparqlWordStart(ch: string | undefined): boolean {
   return !!ch && (
     (ch >= 'A' && ch <= 'Z')
@@ -213,8 +232,8 @@ function findMutatingKeyword(stripped: string): string | null {
     const start = match.index;
     const end = start + match[0].length;
     if (
-      !isSparqlNameAdjacent(stripped[start - 1])
-      && !isSparqlNameAdjacent(stripped[end])
+      !isSparqlNameAdjacentBefore(stripped, start)
+      && !isSparqlNameAdjacentAfter(stripped, end)
     ) {
       return match[1] ?? null;
     }

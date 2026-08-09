@@ -2359,6 +2359,8 @@ describe('validateReadOnlySparql', () => {
     ['variable', 'SELECT ?delete WHERE { ?s ?p ?delete }'],
     ['prefix label', 'PREFIX insert: <urn:x:> SELECT ?s WHERE { ?s insert:p ?o }'],
     ['prefixed local name', 'PREFIX ex: <urn:x:> SELECT ?s WHERE { ?s ex:drop ?o }'],
+    ['escaped prefixed local name', 'PREFIX ex: <urn:x:> SELECT ?s WHERE { ?s ex:foo\\/drop ?o }'],
+    ['prefixed local name with escaped suffix', 'PREFIX ex: <urn:x:> SELECT ?s WHERE { ?s ex:drop\\/tail ?o }'],
     ['language tag', 'SELECT ?s WHERE { ?s <urn:p> "value"@add }'],
   ])('allows update words used as a legal %s', (_name, sparql) => {
     expect(validateReadOnlySparql(sparql).safe).toBe(true);
