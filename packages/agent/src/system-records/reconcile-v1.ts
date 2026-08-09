@@ -9,6 +9,7 @@ import {
   SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES,
   SYSTEM_RECORD_MAX_SLICE_ADVANCES,
   SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
+  SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
   createSystemRecordInventoryTraversalV1,
@@ -24,16 +25,28 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
-import type { AgentProfileReceiverV1 } from './receiver-v1.js';
+import type {
+  AgentProfileAdmittedSliceContextV1,
+  AgentProfileAdmittedSliceSnapshotV1,
+} from './admitted-slice-context-v1.js';
+import type {
+  AgentProfilePreparedActiveV1,
+  AgentProfileReceiverV1,
+} from './receiver-v1.js';
 import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
 
 export interface AgentProfileReconcilePermitV1 {
+  readonly admittedContext: AgentProfileAdmittedSliceContextV1;
   release(): void;
 }
 
 /** Shared lifecycle-owned, nonqueued admission. Implementations may gate many reconcilers. */
 export interface AgentProfileReconcileAdmissionV1 {
   tryAcquire(): AgentProfileReconcilePermitV1 | null;
+  /** Authenticate and inspect a context without extending its original deadline. */
+  inspectAdmittedContext(
+    context: AgentProfileAdmittedSliceContextV1,
+  ): AgentProfileAdmittedSliceSnapshotV1;
 }
 
 export interface AgentProfileInventoryLoadRequestV1 {
@@ -57,7 +70,6 @@ export interface CreateAgentProfileReconcilerOptionsV1 {
     signal: AbortSignal,
   ) => Promise<AgentProfileInventoryLoadResultV1>;
   readonly receiver: AgentProfileReceiverV1;
-  readonly nowMs?: () => number;
 }
 
 export type AgentProfileReconcileBlockReasonV1 =
@@ -116,9 +128,9 @@ export async function createAgentProfileReconcilerV1(
   const networkId = options.networkId;
   const providerPeerPublicKey = options.providerPeerPublicKey;
   const tryAcquire = options.admission.tryAcquire.bind(options.admission);
+  const inspectAdmittedContext = options.admission.inspectAdmittedContext.bind(options.admission);
   const loadInventoryObject = options.loadInventoryObject;
-  const receiveActive = options.receiver.receiveActive.bind(options.receiver);
-  const nowMs = options.nowMs ?? Date.now;
+  const prepareActive = options.receiver.prepareActive.bind(options.receiver);
   const rootEnvelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(
     canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(options.rootEnvelope),
   );
@@ -159,60 +171,115 @@ export async function createAgentProfileReconcilerV1(
     if (active) throw new Error('agent-profile reconciler already has an active slice');
     const permit = tryAcquire();
     if (permit === null) return result('deferred', currentPhase(), 0, 0, []);
-    const releasePermit = permit.release.bind(permit);
-
     active = true;
     peakActive = 1;
     const controller = new AbortController();
     activeController = controller;
     const onAbort = (): void => controller.abort(signal.reason);
-    signal.addEventListener('abort', onAbort, { once: true });
-    const admittedAtMs = readNow(nowMs);
-    continuationStartedAtMs ??= admittedAtMs;
-    const deadlineMs = admittedAtMs + SYSTEM_RECORD_SLICE_TIMEOUT_MS;
-    const timeout = setTimeout(
-      () => controller.abort(new Error('agent-profile reconcile slice deadline exceeded')),
-      SYSTEM_RECORD_SLICE_TIMEOUT_MS,
-    );
-    timeout.unref?.();
-    admittedSlices += 1;
+    let listening = false;
+    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      if (continuationLimitReached(admittedAtMs)) {
+      const admittedContext = permit.admittedContext;
+      const initial = readAdmittedSnapshot(inspectAdmittedContext, admittedContext);
+      const deadlineMs = initial.admittedDeadlineMs;
+      const nowMs = (): number => {
+        const snapshot = readAdmittedSnapshot(inspectAdmittedContext, admittedContext);
+        if (snapshot.admittedDeadlineMs !== deadlineMs) {
+          throw new Error('agent-profile admitted slice deadline changed after acquisition');
+        }
+        return snapshot.nowMs;
+      };
+      const remainingMs = deadlineMs - initial.nowMs;
+      if (remainingMs < 0 || remainingMs > SYSTEM_RECORD_SLICE_TIMEOUT_MS) {
+        throw new Error('agent-profile admitted slice deadline is outside its physical bound');
+      }
+      if (signal.aborted) controller.abort(signal.reason);
+      else {
+        signal.addEventListener('abort', onAbort, { once: true });
+        listening = true;
+      }
+      continuationStartedAtMs ??= initial.nowMs;
+      admittedSlices += 1;
+      if (remainingMs === 0) {
+        controller.abort(new Error('agent-profile reconcile slice deadline exceeded'));
+        return result('paused', currentPhase(), 0, 0, []);
+      }
+      timeout = setTimeout(
+        () => controller.abort(new Error('agent-profile reconcile slice deadline exceeded')),
+        remainingMs,
+      );
+      timeout.unref?.();
+      if (controller.signal.aborted) {
+        if (closed) return result('closed', currentPhase(), 0, 0, []);
+        signal.throwIfAborted();
+        return result('paused', currentPhase(), 0, 0, []);
+      }
+      if (continuationLimitReached(initial.nowMs)) {
         return result('blocked', currentPhase(), 0, 0, [], 'continuation-limit');
       }
       if (pendingRows.length > 0) {
-        return await applyPendingRows(controller.signal, deadlineMs);
+        return await applyPendingRows(
+          admittedContext,
+          signal,
+          controller.signal,
+          deadlineMs,
+          nowMs,
+        );
       }
 
       advances += 1;
-      const slice = await traversal.advance(
-        async (objectDigest, expectedKind, loadSignal, path) => {
-          const loaded = await loadInventoryObject(
-            Object.freeze({
-              rootDescriptorDigest: rootEnvelope.objectDigest,
-              objectDigest,
-              expectedKind,
-              path,
-            }),
-            loadSignal ?? controller.signal,
-          );
-          if (loaded.outcome === 'ok' && loaded.objectKind !== expectedKind) {
-            return Object.freeze({
-              outcome: 'rejected' as const,
-              wireBytes: loaded.wireBytes,
-              rejection: 'invalid-response' as const,
-            });
+      let slice: Awaited<ReturnType<typeof traversal.advance>>;
+      try {
+        slice = await traversal.advance(
+          async (objectDigest, expectedKind, loadSignal, path) => {
+            const loaded = await loadInventoryObject(
+              Object.freeze({
+                rootDescriptorDigest: rootEnvelope.objectDigest,
+                objectDigest,
+                expectedKind,
+                path,
+              }),
+              loadSignal ?? controller.signal,
+            );
+            if (loaded.outcome === 'ok' && loaded.objectKind !== expectedKind) {
+              return Object.freeze({
+                outcome: 'rejected' as const,
+                wireBytes: loaded.wireBytes,
+                rejection: 'invalid-response' as const,
+              });
+            }
+            return loaded;
+          },
+          {
+            signal: controller.signal,
+            maxRequests: 1,
+            maxWireBytes: SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
+            deadlineMs,
+            nowMs,
+          },
+        );
+      } catch (error) {
+        const failure = traversal.failureFor(error);
+        if (failure === undefined) throw error;
+        inventoryRequests += failure.requests;
+        inventoryWireBytes += failure.wireBytes;
+        if (failure.reason === 'invalid-slice') throw error;
+        if (failure.reason === 'aborted' || failure.reason === 'deadline') {
+          if (closed) {
+            return result('closed', currentPhase(), failure.requests, failure.wireBytes, []);
           }
-          return loaded;
-        },
-        {
-          signal: controller.signal,
-          maxRequests: 1,
-          maxWireBytes: SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
-          deadlineMs,
-          nowMs,
-        },
-      );
+          if (signal.aborted) throw signal.reason ?? error;
+          return result('paused', currentPhase(), failure.requests, failure.wireBytes, []);
+        }
+        return result(
+          'blocked',
+          'inventory',
+          failure.requests,
+          failure.wireBytes,
+          [],
+          inventoryFailureBlockReason(failure.reason),
+        );
+      }
       inventoryRequests += slice.requests;
       inventoryWireBytes += slice.wireBytes;
       if (slice.validatedLeaves > SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES) {
@@ -246,17 +313,20 @@ export async function createAgentProfileReconcilerV1(
       }
       return result('paused', currentPhase(), slice.requests, slice.wireBytes, []);
     } finally {
-      clearTimeout(timeout);
-      signal.removeEventListener('abort', onAbort);
+      if (timeout !== undefined) clearTimeout(timeout);
+      if (listening) signal.removeEventListener('abort', onAbort);
       activeController = undefined;
       active = false;
-      releasePermit();
+      permit.release();
     }
   }
 
   async function applyPendingRows(
+    admittedContext: AgentProfileAdmittedSliceContextV1,
+    callerSignal: AbortSignal,
     signal: AbortSignal,
     deadlineMs: number,
+    nowMs: () => number,
   ): Promise<AgentProfileReconcileSliceResultV1> {
     const outcomes: SystemRecordApplyOutcomeV1[] = [];
     while (pendingRows.length > 0 && outcomes.length < SYSTEM_RECORD_MAX_SLICE_ADVANCES) {
@@ -271,7 +341,26 @@ export async function createAgentProfileReconcilerV1(
       advances += 1;
       let outcome: SystemRecordApplyOutcomeV1;
       try {
-        outcome = await receiveActive(row, signal);
+        const preparation = await awaitAbortSafePreparation(
+          Promise.resolve().then(() => prepareActive(row, admittedContext, signal)),
+          signal,
+        );
+        if (preparation.status === 'aborted') {
+          if (closed) return result('closed', 'records', 0, 0, outcomes);
+          if (callerSignal.aborted) throw callerSignal.reason ?? new Error('reconcile aborted');
+          return result('paused', 'records', 0, 0, outcomes);
+        }
+        if (
+          signal.aborted
+          || deadlineMs - readNow(nowMs) < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
+        ) {
+          if (closed) return result('closed', 'records', 0, 0, outcomes);
+          if (callerSignal.aborted) throw callerSignal.reason ?? new Error('reconcile aborted');
+          return result('paused', 'records', 0, 0, outcomes);
+        }
+        // Do not race this promise. Dispatch may already have reached the atomic
+        // materializer and its returned promise is the physical settlement boundary.
+        outcome = await preparation.prepared.apply(signal);
       } catch (error) {
         if (outcomes.length > 0 && signal.aborted) {
           return result('paused', 'records', 0, 0, outcomes);
@@ -383,6 +472,76 @@ function inventoryBlockReason(
     case 'transport': return 'inventory-transport';
     case undefined: throw new Error('rejected inventory slice omitted its reason');
   }
+}
+
+function inventoryFailureBlockReason(
+  reason: 'not-found' | 'invalid-response' | 'transport',
+): AgentProfileReconcileBlockReasonV1 {
+  switch (reason) {
+    case 'not-found': return 'inventory-not-found';
+    case 'invalid-response': return 'inventory-invalid-response';
+    case 'transport': return 'inventory-transport';
+  }
+}
+
+function readAdmittedSnapshot(
+  inspect: (
+    context: AgentProfileAdmittedSliceContextV1,
+  ) => AgentProfileAdmittedSliceSnapshotV1,
+  context: AgentProfileAdmittedSliceContextV1,
+): AgentProfileAdmittedSliceSnapshotV1 {
+  const snapshot = inspect(context);
+  if (snapshot === null || typeof snapshot !== 'object') {
+    throw new Error('agent-profile admission returned an invalid context snapshot');
+  }
+  const nowMs = snapshot.nowMs;
+  const admittedDeadlineMs = snapshot.admittedDeadlineMs;
+  if (
+    !Number.isSafeInteger(nowMs)
+    || nowMs < 0
+    || !Number.isSafeInteger(admittedDeadlineMs)
+    || admittedDeadlineMs < 0
+  ) {
+    throw new Error('agent-profile admission returned an invalid monotonic deadline');
+  }
+  return Object.freeze({ nowMs, admittedDeadlineMs });
+}
+
+function awaitAbortSafePreparation(
+  preparation: Promise<AgentProfilePreparedActiveV1>,
+  signal: AbortSignal,
+): Promise<
+  | Readonly<{ status: 'prepared'; prepared: AgentProfilePreparedActiveV1 }>
+  | Readonly<{ status: 'aborted' }>
+> {
+  return new Promise((resolve, reject) => {
+    let terminal = false;
+    const onAbort = (): void => {
+      if (terminal) return;
+      terminal = true;
+      signal.removeEventListener('abort', onAbort);
+      resolve(Object.freeze({ status: 'aborted' as const }));
+    };
+    if (signal.aborted) {
+      onAbort();
+    } else {
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+    preparation.then(
+      (prepared) => {
+        if (terminal) return;
+        terminal = true;
+        signal.removeEventListener('abort', onAbort);
+        resolve(Object.freeze({ status: 'prepared' as const, prepared }));
+      },
+      (error: unknown) => {
+        if (terminal) return;
+        terminal = true;
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 function readNow(now: () => number): number {

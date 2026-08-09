@@ -45,6 +45,7 @@ export {
   createSystemRecordInventoryTraversalV1,
   type SystemRecordInventoryLoadedObjectV1,
   type SystemRecordInventoryRejectedLoadV1,
+  type SystemRecordInventoryTraversalFailureV1,
   type SystemRecordInventoryTraversalSliceResultV1,
   type SystemRecordInventoryTraversalSliceV1,
   type SystemRecordInventoryTraversalV1,

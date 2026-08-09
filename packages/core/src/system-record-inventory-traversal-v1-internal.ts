@@ -68,6 +68,18 @@ export interface SystemRecordInventoryTraversalSliceResultV1 {
   readonly result?: ValidatedSystemRecordInventoryTreeV1;
 }
 
+export interface SystemRecordInventoryTraversalFailureV1 {
+  readonly reason:
+    | 'aborted'
+    | 'deadline'
+    | 'not-found'
+    | 'invalid-response'
+    | 'transport'
+    | 'invalid-slice';
+  readonly requests: number;
+  readonly wireBytes: number;
+}
+
 export interface SystemRecordInventoryTraversalV1 {
   /** Advance one bounded slice. Concurrent calls are rejected. */
   advance(
@@ -81,6 +93,8 @@ export interface SystemRecordInventoryTraversalV1 {
     >,
     slice: SystemRecordInventoryTraversalSliceV1,
   ): Promise<SystemRecordInventoryTraversalSliceResultV1>;
+  /** Return accounting only for a failure thrown by this traversal instance. */
+  failureFor(error: unknown): SystemRecordInventoryTraversalFailureV1 | undefined;
 }
 
 interface SystemRecordInventoryTraversalWorkV1 {
@@ -113,6 +127,7 @@ export function createSystemRecordInventoryTraversalV1(
   let maximumDepth = 0;
   let leafDepth: number | undefined;
   let advancing = false;
+  const failures = new WeakMap<object, SystemRecordInventoryTraversalFailureV1>();
   let completed:
     | Readonly<{
         totalRows: number;
@@ -122,7 +137,7 @@ export function createSystemRecordInventoryTraversalV1(
       }>
     | undefined;
 
-  return Object.freeze({ advance });
+  return Object.freeze({ advance, failureFor });
 
   async function advance(
     load: (
@@ -147,6 +162,9 @@ export function createSystemRecordInventoryTraversalV1(
         result: completedResult(),
       });
     }
+    let requests = 0;
+    let wireBytes = 0;
+    let failureReason: SystemRecordInventoryTraversalFailureV1['reason'] = 'invalid-slice';
     advancing = true;
     try {
       // Pin the admitted budget before the first await. Callers commonly reuse mutable
@@ -179,10 +197,10 @@ export function createSystemRecordInventoryTraversalV1(
       ) {
         throw new Error('inventory traversal slice budget is invalid');
       }
-      let requests = 0;
-      let wireBytes = 0;
+      failureReason = 'invalid-response';
       const sliceRows: SystemRecordInventoryRowV1[] = [];
       while (pending.length > 0) {
+        if (signal?.aborted) failureReason = 'aborted';
         abortIfNeeded(signal);
         if (readNow() >= deadlineMs) break;
         const work = pending[pending.length - 1];
@@ -200,39 +218,59 @@ export function createSystemRecordInventoryTraversalV1(
         }
         const remainingMs = deadlineMs - readNow();
         if (remainingMs <= 0) break;
-        const loaded = await loadInventoryObjectWithinDeadlineV1(
-          (loadSignal) => load(
-            work.digest,
-            expectedKind,
-            loadSignal,
-            Object.freeze([...work.path]),
-          ),
-          signal,
-          remainingMs,
-        );
-        requests += 1;
-        abortIfNeeded(signal);
-        if (readNow() >= deadlineMs)
-          throw new Error('inventory traversal slice deadline expired during load');
-        if (loaded === undefined) throw new Error(`inventory tree is missing ${work.digest}`);
+        let loaded:
+          | SystemRecordInventoryLoadedObjectV1
+          | SystemRecordInventoryRejectedLoadV1
+          | undefined;
+        failureReason = 'transport';
+        try {
+          loaded = await loadInventoryObjectWithinDeadlineV1(
+            (loadSignal) => {
+              requests += 1;
+              return load(
+                work.digest,
+                expectedKind,
+                loadSignal,
+                Object.freeze([...work.path]),
+              );
+            },
+            signal,
+            remainingMs,
+          );
+        } catch (error) {
+          if (signal?.aborted) failureReason = 'aborted';
+          else if (error instanceof InventoryTraversalDeadlineError) failureReason = 'deadline';
+          throw error;
+        }
+        if (loaded === undefined) {
+          failureReason = 'not-found';
+          throw new Error(`inventory tree is missing ${work.digest}`);
+        }
+        failureReason = 'invalid-response';
         const probe = snapshotDataRecord(loaded, 'inventory loader result', {
           rejectNullValues: true,
         });
+        if (
+          !Number.isSafeInteger(probe.wireBytes)
+          || (probe.wireBytes as number) < 0
+          || (probe.wireBytes as number) > maximumNextBytes
+          || wireBytes + (probe.wireBytes as number) > maxWireBytes
+        ) {
+          throw new Error('inventory loader returned invalid actual wire accounting');
+        }
+        wireBytes += probe.wireBytes as number;
+        if (signal?.aborted) failureReason = 'aborted';
+        abortIfNeeded(signal);
+        if (readNow() >= deadlineMs) {
+          failureReason = 'deadline';
+          throw new InventoryTraversalDeadlineError();
+        }
         if (probe.outcome === 'rejected') {
           const rejected = snapshotExactDataRecord(
             probe,
             ['outcome', 'wireBytes', 'rejection'],
             'rejected inventory loader result',
           );
-          if (
-            !Number.isSafeInteger(rejected.wireBytes) ||
-            (rejected.wireBytes as number) < 6 ||
-            (rejected.wireBytes as number) > maximumNextBytes ||
-            wireBytes + (rejected.wireBytes as number) > maxWireBytes
-          ) {
-            throw new Error('inventory loader returned invalid actual wire accounting');
-          }
-          wireBytes += rejected.wireBytes as number;
           if (
             rejected.rejection !== 'not-found' &&
             rejected.rejection !== 'invalid-response' &&
@@ -272,14 +310,10 @@ export function createSystemRecordInventoryTraversalV1(
           'successful inventory loader result',
         );
         if (
-          !Number.isSafeInteger(artifact.wireBytes) ||
-          (artifact.wireBytes as number) < 6 ||
-          (artifact.wireBytes as number) > maximumNextBytes ||
-          wireBytes + (artifact.wireBytes as number) > maxWireBytes
+          !Number.isSafeInteger(artifact.wireBytes)
         ) {
           throw new Error('inventory loader returned invalid actual wire accounting');
         }
-        wireBytes += artifact.wireBytes as number;
         if (
           artifact.objectKind !== 'inventory-leaf' &&
           artifact.objectKind !== 'inventory-internal'
@@ -406,9 +440,32 @@ export function createSystemRecordInventoryTraversalV1(
         rows: Object.freeze([...sliceRows]),
         result: completedResult(),
       });
+    } catch (error) {
+      throw recordFailure(error, failureReason, requests, wireBytes);
     } finally {
       advancing = false;
     }
+  }
+
+  function failureFor(error: unknown): SystemRecordInventoryTraversalFailureV1 | undefined {
+    if ((typeof error !== 'object' && typeof error !== 'function') || error === null) {
+      return undefined;
+    }
+    const failure = failures.get(error);
+    return failure === undefined ? undefined : Object.freeze({ ...failure });
+  }
+
+  function recordFailure(
+    error: unknown,
+    reason: SystemRecordInventoryTraversalFailureV1['reason'],
+    requests: number,
+    wireBytes: number,
+  ): Error {
+    const wrapped = error instanceof Error
+      ? error
+      : new Error('inventory traversal failed', { cause: error });
+    failures.set(wrapped, Object.freeze({ reason, requests, wireBytes }));
+    return wrapped;
   }
 
   function completedResult(): ValidatedSystemRecordInventoryTreeV1 {
@@ -442,6 +499,12 @@ function abortIfNeeded(signal?: AbortSignal): void {
   if (signal?.aborted) throw signal.reason ?? new Error('inventory traversal aborted');
 }
 
+class InventoryTraversalDeadlineError extends Error {
+  constructor() {
+    super('inventory traversal slice deadline expired during load');
+  }
+}
+
 async function loadInventoryObjectWithinDeadlineV1<T>(
   load: (signal: AbortSignal) => Promise<T>,
   admittedSignal: AbortSignal | undefined,
@@ -460,7 +523,7 @@ async function loadInventoryObjectWithinDeadlineV1<T>(
   const boundary = new Promise<never>((_resolve, reject) => {
     rejectBoundary = reject;
     timeout = setTimeout(() => {
-      const reason = new Error('inventory traversal slice deadline expired during load');
+      const reason = new InventoryTraversalDeadlineError();
       controller.abort(reason);
       reject(reason);
     }, remainingMs);

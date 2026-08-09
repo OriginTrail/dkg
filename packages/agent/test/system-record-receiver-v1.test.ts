@@ -16,6 +16,7 @@ import {
   createAgentProfileReceiverV1,
   type AgentProfileReceiverCandidateV1,
 } from '../src/system-records/receiver-v1.js';
+import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
 import {
   envelopeArtifact,
   NETWORK,
@@ -36,6 +37,10 @@ import {
   rotatedPublishedReceiverFixture as rotatedPublishedFixture,
 } from './support/agent-profile-receiver-v1-fixture.js';
 
+const ADMITTED_CONTEXT = Object.freeze(
+  Object.create(null),
+) as AgentProfileAdmittedSliceContextV1;
+
 describe('agent-profile system-record active receiver', () => {
   it('verifies the exact closure and submits one immutable active candidate', async () => {
     const fixture = await publishedFixture();
@@ -54,6 +59,7 @@ describe('agent-profile system-record active receiver', () => {
     });
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => preparedFixtureApply('1', 'a'));
     const receiver = createAgentProfileReceiverV1({
@@ -64,7 +70,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, signal))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
     expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
@@ -78,8 +84,9 @@ describe('agent-profile system-record active receiver', () => {
       decodeOpaqueKaBundleV1(bundleArtifact.canonicalBytes).projectionBytes,
     );
     expect(candidate).not.toHaveProperty('signal');
-    expect(prepareCandidateApply.mock.calls[0]![1]).toBe(signal);
-    expect(prepareCandidateApply.mock.calls[0]).toHaveLength(2);
+    expect(prepareCandidateApply.mock.calls[0]![1]).toBe(ADMITTED_CONTEXT);
+    expect(prepareCandidateApply.mock.calls[0]![2]).toBe(signal);
+    expect(prepareCandidateApply.mock.calls[0]).toHaveLength(3);
   });
 
   it('does not invoke active bundle verification for a non-active current head', async () => {
@@ -129,7 +136,7 @@ describe('agent-profile system-record active receiver', () => {
       ...fixture.row,
       version: tombstone.version,
       headDigest: tombstoneEnvelope.objectDigest,
-    }), new AbortController().signal)).rejects.toThrow(/inventory row does not bind/);
+    }), ADMITTED_CONTEXT, new AbortController().signal)).rejects.toThrow(/inventory row does not bind/);
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(verifyCurrentBundle).not.toHaveBeenCalled();
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -165,7 +172,7 @@ describe('agent-profile system-record active receiver', () => {
     await expect(receiver.receiveActive(Object.freeze({
       ...fixture.row,
       headDigest: expiredEnvelope.objectDigest,
-    }), new AbortController().signal)).rejects.toThrow(/expired agent-profile head/);
+    }), ADMITTED_CONTEXT, new AbortController().signal)).rejects.toThrow(/expired agent-profile head/);
     expect(resolve).toHaveBeenCalledTimes(1);
     expect(verifyCurrentBundle).not.toHaveBeenCalled();
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -180,7 +187,7 @@ describe('agent-profile system-record active receiver', () => {
     const verifyCurrentBundle = vi.fn(
       () => true,
     );
-    const prepareCandidateApply = vi.fn();
+    const prepareCandidateApply = vi.fn(() => preparedFixtureApply('1', 'a'));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
       artifacts: fixture.store,
@@ -189,11 +196,11 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/expired agent-profile head/);
     expect(nowMs).toHaveBeenCalledTimes(2);
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
-    expect(prepareCandidateApply).not.toHaveBeenCalled();
+    expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
   });
 
   it('clamps signed wall-clock expiry onto the bridge monotonic deadline', async () => {
@@ -201,13 +208,13 @@ describe('agent-profile system-record active receiver', () => {
     const validUntilUnixMs = Date.parse(fixture.envelope.object.validUntil);
     const nowMs = vi.fn()
       .mockReturnValueOnce(validUntilUnixMs - 100)
-      .mockReturnValueOnce(validUntilUnixMs - 80)
       .mockReturnValue(validUntilUnixMs - 60);
     const existingMonotonicDeadlineMs = 5_200;
     const monotonicNowMs = 5_000;
     let admittedDeadlineMs: number | undefined;
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => Object.freeze({
       existingMonotonicDeadlineMs,
@@ -229,9 +236,9 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .resolves.toMatchObject({ outcome: 'applied' });
-    expect(nowMs).toHaveBeenCalledTimes(3);
+    expect(nowMs).toHaveBeenCalledTimes(2);
     expect(admittedDeadlineMs).toBe(5_060);
     expect(admittedDeadlineMs).not.toBe(validUntilUnixMs);
   });
@@ -305,7 +312,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(apply).toHaveBeenCalledTimes(1);
   });
@@ -324,7 +331,7 @@ describe('agent-profile system-record active receiver', () => {
       }) as never),
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/monotonic apply existing deadline is invalid/);
   });
 
@@ -333,7 +340,6 @@ describe('agent-profile system-record active receiver', () => {
     const validUntilMs = Date.parse(fixture.envelope.object.validUntil);
     const nowMs = vi.fn()
       .mockReturnValueOnce(validUntilMs - 2)
-      .mockReturnValueOnce(validUntilMs - 1)
       .mockReturnValue(validUntilMs);
     const apply = vi.fn(() => ({
       outcome: 'applied' as const,
@@ -342,6 +348,7 @@ describe('agent-profile system-record active receiver', () => {
     }));
     const prepareCandidateApply = vi.fn(async (
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => {
       await Promise.resolve();
@@ -355,9 +362,9 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/expired agent-profile head/);
-    expect(nowMs).toHaveBeenCalledTimes(3);
+    expect(nowMs).toHaveBeenCalledTimes(2);
     expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
     expect(apply).not.toHaveBeenCalled();
   });
@@ -366,6 +373,7 @@ describe('agent-profile system-record active receiver', () => {
     const fixture = await publishedFixture(true);
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => preparedFixtureApply('1', 'a'));
     const receiver = createAgentProfileReceiverV1({
@@ -378,6 +386,7 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(
       fixture.row,
+      ADMITTED_CONTEXT,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'applied' });
     const candidate = prepareCandidateApply.mock.calls[0]![0];
@@ -395,6 +404,7 @@ describe('agent-profile system-record active receiver', () => {
     const verifyAuthorityEnvelope = vi.fn(() => true);
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => preparedFixtureApply('5', '9'));
     const receiver = createAgentProfileReceiverV1({
@@ -406,7 +416,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .resolves.toMatchObject({ outcome: 'applied' });
     const resolvedKinds = fixture.resolve.mock.calls
       .map(([lookup]) => lookup.type === 'object' ? lookup.objectKind : lookup.type);
@@ -456,7 +466,7 @@ describe('agent-profile system-record active receiver', () => {
         prepareCandidateApply,
       });
 
-      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
         .rejects.toThrow(condition === 'missing' ? /missing/ : /authority-transition verification/);
       expect(prepareCandidateApply).not.toHaveBeenCalled();
     },
@@ -478,7 +488,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/owned-subject table/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
@@ -509,7 +519,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/does not bind the verified head/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
@@ -525,7 +535,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/bundle verification failed/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
@@ -544,7 +554,11 @@ describe('agent-profile system-record active receiver', () => {
         prepareCandidateApply,
       });
 
-      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      await expect(receiver.receiveActive(
+        fixture.row,
+        ADMITTED_CONTEXT,
+        new AbortController().signal,
+      ))
         .rejects.toThrow(error);
       expect(verifyCurrentBundle).toHaveBeenCalledOnce();
       expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -567,7 +581,11 @@ describe('agent-profile system-record active receiver', () => {
         prepareCandidateApply,
       });
 
-      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      await expect(receiver.receiveActive(
+        fixture.row,
+        ADMITTED_CONTEXT,
+        new AbortController().signal,
+      ))
         .rejects.toThrow(error);
       expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
       expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -590,13 +608,16 @@ describe('agent-profile system-record active receiver', () => {
         prepareCandidateApply,
       });
 
-      await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+      await expect(receiver.receiveActive(
+        fixture.row,
+        ADMITTED_CONTEXT,
+        new AbortController().signal,
+      ))
         .rejects.toThrow(error);
       expect(verifyCurrentBundle).toHaveBeenCalledOnce();
       expect(prepareCandidateApply).not.toHaveBeenCalled();
     },
   );
-
   it('isolates signed bundle bytes from mutations by the injected verifier', async () => {
     const fixture = await publishedFixture();
     const signal = new AbortController().signal;
@@ -615,6 +636,7 @@ describe('agent-profile system-record active receiver', () => {
     });
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => preparedFixtureApply('4', 'f'));
     const receiver = createAgentProfileReceiverV1({
@@ -625,7 +647,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, signal))
       .resolves.toMatchObject({ outcome: 'applied' });
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
     const candidate = prepareCandidateApply.mock.calls[0]![0];
@@ -655,7 +677,7 @@ describe('agent-profile system-record active receiver', () => {
       }),
     });
 
-    await expect(receiver.receiveActive(fixture.row, controller.signal)).resolves.toEqual({
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, controller.signal)).resolves.toEqual({
       outcome: 'applied',
       stateRevision: '2',
       appliedStateDigest: `0x${'c'.repeat(64)}`,
@@ -682,7 +704,7 @@ describe('agent-profile system-record active receiver', () => {
       },
     });
 
-    await expect(receiver.receiveActive(fixture.row, controller.signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, controller.signal))
       .rejects.toThrow('pre-apply stop');
     expect(apply).not.toHaveBeenCalled();
   });
@@ -707,7 +729,7 @@ describe('agent-profile system-record active receiver', () => {
       quarantined: false,
     };
 
-    await expect(receiver.receiveActive(row, controller.signal)).rejects.toThrow('test stop');
+    await expect(receiver.receiveActive(row, ADMITTED_CONTEXT, controller.signal)).rejects.toThrow('test stop');
     expect(resolve).not.toHaveBeenCalled();
   });
 
@@ -743,6 +765,7 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(
       Object.freeze({ ...fixture.row, ...patch }),
+      ADMITTED_CONTEXT,
       new AbortController().signal,
     )).rejects.toThrow(error);
     expect(resolve).not.toHaveBeenCalled();
@@ -765,6 +788,7 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(
       Object.freeze({ ...fixture.row, version: '1' }),
+      ADMITTED_CONTEXT,
       new AbortController().signal,
     )).rejects.toThrow(/inventory row does not bind/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -786,6 +810,7 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(
       fixture.row,
+      ADMITTED_CONTEXT,
       new AbortController().signal,
     )).rejects.toThrow(/authority verification failed/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -819,7 +844,7 @@ describe('agent-profile system-record active receiver', () => {
       prepareCandidateApply,
     });
 
-    await expect(receiver.receiveActive(fixture.row, new AbortController().signal))
+    await expect(receiver.receiveActive(fixture.row, ADMITTED_CONTEXT, new AbortController().signal))
       .rejects.toThrow(/authority verification failed/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
@@ -854,6 +879,7 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(
       fixture.row,
+      ADMITTED_CONTEXT,
       new AbortController().signal,
     )).rejects.toThrow(/closure artifact exceeds/);
     expect(prepareCandidateApply).not.toHaveBeenCalled();
@@ -866,6 +892,7 @@ describe('agent-profile system-record active receiver', () => {
     );
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverCandidateV1,
+      _admittedContext: AgentProfileAdmittedSliceContextV1,
       _signal: AbortSignal,
     ) => preparedFixtureApply('3', 'e'));
     const resolveArtifact = vi.fn(fixture.store.resolve.bind(fixture.store));
@@ -890,6 +917,7 @@ describe('agent-profile system-record active receiver', () => {
 
     await expect(receiver.receiveActive(
       fixture.row,
+      ADMITTED_CONTEXT,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'applied', stateRevision: '3' });
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);

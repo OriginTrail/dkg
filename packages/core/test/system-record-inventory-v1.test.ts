@@ -238,18 +238,74 @@ describe('system-record immutable B+tree objects', () => {
       validatedRows: 0, validatedLeaves: 0, rows: [], rejection: 'busy',
     });
 
+    const zeroByteReset = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(zeroByteReset.advance(async () => ({
+      outcome: 'rejected', wireBytes: 0, rejection: 'transport',
+    }), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).resolves.toEqual({
+      status: 'rejected', requests: 1, wireBytes: 0,
+      validatedRows: 0, validatedLeaves: 0, rows: [], rejection: 'transport',
+    });
+
     const aborted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     const controller = new AbortController();
-    await expect(aborted.advance(async (digest) => {
-      controller.abort(new Error('aborted-after-load'));
-      const stored = snapshot.objects.get(digest)!;
-      return loadedInventoryObject(stored);
+    const requested = Promise.withResolvers<void>();
+    const delivery = Promise.withResolvers<ReturnType<typeof loadedInventoryObject>>();
+    const rootLoaded = loadedInventoryObject(
+      snapshot.objects.get(snapshot.descriptor.treeRootDigest)!,
+    );
+    let abortedError: unknown;
+    const abortedAdvance = aborted.advance(() => {
+      requested.resolve();
+      return delivery.promise;
     }, {
       signal: controller.signal,
       maxRequests: 1,
       maxWireBytes: 2 * 1024 * 1024,
       deadlineMs: Date.now() + 3_000,
-    })).rejects.toThrow(/aborted-after-load/);
+    });
+    await requested.promise;
+    delivery.resolve(rootLoaded);
+    // Settle the response through the loader boundary before cancellation is observed.
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort(new Error('aborted-after-load'));
+    try {
+      await abortedAdvance;
+    } catch (error) {
+      abortedError = error;
+    }
+    expect(abortedError).toBeInstanceOf(Error);
+    expect((abortedError as Error).message).toMatch(/aborted-after-load/);
+    expect(aborted.failureFor(abortedError)).toEqual({
+      reason: 'aborted',
+      requests: 1,
+      wireBytes: rootLoaded.wireBytes,
+    });
+
+    const malformed = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    let malformedError: unknown;
+    try {
+      await malformed.advance(async () => ({
+        ...rootLoaded,
+        canonicalBytes: Uint8Array.from([0, ...rootLoaded.canonicalBytes.subarray(1)]),
+      }), {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 3_000,
+      });
+    } catch (error) {
+      malformedError = error;
+    }
+    expect(malformedError).toBeInstanceOf(Error);
+    expect(malformed.failureFor(malformedError)).toEqual({
+      reason: 'invalid-response',
+      requests: 1,
+      wireBytes: rootLoaded.wireBytes,
+    });
   });
 
   it('pins slice admission while an awaited loader mutates its source object', async () => {

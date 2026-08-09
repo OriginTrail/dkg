@@ -9,8 +9,12 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import { parseNQuads } from '../src/dkg-agent-utils.js';
+import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
 import type { SystemRecordArtifactRepositoryV1 } from '../src/system-records/artifact-v1.js';
-import { createAgentProfileReceiverV1 } from '../src/system-records/receiver-v1.js';
+import {
+  createAgentProfileReceiverV1,
+  type AgentProfileReceiverV1,
+} from '../src/system-records/receiver-v1.js';
 import {
   createAgentProfileReconcilerV1,
   type AgentProfileReconcileAdmissionV1,
@@ -42,7 +46,6 @@ describe('agent-profile System Record reconciler V1', () => {
       admission,
       loadInventoryObject,
       receiver: receiver(fixture.store, consumeCandidate),
-      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
     });
 
     const signal = new AbortController().signal;
@@ -71,6 +74,7 @@ describe('agent-profile System Record reconciler V1', () => {
       outcomes: [{ outcome: 'applied' }],
     });
     expect(consumeCandidate).toHaveBeenCalledTimes(1);
+    expect(consumeCandidate.mock.calls[0]![1]).toBe(admission.lastContext());
     expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
     expect(reconciler.stats()).toMatchObject({
       admittedSlices: 2,
@@ -189,7 +193,11 @@ describe('agent-profile System Record reconciler V1', () => {
     await expect(reconciler.advance(new AbortController().signal))
       .rejects.toThrow(/already has an active slice/);
     reconciler.close();
-    await expect(active).rejects.toThrow(/reconciler closed/);
+    await expect(active).resolves.toMatchObject({
+      status: 'closed',
+      inventoryRequests: 1,
+      inventoryWireBytes: 0,
+    });
     expect(admission.stats()).toMatchObject({ active: 0, peak: 1, acquisitions: 1 });
     await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
       status: 'closed',
@@ -212,7 +220,6 @@ describe('agent-profile System Record reconciler V1', () => {
       admission: admissionGate(),
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: receiver(fixture.store, consumeCandidate),
-      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
     });
 
     await reconciler.advance(new AbortController().signal);
@@ -228,6 +235,245 @@ describe('agent-profile System Record reconciler V1', () => {
       pendingRows: 0,
     });
     expect(consumeCandidate).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases admission when close aborts a stalled predispatch receiver', async () => {
+    const fixture = await publishedFixture();
+    const admission = admissionGate();
+    const started = Promise.withResolvers<void>();
+    const stalledReceiver = receiverWithPreparation(async () => {
+      started.resolve();
+      return new Promise<never>(() => undefined);
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: stalledReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    const active = reconciler.advance(new AbortController().signal);
+    await started.promise;
+    reconciler.close();
+
+    await expect(active).resolves.toMatchObject({
+      status: 'closed',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
+    expect(reconciler.stats()).toMatchObject({ active: 0, queued: 0, closed: true });
+  });
+
+  it('releases admission at the original deadline when predispatch receiver work stalls', async () => {
+    const fixture = await publishedFixture();
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-09T00:00:00.000Z'));
+    try {
+      const admission = admissionGate();
+      const started = Promise.withResolvers<void>();
+      const stalledReceiver = receiverWithPreparation(async () => {
+        started.resolve();
+        return new Promise<never>(() => undefined);
+      });
+      const reconciler = await createAgentProfileReconcilerV1({
+        networkId: NETWORK,
+        rootEnvelope: fixture.rootEnvelope,
+        providerPeerPublicKey: fixture.peerSigner.publicKey,
+        admission,
+        loadInventoryObject: fixture.loadInventoryObject,
+        receiver: stalledReceiver,
+      });
+
+      await reconciler.advance(new AbortController().signal);
+      const active = reconciler.advance(new AbortController().signal);
+      await started.promise;
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      await expect(active).resolves.toMatchObject({
+        status: 'paused',
+        phase: 'records',
+        pendingRows: 1,
+      });
+      expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
+      expect(reconciler.stats()).toMatchObject({ active: 0, queued: 0, closed: false });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('awaits physical settlement after atomic apply dispatch even when closed', async () => {
+    const fixture = await publishedFixture();
+    const admission = admissionGate();
+    const dispatched = Promise.withResolvers<void>();
+    const applyResult = Promise.withResolvers<{
+      outcome: 'applied';
+      stateRevision: string;
+      appliedStateDigest: `0x${string}`;
+    }>();
+    const preparedReceiver = receiverWithPreparation(async () => Object.freeze({
+      async apply() {
+        dispatched.resolve();
+        return applyResult.promise;
+      },
+    }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: preparedReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    let settled = false;
+    const active = reconciler.advance(new AbortController().signal);
+    void active.then(() => { settled = true; });
+    await dispatched.promise;
+    reconciler.close();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(admission.stats().active).toBe(1);
+
+    applyResult.resolve({
+      outcome: 'applied',
+      stateRevision: '3',
+      appliedStateDigest: `0x${'cc'.repeat(32)}`,
+    });
+    await expect(active).resolves.toMatchObject({
+      status: 'complete',
+      outcomes: [{ outcome: 'applied' }],
+      pendingRows: 0,
+    });
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
+  });
+
+  it('releases an acquired permit when the admission clock is invalid', async () => {
+    const fixture = await publishedFixture();
+    const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
+    const release = vi.fn();
+    const admission: AgentProfileReconcileAdmissionV1 = Object.freeze({
+      tryAcquire: () => Object.freeze({ admittedContext: context, release }),
+      inspectAdmittedContext: () => Object.freeze({ nowMs: -1, admittedDeadlineMs: 3_000 }),
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiver(fixture.store, vi.fn()),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal))
+      .rejects.toThrow(/invalid monotonic deadline/);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(reconciler.stats()).toMatchObject({
+      admittedSlices: 0,
+      active: 0,
+      queued: 0,
+    });
+  });
+
+  it('accounts exact wire for malformed and aborted inventory responses', async () => {
+    const malformedFixture = await publishedFixture();
+    let malformedWireBytes = 0;
+    const malformed = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: malformedFixture.rootEnvelope,
+      providerPeerPublicKey: malformedFixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: async (request, signal) => {
+        const loaded = await malformedFixture.loadInventoryObject(request, signal);
+        if (loaded.outcome !== 'ok') return loaded;
+        malformedWireBytes = loaded.wireBytes;
+        return Object.freeze({
+          ...loaded,
+          canonicalBytes: Uint8Array.from([0, ...loaded.canonicalBytes.subarray(1)]),
+        });
+      },
+      receiver: receiver(malformedFixture.store, vi.fn()),
+    });
+
+    const malformedResult = await malformed.advance(new AbortController().signal);
+    expect(malformedResult).toMatchObject({
+      status: 'blocked',
+      reason: 'inventory-invalid-response',
+      inventoryRequests: 1,
+      inventoryWireBytes: malformedWireBytes,
+    });
+    expect(malformed.stats()).toMatchObject({
+      inventoryRequests: 1,
+      inventoryWireBytes: malformedWireBytes,
+    });
+
+    const abortedFixture = await publishedFixture();
+    const caller = new AbortController();
+    const rootRequest = Object.freeze({
+      rootDescriptorDigest: abortedFixture.rootEnvelope.objectDigest,
+      objectDigest: abortedFixture.rootEnvelope.object.treeRootDigest,
+      expectedKind: 'inventory-leaf' as const,
+      path: Object.freeze([] as number[]),
+    });
+    const loaded = await abortedFixture.loadInventoryObject(
+      rootRequest,
+      new AbortController().signal,
+    );
+    const requested = Promise.withResolvers<void>();
+    const delivery = Promise.withResolvers<typeof loaded>();
+    const aborted = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: abortedFixture.rootEnvelope,
+      providerPeerPublicKey: abortedFixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: () => {
+        requested.resolve();
+        return delivery.promise;
+      },
+      receiver: receiver(abortedFixture.store, vi.fn()),
+    });
+
+    const abortedAdvance = aborted.advance(caller.signal);
+    await requested.promise;
+    delivery.resolve(loaded);
+    // Settle the response through the loader boundary before cancellation is observed.
+    await Promise.resolve();
+    await Promise.resolve();
+    caller.abort(new Error('caller-aborted-after-response'));
+    await expect(abortedAdvance).rejects.toThrow(/caller-aborted-after-response/);
+    expect(aborted.stats()).toMatchObject({
+      inventoryRequests: 1,
+      inventoryWireBytes: loaded.wireBytes,
+      active: 0,
+    });
+  });
+
+  it('accepts and accounts a zero-byte transport reset', async () => {
+    const fixture = await publishedFixture();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: async () => Object.freeze({
+        outcome: 'rejected' as const,
+        wireBytes: 0,
+        rejection: 'transport' as const,
+      }),
+      receiver: receiver(fixture.store, vi.fn()),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      reason: 'inventory-transport',
+      inventoryRequests: 1,
+      inventoryWireBytes: 0,
+    });
+    expect(reconciler.stats()).toMatchObject({ inventoryRequests: 1, inventoryWireBytes: 0 });
   });
 
   it('rejects an untrusted provider root before acquiring admission or loading inventory', async () => {
@@ -344,20 +590,41 @@ function receiver(
   });
 }
 
+function receiverWithPreparation(
+  prepareActive: AgentProfileReceiverV1['prepareActive'],
+): AgentProfileReceiverV1 {
+  const receiver: AgentProfileReceiverV1 = Object.freeze({
+    prepareActive,
+    async receiveActive(row, admittedContext, signal) {
+      const prepared = await prepareActive(row, admittedContext, signal);
+      signal.throwIfAborted();
+      return prepared.apply(signal);
+    },
+  });
+  return receiver;
+}
+
 function admissionGate(initiallyHeld = false): AgentProfileReconcileAdmissionV1 & {
   stats(): { active: 0 | 1; peak: 0 | 1; acquisitions: number };
+  lastContext(): AgentProfileAdmittedSliceContextV1 | undefined;
 } {
   let held = initiallyHeld;
   let peak: 0 | 1 = held ? 1 : 0;
   let acquisitions = 0;
+  let lastContext: AgentProfileAdmittedSliceContextV1 | undefined;
+  const contexts = new WeakMap<object, number>();
   return Object.freeze({
     tryAcquire() {
       if (held) return null;
       held = true;
       peak = 1;
       acquisitions += 1;
+      const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
+      contexts.set(context, Date.now() + 3_000);
+      lastContext = context;
       let live = true;
       return Object.freeze({
+        admittedContext: context,
         release() {
           if (!live) return;
           live = false;
@@ -365,8 +632,16 @@ function admissionGate(initiallyHeld = false): AgentProfileReconcileAdmissionV1 
         },
       });
     },
+    inspectAdmittedContext(context) {
+      const admittedDeadlineMs = contexts.get(context);
+      if (admittedDeadlineMs === undefined) throw new Error('test admitted context is invalid');
+      return Object.freeze({ nowMs: Date.now(), admittedDeadlineMs });
+    },
     stats() {
       return { active: held ? 1 : 0, peak, acquisitions };
+    },
+    lastContext() {
+      return lastContext;
     },
   });
 }
