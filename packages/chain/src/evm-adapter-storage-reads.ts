@@ -12,77 +12,9 @@
 import { EVMChainAdapterBase } from './evm-adapter-base.js';
 import { Contract, ethers } from 'ethers';
 import type { ChainReadOptions, KnowledgeAssetUpdateContext } from './chain-adapter.js';
-
-const UPDATE_CONTEXT_FIELDS = [
-  'merkleRootsCount',
-  'minted',
-  'byteSize',
-  'endEpoch',
-  'tokenAmount',
-  'isImmutable',
-  'merkleLeafCount',
-] as const;
-
-type UpdateContextField = (typeof UPDATE_CONTEXT_FIELDS)[number];
-type NormalizedUpdateContext = Record<UpdateContextField, unknown>;
-
-/** Normalize ethers' named Result and plain positional tuple shapes once. */
-function normalizeUpdateContext(raw: unknown, kaId: bigint): NormalizedUpdateContext {
-  const named = typeof raw === 'object' && raw !== null
-    ? raw as Record<string, unknown>
-    : {};
-  const positional = Array.isArray(raw) ? raw : [];
-  return Object.fromEntries(UPDATE_CONTEXT_FIELDS.map((name, index) => {
-    const value = named[name] ?? positional[index];
-    if (value === undefined) {
-      throw new Error(`Missing ${name} in update context for KA ${kaId}`);
-    }
-    return [name, value];
-  })) as NormalizedUpdateContext;
-}
-
-function decodeBigIntScalar(value: unknown, name: UpdateContextField, kaId: bigint): bigint {
-  if (
-    typeof value !== 'string'
-    && typeof value !== 'number'
-    && typeof value !== 'bigint'
-    && typeof value !== 'boolean'
-  ) {
-    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
-  }
-  try {
-    return BigInt(value);
-  } catch {
-    throw new Error(`Invalid ${name} in update context for KA ${kaId}`);
-  }
-}
-
-function decodeKnowledgeAssetUpdateContext(
-  raw: unknown,
-  kaId: bigint,
-): KnowledgeAssetUpdateContext {
-  const context = normalizeUpdateContext(raw, kaId);
-  const merkleLeafCount = Number(decodeBigIntScalar(
-    context.merkleLeafCount,
-    'merkleLeafCount',
-    kaId,
-  ));
-  if (!Number.isSafeInteger(merkleLeafCount) || merkleLeafCount < 0) {
-    throw new Error(`Invalid merkleLeafCount in update context for KA ${kaId}`);
-  }
-  if (typeof context.isImmutable !== 'boolean') {
-    throw new Error(`Invalid isImmutable in update context for KA ${kaId}`);
-  }
-  return {
-    merkleRootsCount: decodeBigIntScalar(context.merkleRootsCount, 'merkleRootsCount', kaId),
-    minted: decodeBigIntScalar(context.minted, 'minted', kaId),
-    byteSize: decodeBigIntScalar(context.byteSize, 'byteSize', kaId),
-    endEpoch: decodeBigIntScalar(context.endEpoch, 'endEpoch', kaId),
-    tokenAmount: decodeBigIntScalar(context.tokenAmount, 'tokenAmount', kaId),
-    isImmutable: context.isImmutable,
-    merkleLeafCount,
-  };
-}
+import {
+  decodeKnowledgeAssetMerkleRootCount,
+} from './evm-knowledge-asset-update-context.js';
 
 export class StorageReadMethods extends EVMChainAdapterBase {
   // =====================================================================
@@ -119,14 +51,7 @@ export class StorageReadMethods extends EVMChainAdapterBase {
   ): Promise<KnowledgeAssetUpdateContext> {
     await this.init();
     const kas = this.requireKCStorage();
-    const rawContext = await this.readContractWithOptions(
-      kas,
-      'kas.getKnowledgeAssetUpdateContext',
-      'getKnowledgeAssetUpdateContext',
-      [kaId],
-      { signal: options.signal },
-    );
-    return decodeKnowledgeAssetUpdateContext(rawContext, kaId);
+    return this.readKnowledgeAssetUpdateContext(kas, kaId, options);
   }
 
   async getMerkleRootCount(kaId: bigint, options: ChainReadOptions = {}): Promise<bigint> {
@@ -138,12 +63,8 @@ export class StorageReadMethods extends EVMChainAdapterBase {
       'getKnowledgeAssetUpdateContext',
       [kaId],
       { signal: options.signal },
-    ) as { merkleRootsCount?: bigint } & readonly unknown[];
-    const rawCount = context.merkleRootsCount ?? context[0];
-    if (rawCount === undefined) {
-      throw new Error(`Missing Merkle-root count for KA ${kaId}`);
-    }
-    return BigInt(rawCount as string | number | bigint | boolean);
+    );
+    return decodeKnowledgeAssetMerkleRootCount(context, kaId);
   }
 
   async getMerkleLeafCount(kaId: bigint): Promise<number> {

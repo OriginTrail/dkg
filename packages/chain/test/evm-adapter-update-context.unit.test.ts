@@ -40,17 +40,15 @@ function adapterWithUpdateContext(response: unknown): {
 }
 
 describe('EVMChainAdapter KA scalar update context', () => {
-  it('returns the typed descriptor through one abortable RPC read', async () => {
+  it('returns the typed descriptor through one abortable canonical RPC read', async () => {
     const response = Object.assign(
       [3n, 41n, 12_345n, 500n, 99n, false, 77n],
       {
-        merkleRootsCount: 3n,
-        minted: 41n,
-        byteSize: 12_345n,
-        endEpoch: 500n,
-        tokenAmount: 99n,
-        isImmutable: false,
-        merkleLeafCount: 77n,
+        // Ethers exposes named aliases, but the ABI positions remain the
+        // source of truth and aliases cannot override them.
+        merkleRootsCount: 999n,
+        byteSize: false,
+        endEpoch: 999n,
       },
     );
     const { adapter, calls, storage } = adapterWithUpdateContext(response);
@@ -105,6 +103,65 @@ describe('EVMChainAdapter KA scalar update context', () => {
     expect(calls[0]?.[4]).toEqual({ signal: controller.signal });
   });
 
+  it('uses the same canonical tuple read for update token sizing', async () => {
+    const response = Object.assign(
+      [3n, 41n, 100n, 10n, 99n, false, 77n],
+      {
+        merkleRootsCount: 999n,
+        byteSize: false,
+        endEpoch: 999n,
+      },
+    );
+    const { adapter, storage } = adapterWithUpdateContext(response);
+    const chronos = {};
+    const askStorage = {};
+    const calls: string[] = [];
+    const mutable = adapter as unknown as {
+      contracts: {
+        knowledgeAssetStorage: object;
+        chronos: object;
+        askStorage: object;
+      };
+      readContractWithOptions: (
+        contract: object,
+        label: string,
+        method: string,
+        args: readonly unknown[],
+        options?: unknown,
+      ) => Promise<unknown>;
+    };
+    mutable.contracts.knowledgeAssetStorage = storage;
+    mutable.contracts.chronos = chronos;
+    mutable.contracts.askStorage = askStorage;
+    mutable.readContractWithOptions = async (_contract, label) => {
+      calls.push(label);
+      if (label === 'kas.getKnowledgeAssetUpdateContext') return response;
+      if (label === 'chronos.getCurrentEpoch') return 5n;
+      if (label === 'askStorage.getStakeWeightedAverageAsk') return 1_024n;
+      throw new Error(`Unexpected contract read: ${label}`);
+    };
+
+    await expect(adapter.computeUpdateNewTokenAmount({
+      kaId: 42n,
+      newByteSize: 101n,
+      currentTokenAmount: 99n,
+    })).resolves.toBe(104n);
+    expect(calls).toEqual([
+      'kas.getKnowledgeAssetUpdateContext',
+      'chronos.getCurrentEpoch',
+      'askStorage.getStakeWeightedAverageAsk',
+    ]);
+  });
+
+  it('rejects boolean values in uint tuple positions', async () => {
+    const { adapter } = adapterWithUpdateContext([
+      1n, 1n, false, 10n, 1n, false, 1n,
+    ]);
+
+    await expect(adapter.getKnowledgeAssetUpdateContext(405n))
+      .rejects.toThrow('Invalid byteSize in update context for KA 405');
+  });
+
   it('fails closed when a required sizing field is absent', async () => {
     const { adapter } = adapterWithUpdateContext([
       1n, 1n, 100n, 10n, 1n, false,
@@ -113,18 +170,56 @@ describe('EVMChainAdapter KA scalar update context', () => {
     await expect(adapter.getKnowledgeAssetUpdateContext(404n))
       .rejects.toThrow('Missing merkleLeafCount in update context for KA 404');
   });
-
-  it('fails closed with a field-specific error for an invalid numeric scalar', async () => {
-    const { adapter } = adapterWithUpdateContext([
-      1n, 1n, { malformed: true }, 10n, 1n, false, 8n,
-    ]);
-
-    await expect(adapter.getKnowledgeAssetUpdateContext(405n))
-      .rejects.toThrow('Invalid byteSize in update context for KA 405');
-  });
 });
 
 describe('MockChainAdapter KA scalar update context', () => {
+  it('initializes the legacy V8 scalar context without changing its defaults', async () => {
+    const adapter = new MockChainAdapter();
+    await adapter.createKnowledgeAsset({
+      merkleRoot: new Uint8Array(32).fill(0x11),
+      knowledgeAssetsCount: 4,
+      signatures: [],
+    });
+
+    await expect(adapter.getKnowledgeAssetUpdateContext(1n)).resolves.toEqual({
+      merkleRootsCount: 1n,
+      minted: 4n,
+      byteSize: 0n,
+      endEpoch: 2n,
+      tokenAmount: 0n,
+      isImmutable: false,
+      merkleLeafCount: 0,
+    });
+  });
+
+  it('initializes fixture registration through the grouped scalar context', async () => {
+    const adapter = new MockChainAdapter();
+    adapter.__registerKC({
+      kaId: 55n,
+      contextGraphId: 7n,
+      merkleRootHex: `0x${'22'.repeat(32)}`,
+      chunks: [
+        { chunkId: 0n, chunk: `0x${'33'.repeat(32)}` },
+        { chunkId: 1n, chunk: `0x${'44'.repeat(32)}` },
+      ],
+      merkleLeafCount: 9,
+      byteSize: 8_192n,
+      startEpoch: 3n,
+      endEpoch: 8n,
+      tokenAmount: 123n,
+    });
+
+    await expect(adapter.getKnowledgeAssetUpdateContext(55n)).resolves.toEqual({
+      merkleRootsCount: 1n,
+      minted: 1n,
+      byteSize: 8_192n,
+      endEpoch: 8n,
+      tokenAmount: 123n,
+      isImmutable: false,
+      merkleLeafCount: 9,
+    });
+  });
+
   it('restates the current version, bytes and leaves after growth and shrink updates', async () => {
     const adapter = new MockChainAdapter();
     await adapter.ensureProfile();
