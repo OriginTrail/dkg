@@ -15,12 +15,15 @@ describe('historical Context Graph name-hash reverse resolution', () => {
   it('switches above the fast cap before issuing any getNameHash read', async () => {
     const {
       adapter,
-      historicalLogResolver,
+      fence,
       readContractWithOptions,
       setLatestId,
     } = fixture([]);
     setLatestId(CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n);
-    const historical = vi.spyOn(historicalLogResolver, 'resolve').mockResolvedValue(77n);
+    const historical = vi.spyOn(
+      fence as unknown as { resolveHistorical: (nameHash: string) => Promise<bigint | null> },
+      'resolveHistorical',
+    ).mockResolvedValue(77n);
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(77n);
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(1);
@@ -88,6 +91,93 @@ describe('historical Context Graph name-hash reverse resolution', () => {
       /RPC backends disagree on canonical block hash at historical head 101/i,
     );
     expect(scenario.queryEventLogsPage).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when same-head RPCs disagree on the pinned historical high-water', async () => {
+    const scenario = historicalFixture([[42n]]);
+    const pinnedHighWater = CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n;
+    const peerProvider = {
+      getBlock: vi.fn(async (blockNumber: number) => ({
+        number: blockNumber,
+        hash: `0x${'33'.repeat(32)}`,
+      })),
+    };
+    const primaryRead = vi.fn(async () => pinnedHighWater);
+    const peerRead = vi.fn(async (options?: { blockTag?: number }) =>
+      options?.blockTag === 101 ? pinnedHighWater + 1n : pinnedHighWater);
+    scenario.adapter.providers = [scenario.provider, peerProvider];
+    scenario.resolveContractDeployBlock.mockResolvedValue({
+      fromBlock: 100,
+      head: 101,
+      scanProviders: [
+        { provider: scenario.provider, backendHead: 101 },
+        { provider: peerProvider, backendHead: 101 },
+      ],
+    });
+    scenario.adapter.rebindContract.mockImplementation(
+      (_contract: unknown, provider: unknown) => ({
+        getLatestContextGraphId: provider === peerProvider ? peerRead : primaryRead,
+        getNameHash: scenario.getNameHash,
+      }),
+    );
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      'resolveContextGraphIdByNameHash: RPC backends disagree on registry ' +
+      'high-water at historical head 101',
+    );
+    expect(primaryRead).toHaveBeenCalledWith({ blockTag: 101 });
+    expect(peerRead).toHaveBeenCalledWith({ blockTag: 101 });
+    expect(scenario.queryEventLogsPage).not.toHaveBeenCalled();
+    expect(scenario.getNameHash).not.toHaveBeenCalled();
+  });
+
+  it('fails closed when one same-head RPC cannot read the pinned historical high-water', async () => {
+    const scenario = historicalFixture([[42n]]);
+    const pinnedHighWater = CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n;
+    const peerFailure = new Error('pinned counter unavailable');
+    const peerProvider = {
+      getBlock: vi.fn(async (blockNumber: number) => ({
+        number: blockNumber,
+        hash: `0x${'33'.repeat(32)}`,
+      })),
+    };
+    const primaryRead = vi.fn(async () => pinnedHighWater);
+    const peerRead = vi.fn(async (options?: { blockTag?: number }) => {
+      if (options?.blockTag === 101) throw peerFailure;
+      return pinnedHighWater;
+    });
+    scenario.adapter.providers = [scenario.provider, peerProvider];
+    scenario.resolveContractDeployBlock.mockResolvedValue({
+      fromBlock: 100,
+      head: 101,
+      scanProviders: [
+        { provider: scenario.provider, backendHead: 101 },
+        { provider: peerProvider, backendHead: 101 },
+      ],
+    });
+    scenario.adapter.rebindContract.mockImplementation(
+      (_contract: unknown, provider: unknown) => ({
+        getLatestContextGraphId: provider === peerProvider ? peerRead : primaryRead,
+        getNameHash: scenario.getNameHash,
+      }),
+    );
+
+    let failure: unknown;
+    try {
+      await scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH);
+    } catch (error) {
+      failure = error;
+    }
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe(
+      'resolveContextGraphIdByNameHash: 1 of 2 RPC backends failed to read ' +
+      'registry high-water at historical head 101',
+    );
+    expect((failure as Error & { cause?: unknown }).cause).toBe(peerFailure);
+    expect(primaryRead).toHaveBeenCalledWith({ blockTag: 101 });
+    expect(peerRead).toHaveBeenCalledWith({ blockTag: 101 });
+    expect(scenario.queryEventLogsPage).not.toHaveBeenCalled();
+    expect(scenario.getNameHash).not.toHaveBeenCalled();
   });
 
   it('keeps the historical fallback fail-closed on duplicate numeric slots', async () => {

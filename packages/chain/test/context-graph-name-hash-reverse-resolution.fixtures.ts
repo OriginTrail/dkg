@@ -5,9 +5,6 @@ import {
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
 } from '../src/context-graph-name-hash-resolver.js';
 import type { EvmContextGraphNameHashFence } from '../src/evm-context-graph-name-hash-fence.js';
-import type {
-  EvmContextGraphNameHashHistoricalLogResolver,
-} from '../src/evm-context-graph-name-hash-historical-log-resolver.js';
 
 const PRIVATE_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -39,9 +36,7 @@ export function resolverInternals(adapter: any) {
   const resolver = adapter.getContextGraphNameHashResolver();
   return {
     resolver,
-    fence: resolver.reader as EvmContextGraphNameHashFence,
-    historicalLogResolver:
-      resolver.historicalLogResolver as EvmContextGraphNameHashHistoricalLogResolver,
+    fence: resolver.source as EvmContextGraphNameHashFence,
   };
 }
 
@@ -109,13 +104,12 @@ export function fixture(initialHashes: ReadonlyArray<string | null> = [NAME_HASH
   });
   adapter.resolveContractDeployBlock = resolveContractDeployBlock;
   adapter.queryEventLogsPage = queryEventLogsPage;
-  const { resolver, fence, historicalLogResolver } = resolverInternals(adapter);
+  const { resolver, fence } = resolverInternals(adapter);
 
   return {
     adapter,
     resolver,
     fence,
-    historicalLogResolver,
     hashes,
     readContractWithOptions,
     resolveContractDeployBlock,

@@ -915,7 +915,7 @@ export class EVMChainAdapterBase {
    */
   protected getContextGraphNameHashResolver(): EvmContextGraphNameHashResolver {
     this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
-      reader: new EvmContextGraphNameHashFence({
+      source: new EvmContextGraphNameHashFence({
         initialize: () => this.init(),
         requireContextGraphStorage: () => this.requireContextGraphStorage(),
         providers: () => this.providers,

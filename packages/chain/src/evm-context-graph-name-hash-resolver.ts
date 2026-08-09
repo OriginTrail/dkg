@@ -3,47 +3,30 @@
 /**
  * Small orchestrator for EVM Context Graph name-hash reverse resolution.
  *
- * Result caching, current-slot enumeration, historical log scanning, and
- * shared chain fences deliberately have separate owners. The adapter supplies
- * only low-level EVM primitives and retains one stable public lookup method.
+ * Result caching is the only concern outside the chain source. The adapter
+ * supplies one source whose high-level resolve operation owns current-slot and
+ * historical lookup ordering, consensus, and revalidation end to end.
  */
 
 import { ContextGraphNameHashResolver } from './context-graph-name-hash-resolver.js';
 import {
-  EvmContextGraphNameHashCurrentSlotResolver,
-} from './evm-context-graph-name-hash-current-slot-resolver.js';
-import {
-  type EvmContextGraphNameHashReader,
+  type EvmContextGraphNameHashSource,
 } from './evm-context-graph-name-hash-fence.js';
-import {
-  EvmContextGraphNameHashHistoricalLogResolver,
-} from './evm-context-graph-name-hash-historical-log-resolver.js';
 
 export interface EvmContextGraphNameHashResolverDependencies {
-  readonly reader: EvmContextGraphNameHashReader;
+  readonly source: EvmContextGraphNameHashSource;
 }
 
 export class EvmContextGraphNameHashResolver {
   private readonly resolutionCache: ContextGraphNameHashResolver;
 
-  private readonly reader: EvmContextGraphNameHashReader;
-
-  private readonly currentSlotResolver: EvmContextGraphNameHashCurrentSlotResolver;
-
-  private readonly historicalLogResolver: EvmContextGraphNameHashHistoricalLogResolver;
+  private readonly source: EvmContextGraphNameHashSource;
 
   constructor(dependencies: EvmContextGraphNameHashResolverDependencies) {
     this.resolutionCache = new ContextGraphNameHashResolver({
       load: (nameHash) => this.loadFromChain(nameHash),
     });
-    this.reader = dependencies.reader;
-    this.currentSlotResolver = new EvmContextGraphNameHashCurrentSlotResolver(
-      this.reader,
-      { onIndexCommit: () => this.resolutionCache.invalidateAll() },
-    );
-    this.historicalLogResolver = new EvmContextGraphNameHashHistoricalLogResolver(
-      this.reader,
-    );
+    this.source = dependencies.source;
   }
 
   resolve(nameHash: string, signal?: AbortSignal): Promise<bigint | null> {
@@ -51,16 +34,15 @@ export class EvmContextGraphNameHashResolver {
   }
 
   invalidateAll(): void {
-    this.reader.invalidate();
-    this.currentSlotResolver.clear();
+    this.source.invalidate();
     this.resolutionCache.invalidateAll();
   }
 
-  /** One uncached lookup across the current-slot or historical EVM lane. */
+  /** One uncached, fully fenced lookup across the adapter-owned chain source. */
   async loadFromChain(normalizedNameHash: string): Promise<bigint | null> {
-    const current = await this.currentSlotResolver.resolve(normalizedNameHash);
-    return current.mode === 'historical'
-      ? this.historicalLogResolver.resolve(normalizedNameHash)
-      : current.id;
+    return this.source.resolve(
+      normalizedNameHash,
+      () => this.resolutionCache.invalidateAll(),
+    );
   }
 }
