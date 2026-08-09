@@ -50,7 +50,7 @@ function sizedTarget(
           byteSize,
           merkleLeafCount,
           assertionVersion: '1',
-          finalizedBlockHash: '0x01',
+          anchor: { kind: 'pinned-finalized', blockHash: '0x01' },
         },
   };
 }
@@ -279,7 +279,10 @@ interface RecoveryTarget {
     readonly byteSize: bigint;
     readonly merkleLeafCount: bigint;
     readonly assertionVersion: string;
-    readonly finalizedBlockHash: string;
+    readonly anchor: {
+      readonly kind: 'pinned-finalized';
+      readonly blockHash: string;
+    };
   };
 }
 
@@ -309,7 +312,7 @@ function recoveryTarget(localCgId: string, ordinal: number): RecoveryTarget {
       byteSize: 1_024n,
       merkleLeafCount: 8n,
       assertionVersion: '1',
-      finalizedBlockHash: '0x01',
+      anchor: { kind: 'pinned-finalized', blockHash: '0x01' },
     },
   };
 }

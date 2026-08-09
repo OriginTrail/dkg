@@ -252,6 +252,7 @@ import {
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import {
+  enrichVmRecoveryFootprints,
   planVmRecoveryMicrobatch,
   VmRecoveryProviderPolicy,
   type VmRecoveryChainFootprint,
@@ -4710,27 +4711,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
-   * Best-effort finalized-inventory cost hint for exact VM recovery planning.
-   * Only a public-policy-proven tuple bound to the same root/version is usable;
-   * private/catalog sizing and partial legacy reads return `unknown`. Tests and
-   * the pinned-inventory adapter replace this narrow seam without changing
-   * provider selection or the transfer executor.
-   */
-  async readVmReconcileRecoveryFootprint(
-    this: DKGAgent,
-    _onChainCgId: bigint,
-    _kaId: bigint,
-    _merkleRoot: Uint8Array,
-  ): Promise<VmRecoveryChainFootprint> {
-    // The scalable source is the pinned finalized inventory row, which reads
-    // update-context + root in one snapshot. The legacy ordinal path does not
-    // own that row yet and must not add N sizing RPCs or use private/catalog
-    // byte size as a public payload estimate. A stacked inventory adapter (or
-    // a focused test) replaces this seam; unavailable hints stay singleton.
-    return { kind: 'unknown' };
-  }
-
-  /**
    * Drain one exact missing-KA batch. The initial ordinal scan has already
    * proven these UALs are not locally materialized, so no already-confirmed KA
    * enters the wire request. After every peer response we re-run local chain
@@ -4763,9 +4743,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
 
     const expectedOnChainCgId = onChainCgId.toString();
-    const currentTargets = targets.filter((target) =>
+    let currentTargets = targets.filter((target) =>
       target.localCgId === localCgId && target.onChainCgId === expectedOnChainCgId);
     if (currentTargets.length === 0) return noRecovery();
+    currentTargets = await enrichVmRecoveryFootprints(
+      currentTargets,
+      onChainCgId,
+      this.chain,
+      {
+        maxContextReads: MAX_EXACT_SYNC_ASSETS,
+        signal,
+        isCurrent: isRecoveryCurrent,
+      },
+    );
+    if (!isRecoveryCurrent()) return noRecovery();
     const admissionCursor = (
       this.vmReconcileRotationAdmissionCursorByCg.get(localCgId) ?? 0
     ) % currentTargets.length;
@@ -5513,11 +5504,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
-        const recoveryFootprint = options.recoveryFootprint
-          ?? await this.readVmReconcileRecoveryFootprint(onChainCgId, kaId, merkleRoot);
-        if (options.isTargetCurrent && !options.isTargetCurrent()) {
-          return { status: 'skip' };
-        }
+        const recoveryFootprint = options.recoveryFootprint ?? { kind: 'unknown' as const };
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),

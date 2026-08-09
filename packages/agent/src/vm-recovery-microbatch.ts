@@ -6,12 +6,138 @@ export type VmRecoveryChainFootprint =
       readonly byteSize: bigint;
       /** On-chain public post-canonicalization Merkle-leaf count. */
       readonly merkleLeafCount: bigint;
-      /** Root/update version read in the same finalized snapshot. */
+      /** Root/update version associated with this cost observation. */
       readonly assertionVersion: string;
-      /** Finalized anchor binding the policy, root, and sizing tuple. */
-      readonly finalizedBlockHash: string;
+      /**
+       * Provenance of this soft scheduling hint.
+       *
+       * A pinned-finalized hint binds policy, root and sizing to one snapshot.
+       * The classic reconciler can only obtain a latest-bounded scalar read;
+       * it deliberately carries no synthetic block hash. Both remain hints:
+       * exact executor caps and post-fetch chain reconciliation are the
+       * correctness boundary.
+       */
+      readonly anchor:
+        | {
+            readonly kind: 'pinned-finalized';
+            readonly blockHash: string;
+          }
+        | { readonly kind: 'latest-bounded' };
     }
   | { readonly kind: 'unknown' };
+
+export interface VmRecoveryFootprintBridgeTarget {
+  readonly kaId: string;
+  readonly recoveryFootprint?: VmRecoveryChainFootprint;
+}
+
+export interface VmRecoveryFootprintBridgeReader {
+  getContextGraphAccessPolicy?(contextGraphId: bigint): Promise<number>;
+  getKnowledgeAssetUpdateContext?(
+    kaId: bigint,
+    options?: { signal?: AbortSignal },
+  ): Promise<{
+    merkleRootsCount: bigint;
+    byteSize: bigint;
+    merkleLeafCount: number;
+  }>;
+}
+
+export interface VmRecoveryFootprintBridgeOptions {
+  /** Hard upper bound on per-slice update-context reads. */
+  maxContextReads: number;
+  signal?: AbortSignal;
+  /** Captured subscription/binding lifecycle guard. */
+  isCurrent: () => boolean;
+}
+
+/**
+ * Enrich a bounded prefix of classic-reconciler targets with public-chain
+ * sizing hints.
+ *
+ * This is intentionally weaker than the pinned finalized inventory scanner:
+ * the access-policy and update-context calls are latest-state reads and are
+ * not root-atomic. Consequently they get an explicit `latest-bounded` anchor
+ * and can only influence soft packing. Any absent capability, non-public
+ * policy, failed/zero scalar read, abort, or stale lifecycle leaves the target
+ * unknown so it retains the legacy singleton request shape.
+ */
+export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBridgeTarget>(
+  targets: readonly T[],
+  onChainCgId: bigint,
+  reader: VmRecoveryFootprintBridgeReader,
+  options: Readonly<VmRecoveryFootprintBridgeOptions>,
+): Promise<T[]> {
+  const original = [...targets];
+  if (
+    !Number.isSafeInteger(options.maxContextReads)
+    || options.maxContextReads <= 0
+    || targets.length === 0
+    || options.signal?.aborted
+    || !options.isCurrent()
+    || typeof reader.getContextGraphAccessPolicy !== 'function'
+    || typeof reader.getKnowledgeAssetUpdateContext !== 'function'
+  ) return original;
+
+  let accessPolicy: number;
+  try {
+    accessPolicy = await reader.getContextGraphAccessPolicy(onChainCgId);
+  } catch {
+    return original;
+  }
+  if (
+    accessPolicy !== 0
+    || options.signal?.aborted
+    || !options.isCurrent()
+  ) return original;
+
+  const unknownEntries = targets
+    .map((target, index) => ({ target, index }))
+    .filter(({ target }) => !target.recoveryFootprint
+      || target.recoveryFootprint.kind === 'unknown')
+    .slice(0, options.maxContextReads);
+  if (unknownEntries.length === 0) return original;
+
+  const observed = await Promise.all(unknownEntries.map(async ({ target, index }) => {
+    if (options.signal?.aborted || !options.isCurrent()) return { index };
+    try {
+      const context = await reader.getKnowledgeAssetUpdateContext!(
+        BigInt(target.kaId),
+        options.signal ? { signal: options.signal } : undefined,
+      );
+      if (
+        options.signal?.aborted
+        || !options.isCurrent()
+        || context.merkleRootsCount <= 0n
+        || context.byteSize <= 0n
+        || !Number.isSafeInteger(context.merkleLeafCount)
+        || context.merkleLeafCount <= 0
+      ) return { index };
+      return {
+        index,
+        footprint: {
+          kind: 'public-v10',
+          byteSize: context.byteSize,
+          merkleLeafCount: BigInt(context.merkleLeafCount),
+          assertionVersion: context.merkleRootsCount.toString(),
+          anchor: { kind: 'latest-bounded' },
+        } satisfies VmRecoveryChainFootprint,
+      };
+    } catch {
+      return { index };
+    }
+  }));
+
+  // An unsubscribe/rebind/abort invalidates the whole latest-state observation
+  // instead of leaking a partially enriched scheduling plan across lifecycles.
+  if (options.signal?.aborted || !options.isCurrent()) return original;
+  const enriched = [...targets];
+  for (const { index, footprint } of observed) {
+    if (!footprint) continue;
+    enriched[index] = { ...targets[index]!, recoveryFootprint: footprint };
+  }
+  return enriched;
+}
 
 export interface VmRecoveryTargetFootprint {
   readonly recoveryFootprint: VmRecoveryChainFootprint;
