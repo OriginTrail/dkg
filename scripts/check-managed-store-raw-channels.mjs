@@ -27,6 +27,7 @@ const REVIEWED_NON_STORE_CALLS = Object.freeze([
     method: 'query',
     receiver: 'request',
     expression: 'sql',
+    occurrence: 1,
     reason: 'Optional mssql Request.query API; not an RDF TripleStore channel.',
   }),
 ]);
@@ -244,7 +245,26 @@ function reviewedNonStoreCallKey(record) {
     record.method,
     record.receiver,
     record.expression,
+    record.occurrence,
   ].join('\0');
+}
+
+function reviewedNonStoreCallBaseKey(record) {
+  return [
+    record.package,
+    record.path,
+    record.symbol,
+    record.method,
+    record.receiver,
+    record.expression,
+  ].join('\0');
+}
+
+function addReviewedNonStoreOccurrence(record, occurrences) {
+  const baseKey = reviewedNonStoreCallBaseKey(record);
+  const occurrence = (occurrences.get(baseKey) ?? 0) + 1;
+  occurrences.set(baseKey, occurrence);
+  return Object.freeze({ ...record, occurrence });
 }
 
 const REVIEWED_NON_STORE_CALLS_BY_KEY = new Map(
@@ -477,7 +497,7 @@ function selfTestRawStoreAliasResolution() {
 }
 
 function selfTestReviewedNonStoreCalls() {
-  const reviewed = {
+  const candidate = {
     package: 'agent',
     path: 'packages/agent/src/example.ts',
     symbol: 'readSql',
@@ -485,6 +505,7 @@ function selfTestReviewedNonStoreCalls() {
     receiver: 'request',
     expression: 'sql',
   };
+  const reviewed = { ...candidate, occurrence: 1 };
   const allowlist = new Map([[reviewedNonStoreCallKey(reviewed), reviewed]]);
   if (!allowlist.has(reviewedNonStoreCallKey(reviewed))) {
     throw new Error('reviewed non-store self-test rejected an exact non-store call');
@@ -492,6 +513,15 @@ function selfTestReviewedNonStoreCalls() {
   const untypedStoreAlias = { ...reviewed, receiver: 'rawStore' };
   if (allowlist.has(reviewedNonStoreCallKey(untypedStoreAlias))) {
     throw new Error('reviewed non-store self-test admitted an untyped store alias');
+  }
+  const occurrences = new Map();
+  const first = addReviewedNonStoreOccurrence(candidate, occurrences);
+  const duplicate = addReviewedNonStoreOccurrence(candidate, occurrences);
+  if (!allowlist.has(reviewedNonStoreCallKey(first))) {
+    throw new Error('reviewed non-store self-test rejected the first allowed occurrence');
+  }
+  if (allowlist.has(reviewedNonStoreCallKey(duplicate))) {
+    throw new Error('reviewed non-store self-test admitted a duplicate allowed occurrence');
   }
 }
 
@@ -556,6 +586,7 @@ function scanPackage(name, configPath) {
   let dynamicQueries = 0;
   const dynamicQueryRecords = [];
   const reviewedNonStoreCalls = new Set();
+  const reviewedNonStoreOccurrences = new Map();
   let scannedFiles = 0;
 
   for (const sourceFile of program.getSourceFiles()) {
@@ -584,7 +615,10 @@ function scanPackage(name, configPath) {
           const sourcePath = fileName.slice(REPOSITORY_ROOT.length + 1);
           const location = `${sourcePath}:${line}`;
           if (untypedCandidate) {
-            const record = untypedRawCallRecord(name, sourcePath, sourceFile, node, access);
+            const record = addReviewedNonStoreOccurrence(
+              untypedRawCallRecord(name, sourcePath, sourceFile, node, access),
+              reviewedNonStoreOccurrences,
+            );
             const key = reviewedNonStoreCallKey(record);
             if (REVIEWED_NON_STORE_CALLS_BY_KEY.has(key)) {
               reviewedNonStoreCalls.add(key);
