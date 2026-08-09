@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import { StorePriorityScheduler } from '../src/store-priority-scheduler.js';
 
@@ -30,6 +30,39 @@ const deferred = <T>() => {
 };
 
 describe('control barrier contract survives the coordinator extraction', () => {
+  it('clears cached tagged inflight before a later untagged-only barrier', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 8 });
+    const storeId = {};
+
+    await scheduler.run('normal', 'tagged.complete', async () => undefined, undefined, {
+      mode: 'shared',
+      storeId,
+      generation: 'gen-1',
+    });
+    expect(scheduler.snapshot.admissionTaggedInflight).toBe(0);
+
+    const untagged = deferred<void>();
+    const untaggedRun = scheduler.run('normal', 'untagged.blocker', () => untagged.promise);
+    await settle();
+
+    let started = false;
+    const barrier = scheduler.runControlBarrierEffect(
+      storeId,
+      'probe.effect',
+      async () => {
+        started = true;
+      },
+    );
+    expectTypeOf(barrier).toEqualTypeOf<Promise<void>>();
+    await settle();
+    expect(started).toBe(false);
+
+    untagged.resolve();
+    await untaggedRun;
+    await barrier;
+    expect(started).toBe(true);
+  });
+
   it('waits for BOTH untagged and same-store tagged work before starting', async () => {
     // The reviewer's scenario: one untagged run and one tagged run for the same
     // store, both in flight when the barrier is enqueued. The transition must

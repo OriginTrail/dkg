@@ -40,7 +40,7 @@ import {
 } from './sparql-json-results.js';
 import {
   externalStorePriorityScheduler,
-  type StoreQueuedAdmissionV1,
+  type StoreAdmissionV1,
 } from '../store-priority-scheduler.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
@@ -124,7 +124,7 @@ const SYSTEM_CONTEXT_GRAPH_IRIS = [
 ] as const;
 
 interface ManagedMutationBindingV1 {
-  readonly admission: StoreQueuedAdmissionV1;
+  readonly admission: StoreAdmissionV1;
   readonly generation: string;
 }
 
@@ -754,7 +754,7 @@ export class SparqlHttpStore implements TripleStore {
           // when the controller was BUILT would seal a generation that has since
           // been replaced.
           barrier: (purpose, transition) =>
-            externalStorePriorityScheduler.runControlBarrier(
+            externalStorePriorityScheduler.runControlBarrierEffect(
               this,
               purpose,
               transition,

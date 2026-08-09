@@ -5,7 +5,7 @@ import {
   STORE_ADMISSION_SHARED_BYPASS_LIMIT,
   StoreControlBarrierTimeoutError,
   StorePriorityScheduler,
-  type StoreQueuedAdmissionV1,
+  type StoreAdmissionV1,
 } from '../src/store-priority-scheduler.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -26,10 +26,10 @@ function openScheduler(now?: () => number): StorePriorityScheduler {
 
 function admission(
   storeId: object,
-  mode: StoreQueuedAdmissionV1['mode'],
+  mode: StoreAdmissionV1['mode'],
   domain?: string,
   generation = 'gen-1',
-): StoreQueuedAdmissionV1 {
+): StoreAdmissionV1 {
   return domain === undefined
     ? { storeId, generation, mode }
     : { storeId, generation, domain, mode };
@@ -717,8 +717,8 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       secondTransitionRan = true;
       return 'barrier-2';
     }, 'gen-1');
-    expectTypeOf(first).toEqualTypeOf<Promise<unknown>>();
-    expectTypeOf(second).toEqualTypeOf<Promise<unknown>>();
+    expectTypeOf(first).toEqualTypeOf<Promise<string>>();
+    expectTypeOf(second).toEqualTypeOf<Promise<string>>();
     expect(scheduler.snapshot).toMatchObject({ barrierPending: 1, barrierCoalesced: 1 });
 
     // An already-aborted caller signal cannot reject a control transition.
@@ -729,7 +729,7 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       generation: 'gen-1',
       mode: 'control-barrier',
     });
-    expectTypeOf(viaRun).toEqualTypeOf<Promise<unknown>>();
+    expectTypeOf(viaRun).toEqualTypeOf<Promise<string>>();
     expect(scheduler.snapshot.barrierCoalesced).toBe(2);
 
     expect(events).not.toContain('barrier:start');

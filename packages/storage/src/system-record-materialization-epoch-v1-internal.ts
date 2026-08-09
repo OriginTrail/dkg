@@ -55,6 +55,18 @@ const exactKeys = (value: unknown, keys: readonly string[], label: string): Reco
   return value as Record<string, unknown>;
 };
 
+export function isSystemRecordMaterializationEpochRotationV1(
+  value: unknown,
+): value is SystemRecordMaterializationEpochRotationV1 {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  return keys.length === 2
+    && keys.includes('epoch')
+    && keys.includes('childGeneration')
+    && typeof (value as Record<string, unknown>).epoch === 'string'
+    && typeof (value as Record<string, unknown>).childGeneration === 'string';
+}
+
 const denseArray = (value: unknown, max: number, label: string): readonly unknown[] => {
   if (!Array.isArray(value) || value.length > max) throw new Error(`${label} is invalid`);
   const keys = Reflect.ownKeys(value);

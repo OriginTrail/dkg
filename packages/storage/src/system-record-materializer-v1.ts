@@ -17,17 +17,10 @@ import {
   snapshotSystemRecordDenseArrayV1,
   snapshotSystemRecordExactDataRecordV1,
 } from './system-record-input-guards-v1-internal.js';
-
-function isMaterializationEpochBindingV1(
-  value: unknown,
-): value is { readonly epoch: string; readonly childGeneration: string } {
-  return typeof value === 'object'
-    && value !== null
-    && 'epoch' in value
-    && typeof value.epoch === 'string'
-    && 'childGeneration' in value
-    && typeof value.childGeneration === 'string';
-}
+import {
+  isSystemRecordMaterializationEpochRotationV1,
+  type SystemRecordMaterializationEpochRotationV1,
+} from './system-record-materialization-epoch-v1-internal.js';
 
 /**
  * System-record V1 lane controller (#2052 Stack B2).
@@ -150,10 +143,9 @@ export interface SystemRecordChildHandoffV1 {
    * its lease and keeps the missing epoch behind an internal legacy marker.
    * A B3 activation still requires the concrete binding.
    */
-  rotateMaterializationEpoch(networkId?: string): Promise<void | {
-    readonly epoch: string;
-    readonly childGeneration: string;
-  }>;
+  rotateMaterializationEpoch(
+    networkId?: string,
+  ): Promise<void | SystemRecordMaterializationEpochRotationV1>;
   /**
    * Bind the exact-recovery read to the proven replacement generation.
    * Optional only while the B2 adapter migrates to the B3 atomic executor;
@@ -226,8 +218,8 @@ export interface SystemRecordLaneExecutionBindingV1 {
  */
 export type SystemRecordLaneBarrierV1 = (
   purpose: string,
-  transition: () => Promise<unknown>,
-) => Promise<unknown>;
+  transition: () => Promise<void>,
+) => Promise<void>;
 
 export interface SystemRecordLaneControllerDepsV1 {
   /** The supervisor-issued live ownership lease. Captured, never accepted per-call. */
@@ -757,17 +749,17 @@ class SystemRecordLaneSession {
   ): Promise<void> {
     this.assertLeaseLive();
     this.commitState('enabling');
-    let rotated: unknown;
+    let rotated: void | SystemRecordMaterializationEpochRotationV1 = undefined;
     try {
       // Under the barrier: admission is sealed and both tagged and untagged
       // work is drained before the child is touched, and not resumed until the
       // replacement generation is bound.
-      rotated = await this.deps.barrier('system-record.enable', async () => {
+      await this.deps.barrier('system-record.enable', async () => {
         await this.deps.handoff.destroyClient();
         await this.deps.handoff.stopAndProveOwnedChildDead();
         await this.deps.handoff.awaitRetiredWork();
         await this.deps.handoff.startAndProveCleanGeneration();
-        return this.deps.handoff.rotateMaterializationEpoch(activation.networkId);
+        rotated = await this.deps.handoff.rotateMaterializationEpoch(activation.networkId);
       });
     } catch (error) {
       this.failManagedMutationsClosed('enable transition did not physically settle');
@@ -776,7 +768,9 @@ class SystemRecordLaneSession {
       this.clearActiveBinding();
       throw error;
     }
-    const rotation = isMaterializationEpochBindingV1(rotated) ? rotated : undefined;
+    const rotation = isSystemRecordMaterializationEpochRotationV1(rotated)
+      ? rotated
+      : undefined;
     if (
       (rotated === undefined && this.deps.executor.applyVerifiedSettlementBound) ||
       (rotated !== undefined && rotation === undefined)

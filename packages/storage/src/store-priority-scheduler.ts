@@ -106,7 +106,7 @@ export type StoreAdmissionMode =
  * sits in front of every store operation in the daemon, so the untagged path
  * must stay the pre-#2052 four-integer comparison it has always been.
  */
-interface StoreAdmissionBaseV1 {
+export interface StoreAdmissionV1 {
   /**
    * Opaque store-instance identity, compared by reference and never
    * serialized. Entries without one are untagged/legacy.
@@ -125,21 +125,8 @@ interface StoreAdmissionBaseV1 {
    * domain so they keep running during an ordinary profile apply.
    */
   readonly domain?: string;
+  readonly mode: StoreAdmissionMode;
 }
-
-/** Admission metadata accepted by the ordinary, result-preserving queue path. */
-export type StoreQueuedAdmissionV1 = StoreAdmissionBaseV1 & {
-  readonly mode: Exclude<StoreAdmissionMode, 'control-barrier'>;
-};
-
-/** Admission metadata for the coalescing, intentionally result-opaque path. */
-export type StoreControlBarrierAdmissionV1 = StoreAdmissionBaseV1 & {
-  readonly mode: 'control-barrier';
-};
-
-export type StoreAdmissionV1 =
-  | StoreQueuedAdmissionV1
-  | StoreControlBarrierAdmissionV1;
 
 import {
   StoreControlBarrierCoordinator,
@@ -703,27 +690,13 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * A `control-barrier` admission is routed out of the priority queues entirely
    * — `priority` and `signal` are ignored for it, by design.
    */
-  run(
-    priority: StoreWorkPriority | undefined,
-    operation: string,
-    work: () => Promise<unknown>,
-    signal: AbortSignal | undefined,
-    admission: StoreControlBarrierAdmissionV1,
-  ): Promise<unknown>;
-  run<T>(
-    priority: StoreWorkPriority | undefined,
-    operation: string,
-    work: () => Promise<T>,
-    signal?: AbortSignal,
-    admission?: StoreQueuedAdmissionV1,
-  ): Promise<T>;
   async run<T>(
     priority: StoreWorkPriority | undefined,
     operation: string,
     work: () => Promise<T>,
     signal?: AbortSignal,
     admission?: StoreAdmissionV1,
-  ): Promise<unknown> {
+  ): Promise<T> {
     const normalizedPriority = priority ?? 'normal';
     // Routed FIRST: a control transition must not be rejectable by an
     // already-aborted caller signal any more than by queue capacity.
@@ -1103,13 +1076,36 @@ export class StorePriorityScheduler extends ObservableScheduler {
    *
    * @param timeoutMs Overrides the default bound for this transition.
    */
-  runControlBarrier(
+  /**
+   * Historical result-preserving barrier API.
+   *
+   * New coalescible transitions should use {@link runControlBarrierEffect}; a
+   * runtime string cannot itself bind the result type shared by later callers.
+   */
+  runControlBarrier<T>(
     storeId: object,
     purpose: string,
-    transition: () => Promise<unknown>,
+    transition: () => Promise<T>,
     generation?: string,
     timeoutMs?: number,
-  ): Promise<unknown> {
+  ): Promise<T> {
+    return this.barrierCoordinator.enqueue(
+      storeId,
+      purpose,
+      transition,
+      generation,
+      timeoutMs,
+    );
+  }
+
+  /** Result-free control barrier for coalescible lifecycle transitions. */
+  runControlBarrierEffect(
+    storeId: object,
+    purpose: string,
+    transition: () => Promise<void>,
+    generation?: string,
+    timeoutMs?: number,
+  ): Promise<void> {
     return this.barrierCoordinator.enqueue(
       storeId,
       purpose,
@@ -1375,7 +1371,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
     operation: string,
     work: () => Promise<T>,
     signal: AbortSignal | undefined,
-    admission: StoreQueuedAdmissionV1,
+    admission: StoreAdmissionV1,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const state = this.getOrCreateStoreState(admission.storeId);

@@ -756,12 +756,10 @@ describe('system-record lane session lifecycle V1', () => {
     });
 
     it('fails managed mutations closed when the epoch binding is MALFORMED', async () => {
-      // The barrier result is `unknown` — coalescing means a later same-key
-      // caller cannot soundly type another caller's shared promise — so the
-      // lane re-validates with `isMaterializationEpochBindingV1`. That guard
-      // shipped without a test, which is the shape worth pinning: a rotation
-      // that returns something plausible-but-wrong must fail CLOSED, not be
-      // read as "no binding" and quietly enable.
+      // The result is captured inside the result-free barrier, then validated
+      // by the canonical epoch-rotation guard. A rotation that returns
+      // something plausible-but-wrong must fail CLOSED, not be read as "no
+      // binding" and quietly enable.
       handoff.rotateMaterializationEpoch = (async () => ({
         epoch: 1,
         childGeneration: null,
