@@ -116,7 +116,6 @@ describe('StorePriorityScheduler admission V1 — default-path invariance', () =
       admissionBoundHolds: 0,
       barrierPending: 0,
       barrierInflight: 0,
-      barrierWaitOccupiedSlotMs: 0,
     });
 
     await Promise.allSettled(settled);
@@ -725,7 +724,6 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
       barrierPending: 1,
       barrierInflight: 0,
       normalInflight: 1,
-      barrierWaitOccupiedSlotMs: 0,
     });
 
     let secondTransitionRan = false;
@@ -760,10 +758,12 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     await expect(viaRun).resolves.toBe('barrier-1');
 
     const snapshot = scheduler.snapshot;
-    // The barrier genuinely waited (so the zero below is not vacuous) and held
-    // zero execution slots for the whole of that wait.
+    // The barrier genuinely waited, and it held no ordinary execution slot for
+    // the duration — proven above by `barrier:start` being absent until the
+    // writer released (749/753), not by a snapshot field. There was one such
+    // field; it reported a hardcoded 0, so asserting it proved only that a
+    // literal equals itself.
     expect(snapshot.barrierWaitMs).toBeGreaterThan(0);
-    expect(snapshot.barrierWaitOccupiedSlotMs).toBe(0);
     expect(snapshot).toMatchObject({ barrierPending: 0, barrierInflight: 0 });
 
     await Promise.all([writer, queueFiller]);
@@ -816,7 +816,6 @@ describe('StorePriorityScheduler admission V1 — control barrier', () => {
     expect(scheduler.snapshot).toMatchObject({
       barrierPending: 0,
       barrierInflight: 0,
-      barrierWaitOccupiedSlotMs: 0,
       admissionTrackedStores: 0,
     });
   });

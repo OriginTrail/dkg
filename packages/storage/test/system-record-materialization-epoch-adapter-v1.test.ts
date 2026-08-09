@@ -67,8 +67,12 @@ afterEach(() => {
 
 describe('sparql-http managed epoch handoff', () => {
   it('rotates through the generation-owned client inside the control barrier', async () => {
+    // The lane MUST take the result-preserving path: a coalesced caller has to
+    // receive the first transition's typed lifecycle data, not an unassigned
+    // local capture. A result-free variant existed alongside it and this test
+    // asserted it was never called — a public API pinned as unreachable, which
+    // is why it is gone rather than merely unused.
     const resultBarrier = vi.spyOn(externalStorePriorityScheduler, 'runControlBarrier');
-    const effectBarrier = vi.spyOn(externalStorePriorityScheduler, 'runControlBarrierEffect');
     const ownership = createManagedOxigraphOwnershipControllerV1(queryEndpoint, updateEndpoint);
     ownership.bindReadyGeneration();
     const options = attachManagedOxigraphLeaseV1(
@@ -85,7 +89,6 @@ describe('sparql-http managed epoch handoff', () => {
 
     const first = await controller!.open({ networkId: 'testnet', kinds: ['agents'], mode: 'shadow' });
     expect(resultBarrier).toHaveBeenCalled();
-    expect(effectBarrier).not.toHaveBeenCalled();
     expect(epoch).toBe('1');
     await first.close('disable');
     expect(epoch).toBe('2');

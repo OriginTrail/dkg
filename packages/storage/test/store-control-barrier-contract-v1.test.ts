@@ -55,7 +55,7 @@ describe('control barrier contract survives the coordinator extraction', () => {
     await settle();
 
     let started = false;
-    const barrier = scheduler.runControlBarrierEffect(
+    const barrier = scheduler.runControlBarrier<void>(
       storeId,
       'probe.effect',
       async () => {

@@ -69,23 +69,6 @@ export interface StorePrioritySchedulerSnapshot extends StorePressureSnapshot {
   barrierTimeouts: number;
   /** Cumulative barrier wait. Proves a measured wait actually happened. */
   barrierWaitMs: number;
-  /**
-   * Execution-slot·milliseconds consumed by barriers while they were WAITING.
-   * Structurally 0: a waiting barrier increments no inflight counter.
-   *
-   * ALWAYS 0 today, and that is a LOSS rather than the property it looks like.
-   * This was a tripwire, not a metric: a live product of two measured
-   * quantities, so that regressing the barrier into an ordinary queued entry
-   * — which would pin a slot for the whole drain — turned it non-zero instead
-   * of silently starving the lane it borrowed from.
-   *
-   * The slot counter that fed it has since been removed, so the tripwire
-   * cannot fire. Reading 0 now means "cannot report", not "nothing to
-   * report", and a dead tripwire documented as armed is worse than none.
-   * Restoring it means counting slots held by control-barrier admissions
-   * again, not reading a constant.
-   */
-  barrierWaitOccupiedSlotMs: number;
 }
 
 /**
@@ -692,9 +675,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
       barrierCoalesced: barrier.coalesced,
       barrierTimeouts: barrier.timeouts,
       barrierWaitMs: barrier.waitMs,
-      // Control barriers run in a reserved controller slot outside ordinary
-      // scheduler capacity, so they structurally occupy zero measured slots.
-      barrierWaitOccupiedSlotMs: 0,
     };
   }
 
@@ -1089,14 +1069,18 @@ export class StorePriorityScheduler extends ObservableScheduler {
    * forever, to diagnose a caller bug faster, is the wrong trade for a
    * process-global scheduler.
    *
-   * Historical result-preserving barrier API.
+   * The `as Promise<T>` below is UNSOUND and deliberately so, pending #2179: a
+   * runtime purpose string cannot bind `T`, so two callers coalescing on one
+   * purpose with different result types both receive the FIRST transition's
+   * value under their own `T`. Every caller today passes the same purpose from
+   * a single call site, which is what makes it survivable rather than correct.
    *
-   * New coalescible transitions should use {@link runControlBarrierEffect}; a
-   * runtime string cannot itself bind the result type shared by later callers.
-   *
-   * @deprecated Result-bearing coalescing cannot be type-safe with a runtime
-   * purpose string. Use `runControlBarrierEffect` for new transitions; #2179
-   * tracks the versioned replacement for typed results.
+   * NOT marked `@deprecated`. It carried that tag pointing at a result-free
+   * wrapper, which cannot serve the only caller there is — the system-record
+   * lane barrier returns typed lifecycle data a coalesced caller must receive.
+   * Deprecating the sole working API in favour of one that cannot replace it
+   * reads as "migrate" while offering nowhere to migrate to. #2179 tracks the
+   * typed replacement; the warning belongs on the cast, which is above.
    *
    * @param timeoutMs Overrides the default bound for this transition.
    */
@@ -1115,23 +1099,6 @@ export class StorePriorityScheduler extends ObservableScheduler {
       generation,
       timeoutMs,
     ) as Promise<T>;
-  }
-
-  /** Result-free control barrier for coalescible lifecycle transitions. */
-  async runControlBarrierEffect(
-    storeId: object,
-    purpose: string,
-    transition: () => Promise<void>,
-    generation?: string,
-    timeoutMs?: number,
-  ): Promise<void> {
-    await this.barrierCoordinator.enqueue(
-      storeId,
-      purpose,
-      transition,
-      generation,
-      timeoutMs,
-    );
   }
 
   private isSealed(storeId: object): boolean {
