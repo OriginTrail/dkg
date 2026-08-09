@@ -42,7 +42,18 @@ const expectedNames = [...(cfg.barrelValueExports ?? [])].sort();
 const added = actualNames.filter((n) => !expectedNames.includes(n));
 const removed = expectedNames.filter((n) => !actualNames.includes(n));
 
+// The INTERNAL entry's export-name set is pinned the same way: it is the
+// PUBLISHED internal contract, and without this pin any new implementation
+// export would silently widen the reachable package surface. Intentional
+// widening updates pack-gate/internal-entry-exports.json in the same PR.
+const actualInternalNames = Object.keys(internal).filter((n) => n !== 'default').sort();
+const expectedInternalNames = [...(cfg.internalEntryExports ?? [])].sort();
+const internalAdded = actualInternalNames.filter((n) => !expectedInternalNames.includes(n));
+const internalRemoved = expectedInternalNames.filter((n) => !actualInternalNames.includes(n));
+
 const verdicts = [
+  [internalAdded.length === 0 && internalRemoved.length === 0,
+    `internal-entry export set matches the pinned snapshot (added: ${internalAdded.join(',') || '-'}; removed: ${internalRemoved.join(',') || '-'})`],
   [added.length === 0 && removed.length === 0,
     `barrel value-export set matches the pinned snapshot (added: ${added.join(',') || '-'}; removed: ${removed.join(',') || '-'}) — intentional changes update pack-gate/barrel-value-exports.json in the same PR`],
   [typeof barrel[cfg.publicError] === 'function', 'barrel exports the public unowned-backend error'],

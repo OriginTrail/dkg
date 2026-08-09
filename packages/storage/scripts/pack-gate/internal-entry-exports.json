@@ -1,0 +1,12 @@
+[
+  "MANAGED_OXIGRAPH_LEASE_OPTION_KEY",
+  "attachManagedOxigraphLeaseV1",
+  "canonicalizeManagedOxigraphEndpointIdentityV1",
+  "createManagedOxigraphOwnershipControllerV1",
+  "extractManagedOxigraphHandoffV1",
+  "extractManagedOxigraphLeaseV1",
+  "isManagedOxigraphOwnershipLeaseV1",
+  "isManagedOxigraphOwnershipLiveV1",
+  "managedOxigraphOwnershipEndpointsMatchV1",
+  "readManagedOxigraphOwnershipSnapshotV1"
+]

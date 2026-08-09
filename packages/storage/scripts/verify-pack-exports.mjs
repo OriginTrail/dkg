@@ -136,13 +136,16 @@ function stageFixtures(scratch) {
 const barrelValueExports = JSON.parse(
   readFileSync(join(fixtureDir, 'barrel-value-exports.json'), 'utf8'),
 );
+const internalEntryExports = JSON.parse(
+  readFileSync(join(fixtureDir, 'internal-entry-exports.json'), 'utf8'),
+);
 
 function runProbe(scratch) {
   return run(process.execPath, [join(scratch, 'probe.mjs')], {
     cwd: scratch,
     env: {
       ...process.env,
-      PACK_GATE_CONFIG: JSON.stringify({ ...GATE, barrelValueExports }),
+      PACK_GATE_CONFIG: JSON.stringify({ ...GATE, barrelValueExports, internalEntryExports }),
     },
   });
 }
@@ -222,6 +225,13 @@ try {
     `import { ${GATE.ownershipMint} as packGateWrapped } from '${authorityJs}';
 export const createStorageOwner = (...args) => packGateWrapped(...args);`,
     'WRAPPER around the mint under a fresh name fails the surface snapshot', runProbe,
+  );
+  // A new implementation export on the internal entry is a PUBLISHED surface
+  // change and must fail until the snapshot is deliberately updated.
+  withBarrelMutant(
+    pkgdir, scratch, 'internal/managed-oxigraph-ownership-v1.js',
+    'export const packGateAccidentalHelper = () => undefined;',
+    'accidental new internal-entry export fails the internal snapshot', runProbe,
   );
   withBarrelMutant(
     pkgdir, scratch, 'index.d.ts',
