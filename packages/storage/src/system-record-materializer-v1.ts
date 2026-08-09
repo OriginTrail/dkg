@@ -487,6 +487,24 @@ export interface SystemRecordLaneControllerTypedDepsV1
  * {@link SystemRecordControllerRegistrationError} before composer code gets a
  * chance to run (or throw something else) from a property read.
  */
+/**
+ * The barrier-mode split, stated once and PROVEN by narrowing rather than
+ * asserted by a cast: `'barrier' in deps` discriminates the union, so the
+ * compiler itself proves the legacy branch has a string `barrier` to wrap
+ * and the typed-only branch has a required `typedBarrier`. A future deps
+ * change that breaks either premise fails to typecheck here instead of
+ * surviving inside an `as`.
+ */
+function normalizeControllerBarrierV1(
+  deps: SystemRecordLaneControllerDepsV1 | SystemRecordLaneControllerTypedDepsV1,
+): SystemRecordLaneTypedBarrierV1 {
+  if (!('barrier' in deps)) return deps.typedBarrier;
+  // Legacy-capable shape: a supplied typed member always wins; the string
+  // barrier is wrapped only when it is all the composer has.
+  return deps.typedBarrier ??
+    ((kind, transition) => deps.barrier(`system-record.${kind}`, transition));
+}
+
 export function createSystemRecordLaneControllerV1(
   deps: SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneControllerV1;
@@ -496,14 +514,12 @@ export function createSystemRecordLaneControllerV1(
 export function createSystemRecordLaneControllerV1(
   deps: SystemRecordLaneControllerDepsV1 | SystemRecordLaneControllerTypedDepsV1,
 ): SystemRecordLaneControllerV1 {
+  // Guard FIRST, before the normalizer or any other deps read — deps come
+  // from composers and may carry accessors; see the registration-invariant
+  // tests.
   if (registeredController) throw new SystemRecordControllerRegistrationError();
 
-  const typedBarrier: SystemRecordLaneTypedBarrierV1 = deps.typedBarrier ??
-    ((kind, transition) =>
-      (deps as SystemRecordLaneControllerDepsV1).barrier(
-        `system-record.${kind}`,
-        transition,
-      ));
+  const typedBarrier = normalizeControllerBarrierV1(deps);
   const session = new SystemRecordLaneSession({
     lease: deps.lease,
     handoff: deps.handoff,

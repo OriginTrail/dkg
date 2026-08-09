@@ -914,6 +914,12 @@ describe('system-record lane session lifecycle V1', () => {
         get() {
           throw new Error('composer accessor ran before the registration guard');
         },
+        // `in` narrowing triggers `has`, not `get` — trap both so ANY deps
+        // inspection before the guard trips this, including the normalizer's
+        // discriminating `'barrier' in deps` check.
+        has() {
+          throw new Error('composer deps were inspected before the registration guard');
+        },
       });
       expect(() => createSystemRecordLaneControllerV1(boobyTrapped as never))
         .toThrow(SystemRecordControllerRegistrationError);
