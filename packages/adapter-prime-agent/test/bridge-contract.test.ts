@@ -305,7 +305,7 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'hello agent', correlationId: 'c-1' }),
     });
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => sent.length === 1);
     expect(sent.map(visiblePrompt)).toEqual(['hello agent']);
 
     startBridgeRun();
@@ -337,7 +337,7 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'one', correlationId: 'c-a' }),
     });
-    await new Promise((r) => setTimeout(r, 30));
+    await until(() => sent.length === 1);
     startBridgeRun();
     const second = await fetch(`${base}/send`, {
       method: 'POST',
@@ -582,7 +582,7 @@ describe('/send', () => {
       headers: authed(),
       body: JSON.stringify({ text: 'hung turn', correlationId: 'c-hard-timeout' }),
     });
-    await new Promise((r) => setTimeout(r, 10));
+    await until(() => sent.length === 1);
     startBridgeRun({
       sessionManager: { getSessionId: () => 'sess-hard-timeout' },
       abort: () => { abortCount += 1; },
@@ -597,7 +597,7 @@ describe('/send', () => {
     });
     expect(whileStillRunning.status).toBe(429);
 
-    await new Promise((r) => setTimeout(r, 70));
+    await until(() => abortCount === 1);
     expect(abortCount).toBe(1);
     // The hard timeout aborts but keeps admission closed until Prime confirms
     // the lifecycle boundary with agent_end.
