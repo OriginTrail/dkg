@@ -8,6 +8,14 @@ import {
   SYSTEM_RECORD_PROVIDER_RESPONSE_TOKEN_REFILL_PER_MINUTE,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
+import {
+  createSystemRecordPermitGateV1,
+  type SystemRecordByteAdmissionV1,
+  type SystemRecordByteReservationV1,
+  type SystemRecordPermitGateV1,
+  type SystemRecordPermitV1,
+} from './resource-admission-v1-internal.js';
+
 export interface SystemRecordProviderTokenBucketSnapshotV1 {
   readonly requestTokens: number;
   readonly responseTokens: number;
@@ -118,50 +126,16 @@ export function createSystemRecordProviderTokenBucketV1(
   });
 }
 
-export interface SystemRecordProviderPermitV1 {
-  release(): void;
-}
+export type SystemRecordProviderPermitV1 = SystemRecordPermitV1;
+export type SystemRecordProviderPermitGateV1 = SystemRecordPermitGateV1;
 
-export interface SystemRecordProviderPermitGateV1 {
-  tryAcquire(): SystemRecordProviderPermitV1 | null;
-  readonly active: 0 | 1;
-}
-
-/** One nonqueued provider permit. Absence is an immediate reset, never a waiter. */
+/** Compatibility facade for the canonical nonqueued System Record permit gate. */
 export function createSystemRecordProviderPermitGateV1(): SystemRecordProviderPermitGateV1 {
-  let held = false;
-  return Object.freeze({
-    tryAcquire(): SystemRecordProviderPermitV1 | null {
-      if (held) return null;
-      held = true;
-      let released = false;
-      return Object.freeze({
-        release(): void {
-          if (released) return;
-          released = true;
-          held = false;
-        },
-      });
-    },
-    get active(): 0 | 1 {
-      return held ? 1 : 0;
-    },
-  });
+  return createSystemRecordPermitGateV1();
 }
 
-export interface SystemRecordProviderFrameReservationV1 {
-  /** Return unused capacity while preserving the exact retained frame bytes. */
-  shrinkTo(bytes: number): void;
-  release(): void;
-}
-
-/**
- * Supplied by the one lifecycle-owned runtime accountant. This module never
- * constructs a private accountant or queues for capacity.
- */
-export interface SystemRecordProviderFrameAdmissionV1 {
-  tryReserve(bytes: number): SystemRecordProviderFrameReservationV1 | null;
-}
+export type SystemRecordProviderFrameReservationV1 = SystemRecordByteReservationV1;
+export type SystemRecordProviderFrameAdmissionV1 = SystemRecordByteAdmissionV1;
 
 function positiveInteger(value: number, label: string): number {
   if (!Number.isSafeInteger(value) || value < 1) {
