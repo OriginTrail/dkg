@@ -18,7 +18,7 @@ import type {
 import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
 
 /** Exact prefix retained only for one selected-provider invocation. */
-export interface SelectedSwmMetaContinuationState {
+interface SelectedSwmMetaContinuationState {
   quads: Quad[];
   bytesEstimate: number;
   nextOffset: number;
