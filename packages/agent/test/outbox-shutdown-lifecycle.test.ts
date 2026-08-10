@@ -18,12 +18,18 @@ import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-met
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
-  it('drains retained selected-SWM prefixes after network stop and before store close', async () => {
+  it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
     const events: string[] = [];
     const transfers = new SelectedSwmMetaTransferCoordinator();
     const deleteCheckpoint = vi.fn(() => events.push('prefix-cleaned'));
     const peerId = 'peer-stop-order';
-    await transfers.run(
+    let releaseTransfer!: () => void;
+    const transferGate = new Promise<void>((resolve) => { releaseTransfer = resolve; });
+    let signalTransferStarted!: () => void;
+    const transferStarted = new Promise<void>((resolve) => {
+      signalTransferStarted = resolve;
+    });
+    const transfer = transfers.run(
       peerId,
       () => createSelectedSwmMetaFetcher({
         remotePeerId: peerId,
@@ -35,15 +41,19 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
           maxPrefixBytesEstimate: 1024,
         }),
         deleteCheckpoint,
-        fetchPage: async () => ({
-          quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
-          bytesReceived: 1,
-          resumedFromOffset: 0,
-          nextOffset: 1,
-          checkpointKey: 'retained-stop-checkpoint',
-          completed: false,
-          timedOut: true,
-        }),
+        fetchPage: async () => {
+          signalTransferStarted();
+          await transferGate;
+          return {
+            quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
+            bytesReceived: 1,
+            resumedFromOffset: 0,
+            nextOffset: 1,
+            checkpointKey: 'retained-stop-checkpoint',
+            completed: false,
+            timedOut: true,
+          };
+        },
       }),
       (fetcher) => fetcher.strategy.fetch({
         ctx: { operationId: 'stop-order', operationName: 'sync' } as never,
@@ -53,6 +63,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
         deadline: Date.now() + 1_000,
       }),
     );
+    await transferStarted;
     // Initial ownership deliberately clears any orphaned cursor for this fresh
     // scope; observe only the later shutdown release.
     deleteCheckpoint.mockClear();
@@ -84,7 +95,14 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       log: { warn: vi.fn() },
     });
 
-    await expect(agent.stop()).resolves.toBeUndefined();
+    const stopping = agent.stop();
+    await vi.waitFor(() => expect(agent.node.stop).toHaveBeenCalledOnce());
+    expect(agent.store.close).not.toHaveBeenCalled();
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(agent.selectedSwmMetaTransfers).toBe(transfers);
+
+    releaseTransfer();
+    await Promise.all([transfer, stopping]);
     expect(events).toEqual(['node-stop', 'prefix-cleaned', 'store-close']);
   });
 
