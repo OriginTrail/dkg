@@ -27,26 +27,33 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
 }
 
 /**
- * Wrap a REAL OxigraphStore so only the named ops throw the classic mid-
- * worker-restart oxigraph failure ('store is closed'); everything else keeps
- * hitting the live store. Mirrors `storeWithFailingOps` in
- * storage-ack-core-unavailable.test.ts — the curated-catalog UPDATE store-
- * failure regression below drives the real persist path (parse → verify →
- * targeted update → insert) up to the armed failure.
+ * Wrap a REAL OxigraphStore so one CATALOG-PERSIST STEP fails with the classic
+ * mid-worker-restart oxigraph failure ('store is closed'); everything else keeps
+ * hitting the live store.
+ *
+ * Keyed on the semantic step, not the storage method that implements it.
+ * `catalogStoreOptions` tags every catalog call with
+ * `source: 'storage-ack.persistCatalog.<step>'`, so this injection survives the
+ * storage layer swapping primitives underneath it. The previous version named
+ * methods instead: #2185 moved the targeted delete from `update()` to
+ * `structuredMutation()`, the arming string went stale, the failure stopped being
+ * injected, and this dead-air guard was inert until CI caught it. Naming more
+ * methods would only have moved the next silent break one refactor further out.
  */
-function storeWithFailingOps(
-  base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'structuredMutation' | 'replaceGraphAndSubject' | 'update' | 'flush')[],
-): TripleStore {
+function storeFailingCatalogPersistStep(base: OxigraphStore, step: string): TripleStore {
+  const source = `storage-ack.persistCatalog.${step}`;
+  const targetsStep = (args: readonly unknown[]): boolean => args.some(
+    (arg) => typeof arg === 'object' && arg !== null
+      && (arg as { source?: unknown }).source === source,
+  );
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
-      if (typeof prop === 'string' && (failingOps as readonly string[]).includes(prop)) {
-        return async () => {
-          throw new Error('store is closed');
-        };
-      }
       const value = Reflect.get(target, prop, receiver);
-      return typeof value === 'function' ? value.bind(target) : value;
+      if (typeof value !== 'function') return value;
+      return (...args: unknown[]) => {
+        if (targetsStep(args)) throw new Error('store is closed');
+        return (value as (...a: unknown[]) => unknown).apply(target, args);
+      };
     },
   });
 }
@@ -251,15 +258,7 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       // hits a closed store used to throw out of the handler → stream reset →
       // publisher no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      // Arm every mutation seam the targeted update could travel, not just the
-      // one it uses today: #2185 migrated this path from `update()` to
-      // `structuredMutation()` and this injection kept naming `update`, so the
-      // failure stopped being injected and the guard went inert. Naming all of
-      // them keeps the guard alive across the next migration too.
-      const store = storeWithFailingOps(
-        new OxigraphStore(),
-        ['structuredMutation', 'replaceGraphAndSubject', 'update'],
-      );
+      const store = storeFailingCatalogPersistStep(new OxigraphStore(), 'deleteSubjects');
       const handler = new StorageACKHandler(
         store as any,
         makeConfig(ethers.Wallet.createRandom(), 42n, { onDecline }),
@@ -287,7 +286,7 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
     it('curated catalog persist / insert throws → CORE_TEMPORARILY_UNAVAILABLE ("store unavailable"), NO signed ACK', async () => {
       // Same durability invariant, second store call: deletes succeed but the
       // catalog INSERT hits the closed store. Still a transient decline.
-      const store = storeWithFailingOps(new OxigraphStore(), ['insert']);
+      const store = storeFailingCatalogPersistStep(new OxigraphStore(), 'insert');
       const handler = makeHandler(ethers.Wallet.createRandom(), store as any);
       const ack = decodeStorageACK(await handler.updateHandler(curatedUpdateIntent(), fakePeerId));
 
