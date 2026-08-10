@@ -16,7 +16,10 @@ import {
   type AgentProfileReconcileAdmissionV1,
   type AgentProfileInventoryLoadRequestV1,
 } from '../src/system-records/reconcile-v1.js';
-import { createAgentProfileReceiverV1 } from '../src/system-records/receiver-v1.js';
+import {
+  createAgentProfileReceiverV1,
+  type AgentProfileReceiverV1,
+} from '../src/system-records/receiver-v1.js';
 import {
   admissionGate,
   NETWORK,
@@ -692,9 +695,17 @@ describe('agent-profile System Record reconciler V1', () => {
       stateRevision: '4',
       appliedStateDigest: `0x${'dd'.repeat(32)}`,
     }));
-    const preparedReceiver = receiverWithPreparation(async () => {
+    const prepareDispatch = vi.fn(async () => {
       nowMs = 2_501;
-      return Object.freeze({ apply });
+      return Object.freeze({ dispatch: apply });
+    });
+    const preparedReceiver: AgentProfileReceiverV1 = Object.freeze({
+      async prepareActive() {
+        return Object.freeze({ prepareDispatch });
+      },
+      async receiveActive() {
+        throw new Error('direct receive is not used by this reconciler test');
+      },
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -713,6 +724,7 @@ describe('agent-profile System Record reconciler V1', () => {
       pendingRows: 1,
       outcomes: [],
     });
+    expect(prepareDispatch).toHaveBeenCalledTimes(1);
     expect(apply).not.toHaveBeenCalled();
     expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
   });

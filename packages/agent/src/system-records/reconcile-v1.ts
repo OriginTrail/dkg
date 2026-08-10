@@ -32,8 +32,8 @@ import type {
   AgentProfileAdmittedSliceSnapshotV1,
 } from './admitted-slice-context-v1.js';
 import {
-  AgentProfileReceiverPreDispatchErrorV1,
   type AgentProfilePreparedActiveV1,
+  type AgentProfilePreparedDispatchV1,
   type AgentProfileReceiverV1,
 } from './receiver-v1.js';
 import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
@@ -289,13 +289,8 @@ export async function createAgentProfileReconcilerV1(
           }),
           loadSignal ?? runtime.signal,
         );
-        if (loaded.outcome === 'ok' && loaded.objectKind !== expectedKind) {
-          return Object.freeze({
-            outcome: 'rejected' as const,
-            wireBytes: loaded.wireBytes,
-            rejection: 'invalid-response' as const,
-          });
-        }
+        // Core owns the legal ambiguous-root alternatives and still validates
+        // every non-root child against its exact signed kind.
         return loaded;
       },
       {
@@ -376,7 +371,7 @@ export async function createAgentProfileReconcilerV1(
         return result('blocked', 'records', 0, 0, outcomes, 'unsupported-row-state');
       }
       advances += 1;
-      let preparation: Awaited<ReturnType<typeof awaitAbortSafePreparation>>;
+      let preparation: AbortSafePreparationResultV1<AgentProfilePreparedActiveV1>;
       try {
         preparation = await awaitAbortSafePreparation(
           Promise.resolve().then(() => prepareActive(row, runtime.signal)),
@@ -396,25 +391,32 @@ export async function createAgentProfileReconcilerV1(
       ) {
         return runtime.stop('records', outcomes);
       }
-      // Do not race this promise. Dispatch may already have reached the atomic
-      // materializer and its returned promise is the physical settlement boundary.
-      let outcome: SystemRecordApplyOutcomeV1;
+      let dispatchPreparation: AbortSafePreparationResultV1<AgentProfilePreparedDispatchV1>;
       try {
-        outcome = await preparation.prepared.apply(runtime.admittedContext, runtime.signal);
-      } catch (error) {
+        dispatchPreparation = await awaitAbortSafePreparation(
+          Promise.resolve().then(() => preparation.prepared.prepareDispatch(
+            runtime.admittedContext,
+            runtime.signal,
+          )),
+          runtime.signal,
+        );
+      } catch {
         if (runtime.signal.aborted) return runtime.stop('records', outcomes);
-        if (error instanceof AgentProfileReceiverPreDispatchErrorV1) {
-          return result(
-            'blocked',
-            'records',
-            0,
-            0,
-            outcomes,
-            'receiver-verification-failed',
-          );
-        }
-        throw error;
+        return result('blocked', 'records', 0, 0, outcomes, 'receiver-verification-failed');
       }
+      if (dispatchPreparation.status === 'aborted') {
+        return runtime.stop('records', outcomes);
+      }
+      if (
+        runtime.signal.aborted
+        || runtime.deadlineMs - readNow(runtime.nowMs)
+          < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
+      ) {
+        return runtime.stop('records', outcomes);
+      }
+      // Do not race or catch this promise. Dispatch has reached the atomic
+      // materializer and its promise is the physical settlement boundary.
+      const outcome = await dispatchPreparation.prepared.dispatch();
       outcomes.push(Object.freeze({ ...outcome }));
       if (isSettledOutcome(outcome)) {
         pendingRows.shift();
@@ -558,13 +560,14 @@ function readAdmittedSnapshot(
   return Object.freeze({ nowMs, admittedDeadlineMs });
 }
 
-function awaitAbortSafePreparation(
-  preparation: Promise<AgentProfilePreparedActiveV1>,
+type AbortSafePreparationResultV1<Prepared> =
+  | Readonly<{ status: 'prepared'; prepared: Prepared }>
+  | Readonly<{ status: 'aborted' }>;
+
+function awaitAbortSafePreparation<Prepared>(
+  preparation: Promise<Prepared>,
   signal: AbortSignal,
-): Promise<
-  | Readonly<{ status: 'prepared'; prepared: AgentProfilePreparedActiveV1 }>
-  | Readonly<{ status: 'aborted' }>
-> {
+): Promise<AbortSafePreparationResultV1<Prepared>> {
   return new Promise((resolve, reject) => {
     let terminal = false;
     const onAbort = (): void => {

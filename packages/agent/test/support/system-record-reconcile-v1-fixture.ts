@@ -134,14 +134,47 @@ export function receiver(
 }
 
 export function receiverWithPreparation(
-  prepareActive: AgentProfileReceiverV1['prepareActive'],
+  prepareActive: (
+    row: Parameters<AgentProfileReceiverV1['prepareActive']>[0],
+    signal: Parameters<AgentProfileReceiverV1['prepareActive']>[1],
+  ) => Readonly<{
+    apply: (
+      admittedContext: AgentProfileAdmittedSliceContextV1,
+      signal: AbortSignal,
+    ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
+  }> | Promise<Readonly<{
+    apply: (
+      admittedContext: AgentProfileAdmittedSliceContextV1,
+      signal: AbortSignal,
+    ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
+  }>>,
 ): AgentProfileReceiverV1 {
   const receiver: AgentProfileReceiverV1 = Object.freeze({
-    prepareActive,
-    async receiveActive(row, admittedContext, signal) {
+    async prepareActive(row, signal) {
       const prepared = await prepareActive(row, signal);
+      let dispatchPrepared = false;
+      return Object.freeze({
+        async prepareDispatch(admittedContext, dispatchSignal) {
+          if (dispatchPrepared) throw new Error('test receiver dispatch already prepared');
+          dispatchSignal.throwIfAborted();
+          dispatchPrepared = true;
+          let dispatched = false;
+          return Object.freeze({
+            async dispatch() {
+              if (dispatched) throw new Error('test receiver dispatch already invoked');
+              dispatched = true;
+              return prepared.apply(admittedContext, dispatchSignal);
+            },
+          });
+        },
+      });
+    },
+    async receiveActive(row, admittedContext, signal) {
+      const prepared = await receiver.prepareActive(row, signal);
       signal.throwIfAborted();
-      return prepared.apply(admittedContext, signal);
+      const dispatch = await prepared.prepareDispatch(admittedContext, signal);
+      signal.throwIfAborted();
+      return dispatch.dispatch();
     },
   });
   return receiver;

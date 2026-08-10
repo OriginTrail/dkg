@@ -72,21 +72,6 @@ export interface AgentProfileReceiverPreparedApplyV1 {
   ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
 }
 
-/** A receiver failure proven to have occurred before atomic apply dispatch. */
-export class AgentProfileReceiverPreDispatchErrorV1 extends Error {
-  override readonly cause: unknown;
-
-  constructor(cause: unknown) {
-    super(
-      cause instanceof Error
-        ? cause.message
-        : 'agent-profile receiver failed before apply dispatch',
-    );
-    this.name = 'AgentProfileReceiverPreDispatchErrorV1';
-    this.cause = cause;
-  }
-}
-
 export interface CreateAgentProfileReceiverOptionsV1 {
   readonly networkId: NetworkIdV1;
   readonly artifacts: SystemRecordArtifactRepositoryV1;
@@ -127,8 +112,8 @@ export interface CreateAgentProfileReceiverOptionsV1 {
 
 export interface AgentProfileReceiverV1 {
   /**
-   * Complete the abort-safe fetch/decode/verification phase. The returned apply
-   * closure is one-shot and is the only boundary that may dispatch a mutation.
+   * Complete the abort-safe fetch/decode/verification phase. The returned state
+   * can prepare one admitted dispatch but cannot mutate storage by itself.
    */
   prepareActive(
     row: SystemRecordInventoryRowV1,
@@ -144,13 +129,18 @@ export interface AgentProfileReceiverV1 {
 
 export interface AgentProfilePreparedActiveV1 {
   /**
-   * Dispatch exactly once. Once called, the returned promise is the physical
-   * settlement boundary and must not be detached on abort or deadline.
+   * Perform admitted bridge work exactly once and return the sole mutation
+   * dispatch boundary. No opaque admitted authority escapes in the result.
    */
-  apply(
+  prepareDispatch(
     admittedContext: AgentProfileAdmittedSliceContextV1,
     signal: AbortSignal,
-  ): Promise<SystemRecordApplyOutcomeV1>;
+  ): Promise<AgentProfilePreparedDispatchV1>;
+}
+
+export interface AgentProfilePreparedDispatchV1 {
+  /** Invoke the atomic materializer exactly once and await its physical settlement. */
+  dispatch(): Promise<SystemRecordApplyOutcomeV1>;
 }
 
 /**
@@ -198,48 +188,52 @@ export function createAgentProfileReceiverV1(
       });
       signal.throwIfAborted();
       const validUntilUnixMs = Date.parse(candidate.head.validUntil);
-      let dispatched = false;
+      let dispatchPrepared = false;
       return Object.freeze({
-        async apply(
+        async prepareDispatch(
           admittedContext: AgentProfileAdmittedSliceContextV1,
           applySignal: AbortSignal,
-        ): Promise<SystemRecordApplyOutcomeV1> {
-          if (dispatched) throw new Error('active profile receiver apply was already dispatched');
-          applySignal.throwIfAborted();
-          dispatched = true;
-          let apply: ReturnType<typeof readPreparedApplyV1>;
-          let admittedDeadlineMs: number;
-          try {
-            const prepared = await prepareCandidateApply(
-              candidate,
-              admittedContext,
-              applySignal,
-            );
-            applySignal.throwIfAborted();
-            apply = readPreparedApplyV1(prepared);
-            applySignal.throwIfAborted();
-            const remainingMs = assertActiveDeadlineFreshV1(
-              validUntilUnixMs,
-              receiverNowMs(nowMs?.() ?? Date.now()),
-            );
-            const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
-            if (!Number.isSafeInteger(translatedDeadlineMs)) {
-              throw new Error('agent-profile translated apply deadline is invalid');
-            }
-            admittedDeadlineMs = Math.min(
-              apply.existingMonotonicDeadlineMs,
-              translatedDeadlineMs,
-            );
-            if (admittedDeadlineMs <= apply.monotonicNowMs) {
-              throw new Error('agent-profile monotonic apply admission is expired');
-            }
-          } catch (error) {
-            if (applySignal.aborted) throw applySignal.reason ?? error;
-            throw new AgentProfileReceiverPreDispatchErrorV1(error);
+        ): Promise<AgentProfilePreparedDispatchV1> {
+          if (dispatchPrepared) {
+            throw new Error('active profile receiver dispatch was already prepared');
           }
-          // Atomic apply is the point of no return. A cancellation that arrives
-          // after dispatch must not detach the operation or hide a committed outcome.
-          return await apply.invoke(admittedDeadlineMs);
+          applySignal.throwIfAborted();
+          dispatchPrepared = true;
+          const prepared = await prepareCandidateApply(
+            candidate,
+            admittedContext,
+            applySignal,
+          );
+          applySignal.throwIfAborted();
+          const apply = readPreparedApplyV1(prepared);
+          applySignal.throwIfAborted();
+          const remainingMs = assertActiveDeadlineFreshV1(
+            validUntilUnixMs,
+            receiverNowMs(nowMs?.() ?? Date.now()),
+          );
+          const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
+          if (!Number.isSafeInteger(translatedDeadlineMs)) {
+            throw new Error('agent-profile translated apply deadline is invalid');
+          }
+          const admittedDeadlineMs = Math.min(
+            apply.existingMonotonicDeadlineMs,
+            translatedDeadlineMs,
+          );
+          if (admittedDeadlineMs <= apply.monotonicNowMs) {
+            throw new Error('agent-profile monotonic apply admission is expired');
+          }
+          let dispatched = false;
+          return Object.freeze({
+            async dispatch(): Promise<SystemRecordApplyOutcomeV1> {
+              if (dispatched) {
+                throw new Error('active profile receiver dispatch was already invoked');
+              }
+              dispatched = true;
+              // This call is the point of no return. Its promise is the physical
+              // settlement boundary and must never be raced or reclassified.
+              return await apply.invoke(admittedDeadlineMs);
+            },
+          });
         },
       });
     },
@@ -250,7 +244,9 @@ export function createAgentProfileReceiverV1(
     ): Promise<SystemRecordApplyOutcomeV1> {
       const prepared = await receiver.prepareActive(row, signal);
       signal.throwIfAborted();
-      return prepared.apply(admittedContext, signal);
+      const dispatch = await prepared.prepareDispatch(admittedContext, signal);
+      signal.throwIfAborted();
+      return dispatch.dispatch();
     },
   });
   return receiver;
