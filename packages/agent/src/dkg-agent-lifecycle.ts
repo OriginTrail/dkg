@@ -7230,7 +7230,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const execution = await runSwmCatchupContinuations({
         units: [{
           key: contextGraphId,
-          tracker: passTracker,
+          ledger: passTracker,
           planeProven: () => cleanSharedMemoryDataSynced > 0,
         }],
         config: passConfig,

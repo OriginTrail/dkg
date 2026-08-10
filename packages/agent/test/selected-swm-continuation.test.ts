@@ -1252,6 +1252,77 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
+  it('grants the newly capable snapshot domain a pass after an empty metadata EOF page', async () => {
+    const publicCg = 'selected-empty-meta-eof-before-snapshots';
+    const manifest = snapshotManifest(publicCg, 3);
+    let wallNow = 1_000;
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      metaPages: [
+        {
+          // The first pass retained the entire manifest, but did not receive
+          // the responder EOF marker before its bounded deadline.
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          // Exact empty EOF tail. Metadata is now complete, but this pass has
+          // no time left to begin the newly discovered snapshot domain.
+          quads: [],
+          resumedFromOffset: manifest.meta.length,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      onMetaFetch: ({ fetch }) => {
+        if (fetch === 2) wallNow += 120_000;
+      },
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(harness.probes.metaFetches()).toBe(2);
+      expect(harness.probes.publicAdmissions()).toBe(3);
+      expect(harness.probes.snapshotReads()).toBe(3);
+      expect(summary.continuationPasses).toBe(2);
+      expect(summary.metadataContinuationYields).toBe(1);
+      expect(summary.resolvedMetadataContinuationYields).toBe(1);
+      expect(summary.snapshotPlaneIncomplete).toBe(1);
+      expect(summary.resolvedSnapshotPlaneIncomplete).toBe(1);
+      expect(summary.swmCoverage).toMatchObject({
+        snapshotsResolved: 3,
+        snapshotsTotal: 3,
+        missingCount: 0,
+      });
+      expect(classifySharedMemoryFreshness(summary)).toMatchObject({
+        phaseFailed: false,
+        timedOut: false,
+        backoffWorthyFailure: false,
+      });
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('treats a responder restart as a new progress generation and completes its replacement prefix', async () => {
     const publicCg = 'selected-restarted-metadata-generation';
     const manifest = snapshotManifest(publicCg, 3);
