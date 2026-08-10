@@ -112,7 +112,15 @@ describe('prepared agent profile V1', () => {
     expect(publishedQuads).not.toBe(expected.publicationQuads);
   });
 
-  it('treats a zero-valued KA id as an existing publication on the next call', async () => {
+  // Inverted from 'treats a zero-valued KA id as an existing publication on the
+  // next call', which pinned update(0n) as the intended behaviour. That semantics
+  // is unreachable against the real publisher: ProfileManager supplies no
+  // precomputedUpdateAttestation, and DKGPublisher.update rejects without one
+  // before it inspects the id. The original passed only because this stub's
+  // update() resolves where the real one throws -- four agent e2e lanes failed on
+  // the real publisher with "Update rejected: on-chain update requires
+  // precomputedUpdateAttestation".
+  it('republishes when the prior publish minted no KA id, because zero is not an id', async () => {
     const publisher = {
       publish: vi.fn(async () => publishResult(0n)),
       update: vi.fn(async () => publishResult(1n)),
@@ -129,8 +137,8 @@ describe('prepared agent profile V1', () => {
 
     await manager.publishProfile(config);
     await manager.publishProfile(config);
-    expect(publisher.publish).toHaveBeenCalledTimes(1);
-    expect(publisher.update).toHaveBeenCalledWith(0n, expect.anything());
+    expect(publisher.publish).toHaveBeenCalledTimes(2);
+    expect(publisher.update).not.toHaveBeenCalled();
   });
 });
 

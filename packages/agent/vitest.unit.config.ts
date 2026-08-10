@@ -109,6 +109,7 @@ export default defineConfig({
       "test/system-record-reconcile-transport-v1.test.ts",
       "test/system-record-reconcile-transport-integration-v1.test.ts",
       "test/system-record-reconcile-closure-continuation-v1.test.ts",
+      "test/profile-manager-republish-v1.test.ts",
       "test/sync-requester-bailout.test.ts",
       "test/swm-catchup-peer-selection.test.ts",
       "test/swm-fanout-peer-selection.test.ts",
