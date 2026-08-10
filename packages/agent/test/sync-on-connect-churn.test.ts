@@ -408,7 +408,12 @@ describe('sync-on-connect churn gates', () => {
       syncFromPeer: async () => emptyDetailedSync({ complete: true }),
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => emptyDetailedSync({ complete: false }),
+      syncSharedMemoryFromPeer: async () => emptyDetailedSync(),
+      syncSelectedSharedMemoryFromPeer: async () => ({
+        kind: 'selected-shared-memory',
+        shared: emptyDetailedSync(),
+        selectedScopeComplete: false,
+      }),
       onPeerSynced: (_peerId, outcome) => {
         if (outcome) onSyncAccounting?.(outcome);
       },
@@ -447,10 +452,13 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
-    (agent as any).syncSharedMemoryFromPeerDetailed = async () => emptyDetailedSync({
-      complete: false,
-      insertedTriples: 4,
-      insertedDataTriples: 4,
+    (agent as any).syncSelectedSharedMemoryFromPeerDetailed = async () => ({
+      kind: 'selected-shared-memory',
+      shared: emptyDetailedSync({
+        insertedTriples: 4,
+        insertedDataTriples: 4,
+      }),
+      selectedScopeComplete: false,
     });
     (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
     (agent as any).syncReconcilerBackoff.set(PEER_A, {
