@@ -215,4 +215,88 @@ describe('agent-profile System Record reconciler boundaries V1', () => {
       pendingRows: 0,
     });
   });
+
+  it('preserves an applied result when permit release fails', async () => {
+    const fixture = await publishedFixture();
+    const releaseFailure = new Error('permit release failed after apply');
+    const admission = admissionThrowingOnRelease(2, releaseFailure);
+    const apply = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '11',
+      appliedStateDigest: `0x${'ab'.repeat(32)}`,
+    }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiverWithPreparation(async () => Object.freeze({ apply })),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      processedRows: 1,
+      pendingRows: 0,
+      outcomes: [{ outcome: 'applied' }],
+    });
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(reconciler.stats()).toMatchObject({
+      processedRows: 1,
+      pendingRows: 0,
+      permitReleaseFailures: 1,
+    });
+  });
+
+  it('preserves dispatch rejection identity when permit release fails', async () => {
+    const fixture = await publishedFixture();
+    const settlementFailure = new Error('atomic settlement rejected before cleanup');
+    const releaseFailure = new Error('permit release failed after rejection');
+    const admission = admissionThrowingOnRelease(2, releaseFailure);
+    const apply = vi.fn(async () => {
+      throw settlementFailure;
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiverWithPreparation(async () => Object.freeze({ apply })),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).rejects.toBe(settlementFailure);
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(reconciler.stats()).toMatchObject({
+      processedRows: 0,
+      pendingRows: 1,
+      permitReleaseFailures: 1,
+    });
+  });
 });
+
+function admissionThrowingOnRelease(
+  throwOnRelease: number,
+  releaseFailure: Error,
+): AgentProfileReconcileAdmissionV1 {
+  const authority = createAgentProfileAdmittedSliceContextAuthorityV1(Date.now);
+  let releases = 0;
+  return Object.freeze({
+    tryAcquire() {
+      const context = authority.mint(Date.now() + 3_000);
+      return Object.freeze({
+        admittedContext: context,
+        release() {
+          releases += 1;
+          authority.revoke(context);
+          if (releases === throwOnRelease) throw releaseFailure;
+        },
+      });
+    },
+    inspectAdmittedContext(context) {
+      return authority.inspect(context);
+    },
+  });
+}

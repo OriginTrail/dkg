@@ -110,6 +110,8 @@ export interface AgentProfileReconcilerStatsV1 {
   readonly active: 0 | 1;
   readonly peakActive: 0 | 1;
   readonly queued: 0;
+  /** Saturating diagnostic count; cleanup never replaces the primary slice settlement. */
+  readonly permitReleaseFailures: number;
   readonly closed: boolean;
 }
 
@@ -178,6 +180,7 @@ export async function createAgentProfileReconcilerV1(
   let inventoryRequests = 0;
   let inventoryWireBytes = 0;
   let processedRows = 0;
+  let permitReleaseFailures = 0;
 
   return Object.freeze({ advance, stats, close });
 
@@ -274,7 +277,14 @@ export async function createAgentProfileReconcilerV1(
       }
       activeController = undefined;
       active = false;
-      permit.release();
+      try {
+        permit.release();
+      } catch {
+        permitReleaseFailures = Math.min(
+          Number.MAX_SAFE_INTEGER,
+          permitReleaseFailures + 1,
+        );
+      }
     }
   }
 
@@ -487,6 +497,7 @@ export async function createAgentProfileReconcilerV1(
       active: active ? 1 : 0,
       peakActive,
       queued: 0,
+      permitReleaseFailures,
       closed,
     });
   }
