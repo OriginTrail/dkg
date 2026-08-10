@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  SYSTEM_RECORD_MAX_CLOSURE_BYTES,
+  SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_HEADER_BYTES,
   SYSTEM_RECORD_MAX_SLICE_REQUESTS,
@@ -345,6 +347,113 @@ describe('agent-profile reconcile exact transport V1', () => {
     });
     continuation.release();
     expect(success.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects and releases a lease above the retained object-count bound', async () => {
+    const control = byteAdmission();
+    const releaseByDigest = new Map<string, ReturnType<typeof vi.fn>>();
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async (_providerId, lookup) => {
+        const release = vi.fn();
+        releaseByDigest.set(lookup.objectDigest, release);
+        return Object.freeze({
+          outcome: 'ok' as const,
+          lease: Object.freeze({
+            artifact: Object.freeze({
+              objectKind: lookup.objectKind,
+              objectDigest: lookup.objectDigest,
+              canonicalBytes: Uint8Array.of(1),
+            }),
+            wireBytes: 1,
+            release,
+          }),
+        });
+      },
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    let objectIndex = 1;
+    while (objectIndex <= SYSTEM_RECORD_MAX_CLOSURE_OBJECTS) {
+      const slice = openSlice(transport, () => 0);
+      const source = continuation.bind(slice);
+      for (let request = 0;
+        request < SYSTEM_RECORD_MAX_SLICE_REQUESTS
+          && objectIndex <= SYSTEM_RECORD_MAX_CLOSURE_OBJECTS;
+        request += 1, objectIndex += 1) {
+        await source.resolve(controlLookup(objectIndex), new AbortController().signal);
+      }
+      slice.release();
+    }
+    expect(continuation.stats()).toMatchObject({
+      artifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+      bytes: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+    });
+    expect(control.activeReservations()).toBe(1 + SYSTEM_RECORD_MAX_CLOSURE_OBJECTS);
+
+    const overflowLookup = controlLookup(SYSTEM_RECORD_MAX_CLOSURE_OBJECTS + 1);
+    const overflowSlice = openSlice(transport, () => 0);
+    await expect(continuation.bind(overflowSlice).resolve(
+      overflowLookup,
+      new AbortController().signal,
+    )).rejects.toThrow(/retained bound/);
+    overflowSlice.release();
+
+    expect(releaseByDigest.get(overflowLookup.objectDigest)).toHaveBeenCalledTimes(1);
+    expect(continuation.stats()).toMatchObject({
+      artifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+      bytes: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+    });
+    expect(control.activeReservations()).toBe(1 + SYSTEM_RECORD_MAX_CLOSURE_OBJECTS);
+    continuation.release();
+    expect([...releaseByDigest.values()].every((release) => release.mock.calls.length === 1))
+      .toBe(true);
+    expect(control.activeReservations()).toBe(0);
+  });
+
+  it('rejects and releases a lease above the retained byte bound', async () => {
+    const control = byteAdmission();
+    const releases: ReturnType<typeof vi.fn>[] = [];
+    const payloadBytes = SYSTEM_RECORD_OBJECT_CAPS_V1['profile-bundle'];
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async (_providerId, lookup) => {
+        const release = vi.fn();
+        releases.push(release);
+        return Object.freeze({
+          outcome: 'ok' as const,
+          lease: Object.freeze({
+            artifact: Object.freeze({
+              objectKind: lookup.objectKind,
+              objectDigest: lookup.objectDigest,
+              canonicalBytes: new Uint8Array(payloadBytes),
+            }),
+            wireBytes: 1,
+            release,
+          }),
+        });
+      },
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    const slice = openSlice(transport, () => 0);
+    const source = continuation.bind(slice);
+    for (let index = 1; index <= 3; index += 1) {
+      await source.resolve(bundleLookup(index), new AbortController().signal);
+    }
+    expect(continuation.stats()).toMatchObject({ artifacts: 3, bytes: SYSTEM_RECORD_MAX_CLOSURE_BYTES });
+
+    await expect(source.resolve(bundleLookup(4), new AbortController().signal))
+      .rejects.toThrow(/retained bound/);
+    expect(releases[3]).toHaveBeenCalledTimes(1);
+    expect(continuation.stats()).toMatchObject({ artifacts: 3, bytes: SYSTEM_RECORD_MAX_CLOSURE_BYTES });
+    expect(control.activeReservations()).toBe(4);
+    slice.release();
+    continuation.release();
+    expect(releases.every((release) => release.mock.calls.length === 1)).toBe(true);
+    expect(control.activeReservations()).toBe(0);
   });
 
   it('does not retain a transferred lease when continuation metadata admission fails', async () => {
@@ -903,6 +1012,26 @@ function successfulFetch(
       lease: Object.freeze({ artifact, wireBytes, release }),
     }),
   });
+}
+
+function controlLookup(index: number): SystemRecordExactArtifactLookupV1 {
+  return Object.freeze({
+    type: 'object',
+    objectKind: 'agent-profile-head',
+    objectDigest: indexedDigest(index),
+  });
+}
+
+function bundleLookup(index: number): SystemRecordExactArtifactLookupV1 {
+  return Object.freeze({
+    type: 'object',
+    objectKind: 'profile-bundle',
+    objectDigest: indexedDigest(index),
+  });
+}
+
+function indexedDigest(index: number): Digest32V1 {
+  return `0x${index.toString(16).padStart(64, '0')}` as Digest32V1;
 }
 
 function byteAdmission() {

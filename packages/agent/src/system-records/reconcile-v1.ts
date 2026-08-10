@@ -90,7 +90,6 @@ export type CreateAgentProfileReconcilerOptionsV1 =
     }>
     | Readonly<{
       readonly transport?: undefined;
-      readonly artifacts: SystemRecordArtifactRepositoryV1;
       readonly loadInventoryObject: (
         request: AgentProfileInventoryLoadRequestV1,
         signal: AbortSignal,
@@ -270,7 +269,6 @@ function createSliceSourceFactoryV1(
     });
   }
   const loadInventoryObject = options.loadInventoryObject;
-  const artifacts = options.artifacts;
   return Object.freeze({
     tryOpen(): AgentProfileSliceSourceOpenResultV1 {
       return Object.freeze({
@@ -278,7 +276,7 @@ function createSliceSourceFactoryV1(
         source: Object.freeze({
           loadInventoryObject,
           prepareActive: (row: SystemRecordInventoryRowV1, signal: AbortSignal) =>
-            prepare(row, artifacts, signal),
+            receiver.prepareActive(row, signal),
           stats: () => Object.freeze({ requests: 0, wireBytes: 0 }),
           release: () => undefined,
         }),

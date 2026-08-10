@@ -97,10 +97,9 @@ export interface CreateAgentProfileReceiverOptionsV1 {
 export interface AgentProfileReceiverV1 {
   /** Open one bounded logical preparation that may resume across physical slices. */
   openPreparation(row: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1;
-  /** Prepare through one explicit admitted-slice artifact source. */
+  /** Prepare through the construction-owned repository for direct callers. */
   prepareActive(
     row: SystemRecordInventoryRowV1,
-    artifacts: SystemRecordArtifactRepositoryV1,
     signal: AbortSignal,
   ): Promise<AgentProfilePreparedActiveV1>;
   /** Convenience for direct callers that already own the admitted slice lifetime. */
@@ -189,13 +188,12 @@ export function createAgentProfileReceiverV1(
     },
     async prepareActive(
       row: SystemRecordInventoryRowV1,
-      artifacts: SystemRecordArtifactRepositoryV1,
       signal: AbortSignal,
     ): Promise<AgentProfilePreparedActiveV1> {
       signal.throwIfAborted();
       const preparation = receiver.openPreparation(row);
       try {
-        return await preparation.prepare(artifacts, signal);
+        return await preparation.prepare(defaultArtifacts, signal);
       } finally {
         preparation.release();
       }
@@ -205,7 +203,7 @@ export function createAgentProfileReceiverV1(
       admittedContext: AgentProfileAdmittedSliceContextV1,
       signal: AbortSignal,
     ): Promise<SystemRecordApplyOutcomeV1> {
-      const prepared = await receiver.prepareActive(row, defaultArtifacts, signal);
+      const prepared = await receiver.prepareActive(row, signal);
       signal.throwIfAborted();
       return prepared.apply(admittedContext, signal);
     },

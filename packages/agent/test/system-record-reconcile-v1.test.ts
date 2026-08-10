@@ -49,7 +49,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject,
       receiver: receiver(fixture.store, consumeCandidate),
     });
@@ -121,7 +120,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: async (request) => {
         const stored = inventory.objects.get(request.objectDigest);
         return stored === undefined
@@ -178,7 +176,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: receiverWithPreparation(prepareActive),
     });
@@ -214,7 +211,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject,
       receiver: receiver(fixture.store, vi.fn()),
     });
@@ -245,7 +241,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject: async (request, signal) => {
         const loaded = await fixture.loadInventoryObject(request, signal);
         if (loaded?.outcome !== 'ok') return loaded;
@@ -296,7 +291,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject: async (request) => {
         const stored = inventory.objects.get(request.objectDigest);
         if (stored === undefined) {
@@ -340,7 +334,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject,
       receiver: receiver(fixture.store, vi.fn()),
     });
@@ -437,7 +430,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject,
       receiver: receiver(fixture.store, vi.fn()),
     });
@@ -472,7 +464,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: receiver(fixture.store, consumeCandidate),
     });
@@ -518,7 +509,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: receiverWithPreparation(prepareActive),
     });
@@ -564,7 +554,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject: async (request) => {
         const stored = inventory.objects.get(request.objectDigest)!;
         return Object.freeze({
@@ -604,7 +593,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: stalledReceiver,
     });
@@ -639,7 +627,6 @@ describe('agent-profile System Record reconciler V1', () => {
         rootEnvelope: fixture.rootEnvelope,
         providerPeerPublicKey: fixture.peerSigner.publicKey,
         admission,
-        artifacts: fixture.store,
         loadInventoryObject: fixture.loadInventoryObject,
         receiver: stalledReceiver,
       });
@@ -679,7 +666,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: preparedReceiver,
     });
@@ -716,7 +702,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: preparedReceiver,
     });
@@ -757,7 +742,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: fixture.loadInventoryObject,
       receiver: receiver(fixture.store, vi.fn()),
     });
@@ -794,7 +778,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject,
       receiver: receiverWithPreparation(prepareActive),
     });
@@ -817,7 +800,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: malformedFixture.rootEnvelope,
       providerPeerPublicKey: malformedFixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: malformedFixture.store,
       loadInventoryObject: async (request, signal) => {
         const loaded = await malformedFixture.loadInventoryObject(request, signal);
         if (loaded.outcome !== 'ok') return loaded;
@@ -861,7 +843,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: abortedFixture.rootEnvelope,
       providerPeerPublicKey: abortedFixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: abortedFixture.store,
       loadInventoryObject: () => {
         requested.resolve();
         return delivery.promise;
@@ -891,7 +872,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      artifacts: fixture.store,
       loadInventoryObject: async () => Object.freeze({
         outcome: 'rejected' as const,
         wireBytes: 0,
@@ -918,7 +898,6 @@ describe('agent-profile System Record reconciler V1', () => {
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject: async () => { throw sentinel; },
       receiver: receiver(fixture.store, vi.fn()),
     });
@@ -952,7 +931,6 @@ describe('agent-profile System Record reconciler V1', () => {
         'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
       ) as typeof fixture.peerSigner.publicKey,
       admission,
-      artifacts: fixture.store,
       loadInventoryObject,
       receiver: receiver(fixture.store, vi.fn()),
     })).rejects.toThrow(/provider signature is invalid/);

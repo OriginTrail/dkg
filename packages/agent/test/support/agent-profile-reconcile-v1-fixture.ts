@@ -159,7 +159,7 @@ export function receiverWithPreparation(
         },
       });
     },
-    prepareActive(row, _artifacts, signal) {
+    prepareActive(row, signal) {
       return prepareActive(row, signal);
     },
     async receiveActive(row, admittedContext, signal) {

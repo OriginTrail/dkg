@@ -3,8 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   SYSTEM_RECORD_MAX_CONTINUATION_CLOSURE_WIRE_BYTES,
   SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
+  type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
+import type { SystemRecordArtifactRepositoryV1 } from '../src/system-records/artifact-v1.js';
 import type { AgentProfileReceiverV1 } from '../src/system-records/receiver-v1.js';
 import { createAgentProfileReconcilerV1 } from '../src/system-records/reconcile-v1.js';
 import { createAgentProfileReconcileTransportV1 } from '../src/system-records/reconcile-transport-v1.js';
@@ -304,10 +306,10 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       appliedStateDigest: `0x${'aa'.repeat(32)}`,
     }));
     const artifacts = fixture.store;
-    const prepareActive: AgentProfileReceiverV1['prepareActive'] = async (
-      row,
-      source,
-      signal,
+    const prepareFromSource = async (
+      row: SystemRecordInventoryRowV1,
+      source: SystemRecordArtifactRepositoryV1,
+      signal: AbortSignal,
     ) => {
       await source.resolve(Object.freeze({
         type: 'object',
@@ -319,13 +321,13 @@ describe('agent-profile reconciler exact transport integration V1', () => {
     const receiverWithRemotePreparation: AgentProfileReceiverV1 = Object.freeze({
       openPreparation(row) {
         return Object.freeze({
-          prepare: (source, signal) => prepareActive(row, source, signal),
+          prepare: (source, signal) => prepareFromSource(row, source, signal),
           release: () => undefined,
         });
       },
-      prepareActive,
+      prepareActive: (row, signal) => prepareFromSource(row, artifacts, signal),
       async receiveActive(row, admittedContext, signal) {
-        const prepared = await prepareActive(row, artifacts, signal);
+        const prepared = await prepareFromSource(row, artifacts, signal);
         return prepared.apply(admittedContext, signal);
       },
     });
