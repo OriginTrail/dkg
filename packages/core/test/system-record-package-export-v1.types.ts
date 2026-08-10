@@ -89,10 +89,27 @@ import type {
   ValidatedSystemRecordInventoryTreeV1,
   VerifySystemRecordEnvelopeOptionsV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  createSystemRecordInventoryRowTraversalV1,
+  type SystemRecordInventoryRowTraversalFailureV1,
+  type SystemRecordInventoryRowTraversalProgressV1,
+  type SystemRecordInventoryRowTraversalSliceResultV1,
+  type SystemRecordInventoryRowTraversalV1,
+} from '@origintrail-official/dkg-core/system-record-inventory-row-traversal-v1';
 
 // Importing the complete type-only surface is the contract. Keep the file
 // compile-only so none of these names become runtime package requirements.
 declare const digest: Digest32V1;
+
+type RowTraversalSubpathContractV1 = readonly [
+  typeof createSystemRecordInventoryRowTraversalV1,
+  SystemRecordInventoryRowTraversalV1,
+  SystemRecordInventoryRowTraversalSliceResultV1,
+  SystemRecordInventoryRowTraversalProgressV1,
+  SystemRecordInventoryRowTraversalFailureV1,
+];
+
+declare const rowTraversalSubpathContract: RowTraversalSubpathContractV1;
 
 const structuralCacheReference = {
   digest,
@@ -108,5 +125,6 @@ const forgedCacheMetadata: SystemRecordCacheMetadataV1 = {};
 
 void forgedCacheReference;
 void forgedCacheMetadata;
+void rowTraversalSubpathContract;
 
 export {};

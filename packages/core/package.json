@@ -20,12 +20,17 @@
       "import": "./dist/system-record-v1.js",
       "default": "./dist/system-record-v1.js"
     },
+    "./system-record-inventory-row-traversal-v1": {
+      "types": "./dist/system-record-inventory-row-traversal-v1.d.ts",
+      "import": "./dist/system-record-inventory-row-traversal-v1.js",
+      "default": "./dist/system-record-inventory-row-traversal-v1.js"
+    },
     "./dist/*": "./dist/*",
     "./package.json": "./package.json"
   },
   "scripts": {
     "build": "tsc",
-    "test": "pnpm run test:baseline && pnpm run test:system-record",
+    "test": "pnpm run test:baseline && pnpm run test:system-record && pnpm run test:system-record-export",
     "test:baseline": "vitest run --exclude 'test/system-record-*.test.ts' --maxWorkers=4",
     "test:system-record": "vitest run --config vitest.system-record.config.ts --maxWorkers=1 --no-file-parallelism",
     "test:system-record-export": "node test/system-record-package-export-v1.mjs && tsc --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext test/system-record-package-export-v1.types.ts",

@@ -41,6 +41,8 @@ import {
   type SystemRecordArtifactRepositoryV1,
   type SystemRecordArtifactV1,
 } from './artifact-v1.js';
+import type { AgentProfileAdmittedSliceContextV1 } from './admitted-slice-context-v1.js';
+import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
 
 export type SignedAgentProfileActiveHeadEnvelopeV1 = SignedAgentProfileHeadEnvelopeV1 & {
   readonly object: AgentProfileActiveHeadObjectV1;
@@ -95,9 +97,12 @@ export interface CreateAgentProfileReceiverOptionsV1 {
    * preparation, it returns authenticated monotonic timing and the apply entry.
    * The receiver owns final freshness, deadline clamping, and the sole call to
    * apply; no replacement proof or prior apply outcome crosses this boundary.
+   * Concrete lifecycle composition remains intentionally default-off; only the
+   * injected bridge can authenticate and re-inspect the opaque admitted context.
    */
   readonly prepareCandidateApply: (
     input: AgentProfileReceiverCandidateV1,
+    admittedContext: AgentProfileAdmittedSliceContextV1,
     signal: AbortSignal,
   ) => AgentProfileReceiverPreparedApplyV1
     | Promise<AgentProfileReceiverPreparedApplyV1>;
@@ -107,13 +112,35 @@ export interface CreateAgentProfileReceiverOptionsV1 {
 
 export interface AgentProfileReceiverV1 {
   /**
-   * Verify and apply one active inventory row. Inventory traversal, admission,
-   * continuation, caching, and retries remain owned by the caller.
+   * Complete the abort-safe fetch/decode/verification phase. The returned state
+   * can prepare one admitted dispatch but cannot mutate storage by itself.
    */
-  receiveActive(
+  prepareActive(
     row: SystemRecordInventoryRowV1,
     signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1>;
+  /** Convenience for direct callers that already own the admitted slice lifetime. */
+  receiveActive(
+    row: SystemRecordInventoryRowV1,
+    admittedContext: AgentProfileAdmittedSliceContextV1,
+    signal: AbortSignal,
   ): Promise<SystemRecordApplyOutcomeV1>;
+}
+
+export interface AgentProfilePreparedActiveV1 {
+  /**
+   * Perform admitted bridge work exactly once and return the sole mutation
+   * dispatch boundary. No opaque admitted authority escapes in the result.
+   */
+  prepareDispatch(
+    admittedContext: AgentProfileAdmittedSliceContextV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedDispatchV1>;
+}
+
+export interface AgentProfilePreparedDispatchV1 {
+  /** Invoke the atomic materializer exactly once and await its physical settlement. */
+  dispatch(): Promise<SystemRecordApplyOutcomeV1>;
 }
 
 /**
@@ -138,14 +165,14 @@ export function createAgentProfileReceiverV1(
         | AgentProfileForkResolutionV1
       >(envelope));
 
-  return Object.freeze({
-    async receiveActive(
+  const receiver: AgentProfileReceiverV1 = Object.freeze({
+    async prepareActive(
       inputRow: SystemRecordInventoryRowV1,
       signal: AbortSignal,
-    ): Promise<SystemRecordApplyOutcomeV1> {
+    ): Promise<AgentProfilePreparedActiveV1> {
       signal.throwIfAborted();
       const row = canonicalInventoryRow(networkId, inputRow);
-      if (row.tombstone || row.quarantined || row.conflictEvidenceDigest !== undefined) {
+      if (!isOrdinaryActiveInventoryRowV1(row)) {
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
 
@@ -161,35 +188,68 @@ export function createAgentProfileReceiverV1(
       });
       signal.throwIfAborted();
       const validUntilUnixMs = Date.parse(candidate.head.validUntil);
-      assertActiveDeadlineFreshV1(
-        validUntilUnixMs,
-        receiverNowMs(nowMs?.() ?? Date.now()),
-      );
-      const prepared = await prepareCandidateApply(candidate, signal);
+      let dispatchPrepared = false;
+      return Object.freeze({
+        async prepareDispatch(
+          admittedContext: AgentProfileAdmittedSliceContextV1,
+          applySignal: AbortSignal,
+        ): Promise<AgentProfilePreparedDispatchV1> {
+          if (dispatchPrepared) {
+            throw new Error('active profile receiver dispatch was already prepared');
+          }
+          applySignal.throwIfAborted();
+          dispatchPrepared = true;
+          const prepared = await prepareCandidateApply(
+            candidate,
+            admittedContext,
+            applySignal,
+          );
+          applySignal.throwIfAborted();
+          const apply = readPreparedApplyV1(prepared);
+          applySignal.throwIfAborted();
+          const remainingMs = assertActiveDeadlineFreshV1(
+            validUntilUnixMs,
+            receiverNowMs(nowMs?.() ?? Date.now()),
+          );
+          const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
+          if (!Number.isSafeInteger(translatedDeadlineMs)) {
+            throw new Error('agent-profile translated apply deadline is invalid');
+          }
+          const admittedDeadlineMs = Math.min(
+            apply.existingMonotonicDeadlineMs,
+            translatedDeadlineMs,
+          );
+          if (admittedDeadlineMs <= apply.monotonicNowMs) {
+            throw new Error('agent-profile monotonic apply admission is expired');
+          }
+          let dispatched = false;
+          return Object.freeze({
+            async dispatch(): Promise<SystemRecordApplyOutcomeV1> {
+              if (dispatched) {
+                throw new Error('active profile receiver dispatch was already invoked');
+              }
+              dispatched = true;
+              // This call is the point of no return. Its promise is the physical
+              // settlement boundary and must never be raced or reclassified.
+              return await apply.invoke(admittedDeadlineMs);
+            },
+          });
+        },
+      });
+    },
+    async receiveActive(
+      row: SystemRecordInventoryRowV1,
+      admittedContext: AgentProfileAdmittedSliceContextV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordApplyOutcomeV1> {
+      const prepared = await receiver.prepareActive(row, signal);
       signal.throwIfAborted();
-      const apply = readPreparedApplyV1(prepared);
+      const dispatch = await prepared.prepareDispatch(admittedContext, signal);
       signal.throwIfAborted();
-      const remainingMs = assertActiveDeadlineFreshV1(
-        validUntilUnixMs,
-        receiverNowMs(nowMs?.() ?? Date.now()),
-      );
-      const translatedDeadlineMs = apply.monotonicNowMs + remainingMs;
-      if (!Number.isSafeInteger(translatedDeadlineMs)) {
-        throw new Error('agent-profile translated apply deadline is invalid');
-      }
-      const admittedDeadlineMs = Math.min(
-        apply.existingMonotonicDeadlineMs,
-        translatedDeadlineMs,
-      );
-      if (admittedDeadlineMs <= apply.monotonicNowMs) {
-        throw new Error('agent-profile monotonic apply admission is expired');
-      }
-      // Atomic apply is the point of no return. A cancellation that arrives
-      // after the storage closure returns must not hide a committed outcome and
-      // make the caller retry it as if nothing happened.
-      return await apply.invoke(admittedDeadlineMs);
+      return dispatch.dispatch();
     },
   });
+  return receiver;
 }
 
 interface BuildVerifiedActiveCandidateFactsOptionsV1 {
