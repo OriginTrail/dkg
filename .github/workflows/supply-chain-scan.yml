@@ -26,7 +26,7 @@ name: Supply chain scan
 
 on:
   pull_request:
-    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip, 'integration/**']
     paths:
       - '.github/workflows/**'
       - '.github/actions/**'

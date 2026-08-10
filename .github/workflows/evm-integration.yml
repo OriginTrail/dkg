@@ -4,7 +4,7 @@ on:
   push:
     branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
   pull_request:
-    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip, 'integration/**']
     types: [opened, synchronize, reopened, labeled, unlabeled]
   merge_group:
   workflow_dispatch:

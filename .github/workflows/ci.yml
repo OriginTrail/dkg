@@ -13,7 +13,7 @@ on:
   push:
     branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
   pull_request:
-    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip]
+    branches: [main, testnet-canary, release/rc.12, rc17-vm-wip, 'integration/**']
     types: [opened, synchronize, reopened, labeled, unlabeled]
   # When merge queue is enabled, this is the pre-merge full-CI safety net.
   # It validates the exact candidate that will land, without introducing a
