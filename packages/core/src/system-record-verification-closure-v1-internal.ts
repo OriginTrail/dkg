@@ -50,6 +50,29 @@ const MINT_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARY_V1 = Symbol(
 );
 const MINTED_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARIES_V1 = new WeakSet<object>();
 
+/**
+ * Identity of the fork this candidate resolves, as verified by the closure.
+ *
+ * Present only when the closure actually ran the direct-successor check for the
+ * current head. Consumers hold local state the closure cannot see -- a recorded
+ * quarantine -- and need these to decide whether the resolution adjudicates
+ * *their* fork rather than some other fork of the same peer. `forkedVersion`
+ * plus `authoritySequence` name the fork event; `forkBaseHeadDigest` names the
+ * common base, which is what distinguishes two fork events that share a
+ * sequence and version but descend from different predecessors.
+ *
+ * Deliberately carries no evidence-head list: the plan makes that list a
+ * verified subset rather than a completeness claim, so a consumer must not
+ * reject a resolution for omitting a conflict it happens to know about.
+ */
+export interface AgentProfileVerifiedForkResolutionFactsV1 {
+  readonly resolutionDigest: Digest32V1;
+  readonly authoritySequence: string;
+  readonly forkedVersion: string;
+  readonly resolutionVersion: string;
+  readonly forkBaseHeadDigest?: Digest32V1;
+}
+
 class AgentProfileVerifiedAuthoritySummaryValueV1 {
   declare private readonly __opaqueAgentProfileVerifiedAuthoritySummaryV1: void;
 
@@ -61,6 +84,7 @@ class AgentProfileVerifiedAuthoritySummaryValueV1 {
     public readonly lastAuthorityTransitionPriorHeadDigest?: Digest32V1,
     public readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1,
     public readonly deletionTableDigest?: Digest32V1,
+    public readonly forkResolution?: AgentProfileVerifiedForkResolutionFactsV1,
   ) {
     if (token !== MINT_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARY_V1) {
       fail('system-record-closure', 'verified authority summary is factory-only');
@@ -104,6 +128,7 @@ function mintAgentProfileVerifiedAuthoritySummaryV1(
     lastAuthorityTransitionPriorHeadDigest?: Digest32V1;
     tombstonePredecessor?: AgentProfileActiveHeadObjectV1;
     deletionTableDigest?: Digest32V1;
+    forkResolution?: AgentProfileVerifiedForkResolutionFactsV1;
   }>,
 ): AgentProfileVerifiedAuthoritySummaryV1 {
   return new AgentProfileVerifiedAuthoritySummaryValueV1(
@@ -114,6 +139,7 @@ function mintAgentProfileVerifiedAuthoritySummaryV1(
     input.lastAuthorityTransitionPriorHeadDigest,
     input.tombstonePredecessor,
     input.deletionTableDigest,
+    input.forkResolution,
   );
 }
 
@@ -635,6 +661,37 @@ function createVerifiedAuthoritySummaryV1(
     tombstonePredecessor:
       tombstonePredecessor?.state === 'active' ? tombstonePredecessor : undefined,
     deletionTableDigest: tombstonePredecessor?.ownedSubjectTableDigest,
+    forkResolution: verifiedForkResolutionFactsV1(state, current),
+  });
+}
+
+/**
+ * Only mint these facts on the path that already proved direct succession.
+ *
+ * A head carrying a resolution digest has been through `isDirectResolvingSuccessorV1`
+ * above, so reaching here without the resolution object means the traversal
+ * diverged from that check and the summary must not claim a verified resolution.
+ * Failing closed keeps a consumer from ever seeing a head whose
+ * `forkResolutionDigest` is set while the summary is silent about it.
+ */
+function verifiedForkResolutionFactsV1(
+  state: CollectedClosureV1,
+  current: AgentProfileHeadObjectV1,
+): AgentProfileVerifiedForkResolutionFactsV1 | undefined {
+  if (current.forkResolutionDigest === undefined) return undefined;
+  const resolution = state.parsedResolutions.find((candidate) =>
+    computeAgentProfileForkResolutionDigestV1(candidate) === current.forkResolutionDigest);
+  if (resolution === undefined) {
+    fail('system-record-closure', 'verified closure lost its current fork resolution');
+  }
+  return Object.freeze({
+    resolutionDigest: current.forkResolutionDigest,
+    authoritySequence: resolution.authoritySequence,
+    forkedVersion: resolution.forkedVersion,
+    resolutionVersion: resolution.resolutionVersion,
+    ...(resolution.forkBaseHeadDigest === undefined
+      ? {}
+      : { forkBaseHeadDigest: resolution.forkBaseHeadDigest }),
   });
 }
 
