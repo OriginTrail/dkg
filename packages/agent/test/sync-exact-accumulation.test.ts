@@ -52,7 +52,12 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 }
 
 describe('exact sync accumulation limits', () => {
-  it('returns a validated selected-SWM metadata prefix on retryable transport exhaustion only', async () => {
+  it.each([
+    'peer-closed-stream',
+    'The stream has been reset',
+    'Remote closed connection during opening',
+    'operation timed out',
+  ])('returns a validated selected-SWM metadata prefix on untagged %s transport exhaustion', async (message) => {
     const requesterScope = 'selected-swm-meta:explicit-policy' as const;
     const checkpointStore = new MemorySyncCheckpointStore();
     let sends = 0;
@@ -76,9 +81,7 @@ describe('exact sync accumulation limits', () => {
       send: async () => {
         sends += 1;
         if (sends === 1) return encoder.encode('valid-page');
-        const error = new Error('operation timed out');
-        markSyncTransportFailure(error);
-        throw error;
+        throw new Error(message);
       },
     }));
 
@@ -146,9 +149,31 @@ describe('exact sync accumulation limits', () => {
       },
     },
     {
+      name: 'validation rejection with transport-like text',
+      scopeId: 7,
+      fail: (_controller: AbortController) => {
+        const error = new Error('operation timed out');
+        markSyncValidationRejection(error);
+        return error;
+      },
+    },
+    {
       name: 'local request build failure',
       scopeId: 6,
       fail: (_controller: AbortController) => new Error('wallet signing failed'),
+    },
+    {
+      name: 'local request timeout with transport-like text',
+      scopeId: 8,
+      fail: (_controller: AbortController) => new Error('operation timed out'),
+    },
+    {
+      name: 'chain RPC timeout with transport-like text',
+      scopeId: 9,
+      fail: (_controller: AbortController) => Object.assign(
+        new Error('operation timed out'),
+        { code: 'RPC_TIMEOUT' },
+      ),
     },
   ])('discards a selected metadata prefix on $name', async ({ name, scopeId, fail }) => {
     const requesterScope = `selected-swm-meta:retained:${scopeId}` as const;
@@ -180,13 +205,22 @@ describe('exact sync accumulation limits', () => {
       signal: controller.signal,
       buildSyncRequest: async () => {
         builds += 1;
-        if (name === 'local request build failure' && builds === 2) throw fail(controller);
+        if (
+          (
+            name === 'local request build failure'
+            || name === 'local request timeout with transport-like text'
+            || name === 'chain RPC timeout with transport-like text'
+          )
+          && builds === 2
+        ) throw fail(controller);
         return encoder.encode('request');
       },
       parseAndFilter: async () => {
         parses += 1;
         if (
-          (name === 'integrity rejection' || name === 'validation rejection')
+          (name === 'integrity rejection'
+            || name === 'validation rejection'
+            || name === 'validation rejection with transport-like text')
           && parses === 2
         ) {
           throw fail(controller);
@@ -200,7 +234,11 @@ describe('exact sync accumulation limits', () => {
         sends += 1;
         if (sends === 1) return encoder.encode('valid-page');
         if (name === 'denial') return encoder.encode('denied');
-        if (name === 'integrity rejection' || name === 'validation rejection') {
+        if (
+          name === 'integrity rejection'
+          || name === 'validation rejection'
+          || name === 'validation rejection with transport-like text'
+        ) {
           return encoder.encode('invalid-page');
         }
         throw fail(controller);

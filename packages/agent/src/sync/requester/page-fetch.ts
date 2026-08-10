@@ -5,6 +5,7 @@ import {
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
 import {
+  isKnownRetryableSyncTransportInterruption,
   isSyncBackoffWorthyError,
   isSyncTransportFailure,
   isSyncValidationRejection,
@@ -903,8 +904,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       && responsePages > 0
       && allQuads.length > 0
       && signal?.aborted !== true
-      && isSyncTransportFailure(err)
-      && isSyncBackoffWorthyError(err)
+      && isKnownRetryableSyncTransportInterruption(err)
     ) {
       logWarn(
         ctx,

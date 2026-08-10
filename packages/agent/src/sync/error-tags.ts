@@ -1,7 +1,11 @@
 import { isOversizedRdfLiteralError } from '@origintrail-official/dkg-core';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
-type SyncErrorTag = 'syncPeerResponded' | 'syncTransportFailure' | 'syncValidationRejected';
+type SyncErrorTag =
+  | 'syncPeerResponded'
+  | 'syncTransportFailure'
+  | 'syncValidationRejected'
+  | 'syncLocalRequestFailure';
 
 function markSyncError(error: unknown, tag: SyncErrorTag): void {
   if (!error || (typeof error !== 'object' && typeof error !== 'function')) return;
@@ -26,6 +30,10 @@ export function markSyncPeerResponded(error: unknown): void {
 
 export function markSyncTransportFailure(error: unknown): void {
   markSyncError(error, 'syncTransportFailure');
+}
+
+export function markSyncLocalRequestFailure(error: unknown): void {
+  markSyncError(error, 'syncLocalRequestFailure');
 }
 
 /**
@@ -61,6 +69,54 @@ export function isSyncTransportFailure(error: unknown): boolean {
   return Boolean(error && typeof error === 'object' && (error as { syncTransportFailure?: boolean }).syncTransportFailure);
 }
 
+function isSyncLocalRequestFailure(error: unknown): boolean {
+  return Boolean(error && typeof error === 'object' && (error as { syncLocalRequestFailure?: boolean }).syncLocalRequestFailure);
+}
+
+function syncErrorMessage(error: unknown): string {
+  return error instanceof Error
+    ? error.message.toLowerCase()
+    : String(error).toLowerCase();
+}
+
+function hasKnownRetryableSyncTransportMessage(error: unknown): boolean {
+  const message = syncErrorMessage(error);
+  return (
+    message.includes('peer-closed-stream') ||
+    message.includes('all multiaddr dials failed') ||
+    message.includes('stream reset') ||
+    message.includes('stream has been reset') ||
+    message.includes('remote closed connection during opening') ||
+    message.includes('connection reset') ||
+    message.includes('econnreset') ||
+    message.includes('etimedout') ||
+    message.includes('send timeout') ||
+    message.includes('operation timed out') ||
+    message.includes('operation was aborted due to timeout')
+  );
+}
+
+/**
+ * A retryable interruption of the DKG peer transport itself.
+ *
+ * The explicit tag is authoritative while the message fallback covers the
+ * small set of libp2p/router errors whose Error can be recreated across a
+ * retry/span boundary. Negative evidence wins: a response-side rejection,
+ * chain RPC/local request construction failure, or caller abort must never be
+ * reclassified merely because its message also contains "timed out".
+ */
+export function isKnownRetryableSyncTransportInterruption(error: unknown): boolean {
+  if (
+    (error instanceof Error && error.name === 'AbortError')
+    || isSyncValidationRejection(error)
+    || didSyncPeerRespond(error)
+    || isChainRpcTransportError(error)
+    || isSyncLocalRequestFailure(error)
+  ) return false;
+
+  return isSyncTransportFailure(error) || hasKnownRetryableSyncTransportMessage(error);
+}
+
 /**
  * PERMANENT ingest rejection (OT-RFC-56): retrying can never succeed — the
  * content itself violates a protocol invariant (today: the RDF-literal size
@@ -78,9 +134,7 @@ export function isSyncPermanentRejection(error: unknown): boolean {
 export function isSyncBackoffWorthyError(error: unknown): boolean {
   if (isSyncTransportFailure(error) || isChainRpcTransportError(error)) return true;
 
-  const message = error instanceof Error
-    ? error.message.toLowerCase()
-    : String(error).toLowerCase();
+  const message = syncErrorMessage(error);
 
   return (
     message.includes('too many active durable data sync session snapshots') ||
@@ -96,14 +150,6 @@ export function isSyncBackoffWorthyError(error: unknown): boolean {
     // aligned with Messenger's recoverable dial classifier so a successfully
     // received durable prefix is not discarded merely because the final page
     // lost its relay stream.
-    message.includes('peer-closed-stream') ||
-    message.includes('all multiaddr dials failed') ||
-    message.includes('stream reset') ||
-    message.includes('connection reset') ||
-    message.includes('econnreset') ||
-    message.includes('etimedout') ||
-    message.includes('send timeout') ||
-    message.includes('operation timed out') ||
-    message.includes('operation was aborted due to timeout')
+    hasKnownRetryableSyncTransportMessage(error)
   );
 }
