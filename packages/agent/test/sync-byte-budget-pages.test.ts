@@ -286,6 +286,49 @@ describe('byte-budget sync pagination', () => {
     await store.close();
   });
 
+  it('honours the negotiated row hint for durable meta while legacy meta remains capped', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'byte-budget-meta-cg';
+    const graph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+    await store.insert(Array.from({ length: 1_200 }, (_, i) => ({
+      graph,
+      subject: `urn:meta-subject:${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: `"value-${i}"`,
+    })));
+    // Model a responder whose legacy page was deliberately reduced. The
+    // additive byte-budget hint must bypass that row cap without bypassing the
+    // serializer's byte cap.
+    const legacyPageSize = 128;
+    const cap = registerTestSyncHandler(store, { syncPageSize: legacyPageSize });
+
+    const legacy = await cap.invoke({
+      contextGraphId,
+      offset: 0,
+      limit: legacyPageSize,
+      includeSharedMemory: false,
+      phase: 'meta',
+      syncSessionId: 'legacy-meta-session',
+    });
+    expect(linesFromNquads(legacy)).toHaveLength(legacyPageSize);
+
+    const upgraded = await cap.invoke({
+      contextGraphId,
+      offset: 0,
+      limit: legacyPageSize,
+      includeSharedMemory: false,
+      phase: 'meta',
+      syncSessionId: 'byte-budget-meta-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    });
+    expect(linesFromNquads(upgraded)).toHaveLength(1_200);
+    expect(new TextEncoder().encode(upgraded).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+
+    await store.close();
+  });
+
   it('never emits an oversized legacy response frame and keeps negotiated data under 4 MiB', async () => {
     const store = new OxigraphStore();
     const graph = `did:dkg:context-graph:${CG_ID}/context/oversized`;
