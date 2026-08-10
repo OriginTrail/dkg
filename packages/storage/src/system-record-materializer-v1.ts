@@ -161,9 +161,36 @@ export interface SystemRecordChildHandoffV1 {
   ): SystemRecordAtomicRecoveryRuntimeV1;
 }
 
+/**
+ * Executor half of the proof consume-or-discard contract.
+ *
+ * A verified proof holds the single-slot, registry-wide transient reservation,
+ * so exactly one party must always end up releasing it. The split is:
+ *
+ * - The lane owns the proof until an apply entry point accepts it. Every path
+ *   that refuses or throws before that point discards, including throws from
+ *   the ownership-snapshot read, the execution binding, and the admission
+ *   barrier.
+ * - The executor owns the proof from the moment one of the apply entry points
+ *   below is invoked. Having accepted it, the executor must consume it, discard
+ *   it, or transfer it to recovery ownership, on every outcome including its own
+ *   rejections. An entry point that rejects *without* having taken ownership
+ *   leaves the proof with the lane, which discards it.
+ *
+ * The lane's discard is tolerant of failure because it deliberately also runs on
+ * paths where the executor already took ownership; it must never convert a
+ * dispatch failure into a reservation error. Neither half may assume the other
+ * released the proof, and neither may release one it does not own -- a
+ * reservation transferred to recovery is owned by recovery until settlement.
+ */
 export interface SystemRecordTransactionExecutorV1 {
   applyVerified(proof: unknown, childGeneration: string): Promise<SystemRecordApplyOutcomeV1>;
-  /** Release an authentic proof that lifecycle admission refused before dispatch. */
+  /**
+   * Release an authentic proof the lane never handed to an apply entry point:
+   * lifecycle admission refused it, or the dispatch threw before ownership
+   * transferred. Implementations must tolerate being called for a proof that is
+   * already consumed, already released, or recovery-owned.
+   */
   discardVerified?(proof: unknown): void;
   /**
    * Preferred activation-bound entry point.
@@ -1268,6 +1295,25 @@ class SystemRecordLaneSession {
     proof: unknown,
     facade: SystemRecordLaneFacadeBindingV1,
   ): Promise<SystemRecordApplyOutcomeV1> {
+    try {
+      return await this.dispatchVerifiedForBinding(proof, facade);
+    } catch (error) {
+      // The refusal paths below discard before returning, and the executor owns
+      // the proof from the moment it accepts one. A throw escaping anywhere else
+      // -- the ownership-snapshot read, the execution-binding construction, the
+      // admission barrier, or an executor that rejected before consuming --
+      // would otherwise strand the proof's transient reservation. That gate is
+      // single-slot and registry-wide, so one stranded proof fails every later
+      // apply in the process with "reservation is already live" until restart.
+      this.discardVerifiedAfterFailedDispatch(proof);
+      throw error;
+    }
+  }
+
+  private async dispatchVerifiedForBinding(
+    proof: unknown,
+    facade: SystemRecordLaneFacadeBindingV1,
+  ): Promise<SystemRecordApplyOutcomeV1> {
     if (
       this.current === 'shutdown' ||
       this.current === 'unavailable' ||
@@ -1404,6 +1450,26 @@ class SystemRecordLaneSession {
       // into an exception or admit the proof to an executor path.
     }
     return outcome;
+  }
+
+  /**
+   * Release a proof whose dispatch threw before the executor took ownership.
+   *
+   * The tolerance here is load-bearing, not defensive habit. `discardProof`
+   * throws once the proof is consumed or its reservation already released, and
+   * a reservation transferred to recovery ownership is deliberately not
+   * releasable. So this runs on paths where the discard is expected to fail:
+   * rethrowing from it would replace the real dispatch failure with a
+   * misleading reservation error, and releasing a recovery-owned reservation
+   * would be worse still. Swallow, and let the original error propagate.
+   */
+  private discardVerifiedAfterFailedDispatch(proof: unknown): void {
+    try {
+      this.deps.executor.discardVerified?.(proof);
+    } catch {
+      // See above: an already-consumed, already-released, or recovery-owned
+      // proof throws here by design and must not mask the dispatch failure.
+    }
   }
 
   /**
