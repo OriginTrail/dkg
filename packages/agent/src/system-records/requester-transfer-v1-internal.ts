@@ -88,6 +88,7 @@ export async function exchangeSystemRecordResponseV1(input: {
     }
     wireBytes += responseFrame.byteLength;
     input.frameReservation.shrinkTo(responseFrame.byteLength);
+    input.signal.throwIfAborted();
     let decoded: SystemRecordDecodedResponseFrameV1;
     try {
       decoded = decodeSystemRecordResponseFrameV1(responseFrame);
@@ -112,6 +113,7 @@ export function retainVerifiedSystemRecordResponseV1(input: {
   readonly transfer: SystemRecordDecodedTransferV1;
   readonly decodeAdmission: SystemRecordRequesterAdmissionV1;
   readonly byteAdmission: SystemRecordRequesterByteAdmissionV1;
+  readonly signal: AbortSignal;
 }): SystemRecordRetainTransferResultV1 {
   const { decoded, wireBytes } = input.transfer;
   if (decoded.header.status !== 'ok') {
@@ -127,8 +129,13 @@ export function retainVerifiedSystemRecordResponseV1(input: {
   }
 
   const decodePermit = input.decodeAdmission.tryAcquire();
-  if (decodePermit === null) return Object.freeze({ outcome: 'busy', wireBytes });
+  if (decodePermit === null) {
+    input.signal.throwIfAborted();
+    return Object.freeze({ outcome: 'busy', wireBytes });
+  }
+  let releaseDecode = true;
   try {
+    input.signal.throwIfAborted();
     try {
       verifySystemRecordResponsePayloadV1(input.request, decoded.header, decoded.payload);
     } catch (error) {
@@ -136,16 +143,20 @@ export function retainVerifiedSystemRecordResponseV1(input: {
     }
     const payloadReservation = input.byteAdmission.tryReserve(decoded.payload.byteLength);
     if (payloadReservation === null) {
-      decodePermit.release();
+      input.signal.throwIfAborted();
       return Object.freeze({ outcome: 'capacity', wireBytes });
     }
+    let releasePayload = true;
     try {
+      input.signal.throwIfAborted();
       const artifact = cloneSystemRecordArtifactV1({
         objectKind: decoded.header.objectKind,
         objectDigest: decoded.header.objectDigest,
         canonicalBytes: decoded.payload,
       });
       let released = false;
+      releaseDecode = false;
+      releasePayload = false;
       return Object.freeze({
         outcome: 'ok',
         retained: Object.freeze({
@@ -159,13 +170,11 @@ export function retainVerifiedSystemRecordResponseV1(input: {
           },
         }),
       });
-    } catch (error) {
-      payloadReservation.release();
-      throw error;
+    } finally {
+      if (releasePayload) payloadReservation.release();
     }
-  } catch (error) {
-    decodePermit.release();
-    throw error;
+  } finally {
+    if (releaseDecode) decodePermit.release();
   }
 }
 

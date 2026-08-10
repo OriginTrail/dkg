@@ -106,6 +106,7 @@ class ExactFetchRegistryV1 {
   readonly #entries = new Map<string, FetchEntryV1>();
   readonly #tracked = new Set<FetchEntryV1>();
   readonly #byteAdmission: SystemRecordRequesterByteAdmissionV1;
+  #closed = false;
 
   constructor(byteAdmission: SystemRecordRequesterByteAdmissionV1) {
     this.#byteAdmission = byteAdmission;
@@ -113,6 +114,10 @@ class ExactFetchRegistryV1 {
 
   get size(): number {
     return this.#entries.size;
+  }
+
+  get closed(): boolean {
+    return this.#closed;
   }
 
   get(key: string): FetchEntryV1 | undefined {
@@ -150,6 +155,8 @@ class ExactFetchRegistryV1 {
   }
 
   close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
     for (const entry of this.#tracked) entry.close();
   }
 
@@ -215,13 +222,13 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
     try {
       signal.throwIfAborted();
       const phase = this.#phase;
-      if (phase.state === 'retained') return this.#deliverLease(phase.source);
+      if (phase.state === 'retained') return this.#deliverLease(phase.source, signal);
       if (phase.state !== 'pending') {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       const shared = await raceSystemRecordAbortV1(phase.transfer, signal);
       return shared.state === 'retained'
-        ? this.#deliverLease(shared.source)
+        ? this.#deliverLease(shared.source, signal)
         : shared.result;
     } finally {
       signal.removeEventListener('abort', releaseObserver);
@@ -272,12 +279,23 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
     return settlement;
   }
 
-  #deliverLease(source: SystemRecordRetainedSourceV1): SystemRecordExactFetchResultV1 {
+  #deliverLease(
+    source: SystemRecordRetainedSourceV1,
+    signal: AbortSignal,
+  ): SystemRecordExactFetchResultV1 {
     if (this.#phase.state !== 'retained' || this.#phase.source !== source) {
       throw new Error('System Record lease source is not retained by its entry');
     }
     const payloadBytes = source.artifact.canonicalBytes.byteLength;
     const reservation = this.#byteAdmission.tryReserve(payloadBytes);
+    if (signal.aborted) {
+      reservation?.release();
+      signal.throwIfAborted();
+    }
+    if (this.#registry.closed) {
+      reservation?.release();
+      return Object.freeze({ outcome: 'closed', wireBytes: source.wireBytes });
+    }
     if (reservation === null) {
       return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
     }
@@ -361,7 +379,6 @@ export function createSystemRecordRequesterV1(
   let completed = 0;
   let activeStream: 0 | 1 = 0;
   let peakActiveStream: 0 | 1 = 0;
-  let closed = false;
 
   return Object.freeze({ fetch, stats, close });
 
@@ -370,10 +387,10 @@ export function createSystemRecordRequesterV1(
     signal: AbortSignal,
   ): Promise<SystemRecordExactFetchResultV1> {
     signal.throwIfAborted();
-    if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
+    if (registry.closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
     const exact = createSystemRecordExactRequestV1(networkId, lookup, requestId());
     signal.throwIfAborted();
-    if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
+    if (registry.closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
     const { key, request, requestFrame } = exact;
     let entry = registry.get(key);
     if (entry !== undefined) {
@@ -417,21 +434,21 @@ export function createSystemRecordRequesterV1(
     const streamPermit = streamAdmission.tryAcquire();
     if (streamPermit === null) {
       signal.throwIfAborted();
-      return Object.freeze({ state: closed ? 'closed' : 'busy' });
+      return Object.freeze({ state: registry.closed ? 'closed' : 'busy' });
     }
     let releaseStream = true;
     try {
       signal.throwIfAborted();
-      if (closed) return Object.freeze({ state: 'closed' });
+      if (registry.closed) return Object.freeze({ state: 'closed' });
       const frameReservation = byteAdmission.tryReserve(SYSTEM_RECORD_MAX_FRAME_BYTES);
       if (frameReservation === null) {
         signal.throwIfAborted();
-        return Object.freeze({ state: closed ? 'closed' : 'capacity' });
+        return Object.freeze({ state: registry.closed ? 'closed' : 'capacity' });
       }
       let releaseFrame = true;
       try {
         signal.throwIfAborted();
-        if (closed) return Object.freeze({ state: 'closed' });
+        if (registry.closed) return Object.freeze({ state: 'closed' });
         releaseStream = false;
         releaseFrame = false;
         return Object.freeze({ state: 'admitted', streamPermit, frameReservation });
@@ -481,6 +498,7 @@ export function createSystemRecordRequesterV1(
         transfer,
         decodeAdmission,
         byteAdmission,
+        signal: pendingSignal,
       });
       if (retained.outcome === 'ok') {
         settlement = Object.freeze({ state: 'retained', source: retained.retained });
@@ -513,6 +531,18 @@ export function createSystemRecordRequesterV1(
       activeStream = 0;
       completed += 1;
     }
+    if (pendingSignal.aborted) {
+      if (settlement.state === 'retained') settlement.source.release();
+      return Object.freeze({
+        state: 'failed',
+        result: classifyRequesterFailure(
+          pendingSignal.reason,
+          pendingSignal,
+          entry.resetReason(),
+          wireBytes,
+        ).result,
+      });
+    }
     return settlement;
   }
 
@@ -529,13 +559,11 @@ export function createSystemRecordRequesterV1(
       peakActiveStream,
       queuedStreams: 0,
       retainedPayloadBytes: entryStats.retainedPayloadBytes,
-      closed,
+      closed: registry.closed,
     });
   }
 
   function close(): void {
-    if (closed) return;
-    closed = true;
     registry.close();
   }
 }

@@ -155,6 +155,212 @@ describe('system-record requester V1', () => {
     });
   });
 
+  it.each(['requester close', 'caller abort'] as const)(
+    'fences retained lease delivery after reentrant %s',
+    async (mode) => {
+      const bytes = byteAdmission();
+      const stream = permitAdmission();
+      const decode = permitAdmission();
+      const exchange = fixtureExchange();
+      const openExchange = vi.fn(async () => exchange.value);
+      const secondController = new AbortController();
+      let requester: ReturnType<typeof createSystemRecordRequesterV1>;
+      let reservationCount = 0;
+      const reentrantBytes: SystemRecordRequesterByteAdmissionV1 = {
+        tryReserve(requested) {
+          const reservation = bytes.tryReserve(requested);
+          reservationCount += 1;
+          if (reservationCount === 4) {
+            if (mode === 'requester close') {
+              requester.close();
+            } else {
+              secondController.abort(new Error('caller aborted during retained delivery'));
+            }
+          }
+          return reservation;
+        },
+      };
+      requester = createSystemRecordRequesterV1({
+        networkId: NETWORK,
+        openExchange,
+        byteAdmission: reentrantBytes,
+        streamAdmission: stream.value,
+        decodeAdmission: decode.value,
+        requestId: () => '1'.repeat(32),
+      });
+
+      const first = await requester.fetch(LOOKUP, new AbortController().signal);
+      expect(first.outcome).toBe('ok');
+      if (first.outcome !== 'ok') return;
+      expect(bytes.reservations).toHaveLength(3);
+
+      const second = requester.fetch(LOOKUP, secondController.signal);
+      if (mode === 'requester close') {
+        await expect(second).resolves.toEqual({
+          outcome: 'closed',
+          wireBytes: first.lease.wireBytes,
+        });
+      } else {
+        await expect(second).rejects.toThrow('caller aborted during retained delivery');
+      }
+
+      expect(openExchange).toHaveBeenCalledOnce();
+      expect(exchange.writeRequestFrame).toHaveBeenCalledOnce();
+      expect(exchange.readResponseFrame).toHaveBeenCalledOnce();
+      expect(exchange.reset).not.toHaveBeenCalled();
+      expect(bytes.reservations).toHaveLength(4);
+      expect(bytes.reservations[0]?.released).toBe(true);
+      expect(bytes.reservations[1]?.released).toBe(false);
+      expect(bytes.reservations[2]?.released).toBe(false);
+      expect(bytes.reservations[3]?.released).toBe(true);
+      expect(requester.stats()).toMatchObject({
+        joined: 1,
+        trackedDigests: 1,
+        activeLeases: 1,
+        retainedPayloadBytes: PAYLOAD.byteLength * 2,
+        activeStream: 0,
+        closed: mode === 'requester close',
+      });
+      expect(decode.active()).toBe(true);
+
+      first.lease.release();
+      expect(bytes.reservations.every(({ released }) => released)).toBe(true);
+      expect(decode.active()).toBe(false);
+      expect(requester.stats()).toMatchObject({
+        trackedDigests: 0,
+        activeLeases: 0,
+        retainedPayloadBytes: 0,
+      });
+    },
+  );
+
+  it.each([
+    ['decode admission', 'requester close'],
+    ['decode admission', 'caller abort'],
+    ['source byte admission', 'requester close'],
+    ['source byte admission', 'caller abort'],
+    ['frame shrink', 'requester close'],
+    ['frame shrink', 'caller abort'],
+    ['frame release', 'requester close'],
+    ['frame release', 'caller abort'],
+    ['stream release', 'requester close'],
+    ['stream release', 'caller abort'],
+  ] as const)(
+    'fences source retention after reentrant %s %s',
+    async (hook, mode) => {
+      const bytes = byteAdmission();
+      const stream = permitAdmission();
+      const decode = permitAdmission();
+      const exchange = fixtureExchange();
+      const openExchange = vi.fn(async () => exchange.value);
+      const controller = new AbortController();
+      let requester: ReturnType<typeof createSystemRecordRequesterV1>;
+      let triggered = false;
+      const trigger = () => {
+        if (triggered) return;
+        triggered = true;
+        if (mode === 'requester close') {
+          requester.close();
+        } else {
+          controller.abort(new Error(`caller aborted during ${hook}`));
+        }
+      };
+      const streamAdmission = {
+        tryAcquire() {
+          const permit = stream.value.tryAcquire();
+          if (permit === null || hook !== 'stream release') return permit;
+          let released = false;
+          return Object.freeze({
+            release() {
+              if (released) return;
+              released = true;
+              permit.release();
+              trigger();
+            },
+          });
+        },
+      };
+      const decodeAdmission = {
+        tryAcquire() {
+          const permit = decode.value.tryAcquire();
+          if (hook === 'decode admission') trigger();
+          return permit;
+        },
+      };
+      let reservationCount = 0;
+      const reentrantBytes: SystemRecordRequesterByteAdmissionV1 = {
+        tryReserve(requested) {
+          const reservation = bytes.tryReserve(requested);
+          reservationCount += 1;
+          if (reservationCount === 2 && hook === 'source byte admission') trigger();
+          if (reservationCount !== 1
+            || (hook !== 'frame shrink' && hook !== 'frame release')) {
+            return reservation;
+          }
+          let released = false;
+          return Object.freeze({
+            shrinkTo(retainedBytes: number) {
+              reservation.shrinkTo(retainedBytes);
+              if (hook === 'frame shrink') trigger();
+            },
+            release() {
+              if (released) return;
+              released = true;
+              reservation.release();
+              if (hook === 'frame release') trigger();
+            },
+          });
+        },
+      };
+      requester = createSystemRecordRequesterV1({
+        networkId: NETWORK,
+        openExchange,
+        byteAdmission: reentrantBytes,
+        streamAdmission,
+        decodeAdmission,
+        requestId: () => '1'.repeat(32),
+      });
+
+      const result = requester.fetch(LOOKUP, controller.signal);
+      if (mode === 'requester close') {
+        await expect(result).resolves.toMatchObject({
+          outcome: 'closed',
+          wireBytes: expect.any(Number),
+        });
+      } else {
+        await expect(result).rejects.toThrow(`caller aborted during ${hook}`);
+      }
+
+      expect(triggered).toBe(true);
+      expect(openExchange).toHaveBeenCalledOnce();
+      expect(exchange.writeRequestFrame).toHaveBeenCalledOnce();
+      expect(exchange.readResponseFrame).toHaveBeenCalledOnce();
+      const resetDuringTransfer = hook === 'decode admission'
+        || hook === 'source byte admission'
+        || hook === 'frame shrink';
+      if (resetDuringTransfer) {
+        expect(exchange.reset).toHaveBeenCalledWith(
+          mode === 'requester close' ? 'closed' : 'cancelled',
+        );
+      } else {
+        expect(exchange.reset).not.toHaveBeenCalled();
+      }
+      await vi.waitFor(() => expect(requester.stats()).toMatchObject({
+        started: 1,
+        completed: 1,
+        trackedDigests: 0,
+        waitingCallers: 0,
+        activeLeases: 0,
+        activeStream: 0,
+        retainedPayloadBytes: 0,
+        closed: mode === 'requester close',
+      }));
+      expect(bytes.reservations.every(({ released }) => released)).toBe(true);
+      expect(stream.active()).toBe(false);
+      expect(decode.active()).toBe(false);
+    },
+  );
+
   it('fetches and verifies an exact inventory object through the public requester', async () => {
     const leaf = { objectType: 'inventory-leaf', rows: [] } as const;
     const payload = canonicalizeSystemRecordInventoryLeafObjectV1(leaf, NETWORK, true);
