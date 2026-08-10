@@ -5078,6 +5078,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         graphUri,
         snapshotRef,
         sinceBatchId,
+        forceFreshSession,
         fetchContext,
       }) => {
         return this.fetchSyncPages(
@@ -5092,7 +5093,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           sinceBatchId,
           fetchContext.signal,
           undefined,
-          onVerifiedFullSnapshot !== undefined,
+          forceFreshSession || onVerifiedFullSnapshot !== undefined,
           exactAssetUals,
         );
       },

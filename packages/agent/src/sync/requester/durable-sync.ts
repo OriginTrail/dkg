@@ -121,6 +121,12 @@ export interface DurableSyncFetchRequest {
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly exactAssetUals?: string[];
+  /**
+   * Rebuild the responder row list instead of resuming an earlier phase.
+   * Verified rootless snapshots need the complete metadata manifest on every
+   * round so a data checkpoint can be mapped back to exact graph boundaries.
+   */
+  readonly forceFreshSession?: boolean;
   readonly fetchContext: DurableSyncFetchContext;
 }
 
@@ -353,7 +359,10 @@ async function runDurableSyncWithBudget(
       const metaFetchDeadline = isSystemContextGraph
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
+      const sinceBatchId = sinceBatchIdFor?.(pid);
       const exactAssetUals = exactAssetUalsFor?.(pid);
+      const rootlessVerifiedFullSnapshot = sinceBatchId === undefined
+        && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
       }
@@ -378,6 +387,10 @@ async function runDurableSyncWithBudget(
         graphUri,
         sinceBatchId,
         exactAssetUals,
+        // DATA safely resumes at verified graph boundaries. META is the
+        // manifest that proves those boundaries, so resuming it independently
+        // would return only a suffix and make the DATA prefix unverifiable.
+        forceFreshSession: phase === 'meta' && rootlessVerifiedFullSnapshot,
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const metaResult: SyncPageResult = skipAgentsMeta
@@ -397,7 +410,6 @@ async function runDurableSyncWithBudget(
       // the post-processing timeout gate below still prevents fanout to the
       // next context graph when stopOnBackoffWorthyFailure is enabled.
       throwIfOperationAborted();
-      const sinceBatchId = sinceBatchIdFor?.(pid);
       const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
       throwIfOperationAborted();
       peerRespondedForContextGraph = true;
