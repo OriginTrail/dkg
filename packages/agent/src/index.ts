@@ -78,6 +78,11 @@ export {
 } from './chain-reconciler.js';
 export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
 export {
+  classifySharedMemoryFreshness,
+  type SelectedSharedMemorySyncResult,
+  type SharedMemoryFreshnessSummary,
+} from './sync/shared-memory-freshness.js';
+export {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,

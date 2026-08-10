@@ -9,6 +9,7 @@ import {
   type DKGAgent,
   type CatchupPassDecisionReason,
   type DurableProgressSummary,
+  type DurableProgressClassification,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SwmSnapshotCoverage,
@@ -543,6 +544,12 @@ export interface CatchupPlaneCompletionEvidence {
   verifiedDataPeers: number;
   /** Peers that cleanly verified one or more V2 KAs with no public triples. */
   verifiedPrivateOnlyPeers?: number;
+  /**
+   * RFC-64 providers whose selected public-SWM scope reached its explicit
+   * terminal boundary. Unlike an ordinary peer's empty response, this is a
+   * graph-complete proof tied to the accepted provider policy.
+   */
+  selectedScopeCompletePeers?: number;
   emptyPeers: number;
   /**
    * The metadata-resolved curator cleanly completed this plane while hosting
@@ -620,8 +627,15 @@ export function catchupPeerPlaneEvidence(
      * mistake here settles a plane nobody proved.
      */
     plane: 'durable' | 'shared-memory';
-    /** Durable-only lifecycle state; the shared plane has no `complete` concept. */
+    /** Durable lifecycle state; selected SWM supplies its own typed equivalent. */
     complete?: boolean;
+    /**
+     * Lane-specific clean-completion verdict when raw diagnostics deliberately
+     * retain superseded failures. Selected SWM is the current producer: its
+     * freshness classifier resolves bounded historical yields while preserving
+     * those counters for telemetry.
+     */
+    completedWithoutFailure?: boolean;
     fromAuthority?: boolean;
   },
 ): CatchupPlaneCompletionEvidence {
@@ -632,7 +646,8 @@ export function catchupPeerPlaneEvidence(
     authorityEmptyPeers: 0,
   };
   if (!plane) return none;
-  if (!catchupPlaneCompletedWithoutFailure(plane, options.complete)) {
+  if (!(options.completedWithoutFailure
+    ?? catchupPlaneCompletedWithoutFailure(plane, options.complete))) {
     // The peer answered and its round was not clean. A pure transport failure is
     // NOT that: we never heard from it, it is already counted in `failedPeers`,
     // and treating unreachable strangers as unresolved evidence would stop a
@@ -690,6 +705,10 @@ export function addCatchupPlaneEvidence(
     total.verifiedPrivateOnlyPeers = (total.verifiedPrivateOnlyPeers ?? 0)
       + peer.verifiedPrivateOnlyPeers;
   }
+  if (peer.selectedScopeCompletePeers) {
+    total.selectedScopeCompletePeers = (total.selectedScopeCompletePeers ?? 0)
+      + peer.selectedScopeCompletePeers;
+  }
   total.emptyPeers += peer.emptyPeers;
   if (peer.authorityEmptyPeers) {
     total.authorityEmptyPeers = (total.authorityEmptyPeers ?? 0) + peer.authorityEmptyPeers;
@@ -710,6 +729,20 @@ export function catchupPlaneProvenByData(
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0
     || (completion?.verifiedPrivateOnlyPeers ?? 0) > 0;
+}
+
+/**
+ * Positive RFC-64 proof: an explicitly selected graph-complete SWM provider
+ * reached the terminal boundary of the accepted public scope.
+ *
+ * This stays separate from `verifiedDataPeers`: a repeat run may prove the
+ * exact same already-materialized scope while inserting zero new triples, and
+ * calling that "verified data received" would corrupt the transfer telemetry.
+ */
+export function catchupPlaneProvenBySelectedScope(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+): boolean {
+  return (completion?.selectedScopeCompletePeers ?? 0) > 0;
 }
 
 /**
@@ -880,6 +913,7 @@ export function catchupPlaneReady(
   options: { isPrivate: boolean },
 ): boolean {
   return catchupPlaneProvenByData(completion)
+    || catchupPlaneProvenBySelectedScope(completion)
     || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options)
     || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
 }
@@ -889,9 +923,16 @@ export function catchupPeerSucceeded(
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
   durableComplete?: boolean,
+  sharedCompletion?: {
+    progress: DurableProgressClassification;
+    /** This lane requires an explicit terminal boundary, not just clean I/O. */
+    terminalBoundaryRequired: boolean;
+  },
 ): boolean {
   const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
-  const sharedProgress = shared ? classifyDurableProgress(shared) : null;
+  const sharedProgress = shared
+    ? sharedCompletion?.progress ?? classifyDurableProgress(shared)
+    : null;
   if (
     !catchupPeerResponded(durable, shared)
     || peerDenied
@@ -904,6 +945,8 @@ export function catchupPeerSucceeded(
   const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
   if (peerPhaseFailed) return false;
   if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  if (sharedCompletion?.terminalBoundaryRequired
+    && !sharedCompletion.progress.completedWithoutFailure) return false;
   const peerMadeProgress = durableProgress.madeReadinessProgress
     || Boolean(sharedProgress?.madeReadinessProgress);
   const peerMetadataOnly = !peerMadeProgress
@@ -1150,18 +1193,29 @@ class WorkerCatchupRunner implements CatchupRunner {
         );
       }
       case 'syncSharedMemory': {
-        const [peerId, contextGraphId, priority, source] = args as [
-          string, string, number | undefined, unknown,
+        const [peerId, contextGraphId, priority, source, selected] = args as [
+          string, string, number | undefined, unknown, unknown,
         ];
+        const admission = {
+          ...(priority === undefined ? {} : { priority }),
+          source: normalizeSyncAdmissionSource(
+            typeof source === 'string' ? source : undefined,
+          ),
+        };
+        // One bridge operation owns producer selection. The Worker supplies a
+        // closed boolean, and only literal `true` may enter the selected lane;
+        // malformed structured-clone values retain ordinary behavior.
+        if (selected === true) {
+          return agent.syncSelectedSharedMemoryFromPeerDetailed(
+            peerId,
+            [contextGraphId],
+            { ...admission, selectedSwmPriority: true },
+          );
+        }
         return agent.syncSharedMemoryFromPeerDetailed(
           peerId,
           [contextGraphId],
-          {
-            ...(priority === undefined ? {} : { priority }),
-            source: normalizeSyncAdmissionSource(
-              typeof source === 'string' ? source : undefined,
-            ),
-          },
+          admission,
         );
       }
       case 'logCatchupPass': {

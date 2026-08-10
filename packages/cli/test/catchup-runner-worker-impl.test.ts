@@ -166,9 +166,31 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           case 'syncDurable':
             durableCalls.push(args[0] as string);
             return durableResult();
-          case 'syncSharedMemory':
+          case 'syncSharedMemory': {
+            if (args[4] !== true) {
+              throw new Error('complete SWM provider must select the RFC-64 lane');
+            }
             sharedCalls.push(args[0] as string);
-            return sharedResult();
+            const shared = sharedResult();
+            return {
+              kind: 'selected-shared-memory',
+              shared: {
+                ...shared,
+                insertedTriples: 0,
+                fetchedDataTriples: 0,
+                insertedDataTriples: 0,
+                bytesReceived: 0,
+                emptyResponses: 1,
+                failedPhases: 1,
+                snapshotPlaneIncomplete: 1,
+                resolvedSnapshotPlaneIncomplete: 1,
+                timedOutPhases: 1,
+                metadataContinuationYields: 1,
+                resolvedMetadataContinuationYields: 1,
+              },
+              selectedScopeComplete: true,
+            };
+          }
           case 'finalizeCatchup':
             return null;
           default:
@@ -183,6 +205,62 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersNotAttempted).toBe(2);
     expect(result.diagnostics?.durable.authorityUnanswered).toBe(false);
     expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(false);
+    // The selected provider proved the exact graph-complete scope without
+    // transferring anything new. Raw historical yield counters remain visible,
+    // but the typed terminal verdict is the positive readiness proof.
+    expect(result.sharedMemorySynced).toBe(0);
+    expect(result.diagnostics?.sharedMemory.failedPhases).toBe(1);
+    expect(result.diagnostics?.sharedMemory.timedOutPhases).toBe(1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers).toBe(1);
+    expect(result.peersSucceeded).toBe(2);
+  });
+
+  it('fails selected SWM closed when its explicit scope is incomplete', async () => {
+    const peerIds = ['peer-swm', 'peer-curator'];
+    const selectedCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-selected-incomplete', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            selectedCalls.push(String(args[0]));
+            return {
+              kind: 'selected-shared-memory',
+              shared: sharedResult(),
+              selectedScopeComplete: false,
+            };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(selectedCalls).toEqual(['peer-swm']);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.incompleteResponders).toBe(1);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(true);
+    // Only the durable curator succeeded. Clean-looking selected payload
+    // counters cannot promote an explicitly incomplete terminal boundary.
+    expect(result.peersSucceeded).toBe(1);
   });
 
   it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {
