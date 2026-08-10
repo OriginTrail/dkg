@@ -420,6 +420,7 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
+  SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
@@ -695,6 +696,19 @@ function combineSyncAdmissionSignals(
       }
     },
   };
+}
+
+/**
+ * Durable DATA may be intentionally tuned down for large assertion payloads,
+ * but durable META is a compact proof manifest that must complete before any
+ * DATA prefix can be mapped to verified graph boundaries. Keep META on the
+ * negotiated byte-budget row hint while preserving the caller's DATA size.
+ */
+export function durableSyncRequestPageSize(
+  phase: SyncPhase,
+  dataPageSize: number = SYNC_REQUEST_PAGE_SIZE,
+): number {
+  return phase === 'meta' ? SYNC_BYTE_BUDGET_MAX_ROWS : dataPageSize;
 }
 
 function syncPageFetchCoalescingKey(params: {
@@ -5709,7 +5723,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
       syncRouterAttempts: SYNC_ROUTER_ATTEMPTS,
       syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+      syncPageSize: durableSyncRequestPageSize(phase),
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       // Caller AbortSignals are waiter-scoped below: one duplicate trigger
       // timing out must not abort the shared fetch for the other waiters. The
