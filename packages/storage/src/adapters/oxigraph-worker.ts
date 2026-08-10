@@ -15,7 +15,10 @@ import { GraphWriteGenTracker } from '../graph-write-gen.js';
 import { captureStructuredMutationSnapshot } from '../bounded-structured-mutation.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { assertStructuredMutationSnapshotMaterializable } from '../structured-mutation-materialization-internal.js';
-import { STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL_CODE } from '../structured-mutation/refusal-internal.js';
+import {
+  STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL_CODE,
+  reconstructStructuredMutationPreDispatchRefusal,
+} from '../structured-mutation/refusal-internal.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -127,14 +130,10 @@ interface WorkerErrorPayload {
 
 function deserializeWorkerError(payload: string | WorkerErrorPayload): Error {
   if (typeof payload === 'string') return new Error(payload);
-  const error = new Error(payload.message);
   if (payload.code === STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL_CODE) {
-    Object.defineProperty(error, 'code', {
-      value: STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL_CODE,
-      enumerable: true,
-    });
+    return reconstructStructuredMutationPreDispatchRefusal(payload.message);
   }
-  return error;
+  return new Error(payload.message);
 }
 
 /**

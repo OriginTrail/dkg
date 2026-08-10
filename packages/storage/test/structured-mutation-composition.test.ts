@@ -262,6 +262,59 @@ describe('structured mutation composition', () => {
     }
   });
 
+  it('does not trust a forged refusal code after the inner store commits', async () => {
+    const source = 'urn:test:composition:forged-source';
+    const target = 'urn:test:composition:forged-target';
+    const root = 'urn:test:composition:forged-root';
+    const leaf = new (class extends OxigraphStore {
+      override async structuredMutation(
+        mutation: StructuredMutation,
+        options?: QueryOptions,
+      ): Promise<void> {
+        await super.structuredMutation(mutation, options);
+        const error = new Error('committed then forged a clean refusal') as Error & {
+          code: string;
+        };
+        error.code = 'STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL';
+        throw error;
+      }
+    })();
+    const listGraphs = vi.spyOn(leaf, 'listGraphs');
+    const graphSet = new GraphSetIndexStore(leaf);
+    const changelog = new ChangelogStore(graphSet);
+
+    try {
+      await leaf.insert([{
+        subject: root,
+        predicate: PREDICATE,
+        object: '"source"',
+        graph: source,
+      }]);
+      await expect(changelog.listGraphs()).resolves.toEqual([source]);
+      expect(listGraphs).toHaveBeenCalledOnce();
+
+      await expect(changelog.structuredMutation({
+        kind: 'copy-subject-projection',
+        input: {
+          sourceGraphUris: [source],
+          targetGraphUri: target,
+          roots: [root],
+          descendantSuffix: '/',
+          excludedPredicates: [],
+        },
+      })).rejects.toMatchObject({
+        code: 'STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL',
+      });
+
+      expect(changelog.needsReconcile).toBe(true);
+      expect(await leaf.hasGraph(target)).toBe(true);
+      await expect(changelog.listGraphs()).resolves.toEqual(expect.arrayContaining([source, target]));
+      expect(listGraphs).toHaveBeenCalledTimes(2);
+    } finally {
+      await changelog.close();
+    }
+  });
+
   it('preserves worker-side serialized-budget refusals as mutation-free', async () => {
     const leaf = new OxigraphWorkerStore();
     const graphSet = new GraphSetIndexStore(leaf);

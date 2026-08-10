@@ -471,7 +471,6 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
         await operation.call(this.inner, snapshot.mutation, options);
       } catch (error) {
         if (
-          snapshot.outcome !== 'noop' &&
           !isTripleStoreCapabilityRefusal(error, 'structuredMutation') &&
           !isStructuredMutationPreDispatchRefusal(error)
         ) {

@@ -158,7 +158,7 @@ describe('GraphSetIndexStore', () => {
     await inner.close();
   });
 
-  it('forwards a known no-op without maintenance and never schedules recovery for its failure', async () => {
+  it('invalidates a warm index when a no-op fails because the inner store lost data', async () => {
     const graph = 'did:dkg:context-graph:noop';
     const inner = new OxigraphStore();
     await inner.insert([q(graph)]);
@@ -171,7 +171,8 @@ describe('GraphSetIndexStore', () => {
       ): Promise<void> {
         observed = mutation;
         observedOptions = options;
-        throw new Error('no-op preflight failed');
+        this.failListGraphs = true;
+        throw new Error('in-memory worker data was lost');
       }
     })(inner);
     const events: GraphSetMutationEvent[] = [];
@@ -185,7 +186,7 @@ describe('GraphSetIndexStore', () => {
     await expect(store.structuredMutation({
       kind: 'delete-subjects',
       input: { graphUri: graph, subjects: [] },
-    }, options)).rejects.toThrow('no-op preflight failed');
+    }, options)).rejects.toThrow('in-memory worker data was lost');
 
     expect(observedOptions).toBe(options);
     expect(observed).toEqual({
@@ -194,8 +195,8 @@ describe('GraphSetIndexStore', () => {
     });
     expect(Object.isFrozen(observed)).toBe(true);
     expect(events).toEqual([]);
-    await expect(store.listGraphs()).resolves.toEqual([graph]);
-    expect(failing.listGraphsCalls).toBe(1);
+    await expect(store.listGraphs()).rejects.toThrow('listGraphs failed');
+    expect(failing.listGraphsCalls).toBe(2);
     await inner.close();
   });
 

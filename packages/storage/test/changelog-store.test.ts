@@ -288,12 +288,12 @@ describe('ChangelogStore — opaque update handling', () => {
     await base.close();
   });
 
-  it('does not flag reconcile when a known no-op fails during inner preflight', async () => {
+  it('flags reconcile when a no-op fails because the inner store lost data', async () => {
     const base = new OxigraphStore();
     const failing = new Proxy(base, {
       get(target, property, receiver) {
         if (property === 'structuredMutation') {
-          return async () => { throw new Error('no-op preflight failed'); };
+          return async () => { throw new Error('in-memory worker data was lost'); };
         }
         const value = Reflect.get(target, property, receiver) as unknown;
         return typeof value === 'function' ? value.bind(target) : value;
@@ -304,9 +304,9 @@ describe('ChangelogStore — opaque update handling', () => {
     await expect(log.structuredMutation({
       kind: 'delete-subjects',
       input: { graphUri: G1, subjects: [] },
-    })).rejects.toThrow('no-op preflight failed');
+    })).rejects.toThrow('in-memory worker data was lost');
 
-    expect(log.needsReconcile).toBe(false);
+    expect(log.needsReconcile).toBe(true);
     await base.close();
   });
 
