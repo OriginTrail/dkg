@@ -458,10 +458,17 @@ async function collectVerificationClosureV1(
  * the only way to obtain this value is to return from the validator.
  *
  * It carries the verified FACTS rather than the resolution they came from, so
- * projection cannot reach the rest of the control object. That matters beyond
+ * the summary is built without naming the control object. That matters beyond
  * tidiness: the raw resolution carries `evidenceHeadDigests`, a verified subset
- * that no consumer may treat as a completeness claim, and this boundary makes
- * it structurally unreachable from the summary rather than merely unused.
+ * no consumer may treat as a completeness claim, and the mint site now has no
+ * expression for it.
+ *
+ * Not an inaccessibility claim -- `collected` is right here, and its
+ * `parsedResolutions` with it. The property is narrower and worth stating
+ * exactly, because a reader who finds that field after being told otherwise
+ * will reasonably conclude the comment lied and reopen a settled question: the
+ * summary reads only `currentForkResolutionFacts`, and the helper that builds
+ * those facts takes only a resolution, so neither can express the mistake.
  */
 interface ValidatedClosureV1 {
   readonly collected: CollectedClosureV1;
