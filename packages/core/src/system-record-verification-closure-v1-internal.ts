@@ -453,15 +453,19 @@ async function collectVerificationClosureV1(
  * The closure after authority validation, carrying what validation actually
  * verified so projection cannot rediscover it.
  *
- * `currentForkResolution` is `null` when the current head advertises none --
- * which is a different fact from "validation did not run", and that second
- * state is unrepresentable here because the only way to obtain this value is to
- * return from the validator. Projection therefore cannot mint a resolution
- * nobody verified: it has no other source, rather than checking and refusing.
+ * Absent means the current head advertises no resolution. "Validation did not
+ * run" is not a third case to guard against -- it is unrepresentable, because
+ * the only way to obtain this value is to return from the validator.
+ *
+ * It carries the verified FACTS rather than the resolution they came from, so
+ * projection cannot reach the rest of the control object. That matters beyond
+ * tidiness: the raw resolution carries `evidenceHeadDigests`, a verified subset
+ * that no consumer may treat as a completeness claim, and this boundary makes
+ * it structurally unreachable from the summary rather than merely unused.
  */
 interface ValidatedClosureV1 {
   readonly collected: CollectedClosureV1;
-  readonly currentForkResolution: AgentProfileForkResolutionV1 | null;
+  readonly currentForkResolutionFacts?: AgentProfileVerifiedForkResolutionFactsV1;
 }
 
 function validateCollectedClosureAuthorityV1(
@@ -524,7 +528,7 @@ function validateCollectedClosureAuthorityV1(
     transitionTupleDigests.set(tuple, transitionDigest);
   }
 
-  let currentForkResolution: AgentProfileForkResolutionV1 | null = null;
+  let currentForkResolutionFacts: AgentProfileVerifiedForkResolutionFactsV1 | undefined;
   for (const [headDigest, head] of state.parsedHeads) {
     assertCompleteUniqueRootLineageV1(state, headDigest, head);
     if (head.acceptedTransitionDigest !== undefined) {
@@ -553,7 +557,7 @@ function validateCollectedClosureAuthorityV1(
           `head ${headDigest} does not directly bind its fork resolution`,
         );
       }
-      currentForkResolution = resolution;
+      currentForkResolutionFacts = verifiedForkResolutionFactsV1(resolution);
     }
   }
 
@@ -572,7 +576,10 @@ function validateCollectedClosureAuthorityV1(
     }
   }
 
-  return Object.freeze({ collected: state, currentForkResolution });
+  return Object.freeze({
+    collected: state,
+    ...(currentForkResolutionFacts === undefined ? {} : { currentForkResolutionFacts }),
+  });
 }
 
 function assertCompleteUniqueRootLineageV1(
@@ -682,19 +689,16 @@ function createVerifiedAuthoritySummaryV1(
     tombstonePredecessor:
       tombstonePredecessor?.state === 'active' ? tombstonePredecessor : undefined,
     deletionTableDigest: tombstonePredecessor?.ownedSubjectTableDigest,
-    forkResolution: validated.currentForkResolution === null
-      ? undefined
-      : verifiedForkResolutionFactsV1(validated.currentForkResolution),
+    forkResolution: validated.currentForkResolutionFacts,
   });
 }
 
 /**
- * Project the resolution validation already verified for this head.
+ * Mint the facts at the point of proof.
  *
- * No lookup here by design: the only way to reach this function is to hand it a
- * resolution that came back from `validateCollectedClosureAuthorityV1`, the site
- * that proved direct succession. A head advertising a resolution the traversal
- * never collected fails there, so no summary can be silent about one.
+ * Called only where `isDirectResolvingSuccessorV1` has just succeeded, so the
+ * verified subset is fixed where it is verified rather than re-derived later
+ * from an object that also carries unverified-by-this-check fields.
  */
 function verifiedForkResolutionFactsV1(
   resolution: AgentProfileForkResolutionV1,

@@ -22,6 +22,7 @@ import type {
   AgentProfileTombstoneHeadObjectV1,
   AgentProfileTransitionConflictEntryV1,
   AgentProfileVerifiedAuthoritySummaryV1,
+  AgentProfileVerifiedForkResolutionFactsV1,
   CanonicalRfc3339SecondsV1,
   Digest32V1,
   NetworkIdV1,
