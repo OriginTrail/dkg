@@ -121,7 +121,11 @@ export interface CatchupPassCoverage {
  * the canonical snapshot tracker while still sharing admission, pass caps and
  * the absolute deadline.
  */
-export interface SwmCatchupProgressLedger {
+export interface SwmCatchupProgressLedger<
+  TCoverage extends CatchupPassCoverage = CatchupPassCoverage,
+> {
+  /** Type-only compatibility marker; the executor never reads coverage. */
+  readonly coverageType?: TCoverage;
   decide(input: {
     nowMs: number;
     deadlineMs: number;
@@ -142,7 +146,7 @@ export interface SwmCatchupProgressLedger {
  * silently acquiring different retry semantics.
  */
 export class SwmCatchupPassTracker<TCoverage extends CatchupPassCoverage>
-implements SwmCatchupProgressLedger {
+implements SwmCatchupProgressLedger<TCoverage> {
   private readonly lastCoverageByPeer = new Map<string, TCoverage>();
 
   private readonly peerProgressHighWater = new Map<string, number>();
@@ -220,6 +224,7 @@ implements SwmCatchupProgressLedger {
 
 export interface SwmCatchupContinuationUnit<
   Key,
+  TCoverage extends CatchupPassCoverage,
 > {
   readonly key: Key;
   /**
@@ -227,7 +232,7 @@ export interface SwmCatchupContinuationUnit<
    * for source compatibility; selected RFC-64 callers may supply a staged
    * ledger rather than the ordinary snapshot-only tracker.
    */
-  readonly tracker: SwmCatchupProgressLedger;
+  readonly tracker: SwmCatchupProgressLedger<TCoverage>;
   readonly planeProven: () => boolean;
 }
 
@@ -270,9 +275,10 @@ export interface SwmCatchupContinuationStop<Key> {
 
 export interface RunSwmCatchupContinuationsOptions<
   Key,
+  TCoverage extends CatchupPassCoverage,
   PassResult,
 > {
-  readonly units: readonly SwmCatchupContinuationUnit<Key>[];
+  readonly units: readonly SwmCatchupContinuationUnit<Key, TCoverage>[];
   readonly config: CatchupPassConfig;
   readonly nowMs: () => number;
   readonly runPass: (
@@ -302,9 +308,10 @@ export interface SwmCatchupContinuationSummary {
  */
 export async function runSwmCatchupContinuations<
   Key,
+  TCoverage extends CatchupPassCoverage,
   PassResult,
 >(
-  options: RunSwmCatchupContinuationsOptions<Key, PassResult>,
+  options: RunSwmCatchupContinuationsOptions<Key, TCoverage, PassResult>,
 ): Promise<SwmCatchupContinuationSummary> {
   const deadlineMs = options.nowMs() + options.config.budgetMs;
   const stopped = new Set<Key>();
