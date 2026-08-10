@@ -25,6 +25,7 @@ import {
   buildPruneLinkedRecordClosuresUpdateFromNormalized,
   buildPruneRankedSubjectsUpdateFromNormalized,
 } from './structured-mutation/retention.js';
+import { markStructuredMutationPreDispatchRefusal } from './structured-mutation/refusal-internal.js';
 
 export type MaterializedStructuredMutation =
   | Readonly<{
@@ -42,19 +43,24 @@ export function materializeStructuredMutation(
   snapshot: StructuredMutationSnapshot,
 ): MaterializedStructuredMutation {
   assertTrustedStructuredMutationSnapshot(snapshot);
-  const mutation = snapshot.mutation;
-  assertSnapshotMaterializable(mutation);
-  const update = buildSnapshotUpdate(mutation);
-  if (update === undefined) {
-    if (snapshot.outcome !== 'noop') {
-      throw new Error('structured mutation candidate unexpectedly materialized as a no-op');
+  try {
+    const mutation = snapshot.mutation;
+    assertSnapshotMaterializable(mutation);
+    const update = buildSnapshotUpdate(mutation);
+    if (update === undefined) {
+      if (snapshot.outcome !== 'noop') {
+        throw new Error('structured mutation candidate unexpectedly materialized as a no-op');
+      }
+      return Object.freeze({ outcome: 'noop', snapshot });
     }
-    return Object.freeze({ outcome: 'noop', snapshot });
+    if (snapshot.outcome !== 'candidate') {
+      throw new Error('structured mutation no-op unexpectedly materialized an update');
+    }
+    return Object.freeze({ outcome: 'execute', snapshot, update });
+  } catch (error) {
+    markStructuredMutationPreDispatchRefusal(error);
+    throw error;
   }
-  if (snapshot.outcome !== 'candidate') {
-    throw new Error('structured mutation no-op unexpectedly materialized an update');
-  }
-  return Object.freeze({ outcome: 'execute', snapshot, update });
 }
 
 /** Validate a worker-bound snapshot before structured clone without building backend text. */
@@ -62,7 +68,12 @@ export function assertStructuredMutationSnapshotMaterializable(
   snapshot: StructuredMutationSnapshot,
 ): void {
   assertTrustedStructuredMutationSnapshot(snapshot);
-  assertSnapshotMaterializable(snapshot.mutation);
+  try {
+    assertSnapshotMaterializable(snapshot.mutation);
+  } catch (error) {
+    markStructuredMutationPreDispatchRefusal(error);
+    throw error;
+  }
 }
 
 function assertSnapshotMaterializable(mutation: ReadonlyStructuredMutation): void {

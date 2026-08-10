@@ -8,10 +8,16 @@ const TRUSTED_STRUCTURED_MUTATION_REFUSALS = new WeakSet<object>();
 export function isStructuredMutationPreDispatchRefusal(
   error: unknown,
 ): boolean {
-  return isBoundedMutationBudgetError(error)
-    || (typeof error === 'object'
-      && error !== null
-      && TRUSTED_STRUCTURED_MUTATION_REFUSALS.has(error));
+  return typeof error === 'object'
+    && error !== null
+    && TRUSTED_STRUCTURED_MUTATION_REFUSALS.has(error);
+}
+
+/** Mark a budget error only while still inside the explicit pre-dispatch boundary. */
+export function markStructuredMutationPreDispatchRefusal(error: unknown): void {
+  if (isBoundedMutationBudgetError(error)) {
+    TRUSTED_STRUCTURED_MUTATION_REFUSALS.add(error);
+  }
 }
 
 /** Reconstruct the private refusal identity after a trusted worker reports it. */

@@ -22,6 +22,7 @@ import {
   BOUNDED_MUTATION_MAX_OPERAND_BYTES,
   buildStructuredMutationUpdate,
 } from '../src/bounded-structured-mutation.js';
+import { BoundedMutationBudgetError } from '../src/structured-mutation/primitives.js';
 
 const GRAPH = 'urn:test:composition';
 const TARGET = 'urn:test:composition:target';
@@ -262,56 +263,65 @@ describe('structured mutation composition', () => {
     }
   });
 
-  it('does not trust a forged refusal code after the inner store commits', async () => {
-    const source = 'urn:test:composition:forged-source';
-    const target = 'urn:test:composition:forged-target';
-    const root = 'urn:test:composition:forged-root';
-    const leaf = new (class extends OxigraphStore {
-      override async structuredMutation(
-        mutation: StructuredMutation,
-        options?: QueryOptions,
-      ): Promise<void> {
-        await super.structuredMutation(mutation, options);
-        const error = new Error('committed then forged a clean refusal') as Error & {
-          code: string;
-        };
-        error.code = 'STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL';
-        throw error;
+  it('does not trust forged or bare low-level refusals after the inner store commits', async () => {
+    const failures: ReadonlyArray<readonly [string, () => Error]> = [
+      ['forged-code', () => Object.assign(
+        new Error('committed then forged a clean refusal'),
+        { code: 'STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL' },
+      )],
+      ['bare-budget', () => new BoundedMutationBudgetError(
+        'committed then threw a bare budget error',
+      )],
+    ];
+
+    for (const [suffix, createFailure] of failures) {
+      const source = `urn:test:composition:${suffix}:source`;
+      const target = `urn:test:composition:${suffix}:target`;
+      const root = `urn:test:composition:${suffix}:root`;
+      const failure = createFailure();
+      const leaf = new (class extends OxigraphStore {
+        override async structuredMutation(
+          mutation: StructuredMutation,
+          options?: QueryOptions,
+        ): Promise<void> {
+          await super.structuredMutation(mutation, options);
+          throw failure;
+        }
+      })();
+      const listGraphs = vi.spyOn(leaf, 'listGraphs');
+      const graphSet = new GraphSetIndexStore(leaf);
+      const changelog = new ChangelogStore(graphSet);
+
+      try {
+        await leaf.insert([{
+          subject: root,
+          predicate: PREDICATE,
+          object: '"source"',
+          graph: source,
+        }]);
+        await expect(changelog.listGraphs()).resolves.toEqual([source]);
+        expect(listGraphs).toHaveBeenCalledOnce();
+
+        const received = await changelog.structuredMutation({
+          kind: 'copy-subject-projection',
+          input: {
+            sourceGraphUris: [source],
+            targetGraphUri: target,
+            roots: [root],
+            descendantSuffix: '/',
+            excludedPredicates: [],
+          },
+        }).then(() => undefined, (error: unknown) => error);
+        expect(received).toBe(failure);
+
+        expect(changelog.needsReconcile).toBe(true);
+        expect(await leaf.hasGraph(target)).toBe(true);
+        await expect(changelog.listGraphs())
+          .resolves.toEqual(expect.arrayContaining([source, target]));
+        expect(listGraphs).toHaveBeenCalledTimes(2);
+      } finally {
+        await changelog.close();
       }
-    })();
-    const listGraphs = vi.spyOn(leaf, 'listGraphs');
-    const graphSet = new GraphSetIndexStore(leaf);
-    const changelog = new ChangelogStore(graphSet);
-
-    try {
-      await leaf.insert([{
-        subject: root,
-        predicate: PREDICATE,
-        object: '"source"',
-        graph: source,
-      }]);
-      await expect(changelog.listGraphs()).resolves.toEqual([source]);
-      expect(listGraphs).toHaveBeenCalledOnce();
-
-      await expect(changelog.structuredMutation({
-        kind: 'copy-subject-projection',
-        input: {
-          sourceGraphUris: [source],
-          targetGraphUri: target,
-          roots: [root],
-          descendantSuffix: '/',
-          excludedPredicates: [],
-        },
-      })).rejects.toMatchObject({
-        code: 'STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL',
-      });
-
-      expect(changelog.needsReconcile).toBe(true);
-      expect(await leaf.hasGraph(target)).toBe(true);
-      await expect(changelog.listGraphs()).resolves.toEqual(expect.arrayContaining([source, target]));
-      expect(listGraphs).toHaveBeenCalledTimes(2);
-    } finally {
-      await changelog.close();
     }
   });
 
