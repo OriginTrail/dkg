@@ -6,7 +6,10 @@ import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@
 import type { SyncPhase } from '../auth/request-build.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
-import type { SyncPageResult } from './page-fetch.js';
+import {
+  type SyncPageFetchOptions,
+  type SyncPageResult,
+} from './page-fetch.js';
 import {
   canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
@@ -128,6 +131,8 @@ export interface SharedMemorySyncSummary {
    * note on `SharedMemorySyncDiagnostics.snapshotPlaneIncomplete`.
    */
   snapshotPlaneIncomplete: number;
+  /** Selected-only metadata deadline yields whose exact prefixes were retained. */
+  metadataContinuationYields: number;
   /** Coherent snapshot coverage for this round; reduced only by {@link selectSwmSnapshotCoverage}. */
   swmCoverage?: SwmSnapshotCoverage;
   /**
@@ -139,6 +144,32 @@ export interface SharedMemorySyncSummary {
   replayPhaseBytesReceived: number;
   /** The USEFUL half of `bytesReceived` — immutable snapshot content. */
   snapshotPhaseBytesReceived: number;
+}
+
+export interface SharedMemoryMetadataFetchRequest {
+  readonly ctx: OperationContext;
+  readonly remotePeerId: string;
+  readonly contextGraphId: string;
+  readonly graphUri: string;
+  readonly deadline: number;
+}
+
+export interface SharedMemoryMetadataFetchOutcome {
+  readonly result: SyncPageResult;
+  /** True when this exact invocation retained a resumable metadata prefix. */
+  readonly continuationYielded: boolean;
+}
+
+/**
+ * Strategy boundary for metadata retrieval.
+ *
+ * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
+ * injects a strategy that owns its exceptional retained-prefix/session state;
+ * the canonical SWM pipeline only consumes the resulting page and yield bit.
+ */
+export interface SharedMemoryMetadataFetcher {
+  fetch(request: SharedMemoryMetadataFetchRequest): Promise<SharedMemoryMetadataFetchOutcome>;
+  release(contextGraphId: string): void;
 }
 
 /**
@@ -203,7 +234,7 @@ interface SharedMemorySyncContext {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
+    options?: SyncPageFetchOptions,
   ) => Promise<SyncPageResult>;
   processSharedMemoryBatch: (
     wsDataQuads: Quad[],
@@ -239,6 +270,8 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   stopOnBackoffWorthyFailure?: boolean;
+  /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
+  metadataFetcher?: SharedMemoryMetadataFetcher;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -277,6 +310,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
     stopOnBackoffWorthyFailure = false,
+    metadataFetcher,
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -304,6 +338,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     backoffWorthyFailures: 0,
     deferredBackpressure: 0,
     snapshotPlaneIncomplete: 0,
+    metadataContinuationYields: 0,
     replayPhaseBytesReceived: 0,
     snapshotPhaseBytesReceived: 0,
   };
@@ -354,6 +389,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
   const recordSnapshotCoverage = (
     walk: PublicSnapshotWalkProgress,
     manifestComplete: boolean,
+    descriptorsAuthoritative: boolean,
     materializationFailures: number,
     materializedRefCount: number,
     unwrittenRefSample: readonly string[],
@@ -385,6 +421,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       snapshotsResolved,
       snapshotsTotal: walk.totalSnapshots,
       manifestComplete,
+      descriptorsAuthoritative,
       missingCount: walk.totalSnapshots - snapshotsResolved,
       // Never-retrieved refs first, then retrieved-but-unwritten ones. Deduped
       // across BOTH sources so the sample can never exceed `missingCount`, which
@@ -405,6 +442,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     // must reach the coverage record, not be lost with the stack.
     let materializedFailuresForCg = 0;
     let materializedRefsForCg = 0;
+    let descriptorsAuthoritativeForCg = true;
     const unresolvedRefSampleForCg: string[] = [];
     try {
       const wsGraph = contextGraphWorkspaceGraphUri(pid);
@@ -414,9 +452,38 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       logInfo(ctx, `Syncing shared memory for context graph "${pid}" from ${remotePeerId}`);
 
       const fetchStartedAt = Date.now();
-      const wsMetaResult = await fetchSyncPages(ctx, remotePeerId, pid, true, 'meta', wsMetaGraph, deadline);
+      const metadataOutcome = metadataFetcher
+        ? await metadataFetcher.fetch({
+          ctx,
+          remotePeerId,
+          contextGraphId: pid,
+          graphUri: wsMetaGraph,
+          deadline,
+        })
+        : {
+          result: await fetchSyncPages(
+            ctx,
+            remotePeerId,
+            pid,
+            true,
+            'meta',
+            wsMetaGraph,
+            deadline,
+          ),
+          continuationYielded: false,
+        };
+      const wsMetaResult = metadataOutcome.result;
       manifestComplete = wsMetaResult.completed;
       peerRespondedForContextGraph = true;
+      if (metadataOutcome.continuationYielded) {
+        // Retain first, checkpoint second. A non-zero cursor is safe only while
+        // the exact prefix it skips remains available to the same invocation.
+        summary.bytesReceived += wsMetaResult.bytesReceived;
+        summary.replayPhaseBytesReceived += wsMetaResult.bytesReceived;
+        summary.metadataContinuationYields += 1;
+        recordPhaseOutcome(wsMetaResult);
+        break;
+      }
       if (wsMetaResult.timedOut && shouldStopAfterBackoffWorthyFailure(pid, 'meta timeout')) {
         recordPhaseOutcome(wsMetaResult, { updateCheckpoint: false });
         break;
@@ -453,6 +520,14 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // one phase cannot be hidden by the sibling's clean empty response.
         recordPhaseOutcome(wsMetaResult, { emptyPhase: true });
         recordPhaseOutcome(wsDataResult, { emptyPhase: true });
+        if (
+          wsMetaResult.completed
+          && !wsMetaResult.timedOut
+          && wsDataResult.completed
+          && !wsDataResult.timedOut
+        ) {
+          metadataFetcher?.release(pid);
+        }
         if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
           break;
         }
@@ -500,7 +575,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // descriptors never parsed is a third state, distinct both from a
       // truncated meta phase and from a genuine entity-share manifest that has
       // no head rows to describe.
-      let descriptorsAuthoritative = true;
       if (snapshotMaterializer && publicSnapshotStore && wsMetaResult.completed) {
         try {
           const descriptors = parseGraphScopedSwmRecoveryDescriptors({
@@ -535,7 +609,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           // materialized while zero assertion graphs were written — and because
           // the parser builds its whole array before returning, ONE malformed
           // head discards the descriptors of every valid KA alongside it.
-          descriptorsAuthoritative = false;
+          descriptorsAuthoritativeForCg = false;
         }
       }
       let materializedGraphs = 0;
@@ -640,7 +714,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           // treating that as vacuity reports full coverage on a round that wrote
           // nothing — wrong in the flattering direction, which is the direction
           // no downstream reader can detect.
-          if (manifestComplete && descriptorsAuthoritative) {
+          if (manifestComplete && descriptorsAuthoritativeForCg) {
             materializedRefs.add(snapshotRef);
             materializedRefsForCg = materializedRefs.size;
           }
@@ -865,7 +939,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `dkg-agent-lifecycle.ts`, the only caller of this function), so that
       // only bites the on-connect fan-out, where this field is a diagnostic
       // rather than a decision input.
-      recordSnapshotCoverage(snapshotSync, wsMetaResult.completed, materializationFailures, materializedRefs.size, unresolvedRefSample, pid);
+      recordSnapshotCoverage(
+        snapshotSync,
+        wsMetaResult.completed,
+        descriptorsAuthoritativeForCg,
+        materializationFailures,
+        materializedRefs.size,
+        unresolvedRefSample,
+        pid,
+      );
       // A voluntary yield is OUR budget decision, not the peer's fault. It is
       // recorded here and deliberately kept out of `timedOutPhases`, which
       // feeds `backoffWorthyFailure` and would back the peer off for it. It is
@@ -904,12 +986,12 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // exactly that.
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
-        && (descriptorsAuthoritative || snapshotSync.totalSnapshots === 0);
+        && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0);
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
           + `not materialized — holding the phase incomplete so metadata cannot certify them`);
       }
-      if (!descriptorsAuthoritative) {
+      if (!descriptorsAuthoritativeForCg) {
         logWarn(ctx, `SWM sync for "${pid}": snapshot descriptors could not be parsed — holding `
           + `the phase incomplete so metadata cannot certify Knowledge Assets that were never written`);
       }
@@ -974,6 +1056,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       }
       recordPhaseOutcome(wsMetaResult);
       recordPhaseOutcome(wsDataResult);
+      metadataFetcher?.release(pid);
       if ((wsMetaResult.timedOut || wsDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
         break;
       }
@@ -998,7 +1081,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (thrownProgress) {
         // Same builder as the success path — the counts arrive as one coherent
         // group attached by the walk, never reassembled here.
-        recordSnapshotCoverage(thrownProgress, manifestComplete, materializedFailuresForCg, materializedRefsForCg, unresolvedRefSampleForCg, pid);
+        recordSnapshotCoverage(
+          thrownProgress,
+          manifestComplete,
+          descriptorsAuthoritativeForCg,
+          materializedFailuresForCg,
+          materializedRefsForCg,
+          unresolvedRefSampleForCg,
+          pid,
+        );
       }
       logWarn(ctx, `SWM sync for context graph "${pid}" from ${remotePeerId} failed: ${err instanceof Error ? err.message : String(err)}`);
       if (isSyncPermanentRejection(err)) {
@@ -1206,7 +1297,7 @@ export async function syncPublicSnapshotsForMeta(params: {
         'snapshot',
         '',
         params.deadline,
-        snapshot.ref,
+        { snapshotRef: snapshot.ref },
       );
       bytesReceived += result.bytesReceived;
       resumedPhases += result.resumedFromOffset > 0 ? 1 : 0;

@@ -47,6 +47,24 @@ describe('getSyncCheckpointKey', () => {
     expect(exactA).not.toBe(exactB);
   });
 
+  it('isolates selected metadata continuation from the ordinary SWM cursor', () => {
+    const ordinary = getSyncCheckpointKey('peerA', 'mfacts', true, 'meta');
+    const selected = getSyncCheckpointKey(
+      'peerA',
+      'mfacts',
+      true,
+      'meta',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      'selected-swm-meta:test',
+    );
+
+    expect(selected).toBe('peerA|mfacts|swm|meta|requester:selected-swm-meta:test');
+    expect(selected).not.toBe(ordinary);
+  });
+
   // R10 — member SWM recovery must get its OWN cursor namespace so it never
   // overwrites or deletes the shared incremental-sync cursor.
   it('scopes the key with a |recovery segment distinct from the normal SWM key', () => {

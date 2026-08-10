@@ -254,7 +254,8 @@ describe('syncPublicSnapshotsForMeta', () => {
         { subject: fullSubject, predicate: `${DKG}publicQuadsCount`, object: `"${fullPayload.length}"^^<${XSD_INTEGER}>`, graph: WS_META },
       ],
       publicSnapshotStore: snapshotStore,
-      fetchSyncPages: async (_c, _p, _cg, _inc, _phase, _graph, _deadline, snapshotRef): Promise<SyncPageResult> => {
+      fetchSyncPages: async (_c, _p, _cg, _inc, _phase, _graph, _deadline, fetchOptions): Promise<SyncPageResult> => {
+        const snapshotRef = fetchOptions?.snapshotRef;
         requestedRefs.push(snapshotRef ?? '');
         // `completed: true` with FEWER quads than the signed count — a relayed
         // stream that terminated cleanly on a prefix. Not corrupt (the digest
