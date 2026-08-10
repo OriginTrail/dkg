@@ -13,6 +13,7 @@ import {
   SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
+  encodeInventoryRowBase64UrlV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type Digest32V1,
@@ -197,6 +198,7 @@ interface AgentProfileSliceSourceFactoryV1 {
 function createSliceSourceFactoryV1(
   options: CreateAgentProfileReconcilerOptionsV1,
 ): AgentProfileSliceSourceFactoryV1 {
+  const networkId = options.networkId;
   const receiver = options.receiver;
   let preparation: AgentProfileActivePreparationV1 | undefined;
   let preparationRowKey: string | undefined;
@@ -210,7 +212,7 @@ function createSliceSourceFactoryV1(
     artifactContinuation = undefined;
   };
   const selectRow = (row: SystemRecordInventoryRowV1): void => {
-    const rowKey = inventoryRowContinuationKeyV1(row);
+    const rowKey = encodeInventoryRowBase64UrlV1(networkId, row);
     if (preparationRowKey !== undefined && preparationRowKey !== rowKey) clearPreparation();
     preparationRowKey = rowKey;
   };
@@ -681,19 +683,6 @@ export async function createAgentProfileReconcilerV1(
     if (completed) return 'complete';
     return pendingRows.length > 0 ? 'records' : 'inventory';
   }
-}
-
-function inventoryRowContinuationKeyV1(row: SystemRecordInventoryRowV1): string {
-  return [
-    row.stableKeyHash,
-    row.peerId,
-    row.authoritySequence,
-    row.version,
-    row.headDigest,
-    row.tombstone ? '1' : '0',
-    row.quarantined ? '1' : '0',
-    row.conflictEvidenceDigest ?? '',
-  ].join('\u0000');
 }
 
 type SettledSystemRecordApplyOutcomeV1 = Extract<

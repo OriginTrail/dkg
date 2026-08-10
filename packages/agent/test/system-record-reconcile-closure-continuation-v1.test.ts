@@ -135,8 +135,8 @@ describe('agent-profile closure continuation V1', () => {
     expect(finalResult).toMatchObject({ status: 'complete', processedRows: 1 });
     expect([...fetchCounts.values()].every((count) => count === 1)).toBe(true);
     expect(fetchCounts.size).toBe(32); // 31 closure artifacts plus one inventory leaf.
-    expect(verifyAuthorityEnvelope).toHaveBeenCalledTimes(29);
-    expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
+    expect(verifyAuthorityEnvelope.mock.calls.length).toBeGreaterThan(29);
+    expect(verifyCurrentBundle).toHaveBeenCalled();
     expect(transportedCandidates).toEqual(directCandidates);
     expect(reconciler.stats()).toMatchObject({
       retainedClosureArtifacts: 0,
@@ -236,6 +236,151 @@ describe('agent-profile closure continuation V1', () => {
     });
   });
 
+  it('rechecks injected authority verification when preparation resumes', async () => {
+    const fixture = await maximumAuthorityClosureFixtureV1();
+    let authorityAllowed = true;
+    let pauseAfterAuthority = true;
+    const verifyAuthorityEnvelope = vi.fn(() => authorityAllowed);
+    const consumeCandidate = vi.fn(async () => appliedOutcome('44'));
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async (_providerId, lookup, signal) => {
+        if (verifyAuthorityEnvelope.mock.calls.length > 0 && pauseAfterAuthority) {
+          pauseAfterAuthority = false;
+          return Object.freeze({ outcome: 'remote-busy' as const, wireBytes: 1 });
+        }
+        const artifact = await fixture.repository.resolve(lookup, signal);
+        if (artifact === null) {
+          return Object.freeze({ outcome: 'not-found' as const, wireBytes: 1 });
+        }
+        return Object.freeze({
+          outcome: 'ok' as const,
+          lease: Object.freeze({
+            artifact,
+            wireBytes: 128 + artifact.canonicalBytes.byteLength,
+            release: vi.fn(),
+          }),
+        });
+      },
+      controlAdmission: trackingByteAdmission(),
+    });
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.repository,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyAuthorityEnvelope,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      consumeCandidate,
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    const callsBeforeResume = verifyAuthorityEnvelope.mock.calls.length;
+    expect(callsBeforeResume).toBeGreaterThan(0);
+    authorityAllowed = false;
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'receiver-verification-failed',
+      pendingRows: 1,
+    });
+    expect(verifyAuthorityEnvelope.mock.calls.length).toBeGreaterThan(callsBeforeResume);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+    expect(reconciler.stats()).toMatchObject({
+      retainedClosureArtifacts: 0,
+      retainedClosureBytes: 0,
+    });
+  });
+
+  it('rechecks publication verification when preparation resumes', async () => {
+    const fixture = await maximumAuthorityClosureFixtureV1();
+    let bundleAllowed = true;
+    let pauseAfterBundle = true;
+    const verifyCurrentBundle = vi.fn(
+      (_head: AgentProfileHeadObjectV1, bundleBytes: Uint8Array) => {
+        if (!bundleAllowed) throw new Error('publication verification was revoked');
+        return verifiedFixtureBundle(bundleBytes);
+      },
+    );
+    const consumeCandidate = vi.fn(async () => appliedOutcome('55'));
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async (_providerId, lookup, signal) => {
+        if (verifyCurrentBundle.mock.calls.length > 0 && pauseAfterBundle) {
+          pauseAfterBundle = false;
+          return Object.freeze({ outcome: 'remote-busy' as const, wireBytes: 1 });
+        }
+        const artifact = await fixture.repository.resolve(lookup, signal);
+        if (artifact === null) {
+          return Object.freeze({ outcome: 'not-found' as const, wireBytes: 1 });
+        }
+        return Object.freeze({
+          outcome: 'ok' as const,
+          lease: Object.freeze({
+            artifact,
+            wireBytes: 128 + artifact.canonicalBytes.byteLength,
+            release: vi.fn(),
+          }),
+        });
+      },
+      controlAdmission: trackingByteAdmission(),
+    });
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.repository,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyAuthorityEnvelope: () => true,
+      verifyCurrentBundle,
+      consumeCandidate,
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    let result;
+    for (let slice = 0; slice < 4; slice += 1) {
+      result = await reconciler.advance(new AbortController().signal);
+      if (!pauseAfterBundle) break;
+      expect(result).toMatchObject({ status: 'paused', phase: 'records' });
+    }
+    expect(result).toMatchObject({ status: 'paused', phase: 'records', pendingRows: 1 });
+    const callsBeforeResume = verifyCurrentBundle.mock.calls.length;
+    expect(callsBeforeResume).toBeGreaterThan(0);
+    bundleAllowed = false;
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'receiver-verification-failed',
+      pendingRows: 1,
+    });
+    expect(verifyCurrentBundle.mock.calls.length).toBeGreaterThan(callsBeforeResume);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+    expect(reconciler.stats()).toMatchObject({
+      retainedClosureArtifacts: 0,
+      retainedClosureBytes: 0,
+    });
+  });
+
   it('releases retained closure ownership when the caller aborts between slices', async () => {
     const fixture = await maximumAuthorityClosureFixtureV1();
     const releases: ReturnType<typeof vi.fn>[] = [];
@@ -270,7 +415,7 @@ describe('agent-profile closure continuation V1', () => {
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
       transport,
-      receiver: syntheticThirteenArtifactReceiver(fixture.repository),
+      receiver: syntheticThirteenArtifactReceiver(),
     });
 
     await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
@@ -313,11 +458,8 @@ function appliedOutcome(byte: string) {
   });
 }
 
-function syntheticThirteenArtifactReceiver(
-  artifacts: AgentProfileReceiverV1['artifacts'],
-): AgentProfileReceiverV1 {
+function syntheticThirteenArtifactReceiver(): AgentProfileReceiverV1 {
   return Object.freeze({
-    artifacts,
     openPreparation() {
       return Object.freeze({
         async prepare(source, signal) {
