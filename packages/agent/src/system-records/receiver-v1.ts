@@ -10,6 +10,7 @@ import {
   buildAgentProfileVerificationClosureV1,
   copyBoundedSystemRecordBytesV1,
   computeOwnedSubjectTableDigestV1,
+  computeSignedSystemRecordEnvelopeDigestV1,
   computeSystemRecordStableKeyHashV1,
   decodeSystemRecordInventoryRowV1,
   encodeSystemRecordInventoryRowV1,
@@ -127,6 +128,19 @@ export interface AgentProfileReceiverV1 {
   ): Promise<SystemRecordApplyOutcomeV1>;
 }
 
+/** Transport-only extension for one bounded preparation resumable across physical slices. */
+export interface AgentProfileContinuationReceiverV1 extends AgentProfileReceiverV1 {
+  openPreparation(row: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1;
+}
+
+export interface AgentProfileActivePreparationV1 {
+  prepare(
+    artifacts: SystemRecordArtifactRepositoryV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1>;
+  release(): void;
+}
+
 export interface AgentProfilePreparedActiveV1 {
   /**
    * Perform admitted bridge work exactly once and return the sole mutation
@@ -149,12 +163,13 @@ export interface AgentProfilePreparedDispatchV1 {
  */
 export function createAgentProfileReceiverV1(
   options: CreateAgentProfileReceiverOptionsV1,
-): AgentProfileReceiverV1 {
+): AgentProfileContinuationReceiverV1 {
   const networkId = options.networkId;
   const resolveArtifact = options.artifacts.resolve.bind(options.artifacts);
   const verifyCurrentBundle = options.verifyCurrentBundle;
   const prepareCandidateApply = options.prepareCandidateApply;
   const nowMs = options.nowMs;
+  const memoizeAuthorityVerification = options.verifyAuthorityEnvelope === undefined;
   const verifyAuthorityEnvelope = options.verifyAuthorityEnvelope
     ?? ((envelope: SignedAgentProfileHeadEnvelopeV1
       | SignedAgentProfileAuthorityTransitionEnvelopeV1
@@ -165,26 +180,83 @@ export function createAgentProfileReceiverV1(
         | AgentProfileForkResolutionV1
       >(envelope));
 
-  const receiver: AgentProfileReceiverV1 = Object.freeze({
-    async prepareActive(
-      inputRow: SystemRecordInventoryRowV1,
-      signal: AbortSignal,
-    ): Promise<AgentProfilePreparedActiveV1> {
-      signal.throwIfAborted();
+  const defaultArtifacts: SystemRecordArtifactRepositoryV1 = Object.freeze({
+    resolve: resolveArtifact,
+  });
+  const receiver: AgentProfileContinuationReceiverV1 = Object.freeze({
+    openPreparation(inputRow: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1 {
       const row = canonicalInventoryRow(networkId, inputRow);
       if (!isOrdinaryActiveInventoryRowV1(row)) {
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
+      const verifiedLocalAuthorityEnvelopes = new Set<Digest32V1>();
+      let released = false;
+      return Object.freeze({ prepare, release });
 
-      const verificationNowMs = receiverNowMs(nowMs?.() ?? Date.now());
+      function prepare(
+        artifacts: SystemRecordArtifactRepositoryV1,
+        signal: AbortSignal,
+      ): Promise<AgentProfilePreparedActiveV1> {
+        if (released) throw new Error('agent-profile receiver preparation is released');
+        return prepareActiveFromResolver(
+          row,
+          artifacts.resolve.bind(artifacts),
+          signal,
+          receiverNowMs(nowMs?.() ?? Date.now()),
+          verifiedLocalAuthorityEnvelopes,
+        );
+      }
+
+      function release(): void {
+        if (released) return;
+        released = true;
+        verifiedLocalAuthorityEnvelopes.clear();
+      }
+    },
+    async prepareActive(
+      row: SystemRecordInventoryRowV1,
+      signal: AbortSignal,
+    ): Promise<AgentProfilePreparedActiveV1> {
+      signal.throwIfAborted();
+      const preparation = receiver.openPreparation(row);
+      try {
+        return await preparation.prepare(defaultArtifacts, signal);
+      } finally {
+        preparation.release();
+      }
+    },
+    async receiveActive(
+      row: SystemRecordInventoryRowV1,
+      admittedContext: AgentProfileAdmittedSliceContextV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordApplyOutcomeV1> {
+      const prepared = await receiver.prepareActive(row, signal);
+      signal.throwIfAborted();
+      const dispatch = await prepared.prepareDispatch(admittedContext, signal);
+      signal.throwIfAborted();
+      return dispatch.dispatch();
+    },
+  });
+  return receiver;
+
+  async function prepareActiveFromResolver(
+    row: SystemRecordInventoryRowV1,
+    resolveForCall: SystemRecordArtifactRepositoryV1['resolve'],
+    signal: AbortSignal,
+    verificationNowMs: number,
+    verifiedLocalAuthorityEnvelopes: Set<Digest32V1>,
+  ): Promise<AgentProfilePreparedActiveV1> {
+      signal.throwIfAborted();
       const candidate = await buildVerifiedActiveCandidateFactsV1({
         networkId,
         row,
         signal,
         nowMs: verificationNowMs,
-        resolveArtifact,
+        resolveArtifact: resolveForCall,
         verifyAuthorityEnvelope,
         verifyCurrentBundle,
+        memoizeAuthorityVerification,
+        verifiedLocalAuthorityEnvelopes,
       });
       signal.throwIfAborted();
       const validUntilUnixMs = Date.parse(candidate.head.validUntil);
@@ -236,20 +308,7 @@ export function createAgentProfileReceiverV1(
           });
         },
       });
-    },
-    async receiveActive(
-      row: SystemRecordInventoryRowV1,
-      admittedContext: AgentProfileAdmittedSliceContextV1,
-      signal: AbortSignal,
-    ): Promise<SystemRecordApplyOutcomeV1> {
-      const prepared = await receiver.prepareActive(row, signal);
-      signal.throwIfAborted();
-      const dispatch = await prepared.prepareDispatch(admittedContext, signal);
-      signal.throwIfAborted();
-      return dispatch.dispatch();
-    },
-  });
-  return receiver;
+  }
 }
 
 interface BuildVerifiedActiveCandidateFactsOptionsV1 {
@@ -262,6 +321,8 @@ interface BuildVerifiedActiveCandidateFactsOptionsV1 {
     CreateAgentProfileReceiverOptionsV1['verifyAuthorityEnvelope']
   >;
   readonly verifyCurrentBundle: CreateAgentProfileReceiverOptionsV1['verifyCurrentBundle'];
+  readonly memoizeAuthorityVerification: boolean;
+  readonly verifiedLocalAuthorityEnvelopes: Set<Digest32V1>;
 }
 
 async function buildVerifiedActiveCandidateFactsV1(
@@ -275,6 +336,8 @@ async function buildVerifiedActiveCandidateFactsV1(
     resolveArtifact,
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
+    memoizeAuthorityVerification,
+    verifiedLocalAuthorityEnvelopes,
   } = options;
   signal.throwIfAborted();
   const resolvedCurrentHeadArtifact = await resolveArtifact({
@@ -307,6 +370,8 @@ async function buildVerifiedActiveCandidateFactsV1(
     resolveArtifact,
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
+    memoizeAuthorityVerification,
+    verifiedLocalAuthorityEnvelopes,
   });
   signal.throwIfAborted();
   const head = envelope.object;
@@ -390,6 +455,8 @@ async function verifyActiveProfileClosureForRowV1(
     resolveArtifact,
     verifyAuthorityEnvelope,
     verifyCurrentBundle,
+    memoizeAuthorityVerification,
+    verifiedLocalAuthorityEnvelopes,
   } = options;
   return buildAgentProfileVerificationClosureV1(row.headDigest, {
     nowMs,
@@ -408,9 +475,21 @@ async function verifyActiveProfileClosureForRowV1(
       });
     },
     verifyAuthorityEnvelope: async (envelope) => {
+      const envelopeDigest = memoizeAuthorityVerification
+        ? computeSignedSystemRecordEnvelopeDigestV1<
+            AgentProfileHeadObjectV1
+            | AgentProfileAuthorityTransitionV1
+            | AgentProfileForkResolutionV1
+          >(envelope)
+        : undefined;
+      if (envelopeDigest !== undefined
+          && verifiedLocalAuthorityEnvelopes.has(envelopeDigest)) return true;
       signal.throwIfAborted();
       const verified = await verifyAuthorityEnvelope(envelope, signal);
       signal.throwIfAborted();
+      if (verified === true && envelopeDigest !== undefined) {
+        verifiedLocalAuthorityEnvelopes.add(envelopeDigest);
+      }
       return verified === true;
     },
     verifyCurrentBundle: async (head, canonicalBundleBytes) => {

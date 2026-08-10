@@ -235,14 +235,14 @@ export function createSystemRecordInventoryTraversalV1(
     const admittedSignal = slice.signal;
     const advanced = await traversal.advance(load, slice);
     if (advanced.status === 'failed') {
-      if (advanced.failure.reason === 'aborted' && admittedSignal?.aborted) {
-        throw admittedSignal.reason ?? new Error('inventory traversal aborted');
-      }
       if (
         advanced.failure.reason === 'transport'
         && advanced.failure.cause !== undefined
       ) {
         throw advanced.failure.cause;
+      }
+      if (advanced.failure.reason === 'aborted' && admittedSignal?.aborted) {
+        throw admittedSignal.reason ?? new Error('inventory traversal aborted');
       }
       throw new Error(advanced.failure.message);
     }
@@ -622,19 +622,20 @@ function createSystemRecordInventoryTraversalStepperV1<
       });
     } catch (error) {
       const reason = traversalFailureReason(error, admittedSignal);
+      const failure = Object.freeze({
+        reason,
+        message: error instanceof Error ? error.message : 'inventory traversal failed',
+        ...(reason === 'transport' && error instanceof InventoryTraversalTransportError
+          ? { cause: error.cause }
+          : {}),
+      }) satisfies SystemRecordInventoryRowTraversalFailureV1;
       return Object.freeze({
         status: 'failed',
         requests,
         wireBytes,
         progress: traversalProgress(),
         sliceRows: Object.freeze([...sliceRows]),
-        failure: Object.freeze({
-          reason,
-          message: error instanceof Error ? error.message : 'inventory traversal failed',
-          ...(reason === 'transport' && error instanceof InventoryTraversalTransportError
-            ? { cause: error.cause }
-            : {}),
-        }),
+        failure,
       });
     } finally {
       advancing = false;

@@ -5,6 +5,7 @@ import {
   SYSTEM_RECORD_MAX_ACTIVATION_INVENTORY_LEAVES,
   SYSTEM_RECORD_MAX_ACTIVATION_RECORDS,
   SYSTEM_RECORD_MAX_CONTINUATION_ADVANCES,
+  SYSTEM_RECORD_MAX_CONTINUATION_CLOSURE_WIRE_BYTES,
   SYSTEM_RECORD_MAX_CONTINUATION_SLICES,
   SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES,
   SYSTEM_RECORD_MAX_SLICE_ADVANCES,
@@ -12,6 +13,7 @@ import {
   SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
   canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1,
+  encodeInventoryRowBase64UrlV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   verifySignedSystemRecordRootDescriptorEnvelopeV1,
   type Digest32V1,
@@ -31,10 +33,20 @@ import type {
   AgentProfileAdmittedSliceContextV1,
   AgentProfileAdmittedSliceSnapshotV1,
 } from './admitted-slice-context-v1.js';
-import {
-  type AgentProfileReceiverV1,
+import type {
+  AgentProfileActivePreparationV1,
+  AgentProfileContinuationReceiverV1,
+  AgentProfilePreparedActiveV1,
+  AgentProfileReceiverV1,
 } from './receiver-v1.js';
+import type { SystemRecordArtifactRepositoryV1 } from './artifact-v1.js';
 import { isOrdinaryActiveInventoryRowV1 } from './inventory-row-policy-v1.js';
+import {
+  AgentProfileReconcileTransportErrorV1,
+  type AgentProfileReconcileArtifactContinuationV1,
+  type AgentProfileReconcileTransportSliceStatsV1,
+  type AgentProfileReconcileTransportV1,
+} from './reconcile-transport-v1.js';
 
 export interface AgentProfileReconcilePermitV1 {
   readonly admittedContext: AgentProfileAdmittedSliceContextV1;
@@ -61,17 +73,31 @@ export type AgentProfileInventoryLoadResultV1 =
   | SystemRecordInventoryLoadedObjectV1
   | SystemRecordInventoryRejectedLoadV1;
 
-export interface CreateAgentProfileReconcilerOptionsV1 {
+interface CreateAgentProfileReconcilerCommonOptionsV1 {
   readonly networkId: NetworkIdV1;
   readonly rootEnvelope: SignedSystemRecordRootDescriptorEnvelopeV1;
   readonly providerPeerPublicKey: SystemRecordPeerPublicKeyV1;
   readonly admission: AgentProfileReconcileAdmissionV1;
-  readonly loadInventoryObject: (
-    request: AgentProfileInventoryLoadRequestV1,
-    signal: AbortSignal,
-  ) => Promise<AgentProfileInventoryLoadResultV1>;
   readonly receiver: AgentProfileReceiverV1;
 }
+
+export type CreateAgentProfileReconcilerOptionsV1 =
+  & CreateAgentProfileReconcilerCommonOptionsV1
+  & (
+    | Readonly<{
+      readonly transport: AgentProfileReconcileTransportV1;
+      readonly receiver: AgentProfileContinuationReceiverV1;
+      readonly loadInventoryObject?: never;
+      readonly artifacts?: never;
+    }>
+    | Readonly<{
+      readonly transport?: undefined;
+      readonly loadInventoryObject: (
+        request: AgentProfileInventoryLoadRequestV1,
+        signal: AbortSignal,
+      ) => Promise<AgentProfileInventoryLoadResultV1>;
+    }>
+  );
 
 export type AgentProfileReconcileBlockReasonV1 =
   | 'continuation-limit'
@@ -93,6 +119,7 @@ export interface AgentProfileReconcileSliceResultV1 {
   readonly phase: 'inventory' | 'records' | 'complete';
   readonly inventoryRequests: number;
   readonly inventoryWireBytes: number;
+  readonly closureWireBytes: number;
   readonly processedRows: number;
   readonly pendingRows: number;
   readonly outcomes: readonly SystemRecordApplyOutcomeV1[];
@@ -105,6 +132,9 @@ export interface AgentProfileReconcilerStatsV1 {
   readonly advances: number;
   readonly inventoryRequests: number;
   readonly inventoryWireBytes: number;
+  readonly closureWireBytes: number;
+  readonly retainedClosureArtifacts: number;
+  readonly retainedClosureBytes: number;
   readonly processedRows: number;
   readonly pendingRows: number;
   readonly active: 0 | 1;
@@ -125,16 +155,147 @@ export interface AgentProfileReconcilerV1 {
 interface AgentProfileAdmittedSliceRuntimeV1 {
   readonly admittedContext: AgentProfileAdmittedSliceContextV1;
   readonly admittedAtMs: number;
-  readonly continuationStartedAtMs: number;
   readonly signal: AbortSignal;
   readonly deadlineMs: number;
   readonly nowMs: () => number;
+  readonly loadInventoryObject: (
+    request: AgentProfileInventoryLoadRequestV1,
+    signal: AbortSignal,
+  ) => Promise<AgentProfileInventoryLoadResultV1>;
+  readonly prepareActive: (
+    row: SystemRecordInventoryRowV1,
+    signal: AbortSignal,
+  ) => Promise<AgentProfilePreparedActiveV1>;
   stop(
     phase: AgentProfileReconcileSliceResultV1['phase'],
     outcomes: readonly SystemRecordApplyOutcomeV1[],
     requests?: number,
     wireBytes?: number,
   ): AgentProfileReconcileSliceResultV1;
+}
+
+interface AgentProfileSliceSourceV1 {
+  readonly loadInventoryObject: AgentProfileAdmittedSliceRuntimeV1['loadInventoryObject'];
+  readonly prepareActive: AgentProfileAdmittedSliceRuntimeV1['prepareActive'];
+  stats(): AgentProfileReconcileTransportSliceStatsV1;
+  release(): void;
+}
+
+type AgentProfileSliceSourceOpenResultV1 =
+  | Readonly<{ status: 'opened'; source: AgentProfileSliceSourceV1 }>
+  | Readonly<{ status: 'deferred' }>;
+
+interface AgentProfileSliceSourceOpenInputV1 {
+  readonly signal: AbortSignal;
+  readonly deadlineMs: number;
+  readonly nowMs: () => number;
+}
+
+interface AgentProfileSliceSourceFactoryV1 {
+  tryOpen(input: AgentProfileSliceSourceOpenInputV1): AgentProfileSliceSourceOpenResultV1;
+  clearPreparation(): void;
+  retainedStats(): Readonly<{ artifacts: number; bytes: number }>;
+  close(): void;
+}
+
+function createSliceSourceFactoryV1(
+  options: CreateAgentProfileReconcilerOptionsV1,
+): AgentProfileSliceSourceFactoryV1 {
+  const networkId = options.networkId;
+  const openPreparation = options.transport === undefined
+    ? undefined
+    : options.receiver.openPreparation.bind(options.receiver);
+  let preparation: AgentProfileActivePreparationV1 | undefined;
+  let preparationRowKey: string | undefined;
+  let closed = false;
+  let artifactContinuation: AgentProfileReconcileArtifactContinuationV1 | undefined;
+  const clearPreparation = (): void => {
+    preparation?.release();
+    preparation = undefined;
+    preparationRowKey = undefined;
+    artifactContinuation?.release();
+    artifactContinuation = undefined;
+  };
+  const selectRow = (row: SystemRecordInventoryRowV1): void => {
+    const rowKey = encodeInventoryRowBase64UrlV1(networkId, row);
+    if (preparationRowKey !== undefined && preparationRowKey !== rowKey) clearPreparation();
+    preparationRowKey = rowKey;
+  };
+  const prepare = (
+    row: SystemRecordInventoryRowV1,
+    artifacts: SystemRecordArtifactRepositoryV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1> => {
+    if (closed) throw new Error('agent-profile slice source factory is closed');
+    if (openPreparation === undefined) {
+      throw new Error('agent-profile transport receiver does not support continuation');
+    }
+    selectRow(row);
+    preparation ??= openPreparation(row);
+    return preparation.prepare(artifacts, signal);
+  };
+  const retainedStats = (): Readonly<{ artifacts: number; bytes: number }> =>
+    artifactContinuation?.stats() ?? Object.freeze({ artifacts: 0, bytes: 0 });
+  const close = (): void => {
+    if (closed) return;
+    closed = true;
+    clearPreparation();
+  };
+  if (options.transport !== undefined) {
+    const openTransportSlice = options.transport.openSlice.bind(options.transport);
+    const openArtifactContinuation = options.transport.openArtifactContinuation.bind(
+      options.transport,
+    );
+    return Object.freeze({
+      tryOpen(input: AgentProfileSliceSourceOpenInputV1): AgentProfileSliceSourceOpenResultV1 {
+        const transportSlice = openTransportSlice(input);
+        if (transportSlice === null) return Object.freeze({ status: 'deferred' });
+        try {
+          return Object.freeze({
+            status: 'opened',
+            source: Object.freeze({
+              loadInventoryObject: transportSlice.loadInventoryObject.bind(transportSlice),
+              prepareActive: (row: SystemRecordInventoryRowV1, signal: AbortSignal) => {
+                selectRow(row);
+                artifactContinuation ??= openArtifactContinuation() ?? undefined;
+                if (artifactContinuation === undefined) {
+                  throw new AgentProfileReconcileTransportErrorV1('capacity', 0);
+                }
+                return prepare(row, artifactContinuation.bind(transportSlice), signal);
+              },
+              stats: transportSlice.stats.bind(transportSlice),
+              release: transportSlice.release.bind(transportSlice),
+            }),
+          });
+        } catch (error) {
+          transportSlice.release();
+          throw error;
+        }
+      },
+      clearPreparation,
+      retainedStats,
+      close,
+    });
+  }
+  const loadInventoryObject = options.loadInventoryObject;
+  const receiver = options.receiver;
+  return Object.freeze({
+    tryOpen(): AgentProfileSliceSourceOpenResultV1 {
+      return Object.freeze({
+        status: 'opened',
+        source: Object.freeze({
+          loadInventoryObject,
+          prepareActive: (row: SystemRecordInventoryRowV1, signal: AbortSignal) =>
+            receiver.prepareActive(row, signal),
+          stats: () => Object.freeze({ requests: 0, wireBytes: 0 }),
+          release: () => undefined,
+        }),
+      });
+    },
+    clearPreparation,
+    retainedStats,
+    close,
+  });
 }
 
 /**
@@ -148,8 +309,6 @@ export async function createAgentProfileReconcilerV1(
   const providerPeerPublicKey = options.providerPeerPublicKey;
   const tryAcquire = options.admission.tryAcquire.bind(options.admission);
   const inspectAdmittedContext = options.admission.inspectAdmittedContext.bind(options.admission);
-  const loadInventoryObject = options.loadInventoryObject;
-  const prepareActive = options.receiver.prepareActive.bind(options.receiver);
   const rootEnvelope = parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1(
     canonicalizeSignedSystemRecordRootDescriptorEnvelopeV1(options.rootEnvelope),
   );
@@ -165,8 +324,8 @@ export async function createAgentProfileReconcilerV1(
   )) {
     throw new Error('agent-profile inventory root provider signature is invalid');
   }
-
   const traversal = createSystemRecordInventoryRowTraversalV1(rootEnvelope.object);
+  const sourceFactory = createSliceSourceFactoryV1(options);
   let pendingRows: SystemRecordInventoryRowV1[] = [];
   let inventoryComplete = false;
   let completed = false;
@@ -179,21 +338,27 @@ export async function createAgentProfileReconcilerV1(
   let advances = 0;
   let inventoryRequests = 0;
   let inventoryWireBytes = 0;
+  let closureWireBytes = 0;
   let processedRows = 0;
   let permitReleaseFailures = 0;
 
   return Object.freeze({ advance, stats, close });
 
   async function advance(signal: AbortSignal): Promise<AgentProfileReconcileSliceResultV1> {
-    signal.throwIfAborted();
+    if (signal.aborted) {
+      sourceFactory.clearPreparation();
+      signal.throwIfAborted();
+    }
     if (closed) return result('closed', currentPhase(), 0, 0, []);
     if (completed) return result('complete', 'complete', 0, 0, []);
     if (active) throw new Error('agent-profile reconciler already has an active slice');
+    if (admittedSlices >= SYSTEM_RECORD_MAX_CONTINUATION_SLICES) {
+      sourceFactory.clearPreparation();
+      return result('blocked', currentPhase(), 0, 0, [], 'continuation-limit');
+    }
     return withAdmittedSlice(signal, async (runtime) => {
-      if (continuationLimitReached(
-        runtime.admittedAtMs,
-        runtime.continuationStartedAtMs,
-      )) {
+      if (continuationLimitReached(runtime.admittedAtMs)) {
+        sourceFactory.clearPreparation();
         return result('blocked', currentPhase(), 0, 0, [], 'continuation-limit');
       }
       return pendingRows.length > 0
@@ -248,22 +413,9 @@ export async function createAgentProfileReconcilerV1(
         callerSignal.addEventListener('abort', onAbort, { once: true });
         listening = true;
       }
-      const startedAtMs = continuationStartedAtMs ?? initial.nowMs;
-      continuationStartedAtMs = startedAtMs;
-      admittedSlices += 1;
-      if (remainingMs === 0) {
-        controller.abort(new Error('agent-profile reconcile slice deadline exceeded'));
-      } else {
-        timeout = setTimeout(
-          () => controller.abort(new Error('agent-profile reconcile slice deadline exceeded')),
-          remainingMs,
-        );
-        timeout.unref?.();
-      }
-      const runtime: AgentProfileAdmittedSliceRuntimeV1 = Object.freeze({
+      const baseRuntime = {
         admittedContext,
         admittedAtMs: initial.nowMs,
-        continuationStartedAtMs: startedAtMs,
         signal: controller.signal,
         deadlineMs,
         nowMs,
@@ -279,9 +431,60 @@ export async function createAgentProfileReconcilerV1(
           if (outcomes.length === 0) callerSignal.throwIfAborted();
           return result('paused', phase, requests, wireBytes, outcomes);
         },
-      });
-      if (runtime.signal.aborted) return runtime.stop(currentPhase(), []);
-      return await run(runtime);
+      } satisfies Omit<
+        AgentProfileAdmittedSliceRuntimeV1,
+        'loadInventoryObject' | 'prepareActive'
+      >;
+      if (controller.signal.aborted) return baseRuntime.stop(currentPhase(), []);
+      const opened = sourceFactory.tryOpen(Object.freeze({
+        signal: controller.signal,
+        deadlineMs,
+        nowMs,
+      }));
+      if (opened.status === 'deferred') {
+        return result('deferred', currentPhase(), 0, 0, []);
+      }
+      const source = opened.source;
+      const openedStats = readSliceSourceStatsV1(source);
+      if (openedStats.requests !== 0 || openedStats.wireBytes !== 0) {
+        source.release();
+        throw new Error('agent-profile slice source opened with prior accounting');
+      }
+      const workPhase = currentPhase();
+      let sliceResult: AgentProfileReconcileSliceResultV1 | undefined;
+      let sliceClosureWireBytes = 0;
+      try {
+        continuationStartedAtMs ??= initial.nowMs;
+        admittedSlices += 1;
+        if (remainingMs === 0) {
+          controller.abort(new Error('agent-profile reconcile slice deadline exceeded'));
+        } else {
+          timeout = setTimeout(
+            () => controller.abort(new Error('agent-profile reconcile slice deadline exceeded')),
+            remainingMs,
+          );
+          timeout.unref?.();
+        }
+        const runtime: AgentProfileAdmittedSliceRuntimeV1 = Object.freeze({
+          ...baseRuntime,
+          loadInventoryObject: source.loadInventoryObject,
+          prepareActive: source.prepareActive,
+        });
+        sliceResult = await run(runtime);
+      } finally {
+        try {
+          if (workPhase === 'records') {
+            sliceClosureWireBytes = readSliceSourceStatsV1(source).wireBytes;
+            closureWireBytes += sliceClosureWireBytes;
+          }
+        } finally {
+          source.release();
+        }
+      }
+      if (sliceResult === undefined) {
+        throw new Error('agent-profile admitted slice completed without a result');
+      }
+      return Object.freeze({ ...sliceResult, closureWireBytes: sliceClosureWireBytes });
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       if (listening && onAbort !== undefined) {
@@ -306,7 +509,7 @@ export async function createAgentProfileReconcilerV1(
     advances += 1;
     const slice = await traversal.advance(
       async (objectDigest, expectedKind, loadSignal, path) => {
-        const loaded = await loadInventoryObject(
+        const loaded = await runtime.loadInventoryObject(
           Object.freeze({
             rootDescriptorDigest: rootEnvelope.objectDigest,
             objectDigest,
@@ -315,8 +518,6 @@ export async function createAgentProfileReconcilerV1(
           }),
           loadSignal ?? runtime.signal,
         );
-        // Core owns the legal ambiguous-root alternatives and still validates
-        // every non-root child against its exact signed kind.
         return loaded;
       },
       {
@@ -396,13 +597,18 @@ export async function createAgentProfileReconcilerV1(
       if (!isOrdinaryActiveInventoryRowV1(row)) {
         return result('blocked', 'records', 0, 0, outcomes, 'unsupported-row-state');
       }
-      advances += 1;
+      if (predispatchBudgetUnavailable(runtime)) {
+        sourceFactory.clearPreparation();
+        return runtime.stop('records', outcomes);
+      }
       const activePreparation = await runPredispatchStage(
         runtime,
         outcomes,
-        () => prepareActive(row, runtime.signal),
+        () => runtime.prepareActive(row, runtime.signal),
       );
       if (activePreparation.status === 'stopped') return activePreparation.result;
+      sourceFactory.clearPreparation();
+      advances += 1;
       const dispatchPreparation = await runPredispatchStage(
         runtime,
         outcomes,
@@ -428,6 +634,7 @@ export async function createAgentProfileReconcilerV1(
       return result('complete', 'complete', 0, 0, outcomes);
     }
     if (runtime.signal.aborted) {
+      sourceFactory.clearPreparation();
       return runtime.stop(currentPhase(), outcomes);
     }
     return result('paused', currentPhase(), 0, 0, outcomes);
@@ -439,6 +646,7 @@ export async function createAgentProfileReconcilerV1(
     prepare: () => Prepared | Promise<Prepared>,
   ): Promise<AgentProfilePredispatchStageResultV1<Prepared>> {
     if (predispatchBudgetUnavailable(runtime)) {
+      sourceFactory.clearPreparation();
       return Object.freeze({
         status: 'stopped' as const,
         result: runtime.stop('records', outcomes),
@@ -450,13 +658,21 @@ export async function createAgentProfileReconcilerV1(
         Promise.resolve().then(prepare),
         runtime.signal,
       );
-    } catch {
+    } catch (error) {
       if (runtime.signal.aborted) {
+        sourceFactory.clearPreparation();
         return Object.freeze({
           status: 'stopped' as const,
           result: runtime.stop('records', outcomes),
         });
       }
+      if (error instanceof AgentProfileReconcileTransportErrorV1 && error.retryable) {
+        return Object.freeze({
+          status: 'stopped' as const,
+          result: runtime.stop('records', outcomes),
+        });
+      }
+      sourceFactory.clearPreparation();
       return Object.freeze({
         status: 'stopped' as const,
         result: result(
@@ -469,10 +685,8 @@ export async function createAgentProfileReconcilerV1(
         ),
       });
     }
-    if (
-      preparation.status === 'aborted'
-      || predispatchBudgetUnavailable(runtime)
-    ) {
+    if (preparation.status === 'aborted' || predispatchBudgetUnavailable(runtime)) {
+      sourceFactory.clearPreparation();
       return Object.freeze({
         status: 'stopped' as const,
         result: runtime.stop('records', outcomes),
@@ -502,6 +716,7 @@ export async function createAgentProfileReconcilerV1(
       phase,
       inventoryRequests: requests,
       inventoryWireBytes: wireBytes,
+      closureWireBytes: 0,
       processedRows: outcomes.filter(isSettledOutcome).length,
       pendingRows: pendingRows.length,
       outcomes: Object.freeze([...outcomes]),
@@ -510,12 +725,16 @@ export async function createAgentProfileReconcilerV1(
   }
 
   function stats(): AgentProfileReconcilerStatsV1 {
+    const retained = sourceFactory.retainedStats();
     return Object.freeze({
       rootDescriptorDigest: rootEnvelope.objectDigest,
       admittedSlices,
       advances,
       inventoryRequests,
       inventoryWireBytes,
+      closureWireBytes,
+      retainedClosureArtifacts: retained.artifacts,
+      retainedClosureBytes: retained.bytes,
       processedRows,
       pendingRows: pendingRows.length,
       active: active ? 1 : 0,
@@ -530,13 +749,16 @@ export async function createAgentProfileReconcilerV1(
     if (closed) return;
     closed = true;
     activeController?.abort(new Error('agent-profile reconciler closed'));
+    sourceFactory.close();
   }
 
-  function continuationLimitReached(now: number, startedAtMs: number): boolean {
-    return admittedSlices > SYSTEM_RECORD_MAX_CONTINUATION_SLICES
-      || advances >= SYSTEM_RECORD_MAX_CONTINUATION_ADVANCES
-      || inventoryWireBytes >= SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES
-      || now - startedAtMs >= SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS;
+  function continuationLimitReached(now: number): boolean {
+    return advances >= SYSTEM_RECORD_MAX_CONTINUATION_ADVANCES
+      || agentProfileReconcileWireContinuationLimitReachedV1(
+        inventoryWireBytes,
+        closureWireBytes,
+      )
+      || now - continuationStartedAtMs! >= SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS;
   }
 
   function currentPhase(): AgentProfileReconcileSliceResultV1['phase'] {
@@ -545,17 +767,19 @@ export async function createAgentProfileReconcilerV1(
   }
 }
 
+/** Pure policy seam for the aggregate and closure-specific continuation wire bounds. */
+export function agentProfileReconcileWireContinuationLimitReachedV1(
+  inventoryWireBytes: number,
+  closureWireBytes: number,
+): boolean {
+  return closureWireBytes >= SYSTEM_RECORD_MAX_CONTINUATION_CLOSURE_WIRE_BYTES
+    || inventoryWireBytes + closureWireBytes >= SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES;
+}
+
 type SettledSystemRecordApplyOutcomeV1 = Extract<
   SystemRecordApplyOutcomeV1,
   { outcome: 'applied' | 'already-applied' | 'stale' }
 >;
-
-type AgentProfilePredispatchStageResultV1<Prepared> =
-  | Readonly<{ status: 'prepared'; prepared: Prepared }>
-  | Readonly<{
-      status: 'stopped';
-      result: AgentProfileReconcileSliceResultV1;
-    }>;
 
 function isSettledOutcome(
   outcome: SystemRecordApplyOutcomeV1,
@@ -621,6 +845,24 @@ function readAdmittedSnapshot(
   }
   return Object.freeze({ nowMs, admittedDeadlineMs });
 }
+
+function readSliceSourceStatsV1(
+  source: AgentProfileSliceSourceV1,
+): AgentProfileReconcileTransportSliceStatsV1 {
+  const value = source.stats();
+  if (!Number.isSafeInteger(value.requests) || value.requests < 0
+      || !Number.isSafeInteger(value.wireBytes) || value.wireBytes < 0) {
+    throw new Error('agent-profile slice source accounting is invalid');
+  }
+  return Object.freeze({ requests: value.requests, wireBytes: value.wireBytes });
+}
+
+type AgentProfilePredispatchStageResultV1<Prepared> =
+  | Readonly<{ status: 'prepared'; prepared: Prepared }>
+  | Readonly<{
+      status: 'stopped';
+      result: AgentProfileReconcileSliceResultV1;
+    }>;
 
 type AbortSafePreparationResultV1<Prepared> =
   | Readonly<{ status: 'prepared'; prepared: Prepared }>

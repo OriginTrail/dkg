@@ -3,19 +3,17 @@ import {
   computeSystemRecordRootDescriptorDigestV1,
   parseCanonicalSignedSystemRecordRootDescriptorEnvelopeV1,
   type SignedSystemRecordRootDescriptorEnvelopeV1,
+  type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
-import {
-  createAgentProfileAdmittedSliceContextAuthorityV1,
-  type AgentProfileAdmittedSliceContextV1,
-} from '../../src/system-records/admitted-slice-context-v1.js';
+import type { AgentProfileAdmittedSliceContextV1 } from '../../src/system-records/admitted-slice-context-v1.js';
 import type { SystemRecordArtifactRepositoryV1 } from '../../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReceiverV1,
   type AgentProfileContinuationReceiverV1,
+  type AgentProfilePreparedActiveV1,
   type AgentProfileReceiverCandidateV1,
-  type AgentProfileReceiverV1,
 } from '../../src/system-records/receiver-v1.js';
 import type {
   AgentProfileInventoryLoadRequestV1,
@@ -23,14 +21,24 @@ import type {
 } from '../../src/system-records/reconcile-v1.js';
 import {
   createFixtureAgentProfileProducerV1,
+  DEPLOYMENT,
   NETWORK,
   produce,
   producerFixture,
   PRODUCER_FIXTURE_NOW_MS,
-  DEPLOYMENT,
 } from './agent-profile-producer-v1-fixture.js';
 
-export { NETWORK };
+export const TEST_PEER_IDS = Object.freeze([
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkf',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkg',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkh',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwki',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkj',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkk',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkm',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwkn',
+  '12D3KooW9pNAk8aiBuGVQtWRdbkLmo5qVL3e2h5UxbN2Nz9ttwko',
+]);
 
 export async function publishedFixture() {
   const fixture = await producerFixture();
@@ -136,39 +144,47 @@ export function receiver(
 
 export function receiverWithPreparation(
   prepareActive: (
-    row: Parameters<AgentProfileReceiverV1['prepareActive']>[0],
-    signal: Parameters<AgentProfileReceiverV1['prepareActive']>[1],
-  ) => Readonly<{
-    apply: (
-      admittedContext: AgentProfileAdmittedSliceContextV1,
-      signal: AbortSignal,
-    ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
-  }> | Promise<Readonly<{
-    apply: (
-      admittedContext: AgentProfileAdmittedSliceContextV1,
-      signal: AbortSignal,
-    ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
-  }>>,
+    row: SystemRecordInventoryRowV1,
+    signal: AbortSignal,
+  ) => Promise<AgentProfilePreparedActiveV1>,
 ): AgentProfileContinuationReceiverV1 {
+  const adapt = async (
+    row: SystemRecordInventoryRowV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1> => {
+    const prepared = await prepareActive(row, signal);
+    let dispatchPrepared = false;
+    return Object.freeze({
+      async prepareDispatch(admittedContext, dispatchSignal) {
+        if (dispatchPrepared) throw new Error('test receiver dispatch already prepared');
+        dispatchSignal.throwIfAborted();
+        dispatchPrepared = true;
+        let dispatched = false;
+        return Object.freeze({
+          async dispatch() {
+            if (dispatched) throw new Error('test receiver dispatch already invoked');
+            dispatched = true;
+            return prepared.apply(admittedContext, dispatchSignal);
+          },
+        });
+      },
+    });
+  };
   const receiver: AgentProfileContinuationReceiverV1 = Object.freeze({
-    async prepareActive(row, signal) {
-      const prepared = await prepareActive(row, signal);
-      let dispatchPrepared = false;
+    openPreparation(row) {
+      let released = false;
       return Object.freeze({
-        async prepareDispatch(admittedContext, dispatchSignal) {
-          if (dispatchPrepared) throw new Error('test receiver dispatch already prepared');
-          dispatchSignal.throwIfAborted();
-          dispatchPrepared = true;
-          let dispatched = false;
-          return Object.freeze({
-            async dispatch() {
-              if (dispatched) throw new Error('test receiver dispatch already invoked');
-              dispatched = true;
-              return prepared.apply(admittedContext, dispatchSignal);
-            },
-          });
+        prepare(_artifacts: SystemRecordArtifactRepositoryV1, signal: AbortSignal) {
+          if (released) throw new Error('test preparation is released');
+          return adapt(row, signal);
+        },
+        release() {
+          released = true;
         },
       });
+    },
+    prepareActive(row, signal) {
+      return adapt(row, signal);
     },
     async receiveActive(row, admittedContext, signal) {
       const prepared = await receiver.prepareActive(row, signal);
@@ -179,6 +195,20 @@ export function receiverWithPreparation(
     },
   });
   return receiver;
+}
+
+export function byteAdmission() {
+  return Object.freeze({
+    tryReserve() {
+      let released = false;
+      return Object.freeze({
+        release() {
+          released = true;
+        },
+        isReleased: () => released,
+      });
+    },
+  });
 }
 
 export function admissionGate(
@@ -192,14 +222,15 @@ export function admissionGate(
   let peak: 0 | 1 = held ? 1 : 0;
   let acquisitions = 0;
   let lastContext: AgentProfileAdmittedSliceContextV1 | undefined;
-  const contextAuthority = createAgentProfileAdmittedSliceContextAuthorityV1(nowMs);
+  const contexts = new WeakMap<object, number>();
   return Object.freeze({
     tryAcquire() {
       if (held) return null;
       held = true;
       peak = 1;
       acquisitions += 1;
-      const context = contextAuthority.mint(nowMs() + 3_000);
+      const context = Object.freeze(Object.create(null)) as AgentProfileAdmittedSliceContextV1;
+      contexts.set(context, nowMs() + 3_000);
       lastContext = context;
       let live = true;
       return Object.freeze({
@@ -207,13 +238,14 @@ export function admissionGate(
         release() {
           if (!live) return;
           live = false;
-          contextAuthority.revoke(context);
           held = false;
         },
       });
     },
     inspectAdmittedContext(context) {
-      return contextAuthority.inspect(context);
+      const admittedDeadlineMs = contexts.get(context);
+      if (admittedDeadlineMs === undefined) throw new Error('test admitted context is invalid');
+      return Object.freeze({ nowMs: nowMs(), admittedDeadlineMs });
     },
     stats() {
       return { active: held ? 1 : 0, peak, acquisitions };
