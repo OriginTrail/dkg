@@ -263,6 +263,7 @@ import {
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
+  type SelectedSwmMetaRetentionScope,
   type SyncCheckpointScope,
 } from './sync/checkpoint/state.js';
 import {
@@ -292,7 +293,10 @@ import {
   selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import { createSelectedSwmMetaFetcher } from './sync/selected-swm-meta-fetcher.js';
+import {
+  createSelectedSwmMetaFetcher,
+  type SelectedSwmMetaFetcher,
+} from './sync/selected-swm-meta-fetcher.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -731,6 +735,7 @@ function syncPageFetchCoalescingKey(params: {
   recovery?: boolean;
   forceFreshSession?: boolean;
   assetUals?: readonly string[];
+  returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
@@ -746,6 +751,7 @@ function syncPageFetchCoalescingKey(params: {
     params.recovery === true,
     params.forceFreshSession === true,
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
+    params.returnAcceptedPrefixOnRetryableTransportFailure === true,
     params.requesterScope ?? null,
     params.maxAcceptedQuads ?? null,
     params.maxAcceptedHeapBytesEstimate ?? null,
@@ -971,9 +977,9 @@ function selectedSwmMetaRetentionBudgetFor(
   return budget;
 }
 
-function nextSelectedSwmMetaRequesterScope(): SyncCheckpointScope {
+function nextSelectedSwmMetaRequesterScope(): SelectedSwmMetaRetentionScope {
   selectedSwmMetaInvocationSequence += 1;
-  return `selected-swm-meta:${selectedSwmMetaInvocationSequence}`;
+  return `selected-swm-meta:retained:${selectedSwmMetaInvocationSequence}`;
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -5843,6 +5849,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
+      returnAcceptedPrefixOnRetryableTransportFailure,
       // Internal namespace for state whose retained prefix is unavailable to
       // ordinary coalesced callers.
       requesterScope,
@@ -5868,6 +5875,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         recovery,
         forceFreshSession,
         assetUals,
+        returnAcceptedPrefixOnRetryableTransportFailure,
         requesterScope,
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
@@ -5918,6 +5926,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope,
       maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
       maxAcceptedQuads: exactAccumulationLimits?.maxQuads === undefined
@@ -6254,12 +6263,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const selectedSwmEnabled = Boolean(
       options?.selectedSwmPriority && publicContextGraphIds.length > 0,
     );
-    // This scope is unique even when two selected calls overlap on the same
-    // peer/CG through different top-level single-flight keys. Their in-memory
-    // prefixes must never share a responder cursor or pooled fetch session.
-    const selectedMetaRequesterScope = selectedSwmEnabled
-      ? nextSelectedSwmMetaRequesterScope()
-      : undefined;
     const selectedMetaRetentionBudget = selectedSwmEnabled
       ? (() => {
         const budget = resolveSyncResponderSnapshotPolicy(
@@ -6274,10 +6277,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       })()
       : undefined;
-    const selectedMetaFetcher = selectedSwmEnabled
-      ? createSelectedSwmMetaFetcher({
+    const createSelectedMetaFetcher = (): SelectedSwmMetaFetcher => {
+      const requesterScope = nextSelectedSwmMetaRequesterScope();
+      return createSelectedSwmMetaFetcher({
         remotePeerId,
-        requesterScope: selectedMetaRequesterScope!,
+        requesterScope,
         retentionBudget: selectedMetaRetentionBudget!,
         deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
         fetchPage: (request) => this.fetchSyncPages(
@@ -6289,13 +6293,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           request.graphUri,
           request.deadline,
           {
+            returnAcceptedPrefixOnRetryableTransportFailure:
+              request.returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope: request.requesterScope,
             maxAcceptedQuads: request.maxAcceptedQuads,
             maxAcceptedHeapBytesEstimate: request.maxAcceptedHeapBytesEstimate,
           },
         ),
-      })
-      : undefined;
+      });
+    };
     const singleFlightKey = sharedMemorySyncSingleFlightKey({
       remotePeerId,
       contextGraphIds,
@@ -6306,7 +6312,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selectedSwm: selectedSwmEnabled,
     });
 
-    const runSync = async (): Promise<SharedMemorySyncResult> => {
+    const runSync = async (
+      selectedMetaFetcher?: SelectedSwmMetaFetcher,
+    ): Promise<SharedMemorySyncResult> => {
       const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
       const getSubGraphAdmission = (contextGraphId: string) => {
         let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
@@ -6628,13 +6636,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     };
 
-    return runSyncSingleFlight(this, singleFlightKey, runSync, {
+    return runSyncSingleFlight(this, singleFlightKey, () => (
+      selectedSwmEnabled
+        ? this.getSelectedSwmMetaTransfers().run(
+          remotePeerId,
+          createSelectedMetaFetcher,
+          runSync,
+        )
+        : runSync()
+    ), {
       scope: 'shared-memory',
       source: options?.source,
-    }).finally(() => {
-      // Never leave a non-zero persisted cursor after its in-memory prefix has
-      // gone out of scope. A later invocation must start at offset zero.
-      selectedMetaFetcher?.cleanup();
     });
   }
 

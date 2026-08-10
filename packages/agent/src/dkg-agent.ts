@@ -1947,6 +1947,10 @@ export class DKGAgent extends DKGAgentBase {
       await this.node.stop();
     } finally {
       this.finalizationRuntime.markStopped();
+      // Node stop aborts active transport first; now drain the peer-serial
+      // owners and release every retained selected-SWM prefix/checkpoint before
+      // the backing store closes.
+      await this.closeSelectedSwmMetaTransfers();
     }
     if (this.syncVerifyWorker) {
       await this.syncVerifyWorker.close();

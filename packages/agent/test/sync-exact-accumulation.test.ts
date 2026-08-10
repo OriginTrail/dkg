@@ -12,6 +12,10 @@ import {
   fetchSyncPages,
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+import {
+  toSyncTransportFailureError,
+  toSyncValidationRejectionError,
+} from '../src/sync/error-tags.js';
 
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
 const encoder = new TextEncoder();
@@ -48,6 +52,296 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 }
 
 describe('exact sync accumulation limits', () => {
+  it.each([
+    'peer-closed-stream',
+    'The stream has been reset',
+    'Remote closed connection during opening',
+    'operation timed out',
+  ])('returns a validated selected-SWM metadata prefix on untagged %s transport exhaustion', async (message) => {
+    const requesterScope = 'selected-swm-meta:explicit-policy' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let sends = 0;
+    const acceptedQuad = {
+      subject: 'urn:selected:accepted',
+      predicate: 'urn:p',
+      object: '"o"',
+      graph: 'urn:meta',
+    };
+
+    const result = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      parseAndFilter: async () => ({ quads: [acceptedQuad], totalQuads: 1 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        throw new Error(message);
+      },
+    }));
+
+    expect(result).toMatchObject({
+      quads: [acceptedQuad],
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    expect(checkpointStore.get(result.checkpointKey)?.responderSessionId).toBeTruthy();
+  });
+
+  it('retains selected metadata when a tagged transport deadline has AbortError shape', async () => {
+    const requesterScope = 'selected-swm-meta:tagged-abort-deadline' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let sends = 0;
+    const acceptedQuad = {
+      subject: 'urn:selected:tagged-abort',
+      predicate: 'urn:p',
+      object: '"o"',
+      graph: 'urn:meta',
+    };
+
+    const result = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: new AbortController().signal,
+      parseAndFilter: async () => ({ quads: [acceptedQuad], totalQuads: 1 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        const error = new Error('request timeout');
+        error.name = 'AbortError';
+        Object.freeze(error);
+        throw toSyncTransportFailureError(error);
+      },
+    }));
+
+    expect(result).toMatchObject({
+      quads: [acceptedQuad],
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    expect(checkpointStore.get(result.checkpointKey)).toMatchObject({
+      // The selected owner, not the generic page fetcher, owns advancement to
+      // result.nextOffset after it has retained this exact private prefix.
+      offset: 0,
+      responderSessionId: expect.any(String),
+    });
+  });
+
+  it('does not infer selected metadata retention policy from checkpoint scope', async () => {
+    let sends = 0;
+    await expect(fetchSyncPages(fetchParams({
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope: 'selected-swm-meta:retained:1',
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      parseAndFilter: async () => ({
+        quads: [{ subject: 'urn:ordinary', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+        totalQuads: 1,
+      }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        const error = new Error('operation timed out');
+        throw toSyncTransportFailureError(error);
+      },
+    }))).rejects.toThrow('operation timed out');
+  });
+
+  it.each([
+    {
+      name: 'caller abort',
+      scopeId: 2,
+      fail: (controller: AbortController) => {
+        controller.abort(new Error('caller cancelled'));
+        const error = new Error('operation timed out');
+        error.name = 'AbortError';
+        return toSyncTransportFailureError(error);
+      },
+    },
+    {
+      name: 'denial',
+      scopeId: 3,
+      fail: (_controller: AbortController) => new Error('Sync denied by legacy-peer'),
+    },
+    {
+      name: 'integrity rejection',
+      scopeId: 4,
+      fail: (_controller: AbortController) => new Error('metadata integrity rejected'),
+    },
+    {
+      name: 'validation rejection',
+      scopeId: 5,
+      fail: (_controller: AbortController) => {
+        const error = new Error('invalid signed response');
+        return toSyncValidationRejectionError(error);
+      },
+    },
+    {
+      name: 'validation rejection with transport-like text',
+      scopeId: 7,
+      fail: (_controller: AbortController) => {
+        const error = new Error('operation timed out');
+        return toSyncValidationRejectionError(error);
+      },
+    },
+    {
+      name: 'local request build failure',
+      scopeId: 6,
+      fail: (_controller: AbortController) => new Error('wallet signing failed'),
+    },
+    {
+      name: 'local request timeout with transport-like text',
+      scopeId: 8,
+      fail: (_controller: AbortController) => new Error('operation timed out'),
+    },
+    {
+      name: 'frozen local request timeout with transport-like text',
+      scopeId: 10,
+      fail: (_controller: AbortController) => Object.freeze(new Error('operation timed out')),
+    },
+    {
+      name: 'frozen response parse timeout with transport-like text',
+      scopeId: 11,
+      fail: (_controller: AbortController) => Object.freeze(new Error('operation timed out')),
+    },
+    {
+      name: 'primitive response parse timeout with transport-like text',
+      scopeId: 12,
+      fail: (_controller: AbortController) => 'operation timed out',
+    },
+    {
+      name: 'chain RPC timeout with transport-like text',
+      scopeId: 9,
+      fail: (_controller: AbortController) => Object.assign(
+        new Error('operation timed out'),
+        { code: 'RPC_TIMEOUT' },
+      ),
+    },
+  ])('discards a selected metadata prefix on $name', async ({ name, scopeId, fail }) => {
+    const requesterScope = `selected-swm-meta:retained:${scopeId}` as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const checkpointKey = getSyncCheckpointKey(
+      'legacy-peer',
+      'large-legacy-cg',
+      true,
+      'meta',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      requesterScope,
+    );
+    const controller = new AbortController();
+    let builds = 0;
+    let sends = 0;
+    let parses = 0;
+    const params = fetchParams({
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      checkpointStore,
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: controller.signal,
+      buildSyncRequest: async () => {
+        builds += 1;
+        if (
+          (
+            name === 'local request build failure'
+            || name === 'local request timeout with transport-like text'
+            || name === 'frozen local request timeout with transport-like text'
+            || name === 'chain RPC timeout with transport-like text'
+          )
+          && builds === 2
+        ) throw fail(controller);
+        return encoder.encode('request');
+      },
+      parseAndFilter: async () => {
+        parses += 1;
+        if (
+          (name === 'integrity rejection'
+            || name === 'validation rejection'
+            || name === 'validation rejection with transport-like text'
+            || name === 'frozen response parse timeout with transport-like text'
+            || name === 'primitive response parse timeout with transport-like text')
+          && parses === 2
+        ) {
+          throw fail(controller);
+        }
+        return {
+          quads: [{ subject: 'urn:accepted', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+          totalQuads: 1,
+        };
+      },
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        if (name === 'denial') return encoder.encode('denied');
+        if (
+          name === 'integrity rejection'
+          || name === 'validation rejection'
+          || name === 'validation rejection with transport-like text'
+          || name === 'frozen response parse timeout with transport-like text'
+          || name === 'primitive response parse timeout with transport-like text'
+        ) {
+          return encoder.encode('invalid-page');
+        }
+        throw fail(controller);
+      },
+    });
+
+    let rejected: unknown;
+    try {
+      await fetchSyncPages(params);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(Error);
+    if (name === 'primitive response parse timeout with transport-like text') {
+      expect(rejected).toMatchObject({
+        message: 'operation timed out',
+        cause: 'operation timed out',
+      });
+    }
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+    // Recreate only an offset. A leaked process-local responder token would
+    // incorrectly make this look resumable instead of rotating to offset zero.
+    checkpointStore.set(checkpointKey, 7);
+    const retry = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      send: async () => new Uint8Array(),
+    }));
+    expect(retry.resumedFromOffset).toBe(0);
+    expect(retry.responderSessionStartedFresh).toBe(true);
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+  });
+
   it('rejects excess wire bytes before parsing and clears resumable state', async () => {
     const firstPage = encoder.encode('page-one');
     const secondPage = encoder.encode('page-two');
@@ -141,7 +435,7 @@ describe('exact sync accumulation limits', () => {
   });
 
   it('tags a fresh scoped metadata accumulation error at the real requester boundary', async () => {
-    const requesterScope = 'selected-swm-meta:fresh-limit-contract' as const;
+    const requesterScope = 'selected-swm-meta:retained:fresh-limit-contract' as const;
     let sends = 0;
     let parses = 0;
 
@@ -181,7 +475,7 @@ describe('exact sync accumulation limits', () => {
 
   it('deletes the process-local responder token for a completed scoped requester', async () => {
     const checkpointStore = new MemorySyncCheckpointStore();
-    const requesterScope = 'selected-swm-meta:cleanup-test' as const;
+    const requesterScope = 'selected-swm-meta:retained:cleanup-test' as const;
     const checkpointKey = getSyncCheckpointKey(
       'legacy-peer',
       'large-legacy-cg',

@@ -11,8 +11,101 @@ import {
   VmReconcileQueueClosedError,
   VmReconcileShutdownTimeoutError,
 } from '../src/vm-reconcile-service.js';
+import {
+  createSelectedSwmMetaFetcher,
+} from '../src/sync/selected-swm-meta-fetcher.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
+import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {
+  it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
+    const events: string[] = [];
+    const transfers = new SelectedSwmMetaTransferCoordinator();
+    const deleteCheckpoint = vi.fn(() => events.push('prefix-cleaned'));
+    const peerId = 'peer-stop-order';
+    let releaseTransfer!: () => void;
+    const transferGate = new Promise<void>((resolve) => { releaseTransfer = resolve; });
+    let signalTransferStarted!: () => void;
+    const transferStarted = new Promise<void>((resolve) => {
+      signalTransferStarted = resolve;
+    });
+    const transfer = transfers.run(
+      peerId,
+      () => createSelectedSwmMetaFetcher({
+        remotePeerId: peerId,
+        requesterScope: 'selected-swm-meta:retained:1',
+        retentionBudget: createSelectedSwmMetaRetentionBudget({
+          maxRows: 10,
+          maxBytesEstimate: 1024,
+          maxPrefixRows: 10,
+          maxPrefixBytesEstimate: 1024,
+        }),
+        deleteCheckpoint,
+        fetchPage: async () => {
+          signalTransferStarted();
+          await transferGate;
+          return {
+            quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }],
+            bytesReceived: 1,
+            resumedFromOffset: 0,
+            nextOffset: 1,
+            checkpointKey: 'retained-stop-checkpoint',
+            completed: false,
+            timedOut: true,
+          };
+        },
+      }),
+      (fetcher) => fetcher.strategy.fetch({
+        ctx: { operationId: 'stop-order', operationName: 'sync' } as never,
+        remotePeerId: peerId,
+        contextGraphId: 'cg-stop-order',
+        graphUri: 'urn:g',
+        deadline: Date.now() + 1_000,
+      }),
+    );
+    await transferStarted;
+    // Initial ownership deliberately clears any orphaned cursor for this fresh
+    // scope; observe only the later shutdown release.
+    deleteCheckpoint.mockClear();
+    events.length = 0;
+
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, {
+      started: true,
+      chainPoller: null,
+      selectedSwmMetaTransfers: transfers,
+      coreHostRecordingsClosed: false,
+      drainCoreHostRecordings: vi.fn(async () => {}),
+      messenger: { stopOutboxDrain: vi.fn(async () => {}) },
+      clearRandomSamplingBindRetry: vi.fn(),
+      clearStorageACKRegistrationRetry: vi.fn(),
+      storageACKRegistrationRetryInFlight: false,
+      randomSamplingHandle: null,
+      inFlightSubstrateFanOutCount: () => 0,
+      router: { closePooling: vi.fn(async () => {}) },
+      node: { stop: vi.fn(async () => { events.push('node-stop'); }) },
+      finalizationRuntime: new FinalizationRuntime(),
+      store: {
+        close: vi.fn(async () => {
+          expect(deleteCheckpoint).toHaveBeenCalledWith('retained-stop-checkpoint');
+          expect(agent.selectedSwmMetaTransfers).toBeUndefined();
+          events.push('store-close');
+        }),
+      },
+      log: { warn: vi.fn() },
+    });
+
+    const stopping = agent.stop();
+    await vi.waitFor(() => expect(agent.node.stop).toHaveBeenCalledOnce());
+    expect(agent.store.close).not.toHaveBeenCalled();
+    expect(deleteCheckpoint).not.toHaveBeenCalled();
+    expect(agent.selectedSwmMetaTransfers).toBe(transfers);
+
+    releaseTransfer();
+    await Promise.all([transfer, stopping]);
+    expect(events).toEqual(['node-stop', 'prefix-cleaned', 'store-close']);
+  });
+
   it('closes and drains membership persistence before network and store teardown', async () => {
     const membershipPersistence = new ContextGraphMembershipPersistScheduler();
     let releaseWrite!: () => void;

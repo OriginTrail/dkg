@@ -25,7 +25,7 @@ import {
   SyncPageAccumulationLimitError,
   type SyncPageResult,
 } from '../src/sync/requester/page-fetch.js';
-import { markSyncTransportFailure } from '../src/sync/error-tags.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -69,8 +69,7 @@ function deniedError(): Error & { syncDenied: boolean } {
 
 function transportError(message: string): Error {
   const err = new Error(message);
-  markSyncTransportFailure(err);
-  return err;
+  return toSyncTransportFailureError(err);
 }
 
 function quad(subject: string): Quad {

@@ -5,10 +5,11 @@ import {
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
 import {
+  isKnownRetryableSyncTransportInterruption,
   isSyncBackoffWorthyError,
   isSyncTransportFailure,
   isSyncValidationRejection,
-  markSyncPeerResponded,
+  toSyncPeerRespondedError,
 } from '../error-tags.js';
 import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
@@ -148,6 +149,16 @@ export interface SyncPageResult {
   checkpointKey: string;
   completed: boolean;
   timedOut: boolean;
+}
+
+function acceptedIncompletePrefixResult(
+  result: Omit<SyncPageResult, 'completed' | 'timedOut'>,
+): SyncPageResult {
+  return {
+    ...result,
+    completed: false,
+    timedOut: true,
+  };
 }
 
 /** Canonical transport path identity for learned requester page sizing. */
@@ -328,6 +339,12 @@ export interface SyncPageFetchOptions {
   readonly recovery?: boolean;
   readonly forceFreshSession?: boolean;
   readonly assetUals?: string[];
+  /**
+   * Permit the selected-SWM transfer owner to retain a validated metadata
+   * prefix after a retryable transport interruption. Checkpoint identity is
+   * intentionally independent of this transfer policy.
+   */
+  readonly returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   readonly requesterScope?: SyncCheckpointScope;
   readonly maxAcceptedQuads?: number;
   readonly maxAcceptedHeapBytesEstimate?: number;
@@ -403,6 +420,8 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Selected-SWM-only policy for returning a validated incomplete prefix. */
+  returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   /** Isolates an internal requester whose retained prefix is not shareable. */
   requesterScope?: SyncCheckpointScope;
   /** Optional cumulative ceilings for proof-sensitive narrow fetches. */
@@ -499,6 +518,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    returnAcceptedPrefixOnRetryableTransportFailure,
     requesterScope,
     maxAcceptedBytes,
     maxAcceptedQuads,
@@ -671,8 +691,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           nextBytesReceived,
           maxAcceptedBytes,
         );
-        markSyncPeerResponded(error);
-        throw error;
+        throw toSyncPeerRespondedError(error);
       }
 
       let parsed: { quads: Quad[]; totalQuads: number };
@@ -724,8 +743,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         }
         acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
       } catch (error) {
-        markSyncPeerResponded(error);
-        throw error;
+        throw toSyncPeerRespondedError(error);
       }
 
       const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
@@ -856,16 +874,57 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         `Durable data transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; returning a verifiable prefix at raw offset ${offset}`,
       );
       phaseTelemetry.finish('timed_out', allQuads.length);
-      return {
+      return acceptedIncompletePrefixResult({
         quads: allQuads,
         bytesReceived,
         resumedFromOffset,
         responderSessionStartedFresh,
         nextOffset: offset,
         checkpointKey,
-        completed: false,
-        timedOut: true,
-      };
+      });
+    }
+
+    // Selected RFC-64 SWM metadata has a stricter all-or-nothing activation
+    // boundary than its transfer boundary. Once at least one page from this
+    // exact scoped responder session has passed decode/parse/accumulation
+    // checks, a later retryable TRANSPORT exhaustion may return that validated
+    // prefix to its single in-memory owner. The owner retains it with this
+    // checkpoint/session and never exposes it to Blazegraph until the metadata
+    // response completes and the ordinary SWM verification path runs.
+    //
+    // Keep this narrower than `isSyncBackoffWorthyError`: responder denials,
+    // validation/integrity rejection, local request construction/signing, and
+    // caller/node aborts all throw and force the owner to discard its prefix.
+    if (
+      includeSharedMemory
+      && phase === 'meta'
+      && returnAcceptedPrefixOnRetryableTransportFailure === true
+      && responsePages > 0
+      && allQuads.length > 0
+      && signal?.aborted !== true
+      && isKnownRetryableSyncTransportInterruption(err)
+    ) {
+      logWarn(
+        ctx,
+        `Selected SWM metadata transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; retaining a private prefix at raw offset ${offset}`,
+      );
+      phaseTelemetry.finish('timed_out', allQuads.length);
+      return acceptedIncompletePrefixResult({
+        quads: allQuads,
+        bytesReceived,
+        resumedFromOffset,
+        responderSessionStartedFresh,
+        nextOffset: offset,
+        checkpointKey,
+      });
+    }
+
+    if (returnAcceptedPrefixOnRetryableTransportFailure === true) {
+      // The selected transfer owner can retain only an explicitly returned
+      // validated prefix. Every thrown boundary invalidates both pieces of its
+      // resume tuple so aborts, denials and local/validation/integrity failures
+      // cannot strand a session without its byte-identical in-memory prefix.
+      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
     }
 
     phaseTelemetry.finish('error', allQuads.length);
