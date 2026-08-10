@@ -353,6 +353,44 @@ describe('system-record requester V1', () => {
     });
   });
 
+  it('cancels a newly created entry when synchronous setup aborts its first caller', async () => {
+    const controller = new AbortController();
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const decode = permitAdmission();
+    const exchange = fixtureExchange();
+    const openExchange = vi.fn(async () => exchange.value);
+    const requester = createSystemRecordRequesterV1({
+      networkId: NETWORK,
+      openExchange,
+      byteAdmission: bytes,
+      streamAdmission: stream.value,
+      decodeAdmission: decode.value,
+      requestId: () => {
+        controller.abort(new Error('caller aborted during request setup'));
+        return '1'.repeat(32);
+      },
+    });
+
+    await expect(requester.fetch(LOOKUP, controller.signal)).rejects.toThrow(
+      'caller aborted during request setup',
+    );
+    await vi.waitFor(() => expect(requester.stats()).toMatchObject({
+      completed: 1,
+      trackedDigests: 0,
+      waitingCallers: 0,
+      activeLeases: 0,
+      activeStream: 0,
+      retainedPayloadBytes: 0,
+    }));
+    await vi.waitFor(() => expect(exchange.reset).toHaveBeenCalledWith('cancelled'));
+    expect(exchange.writeRequestFrame).not.toHaveBeenCalled();
+    expect(bytes.reservations).toHaveLength(1);
+    expect(bytes.reservations[0]?.released).toBe(true);
+    expect(stream.active()).toBe(false);
+    expect(decode.active()).toBe(false);
+  });
+
   it('caps followers per digest without opening another stream', async () => {
     const gate = Promise.withResolvers<void>();
     const exchange = fixtureExchange(async (request) => {
@@ -670,6 +708,36 @@ describe('system-record requester V1', () => {
     opening.resolve(late.value);
     await vi.waitFor(() => expect(late.reset).toHaveBeenCalledWith('deadline'));
     expect(late.writeRequestFrame).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['caller cancellation', 'cancelled'],
+    ['requester close', 'closed'],
+  ] as const)('resets an exchange that opens after %s', async (mode, resetReason) => {
+    const opening = Promise.withResolvers<SystemRecordRequesterExchangeV1>();
+    const controller = new AbortController();
+    const openExchange = vi.fn(async () => opening.promise);
+    const requester = createRequester({ openExchange });
+    const result = requester.fetch(LOOKUP, controller.signal);
+    await vi.waitFor(() => expect(openExchange).toHaveBeenCalledOnce());
+
+    if (mode === 'caller cancellation') {
+      controller.abort(new Error('caller cancelled late open'));
+      await expect(result).rejects.toThrow('caller cancelled late open');
+    } else {
+      requester.close();
+      await expect(result).resolves.toEqual({ outcome: 'closed', wireBytes: 0 });
+    }
+
+    const late = fixtureExchange();
+    opening.resolve(late.value);
+    await vi.waitFor(() => expect(late.reset).toHaveBeenCalledWith(resetReason));
+    expect(late.writeRequestFrame).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(requester.stats()).toMatchObject({
+      completed: 1,
+      trackedDigests: 0,
+      activeStream: 0,
+    }));
   });
 
   it('returns busy when the shared decoder is occupied and retains no payload', async () => {

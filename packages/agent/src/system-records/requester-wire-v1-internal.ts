@@ -33,6 +33,15 @@ type SystemRecordExactObjectKindV1 = Extract<
   Readonly<{ type: 'object' }>
 >['objectKind'];
 
+type SystemRecordExactOperationForObjectKindV1<
+  Kind extends SystemRecordExactObjectKindV1,
+> = Kind extends Extract<
+  SystemRecordExactRequestHeaderV1,
+  Readonly<{ operation: 'get-bundle' }>
+>['objectKind']
+  ? 'get-bundle'
+  : 'get-control-object';
+
 const SYSTEM_RECORD_EXACT_OPERATION_BY_OBJECT_KIND_V1 = Object.freeze({
   'profile-bundle': 'get-bundle',
   'agent-profile-head': 'get-control-object',
@@ -40,12 +49,9 @@ const SYSTEM_RECORD_EXACT_OPERATION_BY_OBJECT_KIND_V1 = Object.freeze({
   'fork-resolution': 'get-control-object',
   'conflict-evidence': 'get-control-object',
   'owned-subject-table': 'get-control-object',
-} satisfies Readonly<Record<
-  SystemRecordExactObjectKindV1,
-  Extract<SystemRecordExactRequestHeaderV1, Readonly<{
-    operation: 'get-bundle' | 'get-control-object';
-  }>>['operation']
->>);
+} satisfies Readonly<{
+  [Kind in SystemRecordExactObjectKindV1]: SystemRecordExactOperationForObjectKindV1<Kind>;
+}>);
 
 export interface SystemRecordExactRequestV1 {
   readonly request: SystemRecordExactRequestHeaderV1;
@@ -77,20 +83,8 @@ export function createSystemRecordExactRequestV1(
       objectKind: normalized.objectKind,
       objectDigest: normalized.objectDigest,
     });
-  } else if (normalized.objectKind === 'profile-bundle') {
-    request = Object.freeze({
-      ...common,
-      operation: 'get-bundle',
-      objectKind: normalized.objectKind,
-      objectDigest: normalized.objectDigest,
-    });
   } else {
-    request = Object.freeze({
-      ...common,
-      operation: 'get-control-object',
-      objectKind: normalized.objectKind,
-      objectDigest: normalized.objectDigest,
-    });
+    request = createSystemRecordExactObjectRequestV1(common, normalized);
   }
   const requestFrame = encodeSystemRecordRequestFrameV1(request);
   return Object.freeze({
@@ -98,6 +92,25 @@ export function createSystemRecordExactRequestV1(
     requestFrame,
     key: systemRecordExactLookupKeyV1(normalized),
   });
+}
+
+function createSystemRecordExactObjectRequestV1(
+  common: Readonly<{
+    wireVersion: typeof SYSTEM_RECORD_WIRE_VERSION_V1;
+    requestId: string;
+    kind: typeof SYSTEM_RECORD_KIND_V1;
+    networkId: NetworkIdV1;
+    payloadBytes: '0';
+  }>,
+  lookup: Extract<SystemRecordExactArtifactLookupV1, Readonly<{ type: 'object' }>>,
+): SystemRecordExactRequestHeaderV1 {
+  const operation = SYSTEM_RECORD_EXACT_OPERATION_BY_OBJECT_KIND_V1[lookup.objectKind];
+  return Object.freeze({
+    ...common,
+    operation,
+    objectKind: lookup.objectKind,
+    objectDigest: lookup.objectDigest,
+  }) as SystemRecordExactRequestHeaderV1;
 }
 
 function snapshotSystemRecordExactLookupV1(

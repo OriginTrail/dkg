@@ -193,6 +193,7 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
   }
 
   async subscribe(signal: AbortSignal): Promise<SystemRecordExactFetchResultV1> {
+    if (signal.aborted) this.#disposeIfIdle();
     signal.throwIfAborted();
     this.#observerCount += 1;
     let observing = true;
@@ -451,27 +452,20 @@ export function createSystemRecordRequesterV1(
       if (error instanceof SystemRecordRequesterTransferError) {
         wireBytes = error.wireBytes;
       }
-      const outcome = error instanceof InvalidSystemRecordResponseError
-        ? 'invalid-response'
-        : pendingSignal.aborted
-          ? entry.resetReason() === 'closed'
-            ? 'closed'
-            : entry.resetReason() === 'deadline'
-              ? 'deadline'
-              : 'transport'
-          : 'transport';
+      const failure = classifyRequesterFailure(
+        error,
+        pendingSignal,
+        entry.resetReason(),
+        wireBytes,
+      );
       try {
-        exchange?.reset(
-          outcome === 'invalid-response'
-            ? 'invalid-response'
-            : pendingSignal.aborted ? entry.resetReason() : outcome,
-        );
+        exchange?.reset(failure.resetReason);
       } catch {
         // Reset is best-effort cleanup and cannot strand the single-flight entry.
       }
       settlement = Object.freeze({
         state: 'failed',
-        result: Object.freeze({ outcome, wireBytes }),
+        result: failure.result,
       });
     } finally {
       clearTimeout(timeout);
@@ -505,6 +499,38 @@ export function createSystemRecordRequesterV1(
     closed = true;
     registry.close();
   }
+}
+
+function classifyRequesterFailure(
+  error: unknown,
+  pendingSignal: AbortSignal,
+  resetReason: SystemRecordRequesterResetReasonV1,
+  wireBytes: number,
+): Readonly<{
+  result: SystemRecordRequesterFailureV1;
+  resetReason: SystemRecordRequesterResetReasonV1;
+}> {
+  if (error instanceof InvalidSystemRecordResponseError) {
+    return Object.freeze({
+      result: Object.freeze({ outcome: 'invalid-response', wireBytes }),
+      resetReason: 'invalid-response',
+    });
+  }
+  if (!pendingSignal.aborted) {
+    return Object.freeze({
+      result: Object.freeze({ outcome: 'transport', wireBytes }),
+      resetReason: 'transport',
+    });
+  }
+  const outcome = resetReason === 'closed'
+    ? 'closed'
+    : resetReason === 'deadline'
+      ? 'deadline'
+      : 'transport';
+  return Object.freeze({
+    result: Object.freeze({ outcome, wireBytes }),
+    resetReason,
+  });
 }
 
 function boundedPositive(value: number, maximum: number, label: string): number {
