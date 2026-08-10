@@ -22,8 +22,9 @@ import type {
   SystemRecordArtifactRepositoryV1,
 } from '../src/system-records/artifact-v1.js';
 import {
-  createAgentProfileReceiverV1,
-  type AgentProfileReceiverCandidateV1,
+  assertAuthenticAgentProfileReceiverCandidateV1,
+  createAgentProfileCandidateReceiverV1,
+  type AgentProfileReceiverAnyCandidateV1,
 } from '../src/system-records/receiver-v1.js';
 import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 import {
@@ -44,7 +45,7 @@ describe('agent-profile private materializer prepare bridge', () => {
     const harness = materializerBridgeHarness();
 
     expect(() => harness.prepareCandidateApply(
-      Object.freeze({ operation: 'active' }) as AgentProfileReceiverCandidateV1,
+      Object.freeze({ operation: 'active' }) as AgentProfileReceiverAnyCandidateV1,
       harness.context,
       new AbortController().signal,
     )).toThrow(/not produced by the verified receiver/);
@@ -115,6 +116,41 @@ describe('agent-profile private materializer prepare bridge', () => {
       terminalTransitionConflict: false,
     });
     expect(harness.issues[0]?.admittedDeadlineMs).toBe(harness.originalDeadlineMs);
+  });
+
+  it.each([
+    { label: 'tombstone' as const, makeFixture: tombstoneFixture },
+    { label: 'quarantine' as const, makeFixture: quarantineFixture },
+  ])('marks a $label candidate authentic at the shared candidate factory', async ({
+    label,
+    makeFixture,
+  }) => {
+    const harness = materializerBridgeHarness();
+    const fixture = await makeFixture();
+    const captured: unknown[] = [];
+    const receiver = createAgentProfileCandidateReceiverV1({
+      networkId: NETWORK,
+      artifacts: agentProfileArtifactSources(fixture.artifacts),
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply: (candidate, admittedContext, signal) => {
+        captured.push(candidate);
+        return harness.prepareCandidateApply(candidate, admittedContext, signal);
+      },
+    });
+
+    await expect(receiver.receiveCandidate(
+      fixture.row,
+      harness.context,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'applied' });
+
+    // The marker is added in the shared candidate factory, not the active-only
+    // facade, so terminal candidates must pass the authenticity guard.
+    expect(captured).toHaveLength(1);
+    expect(() => assertAuthenticAgentProfileReceiverCandidateV1(captured[0])).not.toThrow();
+    expect((captured[0] as AgentProfileReceiverAnyCandidateV1).operation).toBe(label);
+    expect(harness.issues[0]).toMatchObject({ operation: label });
   });
 
   it.each([
@@ -292,7 +328,7 @@ function createReceiver(
   harness: MaterializerBridgeHarness,
   nowMs: () => number = () => PRODUCER_FIXTURE_NOW_MS,
 ) {
-  return createAgentProfileReceiverV1({
+  return createAgentProfileCandidateReceiverV1({
     networkId: NETWORK,
     artifacts: agentProfileArtifactSources(artifacts),
     nowMs,

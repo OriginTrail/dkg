@@ -15,8 +15,8 @@ import type {
 } from './admitted-slice-context-v1.js';
 import {
   assertAuthenticAgentProfileReceiverCandidateV1,
-  type AgentProfileReceiverCandidateV1,
-  type CreateAgentProfileReceiverOptionsV1,
+  type AgentProfileReceiverAnyCandidateV1,
+  type CreateAgentProfileCandidateReceiverOptionsV1,
 } from './receiver-v1.js';
 
 export interface AgentProfileMaterializerBridgeDepsV1 {
@@ -46,7 +46,7 @@ export interface AgentProfileMaterializerProofRuntimeV1 {
 
 /** Private structural port implemented by the activation-owned lane binding. */
 export interface AgentProfileMaterializerLaneBindingV1 {
-  readonly networkId: AgentProfileReceiverCandidateV1['head']['networkId'];
+  readonly networkId: AgentProfileReceiverAnyCandidateV1['head']['networkId'];
   readonly kind: 'agents';
   readonly mode: 'shadow' | 'authoritative';
   readonly sessionIdentity: object;
@@ -56,20 +56,20 @@ export interface AgentProfileMaterializerLaneBindingV1 {
 }
 
 type ActiveCandidateV1 = Extract<
-  AgentProfileReceiverCandidateV1,
+  AgentProfileReceiverAnyCandidateV1,
   { readonly operation: 'active' }
 >;
 type TombstoneCandidateV1 = Extract<
-  AgentProfileReceiverCandidateV1,
+  AgentProfileReceiverAnyCandidateV1,
   { readonly operation: 'tombstone' }
 >;
 type QuarantineCandidateV1 = Extract<
-  AgentProfileReceiverCandidateV1,
+  AgentProfileReceiverAnyCandidateV1,
   { readonly operation: 'quarantine' }
 >;
 
 interface AgentProfileMaterializerIssueCommonV1 {
-  readonly networkId: AgentProfileReceiverCandidateV1['head']['networkId'];
+  readonly networkId: AgentProfileReceiverAnyCandidateV1['head']['networkId'];
   readonly kind: 'agents';
   readonly mode: 'shadow' | 'authoritative';
   readonly sessionIdentity: object;
@@ -115,7 +115,7 @@ export type AgentProfileMaterializerCandidateIssueV1 =
  */
 export function createAgentProfileMaterializerPrepareBridgeV1(
   deps: AgentProfileMaterializerBridgeDepsV1,
-): CreateAgentProfileReceiverOptionsV1['prepareCandidateApply'] {
+): CreateAgentProfileCandidateReceiverOptionsV1['prepareCandidateApply'] {
   const { runtime, session, inspectAdmittedContext, resolveBinding } = deps;
   return (candidate, admittedContext, signal) => {
     assertAuthenticAgentProfileReceiverCandidateV1(candidate);
@@ -191,7 +191,7 @@ export function createAgentProfileMaterializerPrepareBridgeV1(
 
 function matchingBinding(
   binding: AgentProfileMaterializerLaneBindingV1 | null,
-  candidate: AgentProfileReceiverCandidateV1,
+  candidate: AgentProfileReceiverAnyCandidateV1,
   session: SystemRecordLaneSessionV1,
 ): AgentProfileMaterializerLaneBindingV1 | null {
   return binding !== null
@@ -222,7 +222,7 @@ function deferred(
 }
 
 function candidateIssue(
-  candidate: AgentProfileReceiverCandidateV1,
+  candidate: AgentProfileReceiverAnyCandidateV1,
   binding: AgentProfileMaterializerLaneBindingV1,
   admittedDeadlineMs: number,
 ): AgentProfileMaterializerCandidateIssueV1 {

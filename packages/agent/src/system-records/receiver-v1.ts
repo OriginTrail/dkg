@@ -120,7 +120,7 @@ const AUTHENTIC_AGENT_PROFILE_RECEIVER_CANDIDATES_V1 = new WeakSet<object>();
 /** Internal bridge guard: structural candidates never become materializer authority. */
 export function assertAuthenticAgentProfileReceiverCandidateV1(
   value: unknown,
-): asserts value is AgentProfileReceiverCandidateV1 {
+): asserts value is AgentProfileReceiverAnyCandidateV1 {
   if (value === null || typeof value !== 'object'
       || !AUTHENTIC_AGENT_PROFILE_RECEIVER_CANDIDATES_V1.has(value)) {
     throw new Error('agent-profile candidate was not produced by the verified receiver');
