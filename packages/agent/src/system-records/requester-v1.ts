@@ -178,6 +178,7 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
   #phase: FetchPhaseV1;
   #observerCount = 0;
   #leaseCount = 0;
+  #leaseDeliveries = 0;
   #retainedPayloadBytes = 0;
   #lastResetReason: SystemRecordRequesterResetReasonV1 = 'cancelled';
 
@@ -287,51 +288,65 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
     if (this.#phase.state !== 'retained' || this.#phase.source !== source) {
       throw new Error('System Record lease source is not retained by its entry');
     }
-    if (this.#leaseCount >= SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS + 1) {
+    if (this.#leaseCount + this.#leaseDeliveries
+      >= SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS + 1) {
       return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
     }
-    const payloadBytes = source.artifact.canonicalBytes.byteLength;
-    const reservation = this.#byteAdmission.tryReserve(payloadBytes);
-    if (signal.aborted) {
-      reservation?.release();
-      signal.throwIfAborted();
-    }
-    if (this.#registry.closed) {
-      reservation?.release();
-      return Object.freeze({ outcome: 'closed', wireBytes: source.wireBytes });
-    }
-    if (reservation === null) {
-      return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
-    }
-    let artifact: ReturnType<typeof cloneSystemRecordArtifactV1>;
+    this.#leaseDeliveries += 1;
+    let deliveryOwned = true;
     try {
-      artifact = cloneSystemRecordArtifactV1(source.artifact);
-    } catch {
-      reservation.release();
-      return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
+      const payloadBytes = source.artifact.canonicalBytes.byteLength;
+      const reservation = this.#byteAdmission.tryReserve(payloadBytes);
+      if (signal.aborted) {
+        reservation?.release();
+        signal.throwIfAborted();
+      }
+      if (this.#registry.closed) {
+        reservation?.release();
+        return Object.freeze({ outcome: 'closed', wireBytes: source.wireBytes });
+      }
+      if (reservation === null) {
+        return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
+      }
+      let artifact: ReturnType<typeof cloneSystemRecordArtifactV1>;
+      try {
+        artifact = cloneSystemRecordArtifactV1(source.artifact);
+      } catch {
+        reservation.release();
+        return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
+      }
+      this.#leaseDeliveries -= 1;
+      deliveryOwned = false;
+      this.#leaseCount += 1;
+      this.#retainedPayloadBytes += payloadBytes;
+      let released = false;
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: source.wireBytes,
+          release: () => {
+            if (released) return;
+            released = true;
+            this.#leaseCount -= 1;
+            this.#retainedPayloadBytes -= payloadBytes;
+            reservation.release();
+            this.#disposeIfIdle();
+          },
+        }),
+      });
+    } finally {
+      if (deliveryOwned) {
+        this.#leaseDeliveries -= 1;
+        this.#disposeIfIdle();
+      }
     }
-    this.#leaseCount += 1;
-    this.#retainedPayloadBytes += payloadBytes;
-    let released = false;
-    return Object.freeze({
-      outcome: 'ok',
-      lease: Object.freeze({
-        artifact,
-        wireBytes: source.wireBytes,
-        release: () => {
-          if (released) return;
-          released = true;
-          this.#leaseCount -= 1;
-          this.#retainedPayloadBytes -= payloadBytes;
-          reservation.release();
-          this.#disposeIfIdle();
-        },
-      }),
-    });
   }
 
   #disposeIfIdle(): void {
-    if (this.#observerCount !== 0 || this.#leaseCount !== 0) return;
+    if (this.#observerCount !== 0
+      || this.#leaseCount !== 0
+      || this.#leaseDeliveries !== 0) return;
     const phase = this.#phase;
     if (phase.state === 'pending') {
       this.abort('cancelled', new Error('system-record requester has no callers'));
@@ -339,9 +354,12 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
     }
     if (phase.state === 'retained') {
       this.#retainedPayloadBytes -= phase.source.artifact.canonicalBytes.byteLength;
+      this.#phase = Object.freeze({ state: 'disposed' });
+      this.#registry.dispose(this);
       phase.source.release();
+      return;
     }
-    if (phase.state === 'retained' || phase.state === 'failed') {
+    if (phase.state === 'failed') {
       this.#phase = Object.freeze({ state: 'disposed' });
       this.#registry.dispose(this);
     }
@@ -536,10 +554,10 @@ export function createSystemRecordRequesterV1(
       });
     } finally {
       clearTimeout(timeout);
-      frameReservation.release();
-      streamPermit.release();
       activeStream = 0;
       completed += 1;
+      frameReservation.release();
+      streamPermit.release();
     }
     if (pendingSignal.aborted) {
       if (settlement.state === 'retained') settlement.source.release();

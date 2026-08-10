@@ -81,12 +81,14 @@ export async function exchangeSystemRecordResponseV1(input: {
       input.exchange.readResponseFrame(SYSTEM_RECORD_MAX_FRAME_BYTES, input.signal),
       input.signal,
     );
-    if (!(responseFrame instanceof Uint8Array)
-      || responseFrame.byteLength < 1
-      || responseFrame.byteLength > SYSTEM_RECORD_MAX_FRAME_BYTES) {
+    if (!(responseFrame instanceof Uint8Array)) {
       throw new InvalidSystemRecordResponseError(wireBytes);
     }
     wireBytes += responseFrame.byteLength;
+    if (responseFrame.byteLength < 1
+      || responseFrame.byteLength > SYSTEM_RECORD_MAX_FRAME_BYTES) {
+      throw new InvalidSystemRecordResponseError(wireBytes);
+    }
     input.frameReservation.shrinkTo(responseFrame.byteLength);
     input.signal.throwIfAborted();
     let decoded: SystemRecordDecodedResponseFrameV1;

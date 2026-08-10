@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import type {
   CreateSystemRecordRequesterOptionsV1,
+  SystemRecordExactFetchResultV1,
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterExchangeV1,
 } from '../src/system-records/requester-api-v1.js';
@@ -235,6 +236,119 @@ describe('system-record requester V1', () => {
     },
   );
 
+  it('unpublishes a retained entry before releasing its reentrant source owner', async () => {
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const decode = permitAdmission();
+    const openExchange = vi.fn(async () => fixtureExchange().value);
+    let requester: ReturnType<typeof createSystemRecordRequesterV1>;
+    let nested: Promise<SystemRecordExactFetchResultV1> | undefined;
+    let triggerSourceRelease = false;
+    const reentrantBytes: SystemRecordRequesterByteAdmissionV1 = {
+      tryReserve(requested) {
+        const reservation = bytes.tryReserve(requested);
+        const reservationIndex = bytes.reservations.length - 1;
+        if (reservation === null) return null;
+        let released = false;
+        return Object.freeze({
+          shrinkTo: (retainedBytes: number) => reservation.shrinkTo(retainedBytes),
+          release() {
+            if (released) return;
+            released = true;
+            reservation.release();
+            if (triggerSourceRelease && reservationIndex === 1) {
+              triggerSourceRelease = false;
+              nested = requester.fetch(LOOKUP, new AbortController().signal);
+            }
+          },
+        });
+      },
+    };
+    requester = createSystemRecordRequesterV1({
+      networkId: NETWORK,
+      openExchange,
+      byteAdmission: reentrantBytes,
+      streamAdmission: stream.value,
+      decodeAdmission: decode.value,
+      requestId: () => '1'.repeat(32),
+    });
+
+    const first = await requester.fetch(LOOKUP, new AbortController().signal);
+    expect(first.outcome).toBe('ok');
+    if (first.outcome !== 'ok') return;
+    triggerSourceRelease = true;
+    first.lease.release();
+
+    expect(nested).toBeDefined();
+    const nestedResult = await nested!;
+    expect(nestedResult.outcome).toBe('ok');
+    expect(openExchange).toHaveBeenCalledTimes(2);
+    expect(requester.stats()).toMatchObject({
+      trackedDigests: 1,
+      activeLeases: 1,
+      retainedPayloadBytes: PAYLOAD.byteLength * 2,
+    });
+    if (nestedResult.outcome === 'ok') nestedResult.lease.release();
+    expect(requester.stats()).toMatchObject({
+      trackedDigests: 0,
+      activeLeases: 0,
+      retainedPayloadBytes: 0,
+    });
+    expect(bytes.reservations.every(({ released }) => released)).toBe(true);
+    expect(stream.active()).toBe(false);
+    expect(decode.active()).toBe(false);
+  });
+
+  it('reserves a retained lease slot before reentrant byte admission', async () => {
+    const bytes = byteAdmission();
+    let requester: ReturnType<typeof createSystemRecordRequesterV1>;
+    let nested: Promise<SystemRecordExactFetchResultV1> | undefined;
+    let triggerAdmission = false;
+    const reentrantBytes: SystemRecordRequesterByteAdmissionV1 = {
+      tryReserve(requested) {
+        const reservation = bytes.tryReserve(requested);
+        if (triggerAdmission) {
+          triggerAdmission = false;
+          nested = requester.fetch(LOOKUP, new AbortController().signal);
+        }
+        return reservation;
+      },
+    };
+    requester = createSystemRecordRequesterV1({
+      networkId: NETWORK,
+      openExchange: async () => fixtureExchange().value,
+      byteAdmission: reentrantBytes,
+      streamAdmission: permitAdmission().value,
+      decodeAdmission: permitAdmission().value,
+      requestId: () => '1'.repeat(32),
+    });
+    const leases = [];
+    for (let index = 0; index < SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS; index += 1) {
+      const result = await requester.fetch(LOOKUP, new AbortController().signal);
+      expect(result.outcome).toBe('ok');
+      if (result.outcome === 'ok') leases.push(result.lease);
+    }
+
+    triggerAdmission = true;
+    const outer = requester.fetch(LOOKUP, new AbortController().signal);
+    expect(nested).toBeDefined();
+    const [outerResult, nestedResult] = await Promise.all([outer, nested!]);
+    expect([outerResult.outcome, nestedResult.outcome].sort()).toEqual(['capacity', 'ok']);
+    if (outerResult.outcome === 'ok') leases.push(outerResult.lease);
+    if (nestedResult.outcome === 'ok') leases.push(nestedResult.lease);
+    expect(requester.stats().activeLeases).toBe(
+      SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS + 1,
+    );
+
+    for (const lease of leases) lease.release();
+    expect(requester.stats()).toMatchObject({
+      trackedDigests: 0,
+      activeLeases: 0,
+      retainedPayloadBytes: 0,
+    });
+    expect(bytes.reservations.every(({ released }) => released)).toBe(true);
+  });
+
   it.each([
     ['decode admission', 'requester close'],
     ['decode admission', 'caller abort'],
@@ -361,6 +475,87 @@ describe('system-record requester V1', () => {
       expect(decode.active()).toBe(false);
     },
   );
+
+  it('does not let an older stream release clear reentrant leader accounting', async () => {
+    const otherPayload = Uint8Array.of(7, 8, 9);
+    const otherDigest = digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+      otherPayload,
+    );
+    const otherLookup = Object.freeze({
+      type: 'object' as const,
+      objectKind: 'profile-bundle' as const,
+      objectDigest: otherDigest,
+    });
+    const firstExchange = fixtureExchange();
+    const secondGate = Promise.withResolvers<void>();
+    const secondExchange = fixtureExchange(async (request) => {
+      await secondGate.promise;
+      return successResponse(request, otherPayload, otherDigest);
+    });
+    let opened = 0;
+    const openExchange = vi.fn(async () => {
+      opened += 1;
+      return opened === 1 ? firstExchange.value : secondExchange.value;
+    });
+    const stream = permitAdmission();
+    let requester: ReturnType<typeof createSystemRecordRequesterV1>;
+    let second: Promise<SystemRecordExactFetchResultV1> | undefined;
+    let triggerNextLeader = true;
+    const reentrantStream = {
+      tryAcquire() {
+        const permit = stream.value.tryAcquire();
+        if (permit === null) return null;
+        let released = false;
+        return Object.freeze({
+          release() {
+            if (released) return;
+            released = true;
+            permit.release();
+            if (triggerNextLeader) {
+              triggerNextLeader = false;
+              second = requester.fetch(otherLookup, new AbortController().signal);
+            }
+          },
+        });
+      },
+    };
+    requester = createSystemRecordRequesterV1({
+      networkId: NETWORK,
+      openExchange,
+      byteAdmission: byteAdmission(),
+      streamAdmission: reentrantStream,
+      decodeAdmission: permitAdmission().value,
+      requestId: () => '1'.repeat(32),
+    });
+
+    const first = await requester.fetch(LOOKUP, new AbortController().signal);
+    expect(first.outcome).toBe('ok');
+    expect(second).toBeDefined();
+    await secondExchange.requestWritten.promise;
+    expect(stream.active()).toBe(true);
+    expect(requester.stats()).toMatchObject({
+      started: 2,
+      completed: 1,
+      activeStream: 1,
+      peakActiveStream: 1,
+    });
+
+    if (first.outcome === 'ok') first.lease.release();
+    secondGate.resolve();
+    const secondResult = await second!;
+    expect(secondResult.outcome).toBe('ok');
+    if (secondResult.outcome === 'ok') secondResult.lease.release();
+    expect(stream.active()).toBe(false);
+    expect(requester.stats()).toMatchObject({
+      started: 2,
+      completed: 2,
+      trackedDigests: 0,
+      activeLeases: 0,
+      activeStream: 0,
+      peakActiveStream: 1,
+    });
+  });
 
   it('fetches and verifies an exact inventory object through the public requester', async () => {
     const leaf = { objectType: 'inventory-leaf', rows: [] } as const;
@@ -948,6 +1143,33 @@ describe('system-record requester V1', () => {
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'invalid-response', wireBytes: expect.any(Number) });
     expect(malformed.reset).toHaveBeenCalledWith('invalid-response');
+  });
+
+  it('accounts every returned byte before rejecting an oversized response frame', async () => {
+    const oversized = new Uint8Array(SYSTEM_RECORD_MAX_FRAME_BYTES + 1);
+    const exchange = fixtureExchange(async () => oversized);
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const requester = createRequester({
+      bytes,
+      stream,
+      openExchange: async () => exchange.value,
+    });
+
+    const result = await requester.fetch(LOOKUP, new AbortController().signal);
+    expect(result.outcome).toBe('invalid-response');
+    const requestFrame = exchange.writeRequestFrame.mock.calls[0]?.[0];
+    expect(requestFrame).toBeInstanceOf(Uint8Array);
+    expect(result.wireBytes).toBe(requestFrame!.byteLength + oversized.byteLength);
+    expect(exchange.reset).toHaveBeenCalledWith('invalid-response');
+    expect(stream.active()).toBe(false);
+    expect(bytes.reservations).toHaveLength(1);
+    expect(bytes.reservations[0]?.released).toBe(true);
+    expect(requester.stats()).toMatchObject({
+      trackedDigests: 0,
+      activeStream: 0,
+      retainedPayloadBytes: 0,
+    });
   });
 
   it('reserves before network work and releases permits on capacity, deadline, and close', async () => {
