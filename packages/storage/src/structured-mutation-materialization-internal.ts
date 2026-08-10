@@ -3,13 +3,27 @@ import {
   type ReadonlyStructuredMutation,
   type StructuredMutationSnapshot,
 } from './bounded-structured-mutation.js';
-import { materializeCopySubjectProjectionInput } from './structured-mutation/copy-subject-projection.js';
-import { materializeDeleteSubjectsInput } from './structured-mutation/delete-subjects.js';
-import { materializeReplaceProjectionFromGraphInput } from './structured-mutation/replace-projection-from-graph.js';
-import { materializeReplaceSubjectPredicatesInput } from './structured-mutation/replace-subject-predicates.js';
 import {
-  materializePruneLinkedRecordClosuresInput,
-  materializePruneRankedSubjectsInput,
+  assertCopySubjectProjectionInputMaterializable,
+  buildCopySubjectProjectionUpdateFromNormalized,
+} from './structured-mutation/copy-subject-projection.js';
+import {
+  assertDeleteSubjectsInputMaterializable,
+  buildDeleteSubjectsUpdateFromNormalized,
+} from './structured-mutation/delete-subjects.js';
+import {
+  assertReplaceProjectionFromGraphInputMaterializable,
+  buildReplaceProjectionFromGraphUpdateFromNormalized,
+} from './structured-mutation/replace-projection-from-graph.js';
+import {
+  assertReplaceSubjectPredicatesInputMaterializable,
+  buildReplaceSubjectPredicatesUpdateFromNormalized,
+} from './structured-mutation/replace-subject-predicates.js';
+import {
+  assertPruneLinkedRecordClosuresInputMaterializable,
+  assertPruneRankedSubjectsInputMaterializable,
+  buildPruneLinkedRecordClosuresUpdateFromNormalized,
+  buildPruneRankedSubjectsUpdateFromNormalized,
 } from './structured-mutation/retention.js';
 
 export type MaterializedStructuredMutation =
@@ -29,7 +43,8 @@ export function materializeStructuredMutation(
 ): MaterializedStructuredMutation {
   assertTrustedStructuredMutationSnapshot(snapshot);
   const mutation = snapshot.mutation;
-  const update = materializeSnapshotUpdate(mutation);
+  assertSnapshotMaterializable(mutation);
+  const update = buildSnapshotUpdate(mutation);
   if (update === undefined) {
     if (snapshot.outcome !== 'noop') {
       throw new Error('structured mutation candidate unexpectedly materialized as a no-op');
@@ -47,25 +62,44 @@ export function assertStructuredMutationSnapshotMaterializable(
   snapshot: StructuredMutationSnapshot,
 ): void {
   assertTrustedStructuredMutationSnapshot(snapshot);
-  materializeSnapshotUpdate(snapshot.mutation, false);
+  assertSnapshotMaterializable(snapshot.mutation);
 }
 
-function materializeSnapshotUpdate(
-  mutation: ReadonlyStructuredMutation,
-  buildUpdate = true,
-): string | undefined {
+function assertSnapshotMaterializable(mutation: ReadonlyStructuredMutation): void {
   switch (mutation.kind) {
     case 'delete-subjects':
-      return materializeDeleteSubjectsInput(mutation.input, buildUpdate);
+      assertDeleteSubjectsInputMaterializable(mutation.input);
+      return;
     case 'prune-ranked-subjects':
-      return materializePruneRankedSubjectsInput(mutation.input, buildUpdate);
+      assertPruneRankedSubjectsInputMaterializable(mutation.input);
+      return;
     case 'prune-linked-record-closures':
-      return materializePruneLinkedRecordClosuresInput(mutation.input, buildUpdate);
+      assertPruneLinkedRecordClosuresInputMaterializable(mutation.input);
+      return;
     case 'replace-subject-predicates':
-      return materializeReplaceSubjectPredicatesInput(mutation.input, buildUpdate);
+      assertReplaceSubjectPredicatesInputMaterializable(mutation.input);
+      return;
     case 'replace-projection-from-graph':
-      return materializeReplaceProjectionFromGraphInput(mutation.input, buildUpdate);
+      assertReplaceProjectionFromGraphInputMaterializable(mutation.input);
+      return;
     case 'copy-subject-projection':
-      return materializeCopySubjectProjectionInput(mutation.input, buildUpdate);
+      assertCopySubjectProjectionInputMaterializable(mutation.input);
+  }
+}
+
+function buildSnapshotUpdate(mutation: ReadonlyStructuredMutation): string | undefined {
+  switch (mutation.kind) {
+    case 'delete-subjects':
+      return buildDeleteSubjectsUpdateFromNormalized(mutation.input);
+    case 'prune-ranked-subjects':
+      return buildPruneRankedSubjectsUpdateFromNormalized(mutation.input);
+    case 'prune-linked-record-closures':
+      return buildPruneLinkedRecordClosuresUpdateFromNormalized(mutation.input);
+    case 'replace-subject-predicates':
+      return buildReplaceSubjectPredicatesUpdateFromNormalized(mutation.input);
+    case 'replace-projection-from-graph':
+      return buildReplaceProjectionFromGraphUpdateFromNormalized(mutation.input);
+    case 'copy-subject-projection':
+      return buildCopySubjectProjectionUpdateFromNormalized(mutation.input);
   }
 }

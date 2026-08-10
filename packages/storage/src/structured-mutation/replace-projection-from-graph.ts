@@ -63,10 +63,9 @@ export function replaceProjectionFromGraphSemantics(
   };
 }
 
-export function materializeReplaceProjectionFromGraphInput(
+export function assertReplaceProjectionFromGraphInputMaterializable(
   input: ReplaceProjectionFromGraphInput,
-  buildUpdate = true,
-): string | undefined {
+): void {
   assertOperandBudget('replaceProjectionFromGraph', [
     input.targetGraphUri,
     input.stagingGraphUri,
@@ -74,14 +73,13 @@ export function materializeReplaceProjectionFromGraphInput(
     ...input.preservedTargetPredicates,
     ...input.targetSubjectPrefixes,
   ]);
-  return buildUpdate ? buildReplaceProjectionFromGraphUpdateFromNormalized(input) : undefined;
 }
 
 export function normalizeReplaceProjectionFromGraphInput(
   input: ReplaceProjectionFromGraphInput,
 ): ReplaceProjectionFromGraphInput {
   const captured = captureReplaceProjectionFromGraphInput(input);
-  materializeReplaceProjectionFromGraphInput(captured, false);
+  assertReplaceProjectionFromGraphInputMaterializable(captured);
   return captured;
 }
 

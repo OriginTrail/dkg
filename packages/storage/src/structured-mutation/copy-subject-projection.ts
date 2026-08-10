@@ -70,10 +70,9 @@ export function copySubjectProjectionSemantics(
   };
 }
 
-export function materializeCopySubjectProjectionInput(
+export function assertCopySubjectProjectionInputMaterializable(
   input: CopySubjectProjectionInput,
-  buildUpdate = true,
-): string | undefined {
+): void {
   assertOperandBudget('copySubjectProjection', [
     ...input.sourceGraphUris,
     input.targetGraphUri,
@@ -81,14 +80,13 @@ export function materializeCopySubjectProjectionInput(
     input.descendantSuffix,
     ...input.excludedPredicates,
   ]);
-  return buildUpdate ? buildCopySubjectProjectionUpdateFromNormalized(input) : undefined;
 }
 
 export function normalizeCopySubjectProjectionInput(
   input: CopySubjectProjectionInput,
 ): CopySubjectProjectionInput {
   const captured = captureCopySubjectProjectionInput(input);
-  materializeCopySubjectProjectionInput(captured, false);
+  assertCopySubjectProjectionInputMaterializable(captured);
   return captured;
 }
 

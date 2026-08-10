@@ -33,17 +33,13 @@ export function deleteSubjectsSemantics(
   };
 }
 
-export function materializeDeleteSubjectsInput(
-  input: DeleteSubjectsInput,
-  buildUpdate = true,
-): string | undefined {
+export function assertDeleteSubjectsInputMaterializable(input: DeleteSubjectsInput): void {
   assertOperandBudget('deleteSubjects', [input.graphUri, ...input.subjects]);
-  return buildUpdate ? buildDeleteSubjectsUpdateFromNormalized(input) : undefined;
 }
 
 export function normalizeDeleteSubjectsInput(input: DeleteSubjectsInput): DeleteSubjectsInput {
   const captured = captureDeleteSubjectsInput(input);
-  materializeDeleteSubjectsInput(captured, false);
+  assertDeleteSubjectsInputMaterializable(captured);
   return captured;
 }
 

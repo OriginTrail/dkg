@@ -22,6 +22,7 @@ import {
 } from '../src/index.js';
 import {
   BOUNDED_MUTATION_MAX_IRIS,
+  BOUNDED_MUTATION_MAX_OPERAND_BYTES,
   BOUNDED_MUTATION_MAX_UPDATE_BYTES,
   buildCopySubjectProjectionUpdate,
   buildDeleteSubjectsUpdate,
@@ -440,7 +441,7 @@ describe('bounded structured mutation capabilities', () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
-  it('suppresses embedded and live-worker I/O for a valid empty delete', async () => {
+  it('keeps valid empty deletes I/O-free and rejects oversized worker no-ops before posting', async () => {
     const embedded = new OxigraphStore();
     const embeddedStore = (embedded as unknown as {
       store: { update: (sparql: string) => void };
@@ -469,6 +470,14 @@ describe('bounded structured mutation capabilities', () => {
 
       expect(workerInternals.nextId).toBe(nextId);
       expect(worker.getWriteGen(GRAPH)).toBe(workerGeneration);
+
+      const oversizedGraph = `urn:test:${'x'.repeat(BOUNDED_MUTATION_MAX_OPERAND_BYTES + 1)}`;
+      await expect(worker.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: oversizedGraph, subjects: [] },
+      })).rejects.toThrow(/operand bytes/);
+      expect(workerInternals.nextId).toBe(nextId);
+      expect(worker.getWriteGen(oversizedGraph)).toBe(0);
     } finally {
       await worker.close();
     }

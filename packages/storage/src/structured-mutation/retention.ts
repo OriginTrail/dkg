@@ -73,10 +73,9 @@ export function pruneRankedSubjectsSemantics(
   return { guardedGraphs: [input.graphUri], touchedGraphs: [input.graphUri], mightMutate: true };
 }
 
-export function materializePruneRankedSubjectsInput(
+export function assertPruneRankedSubjectsInputMaterializable(
   input: PruneRankedSubjectsInput,
-  buildUpdate = true,
-): string | undefined {
+): void {
   assertOperandBudget('pruneRankedSubjects', [
     input.graphUri,
     input.subjectPrefix,
@@ -85,7 +84,6 @@ export function materializePruneRankedSubjectsInput(
     input.secondaryRankPredicate,
     ...input.eligibleObjects,
   ]);
-  return buildUpdate ? buildPruneRankedSubjectsUpdateFromNormalized(input) : undefined;
 }
 
 export function capturePruneLinkedRecordClosuresInput(
@@ -137,10 +135,9 @@ export function pruneLinkedRecordClosuresSemantics(
   return { guardedGraphs: [input.graphUri], touchedGraphs: [input.graphUri], mightMutate: true };
 }
 
-export function materializePruneLinkedRecordClosuresInput(
+export function assertPruneLinkedRecordClosuresInputMaterializable(
   input: PruneLinkedRecordClosuresInput,
-  buildUpdate = true,
-): string | undefined {
+): void {
   assertOperandBudget('pruneLinkedRecordClosures', [
     input.graphUri,
     ...input.matchObjectIris,
@@ -149,14 +146,13 @@ export function materializePruneLinkedRecordClosuresInput(
     input.descendantSeparator,
     ...(input.protectedRecordIri ? [input.protectedRecordIri] : []),
   ]);
-  return buildUpdate ? buildPruneLinkedRecordClosuresUpdateFromNormalized(input) : undefined;
 }
 
 export function normalizePruneRankedSubjectsInput(
   input: PruneRankedSubjectsInput,
 ): PruneRankedSubjectsInput {
   const captured = capturePruneRankedSubjectsInput(input);
-  materializePruneRankedSubjectsInput(captured, false);
+  assertPruneRankedSubjectsInputMaterializable(captured);
   return captured;
 }
 
@@ -212,7 +208,7 @@ export function normalizePruneLinkedRecordClosuresInput(
   input: PruneLinkedRecordClosuresInput,
 ): PruneLinkedRecordClosuresInput {
   const captured = capturePruneLinkedRecordClosuresInput(input);
-  materializePruneLinkedRecordClosuresInput(captured, false);
+  assertPruneLinkedRecordClosuresInputMaterializable(captured);
   return captured;
 }
 

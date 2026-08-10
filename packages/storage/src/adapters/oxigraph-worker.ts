@@ -728,6 +728,7 @@ export class OxigraphWorkerStore implements TripleStore {
     _options?: TripleStoreQueryOptions,
   ): Promise<void> {
     const snapshot = captureStructuredMutationSnapshot(mutation);
+    assertStructuredMutationSnapshotMaterializable(snapshot);
     if (snapshot.outcome === 'noop') {
       await this.preflightNoop('structuredMutation');
       return;
@@ -738,7 +739,6 @@ export class OxigraphWorkerStore implements TripleStore {
         label: 'OxigraphWorkerStore.structuredMutation',
       });
     }
-    assertStructuredMutationSnapshotMaterializable(snapshot);
     await this.call('structuredMutation', snapshot.mutation);
     this.writeGen.recordGraphWrites(snapshot.effects.touchedGraphs);
   }

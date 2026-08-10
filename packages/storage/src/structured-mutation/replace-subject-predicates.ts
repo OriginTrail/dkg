@@ -71,12 +71,10 @@ export function replaceSubjectPredicatesSemantics(
   return { guardedGraphs: [input.graphUri], touchedGraphs: [input.graphUri], mightMutate: true };
 }
 
-export function materializeReplaceSubjectPredicatesInput(
+export function assertReplaceSubjectPredicatesInputMaterializable(
   input: ReplaceSubjectPredicatesInput,
-  buildUpdate = true,
-): string | undefined {
+): void {
   assertOperandBudget('replaceSubjectPredicates', replaceSubjectPredicatesOperands(input));
-  return buildUpdate ? buildReplaceSubjectPredicatesUpdateFromNormalized(input) : undefined;
 }
 
 function* replaceSubjectPredicatesOperands(
@@ -97,7 +95,7 @@ export function normalizeReplaceSubjectPredicatesInput(
   input: ReplaceSubjectPredicatesInput,
 ): ReplaceSubjectPredicatesInput {
   const captured = captureReplaceSubjectPredicatesInput(input);
-  materializeReplaceSubjectPredicatesInput(captured, false);
+  assertReplaceSubjectPredicatesInputMaterializable(captured);
   return captured;
 }
 
