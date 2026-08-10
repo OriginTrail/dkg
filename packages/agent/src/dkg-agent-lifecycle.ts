@@ -251,6 +251,7 @@ import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-cor
 import {
   deleteSyncPageCheckpoint,
   fetchSyncPages,
+  SyncPageSizeProfileCache,
   type SyncPageFetchOptions,
   type SyncPageResult,
 } from './sync/requester/page-fetch.js';
@@ -614,6 +615,7 @@ type ContextGraphCatchupResult = Awaited<ReturnType<DKGAgent['runCatchupOverPeer
 
 const inFlightSyncPageFetchesByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncPageFetch>>();
 const inFlightSyncSingleFlightsByAgent = new WeakMap<DKGAgent, Map<string, InFlightSyncSingleFlight>>();
+const syncPageSizeProfilesByAgent = new WeakMap<DKGAgent, SyncPageSizeProfileCache>();
 const alreadyMemberDelegationRefreshChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 const durableContextGraphSyncChains = new WeakMap<DKGAgent, Map<string, Promise<void>>>();
 
@@ -761,6 +763,25 @@ function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPa
     inFlightSyncPageFetchesByAgent.set(agent, inFlight);
   }
   return inFlight;
+}
+
+function syncPageSizeProfileFor(agent: DKGAgent, params: {
+  remotePeerId: string;
+  contextGraphId: string;
+  includeSharedMemory: boolean;
+  phase: SyncPhase;
+}) {
+  let cache = syncPageSizeProfilesByAgent.get(agent);
+  if (!cache) {
+    cache = new SyncPageSizeProfileCache();
+    syncPageSizeProfilesByAgent.set(agent, cache);
+  }
+  return cache.get(JSON.stringify([
+    params.remotePeerId,
+    params.contextGraphId,
+    params.includeSharedMemory ? 'swm' : 'vm',
+    params.phase,
+  ]));
 }
 
 /**
@@ -5926,6 +5947,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? exactAccumulationLimits.maxQuads
           : Math.min(exactAccumulationLimits.maxQuads, maxAcceptedQuads),
       maxAcceptedHeapBytesEstimate,
+      pageSizeProfile: syncPageSizeProfileFor(this, {
+        remotePeerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+      }),
       deadline,
       recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
