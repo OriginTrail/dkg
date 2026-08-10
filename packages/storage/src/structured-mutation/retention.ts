@@ -12,52 +12,50 @@ import {
   assertOperandBudget,
   boundedInteger,
   boundedString,
-  boundedUniqueStrings,
-  uniqueIris,
 } from './primitives.js';
+import {
+  captureInputRecord,
+  captureUniqueIris,
+  captureUniqueStrings,
+  type StructuredMutationSemantics,
+} from './capture-internal.js';
 
-export function normalizePruneRankedSubjectsInput(
-  input: PruneRankedSubjectsInput,
-): PruneRankedSubjectsInput {
-  const graphUri = absoluteIri(input.graphUri, 'pruneRankedSubjects.graphUri');
-  const subjectPrefix = absoluteIri(input.subjectPrefix, 'pruneRankedSubjects.subjectPrefix');
+export function capturePruneRankedSubjectsInput(input: unknown): PruneRankedSubjectsInput {
+  const value = captureInputRecord(input, 'pruneRankedSubjects');
+  const graphUri = absoluteIri(value.graphUri as string, 'pruneRankedSubjects.graphUri');
+  const subjectPrefix = absoluteIri(
+    value.subjectPrefix as string,
+    'pruneRankedSubjects.subjectPrefix',
+  );
   const eligibilityPredicate = absoluteIri(
-    input.eligibilityPredicate,
+    value.eligibilityPredicate as string,
     'pruneRankedSubjects.eligibilityPredicate',
   );
-  const primaryRankPredicate = absoluteIri(
-    input.primaryRankPredicate,
-    'pruneRankedSubjects.primaryRankPredicate',
-  );
-  const secondaryRankPredicate = absoluteIri(
-    input.secondaryRankPredicate,
-    'pruneRankedSubjects.secondaryRankPredicate',
-  );
-  const eligibleObjects = boundedUniqueStrings(
-    input.eligibleObjects,
+  const eligibleObjects = captureUniqueStrings(
+    value.eligibleObjects,
     'pruneRankedSubjects.eligibleObjects',
     16,
   );
+  const primaryRankPredicate = absoluteIri(
+    value.primaryRankPredicate as string,
+    'pruneRankedSubjects.primaryRankPredicate',
+  );
+  const secondaryRankPredicate = absoluteIri(
+    value.secondaryRankPredicate as string,
+    'pruneRankedSubjects.secondaryRankPredicate',
+  );
   const retainNewest = boundedInteger(
-    input.retainNewest,
+    value.retainNewest as number,
     'pruneRankedSubjects.retainNewest',
     BOUNDED_MUTATION_MAX_IRIS,
   );
   const maxDelete = boundedInteger(
-    input.maxDelete,
+    value.maxDelete as number,
     'pruneRankedSubjects.maxDelete',
     BOUNDED_MUTATION_MAX_PRUNE_DELETE,
   );
   if (maxDelete === 0) throw new Error('pruneRankedSubjects.maxDelete must be positive');
-  assertOperandBudget('pruneRankedSubjects', [
-    graphUri,
-    subjectPrefix,
-    eligibilityPredicate,
-    primaryRankPredicate,
-    secondaryRankPredicate,
-    ...eligibleObjects,
-  ]);
-  return {
+  return Object.freeze({
     graphUri,
     subjectPrefix,
     eligibilityPredicate,
@@ -66,7 +64,100 @@ export function normalizePruneRankedSubjectsInput(
     secondaryRankPredicate,
     retainNewest,
     maxDelete,
-  };
+  });
+}
+
+export function pruneRankedSubjectsSemantics(
+  input: PruneRankedSubjectsInput,
+): StructuredMutationSemantics {
+  return { guardedGraphs: [input.graphUri], touchedGraphs: [input.graphUri], mightMutate: true };
+}
+
+export function materializePruneRankedSubjectsInput(
+  input: PruneRankedSubjectsInput,
+  buildUpdate = true,
+): string | undefined {
+  assertOperandBudget('pruneRankedSubjects', [
+    input.graphUri,
+    input.subjectPrefix,
+    input.eligibilityPredicate,
+    input.primaryRankPredicate,
+    input.secondaryRankPredicate,
+    ...input.eligibleObjects,
+  ]);
+  return buildUpdate ? buildPruneRankedSubjectsUpdateFromNormalized(input) : undefined;
+}
+
+export function capturePruneLinkedRecordClosuresInput(
+  input: unknown,
+): PruneLinkedRecordClosuresInput {
+  const value = captureInputRecord(input, 'pruneLinkedRecordClosures');
+  const graphUri = absoluteIri(value.graphUri as string, 'pruneLinkedRecordClosures.graphUri');
+  const matchObjectIris = captureUniqueIris(
+    value.matchObjectIris,
+    'pruneLinkedRecordClosures.matchObjectIris',
+    BOUNDED_MUTATION_MAX_IRIS,
+    false,
+  );
+  const linkPredicates = captureUniqueIris(
+    value.linkPredicates,
+    'pruneLinkedRecordClosures.linkPredicates',
+    BOUNDED_MUTATION_MAX_PREDICATES,
+    false,
+  );
+  const recordParentPredicate = absoluteIri(
+    value.recordParentPredicate as string,
+    'pruneLinkedRecordClosures.recordParentPredicate',
+  );
+  const rawProtectedRecordIri = value.protectedRecordIri;
+  const protectedRecordIri = rawProtectedRecordIri === undefined
+    ? undefined
+    : absoluteIri(
+        rawProtectedRecordIri as string,
+        'pruneLinkedRecordClosures.protectedRecordIri',
+      );
+  const descendantSeparator = boundedString(
+    value.descendantSeparator as string,
+    'pruneLinkedRecordClosures.descendantSeparator',
+    64,
+  );
+  return Object.freeze({
+    graphUri,
+    matchObjectIris,
+    linkPredicates,
+    recordParentPredicate,
+    protectedRecordIri,
+    descendantSeparator,
+  });
+}
+
+export function pruneLinkedRecordClosuresSemantics(
+  input: PruneLinkedRecordClosuresInput,
+): StructuredMutationSemantics {
+  return { guardedGraphs: [input.graphUri], touchedGraphs: [input.graphUri], mightMutate: true };
+}
+
+export function materializePruneLinkedRecordClosuresInput(
+  input: PruneLinkedRecordClosuresInput,
+  buildUpdate = true,
+): string | undefined {
+  assertOperandBudget('pruneLinkedRecordClosures', [
+    input.graphUri,
+    ...input.matchObjectIris,
+    ...input.linkPredicates,
+    input.recordParentPredicate,
+    input.descendantSeparator,
+    ...(input.protectedRecordIri ? [input.protectedRecordIri] : []),
+  ]);
+  return buildUpdate ? buildPruneLinkedRecordClosuresUpdateFromNormalized(input) : undefined;
+}
+
+export function normalizePruneRankedSubjectsInput(
+  input: PruneRankedSubjectsInput,
+): PruneRankedSubjectsInput {
+  const captured = capturePruneRankedSubjectsInput(input);
+  materializePruneRankedSubjectsInput(captured, false);
+  return captured;
 }
 
 export function buildPruneRankedSubjectsUpdate(input: PruneRankedSubjectsInput): string {
@@ -120,44 +211,9 @@ WHERE {
 export function normalizePruneLinkedRecordClosuresInput(
   input: PruneLinkedRecordClosuresInput,
 ): PruneLinkedRecordClosuresInput {
-  const graphUri = absoluteIri(input.graphUri, 'pruneLinkedRecordClosures.graphUri');
-  const matchObjectIris = uniqueIris(
-    input.matchObjectIris,
-    'pruneLinkedRecordClosures.matchObjectIris',
-  );
-  const linkPredicates = uniqueIris(
-    input.linkPredicates,
-    'pruneLinkedRecordClosures.linkPredicates',
-    BOUNDED_MUTATION_MAX_PREDICATES,
-  );
-  const recordParentPredicate = absoluteIri(
-    input.recordParentPredicate,
-    'pruneLinkedRecordClosures.recordParentPredicate',
-  );
-  const protectedRecordIri = input.protectedRecordIri === undefined
-    ? undefined
-    : absoluteIri(input.protectedRecordIri, 'pruneLinkedRecordClosures.protectedRecordIri');
-  const descendantSeparator = boundedString(
-    input.descendantSeparator,
-    'pruneLinkedRecordClosures.descendantSeparator',
-    64,
-  );
-  assertOperandBudget('pruneLinkedRecordClosures', [
-    graphUri,
-    ...matchObjectIris,
-    ...linkPredicates,
-    recordParentPredicate,
-    descendantSeparator,
-    ...(protectedRecordIri ? [protectedRecordIri] : []),
-  ]);
-  return {
-    graphUri,
-    matchObjectIris,
-    linkPredicates,
-    recordParentPredicate,
-    protectedRecordIri,
-    descendantSeparator,
-  };
+  const captured = capturePruneLinkedRecordClosuresInput(input);
+  materializePruneLinkedRecordClosuresInput(captured, false);
+  return captured;
 }
 
 export function buildPruneLinkedRecordClosuresUpdate(input: PruneLinkedRecordClosuresInput): string {

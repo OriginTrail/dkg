@@ -26,6 +26,7 @@ import type { SystemRecordLaneControllerV1 } from './system-record-materializer-
 import {
   captureStructuredMutationSnapshot,
 } from './bounded-structured-mutation.js';
+import { isBoundedMutationBudgetError } from './structured-mutation/primitives.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -471,7 +472,8 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       } catch (error) {
         if (
           snapshot.outcome !== 'noop' &&
-          !isTripleStoreCapabilityRefusal(error, 'structuredMutation')
+          !isTripleStoreCapabilityRefusal(error, 'structuredMutation') &&
+          !isBoundedMutationBudgetError(error)
         ) {
           this.flagReconcile('structuredMutation(indeterminate-failure)');
         }

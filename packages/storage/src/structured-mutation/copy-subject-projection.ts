@@ -1,6 +1,7 @@
 import { sparqlString } from '@origintrail-official/dkg-core';
 import type { CopySubjectProjectionInput } from '../triple-store.js';
 import {
+  BOUNDED_MUTATION_MAX_IRIS,
   BOUNDED_MUTATION_MAX_PREDICATES,
   BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
   BoundedMutationBudgetError,
@@ -8,50 +9,87 @@ import {
   assertBoundedStructuredUpdate,
   assertOperandBudget,
   boundedString,
-  uniqueIris,
 } from './primitives.js';
+import {
+  captureInputRecord,
+  captureUniqueIris,
+  type StructuredMutationSemantics,
+} from './capture-internal.js';
 
-export function normalizeCopySubjectProjectionInput(
-  input: CopySubjectProjectionInput,
-): CopySubjectProjectionInput {
-  const sourceGraphUris = uniqueIris(
-    input.sourceGraphUris,
+export function captureCopySubjectProjectionInput(input: unknown): CopySubjectProjectionInput {
+  const value = captureInputRecord(input, 'copySubjectProjection');
+  const sourceGraphUris = captureUniqueIris(
+    value.sourceGraphUris,
     'copySubjectProjection.sourceGraphUris',
     BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
+    false,
   );
-  const targetGraphUri = absoluteIri(input.targetGraphUri, 'copySubjectProjection.targetGraphUri');
+  const targetGraphUri = absoluteIri(
+    value.targetGraphUri as string,
+    'copySubjectProjection.targetGraphUri',
+  );
   if (sourceGraphUris.includes(targetGraphUri)) {
     throw new Error('copySubjectProjection target graph must not be a source graph');
   }
-  const roots = uniqueIris(input.roots, 'copySubjectProjection.roots');
+  const roots = captureUniqueIris(
+    value.roots,
+    'copySubjectProjection.roots',
+    BOUNDED_MUTATION_MAX_IRIS,
+    false,
+  );
   const descendantSuffix = boundedString(
-    input.descendantSuffix,
+    value.descendantSuffix as string,
     'copySubjectProjection.descendantSuffix',
     256,
   );
   if (!descendantSuffix.startsWith('/')) {
     throw new Error('copySubjectProjection.descendantSuffix must start with /');
   }
-  const excludedPredicates = uniqueIris(
-    input.excludedPredicates,
+  const excludedPredicates = captureUniqueIris(
+    value.excludedPredicates,
     'copySubjectProjection.excludedPredicates',
     BOUNDED_MUTATION_MAX_PREDICATES,
     true,
   );
-  assertOperandBudget('copySubjectProjection', [
-    ...sourceGraphUris,
-    targetGraphUri,
-    ...roots,
-    descendantSuffix,
-    ...excludedPredicates,
-  ]);
-  return {
+  return Object.freeze({
     sourceGraphUris,
     targetGraphUri,
     roots,
     descendantSuffix,
     excludedPredicates,
+  });
+}
+
+export function copySubjectProjectionSemantics(
+  input: CopySubjectProjectionInput,
+): StructuredMutationSemantics {
+  return {
+    guardedGraphs: [...input.sourceGraphUris, input.targetGraphUri],
+    touchedGraphs: [input.targetGraphUri],
+    mightMutate: true,
   };
+}
+
+export function materializeCopySubjectProjectionInput(
+  input: CopySubjectProjectionInput,
+  buildUpdate = true,
+): string | undefined {
+  assertOperandBudget('copySubjectProjection', [
+    ...input.sourceGraphUris,
+    input.targetGraphUri,
+    ...input.roots,
+    input.descendantSuffix,
+    ...input.excludedPredicates,
+  ]);
+  return buildUpdate ? buildCopySubjectProjectionUpdateFromNormalized(input) : undefined;
+}
+
+export function normalizeCopySubjectProjectionInput(
+  input: CopySubjectProjectionInput,
+): CopySubjectProjectionInput {
+  const captured = captureCopySubjectProjectionInput(input);
+  materializeCopySubjectProjectionInput(captured, false);
+  return captured;
 }
 
 export function buildCopySubjectProjectionUpdate(input: CopySubjectProjectionInput): string {
@@ -82,7 +120,12 @@ WHERE {
 export function chunkCopySubjectProjectionInput(
   input: CopySubjectProjectionInput,
 ): CopySubjectProjectionInput[] {
-  const roots = uniqueIris(input.roots, 'copySubjectProjection.roots');
+  const roots = captureUniqueIris(
+    input.roots,
+    'copySubjectProjection.roots',
+    BOUNDED_MUTATION_MAX_IRIS,
+    false,
+  );
   const normalized = normalizeCopySubjectProjectionInput({ ...input, roots: [roots[0]] });
   const chunks: CopySubjectProjectionInput[] = [];
 

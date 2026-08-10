@@ -25,6 +25,7 @@ import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-backend-u
 import {
   captureStructuredMutationSnapshot,
 } from './bounded-structured-mutation.js';
+import { isBoundedMutationBudgetError } from './structured-mutation/primitives.js';
 import {
   CACHED_READ_GATE_V1,
   asCachedReadGateV1,
@@ -566,7 +567,8 @@ export class GraphSetIndexStore implements TripleStore {
     } catch (error) {
       if (
         snapshot.outcome !== 'noop' &&
-        !isTripleStoreCapabilityRefusal(error, 'structuredMutation')
+        !isTripleStoreCapabilityRefusal(error, 'structuredMutation') &&
+        !isBoundedMutationBudgetError(error)
       ) {
         this.scheduleFullRefresh('structuredMutation');
       }

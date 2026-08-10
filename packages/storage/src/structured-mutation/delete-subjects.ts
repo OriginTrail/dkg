@@ -1,16 +1,50 @@
 import type { DeleteSubjectsInput } from '../triple-store.js';
 import {
+  BOUNDED_MUTATION_MAX_IRIS,
   absoluteIri,
   assertBoundedStructuredUpdate,
   assertOperandBudget,
-  uniqueIris,
 } from './primitives.js';
+import {
+  captureInputRecord,
+  captureUniqueIris,
+  type StructuredMutationSemantics,
+} from './capture-internal.js';
+
+export function captureDeleteSubjectsInput(input: unknown): DeleteSubjectsInput {
+  const value = captureInputRecord(input, 'deleteSubjects');
+  const graphUri = absoluteIri(value.graphUri as string, 'deleteSubjects.graphUri');
+  const subjects = captureUniqueIris(
+    value.subjects,
+    'deleteSubjects.subjects',
+    BOUNDED_MUTATION_MAX_IRIS,
+    true,
+  );
+  return Object.freeze({ graphUri, subjects });
+}
+
+export function deleteSubjectsSemantics(
+  input: DeleteSubjectsInput,
+): StructuredMutationSemantics {
+  return {
+    guardedGraphs: [input.graphUri],
+    touchedGraphs: [input.graphUri],
+    mightMutate: input.subjects.length > 0,
+  };
+}
+
+export function materializeDeleteSubjectsInput(
+  input: DeleteSubjectsInput,
+  buildUpdate = true,
+): string | undefined {
+  assertOperandBudget('deleteSubjects', [input.graphUri, ...input.subjects]);
+  return buildUpdate ? buildDeleteSubjectsUpdateFromNormalized(input) : undefined;
+}
 
 export function normalizeDeleteSubjectsInput(input: DeleteSubjectsInput): DeleteSubjectsInput {
-  const graphUri = absoluteIri(input.graphUri, 'deleteSubjects.graphUri');
-  const subjects = uniqueIris(input.subjects, 'deleteSubjects.subjects', undefined, true);
-  assertOperandBudget('deleteSubjects', [graphUri, ...subjects]);
-  return { graphUri, subjects };
+  const captured = captureDeleteSubjectsInput(input);
+  materializeDeleteSubjectsInput(captured, false);
+  return captured;
 }
 
 export function buildDeleteSubjectsUpdate(input: DeleteSubjectsInput): string | undefined {

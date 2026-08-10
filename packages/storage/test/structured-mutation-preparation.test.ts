@@ -1,13 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
+  BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
   buildStructuredMutationUpdate,
   captureStructuredMutationEffects,
   captureStructuredMutationSnapshot,
   type StructuredMutationSnapshot,
 } from '../src/bounded-structured-mutation.js';
+import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
 import { materializeStructuredMutation } from '../src/structured-mutation-materialization-internal.js';
-import type { StructuredMutation } from '../src/triple-store.js';
+import type { StructuredMutation, TripleStore } from '../src/triple-store.js';
 
 const GRAPH = 'urn:test:preparation';
 const TARGET = 'urn:test:preparation:target';
@@ -212,4 +214,100 @@ describe('structured mutation preparation', () => {
     expect(captureStructuredMutationEffects(malformed)).toBeUndefined();
     expect(() => captureStructuredMutationSnapshot(malformed)).toThrow(/absolute IRI/);
   });
+
+  it.each(invalidSnapshotDescriptors())(
+    'rejects the $name descriptor through snapshot capture',
+    ({ mutation, expected }) => {
+      expect(() => captureStructuredMutationSnapshot(mutation)).toThrow(expected);
+    },
+  );
+
+  it('rejects an invalid descriptor in a decorator before inner I/O', async () => {
+    const operation = vi.fn(async () => {});
+    const store = new GraphSetIndexStore({
+      structuredMutation: operation,
+    } as unknown as TripleStore);
+
+    await expect(store.structuredMutation({
+      kind: 'copy-subject-projection',
+      input: {
+        sourceGraphUris: [GRAPH],
+        targetGraphUri: GRAPH,
+        roots: ['urn:test:subject'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    })).rejects.toThrow(/must not be a source/);
+    expect(operation).not.toHaveBeenCalled();
+  });
 });
+
+function invalidSnapshotDescriptors(): Array<{
+  name: string;
+  mutation: StructuredMutation;
+  expected: RegExp;
+}> {
+  const sparseSubjects = Array(2) as string[];
+  sparseSubjects[1] = 'urn:test:subject';
+  return [
+    {
+      name: 'sparse',
+      mutation: deleteMutation(sparseSubjects),
+      expected: /dense array/,
+    },
+    {
+      name: 'duplicate',
+      mutation: deleteMutation(['urn:test:subject', 'urn:test:subject']),
+      expected: /duplicate/,
+    },
+    {
+      name: 'oversized',
+      mutation: {
+        kind: 'copy-subject-projection',
+        input: {
+          sourceGraphUris: Array.from(
+            { length: BOUNDED_MUTATION_MAX_SOURCE_GRAPHS + 1 },
+            (_, index) => `urn:test:source:${index}`,
+          ),
+          targetGraphUri: TARGET,
+          roots: ['urn:test:subject'],
+          descendantSuffix: '/',
+          excludedPredicates: [],
+        },
+      },
+      expected: /must contain/,
+    },
+    {
+      name: 'cross-scope',
+      mutation: {
+        kind: 'replace-subject-predicates',
+        input: {
+          graphUri: GRAPH,
+          subject: 'urn:test:subject',
+          predicates: [PREDICATE],
+          replacementQuads: [{
+            subject: 'urn:test:subject',
+            predicate: PREDICATE,
+            object: '"value"',
+            graph: TARGET,
+          }],
+        },
+      },
+      expected: /must target subject/,
+    },
+    {
+      name: 'same source and target',
+      mutation: {
+        kind: 'copy-subject-projection',
+        input: {
+          sourceGraphUris: [GRAPH],
+          targetGraphUri: GRAPH,
+          roots: ['urn:test:subject'],
+          descendantSuffix: '/',
+          excludedPredicates: [],
+        },
+      },
+      expected: /must not be a source/,
+    },
+  ];
+}

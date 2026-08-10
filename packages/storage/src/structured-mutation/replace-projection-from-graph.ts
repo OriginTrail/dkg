@@ -6,53 +6,83 @@ import {
   absoluteIri,
   assertBoundedStructuredUpdate,
   assertOperandBudget,
-  uniqueIris,
 } from './primitives.js';
+import {
+  captureInputRecord,
+  captureUniqueIris,
+  type StructuredMutationSemantics,
+} from './capture-internal.js';
 
-export function normalizeReplaceProjectionFromGraphInput(
-  input: ReplaceProjectionFromGraphInput,
+export function captureReplaceProjectionFromGraphInput(
+  input: unknown,
 ): ReplaceProjectionFromGraphInput {
+  const value = captureInputRecord(input, 'replaceProjectionFromGraph');
   const targetGraphUri = absoluteIri(
-    input.targetGraphUri,
+    value.targetGraphUri as string,
     'replaceProjectionFromGraph.targetGraphUri',
   );
   const stagingGraphUri = absoluteIri(
-    input.stagingGraphUri,
+    value.stagingGraphUri as string,
     'replaceProjectionFromGraph.stagingGraphUri',
   );
   if (targetGraphUri === stagingGraphUri) {
     throw new Error('replaceProjectionFromGraph requires distinct target and staging graphs');
   }
   const targetSubject = absoluteIri(
-    input.targetSubject,
+    value.targetSubject as string,
     'replaceProjectionFromGraph.targetSubject',
   );
-  const preservedTargetPredicates = uniqueIris(
-    input.preservedTargetPredicates,
+  const preservedTargetPredicates = captureUniqueIris(
+    value.preservedTargetPredicates,
     'replaceProjectionFromGraph.preservedTargetPredicates',
     BOUNDED_MUTATION_MAX_PREDICATES,
     true,
   );
-  const targetSubjectPrefixes = uniqueIris(
-    input.targetSubjectPrefixes,
+  const targetSubjectPrefixes = captureUniqueIris(
+    value.targetSubjectPrefixes,
     'replaceProjectionFromGraph.targetSubjectPrefixes',
     BOUNDED_MUTATION_MAX_PREFIXES,
     true,
   );
-  assertOperandBudget('replaceProjectionFromGraph', [
-    targetGraphUri,
-    stagingGraphUri,
-    targetSubject,
-    ...preservedTargetPredicates,
-    ...targetSubjectPrefixes,
-  ]);
-  return {
+  return Object.freeze({
     targetGraphUri,
     stagingGraphUri,
     targetSubject,
     preservedTargetPredicates,
     targetSubjectPrefixes,
+  });
+}
+
+export function replaceProjectionFromGraphSemantics(
+  input: ReplaceProjectionFromGraphInput,
+): StructuredMutationSemantics {
+  return {
+    guardedGraphs: [input.targetGraphUri, input.stagingGraphUri],
+    touchedGraphs: [input.targetGraphUri],
+    mightMutate: true,
   };
+}
+
+export function materializeReplaceProjectionFromGraphInput(
+  input: ReplaceProjectionFromGraphInput,
+  buildUpdate = true,
+): string | undefined {
+  assertOperandBudget('replaceProjectionFromGraph', [
+    input.targetGraphUri,
+    input.stagingGraphUri,
+    input.targetSubject,
+    ...input.preservedTargetPredicates,
+    ...input.targetSubjectPrefixes,
+  ]);
+  return buildUpdate ? buildReplaceProjectionFromGraphUpdateFromNormalized(input) : undefined;
+}
+
+export function normalizeReplaceProjectionFromGraphInput(
+  input: ReplaceProjectionFromGraphInput,
+): ReplaceProjectionFromGraphInput {
+  const captured = captureReplaceProjectionFromGraphInput(input);
+  materializeReplaceProjectionFromGraphInput(captured, false);
+  return captured;
 }
 
 export function buildReplaceProjectionFromGraphUpdate(

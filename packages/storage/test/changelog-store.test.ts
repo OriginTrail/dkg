@@ -24,6 +24,8 @@ import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGu
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, StructuredMutation, TripleStore, UpdateOptions } from '../src/triple-store.js';
 import { UnsupportedTripleStoreCapabilityError } from '../src/unsupported-capability-error.js';
+import { captureStructuredMutationSnapshot } from '../src/bounded-structured-mutation.js';
+import { materializeStructuredMutation } from '../src/structured-mutation-materialization-internal.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -308,6 +310,36 @@ describe('ChangelogStore — opaque update handling', () => {
     await base.close();
   });
 
+  it('does not flag reconcile after a deferred-budget refusal before backend I/O', async () => {
+    const base = new OxigraphStore();
+    let backendUpdates = 0;
+    const validatingLeaf = new Proxy(base, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') {
+          return async (mutation: StructuredMutation, options?: QueryOptions) => {
+            const materialized = materializeStructuredMutation(
+              captureStructuredMutationSnapshot(mutation),
+            );
+            if (materialized.outcome === 'noop') return;
+            backendUpdates += 1;
+            await target.structuredMutation(mutation, options);
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const log = new ChangelogStore(validatingLeaf);
+
+    await expect(log.structuredMutation(overBudgetDeleteMutation(G1)))
+      .rejects.toThrow(/operand bytes/);
+
+    expect(backendUpdates).toBe(0);
+    expect(log.needsReconcile).toBe(false);
+    expect(await log.readChanges(0, 100)).toEqual([]);
+    await base.close();
+  });
+
   it('keeps an enabled no-op inside the write tail while close drains it', async () => {
     const base = new OxigraphStore();
     await base.insert([q('http://ex.org/delete-me', G1)]);
@@ -410,6 +442,19 @@ describe('ChangelogStore — opaque update handling', () => {
     await base.close();
   });
 });
+
+function overBudgetDeleteMutation(graphUri: string): StructuredMutation {
+  return {
+    kind: 'delete-subjects',
+    input: {
+      graphUri,
+      subjects: Array.from(
+        { length: 65_000 },
+        (_, index) => `urn:test:operand:${index}:${'x'.repeat(55)}`,
+      ),
+    },
+  };
+}
 
 describe('ChangelogStore over Blazegraph — single-request atomicity', () => {
   let server: Server;
