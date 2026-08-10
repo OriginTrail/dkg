@@ -36,7 +36,7 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  */
 function storeWithFailingOps(
   base: OxigraphStore,
-  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'update')[],
+  failingOps: readonly ('query' | 'insert' | 'dropGraph' | 'deleteByPattern' | 'structuredMutation' | 'replaceGraphAndSubject' | 'update' | 'flush')[],
 ): TripleStore {
   return new Proxy(base as unknown as TripleStore, {
     get(target, prop, receiver) {
@@ -251,7 +251,15 @@ describe('V10 UPDATE StorageACK — peer handler + collector quorum', () => {
       // hits a closed store used to throw out of the handler → stream reset →
       // publisher no_response. It must instead reply with the transient decline.
       const onDecline = vi.fn();
-      const store = storeWithFailingOps(new OxigraphStore(), ['update']);
+      // Arm every mutation seam the targeted update could travel, not just the
+      // one it uses today: #2185 migrated this path from `update()` to
+      // `structuredMutation()` and this injection kept naming `update`, so the
+      // failure stopped being injected and the guard went inert. Naming all of
+      // them keeps the guard alive across the next migration too.
+      const store = storeWithFailingOps(
+        new OxigraphStore(),
+        ['structuredMutation', 'replaceGraphAndSubject', 'update'],
+      );
       const handler = new StorageACKHandler(
         store as any,
         makeConfig(ethers.Wallet.createRandom(), 42n, { onDecline }),
