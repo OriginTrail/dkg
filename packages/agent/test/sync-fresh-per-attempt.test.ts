@@ -1749,12 +1749,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     const warnings: string[] = [];
     const limits: number[] = [];
     const pageSizeProfileCache = new SyncPageSizeProfileCache();
-    const pageSizeProfile = pageSizeProfileCache.get({
+    const pageSizeProfileScope = {
       remotePeerId: REMOTE_PEER_ID,
       contextGraphId: CG_ID,
       includeSharedMemory: false,
-      phase: 'data',
-    });
+      phase: 'data' as const,
+    };
     let sendCalls = 0;
 
     await runFetchWithFakeTimers(
@@ -1796,7 +1796,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
 
     expect(sendCalls).toBe(2);
     expect(limits).toEqual([100, SYNC_REQUEST_SAFE_PAGE_SIZE]);
-    expect(pageSizeProfile.preferredPageSize).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(pageSizeProfileCache.preferred(pageSizeProfileScope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
     expect(warnings.some((message) => message.includes('Legacy sync responder busy'))).toBe(true);
   });
 
