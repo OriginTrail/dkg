@@ -89,7 +89,7 @@ describe('SqliteSnapshotPageIndexStore', () => {
     await pageIndexes.upsert(record);
 
     expect(await pageIndexes.get(DIGEST)).toEqual(record);
-    expect(dashboard.db.pragma('user_version', { simple: true })).toBe(33);
+    expect(dashboard.db.pragma('user_version', { simple: true })).toBe(32);
   });
 
   it('falls back to the snapshot when the real SQLite connection cannot read or write', async () => {

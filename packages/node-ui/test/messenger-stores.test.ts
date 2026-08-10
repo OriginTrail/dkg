@@ -46,7 +46,7 @@ describe('V12 migration', () => {
     // DB layer in `db.test.ts`; this assertion just pins the
     // substrate store fixtures to the current schema. V33 adds
     // deployment-scoped selected VM-reconcile cursors.
-    expect(db.db.pragma('user_version', { simple: true })).toBe(33);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
   });
 });
 

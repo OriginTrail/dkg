@@ -3230,6 +3230,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
     isCurrent: () => boolean = () => true,
     signal?: AbortSignal,
   ): Promise<VmReconcileTarget> {
+    // The operator switch is the outer boundary for every reconcile target.
+    // Keep it ahead of subscription self-prime and selected-only name-hash
+    // resolution so a disabled reconciler performs no target-specific chain
+    // IO as a side effect of probing availability.
+    if (!this.vmReconcileEnabled()) {
+      throw new VmReconcileUnavailableError();
+    }
     let sub = this.subscribedContextGraphs.get(localCgId);
     if (!sub?.subscribed && !sub?.coreHosted) {
       if (!this.isRfc64SelectedVmReconcileTargetAllowed(localCgId)) {
@@ -3278,10 +3285,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       binding = current;
     }
-    if (!this.vmReconcileEnabled()) {
-      throw new VmReconcileUnavailableError();
-    }
-
     let cursor = this.reconcileCursors.get(localCgId);
     if (!cursor) {
       cursor = createCursorState(
@@ -3337,8 +3340,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (resolved === null || resolved <= 0n) {
       throw new ContextGraphOnChainIdUnresolvedError(localCgId);
     }
-    if (!this.vmReconcileEnabled()) throw new VmReconcileUnavailableError();
-
     const deploymentId = requireVmReconcileDeploymentId(this.chain.deploymentId);
     const onChainId = resolved.toString();
     let selectedState = this.selectedVmReconcileCursors.get(localCgId);
@@ -4959,10 +4960,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
   clearVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
     const sub = this.subscribedContextGraphs.get(localCgId);
     if (sub?.subscribed || sub?.coreHosted) return;
-    this.forceClearVmReconcileStateForContextGraph(localCgId);
+    // Passive subscription/discovery rows do not own RFC-64 selected-only
+    // progress. Clear subscription-owned reconciliation state while retaining
+    // the independently selected, deployment-fenced cursor.
+    this.forceClearVmReconcileStateForContextGraph(localCgId, {
+      includeSelectedCursor: false,
+    });
   }
 
-  forceClearVmReconcileStateForContextGraph(this: DKGAgent, localCgId: string): void {
+  forceClearVmReconcileStateForContextGraph(
+    this: DKGAgent,
+    localCgId: string,
+    options: { includeSelectedCursor?: boolean } = {},
+  ): void {
     const negativeCacheKeys = this.vmReconcileNegativeCacheKeysByCg.get(localCgId);
     if (negativeCacheKeys) {
       for (const cacheKey of Array.from(negativeCacheKeys)) {
@@ -4980,7 +4990,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Best-effort durable cleanup; generation checks still reject stale rows.
       });
     this.reconcileCursors.delete(localCgId);
-    if (this.selectedVmReconcileCursors.delete(localCgId)) {
+    if (
+      options.includeSelectedCursor !== false
+      && this.selectedVmReconcileCursors.delete(localCgId)
+    ) {
       this.selectedVmReconcileBindingGeneration += 1;
     }
     this.clearVmReconcileRotationStateForContextGraph(localCgId);
