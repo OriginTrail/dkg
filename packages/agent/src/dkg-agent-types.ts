@@ -770,6 +770,38 @@ export interface ContextGraphSubscriptionStore {
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
 }
 
+/**
+ * Durable cursor store owned by selected-only VM reconciliation.
+ *
+ * This deliberately does not extend `ContextGraphSubscriptionStore`: selecting
+ * a public CG for RFC-64 convergence grants neither membership nor Core custody
+ * and therefore must not acquire a subscription-store dependency.
+ */
+export interface SelectedVmReconcileCursorStore {
+  loadSelectedVmReconcileCursor?(
+    deploymentId: string,
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): Promise<SelectedVmReconcileCursorRecord | null>;
+  saveSelectedVmReconcileCursor?(record: SelectedVmReconcileCursorRecord): Promise<void>;
+}
+
+/**
+ * Restart-durable VM progress for an operator-selected RFC-64 public CG.
+ *
+ * This is deliberately not a ContextGraph subscription record: selection
+ * grants neither membership nor Core custody. The local and numeric chain ids
+ * jointly identify the cursor inside one exact chain deployment. A chain/HUB
+ * redeploy therefore cannot reuse progress from an unrelated VM inventory.
+ */
+export interface SelectedVmReconcileCursorRecord {
+  deploymentId: string;
+  contextGraphId: string;
+  onChainContextGraphId: string;
+  nameHash: string;
+  watermark: number;
+}
+
 /** Restart-durable, generation-gated record of one authoritative no-match scan. */
 export interface VmReconcileNegativeRecord {
   cacheKey: string;
@@ -809,6 +841,8 @@ export interface VmReconcileRotationRecord {
 }
 
 export interface ContextGraphSubscriptionRehydrationStatus {
+  /** Whether persisted subscription activation was enabled for this boot. */
+  rehydrationEnabled: boolean;
   /** Non-system persisted rows governed by the rehydration cap. */
   persistedTotal: number;
   /** Persisted system rows seen during rehydration; excluded from cap math. */
@@ -1706,6 +1740,16 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable progress owned by selected-only VM reconciliation. */
+  selectedVmReconcileCursorStore?: SelectedVmReconcileCursorStore;
+  /**
+   * Whether durable context-graph subscription rows become live subscriptions
+   * during startup. Defaults to `true`. When `false`, startup still opens the
+   * same durable stores and leaves every row and RDF graph intact, but it does
+   * not restore those rows into gossip handlers or automatic sync scope.
+   * Explicit subscriptions made after boot continue to work normally.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Durable local store for paged sync checkpoints. Defaults to in-memory. */
   syncCheckpointStore?: SyncCheckpointStore;
   /** OT-RFC-59 durable per-(peer,CG) changelog cursor store. Defaults to in-memory. */
@@ -1776,7 +1820,9 @@ export type ResolvedDKGAgentConfig =
     | 'rfc64PublicCatalogAutoPublish'
     | 'rfc64PublicCatalogBootstrap'
     | 'rfc64CatalogDeploymentProfile'
+    | 'contextGraphSubscriptionRehydrationEnabled'
   > & {
+    contextGraphSubscriptionRehydrationEnabled: boolean;
     storageAckTiming: StorageAckTiming;
     rfc64CatalogDeploymentProfile?: Readonly<CatalogSealDeploymentProfileV1>;
     rfc64PublicCatalogAutoPublishPolicy?: ResolvedRfc64PublicCatalogAutoPublishPolicyV1;

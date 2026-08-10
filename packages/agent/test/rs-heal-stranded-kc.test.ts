@@ -53,8 +53,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling';
 import { writeMaterializedVersion, readMaterializedVersion } from '@origintrail-official/dkg-publisher';
+import { DKGAgent } from '../src/dkg-agent.js';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
@@ -105,10 +107,25 @@ async function seedOntology(store: OxigraphStore, localCgId: string, onChainId: 
 
 /** Minimal `this` for the heal — only what the method body touches. */
 function makeAgentLike(store: OxigraphStore): unknown {
-  return {
+  return Object.assign(Object.create(DKGAgent.prototype), {
     store,
+    contextGraphBindingState: new ContextGraphBindingState(),
     rsHealCursorByCg: new Map<string, string>(),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },
+  });
+}
+
+function authoritativeTarget(onChainId: string): unknown {
+  const sub = { subscribed: true, synced: true, onChainId };
+  return {
+    kind: 'subscription',
+    sub,
+    bindingKind: 'authoritative',
+    onChainId,
+    onChainCgId: BigInt(onChainId),
+    cursor: { watermark: 0, ahead: new Map(), scanOrdinal: 1 },
+    bindingGeneration: 0,
+    watermarkBefore: 0,
   };
 }
 
@@ -116,7 +133,7 @@ async function runHeal(store: OxigraphStore, localCgId: string, onChainId: strin
   await SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
     makeAgentLike(store) as never,
     localCgId,
-    { subscribed: true, synced: true, onChainId } as never,
+    authoritativeTarget(onChainId) as never,
   );
 }
 
@@ -252,7 +269,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const run = () => SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       agentLike as never,
       cg,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
     const healedCount = async (): Promise<number> => {
       const result = await store.query(
@@ -307,7 +324,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const run = () => SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       agentLike,
       cg,
-      { subscribed: true, synced: true, onChainId } as never,
+      authoritativeTarget(onChainId) as never,
     );
     const laterMaterialized = async (): Promise<boolean> => {
       const result = await store.query(
@@ -364,6 +381,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const cursorMap = new Map<string, string>([[cursorKey, 'did:dkg:hardhat:31337/0xbefore/1']]);
     const agentLike = {
       store: fakeStore,
+      contextGraphBindingState: new ContextGraphBindingState(),
       rsHealCursorByCg: cursorMap,
       log: { info: () => undefined, warn: () => undefined, error: () => undefined },
     };
@@ -371,7 +389,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     await expect(SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       agentLike as never,
       'busy-cg',
-      { subscribed: true, synced: true, onChainId: '29' } as never,
+      authoritativeTarget('29') as never,
     )).resolves.toEqual({ status: 'deferred', reason: 'store-busy' });
 
     expect(queryCalls).toBe(3);
@@ -424,11 +442,12 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
     const heal = SwmHostModeMethods.prototype.healStrandedScopedKCs.call(
       {
         store: fakeStore,
+        contextGraphBindingState: new ContextGraphBindingState(),
         rsHealCursorByCg: cursorMap,
         log: { info: () => undefined, warn: () => undefined, error: () => undefined },
       } as never,
       'abort-cg',
-      { subscribed: true, synced: true, onChainId: '30' } as never,
+      authoritativeTarget('30') as never,
       () => !controller.signal.aborted,
       controller.signal,
     );
@@ -453,7 +472,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
       TEST_CG,
       { subscribed: true, synced: true, onChainId: TEST_ONCHAIN, lastReconciledOrdinal: 0 },
     ]]);
-    agentLike.contextGraphBindingGenerations = new Map();
+    agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileEnabled = () => true;
@@ -501,7 +520,7 @@ describe('healStrandedScopedKCs — content-binding gate', () => {
         lastReconciledOrdinal: 0,
       },
     ]]);
-    agentLike.contextGraphBindingGenerations = new Map();
+    agentLike.contextGraphBindingState = new ContextGraphBindingState();
     agentLike.reconcileCursors = new Map();
     agentLike.vmReconcilePhysicalRuns = new Set();
     agentLike.vmReconcileDispatcher = {

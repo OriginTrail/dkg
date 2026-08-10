@@ -25,6 +25,7 @@ import type { Rfc64PublicCatalogNativeSynchronizationEvidenceV1 } from './rfc64/
 import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/public-catalog-reconciliation-failure-v1.js';
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
+import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -364,6 +365,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -1023,6 +1025,19 @@ export class DKGAgentBase {
   protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
+  /**
+   * RFC-64 selected-only VM progress is separate from membership subscriptions.
+   * Each entry is fenced by the exact chain deployment, numeric chain binding,
+   * and a monotonically increasing process-local generation; its watermark is
+   * persisted in a dedicated non-subscription record when the configured store
+   * supports it.
+   */
+  protected readonly selectedVmReconcileCursors = new Map<string, {
+    record: SelectedVmReconcileCursorRecord;
+    cursor: CursorState;
+    bindingGeneration: number;
+  }>();
+  protected selectedVmReconcileBindingGeneration = 0;
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
   /**
@@ -1124,8 +1139,8 @@ export class DKGAgentBase {
   /** Serialize local author-head construction/CAS independently per exact scope. */
   protected readonly rfc64AuthorCatalogMutationQueuesV1 = new Map<string, Promise<void>>();
   protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
-  /** Monotonic per-CG fence for async work captured across an on-chain binding transition. */
-  protected readonly contextGraphBindingGenerations = new Map<string, number>();
+  /** Process-local reverse candidates plus the monotonic binding fence. */
+  protected readonly contextGraphBindingState = new ContextGraphBindingState();
   protected contextGraphSubscriptionRehydrationStatus: ContextGraphSubscriptionRehydrationStatus | null = null;
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();

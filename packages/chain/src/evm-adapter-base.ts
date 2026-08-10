@@ -39,9 +39,13 @@ import { ReadThroughTtlCache } from './keyed-ttl-single-flight-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import { ContextGraphRegistryScanCursor } from './context-graph-registry-scan-cursor.js';
+import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
+import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS } from './evm-adapter-constants.js';
+import { RPC_READ_STALL_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
+
+export { CG_REGISTRY_MAX_SCAN_PAGES } from './evm-adapter-constants.js';
 
 type ContractWriteSender = (
   contract: Contract,
@@ -270,21 +274,6 @@ const KA_HIGH_WATER_MAX_SCAN_PAGES = 1_500;
 
 /** Default pre-10.0.4 fallback eth_getLogs window — the smallest common cap. */
 const KA_HIGH_WATER_DEFAULT_PAGE_SIZE = 2_000;
-
-const CG_REGISTRY_DEFAULT_PAGE_SIZE = 2_000;
-
-const CG_REGISTRY_LEGACY_PAGE_SIZE = 9_000;
-const CG_REGISTRY_LEGACY_MAX_SCAN_PAGES = 1_500;
-
-/**
- * Preserve the old default registry scan span while using smaller RPC-safe
- * pages. Larger configured page windows extend the block span at the same call
- * budget.
- */
-export const CG_REGISTRY_MAX_SCAN_PAGES = Math.ceil(
-  (CG_REGISTRY_LEGACY_PAGE_SIZE * CG_REGISTRY_LEGACY_MAX_SCAN_PAGES) /
-  CG_REGISTRY_DEFAULT_PAGE_SIZE,
-);
 
 export const CG_REGISTRY_REORG_BUFFER_BLOCKS = 50;
 
@@ -916,6 +905,63 @@ export class EVMChainAdapterBase {
    */
   protected readonly cachedContractDeployBlocks: Map<string, number> = new Map();
 
+  /** Lazily constructed by the base-owned internal accessor below. */
+  protected contextGraphNameHashResolver: EvmContextGraphNameHashResolver | undefined;
+
+  /**
+   * Adapter-internal lazy accessor. It is an ordinary protected prototype
+   * method and is explicitly classified as internal by the runtime API-parity
+   * audit; production shape does not depend on how that test discovers APIs.
+   */
+  protected getContextGraphNameHashResolver(): EvmContextGraphNameHashResolver {
+    this.contextGraphNameHashResolver ??= new EvmContextGraphNameHashResolver({
+      source: new EvmContextGraphNameHashFence({
+        initialize: () => this.init(),
+        requireContextGraphStorage: () => this.requireContextGraphStorage(),
+        providers: () => this.providers,
+        rpcUrls: () => this.rpcUrls,
+        scanPageSize: () => this.cgRegistryScanPageSize,
+        ensureConfiguredStaticChainIdValidated: (provider) =>
+          this.ensureConfiguredStaticChainIdValidated(provider),
+        rebindContract: (contract, provider) => this.rebindContract(contract, provider),
+        readLatestBlock: () => this.readTipProvider(
+          'resolveContextGraphIdByNameHash current-slot anchor',
+          (provider) => provider.getBlock('latest'),
+        ),
+        readAnchorHash: (blockNumber) => this.readProviderRetryingNull(
+          'resolveContextGraphIdByNameHash validate current-slot anchor',
+          async (provider) => {
+            const block = await provider.getBlock(blockNumber);
+            return block?.hash?.toLowerCase() ?? null;
+          },
+          { skipPreferred: true },
+        ),
+        resolveContractDeployBlock: (address, operationLabel, contractLabel) =>
+          this.resolveContractDeployBlock(address, operationLabel, contractLabel),
+        queryEventLogsPage: (
+          baseContract,
+          filter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          label,
+          preferred,
+        ) => this.queryEventLogsPage(
+          baseContract,
+          filter,
+          lo,
+          hi,
+          scanProviders,
+          connected,
+          label,
+          preferred,
+        ),
+      }),
+    });
+    return this.contextGraphNameHashResolver;
+  }
+
   protected readonly contextGraphRegistryScanCursor: ContextGraphRegistryScanCursor;
 
   /**
@@ -941,6 +987,7 @@ export class EVMChainAdapterBase {
     this.cachedKav10Address = undefined;
     this.cachedMinRequiredSignatures = undefined;
     this.cachedContractDeployBlocks.clear();
+    this.contextGraphNameHashResolver?.invalidateAll();
     this.contextGraphRegistryScanCursor.clearMemoryCache();
   }
 

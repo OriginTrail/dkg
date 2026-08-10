@@ -26,6 +26,7 @@ import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
@@ -104,7 +105,7 @@ async function captureGraphScopedStore(
     chain,
     store: {},
     subscribedContextGraphs: new Map(),
-    contextGraphBindingGenerations: new Map(),
+    contextGraphBindingState: new ContextGraphBindingState(),
     wireIdToLocalCgId: new Map(),
     graphScopedStoreClosed: false,
     graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -300,7 +301,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain: { chainId: 'none' },
       store: {},
       subscribedContextGraphs: new Map(),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       bindSubscriptionOnChainId: vi.fn(),
       persistContextGraphSubscriptionStrict: vi.fn(),
@@ -674,7 +675,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -861,7 +862,7 @@ describe('durable sync lifecycle chain binding', () => {
         },
       },
       subscribedContextGraphs: new Map([[contextGraphId, oldSubscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       enqueueContextGraphSubscriptionPersistWrite,
     };
 
@@ -915,7 +916,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -1115,7 +1116,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),

@@ -31,7 +31,10 @@ import type { EncryptedWorkspacePayloadMsg, GossipEnvelopeMsg, OperationContext,
 import { ethers } from 'ethers';
 import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
-import { generateSubGraphRegistration } from './metadata.js';
+import {
+  generateSubGraphRegistration,
+  replaceLocallyTrustedKnowledgeAssetControlEnvelope,
+} from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
   resolveKnowledgeAssetWorkspaceHead,
@@ -41,6 +44,7 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
+import { computeFlatKCRootV10 } from './merkle.js';
 
 interface WorkspaceGossipDecodeResult {
   request?: WorkspacePublishRequestMsg;
@@ -1401,6 +1405,32 @@ export class SharedMemoryHandler {
         const publicDigest = workspacePublicQuadsDigest(
           normalized.map((quad) => ({ ...quad, graph: '' })),
         );
+        const operationTimestamp = new Date(Number(timestampMs));
+        if (Number.isNaN(operationTimestamp.getTime())) {
+          validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
+          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
+          withWriteLocksRejection = 'validation';
+          return false;
+        }
+        const persistLocallyTrustedControls = async (): Promise<void> => {
+          const merkleRoot = computeFlatKCRootV10(
+            normalized.map((quad) => ({ ...quad, graph: '' })),
+            privateMerkleRoot?.length ? [privateMerkleRoot] : [],
+          );
+          await replaceLocallyTrustedKnowledgeAssetControlEnvelope(
+            this.store,
+            contentScope.ual,
+            {
+              assertionVersion: contentScope.assertionVersion,
+              merkleRoot,
+            },
+            {
+              publisherPeerId,
+              accessPolicy: graphAccessPolicy,
+              allowedPeers: graphAllowedPeers,
+            },
+          );
+        };
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
           : undefined;
@@ -1435,7 +1465,9 @@ export class SharedMemoryHandler {
               currentHead.allowedPeers.slice().sort().join('\u0000') === graphAllowedPeers.join('\u0000');
             if (sameAssertion) {
               // Exact replay: acknowledge idempotently without churning the
-              // graph or immutable operation snapshot.
+              // graph or immutable operation snapshot. Refresh the local-only
+              // controls too, so a retry completes a prior head/sidecar tear.
+              await persistLocallyTrustedControls();
               return true;
             }
             validationRejectionReason =
@@ -1467,14 +1499,6 @@ export class SharedMemoryHandler {
             withWriteLocksRejection = 'cas';
             return false;
           }
-        }
-
-        const operationTimestamp = new Date(Number(timestampMs));
-        if (Number.isNaN(operationTimestamp.getTime())) {
-          validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
-          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-          withWriteLocksRejection = 'validation';
-          return false;
         }
 
         const replacedAtomically = await tryReplaceGraphAtomically(
@@ -1552,6 +1576,11 @@ export class SharedMemoryHandler {
           shareOperationId,
           subGraphName,
         });
+        // The transport/envelope checks above authenticate these mutable
+        // controls. Persist them outside sync-visible metadata, anchored to
+        // this assertion's locally recomputed root, only after the durable SWM
+        // head has committed. Receipt recovery must fail closed without them.
+        await persistLocallyTrustedControls();
 
         return true;
       });

@@ -361,8 +361,9 @@ import {
 import {
   getSyncBackpressureSnapshot,
   getSyncBackpressureBusyError,
-  resolveBooleanSwitch,
   resolveNonNegativeIntegerSwitch,
+  resolveBooleanSwitch,
+  resolveSyncReconcilerEnabled,
   resolveSyncGlobalBackpressure,
   withGlobalSyncBackpressure,
 } from './sync/backpressure.js';
@@ -595,11 +596,6 @@ import { DKGAgentBase } from './dkg-agent-base.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
-import {
-  captureContextGraphBindingGeneration,
-  clearContextGraphBindingGeneration,
-  isContextGraphBindingGenerationCurrent,
-} from './context-graph-binding-generation.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
@@ -1374,7 +1370,7 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 function syncReconcilerEnabled(config: DKGAgentConfig): boolean {
-  return resolveBooleanSwitch(config.syncReconcilerEnabled, 'DKG_SYNC_RECONCILER_ENABLED', true);
+  return resolveSyncReconcilerEnabled(config.syncReconcilerEnabled);
 }
 
 function syncOnConnectEnabled(config: DKGAgentConfig): boolean {
@@ -5351,14 +5347,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           return Promise.reject(shutdownError());
         }
         const subscription = this.subscribedContextGraphs.get(asset.contextGraphId);
-        let bindingGeneration = captureContextGraphBindingGeneration(
-          this.contextGraphBindingGenerations,
-          asset.contextGraphId,
-        );
+        let bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
         const bindingIsCurrent = () => (
           this.subscribedContextGraphs.get(asset.contextGraphId) === subscription
-          && isContextGraphBindingGenerationCurrent(
-            this.contextGraphBindingGenerations,
+          && this.contextGraphBindingState.isGenerationCurrent(
             asset.contextGraphId,
             bindingGeneration,
           )
@@ -5423,10 +5415,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               subscription,
               verifiedOnChainId,
             );
-            bindingGeneration = captureContextGraphBindingGeneration(
-              this.contextGraphBindingGenerations,
-              asset.contextGraphId,
-            );
+            bindingGeneration = this.contextGraphBindingState.capture(asset.contextGraphId);
             assertLifecycleCurrent();
           }
           if (operationSignal?.aborted) {
@@ -7943,6 +7932,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ...normalizedNext,
       ...(normalizedNext.onChainHash === nextOnChainHash ? {} : { onChainHash: nextOnChainHash }),
     };
+    const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(
+      contextGraphId,
+      previous,
+      canonicalNext,
+      nextWireId,
+    );
     if (
       previousWireId !== nextWireId
       && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId
@@ -7951,7 +7946,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
     this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
-    if (!canonicalNext.subscribed && !canonicalNext.coreHosted) {
+    // VM cleanup policy belongs to the lifecycle consumer, not to the binding
+    // registry. Invalidating a reverse candidate must also invalidate any work
+    // captured against it; otherwise only an inactive subscription needs the
+    // ordinary cursor cleanup.
+    if (bindingFacts.reverseCandidateCleared) {
+      this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    } else if (!bindingFacts.admitted) {
       this.clearVmReconcileStateForContextGraph(contextGraphId);
     }
     // On-demand member subscriptions deliberately keep their live state and
@@ -8184,7 +8185,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // Every in-flight binding continuation also captures the subscription
     // object, so deleting this numeric generation cannot revive old work if a
     // new subscription later reuses the same local id.
-    clearContextGraphBindingGeneration(this.contextGraphBindingGenerations, contextGraphId);
+    this.contextGraphBindingState.delete(contextGraphId);
     return deleted;
   }
 
@@ -8283,10 +8284,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const expectedLiveSub = this.subscribedContextGraphs.get(contextGraphId);
-    const expectedBindingGeneration = captureContextGraphBindingGeneration(
-      this.contextGraphBindingGenerations,
-      contextGraphId,
-    );
+    const expectedBindingGeneration = this.contextGraphBindingState.capture(contextGraphId);
     const sub = subscription ?? expectedLiveSub;
     if (!sub?.subscribed && !sub?.coreHosted) {
       throw new Error(
@@ -8313,8 +8311,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ||
         current !== expectedLiveSub
         || (!current?.subscribed && !current?.coreHosted)
-        || !isContextGraphBindingGenerationCurrent(
-          this.contextGraphBindingGenerations,
+        || !this.contextGraphBindingState.isGenerationCurrent(
           contextGraphId,
           expectedBindingGeneration,
         )
@@ -8617,6 +8614,60 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const persistedRows = await store.loadAll();
       const rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
 
+      // Validate the cap before either branch below so diagnostics retain the
+      // operator's configured cap even when the independent rehydration gate
+      // disables activation entirely.
+      const configuredCap = this.config.maxRehydratedContextGraphSubscriptions;
+      let cap = DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS;
+      if (configuredCap != null) {
+        if (Number.isInteger(configuredCap) && configuredCap >= 0) {
+          cap = configuredCap;
+        } else {
+          this.log.warn(
+            ctx,
+            `Ignoring invalid maxRehydratedContextGraphSubscriptions=${configuredCap} ` +
+              `(must be a non-negative integer); using default ${DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS}.`,
+          );
+        }
+      }
+
+      // Operator kill-switch: inventory the durable rows for diagnostics but
+      // deliberately do not copy any of them into runtime subscription state.
+      // In particular, do not install gossip handlers, add automatic sync
+      // scope, persist node-membership side effects, or touch the RDF store.
+      // A later explicit subscribe remains a normal live activation and updates
+      // the status through updateContextGraphSubscriptionRehydrationStatusAfterPersist.
+      if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
+        const dormantIds = rows.map((row) => row.id).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+        this.contextGraphSubscriptionRehydrationAccountedIds.clear();
+        for (const id of dormantIds) {
+          this.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+        }
+        const completedAt = Date.now();
+        this.contextGraphSubscriptionRehydrationStatus = {
+          rehydrationEnabled: false,
+          persistedTotal: rows.length,
+          systemExcluded: persistedRows.length - rows.length,
+          hostedActivated: 0,
+          hostedActivatedIds: [],
+          activated: 0,
+          dormant: dormantIds.length,
+          activationCap: cap,
+          capDisabled: cap === 0,
+          dormantIds,
+          completedAt,
+          updatedAt: completedAt,
+        };
+        if (rows.length > 0) {
+          this.log.info(
+            ctx,
+            `Context-graph subscription rehydration disabled; left ${rows.length} ` +
+              'non-system persisted subscription(s) dormant without modifying durable state',
+          );
+        }
+        return;
+      }
+
       // `pendingMeta` and the agent chosen for the first authenticated sync
       // are deliberately in-memory state. Recover both from the durable
       // join-approved membership fact before activating subscriptions. Load
@@ -8689,23 +8740,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // above is the prune path for the stale backlog by design. (Follow-up:
       // reconcile contextGraphMembershipStore for rows left dormant / cleared so
       // a prior `active` local-node membership row doesn't linger.)
-      // Validate the cap: it's external config, so a fractional / negative /
-      // NaN value would otherwise do something surprising (0.5 → 1 row,
-      // -1/NaN → silently disables the cap). Accept only a non-negative integer
-      // (0 = "no cap"); fall back to the default otherwise.
-      const configuredCap = this.config.maxRehydratedContextGraphSubscriptions;
-      let cap = DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS;
-      if (configuredCap != null) {
-        if (Number.isInteger(configuredCap) && configuredCap >= 0) {
-          cap = configuredCap;
-        } else {
-          this.log.warn(
-            ctx,
-            `Ignoring invalid maxRehydratedContextGraphSubscriptions=${configuredCap} ` +
-              `(must be a non-negative integer); using default ${DEFAULT_MAX_REHYDRATED_SUBSCRIPTIONS}.`,
-          );
-        }
-      }
       // coreHosted graphs MUST always be restored — their chain-driven
       // reconcile / host-mode path depends on it — so EXEMPT them from the cap.
       // The cap (a #997 anti-wedge measure) applies only to the non-hosted
@@ -8795,6 +8829,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       const completedAt = Date.now();
       this.contextGraphSubscriptionRehydrationStatus = {
+        rehydrationEnabled: true,
         persistedTotal: rows.length,
         systemExcluded: persistedRows.length - rows.length,
         hostedActivated: hostedRows.length,
