@@ -11,6 +11,7 @@ import {
 import type { ContextGraphMembershipStore, SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
+import type { SyncCheckpointScope } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import {
@@ -35,6 +36,9 @@ type FetchArgs = {
   signal?: AbortSignal;
   recovery?: boolean;
   assetUals?: string[];
+  requesterScope?: SyncCheckpointScope;
+  maxAcceptedQuads?: number;
+  maxAcceptedHeapBytesEstimate?: number;
 };
 
 const EXACT_UAL_7 = 'did:dkg:base:84532/0x0000000000000000000000000000000000000001/7';
@@ -239,16 +243,60 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
     args.phase ?? 'data',
     args.graphUri ?? 'did:dkg:context-graph:coalesced-cg',
     args.deadline ?? DEFAULT_DEADLINE,
-    args.snapshotRef,
-    args.sinceBatchId,
-    args.signal,
-    args.recovery,
-    undefined,
-    args.assetUals,
+    {
+      snapshotRef: args.snapshotRef,
+      sinceBatchId: args.sinceBatchId,
+      signal: args.signal,
+      recovery: args.recovery,
+      assetUals: args.assetUals,
+      requesterScope: args.requesterScope,
+      maxAcceptedQuads: args.maxAcceptedQuads,
+      maxAcceptedHeapBytesEstimate: args.maxAcceptedHeapBytesEstimate,
+    },
   );
 }
 
 describe('DKGAgent sync fetch coalescing', () => {
+  it('normalizes the legacy positional fetch tail without losing snapshot scope', async () => {
+    const buildSyncRequest = vi.fn(async () => new Uint8Array([1, 2, 3]));
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    (agent as any).buildSyncRequest = buildSyncRequest;
+
+    try {
+      await agent.fetchSyncPages(
+        createOperationContext('sync'),
+        PEER_A,
+        'legacy-positional-cg',
+        true,
+        'snapshot',
+        '',
+        DEFAULT_DEADLINE,
+        'legacy-snapshot-ref',
+        'legacy-batch-id',
+        undefined,
+        true,
+        true,
+        [EXACT_UAL_7],
+      );
+
+      expect(buildSyncRequest).toHaveBeenCalledWith(
+        'legacy-positional-cg',
+        0,
+        expect.any(Number),
+        true,
+        PEER_A,
+        'snapshot',
+        'legacy-snapshot-ref',
+        'legacy-batch-id',
+        undefined,
+        true,
+        [EXACT_UAL_7],
+      );
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('joins concurrent identical fetches onto one sync page sequence', async () => {
     const response = deferred<Uint8Array>();
     let sends = 0;
@@ -291,6 +339,9 @@ describe('DKGAgent sync fetch coalescing', () => {
       // sequence, and an exact batch must never join a full sync.
       { name: 'assetUals', base: { assetUals: [EXACT_UAL_7] }, variant: { assetUals: [EXACT_UAL_8] } },
       { name: 'assetUals-vs-full', base: {}, variant: { assetUals: [EXACT_UAL_7] } },
+      { name: 'requesterScope', base: {}, variant: { requesterScope: 'selected-swm-meta:test' } },
+      { name: 'maxAcceptedQuads', base: {}, variant: { maxAcceptedQuads: 10 } },
+      { name: 'maxAcceptedHeapBytesEstimate', base: {}, variant: { maxAcceptedHeapBytesEstimate: 4096 } },
     ];
 
     for (const testCase of cases) {

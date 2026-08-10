@@ -1608,6 +1608,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       snapshotsResolved: 0,
       snapshotsTotal: 2,
       manifestComplete: true,
+      descriptorsAuthoritative: true,
       missingCount: 2,
       // The ref that was never served, named — not an empty placeholder. The
       // sample and the count come from the same walk, so they cannot disagree.
@@ -1714,8 +1715,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           return pageResult(contextGraphId, phase);
         },
@@ -1767,6 +1769,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 2,
         snapshotsTotal: 2,
         manifestComplete: true,
+        descriptorsAuthoritative: true,
         missingCount: 0,
         missingSample: [],
         materializationFailures: 0,
@@ -1903,8 +1906,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly, so `manifestComplete` is true — the
           // other half of the vacuity gate. A truncated meta phase parses no
@@ -1953,6 +1957,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 1,
         snapshotsTotal: 1,
         manifestComplete: true,
+        descriptorsAuthoritative: true,
         missingCount: 0,
         missingSample: [],
         materializationFailures: 0,
@@ -2087,8 +2092,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly. That is not incidental: it is what
           // makes `manifestComplete` true, which is the field that turns this
@@ -2153,6 +2159,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 0,
         snapshotsTotal: 2,
         manifestComplete: true,
+        descriptorsAuthoritative: false,
         missingCount: 2,
         missingSample: [],
         materializationFailures: 0,
@@ -2386,6 +2393,7 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
       snapshotsResolved: 2,
       snapshotsTotal: 3,
       manifestComplete: true,
+      descriptorsAuthoritative: true,
       missingCount: 1,
       missingSample: [unreachable.digest],
       materializationFailures: 0,

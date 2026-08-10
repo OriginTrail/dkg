@@ -30,7 +30,10 @@ import {
   withSyncAdmissionSource,
 } from './sync/attempt-telemetry.js';
 import { insertWithOversizeGuard, type OversizeDrop } from './sync/oversize-filter.js';
-import type { SyncPageResult } from './sync/requester/page-fetch.js';
+import type {
+  SyncPageFetchOptions,
+  SyncPageResult,
+} from './sync/requester/page-fetch.js';
 import type { SyncPhase } from './sync/auth/request-build.js';
 import { stripLiteral } from './dkg-agent-utils.js';
 
@@ -98,11 +101,7 @@ interface CuratorMetaRefreshAgent {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    snapshotRef?: string,
-    sinceBatchId?: string,
-    signal?: AbortSignal,
-    recovery?: boolean,
-    forceFreshSession?: boolean,
+    options?: SyncPageFetchOptions,
   ): Promise<SyncPageResult>;
   bindSubscriptionOnChainId?(
     localCgId: string,
@@ -365,11 +364,10 @@ async function fetchAuthoritativeMetaSnapshot(
     // pages. Use the normal bounded sync budget instead of a special 10-second
     // cap that made sufficiently populated private CGs impossible to join.
     Date.now() + SYNC_TOTAL_TIMEOUT_MS,
-    undefined,
-    undefined,
-    options.signal,
-    undefined,
-    true,
+    {
+      signal: options.signal,
+      forceFreshSession: true,
+    },
   );
   const result = await (hasSyncAdmissionSource()
     ? runFetch()

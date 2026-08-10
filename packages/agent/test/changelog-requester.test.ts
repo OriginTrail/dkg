@@ -12,6 +12,7 @@ import {
   classifyDurableMetaGraph,
 } from '../src/sync/durable-integrity.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import type { SyncPageFetchOptions } from '../src/sync/requester/page-fetch.js';
 
 const qd = (graph: string, n: number): Quad => ({ subject: `s${n}`, predicate: 'p', object: `o${n}`, graph });
 
@@ -494,13 +495,9 @@ describe('changelog drop resync reconciliation', () => {
         phase: string,
         _graphUri: string,
         _deadline: number,
-        _snapshotRef?: string,
-        _sinceBatchId?: string,
-        _signal?: AbortSignal,
-        _recovery?: boolean,
-        forceFreshSession?: boolean,
+        options?: SyncPageFetchOptions,
       ) => {
-        forceFreshSessionFlags.push(forceFreshSession === true);
+        forceFreshSessionFlags.push(options?.forceFreshSession === true);
         const quads = phase === 'data' ? [qd(presentGraph, 1)] : [];
         return {
           quads, bytesReceived: 0, resumedFromOffset: 0, nextOffset: quads.length,
