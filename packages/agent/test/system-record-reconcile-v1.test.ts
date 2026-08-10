@@ -378,7 +378,7 @@ describe('agent-profile System Record reconciler V1', () => {
       .resolves.toMatchObject({
         status: 'blocked',
         phase: 'records',
-        reason: 'receiver-verification-failed',
+        reason: 'unsupported-row-state',
         processedRows: 0,
         pendingRows: 1,
       });

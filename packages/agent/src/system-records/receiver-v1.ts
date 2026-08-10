@@ -266,6 +266,13 @@ function normalizeAgentProfileArtifactSourcesV1(
     throw new TypeError('agent-profile artifact input must be a repository or source pair');
   }
   const candidate = input as unknown as Record<PropertyKey, unknown>;
+  if (typeof candidate.resolve === 'function') {
+    const repository = bindAgentProfileArtifactRepositoryV1(input, 'artifacts');
+    return Object.freeze({
+      closureArtifacts: repository,
+      securitySidecarArtifacts: repository,
+    });
+  }
   const hasClosureArtifacts = 'closureArtifacts' in candidate;
   const hasSecuritySidecarArtifacts = 'securitySidecarArtifacts' in candidate;
   if (hasClosureArtifacts || hasSecuritySidecarArtifacts) {
@@ -283,11 +290,7 @@ function normalizeAgentProfileArtifactSourcesV1(
       ),
     });
   }
-  const repository = bindAgentProfileArtifactRepositoryV1(input, 'artifacts');
-  return Object.freeze({
-    closureArtifacts: repository,
-    securitySidecarArtifacts: repository,
-  });
+  throw new TypeError('agent-profile artifact input must provide a repository resolver');
 }
 
 function bindAgentProfileArtifactRepositoryV1(

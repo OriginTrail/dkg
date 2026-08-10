@@ -113,6 +113,7 @@ export type AgentProfileReconcileBlockReasonV1 =
   | 'inventory-busy'
   | 'inventory-transport'
   | 'activation-leaf-limit'
+  | 'unsupported-row-state'
   | 'receiver-verification-failed'
   | 'apply-root-collision'
   | 'apply-capacity-exhausted'
@@ -328,9 +329,7 @@ function normalizeAgentProfileReceiverForReconcileV1(
   return Object.freeze({
     prepare(row: SystemRecordInventoryRowV1, signal: AbortSignal) {
       if (row.tombstone || row.quarantined) {
-        throw new Error(
-          'active-only agent-profile receiver rejected a non-active inventory row',
-        );
+        throw new AgentProfileUnsupportedRowStateErrorV1();
       }
       return receiver.prepareActive(row, signal);
     },
@@ -344,12 +343,17 @@ function normalizeAgentProfileContinuationForReconcileV1(
   if (isAgentProfileCandidateReceiverV1(receiver)) return openPreparation;
   return (row: SystemRecordInventoryRowV1) => {
     if (row.tombstone || row.quarantined) {
-      throw new Error(
-        'active-only agent-profile continuation rejected a non-active inventory row',
-      );
+      throw new AgentProfileUnsupportedRowStateErrorV1();
     }
     return openPreparation(row);
   };
+}
+
+class AgentProfileUnsupportedRowStateErrorV1 extends Error {
+  constructor() {
+    super('active-only agent-profile receiver rejected a non-active inventory row');
+    this.name = 'AgentProfileUnsupportedRowStateErrorV1';
+  }
 }
 
 function isAgentProfileCandidateReceiverV1(
@@ -740,7 +744,9 @@ export async function createAgentProfileReconcilerV1(
           0,
           0,
           outcomes,
-          'receiver-verification-failed',
+          error instanceof AgentProfileUnsupportedRowStateErrorV1
+            ? 'unsupported-row-state'
+            : 'receiver-verification-failed',
         ),
       });
     }

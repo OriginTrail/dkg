@@ -244,6 +244,7 @@ export async function transitionQuarantineFixture(
   reverseDelivery = false,
   withTombstoneFork = false,
   unrelatedTransitionEvidence = false,
+  invalidCompetingPredecessor = false,
 ) {
   const prior = await publishedFixture();
   const nextSigner = createEvmPersonalMessageSignerV1({
@@ -313,6 +314,9 @@ export async function transitionQuarantineFixture(
   });
   const competingTransition: AgentProfileAuthorityTransitionV1 = Object.freeze({
     ...transitionBase,
+    ...(invalidCompetingPredecessor
+      ? { priorHeadDigest: nextSeedEnvelope.objectDigest }
+      : {}),
     nextEvmIssuer: alternateSigner.address.toLowerCase(),
     nextRoot: `did:dkg:agent:${alternateSigner.address.toLowerCase()}`,
   });
