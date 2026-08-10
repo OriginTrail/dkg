@@ -8,6 +8,7 @@ import {
   type StructuredMutationSnapshot,
 } from '../src/bounded-structured-mutation.js';
 import { GraphSetIndexStore } from '../src/graph-set-index-store.js';
+import { CHANGELOG_GRAPH, ChangelogStore } from '../src/changelog-store.js';
 import { materializeStructuredMutation } from '../src/structured-mutation-materialization-internal.js';
 import type { StructuredMutation, TripleStore } from '../src/triple-store.js';
 
@@ -238,6 +239,69 @@ describe('structured mutation preparation', () => {
         excludedPredicates: [],
       },
     })).rejects.toThrow(/must not be a source/);
+    expect(operation).not.toHaveBeenCalled();
+  });
+
+  it('separates multi-graph guarded scopes from target-only effects', () => {
+    const copy = captureStructuredMutationSnapshot({
+      kind: 'copy-subject-projection',
+      input: {
+        sourceGraphUris: [GRAPH, 'urn:test:preparation:source-2'],
+        targetGraphUri: TARGET,
+        roots: ['urn:test:subject'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    });
+    expect(copy.guardedGraphs).toEqual([GRAPH, 'urn:test:preparation:source-2', TARGET]);
+    expect(copy.outcome).toBe('candidate');
+    if (copy.outcome === 'candidate') {
+      expect(copy.effects.touchedGraphs).toEqual([TARGET]);
+    }
+
+    const replacement = captureStructuredMutationSnapshot({
+      kind: 'replace-projection-from-graph',
+      input: {
+        targetGraphUri: TARGET,
+        stagingGraphUri: GRAPH,
+        targetSubject: 'urn:test:subject',
+        preservedTargetPredicates: [],
+        targetSubjectPrefixes: [],
+      },
+    });
+    expect(replacement.guardedGraphs).toEqual([TARGET, GRAPH]);
+    expect(replacement.outcome).toBe('candidate');
+    if (replacement.outcome === 'candidate') {
+      expect(replacement.effects.touchedGraphs).toEqual([TARGET]);
+    }
+  });
+
+  it('rejects reserved multi-graph sources and staging graphs before inner I/O', async () => {
+    const operation = vi.fn(async () => {});
+    const store = new ChangelogStore({
+      structuredMutation: operation,
+    } as unknown as TripleStore);
+
+    await expect(store.structuredMutation({
+      kind: 'copy-subject-projection',
+      input: {
+        sourceGraphUris: [CHANGELOG_GRAPH],
+        targetGraphUri: TARGET,
+        roots: ['urn:test:subject'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    })).rejects.toThrow(/reserved changelog plane/);
+    await expect(store.structuredMutation({
+      kind: 'replace-projection-from-graph',
+      input: {
+        targetGraphUri: TARGET,
+        stagingGraphUri: CHANGELOG_GRAPH,
+        targetSubject: 'urn:test:subject',
+        preservedTargetPredicates: [],
+        targetSubjectPrefixes: [],
+      },
+    })).rejects.toThrow(/reserved changelog plane/);
     expect(operation).not.toHaveBeenCalled();
   });
 });

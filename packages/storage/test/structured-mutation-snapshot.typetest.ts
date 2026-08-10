@@ -15,6 +15,14 @@ const snapshot = captureStructuredMutationSnapshot({
   },
 });
 
+if (snapshot.outcome === 'noop') {
+  const effects: undefined = snapshot.effects;
+  void effects;
+} else {
+  const touchedGraphs: readonly string[] = snapshot.effects.touchedGraphs;
+  void touchedGraphs;
+}
+
 if (snapshot.mutation.kind === 'replace-subject-predicates') {
   // @ts-expect-error snapshot input fields are immutable
   snapshot.mutation.input.graphUri = 'urn:test:redirected';

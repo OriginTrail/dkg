@@ -582,9 +582,12 @@ export function createListContextGraphsCacheInvalidatingStore(
           await invalidateAfterMutation(
             () => innerStore.structuredMutation!(snapshot.mutation, options),
             () => snapshot.outcome !== 'noop',
-            () => snapshot.effects?.touchedGraphs.forEach(
-              (graph) => markProjectionDirty?.(undefined, graph),
-            ),
+            () => {
+              if (snapshot.outcome === 'noop') return;
+              snapshot.effects.touchedGraphs.forEach(
+                (graph) => markProjectionDirty?.(undefined, graph),
+              );
+            },
           );
         }
       : undefined,

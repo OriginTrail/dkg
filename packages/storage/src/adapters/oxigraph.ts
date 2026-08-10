@@ -429,7 +429,7 @@ export class OxigraphStore implements TripleStore {
     if (materialized.outcome === 'noop') return;
     this.store.update(materialized.update);
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites(snapshot.effects!.touchedGraphs);
+    this.writeGen.recordGraphWrites(materialized.snapshot.effects.touchedGraphs);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {

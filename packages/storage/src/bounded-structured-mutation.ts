@@ -141,12 +141,20 @@ export type ReadonlyStructuredMutation =
     }>;
   }>;
 
-export interface StructuredMutationSnapshot {
+interface StructuredMutationSnapshotBase {
   readonly mutation: ReadonlyStructuredMutation;
   readonly guardedGraphs: readonly string[];
-  readonly effects: StructuredMutationEffects | undefined;
-  readonly outcome: 'noop' | 'candidate';
 }
+
+export type StructuredMutationSnapshot =
+  | Readonly<StructuredMutationSnapshotBase & {
+    outcome: 'noop';
+    effects: undefined;
+  }>
+  | Readonly<StructuredMutationSnapshotBase & {
+    outcome: 'candidate';
+    effects: StructuredMutationEffects;
+  }>;
 
 const STRUCTURED_MUTATION_SNAPSHOT_BRAND = Symbol('structured-mutation-snapshot');
 const STRUCTURED_MUTATION_SNAPSHOTS = new WeakMap<object, StructuredMutationSnapshot>();
@@ -205,18 +213,21 @@ export function captureStructuredMutationSnapshot(
       throw new Error(`Unsupported structured mutation kind ${String(kind)}`);
   }
   const guardedGraphs = Object.freeze([...semantics.guardedGraphs]);
-  const mightMutate = semantics.mightMutate;
-  const effects = mightMutate
+  const snapshot: StructuredMutationSnapshot = semantics.mightMutate
     ? Object.freeze({
+      mutation: captured,
+      guardedGraphs,
+      outcome: 'candidate' as const,
+      effects: Object.freeze({
         touchedGraphs: Object.freeze([...semantics.touchedGraphs]),
-      })
-    : undefined;
-  const snapshot: StructuredMutationSnapshot = Object.freeze({
-    mutation: captured,
-    guardedGraphs,
-    effects,
-    outcome: mightMutate ? 'candidate' : 'noop',
-  });
+      }),
+    })
+    : Object.freeze({
+      mutation: captured,
+      guardedGraphs,
+      outcome: 'noop' as const,
+      effects: undefined,
+    });
   STRUCTURED_MUTATION_SNAPSHOTS.set(captured, snapshot);
   return snapshot;
 }

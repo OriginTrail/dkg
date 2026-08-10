@@ -13,10 +13,13 @@ import {
 } from './structured-mutation/retention.js';
 
 export type MaterializedStructuredMutation =
-  | Readonly<{ outcome: 'noop'; snapshot: StructuredMutationSnapshot }>
+  | Readonly<{
+    outcome: 'noop';
+    snapshot: Extract<StructuredMutationSnapshot, { outcome: 'noop' }>;
+  }>
   | Readonly<{
     outcome: 'execute';
-    snapshot: StructuredMutationSnapshot;
+    snapshot: Extract<StructuredMutationSnapshot, { outcome: 'candidate' }>;
     update: string;
   }>;
 

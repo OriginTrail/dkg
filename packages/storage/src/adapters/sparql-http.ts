@@ -1296,7 +1296,7 @@ export class SparqlHttpStore implements TripleStore {
     }
     const materialized = materializeStructuredMutation(snapshot);
     if (materialized.outcome === 'noop') return;
-    const effects = snapshot.effects!;
+    const effects = materialized.snapshot.effects;
     try {
       await this.postUpdate(
         materialized.update,

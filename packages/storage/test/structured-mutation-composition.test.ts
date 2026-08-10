@@ -11,13 +11,17 @@ import {
   EXTERNAL_LITERAL_REF_DATATYPE,
   GraphSetIndexStore,
   OxigraphStore,
+  OxigraphWorkerStore,
   SharedMemoryLiteralBlobStore,
   captureStructuredMutationSnapshot,
   type GraphSetMutationEvent,
   type QueryOptions,
   type StructuredMutation,
 } from '../src/index.js';
-import { BOUNDED_MUTATION_MAX_OPERAND_BYTES } from '../src/bounded-structured-mutation.js';
+import {
+  BOUNDED_MUTATION_MAX_OPERAND_BYTES,
+  buildStructuredMutationUpdate,
+} from '../src/bounded-structured-mutation.js';
 
 const GRAPH = 'urn:test:composition';
 const TARGET = 'urn:test:composition:target';
@@ -253,6 +257,51 @@ describe('structured mutation composition', () => {
       );
       expect(await leaf.hasGraph(SWM_GRAPH)).toBe(true);
       expect(changelog.needsReconcile).toBe(false);
+    } finally {
+      await changelog.close();
+    }
+  });
+
+  it('preserves worker-side serialized-budget refusals as mutation-free', async () => {
+    const leaf = new OxigraphWorkerStore();
+    const graphSet = new GraphSetIndexStore(leaf);
+    const changelog = new ChangelogStore(graphSet);
+    const listGraphs = vi.spyOn(leaf, 'listGraphs');
+    const mutation: StructuredMutation = {
+      kind: 'delete-subjects',
+      input: {
+        graphUri: GRAPH,
+        subjects: Array.from(
+          { length: 75_000 },
+          (_, index) => `urn:test:${index.toString().padStart(5, '0')}:${'x'.repeat(40)}`,
+        ),
+      },
+    };
+
+    try {
+      await leaf.insert([{
+        subject: 'urn:test:composition:retained',
+        predicate: PREDICATE,
+        object: '"retained"',
+        graph: GRAPH,
+      }]);
+      await expect(changelog.listGraphs()).resolves.toEqual([GRAPH]);
+      expect(listGraphs).toHaveBeenCalledOnce();
+      const generation = leaf.getWriteGen(GRAPH);
+      expect(() => buildStructuredMutationUpdate(mutation))
+        .toThrow(/serialized update exceeds/);
+
+      await expect(changelog.structuredMutation(mutation))
+        .rejects.toMatchObject({
+          code: 'STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL',
+          message: expect.stringMatching(/serialized update exceeds/),
+        });
+
+      expect(changelog.needsReconcile).toBe(false);
+      expect(leaf.getWriteGen(GRAPH)).toBe(generation);
+      expect(await leaf.countQuads(GRAPH)).toBe(1);
+      await expect(changelog.listGraphs()).resolves.toEqual([GRAPH]);
+      expect(listGraphs).toHaveBeenCalledOnce();
     } finally {
       await changelog.close();
     }
