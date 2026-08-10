@@ -38,6 +38,7 @@ import {
 } from './support/agent-profile-receiver-v1-fixture.js';
 import {
   quarantineFixture,
+  transitionQuarantineFixture,
 } from './support/agent-profile-receiver-conflict-v1-fixture.js';
 
 describe('agent-profile private materializer prepare bridge', () => {
@@ -116,6 +117,26 @@ describe('agent-profile private materializer prepare bridge', () => {
       terminalTransitionConflict: false,
     });
     expect(harness.issues[0]?.admittedDeadlineMs).toBe(harness.originalDeadlineMs);
+  });
+
+  it('maps a terminal transition conflict through to the issued quarantine', async () => {
+    const harness = materializerBridgeHarness();
+    const fixture = await transitionQuarantineFixture();
+    const receiver = createReceiver(fixture.artifacts, harness);
+
+    await expect(receiver.receiveCandidate(
+      fixture.row,
+      harness.context,
+      new AbortController().signal,
+    )).resolves.toMatchObject({ outcome: 'applied' });
+
+    expect(harness.issueCandidate).toHaveBeenCalledTimes(1);
+    expect(harness.issueCandidate.mock.calls[0]?.[0]).toMatchObject({
+      operation: 'quarantine',
+      admittedDeadlineMs: harness.originalDeadlineMs,
+      conflictEvidenceDigest: fixture.evidenceDigest,
+      terminalTransitionConflict: true,
+    });
   });
 
   it.each([

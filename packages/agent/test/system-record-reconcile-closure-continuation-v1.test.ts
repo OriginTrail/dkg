@@ -34,6 +34,76 @@ import {
 import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 
 describe('agent-profile closure continuation V1', () => {
+  it('releases receiver preparation before bridge preflight and apply settlement', async () => {
+    const fixture = await maximumAuthorityClosureFixtureV1();
+    let preparationReleased = false;
+    let releasedAtPreflight: boolean | undefined;
+    let releasedAtSettlement: boolean | undefined;
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async (_providerId, lookup, signal) => {
+        const artifact = await fixture.repository.resolve(lookup, signal);
+        if (artifact === null) {
+          return Object.freeze({ outcome: 'not-found' as const, wireBytes: 1 });
+        }
+        return Object.freeze({
+          outcome: 'ok' as const,
+          lease: Object.freeze({
+            artifact,
+            wireBytes: 128 + artifact.canonicalBytes.byteLength,
+            release: vi.fn(),
+          }),
+        });
+      },
+      controlAdmission: trackingByteAdmission(),
+    });
+    // Inverted successor of the dropped D5b test, which pinned the forbidden
+    // polarity by asserting the preparation was still live during apply.
+    const receiver = Object.freeze({
+      openPreparation() {
+        return Object.freeze({
+          prepare: async () => Object.freeze({
+            prepareDispatch: async () => {
+              releasedAtPreflight = preparationReleased;
+              return Object.freeze({
+                dispatch: async () => {
+                  releasedAtSettlement = preparationReleased;
+                  return appliedOutcome('01');
+                },
+              });
+            },
+          }),
+          release() {
+            preparationReleased = true;
+          },
+        });
+      },
+      prepareActive: async () => { throw new Error('test uses stateful preparation'); },
+      receiveActive: async () => { throw new Error('test uses stateful preparation'); },
+      prepareCandidate: async () => { throw new Error('test uses stateful preparation'); },
+      receiveCandidate: async () => { throw new Error('test uses stateful preparation'); },
+    }) as unknown as AgentProfileCandidateContinuationReceiverV1;
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver,
+    });
+
+    let last;
+    for (let advance = 0; advance < SYSTEM_RECORD_MAX_SLICE_REQUESTS; advance += 1) {
+      last = await reconciler.advance(new AbortController().signal);
+      if (last.status !== 'paused') break;
+    }
+    expect(last).toMatchObject({ status: 'complete', processedRows: 1 });
+    expect(releasedAtPreflight).toBe(true);
+    expect(releasedAtSettlement).toBe(true);
+    expect(preparationReleased).toBe(true);
+  });
+
   it('completes a 31-artifact authority closure over three bounded physical slices', async () => {
     const fixture = await maximumAuthorityClosureFixtureV1();
     expect(fixture.artifacts.size).toBe(31);
