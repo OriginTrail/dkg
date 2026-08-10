@@ -1,10 +1,13 @@
-import { ethers } from 'ethers';
+import { ethers, type JsonRpcProvider } from 'ethers';
 import { expect, vi } from 'vitest';
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import {
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
 } from '../src/evm-context-graph-name-hash-fence.js';
-import type { EvmContextGraphNameHashFence } from '../src/evm-context-graph-name-hash-fence.js';
+import type {
+  ContextGraphNameHashProviderHighWaters,
+  EvmContextGraphNameHashFence,
+} from '../src/evm-context-graph-name-hash-fence.js';
 
 const PRIVATE_KEY =
   '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80';
@@ -37,6 +40,74 @@ export function resolverInternals(adapter: any) {
   return {
     resolver,
     fence: resolver.source as EvmContextGraphNameHashFence,
+  };
+}
+
+export function providerHighWaterSnapshot(
+  entries: ReadonlyArray<readonly [object, bigint]>,
+  unavailableProviderCount = 0,
+): ContextGraphNameHashProviderHighWaters {
+  const providerHighWaters = new Map(
+    entries as ReadonlyArray<readonly [JsonRpcProvider, bigint]>,
+  );
+  return {
+    latestId: [...providerHighWaters.values()].reduce(
+      (maximum, value) => value > maximum ? value : maximum,
+      0n,
+    ),
+    providerHighWaters,
+    unavailableProviderCount,
+  };
+}
+
+export function providerQuorumFixture(options: {
+  readonly providers: readonly object[];
+  readonly readHighWater?: (provider: object) => bigint | Promise<bigint>;
+  readonly readNameHash?: (
+    provider: object,
+    contextGraphId: bigint,
+  ) => string | Promise<string>;
+}) {
+  const adapter: any = new EVMChainAdapter(minimalConfig());
+  adapter.initialized = true;
+  adapter.init = vi.fn(async () => {});
+  adapter.providers = [...options.providers];
+  adapter.rpcUrls = options.providers.map(
+    (_provider, index) => `http://provider-${index}.invalid`,
+  );
+  adapter.ensureConfiguredStaticChainIdValidated = vi.fn(async () => 31337n);
+  const storage = {
+    getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6'),
+  };
+  adapter.contracts = { contextGraphStorage: storage };
+  const getLatestContextGraphId = vi.fn(async (provider: object) => {
+    if (options.readHighWater === undefined) {
+      throw new Error('Unexpected getLatestContextGraphId read');
+    }
+    return options.readHighWater(provider);
+  });
+  const getNameHash = vi.fn(async (provider: object, contextGraphId: bigint) => {
+    if (options.readNameHash === undefined) {
+      throw new Error('Unexpected getNameHash read');
+    }
+    return options.readNameHash(provider, contextGraphId);
+  });
+  adapter.rebindContract = vi.fn((_contract: unknown, provider: object) => ({
+    getLatestContextGraphId: () => getLatestContextGraphId(provider),
+    getNameHash: (contextGraphId: bigint) => getNameHash(provider, contextGraphId),
+  }));
+  const { fence } = resolverInternals(adapter);
+  const anchorHash = `0x${'11'.repeat(32)}`;
+  vi.spyOn(fence, 'captureAnchor').mockResolvedValue({
+    blockNumber: 100,
+    blockHash: anchorHash,
+  });
+  vi.spyOn(fence, 'loadAnchorHash').mockResolvedValue(anchorHash);
+  return {
+    adapter,
+    fence,
+    getLatestContextGraphId,
+    getNameHash,
   };
 }
 
