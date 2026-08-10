@@ -896,6 +896,47 @@ function sharedMemorySyncSingleFlightKey(params: {
   });
 }
 
+function normalizeSyncPageFetchOptions(
+  optionsOrSnapshotRef: SyncPageFetchOptions | string | undefined,
+  legacySinceBatchId: string | undefined,
+  legacySignal: AbortSignal | undefined,
+  legacyRecovery: boolean | undefined,
+  legacyForceFreshSession: boolean | undefined,
+  legacyAssetUals: string[] | undefined,
+): SyncPageFetchOptions {
+  if (
+    typeof optionsOrSnapshotRef === 'object'
+    && optionsOrSnapshotRef !== null
+    && !Array.isArray(optionsOrSnapshotRef)
+  ) {
+    if (
+      legacySinceBatchId !== undefined
+      || legacySignal !== undefined
+      || legacyRecovery !== undefined
+      || legacyForceFreshSession !== undefined
+      || legacyAssetUals !== undefined
+    ) {
+      throw new TypeError(
+        'fetchSyncPages cannot mix an options object with legacy positional modifiers',
+      );
+    }
+    return optionsOrSnapshotRef;
+  }
+  if (optionsOrSnapshotRef !== undefined && typeof optionsOrSnapshotRef !== 'string') {
+    throw new TypeError(
+      'fetchSyncPages options must be an object or a legacy snapshotRef string',
+    );
+  }
+  return {
+    snapshotRef: optionsOrSnapshotRef,
+    sinceBatchId: legacySinceBatchId,
+    signal: legacySignal,
+    recovery: legacyRecovery,
+    forceFreshSession: legacyForceFreshSession,
+    assetUals: legacyAssetUals,
+  };
+}
+
 let selectedSwmMetaInvocationSequence = 0;
 
 type SelectedSwmMetaRetentionBudget = ReturnType<
@@ -5727,6 +5768,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    * Paginate through sync pages for a single graph (data or meta).
    * Uses buildSyncRequest to produce authenticated requests for private CGs.
    */
+  /** @deprecated Use the named options object overload. */
+  fetchSyncPages(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    includeSharedMemory: boolean,
+    phase: SyncPhase,
+    graphUri: string,
+    deadline: number,
+    snapshotRef?: string,
+    sinceBatchId?: string,
+    signal?: AbortSignal,
+    recovery?: boolean,
+    forceFreshSession?: boolean,
+    assetUals?: string[],
+  ): Promise<SyncPageResult>;
+
+  fetchSyncPages(this: DKGAgent,
+    ctx: OperationContext,
+    remotePeerId: string,
+    contextGraphId: string,
+    includeSharedMemory: boolean,
+    phase: SyncPhase,
+    graphUri: string,
+    deadline: number,
+    options?: SyncPageFetchOptions,
+  ): Promise<SyncPageResult>;
+
   async fetchSyncPages(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -5735,8 +5804,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     phase: SyncPhase,
     graphUri: string,
     deadline: number,
-    options: SyncPageFetchOptions = {},
+    optionsOrSnapshotRef: SyncPageFetchOptions | string | undefined = {},
+    legacySinceBatchId?: string,
+    legacySignal?: AbortSignal,
+    legacyRecovery?: boolean,
+    legacyForceFreshSession?: boolean,
+    legacyAssetUals?: string[],
   ): Promise<SyncPageResult> {
+    const options = normalizeSyncPageFetchOptions(
+      optionsOrSnapshotRef,
+      legacySinceBatchId,
+      legacySignal,
+      legacyRecovery,
+      legacyForceFreshSession,
+      legacyAssetUals,
+    );
     const {
       snapshotRef,
       sinceBatchId,
