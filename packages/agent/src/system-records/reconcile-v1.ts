@@ -274,7 +274,9 @@ export async function createAgentProfileReconcilerV1(
           wireBytes = 0,
         ): AgentProfileReconcileSliceResultV1 => {
           if (closed) return result('closed', phase, requests, wireBytes, outcomes);
-          callerSignal.throwIfAborted();
+          // Before dispatch, preserve exact caller-abort identity. Once any dispatch
+          // settles, return its outcome so a committed mutation cannot be hidden.
+          if (outcomes.length === 0) callerSignal.throwIfAborted();
           return result('paused', phase, requests, wireBytes, outcomes);
         },
       });

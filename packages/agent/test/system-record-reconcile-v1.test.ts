@@ -543,6 +543,78 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(reconciler.stats()).toMatchObject({ processedRows: 1, pendingRows: 1 });
   });
 
+  it('returns a committed first-row outcome when the caller aborts during dispatch', async () => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const rows = TEST_PEER_IDS.slice(0, 2).map((peerId): SystemRecordInventoryRowV1 => ({
+      stableKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, peerId),
+      peerId,
+      authoritySequence: headEnvelope.object.authoritySequence,
+      version: headEnvelope.object.version,
+      headDigest: headEnvelope.objectDigest,
+      tombstone: false,
+      quarantined: false,
+    }));
+    const inventory = buildSystemRecordInventoryTreeV1(NETWORK, rows);
+    const rootEnvelope = await signRootDescriptor(fixture, inventory.descriptor);
+    const admission = admissionGate();
+    const dispatched = Promise.withResolvers<void>();
+    const settlement = Promise.withResolvers<{
+      outcome: 'applied';
+      stateRevision: string;
+      appliedStateDigest: `0x${string}`;
+    }>();
+    const apply = vi.fn(async () => {
+      dispatched.resolve();
+      return settlement.promise;
+    });
+    const prepareActive = vi.fn(async () => Object.freeze({ apply }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: async (request) => {
+        const stored = inventory.objects.get(request.objectDigest)!;
+        return Object.freeze({
+          outcome: 'ok' as const,
+          objectKind: stored.objectKind,
+          canonicalBytes: stored.canonicalBytes,
+          wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
+        });
+      },
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    const caller = new AbortController();
+    const active = reconciler.advance(caller.signal);
+    await dispatched.promise;
+    caller.abort(new Error('caller aborted after atomic dispatch'));
+    settlement.resolve({
+      outcome: 'applied',
+      stateRevision: '10',
+      appliedStateDigest: `0x${'ab'.repeat(32)}`,
+    });
+
+    await expect(active).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      processedRows: 1,
+      pendingRows: 1,
+      outcomes: [{
+        outcome: 'applied',
+        stateRevision: '10',
+        appliedStateDigest: `0x${'ab'.repeat(32)}`,
+      }],
+    });
+    expect(prepareActive).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
+    expect(reconciler.stats()).toMatchObject({ processedRows: 1, pendingRows: 1, active: 0 });
+  });
+
   it('blocks when a verified head expires before prepared apply dispatch', async () => {
     const fixture = await publishedFixture();
     const headEnvelope = fixture.store.snapshot().currentHead;
