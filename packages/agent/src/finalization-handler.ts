@@ -31,7 +31,11 @@ import {
   type TripleStore,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
+import {
+  resolvePublicFinalizedMaterializationAuthority,
+  type ChainAdapter,
+  type EventFilter,
+} from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generatedPrivateCatalogFloorQuads,
@@ -1893,14 +1897,21 @@ export class FinalizationHandler {
       ctx,
     } = input;
     const contentAlreadyMaterialized = verifiedLayer.layer === MemoryLayer.VerifiableMemory;
-    const publicAuthority = await this.resolvePublicFinalizedMaterializationAuthority({
-      onChainCgId,
-      scope,
+    const publicAuthorityResult = await resolvePublicFinalizedMaterializationAuthority({
+      chain: this.chain,
+      onChainContextGraphId: onChainCgId,
       kaId: batchId,
+      assertionVersion: scope.assertionVersion,
       merkleRoot,
-      ctx,
     });
-    if (!publicAuthority) {
+    if (publicAuthorityResult.kind === 'unavailable') {
+      if (publicAuthorityResult.detail) {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: public finalized authority is unavailable for ${scope.ual}: `
+            + publicAuthorityResult.detail,
+        );
+      }
       if (contentAlreadyMaterialized) {
         this.log.info(
           ctx,
@@ -1916,6 +1927,14 @@ export class FinalizationHandler {
       }
       return 'verified-vm-metadata-pending';
     }
+    if (publicAuthorityResult.authorUnavailableReason) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: latest-root author is unavailable for ${scope.ual}: `
+          + publicAuthorityResult.authorUnavailableReason,
+      );
+    }
+    const publicAuthority = publicAuthorityResult;
 
     const finalizedHead: GraphScopedMaterializationEnvelope = {
       ...head,
@@ -2265,86 +2284,6 @@ export class FinalizationHandler {
       counts: { roots: 0, triples: publicTripleCount },
     });
     return 'applied';
-  }
-
-  /**
-   * Prove that a receiptless materialization is safe for the current public
-   * chain state. Access-policy alone is insufficient because an unknown CG id
-   * reads as Solidity's default public value, so liveness is mandatory. Root
-   * count pins the workspace assertion version and prevents a same-root update
-   * from inheriting the wrong version-specific metadata.
-   */
-  private async resolvePublicFinalizedMaterializationAuthority(input: {
-    onChainCgId?: string;
-    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-    kaId: bigint;
-    merkleRoot: Uint8Array;
-    ctx: OperationContext;
-  }): Promise<{ authorAddress?: string } | undefined> {
-    const chain = this.chain;
-    if (
-      !chain
-      || chain.chainId === 'none'
-      || !chain.isContextGraphActiveOnChain
-      || !chain.getContextGraphAccessPolicy
-      || !chain.getMerkleRootCount
-      || !chain.getLatestMerkleRoot
-      || !input.onChainCgId
-    ) return undefined;
-
-    let onChainCgId: bigint;
-    let assertionVersion: bigint;
-    try {
-      onChainCgId = BigInt(input.onChainCgId);
-      assertionVersion = BigInt(input.scope.assertionVersion);
-      if (onChainCgId <= 0n || assertionVersion <= 0n) return undefined;
-    } catch {
-      return undefined;
-    }
-
-    try {
-      const [active, accessPolicy, rootCountBefore] = await Promise.all([
-        chain.isContextGraphActiveOnChain(onChainCgId),
-        chain.getContextGraphAccessPolicy(onChainCgId),
-        chain.getMerkleRootCount(input.kaId),
-      ]);
-      const latestRoot = await chain.getLatestMerkleRoot(input.kaId);
-      let authorAddress: string | undefined;
-      if (chain.getLatestMerkleRootAuthor) {
-        try {
-          const candidate = await chain.getLatestMerkleRootAuthor(input.kaId);
-          if (ethers.isAddress(candidate) && candidate !== ethers.ZeroAddress) {
-            authorAddress = ethers.getAddress(candidate);
-          }
-        } catch (err) {
-          this.log.info(
-            input.ctx,
-            `Chain-reconcile: latest-root author is unavailable for ${input.scope.ual}: `
-              + `${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-      // Sandwich the latest-root and optional author reads between two
-      // monotonic root-count reads. Without adapter-level block tags this is
-      // the conservative coherence boundary: an overlapping update changes
-      // the count and fails closed, including same-root updates.
-      const rootCountAfter = await chain.getMerkleRootCount(input.kaId);
-      if (
-        !active
-        || accessPolicy !== 0
-        || rootCountBefore !== rootCountAfter
-        || rootCountAfter !== assertionVersion
-        || !equalBytes(latestRoot, input.merkleRoot)
-      ) return undefined;
-      return authorAddress ? { authorAddress } : {};
-    } catch (err) {
-      this.log.info(
-        input.ctx,
-        `Chain-reconcile: public finalized authority is unavailable for ${input.scope.ual}: `
-          + `${err instanceof Error ? err.message : String(err)}`,
-      );
-      return undefined;
-    }
   }
 
   /**
