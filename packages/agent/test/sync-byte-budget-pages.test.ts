@@ -52,6 +52,35 @@ function pageSizeScope(
   } as const;
 }
 
+type PageFetchParams = Parameters<typeof fetchSyncPages>[0];
+
+function pageFetchParams(overrides: Partial<PageFetchParams> = {}): PageFetchParams {
+  return {
+    ctx: makeCtx(),
+    remotePeerId: REMOTE_PEER_ID,
+    contextGraphId: CG_ID,
+    includeSharedMemory: true,
+    phase: 'meta',
+    graphUri: 'urn:meta',
+    deadline: Date.now() + 15_000,
+    syncPageTimeoutMs: 5_000,
+    syncRouterAttempts: 1,
+    syncPageRetryAttempts: 3,
+    syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+    syncDeniedResponse: '#DENIED',
+    debugSyncProgress: false,
+    protocolSync: '/dkg/test/sync',
+    checkpointStore: new MemorySyncCheckpointStore(),
+    buildSyncRequest: async () => new TextEncoder().encode('request'),
+    parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+    send: async () => new Uint8Array(),
+    logWarn: noopLog,
+    logInfo: noopLog,
+    logDebug: noopLog,
+    ...overrides,
+  };
+}
+
 describe('byte-budget sync pagination', () => {
   it('advertises byte-budget paging in an unauthenticated public request', async () => {
     const encoded = await buildSyncRequestEnvelope({
@@ -207,23 +236,11 @@ describe('byte-budget sync pagination', () => {
   it('keeps a successful fallback size sticky and probes upward gradually', async () => {
     const requestedSizes: number[] = [];
     let sends = 0;
-    const result = await fetchSyncPages({
-      ctx: makeCtx(),
-      remotePeerId: REMOTE_PEER_ID,
-      contextGraphId: CG_ID,
-      includeSharedMemory: true,
+    const result = await fetchSyncPages(pageFetchParams({
       phase: 'snapshot',
       graphUri: '',
       snapshotRef: 'snapshot-ref',
-      deadline: Date.now() + 15_000,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
       syncPageRetryAttempts: 2,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
-      debugSyncProgress: false,
-      protocolSync: '/dkg/test/sync',
-      checkpointStore: new MemorySyncCheckpointStore(),
       buildSyncRequest: async (_cg, _offset, limit) => {
         requestedSizes.push(limit);
         return new TextEncoder().encode('request');
@@ -236,10 +253,7 @@ describe('byte-budget sync pagination', () => {
           ? new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .')
           : new Uint8Array();
       },
-      logWarn: noopLog,
-      logInfo: noopLog,
-      logDebug: noopLog,
-    });
+    }));
 
     expect(requestedSizes).toEqual([
       SYNC_REQUEST_PAGE_SIZE,
@@ -257,21 +271,8 @@ describe('byte-budget sync pagination', () => {
     const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
     const checkpointStore = new MemorySyncCheckpointStore();
     let failFirstRound = true;
-    const run = () => fetchSyncPages({
-      ctx: makeCtx(),
-      remotePeerId: REMOTE_PEER_ID,
-      contextGraphId: CG_ID,
-      includeSharedMemory: true,
-      phase: 'meta',
-      graphUri: 'urn:meta',
-      deadline: Date.now() + 15_000,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
+    const run = () => fetchSyncPages(pageFetchParams({
       syncPageRetryAttempts: 3,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
-      debugSyncProgress: false,
-      protocolSync: '/dkg/test/sync',
       checkpointStore,
       pageSizeProfileCache,
       buildSyncRequest: async (_cg, _offset, limit) => {
@@ -283,10 +284,7 @@ describe('byte-budget sync pagination', () => {
         if (failFirstRound) throw new Error('sync responder queue wait exceeded');
         return new Uint8Array();
       },
-      logWarn: noopLog,
-      logInfo: noopLog,
-      logDebug: noopLog,
-    });
+    }));
 
     await expect(run()).rejects.toThrow('sync responder queue wait exceeded');
     expect(requestedSizes).toEqual([
@@ -307,21 +305,8 @@ describe('byte-budget sync pagination', () => {
     const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
     const checkpointStore = new MemorySyncCheckpointStore();
     let failTransport = true;
-    const run = () => fetchSyncPages({
-      ctx: makeCtx(),
-      remotePeerId: REMOTE_PEER_ID,
-      contextGraphId: CG_ID,
-      includeSharedMemory: true,
-      phase: 'meta',
-      graphUri: 'urn:meta',
-      deadline: Date.now() + 15_000,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
+    const run = () => fetchSyncPages(pageFetchParams({
       syncPageRetryAttempts: 1,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
-      debugSyncProgress: false,
-      protocolSync: '/dkg/test/sync',
       checkpointStore,
       pageSizeProfileCache,
       buildSyncRequest: async (_cg, _offset, limit) => {
@@ -333,10 +318,7 @@ describe('byte-budget sync pagination', () => {
         if (failTransport) throw new Error('terminal relay stream reset');
         return new Uint8Array();
       },
-      logWarn: noopLog,
-      logInfo: noopLog,
-      logDebug: noopLog,
-    });
+    }));
 
     await expect(run()).rejects.toThrow('terminal relay stream reset');
     expect(requestedSizes).toEqual([SYNC_REQUEST_PAGE_SIZE]);
@@ -355,33 +337,14 @@ describe('byte-budget sync pagination', () => {
     const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
     pageSizeProfile.preferredPageSize = 2_048;
     const requestedSizes: number[] = [];
-    await expect(fetchSyncPages({
-      ctx: makeCtx(),
-      remotePeerId: REMOTE_PEER_ID,
-      contextGraphId: CG_ID,
-      includeSharedMemory: true,
-      phase: 'meta',
-      graphUri: 'urn:meta',
-      deadline: Date.now() + 15_000,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
+    await expect(fetchSyncPages(pageFetchParams({
       syncPageRetryAttempts: 2,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
-      debugSyncProgress: false,
-      protocolSync: '/dkg/test/sync',
-      checkpointStore: new MemorySyncCheckpointStore(),
       pageSizeProfileCache,
       buildSyncRequest: async (_cg, _offset, limit) => {
         requestedSizes.push(limit);
         throw new Error('wallet signer unavailable');
       },
-      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
-      send: async () => new Uint8Array(),
-      logWarn: noopLog,
-      logInfo: noopLog,
-      logDebug: noopLog,
-    })).rejects.toThrow('wallet signer unavailable');
+    }))).rejects.toThrow('wallet signer unavailable');
 
     expect(requestedSizes).toEqual([2_048, 2_048]);
     expect(pageSizeProfile.preferredPageSize).toBe(2_048);
@@ -393,23 +356,9 @@ describe('byte-budget sync pagination', () => {
     const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
     pageSizeProfile.preferredPageSize = 2_048;
     const requestedSizes: number[] = [];
-    await expect(fetchSyncPages({
-      ctx: makeCtx(),
-      remotePeerId: REMOTE_PEER_ID,
-      contextGraphId: CG_ID,
-      includeSharedMemory: true,
-      phase: 'meta',
-      graphUri: 'urn:meta',
-      deadline: Date.now() + 15_000,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
+    await expect(fetchSyncPages(pageFetchParams({
       syncPageRetryAttempts: 2,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
       signal: controller.signal,
-      debugSyncProgress: false,
-      protocolSync: '/dkg/test/sync',
-      checkpointStore: new MemorySyncCheckpointStore(),
       pageSizeProfileCache,
       buildSyncRequest: async (_cg, _offset, limit) => {
         requestedSizes.push(limit);
@@ -420,10 +369,7 @@ describe('byte-budget sync pagination', () => {
         controller.abort(new Error('node stopping'));
         throw new Error('transport closed during shutdown');
       },
-      logWarn: noopLog,
-      logInfo: noopLog,
-      logDebug: noopLog,
-    })).rejects.toThrow('transport closed during shutdown');
+    }))).rejects.toThrow('transport closed during shutdown');
 
     expect(requestedSizes).toEqual([2_048]);
     expect(pageSizeProfile.preferredPageSize).toBe(2_048);
