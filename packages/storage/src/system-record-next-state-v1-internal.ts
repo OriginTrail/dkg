@@ -932,6 +932,26 @@ function classifyTombstoneAdvance(
   if (snapshot.state === 'absent') return Object.freeze({ outcome: 'advance' });
   const current = snapshot.appliedState;
   if (current.headDigest === headDigest) return Object.freeze({ outcome: 'advance' });
+  // A tombstone must never advance over a fork quarantine. The quarantined row
+  // persists the quarantined ACTIVE head's digest, version, peer, root and
+  // lineage, so a tombstone naming that head as its predecessor satisfies every
+  // conjunct below -- it would delete the row, resolving the equivocation by
+  // omission and taking the evidence with it, on nothing more than the peer
+  // declining to advertise the competing branch. Only a verified direct
+  // fork-resolving successor clears a quarantine, and that path is the active
+  // classifier's, not this one. Checked after the equal-head return, so that if
+  // a tombstone row ever carries conflict slots forward its replay stays
+  // idempotent. No reachable row does today: slots populate only on a terminal
+  // transition conflict, which can never clear (unquarantine defers while slots
+  // are non-empty) and, with this gate, can never be tombstoned either. The
+  // ordering is a cheap default, not a defended state -- do not read it as
+  // evidence that such a row exists.
+  if (current.status === 'quarantined'
+      || current.conflictEvidenceDigest !== undefined
+      || current.conflictDigestSlots.length > 0
+      || current.conflictOverflow) {
+    return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
+  }
   const predecessor = facts.verifiedAuthoritySummary.tombstonePredecessor;
   if (predecessor === undefined) {
     return Object.freeze({ outcome: 'deferred', reason: 'verified-state-mismatch' });

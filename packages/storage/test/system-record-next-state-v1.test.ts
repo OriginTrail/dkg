@@ -734,6 +734,111 @@ describe('system-record terminal and quarantine next-state derivation', () => {
     activeRegistry.consumer.release(activeFacts);
   });
 
+  // The tombstone classifier is a parallel path to the active one and had no
+  // quarantine gate, so a peer that equivocated could delete the quarantined row
+  // -- and the evidence of its own equivocation -- by publishing a tombstone for
+  // the head it had quarantined. Every conjunct of the advance matches here,
+  // which is the point: without the gate this fixture advances and plans a
+  // deletion.
+  it('never lets a tombstone advance over a fork-quarantined row', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const initialRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const initialFacts = initialRegistry.consumer.consume(
+      initialRegistry.issuer.issueActive(fixture.active),
+      fixture.binding,
+    );
+    const active = expectReady(deriveSystemRecordReplacementV1({
+      facts: initialFacts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: initialFacts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          initialFacts.networkId,
+          initialFacts.head.peerId,
+        ),
+        materializationEpoch: initialFacts.materializationEpoch,
+        quads: [fixture.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    }));
+    const activeTuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: active.plan.next.appliedState,
+      headVersion: active.plan.next.headVersion,
+      ownedSubjectTable: active.plan.next.ownedSubjectTable,
+      rootClaimSet: active.plan.next.rootClaimSet,
+      capacityState: active.plan.next.capacityState,
+      receipt: active.plan.next.receipt,
+    });
+    const activeSnapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: initialFacts.networkId,
+      stableKeyHash: active.plan.stableKeyHash,
+      materializationEpoch: initialFacts.materializationEpoch,
+      quads: [
+        ...activeTuple.record,
+        ...activeTuple.capacity,
+        ...activeTuple.epoch,
+        ...activeTuple.receipt,
+      ],
+    });
+    initialRegistry.consumer.release(initialFacts);
+
+    const quarantineRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const quarantineFacts = quarantineRegistry.consumer.consume(
+      quarantineRegistry.issuer.issueCandidate({ operation: 'quarantine', ...fixture.quarantine }),
+      fixture.binding,
+    );
+    const quarantined = expectReady(deriveSystemRecordReplacementV1({
+      facts: quarantineFacts,
+      snapshot: activeSnapshot,
+      observedRootClaimQuads: active.plan.next.rootClaimQuads,
+    }));
+    expect(quarantined.plan.next.appliedState.status).toBe('quarantined');
+    const quarantineTuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: quarantined.plan.next.appliedState,
+      headVersion: quarantined.plan.next.headVersion,
+      ownedSubjectTable: quarantined.plan.next.ownedSubjectTable,
+      rootClaimSet: quarantined.plan.next.rootClaimSet,
+      capacityState: quarantined.plan.next.capacityState,
+      receipt: quarantined.plan.next.receipt,
+    });
+    const quarantinedSnapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: quarantineFacts.networkId,
+      stableKeyHash: quarantined.plan.stableKeyHash,
+      materializationEpoch: quarantineFacts.materializationEpoch,
+      quads: [
+        ...quarantineTuple.record,
+        ...quarantineTuple.capacity,
+        ...quarantineTuple.epoch,
+        ...quarantineTuple.receipt,
+      ],
+    });
+    quarantineRegistry.consumer.release(quarantineFacts);
+    if (quarantinedSnapshot.state !== 'present') throw new Error('expected a quarantined row');
+
+    // The tombstone names exactly the head the row quarantined, so nothing but
+    // the status gate stands between it and a deletion.
+    const tombstoneRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const tombstoneFacts = tombstoneRegistry.consumer.consume(
+      tombstoneRegistry.issuer.issueCandidate({ operation: 'tombstone', ...fixture.tombstone }),
+      fixture.binding,
+    );
+    expect(tombstoneFacts.verifiedAuthoritySummary.tombstonePredecessor)
+      .toBeDefined();
+    expect(quarantinedSnapshot.appliedState.headDigest).toBe(
+      computeAgentProfileHeadObjectDigestV1(
+        tombstoneFacts.verifiedAuthoritySummary.tombstonePredecessor!,
+      ),
+    );
+    expect(quarantinedSnapshot.headVersion).toBe(
+      tombstoneFacts.verifiedAuthoritySummary.tombstonePredecessor!.version,
+    );
+    expect(deriveSystemRecordReplacementV1({
+      facts: tombstoneFacts,
+      snapshot: quarantinedSnapshot,
+      observedRootClaimQuads: quarantined.plan.next.rootClaimQuads,
+    })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
+    tombstoneRegistry.consumer.release(tombstoneFacts);
+  });
+
   it('persists terminal transition object digests in the bounded quarantine slots', async () => {
     const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
     const transitionDigests = Object.freeze([
