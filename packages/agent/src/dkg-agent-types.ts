@@ -1249,12 +1249,6 @@ export interface DurableSyncResult extends DurableSyncDiagnostics {
 export interface SharedMemorySyncResult extends SharedMemorySyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
-  /**
-   * Explicit whole-selected-scope verdict when this result came from the
-   * RFC-64 selected SWM lane. Undefined keeps the legacy per-phase accounting
-   * contract for ordinary and private shared-memory sync.
-   */
-  complete?: boolean;
 }
 
 // ── DKGAgent configuration ──────────────────────────────────────────

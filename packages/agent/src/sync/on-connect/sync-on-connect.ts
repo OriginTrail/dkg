@@ -13,6 +13,23 @@ type SyncProgressSummary = SharedMemoryFreshnessSummary & {
 
 type SyncFromPeerResult = number | SyncProgressSummary;
 
+type DurableSyncFromPeerResult = number | (SyncProgressSummary & {
+  readonly complete?: boolean;
+});
+
+/**
+ * Terminal verdict owned only by the priority selected-SWM lane. Keeping it in
+ * a discriminated wrapper prevents ordinary/private shared-memory producers or
+ * generic diagnostics mergers from accidentally changing reconnect freshness.
+ */
+export interface SelectedSharedMemorySyncResult {
+  readonly kind: 'selected-shared-memory';
+  readonly shared: SyncProgressSummary;
+  readonly selectedScopeComplete: boolean;
+}
+
+type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
+
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
   progress?: boolean;
@@ -30,14 +47,18 @@ interface SyncOnConnectContext {
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
   /** Selected graph-complete SWM scope that must run before unrelated history. */
   getPrioritySharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
-  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
+  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
   syncSharedMemoryFromPeer: (
     peerId: string,
     contextGraphIds: string[],
-    options?: { selectedPriority?: boolean },
   ) => Promise<SyncFromPeerResult>;
+  /** Dedicated typed boundary for priority selected-SWM whole-scope results. */
+  syncSelectedSharedMemoryFromPeer?: (
+    peerId: string,
+    contextGraphIds: string[],
+  ) => Promise<SelectedSharedMemorySyncResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
@@ -158,6 +179,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
+    syncSelectedSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
     logInfo,
   } = context;
@@ -179,15 +201,25 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let sawExplicitIncompleteSharedResult = false;
   let cleanDurableDetailedRound = false;
   const recordSyncAccounting = (
-    result: SyncFromPeerResult,
+    result: SyncAccountingResult,
     phase: 'durable' | 'shared',
   ): SyncResultAccounting => {
-    const complete = typeof result !== 'number'
+    const selectedResult = phase === 'shared'
+      && typeof result !== 'number'
+      && 'kind' in result
+      && result.kind === 'selected-shared-memory'
+        ? result
+        : undefined;
+    const syncResult = (selectedResult?.shared ?? result) as SyncFromPeerResult;
+    const complete = selectedResult?.selectedScopeComplete ?? (
+      phase === 'durable'
+      && typeof result !== 'number'
       && 'complete' in result
       && typeof result.complete === 'boolean'
         ? result.complete
-        : undefined;
-    const accounting = classifySyncResult(result, phase, complete);
+        : undefined
+    );
+    const accounting = classifySyncResult(syncResult, phase, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
     sawFailedPhase = sawFailedPhase || accounting.failed;
@@ -282,10 +314,12 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
         ctx,
         `Prioritizing ${prioritySharedMemoryContextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
       );
-      const priorityWsSynced = await syncSharedMemoryFromPeer(
+      if (!syncSelectedSharedMemoryFromPeer) {
+        throw new Error('Priority selected SWM scope has no selected result producer');
+      }
+      const priorityWsSynced = await syncSelectedSharedMemoryFromPeer(
         remotePeer,
         prioritySharedMemoryContextGraphIds,
-        { selectedPriority: true },
       );
       const prioritySharedAccounting = recordSyncAccounting(priorityWsSynced, 'shared');
       logInfo(

@@ -117,12 +117,21 @@ describe('runSyncOnConnect callbacks', () => {
       },
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds, options) => {
-        order.push(
-          `shared:${contextGraphIds.join(',')}:`
-            + (options?.selectedPriority === true ? 'selected' : 'ordinary'),
-        );
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        order.push(`shared:${contextGraphIds.join(',')}:ordinary`);
         return 0;
+      },
+      syncSelectedSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        order.push(`shared:${contextGraphIds.join(',')}:selected`);
+        return {
+          kind: 'selected-shared-memory',
+          shared: {
+            insertedTriples: 0,
+            completedPhases: 1,
+            checkpointAdvances: 0,
+          },
+          selectedScopeComplete: true,
+        };
       },
       logInfo: noopLog,
     });
