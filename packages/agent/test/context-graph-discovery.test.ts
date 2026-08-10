@@ -472,7 +472,7 @@ describe('listContextGraphs merge', () => {
       name: 'Chain Only',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '701',
     });
 
     const contextGraphs = await agent.listContextGraphs();
@@ -865,7 +865,7 @@ describe('listContextGraphs merge', () => {
       name: 'Policy Unknown Tail',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '702',
     } satisfies ContextGraphSub);
 
     const scoped = await agent.listContextGraphs({ callerAgentAddress: ethers.Wallet.createRandom().address });
@@ -888,7 +888,7 @@ describe('listContextGraphs merge', () => {
       name: 'Unscoped No Legacy Fallback',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '703',
     } satisfies ContextGraphSub, { persist: false });
 
     const isPrivateOrig = (agent as any).isPrivateContextGraph.bind(agent);
@@ -2028,7 +2028,7 @@ describe('listContextGraphs merge', () => {
       name: 'Cache Invalidated',
       subscribed: true,
       synced: false,
-      onChainId: '0xabc123',
+      onChainId: '704',
     } satisfies ContextGraphSub, { persist: false });
 
     const afterInvalidation = await agent.listContextGraphs({ callerAgentAddress: null });
@@ -2246,7 +2246,7 @@ describe('discoverContextGraphsFromChain', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xdeadbeef00000000000000000000000000000000000000000000000000000001',
+        contextGraphId: '801',
         name: 'test-revealed',
         creator: '0x1234',
         accessPolicy: 0,
@@ -2270,7 +2270,7 @@ describe('discoverContextGraphsFromChain', () => {
     expect(entry).toBeDefined();
     expect(entry!.subscribed).toBe(false);
     expect(entry!.synced).toBe(false);
-    expect(entry!.onChainId).toBe('0xdeadbeef00000000000000000000000000000000000000000000000000000001');
+    expect(entry!.onChainId).toBe('801');
     expect((agent as any).config.syncContextGraphs ?? []).not.toContain('test-revealed');
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(persisted.has('test-revealed')).toBe(false);
@@ -2290,7 +2290,7 @@ describe('discoverContextGraphsFromChain', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xcafebabe00000000000000000000000000000000000000000000000000000003',
+        contextGraphId: '803',
         name: 'leaked-curated',
         creator: '0x000000000000000000000000000000000000dEaD',
         accessPolicy: 1,
@@ -2314,7 +2314,7 @@ describe('discoverContextGraphsFromChain', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xdeadbeef00000000000000000000000000000000000000000000000000000002',
+        contextGraphId: '802',
         creator: '0x1234',
         accessPolicy: 0,
         blockNumber: 100,
@@ -2338,7 +2338,7 @@ describe('discoverContextGraphsFromChain', () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: '0xaaa',
+        contextGraphId: '804',
         creator: '0x1234',
         accessPolicy: 0,
         blockNumber: 50,
@@ -2354,7 +2354,7 @@ describe('discoverContextGraphsFromChain', () => {
       name: 'Known',
       subscribed: true,
       synced: true,
-      onChainId: '0xaaa',
+      onChainId: '804',
     });
 
     const discovered = await agent.discoverContextGraphsFromChain();
@@ -2443,7 +2443,7 @@ describe('discoverContextGraphsFromChain', () => {
     const listCalls: unknown[] = [];
     const entries: ContextGraphOnChain[] = [
       {
-        contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000010',
+        contextGraphId: '810',
         name: 'legacy-list-incremental',
         creator: '0x1234',
         accessPolicy: 0,
@@ -2451,7 +2451,7 @@ describe('discoverContextGraphsFromChain', () => {
         metadataRevealed: true,
       },
       {
-        contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000011',
+        contextGraphId: '811',
         name: 'legacy-list-seed',
         creator: '0x1234',
         accessPolicy: 0,
@@ -2487,7 +2487,7 @@ describe('discoverContextGraphsFromChain', () => {
 
   it('applies cursor scan pages once and acknowledges after local discovery work', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000001';
+    const contextGraphId = '821';
     const revealed: ContextGraphOnChain = {
       contextGraphId,
       name: 'paged-revealed',
@@ -2549,7 +2549,7 @@ describe('discoverContextGraphsFromChain', () => {
   it('propagates cursor scan page apply failures without acknowledging progress', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     const revealed: ContextGraphOnChain = {
-      contextGraphId: '0xfeed000000000000000000000000000000000000000000000000000000000002',
+      contextGraphId: '822',
       name: 'apply-failure-revealed',
       creator: '0x1234',
       accessPolicy: 0,
@@ -2586,7 +2586,7 @@ describe('discoverContextGraphsFromChain', () => {
 
   it('retries cursor pages after partial local apply without acknowledging until RDF binding exists', async () => {
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
-    const contextGraphId = '0xfeed000000000000000000000000000000000000000000000000000000000003';
+    const contextGraphId = '823';
     const revealed: ContextGraphOnChain = {
       contextGraphId,
       name: 'retry-safe-revealed',
@@ -2730,7 +2730,7 @@ describe('discoverContextGraphsFromChain', () => {
       err.name = 'ContextGraphChainScanPartialError';
       err.partialResults = [
         {
-          contextGraphId: '0xfeedbeef00000000000000000000000000000000000000000000000000000001',
+          contextGraphId: '824',
           name: 'partial-revealed',
           creator: '0x1234',
           accessPolicy: 0,
@@ -2765,7 +2765,7 @@ describe('discoverContextGraphsFromChain', () => {
 
     const entry = agent!.getSubscribedContextGraphs().get('partial-revealed');
     expect(entry).toBeDefined();
-    expect(entry!.onChainId).toBe('0xfeedbeef00000000000000000000000000000000000000000000000000000001');
+    expect(entry!.onChainId).toBe('824');
     expect((agent as any).chainContextGraphScanFailure?.count).toBe(2);
     const warnings = entries.filter((entry) =>
       entry.level === 'warn' && entry.message.includes('Chain context graph scan failed'),
@@ -2857,14 +2857,14 @@ describe('hash-vs-name duplication regression', () => {
     await agent?.stop().catch(() => {});
   });
 
-  it('chain discovery then ontology sync produces one merged entry, no ghost 0x contextGraph', async () => {
+  it('chain discovery then ontology sync produces one merged entry, no on-chain-id ghost', async () => {
     const localName = 'merged-contextGraph';
-    const expectedHash = ethers.keccak256(ethers.toUtf8Bytes(localName));
+    const onChainId = '825';
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: expectedHash,
+        contextGraphId: onChainId,
         name: localName,
         creator: '0x1234',
         accessPolicy: 0,
@@ -2891,7 +2891,7 @@ describe('hash-vs-name duplication regression', () => {
     expect(storeDiscovered).toBeLessThanOrEqual(1);
 
     const contextGraphs = await agent.listContextGraphs();
-    const matches = contextGraphs.filter(p => p.id === localName || p.id === expectedHash);
+    const matches = contextGraphs.filter(p => p.id === localName || p.id === onChainId);
     expect(matches.length).toBe(1);
     expect(matches[0].id).toBe(localName);
     expect(matches[0].subscribed).toBe(false);
@@ -2901,7 +2901,7 @@ describe('hash-vs-name duplication regression', () => {
     expect(matches[0].synced).toBe(false);
     expect(matches[0].callerInvolved).toBeUndefined();
 
-    const ghosts = contextGraphs.filter(p => p.id.startsWith('0x'));
+    const ghosts = contextGraphs.filter(p => p.id === onChainId);
     expect(ghosts.length).toBe(0);
   }, 15000);
 });
