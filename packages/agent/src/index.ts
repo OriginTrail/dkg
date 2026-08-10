@@ -230,6 +230,7 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorStore,
   type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
   type PeerHealth,

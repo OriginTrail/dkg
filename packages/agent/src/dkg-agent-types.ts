@@ -768,6 +768,16 @@ export interface ContextGraphSubscriptionStore {
   saveVmReconcileNegative?(record: VmReconcileNegativeRecord): Promise<void>;
   deleteVmReconcileNegative?(cacheKey: string): Promise<void>;
   deleteVmReconcileNegativesForContextGraph?(contextGraphId: string): Promise<void>;
+}
+
+/**
+ * Durable cursor store owned by selected-only VM reconciliation.
+ *
+ * This deliberately does not extend `ContextGraphSubscriptionStore`: selecting
+ * a public CG for RFC-64 convergence grants neither membership nor Core custody
+ * and therefore must not acquire a subscription-store dependency.
+ */
+export interface SelectedVmReconcileCursorStore {
   loadSelectedVmReconcileCursor?(
     deploymentId: string,
     contextGraphId: string,
@@ -1704,6 +1714,8 @@ export interface DKGAgentConfig {
   };
   /** Durable local store for subscribed context-graph runtime state. */
   contextGraphSubscriptionStore?: ContextGraphSubscriptionStore;
+  /** Durable progress owned by selected-only VM reconciliation. */
+  selectedVmReconcileCursorStore?: SelectedVmReconcileCursorStore;
   /**
    * Whether durable context-graph subscription rows become live subscriptions
    * during startup. Defaults to `true`. When `false`, startup still opens the

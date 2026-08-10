@@ -3349,7 +3349,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     ) {
       let watermark = 0;
       try {
-        const persisted = await this.config.contextGraphSubscriptionStore
+        const persisted = await this.config.selectedVmReconcileCursorStore
           ?.loadSelectedVmReconcileCursor?.(deploymentId, localCgId, onChainId);
         if (
           persisted?.deploymentId === deploymentId
@@ -3551,7 +3551,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         nameHash: target.nameHash,
         watermark,
       };
-      await this.config.contextGraphSubscriptionStore
+      await this.config.selectedVmReconcileCursorStore
         ?.saveSelectedVmReconcileCursor?.(nextRecord);
       if (!isTargetCurrent()) return;
       target.selectedState.record = nextRecord;
