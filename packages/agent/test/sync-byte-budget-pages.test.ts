@@ -268,7 +268,7 @@ describe('byte-budget sync pagination', () => {
   it('retains the safe fallback across bounded continuation fetches', async () => {
     const requestedSizes: number[] = [];
     const pageSizeProfileCache = new SyncPageSizeProfileCache();
-    const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
+    const scope = pageSizeScope(REMOTE_PEER_ID);
     const checkpointStore = new MemorySyncCheckpointStore();
     let failFirstRound = true;
     const run = () => fetchSyncPages(pageFetchParams({
@@ -292,7 +292,7 @@ describe('byte-budget sync pagination', () => {
       SYNC_REQUEST_SAFE_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
     ]);
-    expect(pageSizeProfile.preferredPageSize).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
 
     failFirstRound = false;
     await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
@@ -302,7 +302,7 @@ describe('byte-budget sync pagination', () => {
   it('retains a terminal transport fallback when no retry callback runs', async () => {
     const requestedSizes: number[] = [];
     const pageSizeProfileCache = new SyncPageSizeProfileCache();
-    const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
+    const scope = pageSizeScope(REMOTE_PEER_ID);
     const checkpointStore = new MemorySyncCheckpointStore();
     let failTransport = true;
     const run = () => fetchSyncPages(pageFetchParams({
@@ -322,7 +322,7 @@ describe('byte-budget sync pagination', () => {
 
     await expect(run()).rejects.toThrow('terminal relay stream reset');
     expect(requestedSizes).toEqual([SYNC_REQUEST_PAGE_SIZE]);
-    expect(pageSizeProfile.preferredPageSize).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
 
     failTransport = false;
     await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
@@ -334,8 +334,8 @@ describe('byte-budget sync pagination', () => {
 
   it('does not poison page-size learning when request construction fails locally', async () => {
     const pageSizeProfileCache = new SyncPageSizeProfileCache();
-    const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
-    pageSizeProfile.preferredPageSize = 2_048;
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    pageSizeProfileCache.remember(scope, 2_048);
     const requestedSizes: number[] = [];
     await expect(fetchSyncPages(pageFetchParams({
       syncPageRetryAttempts: 2,
@@ -347,14 +347,14 @@ describe('byte-budget sync pagination', () => {
     }))).rejects.toThrow('wallet signer unavailable');
 
     expect(requestedSizes).toEqual([2_048, 2_048]);
-    expect(pageSizeProfile.preferredPageSize).toBe(2_048);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(2_048);
   });
 
   it('does not poison page-size learning when the caller aborts during send', async () => {
     const controller = new AbortController();
     const pageSizeProfileCache = new SyncPageSizeProfileCache();
-    const pageSizeProfile = pageSizeProfileCache.get(pageSizeScope(REMOTE_PEER_ID));
-    pageSizeProfile.preferredPageSize = 2_048;
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    pageSizeProfileCache.remember(scope, 2_048);
     const requestedSizes: number[] = [];
     await expect(fetchSyncPages(pageFetchParams({
       syncPageRetryAttempts: 2,
@@ -372,22 +372,27 @@ describe('byte-budget sync pagination', () => {
     }))).rejects.toThrow('transport closed during shutdown');
 
     expect(requestedSizes).toEqual([2_048]);
-    expect(pageSizeProfile.preferredPageSize).toBe(2_048);
+    expect(pageSizeProfileCache.preferred(scope)).toBe(2_048);
   });
 
   it('bounds and expires agent-local page-size profiles', () => {
     const cache = new SyncPageSizeProfileCache(2, 100);
-    const first = cache.get(pageSizeScope('first'), 0);
-    first.preferredPageSize = 64;
-    const second = cache.get(pageSizeScope('second'), 1);
-    expect(cache.get(pageSizeScope('first'), 2)).toBe(first);
-    cache.get(pageSizeScope('third'), 3);
-    expect(cache.get(pageSizeScope('second'), 4)).not.toBe(second);
+    cache.remember(pageSizeScope('first'), 64, 0);
+    cache.remember(pageSizeScope('second'), 128, 1);
+    expect(cache.preferred(pageSizeScope('first'), 2)).toBe(64);
+    cache.remember(pageSizeScope('third'), 256, 3);
+    expect(cache.preferred(pageSizeScope('second'), 4)).toBeUndefined();
 
     const expiringCache = new SyncPageSizeProfileCache(2, 100);
-    const expiring = expiringCache.get(pageSizeScope('expiring'), 0);
-    expect(expiringCache.get(pageSizeScope('expiring'), 99)).toBe(expiring);
-    expect(expiringCache.get(pageSizeScope('expiring'), 199)).not.toBe(expiring);
+    expiringCache.remember(pageSizeScope('expiring'), 64, 0);
+    expect(expiringCache.preferred(pageSizeScope('expiring'), 99)).toBe(64);
+    expect(expiringCache.preferred(pageSizeScope('expiring'), 199)).toBeUndefined();
+
+    const writeRefreshed = new SyncPageSizeProfileCache(2, 100);
+    writeRefreshed.remember(pageSizeScope('write-refreshed'), 64, 0);
+    writeRefreshed.remember(pageSizeScope('write-refreshed'), 128, 99);
+    expect(writeRefreshed.preferred(pageSizeScope('write-refreshed'), 198)).toBe(128);
+    expect(() => writeRefreshed.remember(pageSizeScope('invalid'), 0)).toThrow(RangeError);
   });
 
   it('serializes a UTF-8-correct prefix inside the response target', () => {
