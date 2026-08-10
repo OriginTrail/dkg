@@ -4,7 +4,12 @@ import {
   sendSyncRequest,
   type SingleUseSyncSender,
 } from '../../p2p/sync-transport.js';
-import { isSyncBackoffWorthyError, markSyncPeerResponded } from '../error-tags.js';
+import {
+  isSyncBackoffWorthyError,
+  isSyncTransportFailure,
+  isSyncValidationRejection,
+  markSyncPeerResponded,
+} from '../error-tags.js';
 import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
 import type { SyncPhase } from '../auth/request-build.js';
@@ -145,6 +150,170 @@ export interface SyncPageResult {
   timedOut: boolean;
 }
 
+/** Canonical transport path identity for learned requester page sizing. */
+export interface SyncPageSizeProfileScope {
+  remotePeerId: string;
+  contextGraphId: string;
+  includeSharedMemory: boolean;
+  phase: SyncPhase;
+}
+
+const DEFAULT_SYNC_PAGE_SIZE_PROFILE_TTL_MS = 10 * 60_000;
+const DEFAULT_SYNC_PAGE_SIZE_PROFILE_MAX_ENTRIES = 4_096;
+
+/** Bounded agent-local memory for path/CG/phase page-size learning. */
+export class SyncPageSizeProfileCache {
+  private readonly entries = new Map<
+    string,
+    { preferredPageSize: number; touchedAt: number }
+  >();
+
+  constructor(
+    private readonly maxEntries = DEFAULT_SYNC_PAGE_SIZE_PROFILE_MAX_ENTRIES,
+    private readonly ttlMs = DEFAULT_SYNC_PAGE_SIZE_PROFILE_TTL_MS,
+  ) {
+    if (!Number.isSafeInteger(maxEntries) || maxEntries < 1) {
+      throw new RangeError('Sync page-size profile maxEntries must be a positive integer');
+    }
+    if (!Number.isSafeInteger(ttlMs) || ttlMs < 1) {
+      throw new RangeError('Sync page-size profile ttlMs must be a positive integer');
+    }
+  }
+
+  preferred(scope: SyncPageSizeProfileScope, now = Date.now()): number | undefined {
+    const key = this.key(scope);
+    const existing = this.entries.get(key);
+    if (!existing) return undefined;
+    if (now - existing.touchedAt >= this.ttlMs) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    // Refresh insertion order as a small LRU; this also avoids scanning the
+    // whole map on each access.
+    this.entries.delete(key);
+    existing.touchedAt = now;
+    this.entries.set(key, existing);
+    return existing.preferredPageSize;
+  }
+
+  remember(
+    scope: SyncPageSizeProfileScope,
+    preferredPageSize: number,
+    now = Date.now(),
+  ): void {
+    if (!Number.isSafeInteger(preferredPageSize) || preferredPageSize < 1) {
+      throw new RangeError('Sync page-size preference must be a positive integer');
+    }
+    const key = this.key(scope);
+    // Writes are touches too: refresh TTL/LRU metadata at the same boundary
+    // that validates and stores the learned preference.
+    this.entries.delete(key);
+    while (this.entries.size >= this.maxEntries) {
+      const oldest = this.entries.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+    this.entries.set(key, { preferredPageSize, touchedAt: now });
+  }
+
+  private key(scope: SyncPageSizeProfileScope): string {
+    // Keep this identity beside the requester policy it controls. This is
+    // transport-capacity memory, so transfer identity (graph URI, snapshot,
+    // delta watermark, recovery, exact assets, scope, and limits) is
+    // intentionally excluded. The lifecycle wrapper owns only the bounded
+    // agent-local cache, not these grouping rules.
+    return JSON.stringify([
+      scope.remotePeerId,
+      scope.contextGraphId,
+      scope.includeSharedMemory ? 'swm' : 'vm',
+      scope.phase,
+    ]);
+  }
+}
+
+type PageSizeAdjustment = {
+  previousPageSize: number;
+  currentPageSize: number;
+};
+
+/** Owns the adaptive requester page-size state machine for one fetch. */
+class AdaptiveSyncPageSizer {
+  private readonly safePageSize: number;
+
+  private activePageSize: number;
+
+  private consecutiveSuccessfulPages = 0;
+
+  constructor(
+    private readonly syncPageSize: number,
+    private readonly usesByteBudgetPagination: boolean,
+    preferredPageSize?: number,
+    private readonly rememberPreferredPageSize?: (pageSize: number) => void,
+  ) {
+    this.safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+    this.activePageSize = Number.isSafeInteger(preferredPageSize)
+      ? Math.max(this.safePageSize, Math.min(syncPageSize, preferredPageSize!))
+      : syncPageSize;
+  }
+
+  current(): number {
+    return this.activePageSize;
+  }
+
+  onRetryFailure(error: unknown, signal?: AbortSignal): PageSizeAdjustment {
+    const previousPageSize = this.activePageSize;
+    if (this.canLearnFromFailure(error, signal)) {
+      if (this.activePageSize > this.safePageSize) {
+        // The transport has only three total attempts. Jump to the proven
+        // frame-safe floor immediately; sustained success probes upward again.
+        this.activePageSize = this.safePageSize;
+      }
+      this.rememberCurrentPageSize();
+    }
+    // Every failed retry breaks a success streak, even when it originated
+    // locally and therefore cannot teach us anything about path capacity.
+    this.consecutiveSuccessfulPages = 0;
+    return { previousPageSize, currentPageSize: this.activePageSize };
+  }
+
+  onTerminalFailure(error: unknown, signal?: AbortSignal): PageSizeAdjustment {
+    const previousPageSize = this.activePageSize;
+    if (
+      this.canLearnFromFailure(error, signal)
+      && this.activePageSize > this.safePageSize
+    ) {
+      this.activePageSize = this.safePageSize;
+      this.rememberCurrentPageSize();
+    }
+    return { previousPageSize, currentPageSize: this.activePageSize };
+  }
+
+  onPageSuccess(): void {
+    this.rememberCurrentPageSize();
+    if (this.usesByteBudgetPagination && this.activePageSize < this.syncPageSize) {
+      this.consecutiveSuccessfulPages += 1;
+      if (this.consecutiveSuccessfulPages >= 3) {
+        this.activePageSize = Math.min(
+          this.syncPageSize,
+          this.activePageSize * 2,
+        );
+        this.rememberCurrentPageSize();
+        this.consecutiveSuccessfulPages = 0;
+      }
+    } else {
+      this.consecutiveSuccessfulPages = 0;
+    }
+  }
+
+  private canLearnFromFailure(error: unknown, signal?: AbortSignal): boolean {
+    return signal?.aborted !== true && shouldReducePageSize(error);
+  }
+
+  private rememberCurrentPageSize(): void {
+    this.rememberPreferredPageSize?.(this.activePageSize);
+  }
+}
+
 /**
  * Optional modifiers for one Agent-owned page fetch.
  *
@@ -241,6 +410,8 @@ interface FetchSyncPagesParams {
   maxAcceptedQuads?: number;
   /** Retained V8 heap estimate; checked before each parsed page is appended. */
   maxAcceptedHeapBytesEstimate?: number;
+  /** Optional bounded agent-local profiles keyed inside the requester. */
+  pageSizeProfileCache?: SyncPageSizeProfileCache;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
   /**
    * Per-attempt send hook. `DKGAgent`'s production adapter sends raw
@@ -294,6 +465,15 @@ function throwIfAborted(signal: AbortSignal | undefined): void {
   if (signal?.aborted) throw asAbortError(signal.reason);
 }
 
+function shouldReducePageSize(error: unknown): boolean {
+  // Request construction can fail before a byte leaves this node (wallet,
+  // chain RPC, signing). Only a send failure or an explicit responder-capacity
+  // rejection is evidence that a smaller page could help.
+  return isSyncTransportFailure(error) || (
+    isSyncValidationRejection(error) && isSyncBackoffWorthyError(error)
+  );
+}
+
 export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<SyncPageResult> {
   const {
     ctx,
@@ -323,6 +503,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     maxAcceptedBytes,
     maxAcceptedQuads,
     maxAcceptedHeapBytesEstimate,
+    pageSizeProfileCache,
     parseAndFilter,
     send,
     logWarn,
@@ -384,7 +565,6 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // so the reduction intentionally applies to any retryable transport failure.
   // A transient failure merely makes the remainder of this phase conservative;
   // it never changes offsets or responder-session identity.
-  const safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
   // Byte-budget pagination: a SHORT page is NOT EOF — only an empty response is
   // (see the loop's EOF checks). This is a REQUESTER-SIDE default derived from
   // `syncPageSize > SYNC_PAGE_SIZE` (the fetch wrapper passes
@@ -396,9 +576,21 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // data alike; a pre-canary requester using the 500-row cap is the only one
   // that would regress, and only on an oversized (>4 MiB) meta subject.
   const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
-  let activePageSize = syncPageSize;
+  const pageSizeProfileScope = {
+    remotePeerId,
+    contextGraphId,
+    includeSharedMemory,
+    phase,
+  } satisfies SyncPageSizeProfileScope;
+  const adaptivePageSizer = new AdaptiveSyncPageSizer(
+    syncPageSize,
+    usesByteBudgetPagination,
+    pageSizeProfileCache?.preferred(pageSizeProfileScope),
+    pageSizeProfileCache
+      ? (pageSize) => pageSizeProfileCache.remember(pageSizeProfileScope, pageSize)
+      : undefined,
+  );
   let successfulPageSize = syncPageSize;
-  let consecutiveSuccessfulPages = 0;
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
@@ -448,8 +640,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // full rationale (codex review on #569 follow-ups #1, #4-#8).
         requestFactory: async () => {
           throwIfAborted(signal);
-          successfulPageSize = activePageSize;
-          const request = await buildSyncRequest(contextGraphId, curOffset, activePageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery, assetUals);
+          successfulPageSize = adaptivePageSizer.current();
+          const request = await buildSyncRequest(contextGraphId, curOffset, successfulPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery, assetUals);
           throwIfAborted(signal);
           return request;
         },
@@ -460,18 +652,9 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           }
         },
         onRetry: (attempt, delay, err) => {
-          const priorPageSize = activePageSize;
-          if (activePageSize > safePageSize) {
-            // Adapt to the actual path capacity instead of falling all the way
-            // from 8192 rows to the 64-row emergency floor. A lossy relay can
-            // often carry 1k-4k rows reliably; halving finds that stable point
-            // within the existing retry budget without turning the remainder
-            // of the phase into hundreds of tiny round trips.
-            activePageSize = Math.max(safePageSize, Math.floor(activePageSize / 2));
-          }
-          consecutiveSuccessfulPages = 0;
-          const pageSizeNote = activePageSize < priorPageSize
-            ? `; reducing page size ${priorPageSize}->${activePageSize}`
+          const adjustment = adaptivePageSizer.onRetryFailure(err, signal);
+          const pageSizeNote = adjustment.currentPageSize < adjustment.previousPageSize
+            ? `; reducing page size ${adjustment.previousPageSize}->${adjustment.currentPageSize}`
             : '';
           logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
@@ -560,19 +743,9 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
       appendInPlace(allQuads, parsed.quads);
       offset += parsed.totalQuads;
-      // Keep the size that actually crossed the path. Probe upward only after
-      // three consecutive successful pages, and at most double at a time.
-      // This avoids the old 8192 -> 64 -> 8192 oscillation where every useful
-      // page paid for a doomed large request and its timeout first.
-      if (usesByteBudgetPagination && activePageSize < syncPageSize) {
-        consecutiveSuccessfulPages += 1;
-        if (consecutiveSuccessfulPages >= 3) {
-          activePageSize = Math.min(syncPageSize, activePageSize * 2);
-          consecutiveSuccessfulPages = 0;
-        }
-      } else {
-        consecutiveSuccessfulPages = 0;
-      }
+      // Keep the size that actually crossed the path. The requester policy
+      // probes upward only after sustained success, at most doubling each time.
+      adaptivePageSizer.onPageSuccess();
 
       if (debugSyncProgress) {
         logInfo(
@@ -587,6 +760,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       if (!usesByteBudgetPagination && parsed.totalQuads < successfulPageSize) break;
     }
   } catch (err) {
+    // The transport retry helper has no onRetry callback after its terminal
+    // attempt. Persist one final backoff step so the next bounded continuation
+    // does not repeat the same known-failing page size from scratch.
+    adaptivePageSizer.onTerminalFailure(err, signal);
     if (err instanceof SyncPageAccumulationLimitError) {
       err.responderSessionStartedFresh = responderSessionStartedFresh;
     }

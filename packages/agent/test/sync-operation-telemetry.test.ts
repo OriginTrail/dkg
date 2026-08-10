@@ -474,6 +474,112 @@ describe('W1 A8/M5 — `source` is in no coalescing key, at every scope', () => 
   });
 });
 
+describe('adaptive page-size production wiring', () => {
+  it('reuses a learned size for the same peer/CG/plane/phase and isolates other keys', async () => {
+    const requested: Array<{
+      peerId: string;
+      contextGraphId: string;
+      includeSharedMemory: boolean;
+      phase: string;
+      limit: number;
+    }> = [];
+    let failTransport = true;
+    const agent = await createAgent({
+      sendToPeer: async () => {
+        if (failTransport) throw new Error('relay stream reset');
+        return new Uint8Array();
+      },
+    });
+    (agent as any).buildSyncRequest = async (
+      contextGraphId: string,
+      _offset: number,
+      limit: number,
+      includeSharedMemory: boolean,
+      remotePeerId: string,
+      phase: string,
+    ) => {
+      requested.push({
+        peerId: remotePeerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        limit,
+      });
+      return new Uint8Array([1, 2, 3]);
+    };
+    const fetch = (
+      peerId: string,
+      phase: 'meta' | 'data',
+      contextGraphId = CG,
+      includeSharedMemory = true,
+    ) =>
+      (agent as any).fetchSyncPages(
+        createOperationContext('sync'),
+        peerId,
+        contextGraphId,
+        includeSharedMemory,
+        phase,
+        `did:dkg:context-graph:${contextGraphId}/${phase}`,
+        DEFAULT_DEADLINE,
+      );
+
+    await expect(fetch(PEER_A, 'meta')).rejects.toThrow('relay stream reset');
+    expect(requested.map(({ limit }) => limit)).toEqual([8_192, 64, 64]);
+
+    failTransport = false;
+    await expect(fetch(PEER_A, 'meta')).resolves.toMatchObject({ completed: true });
+    expect(requested.at(-1)).toMatchObject({
+      peerId: PEER_A,
+      contextGraphId: CG,
+      includeSharedMemory: true,
+      phase: 'meta',
+      limit: 64,
+    });
+
+    await expect(fetch(PEER_A, 'data')).resolves.toMatchObject({ completed: true });
+    expect(requested.at(-1)).toMatchObject({
+      peerId: PEER_A,
+      contextGraphId: CG,
+      includeSharedMemory: true,
+      phase: 'data',
+      limit: 8_192,
+    });
+
+    const peerB = '12D3KooWPageSizeProfileIsolationPeerBBBBBBBBBBBBBBBB';
+    await expect(fetch(peerB, 'meta')).resolves.toMatchObject({ completed: true });
+    expect(requested.at(-1)).toMatchObject({
+      peerId: peerB,
+      contextGraphId: CG,
+      includeSharedMemory: true,
+      phase: 'meta',
+      limit: 8_192,
+    });
+
+    const otherContextGraphId = `${CG}-other`;
+    await expect(fetch(PEER_A, 'meta', otherContextGraphId)).resolves.toMatchObject({
+      completed: true,
+    });
+    expect(requested.at(-1)).toMatchObject({
+      peerId: PEER_A,
+      contextGraphId: otherContextGraphId,
+      includeSharedMemory: true,
+      phase: 'meta',
+      limit: 8_192,
+    });
+
+    await expect(fetch(PEER_A, 'meta', CG, false)).resolves.toMatchObject({
+      completed: true,
+    });
+    expect(requested.at(-1)).toMatchObject({
+      peerId: PEER_A,
+      contextGraphId: CG,
+      includeSharedMemory: false,
+      phase: 'meta',
+      limit: 8_192,
+    });
+  });
+});
+
 describe('W1 A6/M6 — the changelog lane reports its own attempts AND bytes', () => {
   it('records transport=changelog, phase=delta with both byte legs', async () => {
     harness.install();

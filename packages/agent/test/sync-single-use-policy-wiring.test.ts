@@ -20,7 +20,8 @@ const fetchSyncPagesMock = vi.hoisted(() => vi.fn(async (params: any) => {
   };
 }));
 
-vi.mock('../src/sync/requester/page-fetch.js', () => ({
+vi.mock('../src/sync/requester/page-fetch.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/sync/requester/page-fetch.js')>(),
   fetchSyncPages: fetchSyncPagesMock,
 }));
 
