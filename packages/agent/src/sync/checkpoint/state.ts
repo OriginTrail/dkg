@@ -13,13 +13,6 @@ export type SyncCheckpointScope = `selected-swm-meta:${string}`;
 /** Runtime-distinct namespace owned only by retained selected-SWM metadata. */
 export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;
 
-export function isSelectedSwmMetaRetentionScope(
-  value: unknown,
-): value is SelectedSwmMetaRetentionScope {
-  return typeof value === 'string'
-    && /^selected-swm-meta:retained:[1-9]\d*$/.test(value);
-}
-
 export const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 
 export interface SyncCheckpointEntry {

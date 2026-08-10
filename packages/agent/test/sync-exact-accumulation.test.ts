@@ -53,7 +53,7 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 
 describe('exact sync accumulation limits', () => {
   it('returns a validated selected-SWM metadata prefix on retryable transport exhaustion only', async () => {
-    const requesterScope = 'selected-swm-meta:retained:1' as const;
+    const requesterScope = 'selected-swm-meta:explicit-policy' as const;
     const checkpointStore = new MemorySyncCheckpointStore();
     let sends = 0;
     const acceptedQuad = {
@@ -69,6 +69,7 @@ describe('exact sync accumulation limits', () => {
       phase: 'meta',
       graphUri: 'urn:meta',
       requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
       assetUals: undefined,
       maxAcceptedBytes: undefined,
       parseAndFilter: async () => ({ quads: [acceptedQuad], totalQuads: 1 }),
@@ -91,13 +92,13 @@ describe('exact sync accumulation limits', () => {
     expect(checkpointStore.get(result.checkpointKey)?.responderSessionId).toBeTruthy();
   });
 
-  it('does not expose transport prefixes to a non-retained custom SWM metadata scope', async () => {
+  it('does not infer selected metadata retention policy from checkpoint scope', async () => {
     let sends = 0;
     await expect(fetchSyncPages(fetchParams({
       includeSharedMemory: true,
       phase: 'meta',
       graphUri: 'urn:meta',
-      requesterScope: 'selected-swm-meta:ordinary-custom',
+      requesterScope: 'selected-swm-meta:retained:1',
       assetUals: undefined,
       maxAcceptedBytes: undefined,
       parseAndFilter: async () => ({
@@ -117,6 +118,7 @@ describe('exact sync accumulation limits', () => {
   it.each([
     {
       name: 'caller abort',
+      scopeId: 2,
       fail: (controller: AbortController) => {
         controller.abort(new Error('caller cancelled'));
         const error = new Error('operation timed out');
@@ -125,7 +127,18 @@ describe('exact sync accumulation limits', () => {
       },
     },
     {
+      name: 'denial',
+      scopeId: 3,
+      fail: (_controller: AbortController) => new Error('Sync denied by legacy-peer'),
+    },
+    {
+      name: 'integrity rejection',
+      scopeId: 4,
+      fail: (_controller: AbortController) => new Error('metadata integrity rejected'),
+    },
+    {
       name: 'validation rejection',
+      scopeId: 5,
       fail: (_controller: AbortController) => {
         const error = new Error('invalid signed response');
         markSyncValidationRejection(error);
@@ -134,10 +147,23 @@ describe('exact sync accumulation limits', () => {
     },
     {
       name: 'local request build failure',
+      scopeId: 6,
       fail: (_controller: AbortController) => new Error('wallet signing failed'),
     },
-  ])('discards a selected metadata prefix on $name', async ({ name, fail }) => {
-    const requesterScope = `selected-swm-meta:retained:${name.replaceAll(' ', '-')}` as const;
+  ])('discards a selected metadata prefix on $name', async ({ name, scopeId, fail }) => {
+    const requesterScope = `selected-swm-meta:retained:${scopeId}` as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    const checkpointKey = getSyncCheckpointKey(
+      'legacy-peer',
+      'large-legacy-cg',
+      true,
+      'meta',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      requesterScope,
+    );
     const controller = new AbortController();
     let builds = 0;
     let sends = 0;
@@ -146,7 +172,9 @@ describe('exact sync accumulation limits', () => {
       includeSharedMemory: true,
       phase: 'meta',
       graphUri: 'urn:meta',
+      checkpointStore,
       requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
       assetUals: undefined,
       maxAcceptedBytes: undefined,
       signal: controller.signal,
@@ -157,7 +185,12 @@ describe('exact sync accumulation limits', () => {
       },
       parseAndFilter: async () => {
         parses += 1;
-        if (name === 'validation rejection' && parses === 2) throw fail(controller);
+        if (
+          (name === 'integrity rejection' || name === 'validation rejection')
+          && parses === 2
+        ) {
+          throw fail(controller);
+        }
         return {
           quads: [{ subject: 'urn:accepted', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
           totalQuads: 1,
@@ -166,12 +199,33 @@ describe('exact sync accumulation limits', () => {
       send: async () => {
         sends += 1;
         if (sends === 1) return encoder.encode('valid-page');
-        if (name === 'validation rejection') return encoder.encode('invalid-page');
+        if (name === 'denial') return encoder.encode('denied');
+        if (name === 'integrity rejection' || name === 'validation rejection') {
+          return encoder.encode('invalid-page');
+        }
         throw fail(controller);
       },
     });
 
     await expect(fetchSyncPages(params)).rejects.toBeInstanceOf(Error);
+    expect(checkpointStore.get(checkpointKey)).toBeUndefined();
+
+    // Recreate only an offset. A leaked process-local responder token would
+    // incorrectly make this look resumable instead of rotating to offset zero.
+    checkpointStore.set(checkpointKey, 7);
+    const retry = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      send: async () => new Uint8Array(),
+    }));
+    expect(retry.resumedFromOffset).toBe(0);
+    expect(retry.responderSessionStartedFresh).toBe(true);
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
   });
 
   it('rejects excess wire bytes before parsing and clears resumable state', async () => {

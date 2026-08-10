@@ -205,6 +205,7 @@ interface SelectedMetaPageFetchRequest {
   readonly contextGraphId: string;
   readonly graphUri: string;
   readonly deadline: number;
+  readonly returnAcceptedPrefixOnRetryableTransportFailure: true;
   readonly requesterScope: SelectedSwmMetaRetentionScope;
   readonly maxAcceptedQuads: number;
   readonly maxAcceptedHeapBytesEstimate: number;
@@ -288,6 +289,7 @@ export function createSelectedSwmMetaFetcher(options: {
     try {
       const fetched = await options.fetchPage({
         ...request,
+        returnAcceptedPrefixOnRetryableTransportFailure: true,
         requesterScope: state.requesterScope,
         maxAcceptedQuads: reservation.maxRows,
         maxAcceptedHeapBytesEstimate: reservation.maxBytesEstimate,

@@ -36,6 +36,7 @@ type FetchArgs = {
   signal?: AbortSignal;
   recovery?: boolean;
   assetUals?: string[];
+  returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
@@ -249,6 +250,8 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
       signal: args.signal,
       recovery: args.recovery,
       assetUals: args.assetUals,
+      returnAcceptedPrefixOnRetryableTransportFailure:
+        args.returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope: args.requesterScope,
       maxAcceptedQuads: args.maxAcceptedQuads,
       maxAcceptedHeapBytesEstimate: args.maxAcceptedHeapBytesEstimate,
@@ -339,6 +342,11 @@ describe('DKGAgent sync fetch coalescing', () => {
       // sequence, and an exact batch must never join a full sync.
       { name: 'assetUals', base: { assetUals: [EXACT_UAL_7] }, variant: { assetUals: [EXACT_UAL_8] } },
       { name: 'assetUals-vs-full', base: {}, variant: { assetUals: [EXACT_UAL_7] } },
+      {
+        name: 'returnAcceptedPrefixOnRetryableTransportFailure',
+        base: {},
+        variant: { returnAcceptedPrefixOnRetryableTransportFailure: true },
+      },
       { name: 'requesterScope', base: {}, variant: { requesterScope: 'selected-swm-meta:test' } },
       { name: 'maxAcceptedQuads', base: {}, variant: { maxAcceptedQuads: 10 } },
       { name: 'maxAcceptedHeapBytesEstimate', base: {}, variant: { maxAcceptedHeapBytesEstimate: 4096 } },
