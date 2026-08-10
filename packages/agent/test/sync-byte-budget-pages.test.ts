@@ -292,7 +292,7 @@ describe('byte-budget sync pagination', () => {
     const graph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     await store.insert(Array.from({ length: 1_200 }, (_, i) => ({
       graph,
-      subject: `urn:meta-subject:${i.toString().padStart(4, '0')}`,
+      subject: `did:dkg:activity:meta-subject-${i.toString().padStart(4, '0')}`,
       predicate: 'urn:predicate',
       object: `"value-${i}"`,
     })));
