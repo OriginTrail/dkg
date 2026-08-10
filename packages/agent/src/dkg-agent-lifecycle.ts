@@ -316,10 +316,10 @@ import {
 import {
   runSyncOnConnect,
   SyncOnConnectPostSyncError,
-  type SelectedSharedMemorySyncResult,
   type SyncOnConnectOutcome,
   type SyncOnConnectPeerOutcome,
 } from './sync/on-connect/sync-on-connect.js';
+import type { SelectedSharedMemorySyncResult } from './sync/shared-memory-freshness.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {

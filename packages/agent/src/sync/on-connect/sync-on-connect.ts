@@ -5,6 +5,7 @@ import {
 import {
   classifySharedMemoryFreshness,
   type SharedMemoryFreshnessSummary,
+  type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
@@ -16,17 +17,6 @@ type SyncFromPeerResult = number | SyncProgressSummary;
 type DurableSyncFromPeerResult = number | (SyncProgressSummary & {
   readonly complete?: boolean;
 });
-
-/**
- * Terminal verdict owned only by the priority selected-SWM lane. Keeping it in
- * a discriminated wrapper prevents ordinary/private shared-memory producers or
- * generic diagnostics mergers from accidentally changing reconnect freshness.
- */
-export interface SelectedSharedMemorySyncResult {
-  readonly kind: 'selected-shared-memory';
-  readonly shared: SyncProgressSummary;
-  readonly selectedScopeComplete: boolean;
-}
 
 interface SelectedSharedMemorySyncLane {
   /** Resolve the graph-complete SWM scope that must run before unrelated history. */
