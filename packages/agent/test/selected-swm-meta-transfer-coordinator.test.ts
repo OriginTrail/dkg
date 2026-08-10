@@ -2,8 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import {
   createSelectedSwmMetaFetcher,
-  SelectedSwmMetaTransferCoordinator,
 } from '../src/sync/selected-swm-meta-fetcher.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
 const testContext = {
@@ -246,43 +246,56 @@ describe('selected SWM metadata transfer ownership', () => {
     const clock = () => baseNow + elapsedMs;
     const deleteCheckpoint = vi.fn();
     const budget = createSelectedSwmMetaRetentionBudget({
-      maxRows: 1,
+      maxRows: 2,
       maxBytesEstimate: 1024 * 1024,
       maxPrefixRows: 1,
       maxPrefixBytesEstimate: 1024 * 1024,
     });
     const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
-    let releasePeerA!: () => void;
-    const peerAGate = new Promise<void>((resolve) => { releasePeerA = resolve; });
-    let signalPeerAStarted!: () => void;
-    const peerAStarted = new Promise<void>((resolve) => { signalPeerAStarted = resolve; });
+    let releasePeerAActiveFetch!: () => void;
+    const peerAActiveFetchGate = new Promise<void>((resolve) => {
+      releasePeerAActiveFetch = resolve;
+    });
+    let signalPeerAActiveFetchStarted!: (availableRows: number) => void;
+    const peerAActiveFetchStarted = new Promise<number>((resolve) => {
+      signalPeerAActiveFetchStarted = resolve;
+    });
     let peerACompleted = false;
     let peerBAvailableRows: number | undefined;
-    const createFetcher = (peerId: string) => createSelectedSwmMetaFetcher({
-      remotePeerId: peerId,
-      requesterScope: `selected-swm-meta:retained:${peerId}`,
-      retentionBudget: budget,
-      deleteCheckpoint,
-      now: clock,
-      retentionTtlMs: 20,
-      fetchPage: async (request) => {
-        if (peerId === 'peer-b') peerBAvailableRows = request.maxAcceptedQuads;
-        return {
-          quads: [{
-            subject: `urn:${peerId}:${request.contextGraphId}`,
-            predicate: 'urn:p',
-            object: '"o"',
-            graph: 'urn:meta',
-          }],
-          bytesReceived: 1,
-          resumedFromOffset: 0,
-          nextOffset: 1,
-          checkpointKey: `${peerId}:${request.contextGraphId}:checkpoint`,
-          completed: false,
-          timedOut: true,
-        };
-      },
-    });
+    let peerAFetcher: ReturnType<typeof createSelectedSwmMetaFetcher> | undefined;
+    const createFetcher = (peerId: string) => {
+      const fetcher = createSelectedSwmMetaFetcher({
+        remotePeerId: peerId,
+        requesterScope: `selected-swm-meta:retained:${peerId}`,
+        retentionBudget: budget,
+        deleteCheckpoint,
+        now: clock,
+        retentionTtlMs: 20,
+        fetchPage: async (request) => {
+          if (peerId === 'peer-a' && request.contextGraphId === 'cg-active') {
+            signalPeerAActiveFetchStarted(request.maxAcceptedQuads);
+            await peerAActiveFetchGate;
+          }
+          if (peerId === 'peer-b') peerBAvailableRows = request.maxAcceptedQuads;
+          return {
+            quads: [{
+              subject: `urn:${peerId}:${request.contextGraphId}`,
+              predicate: 'urn:p',
+              object: '"o"',
+              graph: 'urn:meta',
+            }],
+            bytesReceived: 1,
+            resumedFromOffset: 0,
+            nextOffset: 1,
+            checkpointKey: `${peerId}:${request.contextGraphId}:checkpoint`,
+            completed: false,
+            timedOut: true,
+          };
+        },
+      });
+      if (peerId === 'peer-a') peerAFetcher = fetcher;
+      return fetcher;
+    };
     const request = (peerId: string, contextGraphId: string) => ({
       ctx: testContext,
       remotePeerId: peerId,
@@ -295,29 +308,27 @@ describe('selected SWM metadata transfer ownership', () => {
       await coordinator.run(
         'peer-a',
         () => createFetcher('peer-a'),
-        (fetcher) => fetcher.strategy.fetch(request('peer-a', 'cg-a')),
+        (fetcher) => fetcher.strategy.fetch(request('peer-a', 'cg-old')),
       );
 
       const activePeerA = coordinator.run(
         'peer-a',
         () => createFetcher('peer-a'),
-        async () => {
-          signalPeerAStarted();
-          await peerAGate;
-        },
+        (fetcher) => fetcher.strategy.fetch(request('peer-a', 'cg-active')),
       );
       void activePeerA.then(() => { peerACompleted = true; });
-      await peerAStarted;
+      expect(await peerAActiveFetchStarted).toBe(1);
       elapsedMs = 21;
 
-      // A's timer must release its expired process-wide lease without waiting
-      // for A's unrelated outer operation. Otherwise concurrent peer B sees a
-      // zero-row reservation even though A has exceeded its independent TTL.
+      // A's timer must release the old prefix without touching the active CG's
+      // in-flight reservation. Otherwise B sees zero rows, or A loses its
+      // active continuation, after the shared process-wide budget is reclaimed.
       await vi.waitFor(
-        () => expect(deleteCheckpoint).toHaveBeenCalledWith('peer-a:cg-a:checkpoint'),
+        () => expect(deleteCheckpoint).toHaveBeenCalledWith('peer-a:cg-old:checkpoint'),
         { timeout: 250 },
       );
       expect(peerACompleted).toBe(false);
+      expect(deleteCheckpoint).not.toHaveBeenCalledWith('peer-a:cg-active:checkpoint');
 
       await coordinator.run(
         'peer-b',
@@ -327,10 +338,12 @@ describe('selected SWM metadata transfer ownership', () => {
       expect(peerBAvailableRows).toBe(1);
       expect(peerACompleted).toBe(false);
 
-      releasePeerA();
+      releasePeerAActiveFetch();
       await activePeerA;
+      expect(peerAFetcher?.continuation('cg-active').progress).toBe(1);
+      expect(deleteCheckpoint).not.toHaveBeenCalledWith('peer-a:cg-active:checkpoint');
     } finally {
-      releasePeerA();
+      releasePeerAActiveFetch();
       await coordinator.close();
     }
   });

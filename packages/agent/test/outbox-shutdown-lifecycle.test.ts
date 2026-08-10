@@ -13,8 +13,8 @@ import {
 } from '../src/vm-reconcile-service.js';
 import {
   createSelectedSwmMetaFetcher,
-  SelectedSwmMetaTransferCoordinator,
 } from '../src/sync/selected-swm-meta-fetcher.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
 describe('DKGAgent outbox shutdown lifecycle', () => {

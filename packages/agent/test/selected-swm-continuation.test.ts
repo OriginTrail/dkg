@@ -14,9 +14,9 @@ import {
   runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
 import {
-  SelectedSwmMetaTransferCoordinator,
   type SelectedSwmMetaContinuation,
 } from '../src/sync/selected-swm-meta-fetcher.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import {
   applySelectedSwmFreshnessResolution,
   classifySelectedSwmRoundFreshness,
