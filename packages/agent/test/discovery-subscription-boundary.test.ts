@@ -84,6 +84,18 @@ describe('Context Graph discovery/subscription boundary', () => {
     const hostedId = 'rehydration-disabled-host';
     const graph = contextGraphDataGraphUri(subscribedId);
     const persisted = new Map<string, ContextGraphSubscriptionRecord>([
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, {
+        id: SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        subscribed: true,
+        synced: true,
+        syncScoped: true,
+      }],
+      [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, {
+        id: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        subscribed: true,
+        synced: true,
+        syncScoped: true,
+      }],
       [subscribedId, {
         id: subscribedId,
         subscribed: true,
@@ -135,11 +147,16 @@ describe('Context Graph discovery/subscription boundary', () => {
         expect((agent as any).gossipRegistered.has(id)).toBe(false);
         expect(persisted.get(id)).toEqual(durableBefore.get(id));
       }
+      for (const systemId of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
+        expect(agent.getSubscribedContextGraphs().get(systemId)?.subscribed).toBe(true);
+        expect((agent as any).gossipRegistered.has(systemId)).toBe(true);
+      }
       expect(deleted).not.toContain(subscribedId);
       expect(deleted).not.toContain(hostedId);
       expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
         rehydrationEnabled: false,
         persistedTotal: 2,
+        systemExcluded: 2,
         hostedActivated: 0,
         activated: 0,
         dormant: 2,
