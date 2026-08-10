@@ -15,7 +15,11 @@ import {
 } from '../src/dkg-agent-constants.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  fetchSyncPages,
+  SyncPageSizeProfileCache,
+  type SyncPageSizeProfile,
+} from '../src/sync/requester/page-fetch.js';
 import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
@@ -227,12 +231,151 @@ describe('byte-budget sync pagination', () => {
 
     expect(requestedSizes).toEqual([
       SYNC_REQUEST_PAGE_SIZE,
-      SYNC_REQUEST_PAGE_SIZE / 2,
-      SYNC_REQUEST_PAGE_SIZE / 2,
-      SYNC_REQUEST_PAGE_SIZE / 2,
-      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE * 2,
     ]);
     expect(result.completed).toBe(true);
+  });
+
+  it('retains the safe fallback across bounded continuation fetches', async () => {
+    const requestedSizes: number[] = [];
+    const pageSizeProfile: SyncPageSizeProfile = {};
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let failFirstRound = true;
+    const run = () => fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 15_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 3,
+      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore,
+      pageSizeProfile,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => {
+        if (failFirstRound) throw new Error('sync responder queue wait exceeded');
+        return new Uint8Array();
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    });
+
+    await expect(run()).rejects.toThrow('sync responder queue wait exceeded');
+    expect(requestedSizes).toEqual([
+      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_SAFE_PAGE_SIZE,
+    ]);
+    expect(pageSizeProfile.preferredPageSize).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+
+    failFirstRound = false;
+    await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
+    expect(requestedSizes.at(-1)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+  });
+
+  it('does not poison page-size learning when request construction fails locally', async () => {
+    const pageSizeProfile: SyncPageSizeProfile = { preferredPageSize: 2_048 };
+    const requestedSizes: number[] = [];
+    await expect(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 15_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 2,
+      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+      syncDeniedResponse: '#DENIED',
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      pageSizeProfile,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        throw new Error('wallet signer unavailable');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => new Uint8Array(),
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    })).rejects.toThrow('wallet signer unavailable');
+
+    expect(requestedSizes).toEqual([2_048, 2_048]);
+    expect(pageSizeProfile.preferredPageSize).toBe(2_048);
+  });
+
+  it('does not poison page-size learning when the caller aborts during send', async () => {
+    const controller = new AbortController();
+    const pageSizeProfile: SyncPageSizeProfile = { preferredPageSize: 2_048 };
+    const requestedSizes: number[] = [];
+    await expect(fetchSyncPages({
+      ctx: makeCtx(),
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 15_000,
+      syncPageTimeoutMs: 5_000,
+      syncRouterAttempts: 1,
+      syncPageRetryAttempts: 2,
+      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+      syncDeniedResponse: '#DENIED',
+      signal: controller.signal,
+      debugSyncProgress: false,
+      protocolSync: '/dkg/test/sync',
+      checkpointStore: new MemorySyncCheckpointStore(),
+      pageSizeProfile,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => {
+        controller.abort(new Error('node stopping'));
+        throw new Error('transport closed during shutdown');
+      },
+      logWarn: noopLog,
+      logInfo: noopLog,
+      logDebug: noopLog,
+    })).rejects.toThrow('transport closed during shutdown');
+
+    expect(requestedSizes).toEqual([2_048]);
+    expect(pageSizeProfile.preferredPageSize).toBe(2_048);
+  });
+
+  it('bounds and expires agent-local page-size profiles', () => {
+    const cache = new SyncPageSizeProfileCache(2, 100);
+    const first = cache.get('first', 0);
+    first.preferredPageSize = 64;
+    const second = cache.get('second', 1);
+    expect(cache.get('first', 2)).toBe(first);
+    cache.get('third', 3);
+    expect(cache.get('second', 4)).not.toBe(second);
+
+    const expiringCache = new SyncPageSizeProfileCache(2, 100);
+    const expiring = expiringCache.get('expiring', 0);
+    expect(expiringCache.get('expiring', 99)).toBe(expiring);
+    expect(expiringCache.get('expiring', 199)).not.toBe(expiring);
   });
 
   it('serializes a UTF-8-correct prefix inside the response target', () => {

@@ -185,7 +185,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(didSyncPeerRespond(transportError)).toBe(false);
   });
 
-  it('backs a preferred 256-row page down to the 64-row frame-safe floor across retries', async () => {
+  it('reaches the 64-row frame-safe floor on the first transport retry', async () => {
     const limits: number[] = [];
     let attempts = 0;
     const promise = fetchSyncPages({
@@ -231,7 +231,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       completed: true,
       nextOffset: 0,
     });
-    expect(limits).toEqual([256, 128, 64]);
+    expect(limits).toEqual([256, 64, 64]);
   });
 
   it('tags parser failures after response bytes as peer responses', async () => {
