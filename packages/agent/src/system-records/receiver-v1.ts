@@ -115,6 +115,18 @@ export type AgentProfileArtifactInputV1 =
   | SystemRecordArtifactRepositoryV1
   | AgentProfileArtifactSourcesV1;
 
+const AUTHENTIC_AGENT_PROFILE_RECEIVER_CANDIDATES_V1 = new WeakSet<object>();
+
+/** Internal bridge guard: structural candidates never become materializer authority. */
+export function assertAuthenticAgentProfileReceiverCandidateV1(
+  value: unknown,
+): asserts value is AgentProfileReceiverCandidateV1 {
+  if (value === null || typeof value !== 'object'
+      || !AUTHENTIC_AGENT_PROFILE_RECEIVER_CANDIDATES_V1.has(value)) {
+    throw new Error('agent-profile candidate was not produced by the verified receiver');
+  }
+}
+
 interface CreateAgentProfileReceiverCommonOptionsV1 {
   readonly networkId: NetworkIdV1;
   readonly artifacts: AgentProfileArtifactInputV1;
@@ -496,6 +508,7 @@ function createAgentProfileCandidateReceiverInternalV1(
       verifyAuthorityEnvelope: verifyForCall,
       verifyCurrentBundle,
     });
+    AUTHENTIC_AGENT_PROFILE_RECEIVER_CANDIDATES_V1.add(candidate);
     signal.throwIfAborted();
     let dispatchPrepared = false;
     return Object.freeze({

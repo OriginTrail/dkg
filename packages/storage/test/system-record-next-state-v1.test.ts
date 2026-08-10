@@ -8,8 +8,10 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   buildAgentProfileVerificationClosureV1,
+  canonicalizeAgentProfileConflictEvidenceV1,
   canonicalizeOwnedSubjectTableObjectV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
+  computeAgentProfileConflictEvidenceDigestV1,
   computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   computeOwnedSubjectTableDigestV1,
@@ -25,6 +27,8 @@ import {
   SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileAuthorityTransitionV1,
+  type AgentProfileConflictEvidenceV1,
+  type Digest32V1,
   type NetworkIdV1,
   type SignedAgentProfileAuthorityTransitionEnvelopeV1,
   type SignedAgentProfileHeadEnvelopeV1,
@@ -40,6 +44,7 @@ import {
 import {
   assertAuthenticSystemRecordActiveReplacementCompleteV1,
   deriveSystemRecordActiveReplacementV1,
+  deriveSystemRecordReplacementV1,
   type SystemRecordActiveReplacementCompleteV1,
   type SystemRecordActiveReplacementReadyV1,
 } from '../src/system-record-next-state-v1-internal.js';
@@ -59,6 +64,7 @@ import {
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
 import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
+import { makeAuthenticTerminalReplacementFixtureV1 } from './helpers/system-record-terminal-replacement-fixture.js';
 
 interface Vectors {
   readonly variants: {
@@ -413,6 +419,329 @@ describe('system-record active next-state derivation', () => {
         observedRootClaimQuads: cold.plan.next.rootClaimQuads,
       })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
     }
+  });
+});
+
+describe('system-record terminal and quarantine next-state derivation', () => {
+  it('cold-applies an authoritative tombstone with deletion scope and zero transient projection', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const facts = registry.consumer.consume(registry.issuer.issueCandidate({
+      operation: 'tombstone',
+      ...fixture.tombstone,
+    }), fixture.binding);
+    const snapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: facts.networkId,
+      stableKeyHash: computeSystemRecordStableKeyHashV1(facts.networkId, facts.head.peerId),
+      materializationEpoch: facts.materializationEpoch,
+      quads: [fixture.epochQuad],
+    });
+    const ready = expectReady(deriveSystemRecordReplacementV1({
+      facts,
+      snapshot,
+      observedRootClaimQuads: [],
+    }));
+    const update = buildSystemRecordConditionalApplyUpdateV1(ready);
+
+    expect(ready.plan.next.appliedState).toMatchObject({
+      status: 'tombstone',
+      projectionBytes: '0',
+      projectionQuads: '0',
+      ownedSubjectCount: '0',
+      ownedSubjectTableBytes: '0',
+    });
+    expect(ready.plan.next.projectionQuads).toEqual([]);
+    expect(ready.plan.projectionDeletionTable).toEqual(
+      fixture.tombstone.deletionOwnedSubjectTable,
+    );
+    expect(update.subjectUnion).toEqual(fixture.tombstone.deletionOwnedSubjectTable);
+    expect(update.sparql).not.toContain('VALUES (?insertProjectionSubject');
+    expect(ready.plan.next.appliedState).not.toHaveProperty('conflictSidecarIntentOperation');
+    registry.consumer.release(facts);
+  });
+
+  it('tombstones an active row by freeing only that row projection/table contribution', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const activeRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const activeFacts = activeRegistry.consumer.consume(
+      activeRegistry.issuer.issueActive(fixture.active),
+      fixture.binding,
+    );
+    const cold = expectReady(deriveSystemRecordReplacementV1({
+      facts: activeFacts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: activeFacts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          activeFacts.networkId,
+          activeFacts.head.peerId,
+        ),
+        materializationEpoch: activeFacts.materializationEpoch,
+        quads: [fixture.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    }));
+    const activeTuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: cold.plan.next.appliedState,
+      headVersion: cold.plan.next.headVersion,
+      ownedSubjectTable: cold.plan.next.ownedSubjectTable,
+      rootClaimSet: cold.plan.next.rootClaimSet,
+      capacityState: cold.plan.next.capacityState,
+      receipt: cold.plan.next.receipt,
+    });
+    const activeSnapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: activeFacts.networkId,
+      stableKeyHash: cold.plan.stableKeyHash,
+      materializationEpoch: activeFacts.materializationEpoch,
+      quads: [
+        ...activeTuple.record,
+        ...activeTuple.capacity,
+        ...activeTuple.epoch,
+        ...activeTuple.receipt,
+      ],
+    });
+    activeRegistry.consumer.release(activeFacts);
+
+    const terminalRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const terminalFacts = terminalRegistry.consumer.consume(
+      terminalRegistry.issuer.issueCandidate({
+        operation: 'tombstone',
+        ...fixture.tombstone,
+      }),
+      fixture.binding,
+    );
+    const ready = expectReady(deriveSystemRecordReplacementV1({
+      facts: terminalFacts,
+      snapshot: activeSnapshot,
+      observedRootClaimQuads: cold.plan.next.rootClaimQuads,
+    }));
+    expect(ready.plan.next.capacityState.liveRecordCount).toBe(
+      cold.plan.next.capacityState.liveRecordCount,
+    );
+    expect(BigInt(ready.plan.next.capacityState.stateBytes)).toBe(
+      BigInt(cold.plan.next.capacityState.stateBytes),
+    );
+    expect(BigInt(cold.plan.next.capacityState.tableBytes)
+      - BigInt(ready.plan.next.capacityState.tableBytes)).toBe(
+      BigInt(cold.plan.next.appliedState.ownedSubjectTableBytes),
+    );
+    expect(BigInt(cold.plan.next.capacityState.projectionBytes)
+      - BigInt(ready.plan.next.capacityState.projectionBytes)).toBe(
+      BigInt(cold.plan.next.appliedState.projectionBytes),
+    );
+    terminalRegistry.consumer.release(terminalFacts);
+  });
+
+  it('persists a shadow deletion table across restart and clears it at authoritative cutover', async () => {
+    const shadowFixture = await makeAuthenticTerminalReplacementFixtureV1('shadow');
+    const shadowRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const shadowFacts = shadowRegistry.consumer.consume(
+      shadowRegistry.issuer.issueCandidate({
+        operation: 'tombstone',
+        ...shadowFixture.tombstone,
+      }),
+      shadowFixture.binding,
+    );
+    const shadowReady = expectReady(deriveSystemRecordReplacementV1({
+      facts: shadowFacts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: shadowFacts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          shadowFacts.networkId,
+          shadowFacts.head.peerId,
+        ),
+        materializationEpoch: shadowFacts.materializationEpoch,
+        quads: [shadowFixture.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    }));
+    expect(shadowReady.plan.next.appliedState.status).toBe('dirty');
+    expect(shadowReady.plan.next.pendingDeletionTable).toEqual(
+      shadowFixture.tombstone.deletionOwnedSubjectTable,
+    );
+    const shadowTuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: shadowReady.plan.next.appliedState,
+      headVersion: shadowReady.plan.next.headVersion,
+      ownedSubjectTable: shadowReady.plan.next.ownedSubjectTable,
+      pendingDeletionTable: shadowReady.plan.next.pendingDeletionTable!,
+      rootClaimSet: shadowReady.plan.next.rootClaimSet,
+      capacityState: shadowReady.plan.next.capacityState,
+      receipt: shadowReady.plan.next.receipt,
+    });
+    const restarted = decodeSystemRecordAppliedSnapshotV1({
+      networkId: shadowFacts.networkId,
+      stableKeyHash: shadowReady.plan.stableKeyHash,
+      materializationEpoch: shadowFacts.materializationEpoch,
+      quads: [
+        ...shadowTuple.record,
+        ...shadowTuple.capacity,
+        ...shadowTuple.epoch,
+        ...shadowTuple.receipt,
+      ],
+    });
+    expect(restarted.state).toBe('present');
+    if (restarted.state !== 'present') throw new Error('expected restarted dirty state');
+    expect(restarted.pendingDeletionTable).toEqual(
+      shadowFixture.tombstone.deletionOwnedSubjectTable,
+    );
+    shadowRegistry.consumer.release(shadowFacts);
+
+    const authoritativeFixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const authoritativeRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const authoritativeFacts = authoritativeRegistry.consumer.consume(
+      authoritativeRegistry.issuer.issueCandidate({
+        operation: 'tombstone',
+        ...authoritativeFixture.tombstone,
+      }),
+      authoritativeFixture.binding,
+    );
+    const cutover = expectReady(deriveSystemRecordReplacementV1({
+      facts: authoritativeFacts,
+      snapshot: restarted,
+      observedRootClaimQuads: shadowReady.plan.next.rootClaimQuads,
+    }));
+    expect(cutover.plan.next.appliedState.status).toBe('tombstone');
+    expect(cutover.plan.next).not.toHaveProperty('pendingDeletionTable');
+    expect(cutover.plan.next.appliedState).not.toHaveProperty('pendingDeletionTableDigest');
+    expect(cutover.plan.next.appliedState).not.toHaveProperty('conflictSidecarIntentOperation');
+    authoritativeRegistry.consumer.release(authoritativeFacts);
+  });
+
+  it('persists quarantine evidence without a sidecar intent and blocks ordinary unquarantine', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const initialRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const initialFacts = initialRegistry.consumer.consume(
+      initialRegistry.issuer.issueActive(fixture.active),
+      fixture.binding,
+    );
+    const active = expectReady(deriveSystemRecordReplacementV1({
+      facts: initialFacts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: initialFacts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          initialFacts.networkId,
+          initialFacts.head.peerId,
+        ),
+        materializationEpoch: initialFacts.materializationEpoch,
+        quads: [fixture.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    }));
+    const activeTuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: active.plan.next.appliedState,
+      headVersion: active.plan.next.headVersion,
+      ownedSubjectTable: active.plan.next.ownedSubjectTable,
+      rootClaimSet: active.plan.next.rootClaimSet,
+      capacityState: active.plan.next.capacityState,
+      receipt: active.plan.next.receipt,
+    });
+    const activeSnapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: initialFacts.networkId,
+      stableKeyHash: active.plan.stableKeyHash,
+      materializationEpoch: initialFacts.materializationEpoch,
+      quads: [
+        ...activeTuple.record,
+        ...activeTuple.capacity,
+        ...activeTuple.epoch,
+        ...activeTuple.receipt,
+      ],
+    });
+    initialRegistry.consumer.release(initialFacts);
+
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const quarantineFacts = registry.consumer.consume(
+      registry.issuer.issueCandidate({ operation: 'quarantine', ...fixture.quarantine }),
+      fixture.binding,
+    );
+    const quarantined = expectReady(deriveSystemRecordReplacementV1({
+      facts: quarantineFacts,
+      snapshot: activeSnapshot,
+      observedRootClaimQuads: active.plan.next.rootClaimQuads,
+    }));
+    expect(quarantined.plan.next.appliedState).toMatchObject({
+      status: 'quarantined',
+      stateRevision: '2',
+      conflictEvidenceDigest: fixture.quarantine.conflictEvidenceDigest,
+    });
+    expect(quarantined.plan.next.appliedState).not.toHaveProperty(
+      'conflictSidecarIntentOperation',
+    );
+    const tuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: quarantined.plan.next.appliedState,
+      headVersion: quarantined.plan.next.headVersion,
+      ownedSubjectTable: quarantined.plan.next.ownedSubjectTable,
+      rootClaimSet: quarantined.plan.next.rootClaimSet,
+      capacityState: quarantined.plan.next.capacityState,
+      receipt: quarantined.plan.next.receipt,
+    });
+    const snapshot = decodeSystemRecordAppliedSnapshotV1({
+      networkId: quarantineFacts.networkId,
+      stableKeyHash: quarantined.plan.stableKeyHash,
+      materializationEpoch: quarantineFacts.materializationEpoch,
+      quads: [...tuple.record, ...tuple.capacity, ...tuple.epoch, ...tuple.receipt],
+    });
+    registry.consumer.release(quarantineFacts);
+
+    const activeRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const activeFacts = activeRegistry.consumer.consume(
+      activeRegistry.issuer.issueActive(fixture.active),
+      fixture.binding,
+    );
+    expect(deriveSystemRecordReplacementV1({
+      facts: activeFacts,
+      snapshot,
+      observedRootClaimQuads: quarantined.plan.next.rootClaimQuads,
+    })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
+    activeRegistry.consumer.release(activeFacts);
+  });
+
+  it('persists terminal transition object digests in the bounded quarantine slots', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const transitionDigests = Object.freeze([
+      `0x${'bc'.repeat(32)}`,
+      `0x${'de'.repeat(32)}`,
+    ].sort()) as readonly Digest32V1[];
+    const evidence: AgentProfileConflictEvidenceV1 = Object.freeze({
+      objectType: 'conflict-evidence',
+      kind: 'agents',
+      networkId: fixture.active.head.networkId,
+      peerId: fixture.active.head.peerId,
+      entries: Object.freeze([Object.freeze({
+        type: 'transition',
+        priorAuthoritySequence: fixture.active.head.authoritySequence,
+        nextAuthoritySequence: String(BigInt(fixture.active.head.authoritySequence) + 1n),
+        objectDigests: transitionDigests,
+      })]),
+    });
+    const canonicalConflictEvidenceBytes = canonicalizeAgentProfileConflictEvidenceV1(evidence);
+    const conflictEvidenceDigest = computeAgentProfileConflictEvidenceDigestV1(evidence);
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const facts = registry.consumer.consume(registry.issuer.issueCandidate({
+      operation: 'quarantine',
+      ...fixture.active,
+      conflictEvidenceDigest,
+      canonicalConflictEvidenceBytes,
+      terminalTransitionConflict: true,
+    }), fixture.binding);
+    const ready = expectReady(deriveSystemRecordReplacementV1({
+      facts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: facts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          facts.networkId,
+          facts.head.peerId,
+        ),
+        materializationEpoch: facts.materializationEpoch,
+        quads: [fixture.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    }));
+
+    expect(ready.plan.next.appliedState.conflictDigestSlots).toEqual(transitionDigests);
+    expect(ready.plan.next.appliedState.conflictOverflow).toBe(false);
+    expect(ready.plan.next.appliedState).not.toHaveProperty(
+      'conflictSidecarIntentOperation',
+    );
+    registry.consumer.release(facts);
   });
 });
 

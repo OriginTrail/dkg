@@ -9,6 +9,7 @@ import {
 import {
   assertNetworkIdV1,
   canonicalizeOwnedSubjectTableObjectV1,
+  computeOwnedSubjectTableDigestV1,
   computeSystemRecordAppliedStateDigestV1,
   computeSystemRecordCapacityStateDigestV1,
   computeSystemRecordMaterializationReceiptDigestV1,
@@ -59,6 +60,7 @@ export interface SystemRecordPresentSnapshotV1 {
   /** Storage-local frontier kept outside the frozen B1 applied-state object. */
   readonly headVersion: string;
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly pendingDeletionTable?: OwnedSubjectTableObjectV1;
   readonly rootClaimSet: SystemRecordRootClaimSetV1;
   readonly capacityState: SystemRecordCapacityStateV1;
   readonly receipt: SystemRecordMaterializationReceiptV1;
@@ -159,6 +161,16 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     appliedState.currentRoot,
     exactJsonValue(recordRows, SYSTEM_RECORD_V1_PREDICATES.ownedSubjectTable, 'owned table'),
   );
+  const pendingTable = appliedState.pendingDeletionTableDigest === undefined
+    ? undefined
+    : parseCanonicalOwnedSubjectTableObjectV1(
+        appliedState.currentRoot,
+        exactJsonValue(
+          recordRows,
+          SYSTEM_RECORD_V1_PREDICATES.pendingDeletionTable,
+          'pending deletion table',
+        ),
+      );
   const claims = parseCanonicalSystemRecordRootClaimSetV1(exactJsonValue(
     recordRows,
     SYSTEM_RECORD_V1_PREDICATES.rootClaimSet,
@@ -192,6 +204,14 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
       throw new Error(`${label} does not match its canonical object`);
     }
   }
+  if (pendingTable !== undefined
+      && exactPlainValue(
+        recordRows,
+        SYSTEM_RECORD_V1_PREDICATES.pendingDeletionTableDigest,
+        'pending deletion table digest',
+      ) !== appliedState.pendingDeletionTableDigest) {
+    throw new Error('pending deletion table digest does not match its applied state');
+  }
   if (appliedState.networkId !== networkId || appliedState.stableKeyHash !== stableKeyHash
       || claims.networkId !== networkId || claims.stableKeyHash !== stableKeyHash
       || capacity.networkId !== networkId || receipt.networkId !== networkId
@@ -217,6 +237,18 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
   const pendingTableBytes = 'pendingDeletionTableBytes' in appliedState
     ? BigInt(appliedState.pendingDeletionTableBytes as string)
     : 0n;
+  if (pendingTable !== undefined) {
+    const canonicalPendingBytes = canonicalizeOwnedSubjectTableObjectV1(
+      appliedState.currentRoot,
+      pendingTable,
+    );
+    if (computeOwnedSubjectTableDigestV1(appliedState.currentRoot, pendingTable)
+          !== appliedState.pendingDeletionTableDigest
+        || String(pendingTable.length) !== appliedState.pendingDeletionSubjectCount
+        || BigInt(canonicalPendingBytes.byteLength) !== pendingTableBytes) {
+      throw new Error('pending deletion table does not match its count or byte binding');
+    }
+  }
   if (BigInt(capacity.liveRecordCount) < 1n
       || BigInt(capacity.stateBytes) < BigInt(SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES)
       || BigInt(capacity.tableBytes) < persistedTableBytes + pendingTableBytes
@@ -229,6 +261,7 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     appliedState,
     headVersion,
     ownedSubjectTable: table,
+    ...(pendingTable === undefined ? {} : { pendingDeletionTable: pendingTable }),
     rootClaimSet: claims,
     capacityState: capacity,
     receipt,
@@ -245,6 +278,7 @@ export function decodeSystemRecordAppliedSnapshotV1(input: {
     appliedState,
     headVersion,
     ownedSubjectTable: table,
+    ...(pendingTable === undefined ? {} : { pendingDeletionTable: pendingTable }),
     rootClaimSet: claims,
     capacityState: capacity,
     receipt,

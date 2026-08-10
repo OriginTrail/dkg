@@ -32,6 +32,7 @@ import {
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { resolveOwnedSystemRecordRuntimeV1 } from '../src/system-record-runtime-v1-internal.js';
 import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
+import { makeAuthenticTerminalReplacementFixtureV1 } from './helpers/system-record-terminal-replacement-fixture.js';
 
 interface Vectors {
   readonly variants: {
@@ -227,6 +228,65 @@ async function replacementFor(
 }
 
 describe('system-record verified replacement V1', () => {
+  it('issues exact tombstone facts without retaining a predecessor projection', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const source = [...fixture.tombstone.deletionOwnedSubjectTable];
+    const handle = registry.issuer.issueCandidate({
+      operation: 'tombstone',
+      ...fixture.tombstone,
+      deletionOwnedSubjectTable: source,
+    });
+    source[0] = 'urn:test:mutated';
+    const facts = registry.consumer.consume(handle, fixture.binding);
+
+    expect(facts.operation).toBe('tombstone');
+    if (facts.operation !== 'tombstone') throw new Error('expected tombstone facts');
+    expect(facts.deletionOwnedSubjectTable).toEqual(
+      fixture.tombstone.deletionOwnedSubjectTable,
+    );
+    expect(facts.projectionQuads).toEqual([]);
+    expect(facts.ownedSubjectTable).toEqual([]);
+    expect(Object.isFrozen(facts.deletionOwnedSubjectTable)).toBe(true);
+    registry.consumer.release(facts);
+  });
+
+  it('recanonicalizes quarantine evidence and releases failed issue reservations', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1();
+    const valid = { operation: 'quarantine' as const, ...fixture.quarantine };
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const facts = registry.consumer.consume(
+      registry.issuer.issueCandidate(valid),
+      fixture.binding,
+    );
+    expect(facts.operation).toBe('quarantine');
+    if (facts.operation !== 'quarantine') throw new Error('expected quarantine facts');
+    expect(facts.conflictEvidenceDigest).toBe(fixture.quarantine.conflictEvidenceDigest);
+    expect(facts.terminalTransitionConflict).toBe(false);
+    registry.consumer.release(facts);
+
+    const {
+      conflictEvidenceDigest: _digest,
+      canonicalConflictEvidenceBytes: _bytes,
+      terminalTransitionConflict: _terminal,
+      ...active
+    } = fixture.quarantine;
+
+    for (const invalid of [
+      { ...valid, conflictEvidenceDigest: `0x${'00'.repeat(32)}` },
+      { ...valid, terminalTransitionConflict: true },
+      {
+        ...valid,
+        canonicalConflictEvidenceBytes: new Uint8Array((16 * 1024) + 1),
+      },
+    ]) {
+      const isolated = createSystemRecordVerifiedReplacementRegistryV1();
+      expect(() => isolated.issuer.issueCandidate(invalid as typeof valid)).toThrow();
+      const next = isolated.issuer.issueActive(active);
+      isolated.consumer.release(next);
+    }
+  });
+
   it('issues an empty frozen handle and returns one deep-owned immutable snapshot', () => {
     const registry = createSystemRecordVerifiedReplacementRegistryV1();
     const { input, bindings } = fixture();

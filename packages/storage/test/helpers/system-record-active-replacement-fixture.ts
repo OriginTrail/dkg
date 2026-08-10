@@ -105,7 +105,7 @@ export function makeAuthenticActiveReplacementFixtureV1(
   });
   const registry = createSystemRecordVerifiedReplacementRegistryV1();
   const facts = registry.consumer.consume(
-    registry.issuer.issueActive(issue(binding)),
+    registry.issuer.issueActive(makeSystemRecordActiveReplacementIssueV1(binding)),
     binding,
   );
   const snapshot = decodeSystemRecordAppliedSnapshotV1({
@@ -128,7 +128,9 @@ export function makeAuthenticActiveReplacementFixtureV1(
   return Object.freeze({ binding, epochQuad, ready: derivation });
 }
 
-function issue(binding: SystemRecordLaneExecutionBindingV1): SystemRecordActiveReplacementIssueV1 {
+export function makeSystemRecordActiveReplacementIssueV1(
+  binding: SystemRecordLaneExecutionBindingV1,
+): SystemRecordActiveReplacementIssueV1 {
   return {
     ...binding,
     networkId: SYSTEM_RECORD_FIXTURE_NETWORK,

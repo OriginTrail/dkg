@@ -92,8 +92,13 @@ export function buildSystemRecordConditionalApplyUpdateV1(
   const plan = raw.plan;
   const priorSubjects = plan.prior.ownedSubjectTable;
   const nextSubjects = plan.next.ownedSubjectTable;
-  const subjectUnion = mergeSystemRecordOwnedSubjectsV1(priorSubjects, nextSubjects);
-  if (subjectUnion.length < 1) throw new Error('active materialization requires an owned subject');
+  const replacementUnion = mergeSystemRecordOwnedSubjectsV1(priorSubjects, nextSubjects);
+  const subjectUnion = plan.projectionDeletionTable === undefined
+    ? replacementUnion
+    : mergeSystemRecordOwnedSubjectsV1(replacementUnion, plan.projectionDeletionTable);
+  if (subjectUnion.length < 1) {
+    throw new Error('system-record materialization requires a bounded projection subject scope');
+  }
   const oldReserved = plan.prior.reservedQuads;
   const nextReserved = plan.next.reservedQuads;
   const absent = plan.prior.requiredAbsentReservedSubjects;
