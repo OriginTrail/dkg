@@ -4215,9 +4215,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
       ...(automaticPeerSweep && remotePeerIsCompleteSwmProvider
         ? {
-          getPrioritySharedMemorySyncContextGraphs: async (peerId: string) => (
-            await getPrioritySharedMemorySyncPlan(peerId)
-          ).publicContextGraphIds,
+          selectedSharedMemoryLane: {
+            getContextGraphIds: async (peerId: string) => (
+              await getPrioritySharedMemorySyncPlan(peerId)
+            ).publicContextGraphIds,
+            syncFromPeer: async (peerId: string, contextGraphIds: string[]) => (
+              this.syncSelectedSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
+                stopOnBackoffWorthyFailure: true,
+                source,
+                sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
+                priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
+                selectedSwmPriority: true,
+              })
+            ),
+          },
         }
         : {}),
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
@@ -4238,15 +4249,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           sharedMemorySyncPlan,
         });
       },
-      syncSelectedSharedMemoryFromPeer: async (peerId, contextGraphIds) => (
-        this.syncSelectedSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
-          stopOnBackoffWorthyFailure: true,
-          source,
-          sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
-          priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
-          selectedSwmPriority: true,
-        })
-      ),
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
@@ -6451,7 +6453,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
           getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
           stopOnBackoffWorthyFailure,
-          requireCompleteSelectedScopeEvidence: selectedSwmEnabled,
+          snapshotEvidencePolicy: selectedSwmEnabled
+            ? {
+              // Non-empty metadata with no store-backed refs can describe
+              // graph-backed KAs. Until this requester has count/digest-bound
+              // transport evidence for them, the selected lane must fail closed.
+              accepts: ({ verifiedMetadataTriples, snapshotReferences }) => (
+                verifiedMetadataTriples === 0 || snapshotReferences > 0
+              ),
+            }
+            : undefined,
           metadataFetcher: selectedMetaFetcher?.strategy,
           ensureContextGraph: async (contextGraphId) => {
             const graphManager = new GraphManager(this.store);

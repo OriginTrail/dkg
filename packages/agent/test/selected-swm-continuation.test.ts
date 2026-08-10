@@ -1535,12 +1535,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         getSyncContextGraphs: () => [],
         getDurableSyncContextGraphs: () => [],
         getSharedMemorySyncContextGraphs: () => [publicCg],
-        getPrioritySharedMemorySyncContextGraphs: () => [publicCg],
+        selectedSharedMemoryLane: {
+          getContextGraphIds: () => [publicCg],
+          syncFromPeer: async () => selected,
+        },
         syncFromPeer: async () => 0,
         refreshMetaSyncedFlags: async () => undefined,
         discoverContextGraphsFromStore: async () => 0,
         syncSharedMemoryFromPeer: async () => summary,
-        syncSelectedSharedMemoryFromPeer: async () => selected,
         onPeerSynced,
         logInfo: () => {},
       });
@@ -2805,16 +2807,18 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
       getSharedMemorySyncContextGraphs: () => [contextGraphId],
-      getPrioritySharedMemorySyncContextGraphs: () => [contextGraphId],
+      selectedSharedMemoryLane: {
+        getContextGraphIds: () => [contextGraphId],
+        syncFromPeer: async () => ({
+          kind: 'selected-shared-memory',
+          shared,
+          selectedScopeComplete: true,
+        }),
+      },
       syncFromPeer: async () => 0,
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
       syncSharedMemoryFromPeer: async () => shared,
-      syncSelectedSharedMemoryFromPeer: async () => ({
-        kind: 'selected-shared-memory',
-        shared,
-        selectedScopeComplete: true,
-      }),
       onPeerSynced,
       logInfo: () => {},
     });

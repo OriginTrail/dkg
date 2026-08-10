@@ -404,16 +404,18 @@ describe('sync-on-connect churn gates', () => {
       getSyncContextGraphs: () => [],
       getDurableSyncContextGraphs: () => [],
       getSharedMemorySyncContextGraphs: () => ['selected-cg'],
-      getPrioritySharedMemorySyncContextGraphs: () => ['selected-cg'],
+      selectedSharedMemoryLane: {
+        getContextGraphIds: () => ['selected-cg'],
+        syncFromPeer: async () => ({
+          kind: 'selected-shared-memory',
+          shared: emptyDetailedSync(),
+          selectedScopeComplete: false,
+        }),
+      },
       syncFromPeer: async () => emptyDetailedSync({ complete: true }),
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
       syncSharedMemoryFromPeer: async () => emptyDetailedSync(),
-      syncSelectedSharedMemoryFromPeer: async () => ({
-        kind: 'selected-shared-memory',
-        shared: emptyDetailedSync(),
-        selectedScopeComplete: false,
-      }),
       onPeerSynced: (_peerId, outcome) => {
         if (outcome) onSyncAccounting?.(outcome);
       },
