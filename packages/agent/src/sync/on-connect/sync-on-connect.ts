@@ -176,13 +176,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let sawBackpressureDeferral = false;
   let sawDurableMetadataOnlyDetailedSync = false;
   let sawExplicitIncompleteDurableResult = false;
+  let sawExplicitIncompleteSharedResult = false;
   let cleanDurableDetailedRound = false;
   const recordSyncAccounting = (
     result: SyncFromPeerResult,
     phase: 'durable' | 'shared',
   ): SyncResultAccounting => {
-    const complete = phase === 'durable'
-      && typeof result !== 'number'
+    const complete = typeof result !== 'number'
       && 'complete' in result
       && typeof result.complete === 'boolean'
         ? result.complete
@@ -204,6 +204,9 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       cleanDurableDetailedRound = cleanDurableDetailedRound || (
         complete !== false && accounting.cleanNonMetadataResponse
       );
+    } else {
+      sawExplicitIncompleteSharedResult = sawExplicitIncompleteSharedResult
+        || complete === false;
     }
     return accounting;
   };
@@ -217,10 +220,18 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       }
       return 'deferred-backpressure';
     }
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
+    const clearsPeerBackoff = madeProgress || (
+      !sawBackoffWorthyFailure
+      && !sawExplicitIncompleteSharedResult
+      && (cleanDurableRound || sawDeniedPhase)
+    );
     if (clearsPeerBackoff) {
       context.onPeerSynced?.(remotePeer, {
-        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+        fresh: !sawBackoffWorthyFailure
+          && !sawDeniedPhase
+          && !sawFailedPhase
+          && !sawExplicitIncompleteSharedResult
+          && cleanDurableRound,
         progress: madeProgress,
       });
     }

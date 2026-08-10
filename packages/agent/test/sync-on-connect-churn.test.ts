@@ -40,7 +40,7 @@ function allowAllNetworkAdmission(agent: DKGAgent): void {
 
 const noopLog = (_ctx: OperationContext, _message: string) => {};
 
-function emptyDetailedSync(overrides: Record<string, number> = {}) {
+function emptyDetailedSync(overrides: Record<string, number | boolean> = {}) {
   return {
     insertedTriples: 0,
     insertedDataTriples: 0,
@@ -219,6 +219,13 @@ describe('sync-on-connect churn gates', () => {
     )).toBe(false);
 
     (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    // A normal connection-open event never inherits the catalog bootstrap's
+    // selected retry authority, even while the scheduling marker is present.
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(false);
     (agent as any).syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + 60_000,
@@ -377,6 +384,49 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).catchupOnConnectAt.set(PEER_A, staleQueuedAt);
     expect((agent as any).queueSyncFromPeerOnConnect(PEER_A, () => undefined, 0)).toBe(false);
     expect((agent as any).catchupOnConnectAt.get(PEER_A)).toBe(staleQueuedAt);
+  });
+
+  it('records reconciler backoff when selected SWM is explicitly incomplete without progress', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmIncompleteBackoff');
+    (agent as any).started = true;
+    (agent.node as any).node = {
+      getPeers: () => [{ toString: () => PEER_A }],
+      getConnections: () => [],
+    };
+    (agent as any).trySyncFromPeer = async (
+      _peerId: string,
+      onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
+    ) => runSyncOnConnect({
+      remotePeer: PEER_A,
+      syncingPeers: new Set(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      knownCorePeerIds: new Set(),
+      getSyncContextGraphs: () => [],
+      getDurableSyncContextGraphs: () => [],
+      getSharedMemorySyncContextGraphs: () => ['selected-cg'],
+      getPrioritySharedMemorySyncContextGraphs: () => ['selected-cg'],
+      syncFromPeer: async () => emptyDetailedSync({ complete: true }),
+      refreshMetaSyncedFlags: async () => undefined,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeer: async () => emptyDetailedSync({ complete: false }),
+      onPeerSynced: (_peerId, outcome) => {
+        if (outcome) onSyncAccounting?.(outcome);
+      },
+      logInfo: noopLog,
+    });
+
+    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect((agent as any).lastSyncProgressAt.has(PEER_A)).toBe(false);
+    expect((agent as any).syncReconcilerBackoff.get(PEER_A)).toMatchObject({
+      failures: 1,
+    });
+    expect((agent as any).syncReconcilerBackoff.get(PEER_A).nextRetryAt)
+      .toBeGreaterThan(Date.now());
   });
 
   it('does not let one peer backoff suppress connection-open sync for another peer', async () => {

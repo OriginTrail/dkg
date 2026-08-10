@@ -1188,26 +1188,25 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       refreshMetaSyncedFlags: async () => undefined,
       discoverContextGraphsFromStore: async () => 0,
       syncSharedMemoryFromPeerDetailed: async (
-        peerId: string,
+        _peerId: string,
         _contextGraphIds: readonly string[],
-        options: { selectedSwmPriority?: boolean } = {},
-      ) => {
-        if (options.selectedSwmPriority) {
-          // The exact selected continuation exhausted its pass budget while
-          // coverage remained incomplete. Its aggregate counters happen to be
-          // clean, matching the live shape that previously stamped freshness.
-          agent.selectedSwmRetryRequiredPeers.add(peerId);
-        }
-        return cleanDurableResult();
-      },
+        _options: { selectedSwmPriority?: boolean } = {},
+      ) => ({
+        ...cleanDurableResult(),
+        // The producer carries whole-selected-scope completeness explicitly;
+        // freshness accounting must not depend on ambient peer state.
+        complete: false,
+      }),
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
 
     await callTrySyncFromPeer.call(agent, PEER, (outcome) => accounting.push(outcome));
 
-    expect(agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+    expect(agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
     expect(agent.lastSuccessfulSyncAt.has(PEER)).toBe(false);
-    expect(accounting).toEqual([{ fresh: false, progress: false }]);
+    // No freshness/progress callback means the reconciler wrapper classifies
+    // this explicit incomplete result as a failed attempt and grows backoff.
+    expect(accounting).toEqual([]);
   });
 
   it('continues a voluntary 672/905 public snapshot yield to 905/905 with fresh admission', async () => {
@@ -1249,6 +1248,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         snapshotsTotal: 905,
         missingCount: 0,
       });
+      expect(summary.complete).toBe(true);
       expect(summary.continuationPasses).toBe(1);
       expect(summary.snapshotPlaneIncomplete).toBe(1);
       expect(summary.failedPhases).toBe(1);
@@ -1306,7 +1306,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     });
 
     try {
-      await callSyncSharedMemoryFromPeerDetailed(
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
         harness.agent,
         [completeCg, incompleteCg],
         {
@@ -1320,6 +1320,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       );
 
+      expect(summary.complete).toBe(false);
       expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
     } finally {
       await harness.close();
@@ -1437,6 +1438,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       );
 
       expect(first.metadataContinuationYields).toBe(1);
+      expect(first.complete).toBe(false);
       expect(harness.probes.processedMetaBatches).toEqual([]);
       expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
 
@@ -1469,6 +1471,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       );
 
       expect(second.failedPhases).toBe(0);
+      expect(second.complete).toBe(true);
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
       expect(harness.probes.metaRequesterScopes[1]).toBe(
         harness.probes.metaRequesterScopes[0],

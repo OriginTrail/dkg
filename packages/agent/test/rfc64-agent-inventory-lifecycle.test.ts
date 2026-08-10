@@ -53,6 +53,7 @@ function syntheticAgent(dataDirectory?: string): any {
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
     rfc64PersistenceV1: undefined,
+    selectedSwmRetryRequiredPeers: new Set<string>(),
   });
   return agent;
 }
