@@ -107,14 +107,22 @@ function hasKnownRetryableSyncTransportMessage(error: unknown): boolean {
  */
 export function isKnownRetryableSyncTransportInterruption(error: unknown): boolean {
   if (
-    (error instanceof Error && error.name === 'AbortError')
-    || isSyncValidationRejection(error)
+    isSyncValidationRejection(error)
     || didSyncPeerRespond(error)
     || isChainRpcTransportError(error)
     || isSyncLocalRequestFailure(error)
   ) return false;
 
-  return isSyncTransportFailure(error) || hasKnownRetryableSyncTransportMessage(error);
+  // The transport boundary is authoritative even when its deadline surfaces
+  // as AbortError. Caller/node cancellation is rejected separately by the
+  // requester's live signal before this classifier is consulted.
+  if (isSyncTransportFailure(error)) return true;
+
+  // Never infer an untagged AbortError from message text: the same shape is
+  // used for caller cancellation and transport deadlines.
+  if (error instanceof Error && error.name === 'AbortError') return false;
+
+  return hasKnownRetryableSyncTransportMessage(error);
 }
 
 /**

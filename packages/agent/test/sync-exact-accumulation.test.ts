@@ -95,6 +95,53 @@ describe('exact sync accumulation limits', () => {
     expect(checkpointStore.get(result.checkpointKey)?.responderSessionId).toBeTruthy();
   });
 
+  it('retains selected metadata when a tagged transport deadline has AbortError shape', async () => {
+    const requesterScope = 'selected-swm-meta:tagged-abort-deadline' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let sends = 0;
+    const acceptedQuad = {
+      subject: 'urn:selected:tagged-abort',
+      predicate: 'urn:p',
+      object: '"o"',
+      graph: 'urn:meta',
+    };
+
+    const result = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: new AbortController().signal,
+      parseAndFilter: async () => ({ quads: [acceptedQuad], totalQuads: 1 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        const error = new Error('request timeout');
+        error.name = 'AbortError';
+        markSyncTransportFailure(error);
+        throw error;
+      },
+    }));
+
+    expect(result).toMatchObject({
+      quads: [acceptedQuad],
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    expect(checkpointStore.get(result.checkpointKey)).toMatchObject({
+      // The selected owner, not the generic page fetcher, owns advancement to
+      // result.nextOffset after it has retained this exact private prefix.
+      offset: 0,
+      responderSessionId: expect.any(String),
+    });
+  });
+
   it('does not infer selected metadata retention policy from checkpoint scope', async () => {
     let sends = 0;
     await expect(fetchSyncPages(fetchParams({
@@ -125,6 +172,7 @@ describe('exact sync accumulation limits', () => {
       fail: (controller: AbortController) => {
         controller.abort(new Error('caller cancelled'));
         const error = new Error('operation timed out');
+        error.name = 'AbortError';
         markSyncTransportFailure(error);
         return error;
       },
