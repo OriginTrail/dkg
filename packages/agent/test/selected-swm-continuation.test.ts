@@ -205,6 +205,7 @@ interface SelectedProviderSelectionAgent {
   lastSuccessfulSyncAt: Map<string, number>;
   lastSyncProgressAt: Map<string, number>;
   syncReconcilerBackoff: Map<string, unknown>;
+  selectedSwmRetryRequiredPeers: Set<string>;
   getPeerProtocols: () => Promise<string[]>;
   planSharedMemorySyncContextGraphs: () => Promise<{
     publicContextGraphIds: string[];
@@ -228,6 +229,7 @@ interface SelectedProviderSelectionAgent {
 const callTrySyncFromPeer = LifecycleSyncMethods.prototype.trySyncFromPeer as unknown as (
   this: SelectedProviderSelectionAgent,
   remotePeer: string,
+  onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
 ) => Promise<unknown>;
 
 interface AdmissionProbe {
@@ -290,6 +292,7 @@ interface SelectedSwmLifecycleAgentFixture {
       local?: { rows?: number; bytesEstimate?: number };
     };
   };
+  selectedSwmRetryRequiredPeers: Set<string>;
   store: OxigraphStore;
   writeLocks: Map<string, Promise<void>>;
   publicSnapshotStore: {
@@ -422,6 +425,7 @@ function createSelectedSwmLifecycleHarness(
         }
         : {}),
     },
+    selectedSwmRetryRequiredPeers: new Set(),
     store,
     writeLocks: new Map(),
     publicSnapshotStore: {
@@ -716,7 +720,7 @@ describe('selected RFC-64 SWM continuation', () => {
   it('re-enters admission promptly until incomplete coverage becomes complete', async () => {
     const contextGraphId = 'selected-public';
     const admissions: string[] = [];
-    const { summary } = await runSelectedSwmContinuations({
+    const execution = await runSelectedSwmContinuations({
       providerPeerId: PEER,
       units: [selectedUnit(
         contextGraphId,
@@ -737,9 +741,36 @@ describe('selected RFC-64 SWM continuation', () => {
       }),
     });
 
+    const { summary } = execution;
     expect(admissions).toEqual([contextGraphId]);
     expect(summary.continuationPasses).toBe(1);
     expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 3, snapshotsTotal: 3 });
+    expect(execution.incompleteContextGraphIds).toEqual([]);
+  });
+
+  it('reports useful selected progress as retry-required when the next pass stalls', async () => {
+    const contextGraphId = 'selected-progress-then-stalled';
+    const initial = result(contextGraphId, 2, 3, { insertedDataTriples: 2 });
+    const stalled = result(contextGraphId, 2, 3, { insertedDataTriples: 0 });
+    const stop = vi.fn();
+
+    const execution = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
+      units: [selectedUnit(contextGraphId, initial, async () => stalled)],
+      passConfig: { maxPasses: 4, budgetMs: 600_000 },
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, run) => run(),
+      merge,
+      markDeferred: (summary) => summary,
+      onStop: stop,
+    });
+
+    expect(execution.incompleteContextGraphIds).toEqual([contextGraphId]);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      reason: 'coverage-stalled',
+    }));
   });
 
   it('allows one capable zero-progress retry, then stops when coverage stalls', async () => {
@@ -1093,6 +1124,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSuccessfulSyncAt: new Map<string, number>(),
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
+      selectedSwmRetryRequiredPeers: new Set<string>(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async () => mixedPlan,
       resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => (
@@ -1121,6 +1153,61 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       { contextGraphIds: [publicCg], selected: true },
       { contextGraphIds: [privateCg], selected: false },
     ]);
+  });
+
+  it('does not stamp a max-pass incomplete selected provider fresh', async () => {
+    const publicCg = 'selected-max-passes-incomplete';
+    const accounting: Array<{ fresh: boolean; progress?: boolean }> = [];
+    const agent: SelectedProviderSelectionAgent = {
+      started: true,
+      config: {
+        syncOnConnect: true,
+        syncSharedMemoryOnConnect: true,
+        syncContextGraphs: [publicCg],
+        rfc64PublicCatalogBootstrap: {
+          acceptedPublicPolicies: [{ completeSwmProviders: [PEER] }],
+        },
+      },
+      networkAdmissionCoordinator: { isAcceptedPeer: () => true },
+      syncingPeers: new Set<string>(),
+      knownCorePeerIds: new Set<string>(),
+      knownCorePeerIdsV2: new Set<string>(),
+      skippedNoSyncPeers: new Set<string>(),
+      lastSuccessfulSyncAt: new Map<string, number>(),
+      lastSyncProgressAt: new Map<string, number>(),
+      syncReconcilerBackoff: new Map<string, unknown>(),
+      selectedSwmRetryRequiredPeers: new Set<string>(),
+      getPeerProtocols: async () => [PROTOCOL_SYNC],
+      planSharedMemorySyncContextGraphs: async () => ({
+        publicContextGraphIds: [publicCg],
+        privateRecoverFromCurator: [],
+        eligibleContextGraphIds: [publicCg],
+      }),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [PEER],
+      syncFromPeerDetailed: async () => 0,
+      refreshMetaSyncedFlags: async () => undefined,
+      discoverContextGraphsFromStore: async () => 0,
+      syncSharedMemoryFromPeerDetailed: async (
+        peerId: string,
+        _contextGraphIds: readonly string[],
+        options: { selectedSwmPriority?: boolean } = {},
+      ) => {
+        if (options.selectedSwmPriority) {
+          // The exact selected continuation exhausted its pass budget while
+          // coverage remained incomplete. Its aggregate counters happen to be
+          // clean, matching the live shape that previously stamped freshness.
+          agent.selectedSwmRetryRequiredPeers.add(peerId);
+        }
+        return cleanDurableResult();
+      },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await callTrySyncFromPeer.call(agent, PEER, (outcome) => accounting.push(outcome));
+
+    expect(agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+    expect(agent.lastSuccessfulSyncAt.has(PEER)).toBe(false);
+    expect(accounting).toEqual([{ fresh: false, progress: false }]);
   });
 
   it('continues a voluntary 672/905 public snapshot yield to 905/905 with fresh admission', async () => {
@@ -1168,6 +1255,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(summary.resolvedSnapshotPlaneIncomplete).toBe(1);
       expect(summary.timedOutPhases).toBe(0);
       expect(summary.backoffWorthyFailures).toBe(0);
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
       expect(initialSnapshotReads).toBe(672);
       expect(harness.probes.snapshotFetches).toEqual([]);
       expect(harness.probes.maxActiveAdmissions()).toBe(1);
@@ -1203,6 +1291,36 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         fresh: true,
         progress: false,
       });
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps retry state when one selected CG completes and another remains incomplete', async () => {
+    const completeCg = 'selected-multi-complete';
+    const incompleteCg = 'selected-multi-incomplete';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: completeCg },
+      manifest: snapshotManifest(completeCg, 2),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+    });
+
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [completeCg, incompleteCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [completeCg, incompleteCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [completeCg, incompleteCg],
+          },
+        },
+      );
+
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
     } finally {
       await harness.close();
     }
@@ -1320,6 +1438,29 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
       expect(first.metadataContinuationYields).toBe(1);
       expect(harness.probes.processedMetaBatches).toEqual([]);
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+
+      const queuedPeers: string[] = [];
+      const queueAgent = harness.agent as SelectedSwmLifecycleAgentFixture & Record<string, any>;
+      queueAgent.networkAdmissionCoordinator = { isAcceptedPeer: () => true };
+      queueAgent.lastSuccessfulSyncAt = new Map([[PEER, Date.now()]]);
+      queueAgent.lastSyncDisconnectedAt = new Map<string, number>();
+      queueAgent.catchupOnConnectAt = new Map<string, number>();
+      queueAgent.syncReconcilerBackoff = new Map<string, unknown>();
+      queueAgent.syncOnConnectDisconnectBoundary =
+        LifecycleSyncMethods.prototype.syncOnConnectDisconnectBoundary;
+      queueAgent.runSyncFromPeerOnConnect = async (peerId: string) => {
+        queuedPeers.push(peerId);
+      };
+      expect(LifecycleSyncMethods.prototype.queueSyncFromPeerOnConnect.call(
+        queueAgent as never,
+        PEER,
+        () => undefined,
+        0,
+        { selectedSwmRetry: true },
+      )).toBe(true);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(queuedPeers).toEqual([PEER]);
 
       const second = await callSyncSharedMemoryFromPeerDetailed(
         harness.agent,
@@ -1336,6 +1477,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         harness.probes.metaReturnAcceptedPrefixOnRetryableTransportFailure,
       ).toEqual([true, true]);
       expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
     } finally {
       if (previousBudget === undefined) {
         delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
@@ -2115,6 +2257,65 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(firstSummary.failedPhases).toBe(0);
       expect(secondSummary.failedPhases).toBe(0);
       expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      releaseFirst();
+      await harness.close();
+    }
+  });
+
+  it('does not lose a queued incomplete retry marker when an earlier call completes', async () => {
+    const completeCg = 'selected-overlap-complete';
+    const incompleteCg = 'selected-overlap-incomplete';
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
+    let releaseFirst!: () => void;
+    const firstRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    let firstBlocked = false;
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: completeCg },
+      manifest: snapshotManifest(completeCg, 2),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      beforeAdmissionRun: async ({ contextGraphId }) => {
+        if (contextGraphId !== completeCg || firstBlocked) return;
+        firstBlocked = true;
+        signalFirstStarted();
+        await firstRelease;
+      },
+    });
+    const completePlan = {
+      publicContextGraphIds: [completeCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [completeCg],
+    };
+    const incompletePlan = {
+      publicContextGraphIds: [incompleteCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [incompleteCg],
+    };
+
+    try {
+      const first = callSyncSharedMemoryFromPeerDetailed(harness.agent, [completeCg], {
+        selectedSwmPriority: true,
+        priority: 2_000,
+        sharedMemorySyncPlan: completePlan,
+      });
+      await firstStarted;
+      const second = callSyncSharedMemoryFromPeerDetailed(harness.agent, [incompleteCg], {
+        selectedSwmPriority: true,
+        priority: 2_001,
+        sharedMemorySyncPlan: incompletePlan,
+      });
+      await Promise.resolve();
+      releaseFirst();
+
+      const [completeSummary, incompleteSummary] = await Promise.all([first, second]);
+      expect(completeSummary.swmCoverage).toMatchObject({
+        contextGraphId: completeCg,
+        snapshotsResolved: 2,
+        snapshotsTotal: 2,
+      });
+      expect(incompleteSummary.swmCoverage).toBeUndefined();
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
     } finally {
       releaseFirst();
       await harness.close();

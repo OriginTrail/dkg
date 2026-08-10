@@ -3973,6 +3973,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
+    this.selectedSwmRetryRequiredPeers.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -3983,6 +3984,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
+    options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
     if (!syncOnConnectEnabled(this.config)) {
       return false;
@@ -3993,7 +3995,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
+    const selectedSwmRetryRequired = options.selectedSwmRetry === true
+      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
     if (
+      !selectedSwmRetryRequired &&
       lastSuccessfulSync != null &&
       lastSuccessfulSync > disconnectBoundary &&
       now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
@@ -4205,17 +4210,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.skippedNoSyncPeers.add(peerId);
       },
       onPeerSynced: (peerId, outcome) => {
+        const selectedSwmRetryRequired = this.selectedSwmRetryRequiredPeers.has(peerId);
+        const effectiveOutcome = outcome && selectedSwmRetryRequired
+          ? { ...outcome, fresh: false }
+          : outcome;
         const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (outcome?.progress) {
+        if (effectiveOutcome?.progress) {
           this.lastSyncProgressAt.set(peerId, progressAt);
         }
-        if (outcome?.fresh ?? true) {
+        // Generic/durable work cannot stamp the whole peer fresh while exact
+        // selected SWM coverage remains incomplete. Existing success evidence
+        // stays diagnostic history; the dedicated bootstrap retry bypasses it.
+        if ((effectiveOutcome?.fresh ?? true) && !selectedSwmRetryRequired) {
           this.lastSuccessfulSyncAt.set(peerId, progressAt);
         }
         this.skippedNoSyncPeers.delete(peerId);
         this.syncReconcilerBackoff.delete(peerId);
-        if (outcome) {
-          onSyncAccounting?.(outcome);
+        if (effectiveOutcome) {
+          onSyncAccounting?.(effectiveOutcome);
         }
       },
     });
@@ -6638,6 +6650,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         initialSummary,
         continuationSummary,
       );
+      const expectedSelectedContextGraphs = new Set(publicContextGraphIds);
+      const selectedScopeComplete = selectedContinuationUnits.length
+        === expectedSelectedContextGraphs.size
+        && continuationExecution.incompleteContextGraphIds.length === 0;
+      if (selectedScopeComplete) {
+        this.selectedSwmRetryRequiredPeers.delete(remotePeerId);
+      }
       // Preserve the raw historical yield/failure counters for diagnostics;
       // the canonical freshness helper bounds the selected continuation's
       // resolution before final on-connect classification consumes it.
@@ -6652,7 +6671,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ? this.getSelectedSwmMetaTransfers().run(
           remotePeerId,
           createSelectedMetaFetcher,
-          runSync,
+          (selectedMetaFetcher) => {
+            // Different selected calls for one peer serialize behind this
+            // owner. Mark after ownership begins so an earlier complete call
+            // cannot clear a later queued call's retry requirement.
+            this.selectedSwmRetryRequiredPeers.add(remotePeerId);
+            return runSync(selectedMetaFetcher);
+          },
         )
         : runSync()
     ), {

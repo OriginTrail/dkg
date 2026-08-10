@@ -256,6 +256,7 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
                 );
               },
               0,
+              { selectedSwmRetry: true },
             );
           } catch (error) {
             this.log.warn(

@@ -200,6 +200,98 @@ describe('sync-on-connect churn gates', () => {
     expect(calls).toEqual([PEER_A]);
   });
 
+  it('retries incomplete selected SWM past generic freshness without creating a loop', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmRetryFreshnessBypass');
+    const calls: string[] = [];
+    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    const handleSyncError = () => undefined;
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now());
+
+    // Generic fresh-success suppression remains authoritative until the
+    // selected lane explicitly records incomplete exact coverage.
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+
+    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+    });
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    (agent as any).syncReconcilerBackoff.delete(PEER_A);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+    // The ordinary one-minute queue cooldown still prevents retry storms.
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+
+    // A later exact completion clears the marker. Even after the short queue
+    // cooldown expires, the still-fresh generic success prevents another run.
+    (agent as any).selectedSwmRetryRequiredPeers.delete(PEER_A);
+    (agent as any).catchupOnConnectAt.set(
+      PEER_A,
+      Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
+    );
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+  });
+
+  it('clears selected SWM retry state when network admission rejects a peer', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmRetryRejectedPeerCleanup');
+    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+
+    (agent as any).clearNetworkRejectedPeerState(PEER_A);
+
+    expect((agent as any).selectedSwmRetryRequiredPeers.has(PEER_A)).toBe(false);
+  });
+
+  it('clears selected SWM retry state after stop drains transfer owners', async () => {
+    const agent = await DKGAgent.create({
+      name: 'SelectedSwmRetryStopCleanup',
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      chainAdapter: new MockChainAdapter(),
+    });
+    try {
+      await agent.start();
+      (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+
+      await agent.stop();
+
+      expect((agent as any).selectedSwmRetryRequiredPeers.size).toBe(0);
+    } finally {
+      if ((agent as any).started) await agent.stop().catch(() => undefined);
+    }
+  });
+
   it('allows reconnect catch-up after a meaningful offline gap', async () => {
     const agent = await createUnstartedAgent('SyncReconnectOfflineGap');
     const calls: string[] = [];
