@@ -6,9 +6,11 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ProfileManager } from '../src/profile-manager.js';
 
 /**
- * A local/no-chain publish carries no minted knowledge-asset id. The publisher
- * reports that as `kaId: 0n` (see the `?? 0n` fallback in dkg-agent-publish),
- * so a republish has nothing on-chain to update and must publish again.
+ * A local/no-chain publish carries no minted knowledge-asset id, so a republish
+ * has nothing on chain to update and must publish again. Observed in the agent
+ * suite as "No positive on-chain context graph id resolved from 'agents' —
+ * skipping on-chain publish", then "Storing N triples in local store (no
+ * on-chain CG id)"; the resulting PublishResult carries `kaId: 0n`.
  */
 const LOCAL_ONLY_KA_ID = 0n;
 
