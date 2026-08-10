@@ -92,6 +92,10 @@ export default defineConfig({
       // #2050 — the stop rule for the bounded repeat of the public SWM peer walk.
       "test/catchup-pass-policy.test.ts",
       "test/selected-swm-continuation.test.ts",
+      "test/selected-swm-freshness.test.ts",
+      "test/selected-swm-lifecycle-core.test.ts",
+      "test/selected-swm-lifecycle-session.test.ts",
+      "test/selected-swm-lifecycle-queue.test.ts",
       "test/selected-swm-meta-transfer-coordinator.test.ts",
       "test/selected-swm-meta-budget.test.ts",
       "test/outbox-shutdown-lifecycle.test.ts",

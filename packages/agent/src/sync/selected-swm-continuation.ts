@@ -50,6 +50,8 @@ export interface SelectedSwmContinuationProgress {
 export interface SelectedSwmContinuationExecution {
   readonly summary: SharedMemorySyncResult;
   readonly freshnessResolution: SelectedSwmFreshnessResolution;
+  /** Selected Context Graphs that did not prove exact snapshot completion. */
+  readonly incompleteContextGraphIds: readonly string[];
 }
 
 export interface RunSelectedSwmContinuationsOptions {
@@ -417,5 +419,8 @@ export async function runSelectedSwmContinuations(
       recoverableSnapshotYieldFailures,
       recoverableMetadataContinuationYields,
     },
+    incompleteContextGraphIds: [...stateByContextGraph.values()]
+      .filter((state) => !state.completed)
+      .map((state) => state.unit.work.contextGraphId),
   };
 }

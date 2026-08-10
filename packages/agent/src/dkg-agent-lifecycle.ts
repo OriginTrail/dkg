@@ -313,7 +313,13 @@ import {
   registerSyncHandler,
   resolveSyncResponderSnapshotPolicy,
 } from './sync/responder/sync-handler.js';
-import { runSyncOnConnect, SyncOnConnectPostSyncError, type SyncOnConnectOutcome, type SyncOnConnectPeerOutcome } from './sync/on-connect/sync-on-connect.js';
+import {
+  runSyncOnConnect,
+  SyncOnConnectPostSyncError,
+  type SyncOnConnectOutcome,
+  type SyncOnConnectPeerOutcome,
+} from './sync/on-connect/sync-on-connect.js';
+import type { SelectedSharedMemorySyncResult } from './sync/shared-memory-freshness.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { CATCHUP_MAX_CONCURRENT_PEER_SYNCS } from './sync/catchup-concurrency.js';
 import {
@@ -594,6 +600,37 @@ import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './star
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
+
+interface SharedMemorySyncFromPeerOptions {
+  stopOnBackoffWorthyFailure?: boolean;
+  sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
+  /** Admission override for foreground catch-up. */
+  priority?: number;
+  /** Bounded admission origin for node-wide scheduler diagnostics. */
+  source?: SyncAdmissionSource;
+  /** Internal execution selector; excluded from the ordinary public method. */
+  selectedSwmPriority?: boolean;
+}
+
+type OrdinarySharedMemorySyncFromPeerOptions = Omit<
+SharedMemorySyncFromPeerOptions,
+'selectedSwmPriority'
+>;
+
+interface SelectedSharedMemorySyncFromPeerOptions extends Omit<
+SharedMemorySyncFromPeerOptions,
+'selectedSwmPriority'
+> {
+  /** Selects the graph-complete RFC-64 SWM lane and its terminal verdict. */
+  selectedSwmPriority: true;
+}
+
+interface SharedMemorySyncExecution {
+  readonly shared: SharedMemorySyncResult;
+  /** Null for ordinary/private SWM; boolean only for the selected public lane. */
+  readonly selectedScopeComplete: boolean | null;
+}
+
 type InFlightSyncPageFetch = {
   promise: Promise<SyncPageResult>;
   controller: AbortController;
@@ -3969,6 +4006,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
+    this.selectedSwmRetryRequiredPeers.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -3979,6 +4017,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
+    options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
     if (!syncOnConnectEnabled(this.config)) {
       return false;
@@ -3989,7 +4028,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
+    const selectedSwmRetryRequired = options.selectedSwmRetry === true
+      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
     if (
+      !selectedSwmRetryRequired &&
       lastSuccessfulSync != null &&
       lastSuccessfulSync > disconnectBoundary &&
       now - lastSuccessfulSync < SYNC_STALENESS_THRESHOLD_MS
@@ -4169,9 +4211,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
       ...(automaticPeerSweep && remotePeerIsCompleteSwmProvider
         ? {
-          getPrioritySharedMemorySyncContextGraphs: async (peerId: string) => (
-            await getPrioritySharedMemorySyncPlan(peerId)
-          ).publicContextGraphIds,
+          selectedSharedMemoryLane: {
+            getContextGraphIds: async (peerId: string) => (
+              await getPrioritySharedMemorySyncPlan(peerId)
+            ).publicContextGraphIds,
+            syncFromPeer: async (peerId: string, contextGraphIds: string[]) => (
+              this.syncSelectedSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
+                stopOnBackoffWorthyFailure: true,
+                source,
+                sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
+                priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
+                selectedSwmPriority: true,
+              })
+            ),
+          },
         }
         : {}),
       syncFromPeer: (peerId, contextGraphIds) => this.syncFromPeerDetailed(
@@ -4184,17 +4237,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
       discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
-      syncSharedMemoryFromPeer: async (peerId, contextGraphIds, syncOptions) => this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
-        stopOnBackoffWorthyFailure: true,
-        source,
-        sharedMemorySyncPlan: await getSharedMemorySyncPlan(peerId),
-        ...(syncOptions?.selectedPriority
-          ? {
-            priority: RFC64_SELECTED_SWM_ADMISSION_PRIORITY,
-            selectedSwmPriority: true,
-          }
-          : {}),
-      }),
+      syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
+        const sharedMemorySyncPlan = await getSharedMemorySyncPlan(peerId);
+        return this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
+          stopOnBackoffWorthyFailure: true,
+          source,
+          sharedMemorySyncPlan,
+        });
+      },
       syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
@@ -6182,25 +6232,51 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   async syncSharedMemoryFromPeerDetailed(this: DKGAgent,
     remotePeerId: string,
     contextGraphIds: string[],
-    options?: {
-      stopOnBackoffWorthyFailure?: boolean;
-      sharedMemorySyncPlan?: SharedMemorySyncContextGraphPlan;
-      /** Admission override for foreground catch-up. */
-      priority?: number;
-      /**
-       * Bounded admission origin for node-wide scheduler diagnostics. The
-       * closed union: the catch-up Worker RPC is the only untrusted producer
-       * and it clamps in the CLI bridge, while `acquire` re-clamps regardless.
-       */
-      source?: SyncAdmissionSource;
-      /** Internal marker for the selected graph-complete RFC-64 SWM admission. */
-      selectedSwmPriority?: boolean;
-    },
+    options?: OrdinarySharedMemorySyncFromPeerOptions,
   ): Promise<SharedMemorySyncResult> {
+    const execution = await this.syncSharedMemoryFromPeerDetailedExecution(
+      remotePeerId,
+      contextGraphIds,
+      options,
+    );
+    return execution.shared;
+  }
+
+  async syncSelectedSharedMemoryFromPeerDetailed(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphIds: string[],
+    options: SelectedSharedMemorySyncFromPeerOptions,
+  ): Promise<SelectedSharedMemorySyncResult> {
+    const execution = await this.syncSharedMemoryFromPeerDetailedExecution(
+      remotePeerId,
+      contextGraphIds,
+      options,
+    );
+    return {
+      kind: 'selected-shared-memory',
+      shared: execution.shared,
+      selectedScopeComplete: execution.selectedScopeComplete === true,
+    };
+  }
+
+  /** Internal producer shared by the ordinary and selected typed boundaries. */
+  async syncSharedMemoryFromPeerDetailedExecution(this: DKGAgent,
+    remotePeerId: string,
+    contextGraphIds: string[],
+    options?: SharedMemorySyncFromPeerOptions,
+  ): Promise<SharedMemorySyncExecution> {
     const ctx = createOperationContext('sync');
+    const selectedRequest = options?.selectedSwmPriority === true;
+    const execution = (
+      shared: SharedMemorySyncResult,
+      selectedScopeComplete = false,
+    ): SharedMemorySyncExecution => ({
+      shared,
+      selectedScopeComplete: selectedRequest ? selectedScopeComplete : null,
+    });
     if (!durableSyncEnabled(this.config)) {
       this.log.warn(ctx, `Skipping shared-memory sync from ${remotePeerId.slice(-8)} (DKG_DURABLE_SYNC_ENABLED=0)`);
-      return emptySharedMemorySyncResult();
+      return execution(emptySharedMemorySyncResult());
     }
     const recoverPrivateContextGraph = (contextGraphId: string) => runRecoverContextGraphSwmFromPeer(
       {
@@ -6314,7 +6390,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const runSync = async (
       selectedMetaFetcher?: SelectedSwmMetaFetcher,
-    ): Promise<SharedMemorySyncResult> => {
+    ): Promise<SharedMemorySyncExecution> => {
       const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
       const getSubGraphAdmission = (contextGraphId: string) => {
         let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
@@ -6366,6 +6442,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           getRegisteredSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).registered,
           getExcludedSubGraphNames: async (contextGraphId) => (await getSubGraphAdmission(contextGraphId)).excluded,
           stopOnBackoffWorthyFailure,
+          snapshotEvidencePolicy: selectedSwmEnabled
+            ? {
+              // Any graph-backed operation sits outside the immutable snapshot
+              // walk, including when other operations in the same manifest do
+              // have store-backed refs. Until this requester has count/digest-
+              // bound transport evidence for every such operation, the selected
+              // lane must fail closed.
+              accepts: ({
+                verifiedMetadataTriples,
+                snapshotReferences,
+                graphBackedOperations,
+              }) => (
+                verifiedMetadataTriples === 0
+                || (snapshotReferences > 0 && graphBackedOperations === 0)
+              ),
+            }
+            : undefined,
           metadataFetcher: selectedMetaFetcher?.strategy,
           ensureContextGraph: async (contextGraphId) => {
             const graphManager = new GraphManager(this.store);
@@ -6561,7 +6654,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Selected RFC-64 SWM continuation from ${remotePeerId.slice(-8)} stopped on local backpressure`,
           );
         }
-        return initialSummary;
+        return execution(initialSummary);
       }
 
       const continuationExecution = await runSelectedSwmContinuations({
@@ -6627,12 +6720,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         initialSummary,
         continuationSummary,
       );
+      const expectedSelectedContextGraphs = new Set(publicContextGraphIds);
+      const selectedScopeComplete = selectedContinuationUnits.length
+        === expectedSelectedContextGraphs.size
+        && continuationExecution.incompleteContextGraphIds.length === 0;
+      if (selectedScopeComplete) {
+        this.selectedSwmRetryRequiredPeers.delete(remotePeerId);
+      }
       // Preserve the raw historical yield/failure counters for diagnostics;
       // the canonical freshness helper bounds the selected continuation's
       // resolution before final on-connect classification consumes it.
-      return applySelectedSwmFreshnessResolution(
-        finalSummary,
-        continuationExecution.freshnessResolution,
+      return execution(
+        applySelectedSwmFreshnessResolution(
+          finalSummary,
+          continuationExecution.freshnessResolution,
+        ),
+        selectedScopeComplete,
       );
     };
 
@@ -6641,7 +6744,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ? this.getSelectedSwmMetaTransfers().run(
           remotePeerId,
           createSelectedMetaFetcher,
-          runSync,
+          (selectedMetaFetcher) => {
+            // Different selected calls for one peer serialize behind this
+            // owner. Mark after ownership begins so an earlier complete call
+            // cannot clear a later queued call's retry requirement.
+            this.selectedSwmRetryRequiredPeers.add(remotePeerId);
+            return runSync(selectedMetaFetcher);
+          },
         )
         : runSync()
     ), {

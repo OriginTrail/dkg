@@ -270,6 +270,14 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   stopOnBackoffWorthyFailure?: boolean;
+  /** Optional lane-owned policy for deciding whether snapshot evidence is sufficient. */
+  snapshotEvidencePolicy?: {
+    accepts: (evidence: {
+      verifiedMetadataTriples: number;
+      snapshotReferences: number;
+      graphBackedOperations: number;
+    }) => boolean;
+  };
   /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
   metadataFetcher?: SharedMemoryMetadataFetcher;
   deleteCheckpoint: (key: string) => void;
@@ -310,6 +318,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
     stopOnBackoffWorthyFailure = false,
+    snapshotEvidencePolicy,
     metadataFetcher,
     deleteCheckpoint,
     setCheckpoint,
@@ -395,9 +404,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     unwrittenRefSample: readonly string[],
     contextGraphId: string,
   ): void => {
-    // No record for a graph that declared no snapshot refs. `0/0` is not a
-    // shortfall, and a peer with nothing to offer must not look like a peer
-    // that still owes us KAs — an absent record reads as "not capable".
+    // A zero snapshot-ref denominator is ambiguous on a non-empty metadata
+    // response: it can mean a legacy graph-backed asset whose transport graph
+    // is not part of this snapshot walk. Do not turn that into terminal 0/0
+    // evidence. The genuinely empty two-phase response has its own explicit
+    // builder below.
     if (walk.totalSnapshots <= 0) return;
     // RESOLVED MEANS LOCALLY MATERIALIZED, not fetched.
     //
@@ -515,6 +526,29 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.emptyResponses += processed.emptyResponses;
 
       if (processed.emptyResponses > 0) {
+        // Only a clean terminal response from BOTH empty phases proves that
+        // this selected graph has no snapshot-backed or graph-backed SWM
+        // assets. A non-empty metadata response with zero snapshot refs is
+        // deliberately excluded: it can describe graph-backed assets whose
+        // aggregate transport has not been integrity-verified here.
+        if (
+          wsMetaResult.completed
+          && !wsMetaResult.timedOut
+          && wsDataResult.completed
+          && !wsDataResult.timedOut
+        ) {
+          summary.swmCoverage = selectSwmSnapshotCoverage(summary.swmCoverage, {
+            contextGraphId: pid,
+            peerIdSuffix: remotePeerId.slice(-8),
+            snapshotsResolved: 0,
+            snapshotsTotal: 0,
+            manifestComplete: true,
+            descriptorsAuthoritative: true,
+            missingCount: 0,
+            missingSample: [],
+            materializationFailures: 0,
+          });
+        }
         // Count a genuinely empty public graph as complete without requiring
         // cursor movement. Each phase still owns its outcome, so a timeout in
         // one phase cannot be hidden by the sibling's clean empty response.
@@ -929,9 +963,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // The counts, the peer they are attributed to and the missing sample all
       // come from this one round and stay together from here on.
       //
-      // No record for a graph that declared no snapshot refs. `0/0` is not a
-      // shortfall, and a peer with nothing to offer must not look like a peer
-      // that still owes us KAs — an absent record reads as "not capable".
+      // No record for a non-empty graph that declared no snapshot refs. That
+      // shape can contain graph-backed assets and is not terminal until their
+      // count/digest-bound transport is implemented. Only the clean
+      // two-phase-empty branch above emits explicit 0/0 completion.
       //
       // Across a MULTI-CG call the reduction keeps exactly ONE graph's record,
       // named by its `contextGraphId`; the others are dropped. Foreground
@@ -975,18 +1010,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `isGraphAssetMaterialized` sees those markers and skips the KAs for
       // good. That is the same permanent-invisibility failure the G7 repair in
       // this PR exists to prevent, arrived at from a different direction.
-      // The `descriptorsAuthoritative` conjunct is scoped to rounds that
-      // actually declared snapshot refs. With an empty manifest there is no
-      // snapshot the metadata could wrongly certify, so holding the phase down
-      // protects nothing and only discards this round's verified metadata — and
-      // `recordSnapshotCoverage` returns early on an empty manifest, so no
-      // coverage record exists to explain the shortfall either. A Context Graph
-      // whose slices are all graph-backed (`dkg:publicSnapshotGraph`, written
-      // when the publisher has no snapshot store) declares zero refs and hit
-      // exactly that.
+      // The requester applies the caller's evidence policy without knowing
+      // which synchronization lane owns it. A stricter lane can therefore
+      // reject shapes it cannot yet prove while ordinary SWM keeps the
+      // canonical permissive default.
+      const snapshotEvidenceAccepted = snapshotEvidencePolicy?.accepts({
+        verifiedMetadataTriples: processed.verifiedMeta.length,
+        snapshotReferences: snapshotSync.totalSnapshots,
+        graphBackedOperations: countGraphBackedSnapshotOperations(processed.verifiedMeta),
+      }) ?? true;
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
-        && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0);
+        && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
+        && snapshotEvidenceAccepted;
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
           + `not materialized — holding the phase incomplete so metadata cannot certify them`);
@@ -994,6 +1030,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       if (!descriptorsAuthoritativeForCg) {
         logWarn(ctx, `SWM sync for "${pid}": snapshot descriptors could not be parsed — holding `
           + `the phase incomplete so metadata cannot certify Knowledge Assets that were never written`);
+      }
+      if (!snapshotEvidenceAccepted) {
+        logWarn(ctx, `SWM sync for "${pid}": snapshot evidence policy rejected the verified metadata shape; `
+          + 'holding the phase incomplete until the caller can prove the referenced content');
       }
       if (!snapshotPhaseUsable) {
         // The responder was reachable, but the snapshot phase did not produce
@@ -1425,6 +1465,19 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
     byRef.set(ref, metadata);
   }
   return [...byRef.values()];
+}
+
+/**
+ * Count graph-backed share operations whose content is outside the immutable
+ * snapshot-store walk. The selected SWM lane must fail closed while this
+ * aggregate requester cannot prove those transport graphs by count and digest.
+ */
+function countGraphBackedSnapshotOperations(metaQuads: readonly Quad[]): number {
+  return new Set(
+    metaQuads
+      .filter((quad) => quad.predicate === `${DKG}publicSnapshotGraph`)
+      .map((quad) => quad.subject),
+  ).size;
 }
 
 async function hasValidSnapshot(

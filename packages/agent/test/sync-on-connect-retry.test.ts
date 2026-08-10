@@ -109,7 +109,21 @@ describe('runSyncOnConnect callbacks', () => {
       knownCorePeerIds: new Set(),
       getSyncContextGraphs: () => ['selected', 'ordinary'],
       getDurableSyncContextGraphs: () => ['ordinary'],
-      getPrioritySharedMemorySyncContextGraphs: async () => ['selected'],
+      selectedSharedMemoryLane: {
+        getContextGraphIds: async () => ['selected'],
+        syncFromPeer: async (_peerId, contextGraphIds) => {
+          order.push(`shared:${contextGraphIds.join(',')}:selected`);
+          return {
+            kind: 'selected-shared-memory',
+            shared: {
+              insertedTriples: 0,
+              completedPhases: 1,
+              checkpointAdvances: 0,
+            },
+            selectedScopeComplete: true,
+          };
+        },
+      },
       getSharedMemorySyncContextGraphs: async () => ['selected', 'ordinary'],
       syncFromPeer: async (_peerId, contextGraphIds) => {
         order.push(`durable:${contextGraphIds?.join(',') ?? 'all'}`);
@@ -117,11 +131,8 @@ describe('runSyncOnConnect callbacks', () => {
       },
       refreshMetaSyncedFlags: async () => {},
       discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds, options) => {
-        order.push(
-          `shared:${contextGraphIds.join(',')}:`
-            + (options?.selectedPriority === true ? 'selected' : 'ordinary'),
-        );
+      syncSharedMemoryFromPeer: async (_peerId, contextGraphIds) => {
+        order.push(`shared:${contextGraphIds.join(',')}:ordinary`);
         return 0;
       },
       logInfo: noopLog,

@@ -5,6 +5,7 @@ import {
 import {
   classifySharedMemoryFreshness,
   type SharedMemoryFreshnessSummary,
+  type SelectedSharedMemorySyncResult,
 } from '../shared-memory-freshness.js';
 
 type SyncProgressSummary = SharedMemoryFreshnessSummary & {
@@ -12,6 +13,22 @@ type SyncProgressSummary = SharedMemoryFreshnessSummary & {
 };
 
 type SyncFromPeerResult = number | SyncProgressSummary;
+
+type DurableSyncFromPeerResult = number | (SyncProgressSummary & {
+  readonly complete?: boolean;
+});
+
+interface SelectedSharedMemorySyncLane {
+  /** Resolve the graph-complete SWM scope that must run before unrelated history. */
+  getContextGraphIds: (remotePeerId: string) => string[] | Promise<string[]>;
+  /** Produce the lane-owned terminal evidence for exactly that selected scope. */
+  syncFromPeer: (
+    peerId: string,
+    contextGraphIds: string[],
+  ) => Promise<SelectedSharedMemorySyncResult>;
+}
+
+type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
 
 export interface SyncOnConnectPeerOutcome {
   fresh: boolean;
@@ -28,15 +45,14 @@ interface SyncOnConnectContext {
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
-  /** Selected graph-complete SWM scope that must run before unrelated history. */
-  getPrioritySharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
-  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<SyncFromPeerResult>;
+  /** Cohesive selected lane; its scope resolver and typed producer cannot be mis-wired separately. */
+  selectedSharedMemoryLane?: SelectedSharedMemorySyncLane;
+  syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
   syncSharedMemoryFromPeer: (
     peerId: string,
     contextGraphIds: string[],
-    options?: { selectedPriority?: boolean },
   ) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
@@ -153,7 +169,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     getSharedMemorySyncContextGraphs,
-    getPrioritySharedMemorySyncContextGraphs,
+    selectedSharedMemoryLane,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
@@ -176,18 +192,28 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
   let sawBackpressureDeferral = false;
   let sawDurableMetadataOnlyDetailedSync = false;
   let sawExplicitIncompleteDurableResult = false;
+  let sawExplicitIncompleteSharedResult = false;
   let cleanDurableDetailedRound = false;
   const recordSyncAccounting = (
-    result: SyncFromPeerResult,
+    result: SyncAccountingResult,
     phase: 'durable' | 'shared',
   ): SyncResultAccounting => {
-    const complete = phase === 'durable'
+    const selectedResult = phase === 'shared'
+      && typeof result !== 'number'
+      && 'kind' in result
+      && result.kind === 'selected-shared-memory'
+        ? result
+        : undefined;
+    const syncResult = (selectedResult?.shared ?? result) as SyncFromPeerResult;
+    const complete = selectedResult?.selectedScopeComplete ?? (
+      phase === 'durable'
       && typeof result !== 'number'
       && 'complete' in result
       && typeof result.complete === 'boolean'
         ? result.complete
-        : undefined;
-    const accounting = classifySyncResult(result, phase, complete);
+        : undefined
+    );
+    const accounting = classifySyncResult(syncResult, phase, complete);
     madeProgress = madeProgress || accounting.madeProgress;
     sawDeniedPhase = sawDeniedPhase || accounting.denied;
     sawFailedPhase = sawFailedPhase || accounting.failed;
@@ -204,6 +230,9 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       cleanDurableDetailedRound = cleanDurableDetailedRound || (
         complete !== false && accounting.cleanNonMetadataResponse
       );
+    } else {
+      sawExplicitIncompleteSharedResult = sawExplicitIncompleteSharedResult
+        || complete === false;
     }
     return accounting;
   };
@@ -217,10 +246,18 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       }
       return 'deferred-backpressure';
     }
-    const clearsPeerBackoff = madeProgress || (!sawBackoffWorthyFailure && (cleanDurableRound || sawDeniedPhase));
+    const clearsPeerBackoff = madeProgress || (
+      !sawBackoffWorthyFailure
+      && !sawExplicitIncompleteSharedResult
+      && (cleanDurableRound || sawDeniedPhase)
+    );
     if (clearsPeerBackoff) {
       context.onPeerSynced?.(remotePeer, {
-        fresh: !sawBackoffWorthyFailure && !sawDeniedPhase && !sawFailedPhase && cleanDurableRound,
+        fresh: !sawBackoffWorthyFailure
+          && !sawDeniedPhase
+          && !sawFailedPhase
+          && !sawExplicitIncompleteSharedResult
+          && cleanDurableRound,
         progress: madeProgress,
       });
     }
@@ -261,20 +298,19 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     }
 
     const prioritySharedMemoryContextGraphIds = syncSharedMemoryOnConnect
-      && getPrioritySharedMemorySyncContextGraphs
+      && selectedSharedMemoryLane
         ? [...new Set(await runNonTransportStep(() => Promise.resolve(
-          getPrioritySharedMemorySyncContextGraphs(remotePeer),
+          selectedSharedMemoryLane.getContextGraphIds(remotePeer),
         )))]
         : [];
-    if (prioritySharedMemoryContextGraphIds.length > 0) {
+    if (prioritySharedMemoryContextGraphIds.length > 0 && selectedSharedMemoryLane) {
       logInfo(
         ctx,
         `Prioritizing ${prioritySharedMemoryContextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
       );
-      const priorityWsSynced = await syncSharedMemoryFromPeer(
+      const priorityWsSynced = await selectedSharedMemoryLane.syncFromPeer(
         remotePeer,
         prioritySharedMemoryContextGraphIds,
-        { selectedPriority: true },
       );
       const prioritySharedAccounting = recordSyncAccounting(priorityWsSynced, 'shared');
       logInfo(
