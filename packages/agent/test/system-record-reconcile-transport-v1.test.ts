@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   SYSTEM_RECORD_MAX_FRAME_BYTES,
+  SYSTEM_RECORD_MAX_HEADER_BYTES,
   SYSTEM_RECORD_MAX_SLICE_REQUESTS,
+  SYSTEM_RECORD_OBJECT_CAPS_V1,
   type Digest32V1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
@@ -662,8 +664,47 @@ describe('agent-profile reconcile exact transport V1', () => {
       .toEqual(['provider-a', 'provider-b']);
   });
 
-  it('rejects an oversized physical frame and fails over within the slice budget', async () => {
-    const oversizedRelease = vi.fn();
+  it('accepts valid aggregate exchange bytes above the response frame cap', async () => {
+    const release = vi.fn();
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+    ): Promise<SystemRecordExactFetchResultV1> => Object.freeze({
+      outcome: 'ok',
+      lease: Object.freeze({
+        artifact: Object.freeze({
+          objectKind: lookup.objectKind,
+          objectDigest: lookup.objectDigest,
+          canonicalBytes: Uint8Array.of(1),
+        }),
+        wireBytes: SYSTEM_RECORD_MAX_FRAME_BYTES + 1,
+        release,
+      }),
+    }));
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const slice = openSlice(transport, () => 0);
+    await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).resolves.toMatchObject({
+      objectDigest: DIGEST_A,
+    });
+    slice.release();
+    expect(fetchExact.mock.calls.map(([providerId]) => providerId))
+      .toEqual(['provider-a']);
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(transport.stats()).toMatchObject({
+      negativeMemoEntries: 0,
+      requests: 1,
+      wireBytes: SYSTEM_RECORD_MAX_FRAME_BYTES + 1,
+    });
+  });
+
+  it('rejects impossible aggregate exchange accounting and fails over', async () => {
+    const invalidRelease = vi.fn();
+    const maximumExchangeBytes = 4 + SYSTEM_RECORD_MAX_HEADER_BYTES
+      + SYSTEM_RECORD_MAX_FRAME_BYTES;
     const fetchExact = vi.fn(async (
       providerId: string,
       lookup: SystemRecordExactArtifactLookupV1,
@@ -676,8 +717,8 @@ describe('agent-profile reconcile exact transport V1', () => {
               objectDigest: lookup.objectDigest,
               canonicalBytes: Uint8Array.of(1),
             }),
-            wireBytes: SYSTEM_RECORD_MAX_FRAME_BYTES + 1,
-            release: oversizedRelease,
+            wireBytes: maximumExchangeBytes + 1,
+            release: invalidRelease,
           }),
         })
       : successfulFetch(lookup, 1).result);
@@ -693,12 +734,48 @@ describe('agent-profile reconcile exact transport V1', () => {
     slice.release();
     expect(fetchExact.mock.calls.map(([providerId]) => providerId))
       .toEqual(['provider-a', 'provider-b']);
-    expect(oversizedRelease).toHaveBeenCalledTimes(1);
+    expect(invalidRelease).toHaveBeenCalledTimes(1);
     expect(transport.stats()).toMatchObject({
       negativeMemoEntries: 1,
       requests: 2,
-      wireBytes: SYSTEM_RECORD_MAX_FRAME_BYTES + 2,
+      wireBytes: maximumExchangeBytes + 2,
     });
+  });
+
+  it('rejects artifacts above their kind-specific payload cap', async () => {
+    const invalidRelease = vi.fn();
+    const fetchExact = vi.fn(async (
+      providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+    ): Promise<SystemRecordExactFetchResultV1> => providerId === 'provider-a'
+      ? Object.freeze({
+          outcome: 'ok',
+          lease: Object.freeze({
+            artifact: Object.freeze({
+              objectKind: lookup.objectKind,
+              objectDigest: lookup.objectDigest,
+              canonicalBytes: new Uint8Array(
+                SYSTEM_RECORD_OBJECT_CAPS_V1['agent-profile-head'] + 1,
+              ),
+            }),
+            wireBytes: SYSTEM_RECORD_OBJECT_CAPS_V1['agent-profile-head'] + 128,
+            release: invalidRelease,
+          }),
+        })
+      : successfulFetch(lookup, 1).result);
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a', 'provider-b'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const slice = openSlice(transport, () => 0);
+    await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).resolves.toMatchObject({
+      objectDigest: DIGEST_A,
+    });
+    slice.release();
+    expect(invalidRelease).toHaveBeenCalledTimes(1);
+    expect(fetchExact.mock.calls.map(([providerId]) => providerId))
+      .toEqual(['provider-a', 'provider-b']);
   });
 
   it('scopes inventory negatives to the complete root and path coordinates', async () => {

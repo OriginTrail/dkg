@@ -7,6 +7,8 @@ import {
   SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
   SYSTEM_RECORD_MAX_NEGATIVE_MEMO_ENTRIES,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
+  SYSTEM_RECORD_MAX_HEADER_BYTES,
+  SYSTEM_RECORD_OBJECT_CAPS_V1,
   SYSTEM_RECORD_MAX_PEER_ID_BYTES,
   SYSTEM_RECORD_MAX_SLICE_REQUESTS,
   SYSTEM_RECORD_MAX_SLICE_WIRE_BYTES,
@@ -40,6 +42,8 @@ import {
 // continue to own and account the retained payload bytes without copying them.
 const AGENT_PROFILE_RECONCILE_CONTINUATION_HANDLE_BYTES = 128;
 const AGENT_PROFILE_RECONCILE_CONTINUATION_ENTRY_BASE_BYTES = 96;
+const SYSTEM_RECORD_MAX_EXACT_EXCHANGE_WIRE_BYTES =
+  4 + SYSTEM_RECORD_MAX_HEADER_BYTES + SYSTEM_RECORD_MAX_FRAME_BYTES;
 
 export type AgentProfileReconcileNegativeFailureClassV1 =
   | 'timeout'
@@ -791,7 +795,7 @@ function normalizeExactAttemptV1(
       releaseRejectedLease,
     });
   }
-  if (reportedWireBytes > SYSTEM_RECORD_MAX_FRAME_BYTES) {
+  if (reportedWireBytes > SYSTEM_RECORD_MAX_EXACT_EXCHANGE_WIRE_BYTES) {
     return Object.freeze({
       outcome: 'failure',
       failure: Object.freeze({ outcome: 'invalid-response', wireBytes: reportedWireBytes }),
@@ -811,7 +815,9 @@ function normalizeExactAttemptV1(
   }
   if (result.lease.artifact.objectKind !== lookup.objectKind
       || result.lease.artifact.objectDigest !== lookup.objectDigest
-      || !(result.lease.artifact.canonicalBytes instanceof Uint8Array)) {
+      || !(result.lease.artifact.canonicalBytes instanceof Uint8Array)
+      || result.lease.artifact.canonicalBytes.byteLength
+        > SYSTEM_RECORD_OBJECT_CAPS_V1[lookup.objectKind]) {
     return Object.freeze({
       outcome: 'failure',
       failure: Object.freeze({ outcome: 'invalid-response', wireBytes: reportedWireBytes }),

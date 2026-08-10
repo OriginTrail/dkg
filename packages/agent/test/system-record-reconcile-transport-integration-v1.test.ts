@@ -201,6 +201,74 @@ describe('agent-profile reconciler exact transport integration V1', () => {
     });
   });
 
+  it('blocks and releases retained closure state after an invalid response', async () => {
+    const fixture = await publishedFixture();
+    let closureRequests = 0;
+    const closureReleases: ReturnType<typeof vi.fn>[] = [];
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (lookup.type !== 'inventory-object') {
+        closureRequests += 1;
+        if (closureRequests === 2) {
+          return Object.freeze({ outcome: 'invalid-response', wireBytes: 13 });
+        }
+      }
+      const artifact = await fixture.store.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 1 });
+      const release = vi.fn();
+      if (lookup.type !== 'inventory-object') closureReleases.push(release);
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release,
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const consumeCandidate = vi.fn();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: receiver(fixture.store, consumeCandidate),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'receiver-verification-failed',
+      pendingRows: 1,
+    });
+    expect(closureRequests).toBe(2);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+    expect(closureReleases).toHaveLength(1);
+    expect(closureReleases[0]).toHaveBeenCalledTimes(1);
+    expect(transport.stats()).toMatchObject({
+      activeSlice: 0,
+      retainedContinuationArtifacts: 0,
+      retainedContinuationBytes: 0,
+      retainedContinuationControlBytes: 0,
+    });
+    expect(reconciler.stats()).toMatchObject({
+      processedRows: 0,
+      pendingRows: 1,
+      retainedClosureArtifacts: 0,
+      retainedClosureBytes: 0,
+    });
+  });
+
   it('stops at the dedicated closure wire-byte continuation budget', async () => {
     const fixture = await publishedFixture();
     const fetchExact = vi.fn(async (
