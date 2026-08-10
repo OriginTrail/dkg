@@ -150,19 +150,6 @@ export interface SyncPageResult {
   timedOut: boolean;
 }
 
-/**
- * Requester-owned adaptive page-size memory.
- *
- * A caller that intentionally continues the same logical transfer across
- * bounded fetch rounds can reuse this object so a congested path does not
- * restart every round at the optimistic maximum. The fetcher writes only a
- * validated, frame-safe preference and still probes upward after sustained
- * success.
- */
-export interface SyncPageSizeProfile {
-  preferredPageSize?: number;
-}
-
 /** Canonical transport path identity for learned requester page sizing. */
 export interface SyncPageSizeProfileScope {
   remotePeerId: string;
@@ -178,7 +165,7 @@ const DEFAULT_SYNC_PAGE_SIZE_PROFILE_MAX_ENTRIES = 4_096;
 export class SyncPageSizeProfileCache {
   private readonly entries = new Map<
     string,
-    { profile: SyncPageSizeProfile; touchedAt: number }
+    { preferredPageSize: number; touchedAt: number }
   >();
 
   constructor(
@@ -193,36 +180,54 @@ export class SyncPageSizeProfileCache {
     }
   }
 
-  get(scope: SyncPageSizeProfileScope, now = Date.now()): SyncPageSizeProfile {
-    // Keep this identity beside the requester policy it controls. This is
-    // transport-capacity memory, so transfer identity (graph URI, snapshot,
-    // delta watermark, recovery, exact assets, scope, and limits) is
-    // intentionally excluded. The lifecycle wrapper owns only the bounded
-    // agent-local cache, not these grouping rules.
-    const key = JSON.stringify([
-      scope.remotePeerId,
-      scope.contextGraphId,
-      scope.includeSharedMemory ? 'swm' : 'vm',
-      scope.phase,
-    ]);
+  preferred(scope: SyncPageSizeProfileScope, now = Date.now()): number | undefined {
+    const key = this.key(scope);
     const existing = this.entries.get(key);
-    if (existing && now - existing.touchedAt < this.ttlMs) {
-      // Refresh insertion order as a small LRU; this also avoids scanning the
-      // whole map on each access.
+    if (!existing) return undefined;
+    if (now - existing.touchedAt >= this.ttlMs) {
       this.entries.delete(key);
-      existing.touchedAt = now;
-      this.entries.set(key, existing);
-      return existing.profile;
+      return undefined;
     }
-    if (existing) this.entries.delete(key);
+    // Refresh insertion order as a small LRU; this also avoids scanning the
+    // whole map on each access.
+    this.entries.delete(key);
+    existing.touchedAt = now;
+    this.entries.set(key, existing);
+    return existing.preferredPageSize;
+  }
+
+  remember(
+    scope: SyncPageSizeProfileScope,
+    preferredPageSize: number,
+    now = Date.now(),
+  ): void {
+    if (!Number.isSafeInteger(preferredPageSize) || preferredPageSize < 1) {
+      throw new RangeError('Sync page-size preference must be a positive integer');
+    }
+    const key = this.key(scope);
+    // Writes are touches too: refresh TTL/LRU metadata at the same boundary
+    // that validates and stores the learned preference.
+    this.entries.delete(key);
     while (this.entries.size >= this.maxEntries) {
       const oldest = this.entries.keys().next().value as string | undefined;
       if (oldest === undefined) break;
       this.entries.delete(oldest);
     }
-    const created = { profile: {}, touchedAt: now };
-    this.entries.set(key, created);
-    return created.profile;
+    this.entries.set(key, { preferredPageSize, touchedAt: now });
+  }
+
+  private key(scope: SyncPageSizeProfileScope): string {
+    // Keep this identity beside the requester policy it controls. This is
+    // transport-capacity memory, so transfer identity (graph URI, snapshot,
+    // delta watermark, recovery, exact assets, scope, and limits) is
+    // intentionally excluded. The lifecycle wrapper owns only the bounded
+    // agent-local cache, not these grouping rules.
+    return JSON.stringify([
+      scope.remotePeerId,
+      scope.contextGraphId,
+      scope.includeSharedMemory ? 'swm' : 'vm',
+      scope.phase,
+    ]);
   }
 }
 
@@ -242,10 +247,10 @@ class AdaptiveSyncPageSizer {
   constructor(
     private readonly syncPageSize: number,
     private readonly usesByteBudgetPagination: boolean,
-    private readonly profile?: SyncPageSizeProfile,
+    preferredPageSize?: number,
+    private readonly rememberPreferredPageSize?: (pageSize: number) => void,
   ) {
     this.safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
-    const preferredPageSize = profile?.preferredPageSize;
     this.activePageSize = Number.isSafeInteger(preferredPageSize)
       ? Math.max(this.safePageSize, Math.min(syncPageSize, preferredPageSize!))
       : syncPageSize;
@@ -305,7 +310,7 @@ class AdaptiveSyncPageSizer {
   }
 
   private rememberCurrentPageSize(): void {
-    if (this.profile) this.profile.preferredPageSize = this.activePageSize;
+    this.rememberPreferredPageSize?.(this.activePageSize);
   }
 }
 
@@ -571,16 +576,19 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // data alike; a pre-canary requester using the 500-row cap is the only one
   // that would regress, and only on an oversized (>4 MiB) meta subject.
   const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
-  const effectivePageSizeProfile = pageSizeProfileCache?.get({
+  const pageSizeProfileScope = {
     remotePeerId,
     contextGraphId,
     includeSharedMemory,
     phase,
-  });
+  } satisfies SyncPageSizeProfileScope;
   const adaptivePageSizer = new AdaptiveSyncPageSizer(
     syncPageSize,
     usesByteBudgetPagination,
-    effectivePageSizeProfile,
+    pageSizeProfileCache?.preferred(pageSizeProfileScope),
+    pageSizeProfileCache
+      ? (pageSize) => pageSizeProfileCache.remember(pageSizeProfileScope, pageSize)
+      : undefined,
   );
   let successfulPageSize = syncPageSize;
   const syncSessionId = usesPageSession
