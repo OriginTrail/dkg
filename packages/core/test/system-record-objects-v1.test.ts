@@ -1960,6 +1960,100 @@ describe('system-record owned subjects and verification closure', () => {
     await expect(buildClosure(current, artifacts)).rejects.toThrow(/reuses a historical wallet root/);
   });
 
+  // A consumer comparing the summary against a recorded quarantine matches the
+  // resolution's authority sequence against its own applied lineage length. That
+  // equality is an inference from how the closure walks the lineage, not a
+  // declared invariant, so pin it directly -- if it ever goes off by one, the
+  // consumer's fork-resolution gate silently never fires. Two sequences, because
+  // a sequence-zero case alone is satisfied by a constant as well as by the
+  // real derivation.
+  it('mints a resolution authority sequence equal to the lineage length', async () => {
+    const genesis = await genesisForkResolutionCase();
+    const genesisSummary = (await buildClosure(genesis.successor, genesis.artifacts)).authoritySummary;
+    expect(genesisSummary.transitionLineage).toHaveLength(0);
+    expect(genesisSummary.forkResolution).toEqual({
+      resolutionDigest: computeAgentProfileForkResolutionDigestV1(genesis.resolution),
+      authoritySequence: '0',
+      forkedVersion: '0',
+      resolutionVersion: '2',
+    });
+    expect(genesisSummary.forkResolution?.authoritySequence)
+      .toBe(String(genesisSummary.transitionLineage.length));
+
+    const rotated = await rotatedForkResolutionCase();
+    const rotatedSummary = (await buildClosure(rotated.successor, rotated.artifacts)).authoritySummary;
+    expect(rotatedSummary.transitionLineage).toHaveLength(2);
+    expect(rotatedSummary.forkResolution).toEqual({
+      resolutionDigest: computeAgentProfileForkResolutionDigestV1(rotated.resolution),
+      authoritySequence: '2',
+      forkedVersion: '1',
+      resolutionVersion: '3',
+      forkBaseHeadDigest: computeAgentProfileHeadObjectDigestV1(rotated.base),
+    });
+    expect(rotatedSummary.forkResolution?.authoritySequence)
+      .toBe(String(rotatedSummary.transitionLineage.length));
+  });
+
+  it('mints no fork-resolution facts for a head that advertises no resolution', async () => {
+    const fixture = await authorityFixture();
+    const current = { ...activeHead(fixture), bundleDigest: CLOSURE_BUNDLE_DIGEST };
+    expect(current.forkResolutionDigest).toBeUndefined();
+    const closure = await buildClosure(current, closureArtifacts(current, [], []));
+    expect(closure.authoritySummary.forkResolution).toBeUndefined();
+  });
+
+  // The summary's fork-resolution minting fails closed when a head advertises a
+  // resolution the traversal did not collect. That branch has no removal test
+  // because it is unreachable through either entry point, and the reason is a
+  // precondition worth pinning instead: the traversal enqueues the current
+  // head's advertised resolution whatever the root purpose, so an uncollected
+  // resolution is already a closure failure. If this goes red the branch has
+  // become reachable and owes a removal test of its own.
+  it('always collects the resolution its current head advertises, or fails closed', async () => {
+    const rotated = await rotatedForkResolutionCase();
+    const requestedKinds: string[] = [];
+    const closure = await buildAgentProfileVerificationClosureV1(
+      computeAgentProfileHeadObjectDigestV1(rotated.successor),
+      {
+        nowMs: Date.parse('2026-08-08T00:00:00Z'),
+        resolve: async (reference) => {
+          requestedKinds.push(reference.objectKind);
+          return rotated.artifacts.get(`${reference.objectKind}:${reference.digest}`);
+        },
+        verifyAuthorityEnvelope: () => true,
+        verifyCurrentBundle: (_head, bytes) => Buffer.from(bytes).equals(Buffer.from(CLOSURE_BUNDLE)),
+      },
+    );
+    expect(requestedKinds).toContain('fork-resolution');
+    expect(closure.authoritySummary.forkResolution).toBeDefined();
+
+    const withheld = new Map(rotated.artifacts);
+    withheld.delete(
+      `fork-resolution:${computeAgentProfileForkResolutionDigestV1(rotated.resolution)}`,
+    );
+    await expect(buildClosure(rotated.successor, withheld)).rejects.toThrow(/missing/);
+  });
+
+  // The authority-only traversal is the path most likely to mint a summary
+  // without the resolution facts, so demonstrate rather than assume that it
+  // mints the same ones.
+  it('mints identical fork-resolution facts through the authority-only closure', async () => {
+    const rotated = await rotatedForkResolutionCase();
+    const materialization = await buildClosure(rotated.successor, rotated.artifacts);
+    const authorityOnly = await buildAgentProfileForkEvidenceAuthorityClosureV1(
+      computeAgentProfileHeadObjectDigestV1(rotated.successor),
+      {
+        nowMs: Date.parse('2026-08-08T00:00:00Z'),
+        resolve: async (reference) =>
+          rotated.artifacts.get(`${reference.objectKind}:${reference.digest}`),
+        verifyAuthorityEnvelope: () => true,
+      },
+    );
+    expect(materialization.authoritySummary.forkResolution).toBeDefined();
+    expect(authorityOnly.authoritySummary.forkResolution)
+      .toEqual(materialization.authoritySummary.forkResolution);
+  });
+
   it('pins the authority/fork closure edge equations', () => {
     expect(assertSystemRecordClosureAlgebraV1(14n, 'active')).toBe(30);
     expect(assertSystemRecordClosureAlgebraV1(14n, 'tombstone')).toBe(31);
@@ -2215,6 +2309,75 @@ function forkResolution(
     resolutionVersion: '2', evidenceHeadDigests,
     issuedAt: '2026-08-05T12:05:00Z',
   };
+}
+
+/** Version-zero fork: no common base, so the successor descends from nothing. */
+async function genesisForkResolutionCase() {
+  const fixture = await authorityFixture();
+  const initial = activeHead(fixture);
+  const conflicting = { ...initial, bundleDigest: DIGEST_C };
+  const resolution = forkResolution(fixture, initial, [initial, conflicting]);
+  const successor = {
+    ...initial,
+    version: '3' as const,
+    forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+    bundleDigest: CLOSURE_BUNDLE_DIGEST,
+  };
+  return {
+    resolution,
+    successor,
+    artifacts: closureArtifacts(successor, [initial, conflicting], [], [resolution]),
+  } as const;
+}
+
+/**
+ * Rotated authority forking above version zero, so the resolution names a base.
+ * Authority sequence, forked version, resolution version and successor version
+ * are deliberately four distinct numbers, so an assertion over the minted facts
+ * cannot pass while two of the fields are transposed.
+ */
+async function rotatedForkResolutionCase() {
+  const secondIssuer = '0x5555555555555555555555555555555555555555';
+  const thirdIssuer = '0x6666666666666666666666666666666666666666';
+  const fixture = await authorityFixture();
+  const initial = activeHead(fixture);
+  const firstTransition = authorityTransition(fixture, initial);
+  const middle = activeForIssuer(initial, secondIssuer, '1', '0', {
+    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(firstTransition),
+  });
+  const secondTransition = transitionFrom(fixture, middle, '2', thirdIssuer);
+  const base = activeForIssuer(middle, thirdIssuer, '2', '0', {
+    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(secondTransition),
+  });
+  const baseDigest = computeAgentProfileHeadObjectDigestV1(base);
+  const left = { ...base, version: '1' as const, previousHeadDigest: baseDigest };
+  const right = { ...left, bundleDigest: DIGEST_C };
+  const resolution: AgentProfileForkResolutionV1 = {
+    objectType: 'fork-resolution', kind: 'agents', networkId: NETWORK,
+    peerId: fixture.peerId, peerPublicKey: fixture.peerPublicKey,
+    evmIssuer: thirdIssuer, authoritySequence: '2',
+    forkedVersion: '1', resolutionVersion: '3', forkBaseHeadDigest: baseDigest,
+    evidenceHeadDigests: [left, right].map(computeAgentProfileHeadObjectDigestV1).sort(),
+    issuedAt: '2026-08-07T12:05:00Z',
+  };
+  const successor = {
+    ...base,
+    version: '4' as const,
+    previousHeadDigest: baseDigest,
+    forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+    bundleDigest: CLOSURE_BUNDLE_DIGEST,
+  };
+  return {
+    base,
+    resolution,
+    successor,
+    artifacts: closureArtifacts(
+      successor,
+      [base, left, right, middle, initial],
+      [secondTransition, firstTransition],
+      [resolution],
+    ),
+  } as const;
 }
 
 function signEip191(message: Uint8Array, privateKey: Uint8Array): string {
