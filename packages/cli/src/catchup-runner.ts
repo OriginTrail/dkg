@@ -4,12 +4,12 @@ import { fileURLToPath } from 'node:url';
 import {
   authoritativeSyncPeerId,
   classifyDurableProgress,
-  classifySharedMemoryFreshness,
   normalizeDurableSyncResult,
   normalizeSyncAdmissionSource,
   type DKGAgent,
   type CatchupPassDecisionReason,
   type DurableProgressSummary,
+  type DurableProgressClassification,
   type DurableSyncDiagnostics,
   type DurableSyncResult,
   type SwmSnapshotCoverage,
@@ -544,6 +544,12 @@ export interface CatchupPlaneCompletionEvidence {
   verifiedDataPeers: number;
   /** Peers that cleanly verified one or more V2 KAs with no public triples. */
   verifiedPrivateOnlyPeers?: number;
+  /**
+   * RFC-64 providers whose selected public-SWM scope reached its explicit
+   * terminal boundary. Unlike an ordinary peer's empty response, this is a
+   * graph-complete proof tied to the accepted provider policy.
+   */
+  selectedScopeCompletePeers?: number;
   emptyPeers: number;
   /**
    * The metadata-resolved curator cleanly completed this plane while hosting
@@ -699,6 +705,10 @@ export function addCatchupPlaneEvidence(
     total.verifiedPrivateOnlyPeers = (total.verifiedPrivateOnlyPeers ?? 0)
       + peer.verifiedPrivateOnlyPeers;
   }
+  if (peer.selectedScopeCompletePeers) {
+    total.selectedScopeCompletePeers = (total.selectedScopeCompletePeers ?? 0)
+      + peer.selectedScopeCompletePeers;
+  }
   total.emptyPeers += peer.emptyPeers;
   if (peer.authorityEmptyPeers) {
     total.authorityEmptyPeers = (total.authorityEmptyPeers ?? 0) + peer.authorityEmptyPeers;
@@ -719,6 +729,20 @@ export function catchupPlaneProvenByData(
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0
     || (completion?.verifiedPrivateOnlyPeers ?? 0) > 0;
+}
+
+/**
+ * Positive RFC-64 proof: an explicitly selected graph-complete SWM provider
+ * reached the terminal boundary of the accepted public scope.
+ *
+ * This stays separate from `verifiedDataPeers`: a repeat run may prove the
+ * exact same already-materialized scope while inserting zero new triples, and
+ * calling that "verified data received" would corrupt the transfer telemetry.
+ */
+export function catchupPlaneProvenBySelectedScope(
+  completion: CatchupPlaneCompletionEvidence | undefined,
+): boolean {
+  return (completion?.selectedScopeCompletePeers ?? 0) > 0;
 }
 
 /**
@@ -889,6 +913,7 @@ export function catchupPlaneReady(
   options: { isPrivate: boolean },
 ): boolean {
   return catchupPlaneProvenByData(completion)
+    || catchupPlaneProvenBySelectedScope(completion)
     || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options)
     || catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
 }
@@ -898,13 +923,15 @@ export function catchupPeerSucceeded(
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
   durableComplete?: boolean,
-  selectedSharedComplete?: boolean,
+  sharedCompletion?: {
+    progress: DurableProgressClassification;
+    /** This lane requires an explicit terminal boundary, not just clean I/O. */
+    terminalBoundaryRequired: boolean;
+  },
 ): boolean {
   const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
   const sharedProgress = shared
-    ? selectedSharedComplete === undefined
-      ? classifyDurableProgress(shared)
-      : classifySharedMemoryFreshness(shared, { complete: selectedSharedComplete })
+    ? sharedCompletion?.progress ?? classifyDurableProgress(shared)
     : null;
   if (
     !catchupPeerResponded(durable, shared)
@@ -918,6 +945,8 @@ export function catchupPeerSucceeded(
   const peerPhaseFailed = durableProgress.phaseFailed || Boolean(sharedProgress?.phaseFailed);
   if (peerPhaseFailed) return false;
   if (durableProgress.integrityRejected || sharedProgress?.integrityRejected) return false;
+  if (sharedCompletion?.terminalBoundaryRequired
+    && !sharedCompletion.progress.completedWithoutFailure) return false;
   const peerMadeProgress = durableProgress.madeReadinessProgress
     || Boolean(sharedProgress?.madeReadinessProgress);
   const peerMetadataOnly = !peerMadeProgress

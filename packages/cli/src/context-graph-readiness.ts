@@ -12,6 +12,7 @@ import {
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
+  catchupPlaneProvenBySelectedScope,
   catchupPlaneProvenByUnanimousEmpty,
   catchupPlaneReady,
   type CatchupJobResult,
@@ -357,6 +358,7 @@ function cleanCompletionHasResponse(
 ): boolean {
   return (completion?.verifiedDataPeers ?? 0) > 0 ||
     (completion?.verifiedPrivateOnlyPeers ?? 0) > 0 ||
+    (completion?.selectedScopeCompletePeers ?? 0) > 0 ||
     (completion?.emptyPeers ?? 0) > 0 ||
     (completion?.authorityEmptyPeers ?? 0) > 0;
 }
@@ -435,6 +437,7 @@ function catchupPlaneReadinessThisRun(input: {
   const fullyAccounted = (diagnostics?.failedPeers ?? 0) === 0;
   if (completion) {
     const provenPositively = catchupPlaneProvenByData(completion)
+      || catchupPlaneProvenBySelectedScope(completion)
       || catchupPlaneProvenByAuthorityHostedEmpty(completion, diagnostics, options);
     const unanimousEmpty = catchupPlaneProvenByUnanimousEmpty(completion, diagnostics, options);
     return {

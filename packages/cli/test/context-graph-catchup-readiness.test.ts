@@ -254,6 +254,43 @@ describe('context graph catch-up readiness classification', () => {
     expect(classification.error).toContain('incomplete plane remains unready');
   });
 
+  it('accepts an explicit selected-SWM terminal proof with no new inserts', () => {
+    const result = mixedPeerResult(1);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.sharedMemorySynced = 0;
+    result.cleanPlaneCompletions!.sharedMemory.selectedScopeCompletePeers = 1;
+    // These remain raw telemetry from voluntary yields that the selected lane
+    // resolved before producing its terminal verdict. They must not be erased,
+    // and they must not override the stronger typed proof either.
+    result.diagnostics!.sharedMemory.failedPhases = 1;
+    result.diagnostics!.sharedMemory.timedOutPhases = 1;
+    result.diagnostics!.sharedMemory.emptyResponses = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'done',
+      statePatch: {
+        synced: true,
+        sharedMemorySynced: true,
+      },
+      readinessPatch: {
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      eventPayload: {
+        sharedMemorySynced: 0,
+      },
+    });
+  });
+
   it('does not let previously verified shared memory mask a later durable-only request', () => {
     const result = durableMetaOnlyResult();
 
