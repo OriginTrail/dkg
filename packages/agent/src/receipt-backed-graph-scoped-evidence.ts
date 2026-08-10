@@ -59,14 +59,21 @@ function anchorQuads(input: RecoverReceiptBackedGraphScopedEvidenceInput): Quad[
 export async function recoverReceiptBackedGraphScopedEvidence(
   input: RecoverReceiptBackedGraphScopedEvidenceInput,
 ): Promise<ReceiptBackedGraphScopedEvidenceRecovery> {
-  const resolver = input.chain?.resolveCanonicalFinalizationReceipt;
+  let assertionVersion: bigint;
+  try {
+    assertionVersion = BigInt(input.scope.assertionVersion);
+    if (assertionVersion <= 0n) throw new Error('non-positive assertion version');
+  } catch {
+    return { status: 'unavailable', reason: 'target assertion version is invalid' };
+  }
+  const publishResolver = input.chain?.resolveCanonicalFinalizationReceipt;
+  const updateVerifier = input.chain?.verifyKAUpdate;
   const rootCountReader = input.chain?.getMerkleRootCount;
   if (
     !input.chain
     || input.chain.chainId === 'none'
-    || !resolver
     || !rootCountReader
-    || input.scope.assertionVersion !== '1'
+    || (assertionVersion === 1n ? !publishResolver : !updateVerifier)
   ) return { status: 'unavailable', reason: 'canonical receipt recovery is unsupported' };
 
   if (
@@ -108,8 +115,15 @@ export async function recoverReceiptBackedGraphScopedEvidence(
   const { transactionHash } = receiptProvenance;
 
   try {
-    const [resolution, rootCount, trustedControls] = await Promise.all([
-      resolver.call(input.chain, transactionHash),
+    const [receiptAuthority, rootCount, trustedControls] = await Promise.all([
+      assertionVersion === 1n
+        ? publishResolver!.call(input.chain, transactionHash)
+        : updateVerifier!.call(
+            input.chain,
+            transactionHash,
+            input.kaId,
+            input.publisherAddress,
+          ),
       rootCountReader.call(input.chain, input.kaId),
       readLocallyTrustedKnowledgeAssetControlEnvelope(
         input.store,
@@ -119,8 +133,8 @@ export async function recoverReceiptBackedGraphScopedEvidence(
         { source: 'agent.finalization.recoverReceiptBackedEvidence.controls' },
       ),
     ]);
-    if (resolution.status !== 'confirmed' || rootCount !== 1n) {
-      return { status: 'unavailable', reason: 'canonical receipt or unique root is unavailable' };
+    if (rootCount !== assertionVersion) {
+      return { status: 'unavailable', reason: 'canonical receipt or target assertion root is unavailable' };
     }
     let controls = trustedControls;
     if (!controls) {
@@ -164,14 +178,49 @@ export async function recoverReceiptBackedGraphScopedEvidence(
         publisherPeerId: 'unknown',
       };
     }
-    const { receipt } = resolution;
+    let receipt: {
+      txHash: string;
+      blockNumber: number;
+      blockHash: string;
+      txIndex: number;
+      merkleRoot: Uint8Array;
+      publisherAddress: string;
+      authorAddress?: string;
+    };
+    if (assertionVersion === 1n) {
+      if (!('status' in receiptAuthority) || receiptAuthority.status !== 'confirmed') {
+        return { status: 'unavailable', reason: 'canonical publish receipt is unavailable' };
+      }
+      const canonical = receiptAuthority.receipt;
+      if (
+        canonical.txHash.toLowerCase() !== transactionHash.toLowerCase()
+        || canonical.kaId !== input.kaId
+        || canonical.batchId !== input.kaId
+        || canonical.startKAId !== input.kaId
+        || canonical.endKAId !== input.kaId
+      ) return { status: 'unavailable', reason: 'canonical publish receipt does not match the target KA' };
+      receipt = canonical;
+    } else {
+      if (
+        !('verified' in receiptAuthority)
+        || !receiptAuthority.verified
+        || receiptAuthority.onChainMerkleRoot === undefined
+        || receiptAuthority.merkleRootCount !== assertionVersion
+        || receiptAuthority.blockNumber === undefined
+        || receiptAuthority.blockHash === undefined
+        || receiptAuthority.txIndex === undefined
+      ) return { status: 'unavailable', reason: 'canonical update receipt does not match the target assertion' };
+      receipt = {
+        txHash: transactionHash,
+        blockNumber: receiptAuthority.blockNumber,
+        blockHash: receiptAuthority.blockHash,
+        txIndex: receiptAuthority.txIndex,
+        merkleRoot: receiptAuthority.onChainMerkleRoot,
+        publisherAddress: input.publisherAddress,
+      };
+    }
     if (
-      receipt.txHash.toLowerCase() !== transactionHash.toLowerCase()
-      || receipt.kaId !== input.kaId
-      || receipt.batchId !== input.kaId
-      || receipt.startKAId !== input.kaId
-      || receipt.endKAId !== input.kaId
-      || !ethers.isHexString(receipt.blockHash, 32)
+      !ethers.isHexString(receipt.blockHash, 32)
       || !ethers.isAddress(input.publisherAddress)
       || !ethers.isAddress(receipt.publisherAddress)
       || ethers.getAddress(receipt.publisherAddress) !== ethers.getAddress(input.publisherAddress)
@@ -181,7 +230,7 @@ export async function recoverReceiptBackedGraphScopedEvidence(
       || receipt.txIndex < 0
       || ethers.hexlify(receipt.merkleRoot).toLowerCase()
         !== ethers.hexlify(input.merkleRoot).toLowerCase()
-    ) return { status: 'unavailable', reason: 'canonical receipt does not match the target KA' };
+    ) return { status: 'unavailable', reason: 'canonical receipt does not match the target assertion' };
 
     const evidence = VerifiedGraphScopedFinalizationEvidenceCodec.parse({
       assertionVersion: input.scope.assertionVersion,

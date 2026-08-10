@@ -2677,6 +2677,109 @@ describe('graph-scoped finalization handler', () => {
     `);
   });
 
+  it('repairs private version-2 VM metadata from its chain-verified update receipt', async () => {
+    const { message, swmGraph, vmGraph } = await stageGraph({ accessPolicy: 'ownerOnly' });
+    await stageNewerWorkspaceAssertion(
+      swmGraph,
+      message.privateMerkleRoot,
+      message.privateTripleCount,
+    );
+    const staged = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${swmGraph}> { ?s ?p ?o } }`,
+    );
+    if (staged.type !== 'quads') throw new Error('expected staged version-2 SWM quads');
+    const publicQuads = staged.quads.map((quad) => ({ ...quad, graph: '' }));
+    const updateRoot = computeFlatKCRootV10(
+      publicQuads,
+      message.privateMerkleRoot ? [message.privateMerkleRoot] : [],
+    );
+    const updateTxHash = `0x${'ef'.repeat(32)}`;
+    const updateBlockHash = `0x${'12'.repeat(32)}`;
+    const updateMessage: FinalizationMessageMsg = {
+      ...message,
+      kcMerkleRoot: updateRoot,
+      txHash: updateTxHash,
+      blockNumber: 222,
+      txIndex: 5,
+      assertionVersion: '2',
+      operationId: 'graph-finalization-update-op',
+    };
+
+    await seedAuthenticatedLocalControls(updateMessage);
+    await store.dropGraph(vmGraph);
+    await store.insert(publicQuads.map((quad) => ({ ...quad, graph: vmGraph })));
+    const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
+    await store.deleteByPattern({ graph: metaGraph, subject: UAL });
+    await store.insert(generateGraphKnowledgeAssetMetadata({
+      ual: UAL,
+      contextGraphId: CG,
+      merkleRoot: updateRoot,
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'ownerOnly',
+      timestamp: new Date(),
+      assertionVersion: '2',
+      publicTripleCount: publicQuads.length,
+      privateTripleCount: Number(message.privateTripleCount),
+      ...(message.privateMerkleRoot?.length
+        ? { privateMerkleRoot: message.privateMerkleRoot }
+        : {}),
+      assertionGraph: vmGraph,
+      authorAddress: AUTHOR,
+    }, {
+      status: 'confirmed',
+      confirmation: {
+        kind: 'transaction',
+        provenance: {
+          txHash: updateTxHash,
+          blockNumber: 222,
+          blockTimestamp: 1_700_000_000,
+          publisherAddress: PUBLISHER,
+          batchId: PACKED_KA_ID,
+          chainId: 'legacy:1',
+        },
+      },
+    }));
+    for (const predicate of [
+      'http://dkg.io/ontology/accessPolicy',
+      'http://dkg.io/ontology/publisherPeerId',
+    ]) {
+      await store.deleteByPattern({ graph: metaGraph, subject: UAL, predicate });
+    }
+
+    let updateReceiptReads = 0;
+    const repairHandler = makeReconcileHandler({
+      getMerkleRootCount: async () => 2n,
+      verifyKAUpdate: async (transactionHash, kaId, publisherAddress) => {
+        updateReceiptReads += 1;
+        expect(transactionHash).toBe(updateTxHash);
+        expect(kaId).toBe(PACKED_KA_ID);
+        expect(publisherAddress).toBe(PUBLISHER);
+        return {
+          verified: true,
+          onChainMerkleRoot: updateRoot,
+          blockNumber: 222,
+          blockHash: updateBlockHash,
+          txIndex: 5,
+          merkleRootCount: 2n,
+        };
+      },
+    });
+
+    await expect(reconcileGraphScoped(repairHandler, updateMessage, { versionBlock: 222 }))
+      .resolves.toBe('already-confirmed');
+
+    expect(updateReceiptReads).toBe(1);
+    expect(await store.countQuads(vmGraph)).toBe(publicQuads.length);
+    await expectGraphScopedMetadata(`
+      <http://dkg.io/ontology/assertionVersion> "2"^^<http://www.w3.org/2001/XMLSchema#integer> ;
+      <http://dkg.io/ontology/accessPolicy> "ownerOnly" ;
+      <http://dkg.io/ontology/publisherPeerId> "12D3KooWPublisher" ;
+      <http://dkg.io/ontology/confirmationKind> "transaction" ;
+      <http://dkg.io/ontology/transactionHash> "${updateTxHash}" ;
+      <http://dkg.io/ontology/materializedVersion> "222:5" .
+    `);
+  });
+
   it('does not trust peer-recovered workspace controls without an authenticated local sidecar', async () => {
     const { message, vmGraph } = await stageGraph({
       accessPolicy: 'allowList',
