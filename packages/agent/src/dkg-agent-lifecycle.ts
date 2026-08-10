@@ -887,6 +887,7 @@ function sharedMemorySyncSingleFlightKey(params: {
   publicContextGraphIds: readonly string[];
   privateRecoverFromCurator: readonly string[];
   priority?: number;
+  selectedSwm: boolean;
 }): string {
   return syncSingleFlightKey('shared-memory-sync', {
     remotePeerId: params.remotePeerId,
@@ -895,6 +896,7 @@ function sharedMemorySyncSingleFlightKey(params: {
     publicContextGraphIds: params.publicContextGraphIds,
     privateRecoverFromCurator: params.privateRecoverFromCurator,
     priority: params.priority ?? null,
+    selectedSwm: params.selectedSwm,
   });
 }
 
@@ -6218,6 +6220,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       publicContextGraphIds,
       privateRecoverFromCurator,
       priority: options?.priority,
+      selectedSwm: selectedSwmEnabled,
     });
 
     const runSync = async (): Promise<SharedMemorySyncResult> => {
@@ -6417,18 +6420,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             && item.lane === 'shared_memory'
             && publicSet.has(item.contextGraphId)
           ) {
+            const metadataContinuation = selectedMetaFetcher!.continuation(
+              item.contextGraphId,
+            );
             selectedContinuationUnits.push({
-              work: item,
-              initialResult: result,
-              metadataContinuationProgress: () => (
-                selectedMetaFetcher?.progress(item.contextGraphId)
-              ),
-              metadataContinuationGeneration: () => (
-                selectedMetaFetcher?.generation(item.contextGraphId)
-              ),
-              metadataContinuationCompleted: () => (
-                selectedMetaFetcher?.completed(item.contextGraphId) ?? false
-              ),
+              work: {
+                ...item,
+                run: async (remainingContextGraphs) => {
+                  const nextResult = await item.run(remainingContextGraphs);
+                  return {
+                    result: nextResult,
+                    metadataContinuation: selectedMetaFetcher!.continuation(
+                      item.contextGraphId,
+                    ),
+                  };
+                },
+              },
+              initialRound: { result, metadataContinuation },
             });
           }
         },

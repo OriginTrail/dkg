@@ -8,7 +8,6 @@ import {
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
   resolveSwmCatchupPassConfig,
-  runSwmCatchupContinuations,
   runCatchupPlaneWithPolicy,
   runCatchupPlanesWithPolicy,
   selectSwmSnapshotCoverage,
@@ -17,6 +16,9 @@ import {
   type SharedMemorySyncResult,
   type SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
+import {
+  runSwmCatchupContinuations,
+} from '@origintrail-official/dkg-agent/dist/sync/catchup-pass-policy.js';
 import {
   addCatchupPlaneEvidence,
   catchupPeerPlaneEvidence,

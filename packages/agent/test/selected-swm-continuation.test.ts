@@ -13,6 +13,7 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
   runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
+import type { SelectedSwmMetaContinuation } from '../src/sync/selected-swm-meta-fetcher.js';
 import {
   applySelectedSwmFreshnessResolution,
   classifySelectedSwmRoundFreshness,
@@ -155,15 +156,30 @@ function selectedUnit(
   contextGraphId: string,
   initialResult: SharedMemorySyncResult,
   run: () => Promise<SharedMemorySyncResult>,
+  metadata: {
+    readonly initial?: SelectedSwmMetaContinuation;
+    readonly afterRun?: () => SelectedSwmMetaContinuation;
+  } = {},
 ) {
+  const completeMetadata: SelectedSwmMetaContinuation = {
+    progress: undefined,
+    generation: 0,
+    completed: true,
+  };
   return {
     work: {
       contextGraphId,
       lane: 'shared_memory' as const,
       operationId: contextGraphId,
-      run,
+      run: async () => ({
+        result: await run(),
+        metadataContinuation: metadata.afterRun?.() ?? completeMetadata,
+      }),
     },
-    initialResult,
+    initialRound: {
+      result: initialResult,
+      metadataContinuation: metadata.initial ?? completeMetadata,
+    },
   };
 }
 
@@ -737,10 +753,9 @@ describe('selected RFC-64 SWM continuation', () => {
     const contextGraphId = 'selected-zero-meta-progress';
     const run = vi.fn(async () => cleanDurableResult());
     const stop = vi.fn();
-    const unit = {
-      ...selectedUnit(contextGraphId, cleanDurableResult(), run),
-      metadataContinuationProgress: () => 0,
-    };
+    const unit = selectedUnit(contextGraphId, cleanDurableResult(), run, {
+      initial: { progress: 0, generation: 0, completed: false },
+    });
 
     const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
@@ -881,12 +896,10 @@ describe('selected RFC-64 SWM continuation', () => {
       timedOutPhases: 1,
       metadataContinuationYields: 1,
     };
-    const unit = {
-      ...selectedUnit(contextGraphId, initialResult, run),
-      metadataContinuationProgress: () => 1_000,
-      metadataContinuationGeneration: () => 0,
-      metadataContinuationCompleted: () => metadataCompleted,
-    };
+    const unit = selectedUnit(contextGraphId, initialResult, run, {
+      initial: { progress: 1_000, generation: 0, completed: false },
+      afterRun: () => ({ progress: 1_000, generation: 0, completed: metadataCompleted }),
+    });
 
     const { summary } = await runSelectedSwmContinuations({
       providerPeerId: PEER,
@@ -1547,6 +1560,102 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(harness.probes.metaSinceBatchIds).toEqual([undefined, undefined]);
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
+      await harness.close();
+    }
+  });
+
+  it('does not coalesce selected SWM into an ordinary same-priority flight', async () => {
+    const publicCg = 'selected-ordinary-single-flight-isolation';
+    const manifest = snapshotManifest(publicCg, 2);
+    const firstPrefix = manifest.meta.slice(0, 3);
+    const finalSuffix = manifest.meta.slice(3);
+    let signalOrdinaryStarted!: () => void;
+    const ordinaryStarted = new Promise<void>((resolve) => {
+      signalOrdinaryStarted = resolve;
+    });
+    let releaseOrdinary!: () => void;
+    const ordinaryRelease = new Promise<void>((resolve) => {
+      releaseOrdinary = resolve;
+    });
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+        {
+          quads: firstPrefix,
+          resumedFromOffset: 0,
+          nextOffset: firstPrefix.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: finalSuffix,
+          resumedFromOffset: firstPrefix.length,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      onMetaFetch: async ({ fetch }) => {
+        if (fetch === 1) {
+          signalOrdinaryStarted();
+          await ordinaryRelease;
+        }
+      },
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+    let ordinary: Promise<SharedMemorySyncResult> | undefined;
+    let selected: Promise<SharedMemorySyncResult> | undefined;
+
+    try {
+      ordinary = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        priority: 2_000,
+        sharedMemorySyncPlan: plan,
+      });
+      await ordinaryStarted;
+
+      selected = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        priority: 2_000,
+        sharedMemorySyncPlan: plan,
+      });
+      await vi.waitFor(() => expect(harness.probes.metaFetches()).toBeGreaterThanOrEqual(2));
+      releaseOrdinary();
+
+      const [ordinarySummary, selectedSummary] = await Promise.all([ordinary, selected]);
+      expect(ordinarySummary).not.toBe(selectedSummary);
+      expect(harness.probes.metaFetches()).toBe(3);
+      expect(harness.probes.metaRequesterScopes[0]).toBeUndefined();
+      expect(harness.probes.metaRequesterScopes[1]).toMatch(/^selected-swm-meta:\d+$/);
+      expect(harness.probes.metaRequesterScopes[2]).toBe(
+        harness.probes.metaRequesterScopes[1],
+      );
+      expect(selectedSummary.continuationPasses).toBe(1);
+      expect(selectedSummary.resolvedMetadataContinuationYields).toBe(1);
+      expect(selectedSummary.swmCoverage).toMatchObject({
+        contextGraphId: publicCg,
+        snapshotsResolved: 2,
+        snapshotsTotal: 2,
+        missingCount: 0,
+      });
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      releaseOrdinary();
+      await Promise.allSettled([ordinary, selected].filter(
+        (promise): promise is Promise<SharedMemorySyncResult> => promise !== undefined,
+      ));
       await harness.close();
     }
   });

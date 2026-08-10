@@ -17,25 +17,22 @@ import {
   type SelectedSwmFreshnessResolution,
 } from './shared-memory-freshness.js';
 import type { SyncContextGraphPriorityConfig } from './policy.js';
+import type { SelectedSwmMetaContinuation } from './selected-swm-meta-fetcher.js';
 import {
   MAX_CONSECUTIVE_PEER_TRANSPORT_FAILURES,
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
 } from './requester/ordered-sync.js';
 
+/** One completed selected-provider round and its immutable metadata evidence. */
+export interface SelectedSwmContinuationRound {
+  readonly result: SharedMemorySyncResult;
+  readonly metadataContinuation: SelectedSwmMetaContinuation;
+}
+
 export interface SelectedSwmContinuationUnit {
-  readonly work: ContextGraphSyncWork<SharedMemorySyncResult>;
-  readonly initialResult: SharedMemorySyncResult;
-  /**
-   * Exact pre-snapshot progress retained by the selected-provider invocation.
-   * Presence means another bounded pass can resume useful work; absence clears
-   * that capability without erasing its monotone high-water mark.
-   */
-  readonly metadataContinuationProgress?: () => number | undefined;
-  /** Generation of that prefix; changes when the responder restarts at zero. */
-  readonly metadataContinuationGeneration?: () => number | undefined;
-  /** Metadata-phase completion, independent of later data/snapshot/store work. */
-  readonly metadataContinuationCompleted?: () => boolean;
+  readonly work: ContextGraphSyncWork<SelectedSwmContinuationRound>;
+  readonly initialRound: SelectedSwmContinuationRound;
 }
 
 export interface SelectedSwmContinuationStop {
@@ -260,28 +257,26 @@ export async function runSelectedSwmContinuations(
         `Selected SWM continuation received duplicate Context Graph: ${contextGraphId}`,
       );
     }
-    const progress = classifyDurableProgress(unit.initialResult);
+    const { result: initialResult, metadataContinuation } = unit.initialRound;
+    const progress = classifyDurableProgress(initialResult);
     const freshness = classifySelectedSwmRoundFreshness(
       contextGraphId,
-      unit.initialResult,
+      initialResult,
     );
-    const metadataCompleted = unit.metadataContinuationCompleted?.() ?? (
-      unit.metadataContinuationProgress?.() === undefined
-      && progress.completedWithoutFailure
-    );
+    const metadataCompleted = metadataContinuation.completed;
     const ledger = new SelectedSwmContinuationLedger(options.providerPeerId);
     ledger.recordRound({
-      coverage: unit.initialResult.swmCoverage,
+      coverage: initialResult.swmCoverage,
       completedWithoutFailure: progress.completedWithoutFailure,
-      metadataProgress: unit.metadataContinuationProgress?.(),
-      metadataGeneration: unit.metadataContinuationGeneration?.() ?? 0,
+      metadataProgress: metadataContinuation.progress,
+      metadataGeneration: metadataContinuation.generation,
       metadataCompleted,
     });
     stateByContextGraph.set(contextGraphId, {
       unit,
       ledger,
       planeProven:
-        unit.initialResult.insertedDataTriples > 0 && progress.completedWithoutFailure,
+        initialResult.insertedDataTriples > 0 && progress.completedWithoutFailure,
       recoverableIncomplete: freshness.recoverableSnapshotYieldFailures,
       recoverableMetadataYields: freshness.recoverableMetadataContinuationYields,
       metadataCompleted,
@@ -308,34 +303,32 @@ export async function runSelectedSwmContinuations(
       let deadlineExpired = false;
       const continuationWork = candidates.map((candidate) => {
         const state = candidate.key;
-        const { work: item } = state.unit;
-        return {
-          ...item,
+        const { work: roundWork } = state.unit;
+        const item: ContextGraphSyncWork<SharedMemorySyncResult> = {
+          contextGraphId: roundWork.contextGraphId,
+          lane: roundWork.lane,
+          operationId: roundWork.operationId,
           run: async (remainingContextGraphs: number): Promise<SharedMemorySyncResult> => {
             // `run` is invoked only after the global scheduler grants a slot;
             // the executor-owned wrapper atomically rechecks the absolute
             // deadline and starts/counts the pass before permitting I/O.
             const started = await candidate.runStarted(async (pass) => {
-              const result = await item.run(remainingContextGraphs);
+              const round = await roundWork.run(remainingContextGraphs);
+              const { result, metadataContinuation } = round;
               const progress = classifyDurableProgress(result);
               const freshness = classifySelectedSwmRoundFreshness(
-                item.contextGraphId,
+                roundWork.contextGraphId,
                 result,
               );
               state.recoverableIncomplete += freshness.recoverableSnapshotYieldFailures;
               state.recoverableMetadataYields += freshness.recoverableMetadataContinuationYields;
-              state.metadataCompleted = state.metadataCompleted || (
-                state.unit.metadataContinuationCompleted?.() ?? (
-                  state.unit.metadataContinuationProgress?.() === undefined
-                  && progress.completedWithoutFailure
-                )
-              );
+              state.metadataCompleted = state.metadataCompleted
+                || metadataContinuation.completed;
               state.ledger.recordRound({
                 coverage: result.swmCoverage,
                 completedWithoutFailure: progress.completedWithoutFailure,
-                metadataProgress: state.unit.metadataContinuationProgress?.(),
-                metadataGeneration:
-                  state.unit.metadataContinuationGeneration?.() ?? 0,
+                metadataProgress: metadataContinuation.progress,
+                metadataGeneration: metadataContinuation.generation,
                 metadataCompleted: state.metadataCompleted,
               });
               state.completed = freshness.snapshotPlaneComplete;
@@ -343,7 +336,7 @@ export async function runSelectedSwmContinuations(
                 result.insertedDataTriples > 0 && progress.completedWithoutFailure
               );
               options.onContinuation?.({
-                contextGraphId: item.contextGraphId,
+                contextGraphId: roundWork.contextGraphId,
                 progressBefore: pass.progressBefore,
                 progressAfter: pass.progress(),
               });
@@ -351,12 +344,13 @@ export async function runSelectedSwmContinuations(
             });
             if (!started.started) {
               deadlineExpired = true;
-              options.onExpiredAfterAdmission?.(item.contextGraphId);
+              options.onExpiredAfterAdmission?.(roundWork.contextGraphId);
               return options.emptyResult();
             }
             return started.result;
           },
         };
+        return item;
       });
 
       const part = withoutContinuationPasses(await runOrderedContextGraphSyncs({
