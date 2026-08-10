@@ -104,7 +104,11 @@ export class ProfileManager {
       quads: quads.map((quad) => ({ ...quad })),
     };
 
-    const result = this.currentKcId !== null
+    // A publish that never reached chain mints no knowledge-asset id and
+    // reports `0n`, so a republish has nothing on chain to update. Gate the
+    // routing decision rather than the stored id: `profileKcId` must keep
+    // mirroring what the publisher returned.
+    const result = this.currentKcId !== null && this.currentKcId > 0n
       ? await this.publisher.update(this.currentKcId, options)
       : await this.publisher.publish(options);
     this.currentKcId = result.kaId;
