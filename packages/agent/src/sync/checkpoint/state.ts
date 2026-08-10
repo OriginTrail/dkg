@@ -1,14 +1,24 @@
 import type { SyncPhase } from '../auth/request-build.js';
 
 /**
- * Requester-only namespace for one selected-SWM invocation.
+ * Requester-only namespace for one selected-SWM transfer owner.
  *
- * The suffix is deliberately invocation-unique: overlapping selected calls can
- * cover the same peer and Context Graph while retaining different in-memory
- * prefixes, so sharing a cursor/session between them would make either prefix
- * unsafe to resume.
+ * The suffix is deliberately owner-unique. One agent-local peer coordinator
+ * serializes overlapping selected calls and may retain that owner's exact
+ * prefix across bounded outer reconciler invocations; unrelated owners can
+ * never share its cursor/session.
  */
 export type SyncCheckpointScope = `selected-swm-meta:${string}`;
+
+/** Runtime-distinct namespace owned only by retained selected-SWM metadata. */
+export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;
+
+export function isSelectedSwmMetaRetentionScope(
+  value: unknown,
+): value is SelectedSwmMetaRetentionScope {
+  return typeof value === 'string'
+    && /^selected-swm-meta:retained:[1-9]\d*$/.test(value);
+}
 
 export const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 

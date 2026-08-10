@@ -12,6 +12,10 @@ import {
   fetchSyncPages,
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+import {
+  markSyncTransportFailure,
+  markSyncValidationRejection,
+} from '../src/sync/error-tags.js';
 
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
 const encoder = new TextEncoder();
@@ -48,6 +52,128 @@ function fetchParams(overrides: Partial<FetchParams> = {}): FetchParams {
 }
 
 describe('exact sync accumulation limits', () => {
+  it('returns a validated selected-SWM metadata prefix on retryable transport exhaustion only', async () => {
+    const requesterScope = 'selected-swm-meta:retained:1' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let sends = 0;
+    const acceptedQuad = {
+      subject: 'urn:selected:accepted',
+      predicate: 'urn:p',
+      object: '"o"',
+      graph: 'urn:meta',
+    };
+
+    const result = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      parseAndFilter: async () => ({ quads: [acceptedQuad], totalQuads: 1 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        const error = new Error('operation timed out');
+        markSyncTransportFailure(error);
+        throw error;
+      },
+    }));
+
+    expect(result).toMatchObject({
+      quads: [acceptedQuad],
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    expect(checkpointStore.get(result.checkpointKey)?.responderSessionId).toBeTruthy();
+  });
+
+  it('does not expose transport prefixes to a non-retained custom SWM metadata scope', async () => {
+    let sends = 0;
+    await expect(fetchSyncPages(fetchParams({
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope: 'selected-swm-meta:ordinary-custom',
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      parseAndFilter: async () => ({
+        quads: [{ subject: 'urn:ordinary', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+        totalQuads: 1,
+      }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        const error = new Error('operation timed out');
+        markSyncTransportFailure(error);
+        throw error;
+      },
+    }))).rejects.toThrow('operation timed out');
+  });
+
+  it.each([
+    {
+      name: 'caller abort',
+      fail: (controller: AbortController) => {
+        controller.abort(new Error('caller cancelled'));
+        const error = new Error('operation timed out');
+        markSyncTransportFailure(error);
+        return error;
+      },
+    },
+    {
+      name: 'validation rejection',
+      fail: (_controller: AbortController) => {
+        const error = new Error('invalid signed response');
+        markSyncValidationRejection(error);
+        return error;
+      },
+    },
+    {
+      name: 'local request build failure',
+      fail: (_controller: AbortController) => new Error('wallet signing failed'),
+    },
+  ])('discards a selected metadata prefix on $name', async ({ name, fail }) => {
+    const requesterScope = `selected-swm-meta:retained:${name.replaceAll(' ', '-')}` as const;
+    const controller = new AbortController();
+    let builds = 0;
+    let sends = 0;
+    let parses = 0;
+    const params = fetchParams({
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: controller.signal,
+      buildSyncRequest: async () => {
+        builds += 1;
+        if (name === 'local request build failure' && builds === 2) throw fail(controller);
+        return encoder.encode('request');
+      },
+      parseAndFilter: async () => {
+        parses += 1;
+        if (name === 'validation rejection' && parses === 2) throw fail(controller);
+        return {
+          quads: [{ subject: 'urn:accepted', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+          totalQuads: 1,
+        };
+      },
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        if (name === 'validation rejection') return encoder.encode('invalid-page');
+        throw fail(controller);
+      },
+    });
+
+    await expect(fetchSyncPages(params)).rejects.toBeInstanceOf(Error);
+  });
+
   it('rejects excess wire bytes before parsing and clears resumable state', async () => {
     const firstPage = encoder.encode('page-one');
     const secondPage = encoder.encode('page-two');
@@ -141,7 +267,7 @@ describe('exact sync accumulation limits', () => {
   });
 
   it('tags a fresh scoped metadata accumulation error at the real requester boundary', async () => {
-    const requesterScope = 'selected-swm-meta:fresh-limit-contract' as const;
+    const requesterScope = 'selected-swm-meta:retained:fresh-limit-contract' as const;
     let sends = 0;
     let parses = 0;
 
@@ -181,7 +307,7 @@ describe('exact sync accumulation limits', () => {
 
   it('deletes the process-local responder token for a completed scoped requester', async () => {
     const checkpointStore = new MemorySyncCheckpointStore();
-    const requesterScope = 'selected-swm-meta:cleanup-test' as const;
+    const requesterScope = 'selected-swm-meta:retained:cleanup-test' as const;
     const checkpointKey = getSyncCheckpointKey(
       'legacy-peer',
       'large-legacy-cg',
