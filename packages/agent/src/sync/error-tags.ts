@@ -1,4 +1,7 @@
-import { isOversizedRdfLiteralError } from '@origintrail-official/dkg-core';
+import {
+  isOversizedRdfLiteralError,
+  isRecoverableSendError,
+} from '@origintrail-official/dkg-core';
 import { isChainRpcTransportError } from '@origintrail-official/dkg-chain';
 
 type SyncErrorTag =
@@ -110,31 +113,14 @@ function syncErrorMessage(error: unknown): string {
     : String(error).toLowerCase();
 }
 
-function hasKnownRetryableSyncTransportMessage(error: unknown): boolean {
-  const message = syncErrorMessage(error);
-  return (
-    message.includes('peer-closed-stream') ||
-    message.includes('all multiaddr dials failed') ||
-    message.includes('stream reset') ||
-    message.includes('stream has been reset') ||
-    message.includes('remote closed connection during opening') ||
-    message.includes('connection reset') ||
-    message.includes('econnreset') ||
-    message.includes('etimedout') ||
-    message.includes('send timeout') ||
-    message.includes('operation timed out') ||
-    message.includes('operation was aborted due to timeout')
-  );
-}
-
 /**
  * A retryable interruption of the DKG peer transport itself.
  *
- * The explicit tag is authoritative while the message fallback covers the
- * small set of libp2p/router errors whose Error can be recreated across a
- * retry/span boundary. Negative evidence wins: a response-side rejection,
- * chain RPC/local request construction failure, or caller abort must never be
- * reclassified merely because its message also contains "timed out".
+ * The explicit tag is authoritative. Untagged errors delegate to Core's
+ * canonical recoverable-send classifier so Messenger, ProtocolRouter and sync
+ * cannot drift onto separate libp2p/router message lists. Negative evidence
+ * wins: a response-side rejection, chain RPC/local request construction
+ * failure, or caller abort must never be reclassified by message.
  */
 export function isKnownRetryableSyncTransportInterruption(error: unknown): boolean {
   if (
@@ -153,7 +139,7 @@ export function isKnownRetryableSyncTransportInterruption(error: unknown): boole
   // used for caller cancellation and transport deadlines.
   if (error instanceof Error && error.name === 'AbortError') return false;
 
-  return hasKnownRetryableSyncTransportMessage(error);
+  return isRecoverableSendError(error);
 }
 
 /**
@@ -171,7 +157,11 @@ export function isSyncPermanentRejection(error: unknown): boolean {
 }
 
 export function isSyncBackoffWorthyError(error: unknown): boolean {
-  if (isSyncTransportFailure(error) || isChainRpcTransportError(error)) return true;
+  if (
+    isSyncTransportFailure(error)
+    || isChainRpcTransportError(error)
+    || isRecoverableSendError(error)
+  ) return true;
 
   const message = syncErrorMessage(error);
 
@@ -182,13 +172,6 @@ export function isSyncBackoffWorthyError(error: unknown): boolean {
       message.includes('queue wait exceeded') ||
       message.includes('snapshot limit exceeded') ||
       message.includes('busy')
-    )) ||
-    // These libp2p/router surfaces are transport interruptions too, but an
-    // outer retry/span boundary can occasionally recreate the Error and lose
-    // our non-enumerable syncTransportFailure tag. Keep the message fallback
-    // aligned with Messenger's recoverable dial classifier so a successfully
-    // received durable prefix is not discarded merely because the final page
-    // lost its relay stream.
-    hasKnownRetryableSyncTransportMessage(error)
+    ))
   );
 }
