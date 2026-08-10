@@ -42,9 +42,14 @@ async function runChild() {
   let prepare;
   if (typeof root.captureStructuredMutationSnapshot === 'function') {
     const materialization = await import('../dist/structured-mutation-materialization-internal.js');
-    prepare = () => materialization.materializeStructuredMutation(
-      root.captureStructuredMutationSnapshot(fixture),
-    );
+    prepare = () => {
+      const result = materialization.materializeStructuredMutation(
+        root.captureStructuredMutationSnapshot(fixture),
+      );
+      // Match the pre-change path's returned lifetime: retain only the generated
+      // update, not the new API's diagnostic reference back to its input snapshot.
+      return result.outcome === 'execute' ? result.update : undefined;
+    };
   } else {
     prepare = () => {
       const normalized = bounded.normalizeStructuredMutation(fixture);
@@ -60,9 +65,7 @@ async function runChild() {
   let witness = 0;
   for (let index = 0; index < TRIALS; index += 1) {
     const result = prepare();
-    witness += typeof result === 'string'
-      ? result.length
-      : result.outcome === 'execute' ? result.update.length : 0;
+    witness += typeof result === 'string' ? result.length : 0;
   }
   const cpu = process.cpuUsage(cpuBefore);
   globalThis.gc();
