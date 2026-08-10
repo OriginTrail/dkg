@@ -1573,7 +1573,7 @@ describe('durable graph-scoped KA materialization', () => {
     expect(await values(store, 'assertionVersion')).toEqual(['"1"']);
   });
 
-  it('does not pass a lifecycle abort signal into an entered atomic replacement', async () => {
+  it('finishes an entered atomic replacement before applying the lifecycle fence', async () => {
     const store = new OxigraphStore();
     const controller = new AbortController();
     let releaseReplace!: () => void;
@@ -1620,6 +1620,8 @@ describe('durable graph-scoped KA materialization', () => {
     current = false;
     controller.abort();
     await Promise.resolve();
+    expect(controller.signal.reason).toBeInstanceOf(DOMException);
+    expect((controller.signal.reason as Error).name).toBe('AbortError');
     expect(settled).toBe(false);
     expect(observedCommitSignal).toBeUndefined();
 

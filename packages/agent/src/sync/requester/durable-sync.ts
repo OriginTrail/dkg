@@ -59,6 +59,24 @@ export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 export { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
 export type { ExactDurableFetchDisposition } from './exact-durable-fetch.js';
 
+/** Normalize arbitrary AbortSignal reasons without mutating caller-owned errors. */
+function normalizeDurableSyncAbortReason(reason: unknown): Error {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+
+  const error = new Error(
+    reason instanceof Error
+      ? reason.message || 'Durable sync aborted'
+      : typeof reason === 'string'
+        ? reason
+        : 'Durable sync aborted',
+  );
+  error.name = 'AbortError';
+  if (reason !== undefined) {
+    (error as Error & { cause?: unknown }).cause = reason;
+  }
+  return error;
+}
+
 export interface DetailedDurableSyncResult {
   readonly result: InitializedDurableSyncResult;
   /** Present only when this physical run used an exact-asset filter. */
@@ -257,11 +275,7 @@ async function runDurableSyncWithBudget(
 
   const throwIfOperationAborted = () => {
     if (!signal?.aborted) return;
-    const error = signal.reason instanceof Error
-      ? signal.reason
-      : new Error(typeof signal.reason === 'string' ? signal.reason : 'Durable sync aborted');
-    error.name = 'AbortError';
-    throw error;
+    throw normalizeDurableSyncAbortReason(signal.reason);
   };
   const fetchContext = (deadline: number): DurableSyncFetchContext => ({
     deadline,
@@ -655,7 +669,7 @@ async function runDurableSyncWithBudget(
         } else if (outcome === 'stale') {
           logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         } else {
-          logWarn(ctx, `Quarantined oversized graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+          logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         }
       }
       if (partitioned.remainingData.length > 0) {
