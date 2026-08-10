@@ -765,23 +765,13 @@ function inFlightSyncPageFetchesFor(agent: DKGAgent): Map<string, InFlightSyncPa
   return inFlight;
 }
 
-function syncPageSizeProfileFor(agent: DKGAgent, params: {
-  remotePeerId: string;
-  contextGraphId: string;
-  includeSharedMemory: boolean;
-  phase: SyncPhase;
-}) {
+function syncPageSizeProfileCacheFor(agent: DKGAgent): SyncPageSizeProfileCache {
   let cache = syncPageSizeProfilesByAgent.get(agent);
   if (!cache) {
     cache = new SyncPageSizeProfileCache();
     syncPageSizeProfilesByAgent.set(agent, cache);
   }
-  return cache.get(JSON.stringify([
-    params.remotePeerId,
-    params.contextGraphId,
-    params.includeSharedMemory ? 'swm' : 'vm',
-    params.phase,
-  ]));
+  return cache;
 }
 
 /**
@@ -5947,12 +5937,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           ? exactAccumulationLimits.maxQuads
           : Math.min(exactAccumulationLimits.maxQuads, maxAcceptedQuads),
       maxAcceptedHeapBytesEstimate,
-      pageSizeProfile: syncPageSizeProfileFor(this, {
-        remotePeerId,
-        contextGraphId,
-        includeSharedMemory,
-        phase,
-      }),
+      pageSizeProfileCache: syncPageSizeProfileCacheFor(this),
       deadline,
       recovery,
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
