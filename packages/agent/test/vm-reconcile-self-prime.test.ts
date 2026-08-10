@@ -287,6 +287,8 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     config.contextGraphSubscriptionStore = {
       loadAll: async () => [],
       save: async () => undefined,
+    };
+    config.selectedVmReconcileCursorStore = {
       loadSelectedVmReconcileCursor: async () => null,
       saveSelectedVmReconcileCursor: savedSelectedCursor,
     };
@@ -363,9 +365,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       nameHash: string;
       watermark: number;
     }>();
-    const store = {
-      loadAll: async () => [],
-      save: async () => undefined,
+    const selectedCursorStore = {
       loadSelectedVmReconcileCursor: async (
         deploymentId: string,
         contextGraphId: string,
@@ -393,7 +393,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
           targets: [],
         }],
       };
-      config.contextGraphSubscriptionStore = store;
+      config.selectedVmReconcileCursorStore = selectedCursorStore;
     };
 
     const firstChain = new MockChainAdapter();
@@ -500,6 +500,8 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     config.contextGraphSubscriptionStore = {
       loadAll: async () => [],
       save: async () => undefined,
+    };
+    config.selectedVmReconcileCursorStore = {
       loadSelectedVmReconcileCursor,
       saveSelectedVmReconcileCursor,
     };

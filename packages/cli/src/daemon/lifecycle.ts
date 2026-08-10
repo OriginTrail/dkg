@@ -1923,6 +1923,8 @@ export async function runDaemonInner(
       deleteVmReconcileNegativesForContextGraph: async (contextGraphId) => {
         dashDb.deleteVmReconcileNegativesForContextGraph(contextGraphId);
       },
+    },
+    selectedVmReconcileCursorStore: {
       loadSelectedVmReconcileCursor: async (
         deploymentId,
         contextGraphId,
