@@ -56,18 +56,24 @@ export function normalizeCopySubjectProjectionInput(
 
 export function buildCopySubjectProjectionUpdate(input: CopySubjectProjectionInput): string {
   const normalized = normalizeCopySubjectProjectionInput(input);
-  const sources = normalized.sourceGraphUris.map((graph) => `<${graph}>`).join(' ');
-  const roots = normalized.roots.map((root) => `<${root}>`).join(' ');
-  const excluded = normalized.excludedPredicates.length > 0
-    ? `FILTER(?predicate NOT IN (${normalized.excludedPredicates.map((iri) => `<${iri}>`).join(', ')}))`
+  return buildCopySubjectProjectionUpdateFromNormalized(normalized);
+}
+
+export function buildCopySubjectProjectionUpdateFromNormalized(
+  input: CopySubjectProjectionInput,
+): string {
+  const sources = input.sourceGraphUris.map((graph) => `<${graph}>`).join(' ');
+  const roots = input.roots.map((root) => `<${root}>`).join(' ');
+  const excluded = input.excludedPredicates.length > 0
+    ? `FILTER(?predicate NOT IN (${input.excludedPredicates.map((iri) => `<${iri}>`).join(', ')}))`
     : '';
-  return assertBoundedStructuredUpdate('copySubjectProjection', `INSERT { GRAPH <${normalized.targetGraphUri}> { ?subject ?predicate ?object } }
+  return assertBoundedStructuredUpdate('copySubjectProjection', `INSERT { GRAPH <${input.targetGraphUri}> { ?subject ?predicate ?object } }
 WHERE {
   VALUES ?sourceGraph { ${sources} }
   VALUES ?root { ${roots} }
   # sparql-scan-allow: R2 -- ?sourceGraph is VALUES-bound to at most 8 validated exact graph IRIs
   GRAPH ?sourceGraph { ?subject ?predicate ?object }
-  FILTER(?subject = ?root || STRSTARTS(STR(?subject), CONCAT(STR(?root), ${sparqlString(normalized.descendantSuffix)})))
+  FILTER(?subject = ?root || STRSTARTS(STR(?subject), CONCAT(STR(?root), ${sparqlString(input.descendantSuffix)})))
   ${excluded}
 }`);
 }

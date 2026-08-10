@@ -71,26 +71,32 @@ export function normalizePruneRankedSubjectsInput(
 
 export function buildPruneRankedSubjectsUpdate(input: PruneRankedSubjectsInput): string {
   const normalized = normalizePruneRankedSubjectsInput(input);
-  const eligibleObjects = normalized.eligibleObjects.map(sparqlString).join(' ');
+  return buildPruneRankedSubjectsUpdateFromNormalized(normalized);
+}
+
+export function buildPruneRankedSubjectsUpdateFromNormalized(
+  input: PruneRankedSubjectsInput,
+): string {
+  const eligibleObjects = input.eligibleObjects.map(sparqlString).join(' ');
   const eligibilityFilter = `VALUES ?eligibleObject { ${eligibleObjects} }
       FILTER NOT EXISTS {
-        ?subject <${normalized.eligibilityPredicate}> ?ineligibleObject .
-        FILTER(?ineligibleObject NOT IN (${normalized.eligibleObjects.map(sparqlString).join(', ')}))
+        ?subject <${input.eligibilityPredicate}> ?ineligibleObject .
+        FILTER(?ineligibleObject NOT IN (${input.eligibleObjects.map(sparqlString).join(', ')}))
       }`;
   return assertBoundedStructuredUpdate('pruneRankedSubjects', `PREFIX xsd: <http://www.w3.org/2001/XMLSchema#>
-DELETE { GRAPH <${normalized.graphUri}> { ?subject ?predicate ?object } }
+DELETE { GRAPH <${input.graphUri}> { ?subject ?predicate ?object } }
 WHERE {
   {
     SELECT ?subject
            (MAX(?primaryRank) AS ?latestPrimaryRank)
            (MAX(?secondaryRank) AS ?latestSecondaryRank)
     WHERE {
-      GRAPH <${normalized.graphUri}> {
-        ?subject <${normalized.eligibilityPredicate}> ?eligibleObject .
-        OPTIONAL { ?subject <${normalized.primaryRankPredicate}> ?primaryRank }
-        OPTIONAL { ?subject <${normalized.secondaryRankPredicate}> ?secondaryRank }
+      GRAPH <${input.graphUri}> {
+        ?subject <${input.eligibilityPredicate}> ?eligibleObject .
+        OPTIONAL { ?subject <${input.primaryRankPredicate}> ?primaryRank }
+        OPTIONAL { ?subject <${input.secondaryRankPredicate}> ?secondaryRank }
         ${eligibilityFilter}
-        FILTER(STRSTARTS(STR(?subject), ${sparqlString(normalized.subjectPrefix)}))
+        FILTER(STRSTARTS(STR(?subject), ${sparqlString(input.subjectPrefix)}))
       }
     }
     # sparql-scan-allow: R3 -- one bounded retention prune; OFFSET <= 100000 and LIMIT <= 10000; never page-walked
@@ -100,13 +106,13 @@ WHERE {
       xsd:integer(STR(?latestSecondaryRank)),
       0
     )) DESC(STR(?subject))
-    OFFSET ${sparqlInt(normalized.retainNewest, { min: 0 })}
-    LIMIT ${sparqlInt(normalized.maxDelete, { min: 1 })}
+    OFFSET ${sparqlInt(input.retainNewest, { min: 0 })}
+    LIMIT ${sparqlInt(input.maxDelete, { min: 1 })}
   }
-  GRAPH <${normalized.graphUri}> {
-    ?subject <${normalized.eligibilityPredicate}> ?eligibleObject ; ?predicate ?object .
+  GRAPH <${input.graphUri}> {
+    ?subject <${input.eligibilityPredicate}> ?eligibleObject ; ?predicate ?object .
     ${eligibilityFilter}
-    FILTER(STRSTARTS(STR(?subject), ${sparqlString(normalized.subjectPrefix)}))
+    FILTER(STRSTARTS(STR(?subject), ${sparqlString(input.subjectPrefix)}))
   }
 }`);
 }
@@ -156,22 +162,28 @@ export function normalizePruneLinkedRecordClosuresInput(
 
 export function buildPruneLinkedRecordClosuresUpdate(input: PruneLinkedRecordClosuresInput): string {
   const normalized = normalizePruneLinkedRecordClosuresInput(input);
-  const matchObjects = normalized.matchObjectIris.map((root) => `<${root}>`).join(' ');
-  const linkPredicates = normalized.linkPredicates
+  return buildPruneLinkedRecordClosuresUpdateFromNormalized(normalized);
+}
+
+export function buildPruneLinkedRecordClosuresUpdateFromNormalized(
+  input: PruneLinkedRecordClosuresInput,
+): string {
+  const matchObjects = input.matchObjectIris.map((root) => `<${root}>`).join(' ');
+  const linkPredicates = input.linkPredicates
     .map((predicate) => `<${predicate}>`)
     .join(' ');
-  const keepFilter = normalized.protectedRecordIri
-    ? `FILTER(?record != <${normalized.protectedRecordIri}>)`
+  const keepFilter = input.protectedRecordIri
+    ? `FILTER(?record != <${input.protectedRecordIri}>)`
     : '';
-  return assertBoundedStructuredUpdate('pruneLinkedRecordClosures', `DELETE { GRAPH <${normalized.graphUri}> { ?subject ?predicate ?object } }
-WHERE { GRAPH <${normalized.graphUri}> {
+  return assertBoundedStructuredUpdate('pruneLinkedRecordClosures', `DELETE { GRAPH <${input.graphUri}> { ?subject ?predicate ?object } }
+WHERE { GRAPH <${input.graphUri}> {
   VALUES ?matchObject { ${matchObjects} }
   VALUES ?linkPredicate { ${linkPredicates} }
   ?member ?linkPredicate ?matchObject .
-  OPTIONAL { ?member <${normalized.recordParentPredicate}> ?parent }
+  OPTIONAL { ?member <${input.recordParentPredicate}> ?parent }
   BIND(COALESCE(?parent, ?member) AS ?record)
   ${keepFilter}
   ?subject ?predicate ?object .
-  FILTER(?subject = ?record || STRSTARTS(STR(?subject), CONCAT(STR(?record), ${sparqlString(normalized.descendantSeparator)})))
+  FILTER(?subject = ?record || STRSTARTS(STR(?subject), CONCAT(STR(?record), ${sparqlString(input.descendantSeparator)})))
 } }`);
 }

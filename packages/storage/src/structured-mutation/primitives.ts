@@ -86,7 +86,7 @@ export function boundedUniqueStrings(
   return result;
 }
 
-export function assertOperandBudget(label: string, values: readonly string[]): void {
+export function assertOperandBudget(label: string, values: Iterable<string>): void {
   let bytes = 0;
   for (const value of values) {
     bytes += UTF8.encode(value).byteLength;

@@ -15,10 +15,16 @@ export function normalizeDeleteSubjectsInput(input: DeleteSubjectsInput): Delete
 
 export function buildDeleteSubjectsUpdate(input: DeleteSubjectsInput): string | undefined {
   const normalized = normalizeDeleteSubjectsInput(input);
-  if (normalized.subjects.length === 0) return undefined;
-  const values = normalized.subjects.map((subject) => `<${subject}>`).join(' ');
-  return assertBoundedStructuredUpdate('deleteSubjects', `DELETE { GRAPH <${normalized.graphUri}> { ?subject ?predicate ?object } }
-WHERE { GRAPH <${normalized.graphUri}> {
+  return buildDeleteSubjectsUpdateFromNormalized(normalized);
+}
+
+export function buildDeleteSubjectsUpdateFromNormalized(
+  input: DeleteSubjectsInput,
+): string | undefined {
+  if (input.subjects.length === 0) return undefined;
+  const values = input.subjects.map((subject) => `<${subject}>`).join(' ');
+  return assertBoundedStructuredUpdate('deleteSubjects', `DELETE { GRAPH <${input.graphUri}> { ?subject ?predicate ?object } }
+WHERE { GRAPH <${input.graphUri}> {
   VALUES ?subject { ${values} }
   ?subject ?predicate ?object
 } }`);

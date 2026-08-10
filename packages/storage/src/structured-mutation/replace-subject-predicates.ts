@@ -84,22 +84,28 @@ export function buildReplaceSubjectPredicatesUpdate(
   input: ReplaceSubjectPredicatesInput,
 ): string {
   const normalized = normalizeReplaceSubjectPredicatesInput(input);
-  const predicateValues = normalized.predicates.map((predicate) => `<${predicate}>`).join(', ');
-  const insertion = normalized.replacementQuads.length > 0
+  return buildReplaceSubjectPredicatesUpdateFromNormalized(normalized);
+}
+
+export function buildReplaceSubjectPredicatesUpdateFromNormalized(
+  input: ReplaceSubjectPredicatesInput,
+): string {
+  const predicateValues = input.predicates.map((predicate) => `<${predicate}>`).join(', ');
+  const insertion = input.replacementQuads.length > 0
     ? `INSERT {
-  GRAPH <${normalized.graphUri}> {
-${normalized.replacementQuads.map((quad) => `    <${quad.subject}> <${quad.predicate}> ${quad.object} .`).join('\n')}
+  GRAPH <${input.graphUri}> {
+${input.replacementQuads.map((quad) => `    <${quad.subject}> <${quad.predicate}> ${quad.object} .`).join('\n')}
   }
 }
 `
     : '';
   return assertBoundedStructuredUpdate('replaceSubjectPredicates', `DELETE {
-  GRAPH <${normalized.graphUri}> { <${normalized.subject}> ?predicate ?oldObject }
+  GRAPH <${input.graphUri}> { <${input.subject}> ?predicate ?oldObject }
 }
 ${insertion}WHERE {
   OPTIONAL {
-    GRAPH <${normalized.graphUri}> {
-      <${normalized.subject}> ?predicate ?oldObject .
+    GRAPH <${input.graphUri}> {
+      <${input.subject}> ?predicate ?oldObject .
       FILTER(?predicate IN (${predicateValues}))
     }
   }

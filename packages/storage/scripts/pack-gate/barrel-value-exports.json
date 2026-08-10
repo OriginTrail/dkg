@@ -49,6 +49,7 @@
   "buildAtomicSubjectReplaceUpdate",
   "canonicalSharedMemoryScopeWriteGraph",
   "captureStructuredMutationEffects",
+  "captureStructuredMutationSnapshot",
   "changelogSchemaQuad",
   "chunkCopySubjectProjectionInput",
   "createStoreControlBarrierKeyV1",

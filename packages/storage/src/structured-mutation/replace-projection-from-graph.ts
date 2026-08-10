@@ -59,37 +59,43 @@ export function buildReplaceProjectionFromGraphUpdate(
   input: ReplaceProjectionFromGraphInput,
 ): string {
   const normalized = normalizeReplaceProjectionFromGraphInput(input);
-  const preserved = normalized.preservedTargetPredicates.length > 0
-    ? ` && ?stalePredicate NOT IN (${normalized.preservedTargetPredicates.map((iri) => `<${iri}>`).join(', ')})`
+  return buildReplaceProjectionFromGraphUpdateFromNormalized(normalized);
+}
+
+export function buildReplaceProjectionFromGraphUpdateFromNormalized(
+  input: ReplaceProjectionFromGraphInput,
+): string {
+  const preserved = input.preservedTargetPredicates.length > 0
+    ? ` && ?stalePredicate NOT IN (${input.preservedTargetPredicates.map((iri) => `<${iri}>`).join(', ')})`
     : '';
-  const prefixes = normalized.targetSubjectPrefixes
+  const prefixes = input.targetSubjectPrefixes
     .map((prefix) => `STRSTARTS(STR(?staleSubject), ${sparqlString(prefix)})`);
   const staleScopes = [
-    `(?staleSubject = <${normalized.targetSubject}>${preserved})`,
+    `(?staleSubject = <${input.targetSubject}>${preserved})`,
     ...prefixes,
   ].join(' || ');
   const freshScopes = [
-    `?freshSubject = <${normalized.targetSubject}>`,
-    ...normalized.targetSubjectPrefixes.map(
+    `?freshSubject = <${input.targetSubject}>`,
+    ...input.targetSubjectPrefixes.map(
       (prefix) => `STRSTARTS(STR(?freshSubject), ${sparqlString(prefix)})`,
     ),
   ].join(' || ');
   return assertBoundedStructuredUpdate('replaceProjectionFromGraph', `DELETE {
-  GRAPH <${normalized.targetGraphUri}> { ?staleSubject ?stalePredicate ?staleObject }
+  GRAPH <${input.targetGraphUri}> { ?staleSubject ?stalePredicate ?staleObject }
 }
 INSERT {
-  GRAPH <${normalized.targetGraphUri}> { ?freshSubject ?freshPredicate ?freshObject }
+  GRAPH <${input.targetGraphUri}> { ?freshSubject ?freshPredicate ?freshObject }
 }
 WHERE {
   {
-    GRAPH <${normalized.targetGraphUri}> {
+    GRAPH <${input.targetGraphUri}> {
       ?staleSubject ?stalePredicate ?staleObject .
       FILTER(${staleScopes})
     }
   }
   UNION
   {
-    GRAPH <${normalized.stagingGraphUri}> {
+    GRAPH <${input.stagingGraphUri}> {
       ?freshSubject ?freshPredicate ?freshObject .
       FILTER(${freshScopes})
     }
