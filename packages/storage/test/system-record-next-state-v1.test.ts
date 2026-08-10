@@ -606,6 +606,46 @@ describe('system-record terminal and quarantine next-state derivation', () => {
     authoritativeRegistry.consumer.release(authoritativeFacts);
   });
 
+  // The tombstone cutover plans its deletion from the incoming candidate's table
+  // and never compares it with the scope the row recorded. It does not need to,
+  // because a row cannot persist a pending table that disagrees with its own
+  // applied-state binding -- refused here on the way in, and again by the
+  // decoder on the way out. Pin the write half; the read half is pinned in
+  // system-record-state-snapshot-v1.test.ts.
+  it('refuses to encode a pending deletion table that does not bind the applied state', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1('shadow');
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const facts = registry.consumer.consume(
+      registry.issuer.issueCandidate({ operation: 'tombstone', ...fixture.tombstone }),
+      fixture.binding,
+    );
+    const ready = expectReady(deriveSystemRecordReplacementV1({
+      facts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: facts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(facts.networkId, facts.head.peerId),
+        materializationEpoch: facts.materializationEpoch,
+        quads: [fixture.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    }));
+    const recorded = ready.plan.next.pendingDeletionTable!;
+    const widened = Object.freeze([
+      ...recorded,
+      `${ready.plan.next.appliedState.currentRoot}/.well-known/genid/cap1`,
+    ]) as unknown as typeof recorded;
+    expect(() => buildSystemRecordReservedStateQuadsV1({
+      appliedState: ready.plan.next.appliedState,
+      headVersion: ready.plan.next.headVersion,
+      ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+      pendingDeletionTable: widened,
+      rootClaimSet: ready.plan.next.rootClaimSet,
+      capacityState: ready.plan.next.capacityState,
+      receipt: ready.plan.next.receipt,
+    })).toThrow(/does not bind the applied state/);
+    registry.consumer.release(facts);
+  });
+
   it('persists quarantine evidence without a sidecar intent and blocks ordinary unquarantine', async () => {
     const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
     const initialRegistry = createSystemRecordVerifiedReplacementRegistryV1();

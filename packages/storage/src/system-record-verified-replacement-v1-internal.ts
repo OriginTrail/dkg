@@ -805,7 +805,13 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
           });
           AUTHENTIC_VERIFIED_REPLACEMENT_FACTS.add(facts);
           FACT_RESERVATIONS.set(facts, registered.reservation);
+          // The active facts this promotion supersedes must stop being authentic
+          // at the same moment, or one reservation backs two facts objects that
+          // both pass the authenticity check.
+          const superseded = registered.facts;
           registered.facts = facts;
+          AUTHENTIC_VERIFIED_REPLACEMENT_FACTS.delete(superseded);
+          FACT_RESERVATIONS.delete(superseded);
           return handle;
         } catch (error) {
           if (registered.reservation.phase !== 'released') releaseReservation(registered.reservation);

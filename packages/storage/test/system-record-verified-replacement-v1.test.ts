@@ -272,6 +272,12 @@ describe('system-record verified replacement V1', () => {
       ...active
     } = fixture.quarantine;
 
+    // This loop is what keeps the terminal-transition flag re-derived rather than
+    // trusted. The accepting case cannot do it: with the comparison deleted the
+    // flag would be taken on faith, slots would still populate, and every accept
+    // test would stay green. The same classification also lives in the receiver,
+    // so if storage's copy is ever deleted as redundant, their agreement stops
+    // being checked anywhere -- and this is the test that would go red.
     for (const invalid of [
       { ...valid, conflictEvidenceDigest: `0x${'00'.repeat(32)}` },
       { ...valid, terminalTransitionConflict: true },

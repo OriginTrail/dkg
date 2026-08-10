@@ -565,6 +565,17 @@ function deriveSystemRecordTombstoneReplacementV1(input: {
       ).byteLength;
   const rootClaimSetDigest = computeSystemRecordRootClaimSetDigestV1(rootClaimSet);
 
+  // The dirty cutover plans its deletion from the incoming candidate's table
+  // while the durably recorded scope is read only for the CAS and capacity, so
+  // the two being the same scope is what makes the cutover bounded. Two
+  // fail-closed points already force it, which is why there is no third check
+  // here: a row can never persist a pending table that disagrees with its own
+  // applied-state binding, refused when written by buildSystemRecordReservedStateQuadsV1
+  // and again when read by decodeSystemRecordAppliedSnapshotV1 (both pinned --
+  // see 'refuses to encode a pending deletion table' and 'round-trips the exact
+  // pending deletion table'), and classifyTombstoneAdvance only advances a
+  // candidate whose head digest matches the persisted one -- same head, same
+  // predecessor, same table.
   if (snapshot.state === 'present'
       && persistedStateMatchesVerifiedTombstone(
         snapshot,
@@ -870,6 +881,15 @@ function assertTrustedReplacement(
   }
 }
 
+/**
+ * No `kind` clause here on purpose, and its absence is not an oversight to
+ * "restore parity" with the active twin. Only registry-minted facts reach this
+ * assert, and both binding snapshots refuse a non-agents kind at mint
+ * (system-record-verified-replacement-v1-internal.ts:343 and :361, each pinning
+ * kind to 'agents'), a precondition covered by
+ * system-record-verified-replacement-v1.test.ts:541. Re-checking it here would
+ * be a guard nothing can make fail.
+ */
 function assertTrustedTombstoneReplacement(
   facts: SystemRecordVerifiedTombstoneReplacementFactsV1,
   snapshot: SystemRecordAppliedSnapshotV1,
