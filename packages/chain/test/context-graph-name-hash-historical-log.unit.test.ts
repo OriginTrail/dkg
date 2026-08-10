@@ -215,6 +215,41 @@ describe('historical Context Graph name-hash reverse resolution', () => {
     );
   });
 
+  it('fails closed when historical slot verification has only one known high-water backend', async () => {
+    const scenario = historicalFixture([[42n]]);
+    const current = { id: 'current' };
+    const unavailableA = { id: 'unavailable-a' };
+    const unavailableB = { id: 'unavailable-b' };
+    const retryableFailure = () => Object.assign(
+      new Error('current high-water timed out'),
+      { code: 'RPC_TIMEOUT' },
+    );
+    scenario.adapter.providers = [current, unavailableA, unavailableB];
+    scenario.adapter.rpcUrls = [
+      'http://current.invalid',
+      'http://unavailable-a.invalid',
+      'http://unavailable-b.invalid',
+    ];
+    scenario.adapter.rebindContract.mockImplementation(
+      (_contract: unknown, provider: unknown) => ({
+        getLatestContextGraphId: async (options?: { blockTag?: number }) => {
+          if (options?.blockTag !== undefined) {
+            return CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n;
+          }
+          if (provider !== current) throw retryableFailure();
+          return CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS + 1n;
+        },
+        getNameHash: scenario.getNameHash,
+      }),
+    );
+
+    await expect(scenario.adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /insufficient covering RPC quorum.*1 of 3 backends responded, need 2/i,
+    );
+    expect(scenario.getNameHash).toHaveBeenCalledTimes(1);
+    expect(scenario.getNameHash).toHaveBeenCalledWith(42n);
+  });
+
   it('discards a historical result when the adapter binding rotates mid-scan', async () => {
     const fixture = historicalFixture([[42n]]);
     fixture.queryEventLogsPage.mockImplementationOnce(async () => {

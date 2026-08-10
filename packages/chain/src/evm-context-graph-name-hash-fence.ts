@@ -13,6 +13,7 @@ import {
   RPC_READ_STALL_TIMEOUT_MS,
 } from './evm-adapter-constants.js';
 import { withTimeout } from './evm-adapter-rpc.js';
+import { isContractViewRetryable } from './rpc-failover-client.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 
 /**
@@ -98,6 +99,8 @@ export interface EvmContextGraphNameHashFenceDependencies {
 export interface ContextGraphNameHashProviderHighWaters {
   readonly latestId: bigint;
   readonly providerHighWaters: ReadonlyMap<JsonRpcProvider, bigint>;
+  /** Providers whose transient high-water failure leaves slot coverage unknown. */
+  readonly unavailableProviderCount: number;
 }
 
 export interface ContextGraphNameHashScopeToken {
@@ -335,19 +338,19 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     await this.assertScopeCurrent(requestScope, 'current-slot refresh');
 
     let state = previous;
+    let nextState: ContextGraphNameHashSlotState | undefined;
     if (rebuild || staged.length > 0) {
       const idsByHash = rebuild
         ? new Map<string, bigint[]>()
         : cloneIdsByHash(previous?.idsByHash);
       appendSlots(idsByHash, staged, firstId, latestId);
-      state = {
+      nextState = {
         scope: copyScope(requestScope.scope),
         highWater: latestId,
         anchor: nextAnchor,
         idsByHash,
       };
-      this.currentSlotState = state;
-      this.currentSlotGeneration += 1;
+      state = nextState;
     }
 
     const ids = state?.idsByHash.get(normalizedNameHash) ?? [];
@@ -360,6 +363,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const id = ids[0] ?? null;
 
     const verification = await this.loadProviderHighWaters();
+    this.assertCompleteProviderHighWaterBoundary(
+      verification,
+      'current-slot resolution',
+    );
     if (verification.latestId !== latestId) {
       throw new Error(
         `resolveContextGraphIdByNameHash: Context Graph registry advanced from ` +
@@ -371,7 +378,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       const currentHash = await this.readCurrentNameHash(
         id,
         undefined,
-        verification.providerHighWaters,
+        verification,
       );
       if (currentHash !== normalizedNameHash) {
         throw new Error(
@@ -383,6 +390,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     }
 
     await this.assertScopeCurrent(requestScope, 'current-slot resolution');
+    if (nextState !== undefined) {
+      this.currentSlotState = nextState;
+      this.currentSlotGeneration += 1;
+    }
     return { mode: 'current', id, highWater: latestId };
   }
 
@@ -406,7 +417,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
           const currentHash = await this.readCurrentNameHash(
             contextGraphId,
             scanController.signal,
-            highWaterSnapshot.providerHighWaters,
+            highWaterSnapshot,
           );
           slots.push({ id: contextGraphId, nameHash: currentHash });
         } catch (cause) {
@@ -489,6 +500,17 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const failures = reads.filter(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
+    const nonRetryableFailures = failures.filter(
+      (failure) => !isContractViewRetryable(failure.reason),
+    );
+    if (nonRetryableFailures.length > 0) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ${nonRetryableFailures.length} of ` +
+        `${providers.length} RPC backends returned a non-retryable registry ` +
+        'high-water failure',
+        { cause: nonRetryableFailures[0]!.reason },
+      );
+    }
     if (providerHighWaters.size === 0) {
       throw failures[0]?.reason ?? new Error(
         'resolveContextGraphIdByNameHash: no RPC backend returned a current registry high-water',
@@ -498,19 +520,51 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       (maximum, value) => value > maximum ? value : maximum,
       0n,
     );
-    return { latestId, providerHighWaters };
+    return {
+      latestId,
+      providerHighWaters,
+      unavailableProviderCount: failures.length,
+    };
   }
 
-  /** Require every provider at or above the slot to agree, including null. */
+  /**
+   * A reverse lookup cannot return a positive or negative result while any
+   * configured backend's registry boundary is unknown. Such a backend may
+   * commit a higher numeric id (including a duplicate name hash) than every
+   * responder. Incomplete snapshots may stage bounded slot reads, but only a
+   * complete follow-up boundary may authorize a result or cache commit.
+   */
+  private assertCompleteProviderHighWaterBoundary(
+    snapshot: ContextGraphNameHashProviderHighWaters,
+    lane: 'current-slot resolution' | 'historical scan',
+  ): void {
+    if (snapshot.unavailableProviderCount === 0) return;
+    const providerCount =
+      snapshot.providerHighWaters.size + snapshot.unavailableProviderCount;
+    throw new Error(
+      `resolveContextGraphIdByNameHash: incomplete registry high-water ` +
+      `coverage during ${lane}; ${snapshot.providerHighWaters.size} of ` +
+      `${providerCount} RPC backends responded`,
+    );
+  }
+
+  /**
+   * Require a strict majority of providers at or above the slot to respond,
+   * while every response agrees (including null). A transiently unavailable
+   * backend is not conflicting chain evidence; a deterministic failure is.
+   */
   async readCurrentNameHash(
     contextGraphId: bigint,
     signal?: AbortSignal,
-    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
+    capturedHighWaterSnapshot?: ContextGraphNameHashProviderHighWaters,
   ): Promise<string | null> {
     await this.dependencies.initialize();
     const cgs = this.dependencies.requireContextGraphStorage();
-    const highWaters = providerHighWaters
-      ?? (await this.loadProviderHighWaters()).providerHighWaters;
+    const highWaterSnapshot = capturedHighWaterSnapshot === undefined
+      ? await this.loadProviderHighWaters()
+      : capturedHighWaterSnapshot;
+    const highWaters = highWaterSnapshot.providerHighWaters;
+    const { unavailableProviderCount } = highWaterSnapshot;
     const coveringProviders = [...highWaters].filter(
       ([, highWater]) => highWater >= contextGraphId,
     );
@@ -524,18 +578,27 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const failures = reads.filter(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
-    if (failures.length > 0) {
+    const nonRetryableFailures = failures.filter(
+      (failure) => !isContractViewRetryable(failure.reason),
+    );
+    if (nonRetryableFailures.length > 0) {
       throw new Error(
-        `resolveContextGraphIdByNameHash: ${failures.length} of ` +
-        `${coveringProviders.length} covering RPC backends failed to read current slot ` +
-        `${contextGraphId.toString()}`,
-        { cause: failures[0]!.reason },
+        `resolveContextGraphIdByNameHash: ${nonRetryableFailures.length} of ` +
+        `${coveringProviders.length} covering RPC backends returned a non-retryable ` +
+        `failure for current slot ${contextGraphId.toString()}`,
+        { cause: nonRetryableFailures[0]!.reason },
       );
     }
-    if (observed.size === 0) {
+    const fulfilledCount = reads.length - failures.length;
+    const capturedCoveringProviderCount =
+      coveringProviders.length + unavailableProviderCount;
+    const requiredQuorum = Math.floor(capturedCoveringProviderCount / 2) + 1;
+    if (fulfilledCount < requiredQuorum) {
       throw new Error(
-        `resolveContextGraphIdByNameHash: no RPC backend could read slot ` +
-        contextGraphId.toString(),
+        `resolveContextGraphIdByNameHash: insufficient covering RPC quorum for ` +
+        `current slot ${contextGraphId.toString()}; ${fulfilledCount} of ` +
+        `${capturedCoveringProviderCount} backends responded, need ${requiredQuorum}`,
+        { cause: failures[0]?.reason },
       );
     }
     if (observed.size !== 1) {
@@ -572,6 +635,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     );
     const assertHistoricalRegistryCurrent = async (): Promise<void> => {
       const currentBoundary = await this.loadProviderHighWaters();
+      this.assertCompleteProviderHighWaterBoundary(
+        currentBoundary,
+        'historical scan',
+      );
       if (currentBoundary.latestId !== scannedRegistryHighWater) {
         throw new Error(
           `resolveContextGraphIdByNameHash: registry high-water changed from ` +

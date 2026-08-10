@@ -12,6 +12,8 @@ import {
   minimalConfig,
   NAME_HASH,
   OTHER_HASH,
+  providerHighWaterSnapshot,
+  providerQuorumFixture,
   resolverInternals,
 } from './context-graph-name-hash-reverse-resolution.fixtures.js';
 
@@ -50,9 +52,19 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     const { adapter, fence } = fixture([null, NAME_HASH]);
     const enumerationHighWaters = new Map([[{} as any, 2n]]);
     const verificationHighWaters = new Map([[{} as any, 2n]]);
+    const enumerationSnapshot = {
+      latestId: 2n,
+      providerHighWaters: enumerationHighWaters,
+      unavailableProviderCount: 0,
+    };
+    const verificationSnapshot = {
+      latestId: 2n,
+      providerHighWaters: verificationHighWaters,
+      unavailableProviderCount: 0,
+    };
     vi.spyOn(fence, 'loadProviderHighWaters')
-      .mockResolvedValueOnce({ latestId: 2n, providerHighWaters: enumerationHighWaters })
-      .mockResolvedValueOnce({ latestId: 2n, providerHighWaters: verificationHighWaters });
+      .mockResolvedValueOnce(enumerationSnapshot)
+      .mockResolvedValueOnce(verificationSnapshot);
     const slotReader = vi.spyOn(fence, 'readCurrentNameHash').mockImplementation(
       async (id) => id === 2n ? NAME_HASH : null,
     );
@@ -63,9 +75,9 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
       (call) => call[1] instanceof AbortSignal,
     );
     expect(rangeReads).toHaveLength(2);
-    expect(rangeReads.every((call) => call[2] === enumerationHighWaters)).toBe(true);
+    expect(rangeReads.every((call) => call[2] === enumerationSnapshot)).toBe(true);
     const exactRead = slotReader.mock.calls.find((call) => call[1] === undefined);
-    expect(exactRead?.[2]).toBe(verificationHighWaters);
+    expect(exactRead?.[2]).toBe(verificationSnapshot);
   });
 
   it('normalizes an uppercase bytes32 input before current-slot comparison', async () => {
@@ -117,76 +129,185 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     expect(callsForMethod(readContractWithOptions, 'getLatestContextGraphId')).toHaveLength(4);
     expect(callsForMethod(readContractWithOptions, 'getNameHash').map(
       (call) => BigInt(call[3][0]),
-    )).toEqual([1n, 2n, 2n]);
+    )).toEqual([1n, 1n, 2n, 2n]);
   });
 
   it('does not let a lower-high-water RPC hide a slot from a current backend', async () => {
-    const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
-    adapter.init = vi.fn(async () => {});
     const primary = { id: 'lagging' };
     const backup = { id: 'current' };
-    const storage = { getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6') };
-    adapter.contracts = { contextGraphStorage: storage };
-    adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
-      getNameHash: vi.fn(async () => provider === primary ? ethers.ZeroHash : NAME_HASH),
-    }));
-    const { fence } = resolverInternals(adapter);
+    const { adapter, fence } = providerQuorumFixture({
+      providers: [primary, backup],
+      readNameHash: async (provider) => provider === primary ? ethers.ZeroHash : NAME_HASH,
+    });
 
     await expect(fence.readCurrentNameHash(
       1n,
       undefined,
-      new Map([[primary, 0n], [backup, 1n]]),
+      providerHighWaterSnapshot([[primary, 0n], [backup, 1n]]),
     )).resolves.toBe(NAME_HASH);
     expect(adapter.rebindContract).toHaveBeenCalledTimes(1);
   });
 
   it('fails closed when same-high-water RPCs disagree on a current slot', async () => {
-    const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
-    adapter.init = vi.fn(async () => {});
     const primary = { id: 'fork-a' };
     const backup = { id: 'fork-b' };
-    const storage = { getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6') };
-    adapter.contracts = { contextGraphStorage: storage };
-    adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
-      getNameHash: vi.fn(async () => provider === primary ? ethers.ZeroHash : NAME_HASH),
-    }));
-    const { fence } = resolverInternals(adapter);
+    const { fence } = providerQuorumFixture({
+      providers: [primary, backup],
+      readNameHash: async (provider) => provider === primary ? ethers.ZeroHash : NAME_HASH,
+    });
 
     await expect(fence.readCurrentNameHash(
       1n,
       undefined,
-      new Map([[primary, 1n], [backup, 1n]]),
+      providerHighWaterSnapshot([[primary, 1n], [backup, 1n]]),
     )).rejects.toThrow(
       /RPC backends disagree on current slot 1/i,
     );
   });
 
-  it('fails closed when any covering RPC cannot read the current slot', async () => {
-    const adapter: any = new EVMChainAdapter(minimalConfig());
-    adapter.initialized = true;
-    adapter.init = vi.fn(async () => {});
+  it('fails closed when one of two covering RPCs is transiently unavailable', async () => {
     const failing = { id: 'failing' };
     const responding = { id: 'responding' };
-    const storage = { getAddress: vi.fn(async () => '0x00000000000000000000000000000000000000c6') };
-    adapter.contracts = { contextGraphStorage: storage };
-    adapter.rebindContract = vi.fn((_contract: unknown, provider: unknown) => ({
-      getNameHash: vi.fn(async () => {
-        if (provider === failing) throw new Error('slot read timed out');
+    const { adapter, fence } = providerQuorumFixture({
+      providers: [failing, responding],
+      readNameHash: async (provider) => {
+        if (provider === failing) {
+          throw Object.assign(new Error('slot read timed out'), { code: 'RPC_TIMEOUT' });
+        }
         return ethers.ZeroHash;
-      }),
-    }));
-    const { fence } = resolverInternals(adapter);
+      },
+    });
 
     await expect(fence.readCurrentNameHash(
       2n,
       undefined,
-      new Map([[failing, 2n], [responding, 2n]]),
+      providerHighWaterSnapshot([[failing, 2n], [responding, 2n]]),
     )).rejects.toThrow(
-      /1 of 2 covering RPC backends failed to read current slot 2/i,
+      /insufficient covering RPC quorum.*1 of 2 backends responded, need 2/i,
     );
     expect(adapter.rebindContract).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    [
+      'timeout',
+      () => Object.assign(new Error('slot read timed out'), { code: 'RPC_TIMEOUT' }),
+    ],
+    [
+      'HTTP 429',
+      () => Object.assign(new Error('too many requests'), { status: 429 }),
+    ],
+  ])('accepts a two-of-three agreeing quorum when one RPC has a retryable %s', async (
+    _failureKind,
+    createFailure,
+  ) => {
+    const unavailable = { id: 'unavailable' };
+    const respondingA = { id: 'responding-a' };
+    const respondingB = { id: 'responding-b' };
+    const { fence } = providerQuorumFixture({
+      providers: [unavailable, respondingA, respondingB],
+      readNameHash: async (provider) => {
+        if (provider === unavailable) throw createFailure();
+        return NAME_HASH;
+      },
+    });
+
+    await expect(fence.readCurrentNameHash(
+      2n,
+      undefined,
+      providerHighWaterSnapshot([
+        [unavailable, 2n],
+        [respondingA, 2n],
+        [respondingB, 2n],
+      ]),
+    )).resolves.toBe(NAME_HASH);
+  });
+
+  it('fails closed when two of three covering RPCs are transiently unavailable', async () => {
+    const unavailableA = { id: 'unavailable-a' };
+    const unavailableB = { id: 'unavailable-b' };
+    const responding = { id: 'responding' };
+    const { fence } = providerQuorumFixture({
+      providers: [unavailableA, unavailableB, responding],
+      readNameHash: async (provider) => {
+        if (provider !== responding) {
+          throw Object.assign(new Error('slot read timed out'), { code: 'RPC_TIMEOUT' });
+        }
+        return NAME_HASH;
+      },
+    });
+
+    await expect(fence.readCurrentNameHash(
+      2n,
+      undefined,
+      providerHighWaterSnapshot([
+        [unavailableA, 2n],
+        [unavailableB, 2n],
+        [responding, 2n],
+      ]),
+    )).rejects.toThrow(
+      /insufficient covering RPC quorum.*1 of 3 backends responded, need 2/i,
+    );
+  });
+
+  it.each([
+    ['CALL_EXCEPTION', 'execution reverted'],
+    ['BAD_DATA', 'could not decode result data'],
+  ])('fails closed on non-retryable slot %s despite an agreeing majority', async (
+    code,
+    message,
+  ) => {
+    const invalid = { id: 'invalid' };
+    const respondingA = { id: 'responding-a' };
+    const respondingB = { id: 'responding-b' };
+    const { fence } = providerQuorumFixture({
+      providers: [invalid, respondingA, respondingB],
+      readNameHash: async (provider) => {
+        if (provider === invalid) {
+          throw Object.assign(new Error(message), { code });
+        }
+        return NAME_HASH;
+      },
+    });
+
+    await expect(fence.readCurrentNameHash(
+      2n,
+      undefined,
+      providerHighWaterSnapshot([
+        [invalid, 2n],
+        [respondingA, 2n],
+        [respondingB, 2n],
+      ]),
+    )).rejects.toThrow(
+      /non-retryable failure for current slot 2/i,
+    );
+  });
+
+  it('fails closed when fulfilled RPCs disagree despite reaching quorum', async () => {
+    const unavailable = { id: 'unavailable' };
+    const forkA = { id: 'fork-a' };
+    const forkB = { id: 'fork-b' };
+    const { fence } = providerQuorumFixture({
+      providers: [unavailable, forkA, forkB],
+      readNameHash: async (provider) => {
+        if (provider === unavailable) {
+          throw Object.assign(new Error('slot read timed out'), { code: 'RPC_TIMEOUT' });
+        }
+        return provider === forkA ? NAME_HASH : OTHER_HASH;
+      },
+    });
+
+    await expect(fence.readCurrentNameHash(
+      2n,
+      undefined,
+      providerHighWaterSnapshot([
+        [unavailable, 2n],
+        [forkA, 2n],
+        [forkB, 2n],
+      ]),
+    )).rejects.toThrow(
+      /RPC backends disagree on current slot 2/i,
+    );
   });
 
   it('aborts an in-flight provider slot read instead of waiting for its stall timeout', async () => {
@@ -208,12 +329,130 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     const read = fence.readCurrentNameHash(
       1n,
       controller.signal,
-      new Map([[provider, 1n]]),
+      providerHighWaterSnapshot([[provider, 1n]]),
     );
     await started.promise;
     controller.abort(new Error('sibling slot failed'));
 
     await expect(read).rejects.toThrow('sibling slot failed');
+  });
+
+  it('accepts a transient initial high-water failure after complete verification', async () => {
+    const unavailable = { id: 'unavailable' };
+    const respondingA = { id: 'responding-a' };
+    const respondingB = { id: 'responding-b' };
+    let unavailableReads = 0;
+    const {
+      adapter,
+      getLatestContextGraphId,
+      getNameHash,
+    } = providerQuorumFixture({
+      providers: [unavailable, respondingA, respondingB],
+      readHighWater: async (provider) => {
+        if (provider === unavailable && unavailableReads++ === 0) {
+          throw Object.assign(new Error('high-water timed out'), { code: 'RPC_TIMEOUT' });
+        }
+        return 1n;
+      },
+      readNameHash: async () => NAME_HASH,
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(1n);
+    expect(getLatestContextGraphId).toHaveBeenCalledTimes(6);
+    expect(getNameHash).toHaveBeenCalledTimes(5);
+  });
+
+  it.each([
+    ['zero observed ids', 0n, ethers.ZeroHash],
+    ['a stale null result', 1n, ethers.ZeroHash],
+    ['a stale positive result', 1n, NAME_HASH],
+  ])('fails closed before returning %s while a current backend high-water is unknown', async (
+    _scenario,
+    respondingHighWater,
+    slotHash,
+  ) => {
+    const unavailable = { id: 'unavailable-current-backend' };
+    const laggingA = { id: 'lagging-a' };
+    const laggingB = { id: 'lagging-b' };
+    const { adapter, fence } = providerQuorumFixture({
+      providers: [unavailable, laggingA, laggingB],
+      readHighWater: async (provider) => {
+        if (provider === unavailable) {
+          throw Object.assign(new Error('high-water timed out'), { code: 'RPC_TIMEOUT' });
+        }
+        return respondingHighWater;
+      },
+      readNameHash: async () => slotHash,
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /incomplete registry high-water coverage during current-slot resolution; 2 of 3/i,
+    );
+    expect(fence.currentSlotRevision).toBe(0);
+  });
+
+  it('keeps the unavailable-provider count attached to the typed high-water snapshot', async () => {
+    const responding = { id: 'responding' };
+    const { fence } = providerQuorumFixture({
+      providers: [responding],
+      readNameHash: async () => NAME_HASH,
+    });
+
+    await expect(fence.readCurrentNameHash(
+      2n,
+      undefined,
+      providerHighWaterSnapshot([[responding, 2n]], 2),
+    )).rejects.toThrow(
+      /insufficient covering RPC quorum.*1 of 3 backends responded, need 2/i,
+    );
+  });
+
+  it('does not collapse two transient high-water failures into an unsafe one-of-one', async () => {
+    const unavailableA = { id: 'unavailable-a' };
+    const unavailableB = { id: 'unavailable-b' };
+    const responding = { id: 'responding' };
+    const { adapter, fence } = providerQuorumFixture({
+      providers: [unavailableA, unavailableB, responding],
+      readHighWater: async (provider) => {
+        if (provider !== responding) {
+          throw Object.assign(new Error('high-water timed out'), { code: 'RPC_TIMEOUT' });
+        }
+        return 1n;
+      },
+      readNameHash: async () => NAME_HASH,
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /insufficient covering RPC quorum.*1 of 3 backends responded, need 2/i,
+    );
+    expect(fence.currentSlotRevision).toBe(0);
+  });
+
+  it.each([
+    ['CALL_EXCEPTION', 'execution reverted'],
+    ['BAD_DATA', 'could not decode result data'],
+  ])('fails closed on non-retryable high-water %s despite two agreeing providers', async (
+    code,
+    message,
+  ) => {
+    const invalid = { id: 'invalid' };
+    const respondingA = { id: 'responding-a' };
+    const respondingB = { id: 'responding-b' };
+    const { adapter, fence } = providerQuorumFixture({
+      providers: [invalid, respondingA, respondingB],
+      readHighWater: async (provider) => {
+        if (provider === invalid) {
+          throw Object.assign(new Error(message), { code });
+        }
+        return 1n;
+      },
+      readNameHash: async () => NAME_HASH,
+    });
+
+    await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
+      /non-retryable registry high-water failure/i,
+    );
+    expect(fence.currentSlotRevision).toBe(0);
   });
 
   it('fans out provider high-water and covering-slot reads concurrently', async () => {
@@ -253,7 +492,7 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     highWaterRelease.resolve(undefined);
     const snapshot = await highWaters;
 
-    const slot = fence.readCurrentNameHash(1n, undefined, snapshot.providerHighWaters);
+    const slot = fence.readCurrentNameHash(1n, undefined, snapshot);
     await vi.waitFor(() => expect(activeSlots).toBe(2));
     slotRelease.resolve(undefined);
     await expect(slot).resolves.toBeNull();
@@ -346,9 +585,12 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     expect(callsForMethod(readContractWithOptions, 'getNameHash')).toHaveLength(13);
   });
 
-  it('fails closed on any slot read error and aborts sibling failover reads', async () => {
+  it('does not commit a partial index when slot quorum fails and aborts sibling reads', async () => {
     const { adapter, fence, readContractWithOptions } = fixture([null, null, NAME_HASH, null]);
-    const failure = new Error('all RPC endpoints failed getNameHash(2)');
+    const failure = Object.assign(
+      new Error('all RPC endpoints failed getNameHash(2)'),
+      { code: 'RPC_TIMEOUT' },
+    );
     const slotReader = vi.spyOn(fence, 'readCurrentNameHash');
     readContractWithOptions.mockImplementation(async (
       _contract: unknown,
@@ -364,8 +606,9 @@ describe('current-slot Context Graph name-hash reverse resolution', () => {
     });
 
     await expect(adapter.resolveContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /1 of 1 covering RPC backends failed to read current slot 2/i,
+      /insufficient covering RPC quorum.*0 of 1 backends responded, need 1/i,
     );
+    expect(fence.currentSlotRevision).toBe(0);
     const observedSignals = slotReader.mock.calls
       .map((call) => call[1])
       .filter((signal): signal is AbortSignal => signal instanceof AbortSignal);

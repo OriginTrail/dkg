@@ -185,12 +185,14 @@ describe('Context Graph name-hash cache and index invalidation', () => {
     ) => {
       if (method === 'getLatestContextGraphId') return 2n;
       const id = BigInt(args[0] as bigint);
-      if (id === 2n && failDelta) throw new Error('delta RPC failed');
+      if (id === 2n && failDelta) {
+        throw Object.assign(new Error('delta RPC timed out'), { code: 'RPC_TIMEOUT' });
+      }
       return hashes.get(id) ?? ethers.ZeroHash;
     });
 
     await expect(adapter.resolveContextGraphIdByNameHash(OTHER_HASH)).rejects.toThrow(
-      /1 of 1 covering RPC backends failed to read current slot 2/i,
+      /insufficient covering RPC quorum.*0 of 1 backends responded, need 1/i,
     );
     failDelta = false;
     await expect(adapter.resolveContextGraphIdByNameHash(OTHER_HASH)).resolves.toBe(2n);
@@ -270,6 +272,7 @@ describe('Context Graph name-hash cache and index invalidation', () => {
       return {
         latestId: 2n,
         providerHighWaters: new Map([[scenario.adapter.providers[0], 2n]]),
+        unavailableProviderCount: 0,
       };
     });
 
