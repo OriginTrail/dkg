@@ -468,6 +468,25 @@ describe('system-record immutable B+tree objects', () => {
     expect(completed).not.toHaveProperty('sliceRows');
     expect(completed).not.toHaveProperty('failure');
 
+    const sorted = deterministicPeers(256).map(row)
+      .sort((left, right) => left.stableKeyHash.localeCompare(right.stableKeyHash));
+    const multiLevel = twoLeafSnapshot(sorted.slice(0, 128), sorted.slice(128));
+    const childKinds: Array<'inventory-internal' | 'inventory-leaf' | undefined> = [];
+    const multiLevelTraversal = createSystemRecordInventoryTraversalV1(multiLevel.descriptor);
+    let multiLevelResult: Awaited<ReturnType<typeof multiLevelTraversal.advance>>;
+    do {
+      multiLevelResult = await multiLevelTraversal.advance(async (digest, expectedKind) => {
+        childKinds.push(expectedKind);
+        return loadedInventoryObject(multiLevel.objects.get(digest)!);
+      }, {
+        maxRequests: 1,
+        maxWireBytes: 2 * 1024 * 1024,
+        deadlineMs: Date.now() + 3_000,
+      });
+    } while (multiLevelResult.status === 'paused');
+    expect(multiLevelResult.status).toBe('complete');
+    expect(childKinds).toEqual([undefined, 'inventory-leaf', 'inventory-leaf']);
+
     const malformed = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     await expect(malformed.advance(async () => ({
       ...loadedInventoryObject(root),
