@@ -135,6 +135,111 @@ describe('selected SWM metadata transfer ownership', () => {
     }
   });
 
+  it('releases an expired sibling prefix and its budget before a gated same-peer fetch completes', async () => {
+    const peerId = 'peer-active-expiry';
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const deleteCheckpoint = vi.fn();
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 1,
+      maxBytesEstimate: 1024 * 1024,
+      maxPrefixRows: 1,
+      maxPrefixBytesEstimate: 1024 * 1024,
+    });
+    let ownedFetcher: ReturnType<typeof createSelectedSwmMetaFetcher> | undefined;
+    let releaseSecondOperation!: () => void;
+    const secondOperationGate = new Promise<void>((resolve) => {
+      releaseSecondOperation = resolve;
+    });
+    let signalSecondOperationStarted!: () => void;
+    const secondOperationStarted = new Promise<void>((resolve) => {
+      signalSecondOperationStarted = resolve;
+    });
+    let releaseSecondFetch!: () => void;
+    const secondFetchGate = new Promise<void>((resolve) => {
+      releaseSecondFetch = resolve;
+    });
+    let signalSecondFetchStarted!: (availableRows: number) => void;
+    const secondFetchStarted = new Promise<number>((resolve) => {
+      signalSecondFetchStarted = resolve;
+    });
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    const createFetcher = () => {
+      ownedFetcher = createSelectedSwmMetaFetcher({
+        remotePeerId: peerId,
+        requesterScope: 'selected-swm-meta:retained:active-expiry',
+        retentionBudget: budget,
+        deleteCheckpoint,
+        now: clock,
+        retentionTtlMs: 20,
+        fetchPage: async (request) => {
+          if (request.contextGraphId === 'cg-b') {
+            signalSecondFetchStarted(request.maxAcceptedQuads);
+            await secondFetchGate;
+          }
+          return {
+            quads: [{
+              subject: `urn:${request.contextGraphId}`,
+              predicate: 'urn:p',
+              object: '"o"',
+              graph: 'urn:meta',
+            }],
+            bytesReceived: 1,
+            resumedFromOffset: 0,
+            nextOffset: 1,
+            checkpointKey: `${request.contextGraphId}:checkpoint`,
+            completed: false,
+            timedOut: true,
+          };
+        },
+      });
+      return ownedFetcher;
+    };
+    const request = (contextGraphId: string) => ({
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: clock() + 1_000,
+    });
+
+    try {
+      await coordinator.run(
+        peerId,
+        createFetcher,
+        (fetcher) => fetcher.strategy.fetch(request('cg-a')),
+      );
+      expect(ownedFetcher?.continuation('cg-a').progress).toBe(1);
+
+      let secondCompleted = false;
+      const second = coordinator.run(peerId, createFetcher, async (fetcher) => {
+        signalSecondOperationStarted();
+        await secondOperationGate;
+        return fetcher.strategy.fetch(request('cg-b'));
+      });
+      void second.then(() => { secondCompleted = true; });
+      await secondOperationStarted;
+
+      // The peer-wide idle timer is suspended by the active outer operation.
+      // Crossing A's independent TTL before B reaches its fetch boundary must
+      // still release A's checkpoint and make its global row available to B.
+      elapsedMs = 21;
+      releaseSecondOperation();
+      expect(await secondFetchStarted).toBe(1);
+      expect(secondCompleted).toBe(false);
+      expect(deleteCheckpoint).toHaveBeenCalledWith('cg-a:checkpoint');
+      expect(ownedFetcher?.continuation('cg-a').progress).toBeUndefined();
+
+      releaseSecondFetch();
+      await second;
+    } finally {
+      releaseSecondOperation();
+      releaseSecondFetch();
+      await coordinator.close();
+    }
+  });
+
   it('does not serialize independent peers behind one transfer owner', async () => {
     const coordinator = new SelectedSwmMetaTransferCoordinator();
     let releasePeerA!: () => void;

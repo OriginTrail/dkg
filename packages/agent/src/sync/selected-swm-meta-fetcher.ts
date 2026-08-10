@@ -278,6 +278,25 @@ export function createSelectedSwmMetaFetcher(options: {
     return state;
   };
 
+  const pruneExpiredStates = (): void => {
+    for (const [contextGraphId, state] of states) {
+      // This fetcher owns multiple Context Graphs for one peer. The
+      // coordinator's idle timer is intentionally peer-wide and is suspended
+      // while an outer operation runs, so enforce each CG's independent TTL
+      // again at every serialized fetch boundary. Completed/empty state keeps
+      // its existing outer-invocation lifecycle below.
+      if (
+        !state.completed
+        && state.nextOffset > 0
+        && state.quads.length > 0
+        && state.expiresAtMs <= now()
+      ) {
+        release(contextGraphId, state);
+        completedContextGraphs.delete(contextGraphId);
+      }
+    }
+  };
+
   const fetchRetained = async (
     request: SharedMemoryMetadataFetchRequest,
     state: SelectedSwmMetaContinuationState,
@@ -376,6 +395,7 @@ export function createSelectedSwmMetaFetcher(options: {
 
   const strategy: SharedMemoryMetadataFetcher = {
     async fetch(request) {
+      pruneExpiredStates();
       const state = ensureState(request.contextGraphId);
       if (state.completed) {
         return {
@@ -392,6 +412,7 @@ export function createSelectedSwmMetaFetcher(options: {
         };
       }
       const result = await fetchRetained(request, state, true);
+      pruneExpiredStates();
       return { result, continuationYielded: !state.completed };
     },
     release,
@@ -408,6 +429,7 @@ export function createSelectedSwmMetaFetcher(options: {
       };
     },
     settleOuterInvocation() {
+      pruneExpiredStates();
       for (const [contextGraphId, state] of states) {
         // Completed manifests may be reused by continuation passes in the same
         // outer invocation, but never become a cross-invocation cache. Empty
@@ -416,7 +438,6 @@ export function createSelectedSwmMetaFetcher(options: {
           state.completed
           || state.nextOffset <= 0
           || state.quads.length === 0
-          || state.expiresAtMs <= now()
         ) {
           release(contextGraphId, state);
           completedContextGraphs.delete(contextGraphId);
