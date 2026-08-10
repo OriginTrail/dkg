@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
+  SYSTEM_RECORD_MAX_CLOCK_SKEW_MS,
   SYSTEM_RECORD_MAX_SLICE_REQUESTS,
   type AgentProfileHeadObjectV1,
   type Digest32V1,
@@ -150,6 +151,89 @@ describe('agent-profile closure continuation V1', () => {
       .toBe(true);
     expect(control.activeReservations()).toBe(0);
     expect(control.activeBytes()).toBe(0);
+  });
+
+  it('resamples verification time when an expired-prior continuation resumes', async () => {
+    const fixture = await maximumAuthorityClosureFixtureV1({
+      expiredPriorTransitionSequence: 13,
+    });
+    if (fixture.expiredPriorTransitionDigest === undefined
+        || fixture.expiredPriorValidUntil === undefined) {
+      throw new Error('fixture did not expose its expired-prior transition');
+    }
+    const validAtMs = Date.parse(fixture.expiredPriorValidUntil)
+      + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS;
+    let now = validAtMs - 1;
+    let pauseBeforeTransition = true;
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (lookup.objectDigest === fixture.expiredPriorTransitionDigest
+          && pauseBeforeTransition) {
+        pauseBeforeTransition = false;
+        return Object.freeze({ outcome: 'remote-busy', wireBytes: 1 });
+      }
+      const artifact = await fixture.repository.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 1 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: trackingByteAdmission(),
+    });
+    const receiverNowMs = vi.fn(() => now);
+    const receiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.repository,
+      nowMs: receiverNowMs,
+      verifyAuthorityEnvelope: () => true,
+      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
+      consumeCandidate: async () => appliedOutcome('33'),
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver,
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+    });
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    expect(pauseBeforeTransition).toBe(false);
+    expect(reconciler.stats().retainedClosureArtifacts).toBeGreaterThan(0);
+
+    now = validAtMs;
+    let result;
+    for (let slice = 0; slice < 4; slice += 1) {
+      result = await reconciler.advance(new AbortController().signal);
+      if (result.status === 'complete') break;
+      expect(result).toMatchObject({ status: 'paused', phase: 'records' });
+    }
+    expect(result).toMatchObject({ status: 'complete', processedRows: 1 });
+    expect(receiverNowMs.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(reconciler.stats()).toMatchObject({
+      retainedClosureArtifacts: 0,
+      retainedClosureBytes: 0,
+    });
   });
 
   it('releases retained closure ownership when the caller aborts between slices', async () => {

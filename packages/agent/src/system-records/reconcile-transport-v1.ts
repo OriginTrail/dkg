@@ -333,11 +333,7 @@ export function createAgentProfileReconcileTransportV1(
           continue;
         }
         if (!budget.canAttempt()) {
-          return Object.freeze({
-            result: selectedFailure
-              ?? Object.freeze({ outcome: 'capacity' as const, wireBytes: 0 }),
-            wireBytes: lookupWireBytes,
-          });
+          return aggregateFailure('capacity', lookupWireBytes);
         }
         budget.beginAttempt();
         const attemptSignal = AbortSignal.any([signal, callerSignal]);

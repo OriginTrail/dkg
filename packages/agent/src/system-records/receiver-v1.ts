@@ -162,7 +162,6 @@ export function createAgentProfileReceiverV1(
       if (!isOrdinaryActiveInventoryRowV1(row)) {
         throw new Error('active profile receiver requires an ordinary active inventory row');
       }
-      const verificationNowMs = receiverNowMs(nowMs?.() ?? Date.now());
       const verifiedAuthorityEnvelopes = new Set<Digest32V1>();
       const verifiedBundles = new Map<string, VerifiedActiveProfileClosureV1['verifiedBundle']>();
       let released = false;
@@ -173,6 +172,7 @@ export function createAgentProfileReceiverV1(
         signal: AbortSignal,
       ): Promise<AgentProfilePreparedActiveV1> {
         if (released) throw new Error('agent-profile receiver preparation is released');
+        const verificationNowMs = receiverNowMs(nowMs?.() ?? Date.now());
         return prepareActiveFromResolver(
           row,
           artifacts.resolve.bind(artifacts),

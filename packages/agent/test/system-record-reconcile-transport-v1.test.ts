@@ -444,7 +444,8 @@ describe('agent-profile reconcile exact transport V1', () => {
       controlAdmission: byteAdmission(),
     });
     const slice = openSlice(transport, () => 0);
-    await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).resolves.toBeNull();
+    await expect(slice.resolve(LOOKUP_A, new AbortController().signal))
+      .rejects.toMatchObject({ outcome: 'capacity', retryable: true });
     expect(fetchExact).toHaveBeenCalledTimes(SYSTEM_RECORD_MAX_SLICE_REQUESTS);
     expect(transport.openSlice({
       signal: new AbortController().signal,
@@ -476,7 +477,8 @@ describe('agent-profile reconcile exact transport V1', () => {
       controlAdmission: byteAdmission(),
     });
     const first = openSlice(transport, () => 0);
-    await expect(first.resolve(LOOKUP_A, new AbortController().signal)).resolves.toBeNull();
+    await expect(first.resolve(LOOKUP_A, new AbortController().signal))
+      .rejects.toMatchObject({ outcome: 'capacity', retryable: true });
     first.release();
     expect(fetchExact).toHaveBeenCalledTimes(SYSTEM_RECORD_MAX_SLICE_REQUESTS);
 
@@ -489,6 +491,45 @@ describe('agent-profile reconcile exact transport V1', () => {
 
     expect(fetchExact).toHaveBeenCalledTimes(SYSTEM_RECORD_MAX_SLICE_REQUESTS + 1);
     expect(fetchExact.mock.calls.at(-1)?.[0]).toBe('provider-12');
+  });
+
+  it('reports capacity when a memo hit precedes an unattempted healthy provider', async () => {
+    let consumeBudget = false;
+    const successful = successfulFetch(LOOKUP_A, 5);
+    const fetchExact = vi.fn(async (
+      providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (lookup.objectDigest === DIGEST_B || consumeBudget) {
+        return Object.freeze({ outcome: 'remote-error', wireBytes: 1 });
+      }
+      return providerId === 'provider-a'
+        ? Object.freeze({ outcome: 'not-found', wireBytes: 1 })
+        : successful.result;
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a', 'provider-b'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const priming = openSlice(transport, () => 0);
+    await expect(priming.resolve(LOOKUP_A, new AbortController().signal)).resolves.toMatchObject({
+      objectDigest: DIGEST_A,
+    });
+    priming.release();
+    expect(successful.release).toHaveBeenCalledTimes(1);
+
+    consumeBudget = true;
+    const saturated = openSlice(transport, () => 0);
+    for (let lookup = 0; lookup < SYSTEM_RECORD_MAX_SLICE_REQUESTS / 2; lookup += 1) {
+      await expect(saturated.resolve(LOOKUP_B, new AbortController().signal))
+        .rejects.toMatchObject({ outcome: 'remote-error' });
+    }
+    const callsBeforeMemoizedLookup = fetchExact.mock.calls.length;
+    await expect(saturated.resolve(LOOKUP_A, new AbortController().signal))
+      .rejects.toMatchObject({ outcome: 'capacity', retryable: true });
+    expect(fetchExact).toHaveBeenCalledTimes(callsBeforeMemoizedLookup);
+    saturated.release();
   });
 
   it('rejects and releases a mismatched successful lease before failing over', async () => {

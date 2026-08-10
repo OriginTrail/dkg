@@ -27,7 +27,9 @@ import {
   producerFixture,
 } from './agent-profile-producer-v1-fixture.js';
 
-export async function maximumAuthorityClosureFixtureV1() {
+export async function maximumAuthorityClosureFixtureV1(options: Readonly<{
+  expiredPriorTransitionSequence?: number;
+}> = {}) {
   const fixture = await producerFixture();
   const producer = createFixtureAgentProfileProducerV1({
     networkId: NETWORK,
@@ -52,14 +54,20 @@ export async function maximumAuthorityClosureFixtureV1() {
 
   const artifacts = new Map<string, SystemRecordArtifactV1>();
   let current: AgentProfileActiveHeadObjectV1 = initialEnvelope.object;
+  let expiredPriorTransitionDigest: string | undefined;
+  let expiredPriorValidUntil: string | undefined;
   addEnvelopeArtifact(artifacts, 'agent-profile-head', current);
   for (let sequence = 1; sequence <= 14; sequence += 1) {
     const prior = current;
     const nextIssuer = `0x${sequence.toString(16).padStart(40, '0')}`;
+    const expiredPrior = sequence === options.expiredPriorTransitionSequence;
+    if (expiredPrior && prior.validUntil === undefined) {
+      throw new Error('expired-prior fixture requires predecessor validity');
+    }
     const transition: AgentProfileAuthorityTransitionV1 = Object.freeze({
       objectType: 'authority-transition',
       kind: 'agents',
-      mode: 'co-signed',
+      mode: expiredPrior ? 'expired-prior' : 'co-signed',
       networkId: prior.networkId,
       peerId: prior.peerId,
       peerPublicKey: prior.peerPublicKey,
@@ -70,8 +78,13 @@ export async function maximumAuthorityClosureFixtureV1() {
       nextEvmIssuer: nextIssuer,
       nextRoot: `did:dkg:agent:${nextIssuer}`,
       issuedAt: prior.issuedAt,
+      ...(expiredPrior ? { priorValidUntil: prior.validUntil } : {}),
     });
     const transitionDigest = computeAgentProfileAuthorityTransitionDigestV1(transition);
+    if (expiredPrior) {
+      expiredPriorTransitionDigest = transitionDigest;
+      expiredPriorValidUntil = prior.validUntil;
+    }
     const rootSubject = transition.nextRoot;
     current = Object.freeze({
       ...prior,
@@ -155,6 +168,8 @@ export async function maximumAuthorityClosureFixtureV1() {
     rootEnvelope,
     row,
     peerSigner: fixture.peerSigner,
+    expiredPriorTransitionDigest,
+    expiredPriorValidUntil,
   });
 }
 
@@ -167,7 +182,9 @@ function addEnvelopeArtifact(
     ? computeAgentProfileHeadObjectDigestV1(object)
     : computeAgentProfileAuthorityTransitionDigestV1(object);
   const roles = object.objectType === 'authority-transition'
-    ? ['peer', 'prior-evm', 'next-evm'] as const
+    ? object.mode === 'co-signed'
+      ? ['peer', 'prior-evm', 'next-evm'] as const
+      : ['peer', 'next-evm'] as const
     : ['peer', 'current-evm'] as const;
   const signatures = roles.map((role): SystemRecordSignatureEntryV1 => {
     if (role === 'peer') {
