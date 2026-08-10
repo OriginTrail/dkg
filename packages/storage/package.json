@@ -18,6 +18,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
+    "benchmark:structured-mutation": "node scripts/benchmark-structured-mutation.mjs",
     "build": "tsc",
     "test": "vitest run",
     "test:package-exports": "node scripts/verify-pack-exports.mjs",

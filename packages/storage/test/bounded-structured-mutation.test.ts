@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { describe, expect, it, vi } from 'vitest';
 
 import {
@@ -20,9 +22,11 @@ import {
 } from '../src/index.js';
 import {
   BOUNDED_MUTATION_MAX_IRIS,
+  BOUNDED_MUTATION_MAX_OPERAND_BYTES,
   BOUNDED_MUTATION_MAX_UPDATE_BYTES,
   buildCopySubjectProjectionUpdate,
   buildDeleteSubjectsUpdate,
+  buildStructuredMutationUpdate,
   chunkCopySubjectProjectionInput,
   normalizeCopySubjectProjectionInput,
   normalizeDeleteSubjectsInput,
@@ -49,6 +53,80 @@ async function rows(store: TripleStore, graph: string): Promise<Array<Record<str
 }
 
 describe('bounded structured mutation capabilities', () => {
+  it('preserves the canonical update bytes for every mutation kind and the no-op shape', () => {
+    const fixtures: ReadonlyArray<readonly [string, StructuredMutation, number, string]> = [
+      ['delete-subjects', {
+        kind: 'delete-subjects',
+        input: { graphUri: GRAPH, subjects: ['urn:test:a', 'urn:test:b'] },
+      }, 184, '1816e8bb2a177b1a5abc7b66b0d716b9ecfa39caccbc57280add47bc25b7f775'],
+      ['prune-ranked-subjects', {
+        kind: 'prune-ranked-subjects',
+        input: {
+          graphUri: GRAPH,
+          subjectPrefix: 'urn:test:req:',
+          eligibilityPredicate: STATUS,
+          eligibleObjects: ['approved', 'rejected'],
+          primaryRankPredicate: DECIDED_AT,
+          secondaryRankPredicate: REQUESTED_AT,
+          retainNewest: 5,
+          maxDelete: 10,
+        },
+      }, 1_460, 'a4383f845f8eaa592d6e48932c9d1a37623d933e7c550970fea711d040a9f491'],
+      ['prune-linked-record-closures', {
+        kind: 'prune-linked-record-closures',
+        input: {
+          graphUri: GRAPH,
+          matchObjectIris: ['urn:test:agent'],
+          linkPredicates: [P],
+          recordParentPredicate: STATUS,
+          protectedRecordIri: 'urn:test:keep',
+          descendantSeparator: '/',
+        },
+      }, 478, 'a5b262cba67f38f7467316f2e39f917c9c51a96593a10d55c8f1e589a1df9a1f'],
+      ['replace-subject-predicates', {
+        kind: 'replace-subject-predicates',
+        input: {
+          graphUri: GRAPH,
+          subject: 'urn:test:a',
+          predicates: [P],
+          replacementQuads: [quad('urn:test:a', P, '"value"')],
+        },
+      }, 310, '63257772a038004b2043e8946de4f8da682e90e7bcf6156807520966e3f256b8'],
+      ['replace-projection-from-graph', {
+        kind: 'replace-projection-from-graph',
+        input: {
+          targetGraphUri: GRAPH,
+          stagingGraphUri: OTHER_GRAPH,
+          targetSubject: 'urn:test:a',
+          preservedTargetPredicates: [P],
+          targetSubjectPrefixes: ['urn:test:child:'],
+        },
+      }, 618, '1f15cafd7c386ee0f32f742d9188bb53d04e8b026c0aa984302603a2b615fe21'],
+      ['copy-subject-projection', {
+        kind: 'copy-subject-projection',
+        input: {
+          sourceGraphUris: [GRAPH],
+          targetGraphUri: OTHER_GRAPH,
+          roots: ['urn:test:a'],
+          descendantSuffix: '/',
+          excludedPredicates: [P],
+        },
+      }, 434, '16d90e11bc91e1aaa049a5f56b4f55ec03e27090205010fb3a76e64508685ec1'],
+      ['delete-subjects/noop', {
+        kind: 'delete-subjects',
+        input: { graphUri: GRAPH, subjects: [] },
+      }, 0, 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'],
+    ];
+
+    for (const [label, mutation, expectedBytes, expectedHash] of fixtures) {
+      const update = buildStructuredMutationUpdate(mutation);
+      const bytes = update === undefined ? Buffer.alloc(0) : Buffer.from(update, 'utf8');
+      expect(bytes.byteLength, label).toBe(expectedBytes);
+      expect(createHash('sha256').update(bytes).digest('hex'), label).toBe(expectedHash);
+      expect(update === undefined, label).toBe(label.endsWith('/noop'));
+    }
+  });
+
   it('captures immutable graph effects before dispatch', () => {
     const mutation = {
       kind: 'copy-subject-projection' as const,
@@ -361,6 +439,79 @@ describe('bounded structured mutation capabilities', () => {
     await store.structuredMutation({ kind: 'delete-subjects', input: { graphUri: GRAPH, subjects } });
 
     expect(update).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps valid empty deletes I/O-free and rejects oversized worker no-ops before posting', async () => {
+    const embedded = new OxigraphStore();
+    const embeddedStore = (embedded as unknown as {
+      store: { update: (sparql: string) => void };
+    }).store;
+    const update = vi.spyOn(embeddedStore, 'update');
+    const embeddedGeneration = embedded.getWriteGen(GRAPH);
+
+    await embedded.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: GRAPH, subjects: [] },
+    });
+
+    expect(update).not.toHaveBeenCalled();
+    expect(embedded.getWriteGen(GRAPH)).toBe(embeddedGeneration);
+
+    const worker = new OxigraphWorkerStore();
+    const workerInternals = worker as unknown as { nextId: number };
+    try {
+      const nextId = workerInternals.nextId;
+      const workerGeneration = worker.getWriteGen(GRAPH);
+
+      await worker.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: GRAPH, subjects: [] },
+      });
+
+      expect(workerInternals.nextId).toBe(nextId);
+      expect(worker.getWriteGen(GRAPH)).toBe(workerGeneration);
+
+      const oversizedGraph = `urn:test:${'x'.repeat(BOUNDED_MUTATION_MAX_OPERAND_BYTES + 1)}`;
+      await expect(worker.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: oversizedGraph, subjects: [] },
+      })).rejects.toThrow(/operand bytes/);
+      expect(workerInternals.nextId).toBe(nextId);
+      expect(worker.getWriteGen(oversizedGraph)).toBe(0);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('rejects final worker-bound encoding and operand budgets before posting', async () => {
+    const worker = new OxigraphWorkerStore();
+    const workerInternals = worker as unknown as { nextId: number };
+    try {
+      const beforeMutf8 = workerInternals.nextId;
+      await expect(worker.structuredMutation({
+        kind: 'replace-subject-predicates',
+        input: {
+          graphUri: GRAPH,
+          subject: 'urn:test:subject',
+          predicates: [P],
+          replacementQuads: [quad('urn:test:subject', P, `"${'x'.repeat(70_000)}"`)],
+        },
+      })).rejects.toMatchObject({ code: 'OVERSIZED_RDF_LITERAL' });
+      expect(workerInternals.nextId).toBe(beforeMutf8);
+
+      const subjects = Array.from(
+        { length: 65_000 },
+        (_, index) => `urn:test:operand:${index}:${'x'.repeat(55)}`,
+      );
+      const beforeBudget = workerInternals.nextId;
+      await expect(worker.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: GRAPH, subjects },
+      })).rejects.toThrow(/operand bytes/);
+      expect(workerInternals.nextId).toBe(beforeBudget);
+    } finally {
+      await worker.close();
+    }
   });
 
   it('rejects sparse, duplicate, oversized, and cross-scope descriptors before dispatch', () => {

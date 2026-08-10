@@ -1,6 +1,7 @@
 import { sparqlString } from '@origintrail-official/dkg-core';
 import type { CopySubjectProjectionInput } from '../triple-store.js';
 import {
+  BOUNDED_MUTATION_MAX_IRIS,
   BOUNDED_MUTATION_MAX_PREDICATES,
   BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
   BoundedMutationBudgetError,
@@ -8,66 +9,107 @@ import {
   assertBoundedStructuredUpdate,
   assertOperandBudget,
   boundedString,
-  uniqueIris,
 } from './primitives.js';
+import {
+  captureInputRecord,
+  captureUniqueIris,
+  type StructuredMutationSemantics,
+} from './capture-internal.js';
 
-export function normalizeCopySubjectProjectionInput(
-  input: CopySubjectProjectionInput,
-): CopySubjectProjectionInput {
-  const sourceGraphUris = uniqueIris(
-    input.sourceGraphUris,
+export function captureCopySubjectProjectionInput(input: unknown): CopySubjectProjectionInput {
+  const value = captureInputRecord(input, 'copySubjectProjection');
+  const sourceGraphUris = captureUniqueIris(
+    value.sourceGraphUris,
     'copySubjectProjection.sourceGraphUris',
     BOUNDED_MUTATION_MAX_SOURCE_GRAPHS,
+    false,
   );
-  const targetGraphUri = absoluteIri(input.targetGraphUri, 'copySubjectProjection.targetGraphUri');
+  const targetGraphUri = absoluteIri(
+    value.targetGraphUri as string,
+    'copySubjectProjection.targetGraphUri',
+  );
   if (sourceGraphUris.includes(targetGraphUri)) {
     throw new Error('copySubjectProjection target graph must not be a source graph');
   }
-  const roots = uniqueIris(input.roots, 'copySubjectProjection.roots');
+  const roots = captureUniqueIris(
+    value.roots,
+    'copySubjectProjection.roots',
+    BOUNDED_MUTATION_MAX_IRIS,
+    false,
+  );
   const descendantSuffix = boundedString(
-    input.descendantSuffix,
+    value.descendantSuffix as string,
     'copySubjectProjection.descendantSuffix',
     256,
   );
   if (!descendantSuffix.startsWith('/')) {
     throw new Error('copySubjectProjection.descendantSuffix must start with /');
   }
-  const excludedPredicates = uniqueIris(
-    input.excludedPredicates,
+  const excludedPredicates = captureUniqueIris(
+    value.excludedPredicates,
     'copySubjectProjection.excludedPredicates',
     BOUNDED_MUTATION_MAX_PREDICATES,
     true,
   );
-  assertOperandBudget('copySubjectProjection', [
-    ...sourceGraphUris,
-    targetGraphUri,
-    ...roots,
-    descendantSuffix,
-    ...excludedPredicates,
-  ]);
-  return {
+  return Object.freeze({
     sourceGraphUris,
     targetGraphUri,
     roots,
     descendantSuffix,
     excludedPredicates,
+  });
+}
+
+export function copySubjectProjectionSemantics(
+  input: CopySubjectProjectionInput,
+): StructuredMutationSemantics {
+  return {
+    guardedGraphs: [...input.sourceGraphUris, input.targetGraphUri],
+    touchedGraphs: [input.targetGraphUri],
+    mightMutate: true,
   };
+}
+
+export function assertCopySubjectProjectionInputMaterializable(
+  input: CopySubjectProjectionInput,
+): void {
+  assertOperandBudget('copySubjectProjection', [
+    ...input.sourceGraphUris,
+    input.targetGraphUri,
+    ...input.roots,
+    input.descendantSuffix,
+    ...input.excludedPredicates,
+  ]);
+}
+
+export function normalizeCopySubjectProjectionInput(
+  input: CopySubjectProjectionInput,
+): CopySubjectProjectionInput {
+  const captured = captureCopySubjectProjectionInput(input);
+  assertCopySubjectProjectionInputMaterializable(captured);
+  return captured;
 }
 
 export function buildCopySubjectProjectionUpdate(input: CopySubjectProjectionInput): string {
   const normalized = normalizeCopySubjectProjectionInput(input);
-  const sources = normalized.sourceGraphUris.map((graph) => `<${graph}>`).join(' ');
-  const roots = normalized.roots.map((root) => `<${root}>`).join(' ');
-  const excluded = normalized.excludedPredicates.length > 0
-    ? `FILTER(?predicate NOT IN (${normalized.excludedPredicates.map((iri) => `<${iri}>`).join(', ')}))`
+  return buildCopySubjectProjectionUpdateFromNormalized(normalized);
+}
+
+export function buildCopySubjectProjectionUpdateFromNormalized(
+  input: CopySubjectProjectionInput,
+): string {
+  const sources = input.sourceGraphUris.map((graph) => `<${graph}>`).join(' ');
+  const roots = input.roots.map((root) => `<${root}>`).join(' ');
+  const excluded = input.excludedPredicates.length > 0
+    ? `FILTER(?predicate NOT IN (${input.excludedPredicates.map((iri) => `<${iri}>`).join(', ')}))`
     : '';
-  return assertBoundedStructuredUpdate('copySubjectProjection', `INSERT { GRAPH <${normalized.targetGraphUri}> { ?subject ?predicate ?object } }
+  return assertBoundedStructuredUpdate('copySubjectProjection', `INSERT { GRAPH <${input.targetGraphUri}> { ?subject ?predicate ?object } }
 WHERE {
   VALUES ?sourceGraph { ${sources} }
   VALUES ?root { ${roots} }
   # sparql-scan-allow: R2 -- ?sourceGraph is VALUES-bound to at most 8 validated exact graph IRIs
   GRAPH ?sourceGraph { ?subject ?predicate ?object }
-  FILTER(?subject = ?root || STRSTARTS(STR(?subject), CONCAT(STR(?root), ${sparqlString(normalized.descendantSuffix)})))
+  FILTER(?subject = ?root || STRSTARTS(STR(?subject), CONCAT(STR(?root), ${sparqlString(input.descendantSuffix)})))
   ${excluded}
 }`);
 }
@@ -76,7 +118,12 @@ WHERE {
 export function chunkCopySubjectProjectionInput(
   input: CopySubjectProjectionInput,
 ): CopySubjectProjectionInput[] {
-  const roots = uniqueIris(input.roots, 'copySubjectProjection.roots');
+  const roots = captureUniqueIris(
+    input.roots,
+    'copySubjectProjection.roots',
+    BOUNDED_MUTATION_MAX_IRIS,
+    false,
+  );
   const normalized = normalizeCopySubjectProjectionInput({ ...input, roots: [roots[0]] });
   const chunks: CopySubjectProjectionInput[] = [];
 

@@ -15,7 +15,9 @@ import {
   type StructuredMutation,
   type QueryOptions,
   type StoreWorkPriority,
+  captureStructuredMutationSnapshot,
 } from '../src/index.js';
+import { materializeStructuredMutation } from '../src/structured-mutation-materialization-internal.js';
 import {
   ControlledProbeStore,
   CountingStore,
@@ -153,6 +155,78 @@ describe('GraphSetIndexStore', () => {
       descendantSuffix: '/',
       excludedPredicates: ['urn:predicate-before'],
     } });
+    await inner.close();
+  });
+
+  it('invalidates a warm index when a no-op fails because the inner store lost data', async () => {
+    const graph = 'did:dkg:context-graph:noop';
+    const inner = new OxigraphStore();
+    await inner.insert([q(graph)]);
+    let observed: StructuredMutation | undefined;
+    let observedOptions: QueryOptions | undefined;
+    const failing = new (class extends CountingStore {
+      override async structuredMutation(
+        mutation: StructuredMutation,
+        options?: QueryOptions,
+      ): Promise<void> {
+        observed = mutation;
+        observedOptions = options;
+        this.failListGraphs = true;
+        throw new Error('in-memory worker data was lost');
+      }
+    })(inner);
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(failing, {
+      onMutation: (event) => events.push(event),
+    });
+    const options = { source: 'graph-set.noop' };
+
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    events.length = 0;
+    await expect(store.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: graph, subjects: [] },
+    }, options)).rejects.toThrow('in-memory worker data was lost');
+
+    expect(observedOptions).toBe(options);
+    expect(observed).toEqual({
+      kind: 'delete-subjects',
+      input: { graphUri: graph, subjects: [] },
+    });
+    expect(Object.isFrozen(observed)).toBe(true);
+    expect(events).toEqual([]);
+    await expect(store.listGraphs()).rejects.toThrow('listGraphs failed');
+    expect(failing.listGraphsCalls).toBe(2);
+    await inner.close();
+  });
+
+  it('does not rebuild after a deterministic deferred-budget refusal before backend I/O', async () => {
+    const graph = 'did:dkg:context-graph:budget-refusal';
+    const inner = new OxigraphStore();
+    await inner.insert([q(graph)]);
+    let backendUpdates = 0;
+    const validatingLeaf = new (class extends CountingStore {
+      override async structuredMutation(
+        mutation: StructuredMutation,
+        options?: QueryOptions,
+      ): Promise<void> {
+        const materialized = materializeStructuredMutation(
+          captureStructuredMutationSnapshot(mutation),
+        );
+        if (materialized.outcome === 'noop') return;
+        backendUpdates += 1;
+        await super.structuredMutation(mutation, options);
+      }
+    })(inner);
+    const store = new GraphSetIndexStore(validatingLeaf);
+
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    await expect(store.structuredMutation(overBudgetDeleteMutation(graph)))
+      .rejects.toThrow(/operand bytes/);
+
+    expect(backendUpdates).toBe(0);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(validatingLeaf.listGraphsCalls).toBe(1);
     await inner.close();
   });
 
@@ -1360,3 +1434,16 @@ describe('GraphSetIndexStore', () => {
     await optedInStore.close();
   });
 });
+
+function overBudgetDeleteMutation(graphUri: string): StructuredMutation {
+  return {
+    kind: 'delete-subjects',
+    input: {
+      graphUri,
+      subjects: Array.from(
+        { length: 65_000 },
+        (_, index) => `urn:test:operand:${index}:${'x'.repeat(55)}`,
+      ),
+    },
+  };
+}

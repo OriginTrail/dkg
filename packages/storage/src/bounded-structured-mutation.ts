@@ -14,28 +14,41 @@ import {
 } from './structured-mutation/primitives.js';
 import {
   buildDeleteSubjectsUpdate,
+  captureDeleteSubjectsInput,
+  deleteSubjectsSemantics,
   normalizeDeleteSubjectsInput,
 } from './structured-mutation/delete-subjects.js';
 import {
   buildPruneLinkedRecordClosuresUpdate,
   buildPruneRankedSubjectsUpdate,
+  capturePruneLinkedRecordClosuresInput,
+  capturePruneRankedSubjectsInput,
   normalizePruneLinkedRecordClosuresInput,
   normalizePruneRankedSubjectsInput,
+  pruneLinkedRecordClosuresSemantics,
+  pruneRankedSubjectsSemantics,
 } from './structured-mutation/retention.js';
 import {
   buildReplaceSubjectPredicatesUpdate,
+  captureReplaceSubjectPredicatesInput,
   normalizeReplaceSubjectPredicatesInput,
   normalizeReplaceSubjectPredicatesInputForObjectRewrite,
+  replaceSubjectPredicatesSemantics,
 } from './structured-mutation/replace-subject-predicates.js';
 import {
   buildReplaceProjectionFromGraphUpdate,
+  captureReplaceProjectionFromGraphInput,
   normalizeReplaceProjectionFromGraphInput,
+  replaceProjectionFromGraphSemantics,
 } from './structured-mutation/replace-projection-from-graph.js';
 import {
   buildCopySubjectProjectionUpdate,
+  captureCopySubjectProjectionInput,
   chunkCopySubjectProjectionInput,
+  copySubjectProjectionSemantics,
   normalizeCopySubjectProjectionInput,
 } from './structured-mutation/copy-subject-projection.js';
+import type { StructuredMutationSemantics } from './structured-mutation/capture-internal.js';
 
 export {
   BOUNDED_MUTATION_MAX_IRIS,
@@ -61,6 +74,186 @@ export {
   normalizeReplaceSubjectPredicatesInput,
   normalizeReplaceSubjectPredicatesInputForObjectRewrite,
 };
+
+export interface ReadonlyStructuredMutationQuad {
+  readonly subject: string;
+  readonly predicate: string;
+  readonly object: string;
+  readonly graph: string;
+}
+
+export type ReadonlyStructuredMutation =
+  | Readonly<{
+    kind: 'delete-subjects';
+    input: Readonly<{ graphUri: string; subjects: readonly string[] }>;
+  }>
+  | Readonly<{
+    kind: 'prune-ranked-subjects';
+    input: Readonly<{
+      graphUri: string;
+      subjectPrefix: string;
+      eligibilityPredicate: string;
+      eligibleObjects: readonly string[];
+      primaryRankPredicate: string;
+      secondaryRankPredicate: string;
+      retainNewest: number;
+      maxDelete: number;
+    }>;
+  }>
+  | Readonly<{
+    kind: 'prune-linked-record-closures';
+    input: Readonly<{
+      graphUri: string;
+      matchObjectIris: readonly string[];
+      linkPredicates: readonly string[];
+      recordParentPredicate: string;
+      protectedRecordIri?: string;
+      descendantSeparator: string;
+    }>;
+  }>
+  | Readonly<{
+    kind: 'replace-subject-predicates';
+    input: Readonly<{
+      graphUri: string;
+      subject: string;
+      predicates: readonly string[];
+      replacementQuads: readonly ReadonlyStructuredMutationQuad[];
+    }>;
+  }>
+  | Readonly<{
+    kind: 'replace-projection-from-graph';
+    input: Readonly<{
+      targetGraphUri: string;
+      stagingGraphUri: string;
+      targetSubject: string;
+      preservedTargetPredicates: readonly string[];
+      targetSubjectPrefixes: readonly string[];
+    }>;
+  }>
+  | Readonly<{
+    kind: 'copy-subject-projection';
+    input: Readonly<{
+      sourceGraphUris: readonly string[];
+      targetGraphUri: string;
+      roots: readonly string[];
+      descendantSuffix: string;
+      excludedPredicates: readonly string[];
+    }>;
+  }>;
+
+interface StructuredMutationSnapshotBase {
+  readonly mutation: ReadonlyStructuredMutation;
+  readonly guardedGraphs: readonly string[];
+}
+
+export type StructuredMutationSnapshot =
+  | Readonly<StructuredMutationSnapshotBase & {
+    outcome: 'noop';
+    effects: undefined;
+  }>
+  | Readonly<StructuredMutationSnapshotBase & {
+    outcome: 'candidate';
+    effects: StructuredMutationEffects;
+  }>;
+
+const STRUCTURED_MUTATION_SNAPSHOT_BRAND = Symbol('structured-mutation-snapshot');
+const STRUCTURED_MUTATION_SNAPSHOTS = new WeakMap<object, StructuredMutationSnapshot>();
+
+/** Capture one immutable, caller-independent structured mutation observation. */
+export function captureStructuredMutationSnapshot(
+  mutation: StructuredMutation,
+): StructuredMutationSnapshot {
+  if (typeof mutation === 'object' && mutation !== null) {
+    const trusted = STRUCTURED_MUTATION_SNAPSHOTS.get(mutation);
+    if (trusted !== undefined) return trusted;
+  }
+  const descriptor = mutation as unknown as Record<string, unknown>;
+  const kind = descriptor?.kind;
+  const input = descriptor?.input;
+  let captured: ReadonlyStructuredMutation;
+  let semantics: StructuredMutationSemantics;
+  switch (kind) {
+    case 'delete-subjects': {
+      const capturedInput = captureDeleteSubjectsInput(input);
+      captured = brandMutation(kind, capturedInput);
+      semantics = deleteSubjectsSemantics(capturedInput);
+      break;
+    }
+    case 'prune-ranked-subjects': {
+      const capturedInput = capturePruneRankedSubjectsInput(input);
+      captured = brandMutation(kind, capturedInput);
+      semantics = pruneRankedSubjectsSemantics(capturedInput);
+      break;
+    }
+    case 'prune-linked-record-closures': {
+      const capturedInput = capturePruneLinkedRecordClosuresInput(input);
+      captured = brandMutation(kind, capturedInput);
+      semantics = pruneLinkedRecordClosuresSemantics(capturedInput);
+      break;
+    }
+    case 'replace-subject-predicates': {
+      const capturedInput = captureReplaceSubjectPredicatesInput(input);
+      captured = brandMutation(kind, capturedInput);
+      semantics = replaceSubjectPredicatesSemantics(capturedInput);
+      break;
+    }
+    case 'replace-projection-from-graph': {
+      const capturedInput = captureReplaceProjectionFromGraphInput(input);
+      captured = brandMutation(kind, capturedInput);
+      semantics = replaceProjectionFromGraphSemantics(capturedInput);
+      break;
+    }
+    case 'copy-subject-projection': {
+      const capturedInput = captureCopySubjectProjectionInput(input);
+      captured = brandMutation(kind, capturedInput);
+      semantics = copySubjectProjectionSemantics(capturedInput);
+      break;
+    }
+    default:
+      throw new Error(`Unsupported structured mutation kind ${String(kind)}`);
+  }
+  const guardedGraphs = Object.freeze([...semantics.guardedGraphs]);
+  const snapshot: StructuredMutationSnapshot = semantics.mightMutate
+    ? Object.freeze({
+      mutation: captured,
+      guardedGraphs,
+      outcome: 'candidate' as const,
+      effects: Object.freeze({
+        touchedGraphs: Object.freeze([...semantics.touchedGraphs]),
+      }),
+    })
+    : Object.freeze({
+      mutation: captured,
+      guardedGraphs,
+      outcome: 'noop' as const,
+      effects: undefined,
+    });
+  STRUCTURED_MUTATION_SNAPSHOTS.set(captured, snapshot);
+  return snapshot;
+}
+
+/** Storage-internal trust check used by final materialization. */
+export function assertTrustedStructuredMutationSnapshot(
+  snapshot: StructuredMutationSnapshot,
+): void {
+  if (typeof snapshot !== 'object'
+      || snapshot === null
+      || typeof snapshot.mutation !== 'object'
+      || snapshot.mutation === null
+      || STRUCTURED_MUTATION_SNAPSHOTS.get(snapshot.mutation) !== snapshot) {
+    throw new Error('structured mutation snapshot is not trusted');
+  }
+}
+
+function brandMutation<K extends ReadonlyStructuredMutation['kind']>(
+  kind: K,
+  input: Extract<ReadonlyStructuredMutation, { kind: K }>['input'],
+): Extract<ReadonlyStructuredMutation, { kind: K }> {
+  const mutation = { kind, input } as Extract<ReadonlyStructuredMutation, { kind: K }>;
+  Object.defineProperty(mutation, STRUCTURED_MUTATION_SNAPSHOT_BRAND, { value: true });
+  Object.freeze(mutation);
+  return mutation;
+}
 
 function unsupportedMutation(mutation: never): never {
   throw new Error(
@@ -125,26 +318,29 @@ export function buildStructuredMutationUpdate(mutation: StructuredMutation): str
 }
 
 export function structuredMutationGuardedGraphs(mutation: StructuredMutation): readonly string[] {
-  switch (mutation.kind) {
-    case 'replace-projection-from-graph':
-      return [mutation.input.targetGraphUri, mutation.input.stagingGraphUri];
-    case 'copy-subject-projection':
-      return [...mutation.input.sourceGraphUris, mutation.input.targetGraphUri];
-    default:
-      return [mutation.input.graphUri];
-  }
+  return structuredMutationSemantics(mutation).guardedGraphs;
 }
 
 export function structuredMutationTouchedGraphs(mutation: StructuredMutation): readonly string[] {
-  switch (mutation.kind) {
-    case 'replace-projection-from-graph': return [mutation.input.targetGraphUri];
-    case 'copy-subject-projection': return [mutation.input.targetGraphUri];
-    default: return [mutation.input.graphUri];
-  }
+  return structuredMutationSemantics(mutation).touchedGraphs;
 }
 
 export function structuredMutationMightMutate(mutation: StructuredMutation): boolean {
-  return mutation.kind !== 'delete-subjects' || mutation.input.subjects.length > 0;
+  return structuredMutationSemantics(mutation).mightMutate;
+}
+
+function structuredMutationSemantics(
+  mutation: StructuredMutation,
+): StructuredMutationSemantics {
+  switch (mutation.kind) {
+    case 'delete-subjects': return deleteSubjectsSemantics(mutation.input);
+    case 'prune-ranked-subjects': return pruneRankedSubjectsSemantics(mutation.input);
+    case 'prune-linked-record-closures': return pruneLinkedRecordClosuresSemantics(mutation.input);
+    case 'replace-subject-predicates': return replaceSubjectPredicatesSemantics(mutation.input);
+    case 'replace-projection-from-graph': return replaceProjectionFromGraphSemantics(mutation.input);
+    case 'copy-subject-projection': return copySubjectProjectionSemantics(mutation.input);
+    default: return unsupportedMutation(mutation);
+  }
 }
 
 /** Immutable graph-scoped effects captured before a structured mutation is dispatched. */

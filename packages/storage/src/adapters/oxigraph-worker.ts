@@ -12,10 +12,13 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { GraphWriteGenTracker } from '../graph-write-gen.js';
+import { captureStructuredMutationSnapshot } from '../bounded-structured-mutation.js';
+import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
+import { assertStructuredMutationSnapshotMaterializable } from '../structured-mutation-materialization-internal.js';
 import {
-  captureStructuredMutationEffects,
-  normalizeStructuredMutation,
-} from '../bounded-structured-mutation.js';
+  STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL_CODE,
+  reconstructStructuredMutationPreDispatchRefusal,
+} from '../structured-mutation/refusal-internal.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -118,6 +121,19 @@ export interface OxigraphWorkerTimeoutError extends Error {
   method: string;
   /** The bound that was exceeded. */
   timeoutMs: number;
+}
+
+interface WorkerErrorPayload {
+  readonly message: string;
+  readonly code?: string;
+}
+
+function deserializeWorkerError(payload: string | WorkerErrorPayload): Error {
+  if (typeof payload === 'string') return new Error(payload);
+  if (payload.code === STRUCTURED_MUTATION_PRE_DISPATCH_REFUSAL_CODE) {
+    return reconstructStructuredMutationPreDispatchRefusal(payload.message);
+  }
+  return new Error(payload.message);
 }
 
 /**
@@ -336,7 +352,11 @@ export class OxigraphWorkerStore implements TripleStore {
     // this: a spawn only happens in the constructor or within respawn(), which
     // bails the moment a close() is seen.
     this.markSpawnedLive();
-    worker.on('message', (msg: { id: number; result?: unknown; error?: string }) => {
+    worker.on('message', (msg: {
+      id: number;
+      result?: unknown;
+      error?: string | WorkerErrorPayload;
+    }) => {
       if (this.worker !== worker) return;
       // Any successful reply proves this worker is healthy, which ends the
       // crash-loop accounting window (see MAX_CONSECUTIVE_RESPAWNS).
@@ -344,7 +364,7 @@ export class OxigraphWorkerStore implements TripleStore {
       const p = this.pending.get(msg.id);
       if (!p) return;
       this.pending.delete(msg.id);
-      if (msg.error) p.reject(new Error(msg.error));
+      if (msg.error) p.reject(deserializeWorkerError(msg.error));
       else p.resolve(msg.result);
     });
     worker.on('error', (err) => {
@@ -540,6 +560,30 @@ export class OxigraphWorkerStore implements TripleStore {
     return this.postToWorker<T>(timeoutMs, signal, method, args);
   }
 
+  /** Share call()'s lifecycle linearization without allocating a worker message. */
+  private async preflightNoop(method: string): Promise<void> {
+    while (this.respawnPromise) await this.respawnPromise;
+    if (this.lifecycle === 'live' && !this.workerExited) return;
+    throw this.workerUnavailableError(method);
+  }
+
+  private workerUnavailableError(method: string): Error {
+    if (this.lifecycle === 'in_memory_lost') {
+      return new Error(
+        `oxigraph-worker: cannot run "${method}" — the IN-MEMORY store's worker crashed and its data was ` +
+          'lost. An in-memory store cannot be recovered from a worker crash; every request now fails ' +
+          'fast. Use a disk-persisted store (store.path) or restart the node to start from empty.',
+      );
+    }
+    return new Error(
+      `oxigraph-worker: cannot run "${method}" — the store is closed.` +
+        (this.lifecycle === 'gave_up'
+          ? ' (The worker crashed repeatedly and automatic respawn gave up — restart the node and ' +
+            'investigate the [oxigraph-worker] crash logs.)'
+          : ''),
+    );
+  }
+
   private postToWorker<T>(
     timeoutMs: number,
     signal: AbortSignal | undefined,
@@ -558,21 +602,7 @@ export class OxigraphWorkerStore implements TripleStore {
       //   • gave_up — closed + the crash-loop guidance.
       //   • otherwise — a plain operator close.
       if (this.workerExited) {
-        if (this.lifecycle === 'in_memory_lost') {
-          reject(new Error(
-            `oxigraph-worker: cannot run "${method}" — the IN-MEMORY store's worker crashed and its data was ` +
-              'lost. An in-memory store cannot be recovered from a worker crash; every request now fails ' +
-              'fast. Use a disk-persisted store (store.path) or restart the node to start from empty.',
-          ));
-          return;
-        }
-        reject(new Error(
-          `oxigraph-worker: cannot run "${method}" — the store is closed.` +
-            (this.lifecycle === 'gave_up'
-              ? ' (The worker crashed repeatedly and automatic respawn gave up — restart the node and ' +
-                'investigate the [oxigraph-worker] crash logs.)'
-              : ''),
-        ));
+        reject(this.workerUnavailableError(method));
         return;
       }
       if (signal?.aborted) {
@@ -696,10 +726,20 @@ export class OxigraphWorkerStore implements TripleStore {
     // aborting the caller could report failure while the worker later commits.
     _options?: TripleStoreQueryOptions,
   ): Promise<void> {
-    const normalized = normalizeStructuredMutation(mutation);
-    const effects = captureStructuredMutationEffects(normalized);
-    await this.call('structuredMutation', normalized);
-    if (effects) this.writeGen.recordGraphWrites(effects.touchedGraphs);
+    const snapshot = captureStructuredMutationSnapshot(mutation);
+    assertStructuredMutationSnapshotMaterializable(snapshot);
+    if (snapshot.outcome === 'noop') {
+      await this.preflightNoop('structuredMutation');
+      return;
+    }
+    if (snapshot.mutation.kind === 'replace-subject-predicates') {
+      assertQuadLiteralsMutf8Safe(snapshot.mutation.input.replacementQuads, {
+        maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
+        label: 'OxigraphWorkerStore.structuredMutation',
+      });
+    }
+    await this.call('structuredMutation', snapshot.mutation);
+    this.writeGen.recordGraphWrites(snapshot.effects.touchedGraphs);
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);

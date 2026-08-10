@@ -53,6 +53,8 @@ const GATE = Object.freeze({
     ['@origintrail-official/dkg-storage/package.json', true],
     ['@origintrail-official/dkg-storage/dist/internal/managed-oxigraph-ownership-v1.js', false],
     ['@origintrail-official/dkg-storage/dist/store-priority-scheduler.js', false],
+    ['@origintrail-official/dkg-storage/structured-mutation-materialization-internal', false],
+    ['@origintrail-official/dkg-storage/dist/structured-mutation-materialization-internal.js', false],
     ['@origintrail-official/dkg-storage/dist/index.js', false],
   ],
 });

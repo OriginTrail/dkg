@@ -23,9 +23,9 @@ import {
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
 import { ManagedOxigraphBackendUnownedError } from './managed-oxigraph-backend-unowned-error.js';
 import {
-  captureStructuredMutationEffects,
-  normalizeStructuredMutation,
+  captureStructuredMutationSnapshot,
 } from './bounded-structured-mutation.js';
+import { isStructuredMutationPreDispatchRefusal } from './structured-mutation/refusal-internal.js';
 import {
   CACHED_READ_GATE_V1,
   asCachedReadGateV1,
@@ -557,24 +557,26 @@ export class GraphSetIndexStore implements TripleStore {
   }
 
   async structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
-    const normalized = normalizeStructuredMutation(mutation);
-    const effects = captureStructuredMutationEffects(normalized);
+    const snapshot = captureStructuredMutationSnapshot(mutation);
     const operation = this.inner.structuredMutation;
     if (!operation) {
       throw new UnsupportedTripleStoreCapabilityError('structuredMutation', 'GraphSetIndexStore');
     }
     try {
-      await operation.call(this.inner, normalized, options);
+      await operation.call(this.inner, snapshot.mutation, options);
     } catch (error) {
-      if (!isTripleStoreCapabilityRefusal(error, 'structuredMutation')) {
+      if (
+        !isTripleStoreCapabilityRefusal(error, 'structuredMutation') &&
+        !isStructuredMutationPreDispatchRefusal(error)
+      ) {
         this.scheduleFullRefresh('structuredMutation');
       }
       throw error;
     }
-    if (!this.enabled || !effects) return;
+    if (!this.enabled || snapshot.outcome === 'noop') return;
     this.bumpMutation();
     await this.maintainTouchedGraphs(
-      [...effects.touchedGraphs],
+      [...snapshot.effects.touchedGraphs],
       'structuredMutation',
       options,
     );

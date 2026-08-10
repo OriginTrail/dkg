@@ -18,7 +18,7 @@ import {
   UnsupportedTripleStoreCapabilityError,
 } from './unsupported-capability-error.js';
 import {
-  rewriteStructuredMutationQuads,
+  captureStructuredMutationSnapshot,
 } from './bounded-structured-mutation.js';
 
 export const EXTERNAL_LITERAL_REF_DATATYPE = 'http://dkg.io/ontology/externalLiteralRef';
@@ -195,11 +195,19 @@ export class SharedMemoryLiteralBlobStore implements TripleStore {
         'SharedMemoryLiteralBlobStore',
       );
     }
-    const rewritten = await rewriteStructuredMutationQuads(
-      mutation,
-      (quad) => this.externalizeInsertQuad(quad),
+    const snapshot = captureStructuredMutationSnapshot(mutation);
+    if (snapshot.outcome === 'noop' || snapshot.mutation.kind !== 'replace-subject-predicates') {
+      await this.inner.structuredMutation(snapshot.mutation, options);
+      return;
+    }
+    const replacementQuads = await Promise.all(
+      snapshot.mutation.input.replacementQuads.map((quad) => this.externalizeInsertQuad(quad)),
     );
-    await this.inner.structuredMutation(rewritten, options);
+    const rewritten = captureStructuredMutationSnapshot({
+      kind: snapshot.mutation.kind,
+      input: { ...snapshot.mutation.input, replacementQuads },
+    });
+    await this.inner.structuredMutation(rewritten.mutation, options);
   }
 
   async update(sparql: string, options?: UpdateOptions): Promise<void> {

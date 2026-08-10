@@ -24,10 +24,9 @@ import {
 } from './store-chain-capability.js';
 import type { SystemRecordLaneControllerV1 } from './system-record-materializer-v1.js';
 import {
-  captureStructuredMutationEffects,
-  normalizeStructuredMutation,
-  structuredMutationGuardedGraphs,
+  captureStructuredMutationSnapshot,
 } from './bounded-structured-mutation.js';
+import { isStructuredMutationPreDispatchRefusal } from './structured-mutation/refusal-internal.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -458,27 +457,29 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
   }
 
   async structuredMutation(mutation: StructuredMutation, options?: QueryOptions): Promise<void> {
-    const normalized = normalizeStructuredMutation(mutation);
-    const effects = captureStructuredMutationEffects(normalized);
+    const snapshot = captureStructuredMutationSnapshot(mutation);
     const operation = this.inner.structuredMutation;
     if (!operation) {
       throw new UnsupportedTripleStoreCapabilityError('structuredMutation', 'ChangelogStore');
     }
-    if (!this.enabled) return operation.call(this.inner, normalized, options);
-    for (const graph of structuredMutationGuardedGraphs(normalized)) {
+    if (!this.enabled) return operation.call(this.inner, snapshot.mutation, options);
+    for (const graph of snapshot.guardedGraphs) {
       this.assertNotReserved(graph, 'structuredMutation');
     }
     await this.runExclusive(async () => {
       try {
-        await operation.call(this.inner, normalized, options);
+        await operation.call(this.inner, snapshot.mutation, options);
       } catch (error) {
-        if (!isTripleStoreCapabilityRefusal(error, 'structuredMutation')) {
+        if (
+          !isTripleStoreCapabilityRefusal(error, 'structuredMutation') &&
+          !isStructuredMutationPreDispatchRefusal(error)
+        ) {
           this.flagReconcile('structuredMutation(indeterminate-failure)');
         }
         throw error;
       }
-      if (effects) {
-        await this.markPostMutation(effects.touchedGraphs, options);
+      if (snapshot.outcome !== 'noop') {
+        await this.markPostMutation(snapshot.effects.touchedGraphs, options);
       }
     });
   }

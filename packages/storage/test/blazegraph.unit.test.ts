@@ -687,6 +687,17 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     expect(body).toContain('<http://ex.org/job> <http://ex.org/status> "approved"');
   });
 
+  it('structuredMutation sends no request for a valid empty delete', async () => {
+    const s = new BlazegraphStore(baseUrl);
+
+    await s.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: 'http://ex.org/g', subjects: [] },
+    });
+
+    expect(fetchCalls).toHaveLength(0);
+  });
+
   it('structuredMutation rejects oversized replacement literals before fetch', async () => {
     const s = new BlazegraphStore(baseUrl);
     await expect(s.structuredMutation({ kind: 'replace-subject-predicates', input: {

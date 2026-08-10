@@ -22,6 +22,7 @@ import {
   createTripleStore,
   tryReplaceSubjectAtomically,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { contextGraphCatalogUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
@@ -156,13 +157,15 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     const inFlight = new Promise<void>((resolve) => { release = resolve; });
     const options = { source: 'agent.test.structured-mutation-effects' };
     let inner!: TripleStore;
+    let observedMutation: unknown;
     const structuredMutation = vi.fn(function (
       this: TripleStore,
-      _mutation: unknown,
+      receivedMutation: unknown,
       receivedOptions: unknown,
     ) {
       expect(this).toBe(inner);
       expect(receivedOptions).toBe(options);
+      observedMutation = receivedMutation;
       return inFlight;
     });
     inner = { structuredMutation } as unknown as TripleStore;
@@ -193,6 +196,92 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     expect(invalidate).toHaveBeenCalledOnce();
     expect(markProjectionDirty).toHaveBeenCalledOnce();
     expect(markProjectionDirty).toHaveBeenCalledWith(undefined, 'urn:test:target');
+    expect(observedMutation).toEqual({
+      kind: 'copy-subject-projection',
+      input: {
+        sourceGraphUris: ['urn:test:source'],
+        targetGraphUri: 'urn:test:target',
+        roots: ['urn:test:root'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    });
+    expect(Object.isFrozen(observedMutation)).toBe(true);
+  });
+
+  it('forwards every structured mutation kind with exact scoped effects', async () => {
+    const structuredMutation = vi.fn(async () => undefined);
+    const inner = { structuredMutation } as unknown as TripleStore;
+    const invalidate = vi.fn();
+    const markProjectionDirty = vi.fn();
+    const store = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      invalidate,
+      markProjectionDirty,
+    );
+    const options = { source: 'agent.test.all-structured-mutations' };
+    const graph = 'urn:test:agent:graph';
+    const target = 'urn:test:agent:target';
+    const predicate = 'urn:test:agent:predicate';
+    const fixtures: Array<{ mutation: StructuredMutation; touched: string }> = [
+      { mutation: { kind: 'delete-subjects', input: {
+        graphUri: graph, subjects: ['urn:test:agent:subject'],
+      } }, touched: graph },
+      { mutation: { kind: 'prune-ranked-subjects', input: {
+        graphUri: graph,
+        subjectPrefix: 'urn:test:agent:ranked:',
+        eligibilityPredicate: predicate,
+        eligibleObjects: ['approved'],
+        primaryRankPredicate: 'urn:test:agent:rank:primary',
+        secondaryRankPredicate: 'urn:test:agent:rank:secondary',
+        retainNewest: 1,
+        maxDelete: 1,
+      } }, touched: graph },
+      { mutation: { kind: 'prune-linked-record-closures', input: {
+        graphUri: graph,
+        matchObjectIris: ['urn:test:agent:member'],
+        linkPredicates: [predicate],
+        recordParentPredicate: 'urn:test:agent:parent',
+        descendantSeparator: '/',
+      } }, touched: graph },
+      { mutation: { kind: 'replace-subject-predicates', input: {
+        graphUri: graph,
+        subject: 'urn:test:agent:subject',
+        predicates: [predicate],
+        replacementQuads: [{
+          graph,
+          subject: 'urn:test:agent:subject',
+          predicate,
+          object: '"value"',
+        }],
+      } }, touched: graph },
+      { mutation: { kind: 'replace-projection-from-graph', input: {
+        targetGraphUri: target,
+        stagingGraphUri: 'urn:test:agent:staging',
+        targetSubject: 'urn:test:agent:subject',
+        preservedTargetPredicates: [predicate],
+        targetSubjectPrefixes: [],
+      } }, touched: target },
+      { mutation: { kind: 'copy-subject-projection', input: {
+        sourceGraphUris: [graph],
+        targetGraphUri: target,
+        roots: ['urn:test:agent:root'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      } }, touched: target },
+    ];
+
+    for (const [index, fixture] of fixtures.entries()) {
+      await store.structuredMutation!(fixture.mutation, options);
+      expect(structuredMutation.mock.calls[index][1]).toBe(options);
+      expect(Object.isFrozen(structuredMutation.mock.calls[index][0])).toBe(true);
+      expect(markProjectionDirty).toHaveBeenNthCalledWith(
+        index + 1,
+        undefined,
+        fixture.touched,
+      );
+    }
+    expect(invalidate).toHaveBeenCalledTimes(fixtures.length);
   });
 
   it('does not invalidate structured mutation failures or structural no-ops', async () => {
@@ -211,6 +300,8 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       kind: 'delete-subjects',
       input: { graphUri: 'urn:test:target', subjects: [] },
     });
+    expect(inner.structuredMutation).toHaveBeenCalledOnce();
+    expect(Object.isFrozen(inner.structuredMutation.mock.calls[0][0])).toBe(true);
     expect(invalidate).not.toHaveBeenCalled();
     expect(markProjectionDirty).not.toHaveBeenCalled();
 
@@ -221,5 +312,22 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     })).rejects.toThrow('commit failed');
     expect(invalidate).not.toHaveBeenCalled();
     expect(markProjectionDirty).not.toHaveBeenCalled();
+  });
+
+  it('converts synchronous snapshot validation failures into rejected Promises', async () => {
+    const inner = {
+      structuredMutation: vi.fn(async () => undefined),
+    } as unknown as TripleStore;
+    const store = createListContextGraphsCacheInvalidatingStore(inner, vi.fn(), vi.fn());
+    let result!: Promise<void>;
+
+    expect(() => {
+      result = store.structuredMutation!({
+        kind: 'delete-subjects',
+        input: { graphUri: 'relative', subjects: [] },
+      });
+    }).not.toThrow();
+    await expect(result).rejects.toThrow(/absolute IRI/);
+    expect(inner.structuredMutation).not.toHaveBeenCalled();
   });
 });

@@ -117,6 +117,19 @@ describe('managed backend ownership at mutation dispatch', () => {
     await store.close().catch(() => undefined);
   });
 
+  it('completes a valid structured no-op before managed admission and I/O', async () => {
+    const store = await managedStore();
+    ownership.invalidate('port-release-unproven');
+
+    await expect(store.structuredMutation!({
+      kind: 'delete-subjects',
+      input: { graphUri: 'urn:dkg:test:g', subjects: [] },
+    })).resolves.toBeUndefined();
+    expect(requests).toEqual([]);
+
+    await store.close().catch(() => undefined);
+  });
+
   it('refuses a mutation with ZERO I/O after a failed clean-generation start', async () => {
     // The reviewer's second named regression. Here the lease is NOT terminal —
     // the supervisor invalidated with `stop` and will revive — so a check keyed

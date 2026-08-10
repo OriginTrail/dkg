@@ -4,8 +4,14 @@
 // error; a forbidden symbol returning to the barrel turns its suppression
 // into an unused directive (TS2578). The directive token must never begin a
 // wrapped comment line — tsc parses such a comment as a real directive.
-import { ManagedOxigraphBackendUnownedError } from '@origintrail-official/dkg-storage';
+import {
+  ManagedOxigraphBackendUnownedError,
+  captureStructuredMutationSnapshot,
+  type StructuredMutationSnapshot,
+} from '@origintrail-official/dkg-storage';
 import type { ManagedOxigraphSupervisorHandoffV1 } from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
+// @ts-expect-error — final mutation materialization has no supported package subpath
+import { materializeStructuredMutation } from '@origintrail-official/dkg-storage/structured-mutation-materialization-internal';
 // @ts-expect-error — the ownership mint is not on the public barrel
 import { createManagedOxigraphOwnershipControllerV1 } from '@origintrail-official/dkg-storage';
 // Every removed ownership type is pinned individually — runtime namespace
@@ -25,4 +31,10 @@ const witness: [typeof ManagedOxigraphBackendUnownedError, ManagedOxigraphSuperv
   ManagedOxigraphBackendUnownedError,
   null,
 ];
+const snapshotWitness: StructuredMutationSnapshot = captureStructuredMutationSnapshot({
+  kind: 'delete-subjects',
+  input: { graphUri: 'urn:test:pack-gate', subjects: [] },
+});
+void materializeStructuredMutation;
+void snapshotWitness;
 export default witness;

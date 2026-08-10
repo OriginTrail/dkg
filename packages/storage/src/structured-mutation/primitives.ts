@@ -13,6 +13,12 @@ const UTF8 = new TextEncoder();
 
 export class BoundedMutationBudgetError extends Error {}
 
+export function isBoundedMutationBudgetError(
+  error: unknown,
+): error is BoundedMutationBudgetError {
+  return error instanceof BoundedMutationBudgetError;
+}
+
 export function boundedInteger(value: number, label: string, max: number): number {
   if (!Number.isSafeInteger(value) || value < 0 || value > max) {
     throw new Error(`${label} must be an integer in 0..${max}`);
@@ -86,7 +92,7 @@ export function boundedUniqueStrings(
   return result;
 }
 
-export function assertOperandBudget(label: string, values: readonly string[]): void {
+export function assertOperandBudget(label: string, values: Iterable<string>): void {
   let bytes = 0;
   for (const value of values) {
     bytes += UTF8.encode(value).byteLength;
