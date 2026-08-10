@@ -10,6 +10,8 @@ type SyncErrorTag =
   | 'syncValidationRejected'
   | 'syncLocalRequestFailure';
 
+type TaggedSyncThrowable = object;
+
 const syncErrorTagSideChannels: Record<SyncErrorTag, WeakSet<object>> = {
   syncPeerResponded: new WeakSet(),
   syncTransportFailure: new WeakSet(),
@@ -21,7 +23,7 @@ function isTaggableThrowable(error: unknown): error is object {
   return error !== null && (typeof error === 'object' || typeof error === 'function');
 }
 
-function markSyncError(error: unknown, tag: SyncErrorTag): unknown {
+function toTaggedSyncError(error: unknown, tag: SyncErrorTag): TaggedSyncThrowable {
   // JavaScript permits throwing primitives. Normalize only those values so a
   // catch-and-rethrow boundary can carry authoritative classification without
   // changing the identity, class or stack of ordinary Error/object throwables.
@@ -55,16 +57,22 @@ function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
   }
 }
 
-export function markSyncPeerResponded(error: unknown): unknown {
-  return markSyncError(error, 'syncPeerResponded');
+export function toSyncPeerRespondedError<T extends object>(error: T): T;
+export function toSyncPeerRespondedError(error: unknown): TaggedSyncThrowable;
+export function toSyncPeerRespondedError(error: unknown): TaggedSyncThrowable {
+  return toTaggedSyncError(error, 'syncPeerResponded');
 }
 
-export function markSyncTransportFailure(error: unknown): unknown {
-  return markSyncError(error, 'syncTransportFailure');
+export function toSyncTransportFailureError<T extends object>(error: T): T;
+export function toSyncTransportFailureError(error: unknown): TaggedSyncThrowable;
+export function toSyncTransportFailureError(error: unknown): TaggedSyncThrowable {
+  return toTaggedSyncError(error, 'syncTransportFailure');
 }
 
-export function markSyncLocalRequestFailure(error: unknown): unknown {
-  return markSyncError(error, 'syncLocalRequestFailure');
+export function toSyncLocalRequestFailureError<T extends object>(error: T): T;
+export function toSyncLocalRequestFailureError(error: unknown): TaggedSyncThrowable;
+export function toSyncLocalRequestFailureError(error: unknown): TaggedSyncThrowable {
+  return toTaggedSyncError(error, 'syncLocalRequestFailure');
 }
 
 /**
@@ -82,8 +90,10 @@ export function markSyncLocalRequestFailure(error: unknown): unknown {
  * record site untagged is classified by its terminal state, never guessed from
  * text: the deadline/cancel/reset surfaces are indistinguishable by message.
  */
-export function markSyncValidationRejection(error: unknown): unknown {
-  return markSyncError(error, 'syncValidationRejected');
+export function toSyncValidationRejectionError<T extends object>(error: T): T;
+export function toSyncValidationRejectionError(error: unknown): TaggedSyncThrowable;
+export function toSyncValidationRejectionError(error: unknown): TaggedSyncThrowable {
+  return toTaggedSyncError(error, 'syncValidationRejected');
 }
 
 export function isSyncValidationRejection(error: unknown): boolean {

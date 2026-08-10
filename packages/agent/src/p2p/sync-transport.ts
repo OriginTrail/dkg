@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
-  markSyncLocalRequestFailure,
-  markSyncTransportFailure,
-  markSyncValidationRejection,
+  toSyncLocalRequestFailureError,
+  toSyncTransportFailureError,
+  toSyncValidationRejectionError,
   isSyncValidationRejection,
 } from '../sync/error-tags.js';
 import {
@@ -161,7 +161,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           // A request factory may perform chain reads and signing. Preserve
           // that local boundary so a generic timeout message cannot later be
           // mistaken for an untagged libp2p/router interruption.
-          throw markSyncLocalRequestFailure(error);
+          throw toSyncLocalRequestFailureError(error);
         }
         throwIfAborted(params.signal);
         const messageId = randomUUID();
@@ -184,7 +184,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           // is the same class as 'pool closed'. The caller's own signal is the
           // only non-textual evidence of caller cancellation that exists.
           outcome = params.signal?.aborted === true ? 'cancelled' : 'transport_error';
-          throw markSyncTransportFailure(error);
+          throw toSyncTransportFailureError(error);
         }
         responded = true;
         responseByteLength = responseBytes.byteLength;
@@ -197,7 +197,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           // Preserve object identity; primitive throws are normalized once
           // with the same message/cause so downstream classification can carry
           // the response boundary without weakening backoff accounting.
-          throw markSyncValidationRejection(error);
+          throw toSyncValidationRejectionError(error);
         }
         throwIfAborted(params.signal);
         outcome = 'response';

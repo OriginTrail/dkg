@@ -9,7 +9,7 @@ import {
   isSyncBackoffWorthyError,
   isSyncTransportFailure,
   isSyncValidationRejection,
-  markSyncPeerResponded,
+  toSyncPeerRespondedError,
 } from '../error-tags.js';
 import { syncPlaneFor } from '../attempt-telemetry.js';
 import { appendInPlace } from '../append-in-place.js';
@@ -691,7 +691,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           nextBytesReceived,
           maxAcceptedBytes,
         );
-        throw markSyncPeerResponded(error);
+        throw toSyncPeerRespondedError(error);
       }
 
       let parsed: { quads: Quad[]; totalQuads: number };
@@ -743,7 +743,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         }
         acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
       } catch (error) {
-        throw markSyncPeerResponded(error);
+        throw toSyncPeerRespondedError(error);
       }
 
       const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;
