@@ -1,5 +1,11 @@
 export * from './chain-adapter.js';
 export {
+  resolvePublicFinalizedMaterializationAuthority,
+  type PublicFinalizedMaterializationAuthorityRequest,
+  type PublicFinalizedMaterializationAuthorityResult,
+  type PublicFinalizedMaterializationAuthorityUnavailableReason,
+} from './public-finalized-materialization-authority.js';
+export {
   CONTROL_EIP1271_ATTEMPT_TIMEOUT_MS_V1,
   CONTROL_EIP1271_CALL_FROM_V1,
   CONTROL_EIP1271_ENDPOINT_ATTEMPT_POLICY_V1,
