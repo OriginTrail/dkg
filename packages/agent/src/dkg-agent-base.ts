@@ -364,6 +364,7 @@ import {
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
   type VmReconcileNegativeRecord,
+  type SelectedVmReconcileCursorRecord,
   type VmReconcileRotationRecord,
   type ContextGraphMemberPrincipalType,
   type ContextGraphMemberStatus,
@@ -1023,6 +1024,19 @@ export class DKGAgentBase {
   protected vmReconcileSweepInFlight: Promise<void> | null = null;
   /** Phase B — in-memory reconcile cursor per local CG id (watermark + `ahead`). */
   protected readonly reconcileCursors = new Map<string, CursorState>();
+  /**
+   * RFC-64 selected-only VM progress is separate from membership subscriptions.
+   * Each entry is fenced by the exact chain deployment, numeric chain binding,
+   * and a monotonically increasing process-local generation; its watermark is
+   * persisted in a dedicated non-subscription record when the configured store
+   * supports it.
+   */
+  protected readonly selectedVmReconcileCursors = new Map<string, {
+    record: SelectedVmReconcileCursorRecord;
+    cursor: CursorState;
+    bindingGeneration: number;
+  }>();
+  protected selectedVmReconcileBindingGeneration = 0;
   /** Phase B — bounded dedupe of recently-reconciled UALs (live-burst guard). */
   protected readonly recentReconciledUals = new RecentUalSet();
   /**

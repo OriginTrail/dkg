@@ -17,7 +17,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 31;
+const SCHEMA_VERSION = 32;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -1211,6 +1211,21 @@ export class DashboardDB {
         );
       `);
     }
+    if (version < 32) {
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS selected_vm_reconcile_cursors (
+          deployment_id TEXT NOT NULL CHECK (length(trim(deployment_id)) > 0),
+          context_graph_id TEXT NOT NULL,
+          on_chain_context_graph_id TEXT NOT NULL,
+          name_hash TEXT NOT NULL,
+          watermark INTEGER NOT NULL CHECK (watermark >= 0),
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY (deployment_id, context_graph_id, on_chain_context_graph_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_selected_vm_reconcile_cursor_cg
+          ON selected_vm_reconcile_cursors(deployment_id, context_graph_id);
+      `);
+    }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
       this.retentionDays = LEGACY_IMPLICIT_RETENTION_DAYS;
@@ -1945,6 +1960,39 @@ export class DashboardDB {
       'deleteVmReconcileNegativesForContextGraph',
       'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
     ).run(contextGraphId);
+  }
+
+  upsertSelectedVmReconcileCursor(record: SelectedVmReconcileCursorRow): void {
+    this.stmt('upsertSelectedVmReconcileCursor', `
+      INSERT INTO selected_vm_reconcile_cursors (
+        deployment_id, context_graph_id, on_chain_context_graph_id,
+        name_hash, watermark, updated_at
+      ) VALUES (
+        @deployment_id, @context_graph_id, @on_chain_context_graph_id,
+        @name_hash, @watermark, @updated_at
+      )
+      ON CONFLICT(deployment_id, context_graph_id, on_chain_context_graph_id) DO UPDATE SET
+        name_hash = excluded.name_hash,
+        watermark = excluded.watermark,
+        updated_at = excluded.updated_at
+    `).run(record);
+  }
+
+  getSelectedVmReconcileCursor(
+    deploymentId: string,
+    contextGraphId: string,
+    onChainContextGraphId: string,
+  ): SelectedVmReconcileCursorRow | undefined {
+    return this.stmt('getSelectedVmReconcileCursor', `
+      SELECT * FROM selected_vm_reconcile_cursors
+      WHERE deployment_id = ?
+        AND context_graph_id = ?
+        AND on_chain_context_graph_id = ?
+    `).get(
+      deploymentId,
+      contextGraphId,
+      onChainContextGraphId,
+    ) as SelectedVmReconcileCursorRow | undefined;
   }
 
   // --- Phase F: chain-driven VM reconciliation telemetry ---
@@ -4191,6 +4239,15 @@ export interface VmReconcileNegativeRow {
   swm_gen: string;
   candidate_namespaces: string;
   peer_topology_key: string;
+  updated_at: number;
+}
+
+export interface SelectedVmReconcileCursorRow {
+  deployment_id: string;
+  context_graph_id: string;
+  on_chain_context_graph_id: string;
+  name_hash: string;
+  watermark: number;
   updated_at: number;
 }
 

@@ -226,6 +226,17 @@ export function resolveBooleanSwitch(
   return parseBooleanEnv(envName) ?? configValue ?? defaultValue;
 }
 
+/** Effective VM/SWM background reconciler activation. Kept as one public
+ * resolver so runtime gates and operator-facing status cannot disagree about
+ * config/default/environment precedence. */
+export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
+  return resolveBooleanSwitch(
+    configValue,
+    'DKG_SYNC_RECONCILER_ENABLED',
+    true,
+  );
+}
+
 function parseIntegerEnv(name: string): number | undefined {
   const raw = process.env[name]?.trim();
   if (!raw) return undefined;

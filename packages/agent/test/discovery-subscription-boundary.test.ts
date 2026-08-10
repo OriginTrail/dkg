@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { ethers } from 'ethers';
 import {
   encodePublishRequest,
   contextGraphDataGraphUri,
@@ -18,6 +19,163 @@ import {
 } from '../src/index.js';
 
 describe('Context Graph discovery/subscription boundary', () => {
+  it('rejects null instead of silently enabling persisted subscription rehydration', async () => {
+    await expect(DKGAgent.create({
+      name: 'RehydrationNull',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionRehydrationEnabled: null as any,
+    })).rejects.toThrow(
+      'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
+    );
+  });
+
+  it.each([
+    ['default', undefined],
+    ['explicitly enabled', true],
+  ] as const)('keeps persisted subscription rehydration %s', async (_label, enabled) => {
+    const id = `rehydration-${_label.replace(/\s+/g, '-')}`;
+    const record: ContextGraphSubscriptionRecord = {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    };
+    const persisted = new Map([[id, { ...record }]]);
+    const agent = await DKGAgent.create({
+      name: `Rehydration${_label}`,
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      ...(enabled === undefined
+        ? {}
+        : { contextGraphSubscriptionRehydrationEnabled: enabled }),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (next) => { persisted.set(next.id, { ...next }); },
+        delete: async (contextGraphId) => { persisted.delete(contextGraphId); },
+      },
+    });
+
+    try {
+      await agent.start();
+      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
+        subscribed: true,
+        synced: true,
+      });
+      expect((agent as any).config.syncContextGraphs ?? []).toContain(id);
+      expect((agent as any).gossipRegistered.has(id)).toBe(true);
+      expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+        rehydrationEnabled: true,
+        persistedTotal: 1,
+        activated: 1,
+        dormant: 0,
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('leaves durable subscriptions dormant and stored content queryable when rehydration is disabled', async () => {
+    const subscribedId = 'rehydration-disabled-subscriber';
+    const hostedId = 'rehydration-disabled-host';
+    const graph = contextGraphDataGraphUri(subscribedId);
+    const persisted = new Map<string, ContextGraphSubscriptionRecord>([
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, {
+        id: SYSTEM_CONTEXT_GRAPHS.AGENTS,
+        subscribed: true,
+        synced: true,
+        syncScoped: true,
+      }],
+      [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, {
+        id: SYSTEM_CONTEXT_GRAPHS.ONTOLOGY,
+        subscribed: true,
+        synced: true,
+        syncScoped: true,
+      }],
+      [subscribedId, {
+        id: subscribedId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+      }],
+      [hostedId, {
+        id: hostedId,
+        subscribed: false,
+        synced: true,
+        coreHosted: true,
+        syncScoped: true,
+      }],
+    ]);
+    const durableBefore = new Map(
+      [...persisted.entries()].map(([id, record]) => [id, { ...record }]),
+    );
+    const deleted: string[] = [];
+    const agent = await DKGAgent.create({
+      name: 'RehydrationDisabled',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionRehydrationEnabled: false,
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...persisted.values()],
+        save: async (record) => { persisted.set(record.id, { ...record }); },
+        delete: async (contextGraphId) => {
+          deleted.push(contextGraphId);
+          persisted.delete(contextGraphId);
+        },
+      },
+    });
+
+    await agent.store.insert([{
+      subject: 'urn:dkg:retained-subject',
+      predicate: 'urn:dkg:retained-predicate',
+      object: '"retained"',
+      graph,
+    }]);
+
+    try {
+      await agent.start();
+      for (const id of [subscribedId, hostedId]) {
+        expect(agent.getSubscribedContextGraphs().has(id)).toBe(false);
+        expect((agent as any).config.syncContextGraphs ?? []).not.toContain(id);
+        expect((agent as any).gossipRegistered.has(id)).toBe(false);
+        expect(persisted.get(id)).toEqual(durableBefore.get(id));
+      }
+      for (const systemId of [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]) {
+        expect(agent.getSubscribedContextGraphs().get(systemId)?.subscribed).toBe(true);
+        expect((agent as any).gossipRegistered.has(systemId)).toBe(true);
+      }
+      expect(deleted).not.toContain(subscribedId);
+      expect(deleted).not.toContain(hostedId);
+      expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+        rehydrationEnabled: false,
+        persistedTotal: 2,
+        systemExcluded: 2,
+        hostedActivated: 0,
+        activated: 0,
+        dormant: 2,
+        dormantIds: [hostedId, subscribedId],
+      });
+      expect(await agent.query(`
+        ASK WHERE {
+          GRAPH <${graph}> {
+            <urn:dkg:retained-subject> <urn:dkg:retained-predicate> "retained" .
+          }
+        }
+      `, { contextGraphId: subscribedId })).toEqual({
+        bindings: [{ result: 'true' }],
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
   it('keeps discovery passive, activates explicit intent, and rehydrates only the explicit subscription', async () => {
     expect([...Object.values(SYSTEM_CONTEXT_GRAPHS)].sort()).toEqual(['agents', 'ontology']);
     expect(AGENT_REGISTRY_CONTEXT_GRAPH).toBe(SYSTEM_CONTEXT_GRAPHS.AGENTS);
@@ -370,6 +528,139 @@ describe('Context Graph discovery/subscription boundary', () => {
       expect((agent as any).gossipRegistered.has('chain-discovery-only')).toBe(false);
       expect(persisted.has('chain-discovery-only')).toBe(false);
       expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('reverse-resolves the real NameRegistry bytes32 shape before persisting a numeric binding', async () => {
+    const localId = 'chain-discovery-real-registry-shape';
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
+    const numericOnChainId = 202n;
+    const chain = new MockChainAdapter();
+    (chain as any).listContextGraphsFromChain = async () => ([{
+      // This is the production EVM adapter shape: the legacy field is the
+      // NameRegistry bytes32 key, not the ContextGraphStorage slot.
+      contextGraphId: nameHash,
+      name: localId,
+      creator: '0x1111111111111111111111111111111111111111',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    }] satisfies ContextGraphOnChain[]);
+    const resolvedHashes: string[] = [];
+    (chain as any).resolveContextGraphIdByNameHash = async (candidate: string) => {
+      resolvedHashes.push(candidate);
+      return candidate === nameHash ? numericOnChainId : null;
+    };
+    const agent = await DKGAgent.create({
+      name: 'RealShapeChainDiscovery',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+      nodeRole: 'edge',
+    });
+
+    try {
+      await agent.start();
+      expect(await agent.discoverContextGraphsFromChain()).toBe(1);
+      expect(resolvedHashes).toEqual([nameHash]);
+      expect(agent.getSubscribedContextGraphs().get(localId)).toMatchObject({
+        subscribed: false,
+        onChainId: numericOnChainId.toString(),
+        onChainHash: nameHash,
+      });
+
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const contextGraphUri = contextGraphDataGraphUri(localId);
+      const numericBinding = await agent.store.query(`
+        ASK WHERE {
+          GRAPH <${ontologyGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${numericOnChainId}" .
+          }
+        }
+      `);
+      const hashBinding = await agent.store.query(`
+        ASK WHERE {
+          GRAPH <${ontologyGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> "${nameHash}" .
+          }
+        }
+      `);
+      expect(numericBinding).toEqual({ type: 'boolean', value: true });
+      expect(hashBinding).toEqual({ type: 'boolean', value: false });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('fails closed before RDF or subscription mutation when a NameRegistry hash has no numeric binding', async () => {
+    const localId = 'chain-discovery-unbound-registry-name';
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes(localId)).toLowerCase();
+    const chain = new MockChainAdapter();
+    (chain as any).listContextGraphsFromChain = async () => ([{
+      contextGraphId: nameHash,
+      name: localId,
+      creator: '0x1111111111111111111111111111111111111111',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    }] satisfies ContextGraphOnChain[]);
+    (chain as any).resolveContextGraphIdByNameHash = async () => null;
+    const agent = await DKGAgent.create({
+      name: 'UnboundRealShapeChainDiscovery',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+      nodeRole: 'edge',
+    });
+
+    try {
+      await agent.start();
+      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      expect(agent.getSubscribedContextGraphs().has(localId)).toBe(false);
+      const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
+      const contextGraphUri = contextGraphDataGraphUri(localId);
+      const anyBinding = await agent.store.query(`
+        ASK WHERE {
+          GRAPH <${ontologyGraph}> {
+            <${contextGraphUri}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId> ?id .
+          }
+        }
+      `);
+      expect(anyBinding).toEqual({ type: 'boolean', value: false });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  }, 30_000);
+
+  it('rejects revealed metadata whose cleartext does not commit to the registry name hash', async () => {
+    const localId = 'chain-discovery-mismatched-reveal';
+    const nameHash = ethers.keccak256(ethers.toUtf8Bytes('different-name')).toLowerCase();
+    const chain = new MockChainAdapter();
+    (chain as any).listContextGraphsFromChain = async () => ([{
+      contextGraphId: nameHash,
+      name: localId,
+      creator: '0x1111111111111111111111111111111111111111',
+      accessPolicy: 0,
+      blockNumber: 100,
+      metadataRevealed: true,
+    }] satisfies ContextGraphOnChain[]);
+    let resolverCalls = 0;
+    (chain as any).resolveContextGraphIdByNameHash = async () => {
+      resolverCalls += 1;
+      return 203n;
+    };
+    const agent = await DKGAgent.create({
+      name: 'MismatchedRevealChainDiscovery',
+      listenHost: '127.0.0.1',
+      chainAdapter: chain,
+      nodeRole: 'edge',
+    });
+
+    try {
+      await agent.start();
+      expect(await agent.discoverContextGraphsFromChain()).toBe(0);
+      expect(resolverCalls).toBe(0);
+      expect(agent.getSubscribedContextGraphs().has(localId)).toBe(false);
     } finally {
       await agent.stop().catch(() => {});
     }

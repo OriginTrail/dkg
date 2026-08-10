@@ -43,10 +43,10 @@ describe('V12 migration', () => {
     // the V11 `idx_chat_msgid` partial unique index now that
     // receiver-side dedup is owned by the substrate's
     // `message_idempotency` table. Both bumps are tested at the
-    // DB layer in `db.test.ts`; this assertion just pins that
-    // the substrate store fixtures are created against the
-    // Current SCHEMA_VERSION includes the durable VM-reconcile negative cache.
-    expect(db.db.pragma('user_version', { simple: true })).toBe(31);
+    // DB layer in `db.test.ts`; this assertion just pins the
+    // substrate store fixtures to the current schema. V33 adds
+    // deployment-scoped selected VM-reconcile cursors.
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
   });
 });
 
