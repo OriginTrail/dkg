@@ -1244,6 +1244,38 @@ describe('DashboardDB — durable VM reconcile negative cache', () => {
 });
 
 describe('DashboardDB — selected-only VM reconcile cursors', () => {
+  it('creates the deployment-scoped cursor table when upgrading an existing V31 database', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    db.setRetentionDays(42);
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec('DROP TABLE selected_vm_reconcile_cursors;');
+    raw.pragma('user_version = 31');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.getRetentionDays()).toBe(42);
+
+    db.upsertSelectedVmReconcileCursor({
+      deployment_id: 'evm:84532:hub=0xupgrade',
+      context_graph_id: 'selected-upgrade',
+      on_chain_context_graph_id: '298',
+      name_hash: `0x${'22'.repeat(32)}`,
+      watermark: 9,
+      updated_at: 400,
+    });
+    expect(db.getSelectedVmReconcileCursor(
+      'evm:84532:hub=0xupgrade',
+      'selected-upgrade',
+      '298',
+    )).toMatchObject({
+      watermark: 9,
+      updated_at: 400,
+    });
+  });
+
   it('keeps progress independent per deployment, local CG, and numeric chain binding across reopen', () => {
     db.upsertSelectedVmReconcileCursor({
       deployment_id: 'evm:84532:hub=0xaaa',
