@@ -19,6 +19,18 @@ import {
 } from '../src/index.js';
 
 describe('Context Graph discovery/subscription boundary', () => {
+  it('rejects null instead of silently enabling persisted subscription rehydration', async () => {
+    await expect(DKGAgent.create({
+      name: 'RehydrationNull',
+      listenHost: '127.0.0.1',
+      nodeRole: 'edge',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionRehydrationEnabled: null as any,
+    })).rejects.toThrow(
+      'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',
+    );
+  });
+
   it.each([
     ['default', undefined],
     ['explicitly enabled', true],
