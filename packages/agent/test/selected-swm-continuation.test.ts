@@ -437,6 +437,8 @@ interface SelectedSwmLifecycleAgentFixture {
   contextGraphMetaProjection: { markDirtyFromQuads: () => void };
   oversizeTombstoneLog: { record: () => void };
   log: { info: () => void; warn: () => void; debug: () => void };
+  syncSharedMemoryFromPeerDetailedExecution:
+    typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }
 
 interface SelectedSwmLifecycleHarness {
@@ -699,6 +701,8 @@ function createSelectedSwmLifecycleHarness(
     contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
     oversizeTombstoneLog: { record: () => {} },
     log: { info: () => {}, warn: () => {}, debug: () => {} },
+    syncSharedMemoryFromPeerDetailedExecution:
+      LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     getSelectedSwmMetaTransfers: () => {
       selectedSwmMetaTransfers ??= new SelectedSwmMetaTransferCoordinator();
       return selectedSwmMetaTransfers;
@@ -710,9 +714,6 @@ function createSelectedSwmLifecycleHarness(
       if (selectedSwmMetaTransfers === transfers) selectedSwmMetaTransfers = undefined;
     },
   };
-  (agent as any).syncSharedMemoryFromPeerDetailedExecution =
-    LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
-
   return {
     agent,
     probes: {

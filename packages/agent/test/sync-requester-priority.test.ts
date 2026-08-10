@@ -282,6 +282,8 @@ describe('requester per-CG priority admission', () => {
         warn: (_ctx: unknown, message: string) => warnings.push(message),
         debug: noop,
       },
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
 
     const summary = await (
@@ -320,6 +322,8 @@ describe('requester per-CG priority admission', () => {
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
 
     const summary = await (
