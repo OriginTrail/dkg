@@ -34,6 +34,7 @@ import {
 } from './requester-transfer-v1-internal.js';
 import {
   createSystemRecordExactRequestV1,
+  normalizeSystemRecordExactLookupV1,
 } from './requester-wire-v1-internal.js';
 import { raceSystemRecordAbortV1 } from './resource-admission-v1-internal.js';
 
@@ -89,7 +90,7 @@ type FetchPhaseV1 = PendingFetchPhaseV1 | RetainedFetchPhaseV1 | SettledFetchPha
 
 interface FetchEntryV1 {
   readonly key: string;
-  readonly participantCount: number;
+  readonly pendingParticipantCount: number;
   readonly pendingAborted: boolean;
   subscribe(signal: AbortSignal): Promise<SystemRecordExactFetchResultV1>;
   abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void;
@@ -199,8 +200,8 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
     this.#phase = { state: 'pending', controller, transfer };
   }
 
-  get participantCount(): number {
-    return this.#observerCount + this.#leaseCount;
+  get pendingParticipantCount(): number {
+    return this.#phase.state === 'pending' ? this.#observerCount : 0;
   }
 
   get pendingAborted(): boolean {
@@ -285,6 +286,9 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
   ): SystemRecordExactFetchResultV1 {
     if (this.#phase.state !== 'retained' || this.#phase.source !== source) {
       throw new Error('System Record lease source is not retained by its entry');
+    }
+    if (this.#leaseCount >= SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS + 1) {
+      return Object.freeze({ outcome: 'capacity', wireBytes: source.wireBytes });
     }
     const payloadBytes = source.artifact.canonicalBytes.byteLength;
     const reservation = this.#byteAdmission.tryReserve(payloadBytes);
@@ -388,17 +392,17 @@ export function createSystemRecordRequesterV1(
   ): Promise<SystemRecordExactFetchResultV1> {
     signal.throwIfAborted();
     if (registry.closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
-    const exact = createSystemRecordExactRequestV1(networkId, lookup, requestId());
+    const normalized = normalizeSystemRecordExactLookupV1(networkId, lookup);
     signal.throwIfAborted();
     if (registry.closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
-    const { key, request, requestFrame } = exact;
+    const { key } = normalized;
     let entry = registry.get(key);
     if (entry !== undefined) {
       if (entry.pendingAborted) {
         return Object.freeze({ outcome: 'busy', wireBytes: 0 });
       }
       // The first observer owns the transfer; the frozen limit counts followers.
-      if (entry.participantCount >= maxWaitersPerDigest + 1) {
+      if (entry.pendingParticipantCount >= maxWaitersPerDigest + 1) {
         return Object.freeze({ outcome: 'waiter-limit', wireBytes: 0 });
       }
       joined += 1;
@@ -407,6 +411,12 @@ export function createSystemRecordRequesterV1(
     if (registry.size >= maxTrackedDigests) {
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
+    const { request, requestFrame } = createSystemRecordExactRequestV1(
+      normalized,
+      requestId(),
+    );
+    signal.throwIfAborted();
+    if (registry.closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
     const admission = admitLeader(signal);
     if (admission.state !== 'admitted') {
       return Object.freeze({ outcome: admission.state, wireBytes: 0 });

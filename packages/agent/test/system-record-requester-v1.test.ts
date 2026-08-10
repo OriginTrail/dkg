@@ -1,5 +1,6 @@
 import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
+  SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
   SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH,
@@ -707,7 +708,8 @@ describe('system-record requester V1', () => {
       return successResponse(request, PAYLOAD, DIGEST);
     });
     const openExchange = vi.fn(async () => exchange.value);
-    const requester = createRequester({ maxWaitersPerDigest: 1, openExchange });
+    const requestId = vi.fn(() => '1'.repeat(32));
+    const requester = createRequester({ maxWaitersPerDigest: 1, openExchange, requestId });
     const signal = new AbortController().signal;
     const leader = requester.fetch(LOOKUP, signal);
     await exchange.requestWritten.promise;
@@ -722,6 +724,49 @@ describe('system-record requester V1', () => {
       if (result.outcome === 'ok') result.lease.release();
     }
     expect(openExchange).toHaveBeenCalledTimes(1);
+    expect(requestId).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not apply the pending follower cap to late retained leases', async () => {
+    const requester = createRequester({ maxWaitersPerDigest: 1 });
+    const signal = new AbortController().signal;
+    const leases = [];
+
+    for (let index = 0; index < 4; index += 1) {
+      const result = await requester.fetch(LOOKUP, signal);
+      expect(result.outcome).toBe('ok');
+      if (result.outcome === 'ok') leases.push(result.lease);
+    }
+
+    expect(requester.stats()).toMatchObject({
+      started: 1,
+      joined: 3,
+      waitingCallers: 0,
+      activeLeases: 4,
+    });
+    for (const lease of leases) lease.release();
+    expect(requester.stats()).toMatchObject({ activeLeases: 0, trackedDigests: 0 });
+  });
+
+  it('bounds retained leases independently of the pending follower policy', async () => {
+    const requester = createRequester({ maxWaitersPerDigest: 1 });
+    const signal = new AbortController().signal;
+    const leases = [];
+    const leaseLimit = SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS + 1;
+
+    for (let index = 0; index < leaseLimit; index += 1) {
+      const result = await requester.fetch(LOOKUP, signal);
+      expect(result.outcome).toBe('ok');
+      if (result.outcome === 'ok') leases.push(result.lease);
+    }
+    await expect(requester.fetch(LOOKUP, signal)).resolves.toMatchObject({
+      outcome: 'capacity',
+      wireBytes: expect.any(Number),
+    });
+    expect(requester.stats()).toMatchObject({ activeLeases: leaseLimit });
+
+    for (const lease of leases) lease.release();
+    expect(requester.stats()).toMatchObject({ activeLeases: 0, trackedDigests: 0 });
   });
 
   it('counts retained successful entries against the tracked digest cap', async () => {
@@ -921,16 +966,32 @@ describe('system-record requester V1', () => {
     expect(stream.active()).toBe(false);
 
     const slow = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
-    const timed = createRequester({ timeoutMs: 5, openExchange: async () => slow.value });
+    const timedBytes = byteAdmission();
+    const timedStream = permitAdmission();
+    const timed = createRequester({
+      bytes: timedBytes,
+      stream: timedStream,
+      timeoutMs: 5,
+      openExchange: async () => slow.value,
+    });
     await expect(timed.fetch(
       LOOKUP,
       new AbortController().signal,
     )).resolves.toMatchObject({ outcome: 'deadline', wireBytes: expect.any(Number) });
     expect(slow.reset).toHaveBeenCalledWith('deadline');
     expect(timed.stats()).toMatchObject({ trackedDigests: 0, activeStream: 0 });
+    expect(timedStream.active()).toBe(false);
+    expect(timedBytes.reservations).toHaveLength(1);
+    expect(timedBytes.reservations[0]?.released).toBe(true);
 
     const blocked = fixtureExchange(async () => new Promise<Uint8Array>(() => {}));
-    const closing = createRequester({ openExchange: async () => blocked.value });
+    const closingBytes = byteAdmission();
+    const closingStream = permitAdmission();
+    const closing = createRequester({
+      bytes: closingBytes,
+      stream: closingStream,
+      openExchange: async () => blocked.value,
+    });
     const result = closing.fetch(
       LOOKUP,
       new AbortController().signal,
@@ -940,6 +1001,9 @@ describe('system-record requester V1', () => {
     await expect(result).resolves.toMatchObject({ outcome: 'closed', wireBytes: expect.any(Number) });
     expect(blocked.reset).toHaveBeenCalledWith('closed');
     expect(closing.stats()).toMatchObject({ closed: true, trackedDigests: 0, activeStream: 0 });
+    expect(closingStream.active()).toBe(false);
+    expect(closingBytes.reservations).toHaveLength(1);
+    expect(closingBytes.reservations[0]?.released).toBe(true);
     await expect(closing.fetch(
       LOOKUP,
       new AbortController().signal,
@@ -1217,6 +1281,7 @@ function createRequester(overrides: {
   decode?: ReturnType<typeof permitAdmission>;
   openExchange?: CreateSystemRecordRequesterOptionsV1['openExchange'];
   timeoutMs?: number;
+  requestId?: CreateSystemRecordRequesterOptionsV1['requestId'];
   maxWaitersPerDigest?: number;
   maxTrackedDigests?: number;
 } = {}) {
@@ -1228,7 +1293,7 @@ function createRequester(overrides: {
     byteAdmission: overrides.bytes ?? byteAdmission(),
     streamAdmission: stream.value,
     decodeAdmission: decode.value,
-    requestId: () => '1'.repeat(32),
+    requestId: overrides.requestId ?? (() => '1'.repeat(32)),
     ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
     ...(overrides.maxWaitersPerDigest === undefined
       && overrides.maxTrackedDigests === undefined

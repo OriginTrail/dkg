@@ -7,7 +7,10 @@ import {
 import { describe, expect, it } from 'vitest';
 
 import type { SystemRecordExactArtifactLookupV1 } from '../src/system-records/requester-api-v1.js';
-import { createSystemRecordExactRequestV1 } from '../src/system-records/requester-wire-v1-internal.js';
+import {
+  createSystemRecordExactRequestV1,
+  normalizeSystemRecordExactLookupV1,
+} from '../src/system-records/requester-wire-v1-internal.js';
 
 const NETWORK = 'base:84532' as const;
 const REQUEST_ID = '1'.repeat(32);
@@ -76,19 +79,20 @@ describe('system-record exact requester wire mapping V1', () => {
 
   it('snapshots and freezes mutable inventory paths before asynchronous transfer', () => {
     const path = [1, 7];
-    const { key, request } = createSystemRecordExactRequestV1(NETWORK, {
+    const normalized = normalizeSystemRecordExactLookupV1(NETWORK, {
       type: 'inventory-object',
       rootDescriptorDigest: DIGEST_A,
       path,
       objectKind: 'inventory-leaf',
       objectDigest: DIGEST_B,
-    }, REQUEST_ID);
+    });
+    const { request } = createSystemRecordExactRequestV1(normalized, REQUEST_ID);
     path[0] = 0;
 
     expect(request.operation).toBe('get-inventory-object');
     if (request.operation !== 'get-inventory-object') return;
     expect(request.path).toEqual([1, 7]);
-    expect(key).toBe(JSON.stringify([
+    expect(normalized.key).toBe(JSON.stringify([
       'inventory-object',
       DIGEST_A,
       [1, 7],
@@ -106,16 +110,16 @@ describe('system-record exact requester wire mapping V1', () => {
       objectDigest: DIGEST_A,
     } as unknown as SystemRecordExactArtifactLookupV1;
 
-    expect(() => createSystemRecordExactRequestV1(
+    expect(() => normalizeSystemRecordExactLookupV1(
       NETWORK,
       invalid,
-      REQUEST_ID,
     )).toThrow('exact request object kind is invalid');
   });
 });
 
 function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {
-  const mapped = createSystemRecordExactRequestV1(NETWORK, lookup, REQUEST_ID);
+  const normalized = normalizeSystemRecordExactLookupV1(NETWORK, lookup);
+  const mapped = createSystemRecordExactRequestV1(normalized, REQUEST_ID);
   const request = decodeSystemRecordRequestFrameV1(mapped.requestFrame);
   expect(request).toMatchObject({
     wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
@@ -125,7 +129,7 @@ function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {
     payloadBytes: '0',
   });
   return Object.freeze({
-    key: mapped.key,
+    key: normalized.key,
     request,
   });
 }

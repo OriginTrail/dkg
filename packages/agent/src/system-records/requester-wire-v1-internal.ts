@@ -56,42 +56,53 @@ const SYSTEM_RECORD_EXACT_OPERATION_BY_OBJECT_KIND_V1 = Object.freeze({
 export interface SystemRecordExactRequestV1 {
   readonly request: SystemRecordExactRequestHeaderV1;
   readonly requestFrame: Uint8Array;
+}
+
+export interface NormalizedSystemRecordExactLookupV1 {
+  readonly networkId: NetworkIdV1;
+  readonly lookup: SystemRecordExactArtifactLookupV1;
   readonly key: string;
 }
 
-export function createSystemRecordExactRequestV1(
+export function normalizeSystemRecordExactLookupV1(
   networkId: NetworkIdV1,
   lookup: SystemRecordExactArtifactLookupV1,
-  requestId: string,
-): SystemRecordExactRequestV1 {
+): NormalizedSystemRecordExactLookupV1 {
   assertNetworkIdV1(networkId);
   const normalized = snapshotSystemRecordExactLookupV1(lookup);
+  return Object.freeze({
+    networkId,
+    lookup: normalized,
+    key: systemRecordExactLookupKeyV1(normalized),
+  });
+}
+
+export function createSystemRecordExactRequestV1(
+  normalized: NormalizedSystemRecordExactLookupV1,
+  requestId: string,
+): SystemRecordExactRequestV1 {
   const common = {
     wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
     requestId,
     kind: SYSTEM_RECORD_KIND_V1,
-    networkId,
+    networkId: normalized.networkId,
     payloadBytes: '0' as const,
   };
   let request: SystemRecordExactRequestHeaderV1;
-  if (normalized.type === 'inventory-object') {
+  if (normalized.lookup.type === 'inventory-object') {
     request = Object.freeze({
       ...common,
       operation: 'get-inventory-object',
-      rootDescriptorDigest: normalized.rootDescriptorDigest,
-      path: normalized.path,
-      objectKind: normalized.objectKind,
-      objectDigest: normalized.objectDigest,
+      rootDescriptorDigest: normalized.lookup.rootDescriptorDigest,
+      path: normalized.lookup.path,
+      objectKind: normalized.lookup.objectKind,
+      objectDigest: normalized.lookup.objectDigest,
     });
   } else {
-    request = createSystemRecordExactObjectRequestV1(common, normalized);
+    request = createSystemRecordExactObjectRequestV1(common, normalized.lookup);
   }
   const requestFrame = encodeSystemRecordRequestFrameV1(request);
-  return Object.freeze({
-    request,
-    requestFrame,
-    key: systemRecordExactLookupKeyV1(normalized),
-  });
+  return Object.freeze({ request, requestFrame });
 }
 
 function createSystemRecordExactObjectRequestV1(
