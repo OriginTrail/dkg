@@ -13,6 +13,7 @@ import {
   RPC_READ_STALL_TIMEOUT_MS,
 } from './evm-adapter-constants.js';
 import { withTimeout } from './evm-adapter-rpc.js';
+import { isContractViewRetryable } from './rpc-failover-client.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
 
 /**
@@ -98,6 +99,8 @@ export interface EvmContextGraphNameHashFenceDependencies {
 export interface ContextGraphNameHashProviderHighWaters {
   readonly latestId: bigint;
   readonly providerHighWaters: ReadonlyMap<JsonRpcProvider, bigint>;
+  /** Providers whose transient high-water failure leaves slot coverage unknown. */
+  readonly unavailableProviderCount: number;
 }
 
 export interface ContextGraphNameHashScopeToken {
@@ -372,6 +375,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
         id,
         undefined,
         verification.providerHighWaters,
+        verification.unavailableProviderCount,
       );
       if (currentHash !== normalizedNameHash) {
         throw new Error(
@@ -407,6 +411,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
             contextGraphId,
             scanController.signal,
             highWaterSnapshot.providerHighWaters,
+            highWaterSnapshot.unavailableProviderCount,
           );
           slots.push({ id: contextGraphId, nameHash: currentHash });
         } catch (cause) {
@@ -489,6 +494,17 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const failures = reads.filter(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
+    const nonRetryableFailures = failures.filter(
+      (failure) => !isContractViewRetryable(failure.reason),
+    );
+    if (nonRetryableFailures.length > 0) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ${nonRetryableFailures.length} of ` +
+        `${providers.length} RPC backends returned a non-retryable registry ` +
+        'high-water failure',
+        { cause: nonRetryableFailures[0]!.reason },
+      );
+    }
     if (providerHighWaters.size === 0) {
       throw failures[0]?.reason ?? new Error(
         'resolveContextGraphIdByNameHash: no RPC backend returned a current registry high-water',
@@ -498,19 +514,33 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       (maximum, value) => value > maximum ? value : maximum,
       0n,
     );
-    return { latestId, providerHighWaters };
+    return {
+      latestId,
+      providerHighWaters,
+      unavailableProviderCount: failures.length,
+    };
   }
 
-  /** Require every provider at or above the slot to agree, including null. */
+  /**
+   * Require a strict majority of providers at or above the slot to respond,
+   * while every response agrees (including null). A transiently unavailable
+   * backend is not conflicting chain evidence; a deterministic failure is.
+   */
   async readCurrentNameHash(
     contextGraphId: bigint,
     signal?: AbortSignal,
     providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
+    capturedUnavailableProviderCount = 0,
   ): Promise<string | null> {
     await this.dependencies.initialize();
     const cgs = this.dependencies.requireContextGraphStorage();
-    const highWaters = providerHighWaters
-      ?? (await this.loadProviderHighWaters()).providerHighWaters;
+    const highWaterSnapshot = providerHighWaters === undefined
+      ? await this.loadProviderHighWaters()
+      : undefined;
+    const highWaters = providerHighWaters ?? highWaterSnapshot!.providerHighWaters;
+    const unavailableProviderCount = providerHighWaters === undefined
+      ? highWaterSnapshot!.unavailableProviderCount
+      : capturedUnavailableProviderCount;
     const coveringProviders = [...highWaters].filter(
       ([, highWater]) => highWater >= contextGraphId,
     );
@@ -524,18 +554,27 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const failures = reads.filter(
       (result): result is PromiseRejectedResult => result.status === 'rejected',
     );
-    if (failures.length > 0) {
+    const nonRetryableFailures = failures.filter(
+      (failure) => !isContractViewRetryable(failure.reason),
+    );
+    if (nonRetryableFailures.length > 0) {
       throw new Error(
-        `resolveContextGraphIdByNameHash: ${failures.length} of ` +
-        `${coveringProviders.length} covering RPC backends failed to read current slot ` +
-        `${contextGraphId.toString()}`,
-        { cause: failures[0]!.reason },
+        `resolveContextGraphIdByNameHash: ${nonRetryableFailures.length} of ` +
+        `${coveringProviders.length} covering RPC backends returned a non-retryable ` +
+        `failure for current slot ${contextGraphId.toString()}`,
+        { cause: nonRetryableFailures[0]!.reason },
       );
     }
-    if (observed.size === 0) {
+    const fulfilledCount = reads.length - failures.length;
+    const capturedCoveringProviderCount =
+      coveringProviders.length + unavailableProviderCount;
+    const requiredQuorum = Math.floor(capturedCoveringProviderCount / 2) + 1;
+    if (fulfilledCount < requiredQuorum) {
       throw new Error(
-        `resolveContextGraphIdByNameHash: no RPC backend could read slot ` +
-        contextGraphId.toString(),
+        `resolveContextGraphIdByNameHash: insufficient covering RPC quorum for ` +
+        `current slot ${contextGraphId.toString()}; ${fulfilledCount} of ` +
+        `${capturedCoveringProviderCount} backends responded, need ${requiredQuorum}`,
+        { cause: failures[0]?.reason },
       );
     }
     if (observed.size !== 1) {
