@@ -170,7 +170,7 @@ describe('WorkerCatchupRunner lifecycle', () => {
  */
 describe('WorkerCatchupRunner agent bridge', () => {
   function bridgeAgent(overrides: Record<string, unknown> = {}) {
-    const calls: Record<string, unknown[][]> = { durable: [], shared: [] };
+    const calls: Record<string, unknown[][]> = { durable: [], shared: [], selectedShared: [] };
     let resolutionCalls = 0;
     const agent = {
       isPrivateContextGraph: async () => false,
@@ -189,6 +189,10 @@ describe('WorkerCatchupRunner agent bridge', () => {
       syncSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
         calls.shared.push(args);
         return {};
+      },
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        return { kind: 'selected-shared-memory', shared: {}, selectedScopeComplete: true };
       },
       ...overrides,
     };
@@ -383,6 +387,34 @@ describe('WorkerCatchupRunner agent bridge', () => {
       priority: 2000,
       source: 'catchup-foreground',
     });
+  });
+
+  it('routes an RFC-64 complete provider through the typed selected SWM lane', async () => {
+    const { agent, calls } = bridgeAgent({
+      syncSelectedSharedMemoryFromPeerDetailed: async (...args: unknown[]) => {
+        calls.selectedShared.push(args);
+        return {
+          kind: 'selected-shared-memory',
+          shared: { insertedDataTriples: 7 },
+          selectedScopeComplete: true,
+        };
+      },
+    });
+
+    const posted = await invokeThroughBridge(
+      agent,
+      'syncSelectedSharedMemory',
+      ['peer-swm', 'cg-x', 2000, 'catchup-foreground'],
+    );
+
+    expect(calls.shared).toEqual([]);
+    expect(calls.selectedShared).toHaveLength(1);
+    expect(calls.selectedShared[0]!.at(-1)).toMatchObject({
+      priority: 2000,
+      source: 'catchup-foreground',
+      selectedSwmPriority: true,
+    });
+    expect(posted.result).toEqual({ insertedDataTriples: 7 });
   });
 
   it('emits worker pass diagnostics through the parent logger bridge', async () => {

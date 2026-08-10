@@ -389,7 +389,15 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const syncSharedMemory = (
       { priority, source }: CatchupPlaneContext,
     ): Promise<CatchupSharedMemoryResult> =>
-      invoke<CatchupSharedMemoryResult>('syncSharedMemory', peerId, request.contextGraphId, priority, source)
+      invoke<CatchupSharedMemoryResult>(
+        authoritativeSharedMemoryPeerIds.has(peerId)
+          ? 'syncSelectedSharedMemory'
+          : 'syncSharedMemory',
+        peerId,
+        request.contextGraphId,
+        priority,
+        source,
+      )
         .catch(() => emptyShared());
 
     // Narrow each fallback peer to the planes the AUTHORITY has not already

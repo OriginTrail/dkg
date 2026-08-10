@@ -166,9 +166,11 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           case 'syncDurable':
             durableCalls.push(args[0] as string);
             return durableResult();
-          case 'syncSharedMemory':
+          case 'syncSelectedSharedMemory':
             sharedCalls.push(args[0] as string);
             return sharedResult();
+          case 'syncSharedMemory':
+            throw new Error('complete SWM provider must use the selected RFC-64 lane');
           case 'finalizeCatchup':
             return null;
           default:

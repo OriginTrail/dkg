@@ -1164,6 +1164,27 @@ class WorkerCatchupRunner implements CatchupRunner {
           },
         );
       }
+      case 'syncSelectedSharedMemory': {
+        const [peerId, contextGraphId, priority, source] = args as [
+          string, string, number | undefined, unknown,
+        ];
+        const selected = await agent.syncSelectedSharedMemoryFromPeerDetailed(
+          peerId,
+          [contextGraphId],
+          {
+            ...(priority === undefined ? {} : { priority }),
+            source: normalizeSyncAdmissionSource(
+              typeof source === 'string' ? source : undefined,
+            ),
+            selectedSwmPriority: true,
+          },
+        );
+        // The worker already owns the authority verdict and attaches
+        // `fromAuthority` to the returned coverage. Keep the RPC payload on the
+        // historical SharedMemorySyncResult shape while selecting the typed
+        // RFC-64 producer here, at the in-process agent boundary.
+        return selected.shared;
+      }
       case 'logCatchupPass': {
         // The pass loop runs inside the Worker, which has no logger of its own,
         // so the line is FORMATTED there — where the coverage records live — and
