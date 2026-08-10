@@ -32,10 +32,15 @@ export interface SelectedSwmMetaContinuationState {
 
 export interface SelectedSwmMetaFetcher {
   readonly strategy: SharedMemoryMetadataFetcher;
-  progress(contextGraphId: string): number | undefined;
-  generation(contextGraphId: string): number | undefined;
-  completed(contextGraphId: string): boolean;
+  continuation(contextGraphId: string): SelectedSwmMetaContinuation;
   cleanup(): void;
+}
+
+/** Immutable continuation evidence captured immediately after one SWM round. */
+export interface SelectedSwmMetaContinuation {
+  readonly progress: number | undefined;
+  readonly generation: number;
+  readonly completed: boolean;
 }
 
 interface SelectedMetaPageFetchRequest {
@@ -206,9 +211,14 @@ export function createSelectedSwmMetaFetcher(options: {
 
   return {
     strategy,
-    progress: (contextGraphId) => states.get(contextGraphId)?.nextOffset,
-    generation: (contextGraphId) => states.get(contextGraphId)?.generation,
-    completed: (contextGraphId) => completedContextGraphs.has(contextGraphId),
+    continuation: (contextGraphId) => {
+      const state = states.get(contextGraphId);
+      return {
+        progress: state?.nextOffset,
+        generation: state?.generation ?? 0,
+        completed: completedContextGraphs.has(contextGraphId),
+      };
+    },
     cleanup() {
       for (const [contextGraphId, state] of states) release(contextGraphId, state);
       completedContextGraphs.clear();
