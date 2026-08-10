@@ -449,10 +449,25 @@ async function collectVerificationClosureV1(
   });
 }
 
+/**
+ * The closure after authority validation, carrying what validation actually
+ * verified so projection cannot rediscover it.
+ *
+ * `currentForkResolution` is `null` when the current head advertises none --
+ * which is a different fact from "validation did not run", and that second
+ * state is unrepresentable here because the only way to obtain this value is to
+ * return from the validator. Projection therefore cannot mint a resolution
+ * nobody verified: it has no other source, rather than checking and refusing.
+ */
+interface ValidatedClosureV1 {
+  readonly collected: CollectedClosureV1;
+  readonly currentForkResolution: AgentProfileForkResolutionV1 | null;
+}
+
 function validateCollectedClosureAuthorityV1(
   state: CollectedClosureV1,
   nowMs: number,
-): void {
+): ValidatedClosureV1 {
   for (const resolution of state.parsedResolutions) {
     const evidence = resolution.evidenceHeadDigests.map((headDigest) =>
       state.parsedHeads.get(headDigest),
@@ -509,6 +524,7 @@ function validateCollectedClosureAuthorityV1(
     transitionTupleDigests.set(tuple, transitionDigest);
   }
 
+  let currentForkResolution: AgentProfileForkResolutionV1 | null = null;
   for (const [headDigest, head] of state.parsedHeads) {
     assertCompleteUniqueRootLineageV1(state, headDigest, head);
     if (head.acceptedTransitionDigest !== undefined) {
@@ -537,6 +553,7 @@ function validateCollectedClosureAuthorityV1(
           `head ${headDigest} does not directly bind its fork resolution`,
         );
       }
+      currentForkResolution = resolution;
     }
   }
 
@@ -554,6 +571,8 @@ function validateCollectedClosureAuthorityV1(
       }
     }
   }
+
+  return Object.freeze({ collected: state, currentForkResolution });
 }
 
 function assertCompleteUniqueRootLineageV1(
@@ -596,9 +615,10 @@ function assertCompleteUniqueRootLineageV1(
 }
 
 function projectVerificationClosureV1(
-  state: CollectedClosureV1,
+  validated: ValidatedClosureV1,
 ): SystemRecordVerificationClosureV1 {
-  const authoritySummary = createVerifiedAuthoritySummaryV1(state);
+  const state = validated.collected;
+  const authoritySummary = createVerifiedAuthoritySummaryV1(validated);
   const objects = Object.freeze([...state.artifacts].sort(compareClosureObjects));
   return Object.freeze({
     objects,
@@ -610,8 +630,9 @@ function projectVerificationClosureV1(
 }
 
 function createVerifiedAuthoritySummaryV1(
-  state: CollectedClosureV1,
+  validated: ValidatedClosureV1,
 ): AgentProfileVerifiedAuthoritySummaryV1 {
+  const state = validated.collected;
   const current = state.parsedHeads.get(state.currentHeadDigest);
   if (current === undefined) {
     fail('system-record-closure', 'verified closure lost its current head');
@@ -661,31 +682,25 @@ function createVerifiedAuthoritySummaryV1(
     tombstonePredecessor:
       tombstonePredecessor?.state === 'active' ? tombstonePredecessor : undefined,
     deletionTableDigest: tombstonePredecessor?.ownedSubjectTableDigest,
-    forkResolution: verifiedForkResolutionFactsV1(state, current),
+    forkResolution: validated.currentForkResolution === null
+      ? undefined
+      : verifiedForkResolutionFactsV1(validated.currentForkResolution),
   });
 }
 
 /**
- * Only mint these facts on the path that already proved direct succession.
+ * Project the resolution validation already verified for this head.
  *
- * A head carrying a resolution digest has been through `isDirectResolvingSuccessorV1`
- * above, so reaching here without the resolution object means the traversal
- * diverged from that check and the summary must not claim a verified resolution.
- * Failing closed keeps a consumer from ever seeing a head whose
- * `forkResolutionDigest` is set while the summary is silent about it.
+ * No lookup here by design: the only way to reach this function is to hand it a
+ * resolution that came back from `validateCollectedClosureAuthorityV1`, the site
+ * that proved direct succession. A head advertising a resolution the traversal
+ * never collected fails there, so no summary can be silent about one.
  */
 function verifiedForkResolutionFactsV1(
-  state: CollectedClosureV1,
-  current: AgentProfileHeadObjectV1,
-): AgentProfileVerifiedForkResolutionFactsV1 | undefined {
-  if (current.forkResolutionDigest === undefined) return undefined;
-  const resolution = state.parsedResolutions.find((candidate) =>
-    computeAgentProfileForkResolutionDigestV1(candidate) === current.forkResolutionDigest);
-  if (resolution === undefined) {
-    fail('system-record-closure', 'verified closure lost its current fork resolution');
-  }
+  resolution: AgentProfileForkResolutionV1,
+): AgentProfileVerifiedForkResolutionFactsV1 {
   return Object.freeze({
-    resolutionDigest: current.forkResolutionDigest,
+    resolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
     authoritySequence: resolution.authoritySequence,
     forkedVersion: resolution.forkedVersion,
     resolutionVersion: resolution.resolutionVersion,
@@ -744,8 +759,9 @@ async function buildAgentProfileVerificationClosureForPurposeV1(
     currentHeadDigest,
     collection,
   );
-  validateCollectedClosureAuthorityV1(collected, nowMs);
-  return projectVerificationClosureV1(collected);
+  return projectVerificationClosureV1(
+    validateCollectedClosureAuthorityV1(collected, nowMs),
+  );
 }
 
 function createMaterializationClosureExecutionV1(
