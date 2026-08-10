@@ -122,6 +122,7 @@ describe('exact sync accumulation limits', () => {
         if (sends === 1) return encoder.encode('valid-page');
         const error = new Error('request timeout');
         error.name = 'AbortError';
+        Object.freeze(error);
         markSyncTransportFailure(error);
         throw error;
       },
@@ -216,6 +217,21 @@ describe('exact sync accumulation limits', () => {
       fail: (_controller: AbortController) => new Error('operation timed out'),
     },
     {
+      name: 'frozen local request timeout with transport-like text',
+      scopeId: 10,
+      fail: (_controller: AbortController) => Object.freeze(new Error('operation timed out')),
+    },
+    {
+      name: 'frozen response parse timeout with transport-like text',
+      scopeId: 11,
+      fail: (_controller: AbortController) => Object.freeze(new Error('operation timed out')),
+    },
+    {
+      name: 'primitive response parse timeout with transport-like text',
+      scopeId: 12,
+      fail: (_controller: AbortController) => 'operation timed out',
+    },
+    {
       name: 'chain RPC timeout with transport-like text',
       scopeId: 9,
       fail: (_controller: AbortController) => Object.assign(
@@ -257,6 +273,7 @@ describe('exact sync accumulation limits', () => {
           (
             name === 'local request build failure'
             || name === 'local request timeout with transport-like text'
+            || name === 'frozen local request timeout with transport-like text'
             || name === 'chain RPC timeout with transport-like text'
           )
           && builds === 2
@@ -268,7 +285,9 @@ describe('exact sync accumulation limits', () => {
         if (
           (name === 'integrity rejection'
             || name === 'validation rejection'
-            || name === 'validation rejection with transport-like text')
+            || name === 'validation rejection with transport-like text'
+            || name === 'frozen response parse timeout with transport-like text'
+            || name === 'primitive response parse timeout with transport-like text')
           && parses === 2
         ) {
           throw fail(controller);
@@ -286,6 +305,8 @@ describe('exact sync accumulation limits', () => {
           name === 'integrity rejection'
           || name === 'validation rejection'
           || name === 'validation rejection with transport-like text'
+          || name === 'frozen response parse timeout with transport-like text'
+          || name === 'primitive response parse timeout with transport-like text'
         ) {
           return encoder.encode('invalid-page');
         }
@@ -293,7 +314,19 @@ describe('exact sync accumulation limits', () => {
       },
     });
 
-    await expect(fetchSyncPages(params)).rejects.toBeInstanceOf(Error);
+    let rejected: unknown;
+    try {
+      await fetchSyncPages(params);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(Error);
+    if (name === 'primitive response parse timeout with transport-like text') {
+      expect(rejected).toMatchObject({
+        message: 'operation timed out',
+        cause: 'operation timed out',
+      });
+    }
     expect(checkpointStore.get(checkpointKey)).toBeUndefined();
 
     // Recreate only an offset. A leaked process-local responder token would

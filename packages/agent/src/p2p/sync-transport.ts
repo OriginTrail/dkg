@@ -161,8 +161,7 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
           // A request factory may perform chain reads and signing. Preserve
           // that local boundary so a generic timeout message cannot later be
           // mistaken for an untagged libp2p/router interruption.
-          markSyncLocalRequestFailure(error);
-          throw error;
+          throw markSyncLocalRequestFailure(error);
         }
         throwIfAborted(params.signal);
         const messageId = randomUUID();
@@ -179,14 +178,13 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
             params.signal,
           );
         } catch (error) {
-          markSyncTransportFailure(error);
           // Classified by TERMINAL STATE, never by message text: a deadline
           // `TimeoutError` and a caller cancel reach here as the same
           // `AbortError` shape, and `PooledStreamResetError('request timeout')`
           // is the same class as 'pool closed'. The caller's own signal is the
           // only non-textual evidence of caller cancellation that exists.
           outcome = params.signal?.aborted === true ? 'cancelled' : 'transport_error';
-          throw error;
+          throw markSyncTransportFailure(error);
         }
         responded = true;
         responseByteLength = responseBytes.byteLength;
@@ -196,10 +194,10 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
         try {
           await params.validateResponse?.(responseBytes);
         } catch (error) {
-          // Tag, never replace — the original error's message drives peer
-          // backoff and `failedPhases` accounting downstream.
-          markSyncValidationRejection(error);
-          throw error;
+          // Preserve object identity; primitive throws are normalized once
+          // with the same message/cause so downstream classification can carry
+          // the response boundary without weakening backoff accounting.
+          throw markSyncValidationRejection(error);
         }
         throwIfAborted(params.signal);
         outcome = 'response';
