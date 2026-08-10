@@ -6245,18 +6245,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[],
     options?: OrdinarySharedMemorySyncFromPeerOptions,
   ): Promise<SharedMemorySyncResult> {
-    // Keep this public boundary self-contained under the structural invocation
-    // used by the requester/fanout contract tests. The producer is an internal
-    // lifecycle implementation detail, not an additional requirement on a
-    // DKGAgent-shaped caller.
-    const execution = await (
-      LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution as (
-        this: DKGAgent,
-        peerId: string,
-        ids: string[],
-        syncOptions?: SharedMemorySyncFromPeerOptions,
-      ) => Promise<SharedMemorySyncExecution>
-    ).call(this, remotePeerId, contextGraphIds, options);
+    const execution = await this.syncSharedMemoryFromPeerDetailedExecution(
+      remotePeerId,
+      contextGraphIds,
+      options,
+    );
     return execution.shared;
   }
 
@@ -6265,14 +6258,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: string[],
     options: SelectedSharedMemorySyncFromPeerOptions,
   ): Promise<SelectedSharedMemorySyncResult> {
-    const execution = await (
-      LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution as (
-        this: DKGAgent,
-        peerId: string,
-        ids: string[],
-        syncOptions?: SharedMemorySyncFromPeerOptions,
-      ) => Promise<SharedMemorySyncExecution>
-    ).call(this, remotePeerId, contextGraphIds, options);
+    const execution = await this.syncSharedMemoryFromPeerDetailedExecution(
+      remotePeerId,
+      contextGraphIds,
+      options,
+    );
     return {
       kind: 'selected-shared-memory',
       shared: execution.shared,

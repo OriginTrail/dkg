@@ -536,6 +536,8 @@ describe('lifecycle shared-memory fanout isolation', () => {
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
   }
 
