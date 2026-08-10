@@ -751,7 +751,9 @@ export class DKGAgent extends DKGAgentBase {
 
   static async create(inputConfig: DKGAgentConfig): Promise<DKGAgent> {
     const contextGraphSubscriptionRehydrationEnabled =
-      inputConfig.contextGraphSubscriptionRehydrationEnabled ?? true;
+      inputConfig.contextGraphSubscriptionRehydrationEnabled === undefined
+        ? true
+        : inputConfig.contextGraphSubscriptionRehydrationEnabled;
     if (typeof contextGraphSubscriptionRehydrationEnabled !== 'boolean') {
       throw new Error(
         'DKGAgentConfig.contextGraphSubscriptionRehydrationEnabled must be a boolean',

@@ -2860,11 +2860,18 @@ describe('hash-vs-name duplication regression', () => {
   it('chain discovery then ontology sync produces one merged entry, no on-chain-id ghost', async () => {
     const localName = 'merged-contextGraph';
     const onChainId = '825';
+    const onChainNameHash = ethers.keccak256(ethers.toUtf8Bytes(localName));
 
     const chain = createEVMAdapter(HARDHAT_KEYS.CORE_OP);
+    const resolveContextGraphIdByNameHash = recorder(async (candidate: string) => {
+      return candidate === onChainNameHash.toLowerCase()
+        ? BigInt(onChainId)
+        : null;
+    });
+    (chain as any).resolveContextGraphIdByNameHash = resolveContextGraphIdByNameHash;
     (chain as any).listContextGraphsFromChain = async () => ([
       {
-        contextGraphId: onChainId,
+        contextGraphId: onChainNameHash,
         name: localName,
         creator: '0x1234',
         accessPolicy: 0,
@@ -2889,9 +2896,14 @@ describe('hash-vs-name duplication regression', () => {
     ]);
     const storeDiscovered = await agent.discoverContextGraphsFromStore();
     expect(storeDiscovered).toBeLessThanOrEqual(1);
+    expect(resolveContextGraphIdByNameHash.calls).toContainEqual([
+      onChainNameHash.toLowerCase(),
+    ]);
 
     const contextGraphs = await agent.listContextGraphs();
-    const matches = contextGraphs.filter(p => p.id === localName || p.id === onChainId);
+    const matches = contextGraphs.filter(
+      p => p.id === localName || p.id === onChainId || p.id === onChainNameHash,
+    );
     expect(matches.length).toBe(1);
     expect(matches[0].id).toBe(localName);
     expect(matches[0].subscribed).toBe(false);
@@ -2901,7 +2913,9 @@ describe('hash-vs-name duplication regression', () => {
     expect(matches[0].synced).toBe(false);
     expect(matches[0].callerInvolved).toBeUndefined();
 
-    const ghosts = contextGraphs.filter(p => p.id === onChainId);
+    const ghosts = contextGraphs.filter(
+      p => p.id === onChainId || p.id === onChainNameHash,
+    );
     expect(ghosts.length).toBe(0);
   }, 15000);
 });
