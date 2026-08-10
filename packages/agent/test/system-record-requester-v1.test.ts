@@ -2,6 +2,7 @@ import {
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_FRAME_PAYLOAD_BYTES,
+  SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH,
   SYSTEM_RECORD_WIRE_VERSION_V1,
   canonicalizeSystemRecordInventoryLeafObjectV1,
   computeSystemRecordInventoryLeafDigestV1,
@@ -9,6 +10,7 @@ import {
   digestSystemRecordBytesV1,
   encodeSystemRecordResponseFrameV1,
   type Digest32V1,
+  type NetworkIdV1,
   type SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { describe, expect, it, vi } from 'vitest';
@@ -225,6 +227,130 @@ describe('system-record requester V1', () => {
     const result = await first;
     expect(result.outcome).toBe('ok');
     if (result.outcome === 'ok') result.lease.release();
+  });
+
+  it('snapshots every lifecycle dependency before unrelated fetches and awaits', async () => {
+    const originalBytes = byteAdmission();
+    const originalStream = permitAdmission();
+    const originalDecode = permitAdmission();
+    const replacementBytes = byteAdmission();
+    const replacementStream = permitAdmission();
+    const replacementDecode = permitAdmission();
+    const firstResponse = Promise.withResolvers<void>();
+    const seenRequests: SystemRecordRequestHeaderV1[] = [];
+    const firstExchange = fixtureExchange(async (request) => {
+      seenRequests.push(request);
+      await firstResponse.promise;
+      return successResponse(request, PAYLOAD, DIGEST);
+    });
+    const otherPayload = Uint8Array.of(4, 5, 6);
+    const otherDigest = digestSystemRecordBytesV1(
+      SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+      otherPayload,
+    );
+    const secondExchange = fixtureExchange(async (request) => {
+      seenRequests.push(request);
+      return successResponse(request, otherPayload, otherDigest);
+    });
+    const originalOpen = vi.fn()
+      .mockResolvedValueOnce(firstExchange.value)
+      .mockResolvedValueOnce(secondExchange.value);
+    const replacementOpen = vi.fn(async () => fixtureExchange().value);
+    const options = {
+      networkId: NETWORK,
+      openExchange: originalOpen,
+      byteAdmission: originalBytes,
+      streamAdmission: originalStream.value,
+      decodeAdmission: originalDecode.value,
+      requestId: () => '1'.repeat(32),
+    } satisfies CreateSystemRecordRequesterOptionsV1;
+    const requester = createSystemRecordRequesterV1(options);
+
+    const first = requester.fetch(LOOKUP, new AbortController().signal);
+    await firstExchange.requestWritten.promise;
+    Object.assign(options as object, {
+      networkId: 'replacement:1' as NetworkIdV1,
+      openExchange: replacementOpen,
+      byteAdmission: replacementBytes,
+      streamAdmission: replacementStream.value,
+      decodeAdmission: replacementDecode.value,
+      requestId: () => '2'.repeat(32),
+    });
+
+    const otherLookup = Object.freeze({ ...LOOKUP, objectDigest: otherDigest });
+    await expect(requester.fetch(
+      otherLookup,
+      new AbortController().signal,
+    )).resolves.toEqual({ outcome: 'busy', wireBytes: 0 });
+    expect(originalStream.active()).toBe(true);
+    expect(replacementStream.active()).toBe(false);
+    expect(replacementOpen).not.toHaveBeenCalled();
+
+    firstResponse.resolve();
+    const firstResult = await first;
+    expect(firstResult.outcome).toBe('ok');
+    expect(originalDecode.active()).toBe(true);
+    expect(replacementDecode.active()).toBe(false);
+    if (firstResult.outcome === 'ok') firstResult.lease.release();
+
+    const secondResult = await requester.fetch(
+      otherLookup,
+      new AbortController().signal,
+    );
+    expect(secondResult.outcome).toBe('ok');
+    expect(originalOpen).toHaveBeenCalledTimes(2);
+    expect(replacementOpen).not.toHaveBeenCalled();
+    expect(seenRequests).toHaveLength(2);
+    expect(seenRequests.map(({ networkId }) => networkId)).toEqual([NETWORK, NETWORK]);
+    expect(seenRequests.map(({ requestId }) => requestId)).toEqual([
+      '1'.repeat(32),
+      '1'.repeat(32),
+    ]);
+    expect(replacementBytes.reservations).toHaveLength(0);
+    expect(replacementStream.active()).toBe(false);
+    expect(replacementDecode.active()).toBe(false);
+    if (secondResult.outcome === 'ok') secondResult.lease.release();
+    expect(originalBytes.reservations).toHaveLength(6);
+    expect(originalBytes.reservations.every(({ released }) => released)).toBe(true);
+  });
+
+  it('rejects invalid inventory paths before keying or resource admission', async () => {
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const decode = permitAdmission();
+    const exchange = fixtureExchange();
+    const openExchange = vi.fn(async () => exchange.value);
+    const requester = createRequester({ bytes, stream, decode, openExchange });
+    const overDepth = new Array<number>(SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH + 1).fill(0);
+    const hugeSparsePath: number[] = [];
+    hugeSparsePath.length = 1_000_000_000;
+
+    for (const path of [overDepth, hugeSparsePath]) {
+      await expect(requester.fetch({
+        type: 'inventory-object',
+        rootDescriptorDigest: DIGEST,
+        path,
+        objectKind: 'inventory-leaf',
+        objectDigest: DIGEST,
+      }, new AbortController().signal)).rejects.toThrow(
+        `inventory traversal path must contain at most ${SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH} indexes`,
+      );
+    }
+
+    expect(openExchange).not.toHaveBeenCalled();
+    expect(bytes.reservations).toHaveLength(0);
+    expect(stream.active()).toBe(false);
+    expect(decode.active()).toBe(false);
+    expect(exchange.writeRequestFrame).not.toHaveBeenCalled();
+    expect(exchange.readResponseFrame).not.toHaveBeenCalled();
+    expect(exchange.reset).not.toHaveBeenCalled();
+    expect(requester.stats()).toMatchObject({
+      started: 0,
+      joined: 0,
+      completed: 0,
+      trackedDigests: 0,
+      activeStream: 0,
+    });
   });
 
   it('caps followers per digest without opening another stream', async () => {

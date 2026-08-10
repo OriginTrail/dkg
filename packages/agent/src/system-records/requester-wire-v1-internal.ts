@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
+  SYSTEM_RECORD_MAX_INVENTORY_CHILD_INDEX,
+  SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH,
   SYSTEM_RECORD_KIND_V1,
   SYSTEM_RECORD_WIRE_VERSION_V1,
+  assertCanonicalDigest,
+  assertNetworkIdV1,
+  encodeSystemRecordRequestFrameV1,
   type NetworkIdV1,
   type SystemRecordRequestHeaderV1,
   type SystemRecordResponseStatusV1,
@@ -25,6 +30,7 @@ type SystemRecordExactRequestHeaderV1 = Extract<
 
 export interface SystemRecordExactRequestV1 {
   readonly request: SystemRecordExactRequestHeaderV1;
+  readonly requestFrame: Uint8Array;
   readonly key: string;
 }
 
@@ -33,6 +39,7 @@ export function createSystemRecordExactRequestV1(
   lookup: SystemRecordExactArtifactLookupV1,
   requestId: string,
 ): SystemRecordExactRequestV1 {
+  assertNetworkIdV1(networkId);
   const normalized = snapshotSystemRecordExactLookupV1(lookup);
   const common = {
     wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
@@ -66,15 +73,69 @@ export function createSystemRecordExactRequestV1(
       objectDigest: normalized.objectDigest,
     });
   }
-  return Object.freeze({ request, key: systemRecordExactLookupKeyV1(normalized) });
+  const requestFrame = encodeSystemRecordRequestFrameV1(request);
+  return Object.freeze({
+    request,
+    requestFrame,
+    key: systemRecordExactLookupKeyV1(normalized),
+  });
 }
 
 function snapshotSystemRecordExactLookupV1(
   lookup: SystemRecordExactArtifactLookupV1,
 ): SystemRecordExactArtifactLookupV1 {
-  return lookup.type === 'inventory-object'
-    ? Object.freeze({ ...lookup, path: Object.freeze([...lookup.path]) })
-    : Object.freeze({ ...lookup });
+  if (typeof lookup !== 'object' || lookup === null) {
+    throw new TypeError('system-record exact lookup must be an object');
+  }
+  const candidate = lookup as unknown as Readonly<Record<string, unknown>>;
+  const type = candidate.type;
+  if (type === 'inventory-object') {
+    const rootDescriptorDigest = candidate.rootDescriptorDigest;
+    assertCanonicalDigest(rootDescriptorDigest, 'inventory root descriptor digest');
+    const pathValue = candidate.path;
+    if (!Array.isArray(pathValue)
+      || pathValue.length > SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH) {
+      throw new Error(
+        `inventory traversal path must contain at most ${SYSTEM_RECORD_MAX_INVENTORY_PATH_DEPTH} indexes`,
+      );
+    }
+    const path: number[] = [];
+    for (let index = 0; index < pathValue.length; index += 1) {
+      const childIndex = pathValue[index];
+      if (!Number.isInteger(childIndex)
+        || (childIndex as number) < 0
+        || (childIndex as number) > SYSTEM_RECORD_MAX_INVENTORY_CHILD_INDEX) {
+        throw new Error('inventory traversal path must contain bounded child indexes');
+      }
+      path.push(childIndex as number);
+    }
+    const objectKind = candidate.objectKind;
+    if (objectKind !== 'inventory-internal' && objectKind !== 'inventory-leaf') {
+      throw new Error('inventory request object kind is invalid');
+    }
+    const objectDigest = candidate.objectDigest;
+    assertCanonicalDigest(objectDigest, 'inventory object digest');
+    return Object.freeze({
+      type,
+      rootDescriptorDigest,
+      path: Object.freeze(path),
+      objectKind,
+      objectDigest,
+    });
+  }
+  if (type !== 'object') throw new Error('system-record exact lookup type is invalid');
+  const objectKind = candidate.objectKind;
+  if (objectKind !== 'profile-bundle'
+    && objectKind !== 'agent-profile-head'
+    && objectKind !== 'authority-transition'
+    && objectKind !== 'fork-resolution'
+    && objectKind !== 'conflict-evidence'
+    && objectKind !== 'owned-subject-table') {
+    throw new Error('exact request object kind is invalid');
+  }
+  const objectDigest = candidate.objectDigest;
+  assertCanonicalDigest(objectDigest, 'exact object digest');
+  return Object.freeze({ type, objectKind, objectDigest });
 }
 
 function systemRecordExactLookupKeyV1(lookup: SystemRecordExactArtifactLookupV1): string {

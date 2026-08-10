@@ -64,7 +64,6 @@ interface PendingFetchPhaseV1 {
   readonly state: 'pending';
   readonly controller: AbortController;
   readonly transfer: Promise<SystemRecordRequesterSettlementV1>;
-  abortReason?: SystemRecordRequesterResetReasonV1;
 }
 
 interface RetainedFetchPhaseV1 {
@@ -222,7 +221,6 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
   abort(reason: SystemRecordRequesterResetReasonV1, error: Error): void {
     const phase = this.#phase;
     if (phase.state !== 'pending' || phase.controller.signal.aborted) return;
-    phase.abortReason = reason;
     this.#lastResetReason = reason;
     phase.controller.abort(error);
   }
@@ -324,6 +322,11 @@ class ExactFetchEntryV1 implements FetchEntryV1 {
 export function createSystemRecordRequesterV1(
   options: CreateSystemRecordRequesterOptionsV1,
 ): SystemRecordRequesterV1 {
+  const networkId = options.networkId;
+  const openExchange = options.openExchange;
+  const byteAdmission = options.byteAdmission;
+  const streamAdmission = options.streamAdmission;
+  const decodeAdmission = options.decodeAdmission;
   const requestId = options.requestId ?? (() => randomBytes(16).toString('hex'));
   const timeoutMs = boundedPositive(
     options.timeoutMs ?? SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS,
@@ -340,7 +343,7 @@ export function createSystemRecordRequesterV1(
     SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
     'maxWaitersPerDigest',
   );
-  const registry = new ExactFetchRegistryV1(options.byteAdmission);
+  const registry = new ExactFetchRegistryV1(byteAdmission);
   let started = 0;
   let joined = 0;
   let completed = 0;
@@ -356,8 +359,8 @@ export function createSystemRecordRequesterV1(
   ): Promise<SystemRecordExactFetchResultV1> {
     signal.throwIfAborted();
     if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
-    const exact = createSystemRecordExactRequestV1(options.networkId, lookup, requestId());
-    const { key, request } = exact;
+    const exact = createSystemRecordExactRequestV1(networkId, lookup, requestId());
+    const { key, request, requestFrame } = exact;
     let entry = registry.get(key);
     if (entry !== undefined) {
       if (entry.pendingAborted) {
@@ -373,9 +376,9 @@ export function createSystemRecordRequesterV1(
     if (registry.size >= maxTrackedDigests) {
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
-    const streamPermit = options.streamAdmission.tryAcquire();
+    const streamPermit = streamAdmission.tryAcquire();
     if (streamPermit === null) return Object.freeze({ outcome: 'busy', wireBytes: 0 });
-    const frameReservation = options.byteAdmission.tryReserve(SYSTEM_RECORD_MAX_FRAME_BYTES);
+    const frameReservation = byteAdmission.tryReserve(SYSTEM_RECORD_MAX_FRAME_BYTES);
     if (frameReservation === null) {
       streamPermit.release();
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
@@ -385,6 +388,7 @@ export function createSystemRecordRequesterV1(
       (createdEntry, pendingSignal) => run(
         createdEntry,
         request,
+        requestFrame,
         pendingSignal,
         streamPermit,
         frameReservation,
@@ -399,6 +403,7 @@ export function createSystemRecordRequesterV1(
   async function run(
     entry: FetchEntryV1,
     request: SystemRecordRequestHeaderV1,
+    requestFrame: Uint8Array,
     pendingSignal: AbortSignal,
     streamPermit: SystemRecordRequesterPermitV1,
     frameReservation: SystemRecordRequesterByteReservationV1,
@@ -416,12 +421,13 @@ export function createSystemRecordRequesterV1(
     let settlement: SystemRecordRequesterSettlementV1;
     try {
       exchange = await openSystemRecordRequesterExchangeV1({
-        openExchange: options.openExchange,
+        openExchange,
         signal: pendingSignal,
         resetReason: () => entry.resetReason(),
       });
       const transfer = await exchangeSystemRecordResponseV1({
         request,
+        requestFrame,
         exchange,
         frameReservation,
         signal: pendingSignal,
@@ -430,8 +436,8 @@ export function createSystemRecordRequesterV1(
       const retained = retainVerifiedSystemRecordResponseV1({
         request,
         transfer,
-        decodeAdmission: options.decodeAdmission,
-        byteAdmission: options.byteAdmission,
+        decodeAdmission,
+        byteAdmission,
       });
       if (retained.outcome === 'ok') {
         settlement = Object.freeze({ state: 'retained', source: retained.retained });

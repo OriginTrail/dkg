@@ -3,7 +3,6 @@
 import {
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   decodeSystemRecordResponseFrameV1,
-  encodeSystemRecordRequestFrameV1,
   verifySystemRecordResponsePayloadV1,
   type SystemRecordDecodedResponseFrameV1,
   type SystemRecordRequestHeaderV1,
@@ -66,18 +65,18 @@ export async function openSystemRecordRequesterExchangeV1(input: {
 
 export async function exchangeSystemRecordResponseV1(input: {
   readonly request: SystemRecordRequestHeaderV1;
+  readonly requestFrame: Uint8Array;
   readonly exchange: SystemRecordRequesterExchangeV1;
   readonly frameReservation: SystemRecordRequesterByteReservationV1;
   readonly signal: AbortSignal;
 }): Promise<SystemRecordDecodedTransferV1> {
-  const requestFrame = encodeSystemRecordRequestFrameV1(input.request);
   let wireBytes = 0;
   try {
     await raceSystemRecordAbortV1(
-      input.exchange.writeRequestFrame(requestFrame, input.signal),
+      input.exchange.writeRequestFrame(input.requestFrame, input.signal),
       input.signal,
     );
-    wireBytes = requestFrame.byteLength;
+    wireBytes = input.requestFrame.byteLength;
     const responseFrame = await raceSystemRecordAbortV1(
       input.exchange.readResponseFrame(SYSTEM_RECORD_MAX_FRAME_BYTES, input.signal),
       input.signal,

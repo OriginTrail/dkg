@@ -2,7 +2,6 @@ import {
   SYSTEM_RECORD_KIND_V1,
   SYSTEM_RECORD_WIRE_VERSION_V1,
   decodeSystemRecordRequestFrameV1,
-  encodeSystemRecordRequestFrameV1,
   type Digest32V1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { describe, expect, it } from 'vitest';
@@ -103,9 +102,7 @@ describe('system-record exact requester wire mapping V1', () => {
 
 function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {
   const mapped = createSystemRecordExactRequestV1(NETWORK, lookup, REQUEST_ID);
-  const request = decodeSystemRecordRequestFrameV1(
-    encodeSystemRecordRequestFrameV1(mapped.request),
-  );
+  const request = decodeSystemRecordRequestFrameV1(mapped.requestFrame);
   expect(request).toMatchObject({
     wireVersion: SYSTEM_RECORD_WIRE_VERSION_V1,
     requestId: REQUEST_ID,
