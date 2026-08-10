@@ -192,6 +192,7 @@ const expectedRuntimeExports = Object.freeze([
   'assertSystemRecordPeerBindingV1',
   'assertSystemRecordRootClaimSetV1',
   'assertSystemRecordRootDescriptorObjectV1',
+  'buildAgentProfileForkEvidenceAuthorityClosureV1',
   'buildAgentProfileVerificationClosureV1',
   'buildSystemRecordInventoryTreeV1',
   'buildSystemRecordProviderSignatureMessageV1',

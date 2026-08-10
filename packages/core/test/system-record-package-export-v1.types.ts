@@ -7,6 +7,7 @@ import type {
   AgentProfileConflictEvidenceV1,
   AgentProfileExactLinkedSubjectKindV1,
   AgentProfileForkConflictEntryV1,
+  AgentProfileForkEvidenceClosureVerifierV1,
   AgentProfileForkResolutionV1,
   AgentProfileHeadAdvanceEvidenceV1,
   AgentProfileHeadCommonV1,
@@ -100,6 +101,7 @@ import {
 // Importing the complete type-only surface is the contract. Keep the file
 // compile-only so none of these names become runtime package requirements.
 declare const digest: Digest32V1;
+declare const forkEvidenceClosureVerifier: AgentProfileForkEvidenceClosureVerifierV1;
 
 type RowTraversalSubpathContractV1 = readonly [
   typeof createSystemRecordInventoryRowTraversalV1,
@@ -125,6 +127,7 @@ const forgedCacheMetadata: SystemRecordCacheMetadataV1 = {};
 
 void forgedCacheReference;
 void forgedCacheMetadata;
+void forkEvidenceClosureVerifier;
 void rowTraversalSubpathContract;
 
 export {};

@@ -17,6 +17,7 @@ import {
   preparedFixtureApply,
   publishedReceiverFixture as publishedFixture,
 } from './support/agent-profile-receiver-v1-fixture.js';
+import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 
 const ADMITTED_CONTEXT = createAgentProfileAdmittedSliceContextAuthorityV1(
   () => 0,
@@ -33,7 +34,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     const prepareCandidateApply = vi.fn(() => preparedFixtureApply('1', 'a'));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs,
       verifyCurrentBundle,
       prepareCandidateApply,
@@ -86,7 +87,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     });
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,
@@ -118,7 +119,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     }));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs,
       verifyCurrentBundle: () => true,
       prepareCandidateApply: () => Object.freeze({
@@ -143,7 +144,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     const apply = vi.fn();
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply: () => Object.freeze({
@@ -175,7 +176,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     }));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,
@@ -194,7 +195,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     const fixture = await publishedFixture();
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply: vi.fn(async () => Object.freeze({
@@ -234,7 +235,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     });
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,
@@ -258,7 +259,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     const apply = vi.fn();
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply: async () => {
@@ -283,7 +284,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     });
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply: () => Object.freeze({
@@ -309,7 +310,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     }));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,
@@ -345,7 +346,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     }));
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => nowMs,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,
@@ -374,7 +375,7 @@ describe('agent-profile system-record prepared receiver apply', () => {
     });
     const receiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,

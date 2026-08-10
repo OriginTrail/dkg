@@ -13,7 +13,7 @@ import {
 import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
 import {
   createAgentProfileReceiverV1,
-  type AgentProfileContinuationReceiverV1,
+  type AgentProfileCandidateContinuationReceiverV1,
   type AgentProfileReceiverV1,
 } from '../src/system-records/receiver-v1.js';
 import {
@@ -40,6 +40,7 @@ import {
   signRootDescriptor,
 } from './support/agent-profile-reconcile-v1-fixture.js';
 import { NETWORK } from './support/agent-profile-producer-v1-fixture.js';
+import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 
 describe('agent-profile System Record reconciler V1', () => {
   it('counts inventory and closure bytes together at the continuation limit', () => {
@@ -65,8 +66,9 @@ describe('agent-profile System Record reconciler V1', () => {
     }));
     const loadInventoryObject = vi.fn(fixture.loadInventoryObject);
     const continuationReceiver = receiver(fixture.store, consumeCandidate);
+    const prepareActive = vi.fn(continuationReceiver.prepareActive.bind(continuationReceiver));
     const directReceiver: AgentProfileReceiverV1 = Object.freeze({
-      prepareActive: continuationReceiver.prepareActive.bind(continuationReceiver),
+      prepareActive,
       receiveActive: continuationReceiver.receiveActive.bind(continuationReceiver),
     });
     const reconciler = await createAgentProfileReconcilerV1({
@@ -103,6 +105,7 @@ describe('agent-profile System Record reconciler V1', () => {
       pendingRows: 0,
       outcomes: [{ outcome: 'applied' }],
     });
+    expect(prepareActive).toHaveBeenCalledTimes(1);
     expect(consumeCandidate).toHaveBeenCalledTimes(1);
     expect(consumeCandidate.mock.calls[0]![1]).toBe(admission.lastContext());
     expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
@@ -294,7 +297,7 @@ describe('agent-profile System Record reconciler V1', () => {
         conflictEvidenceDigest: `0x${'dd'.repeat(32)}` as const,
       },
     },
-  ])('retains an unsupported $label row without receiver dispatch', async ({ patch }) => {
+  ])('routes a $label row through receiver verification', async ({ patch }) => {
     const fixture = await publishedFixture();
     const headEnvelope = fixture.store.snapshot().currentHead;
     if (headEnvelope === null) throw new Error('fixture active head was not retained');
@@ -310,29 +313,32 @@ describe('agent-profile System Record reconciler V1', () => {
     };
     const inventory = buildSystemRecordInventoryTreeV1(NETWORK, [unsupportedRow]);
     const rootEnvelope = await signRootDescriptor(fixture, inventory.descriptor);
-    const prepareActive = vi.fn();
+    const prepareCandidate = vi.fn(async () => {
+      throw new Error('unsupported row fixture');
+    });
+    const loadInventoryObject = async (request: AgentProfileInventoryLoadRequestV1) => {
+      const stored = inventory.objects.get(request.objectDigest);
+      if (stored === undefined) {
+        return Object.freeze({
+          outcome: 'rejected' as const,
+          wireBytes: 0,
+          rejection: 'not-found' as const,
+        });
+      }
+      return Object.freeze({
+        outcome: 'ok' as const,
+        objectKind: stored.objectKind,
+        canonicalBytes: stored.canonicalBytes,
+        wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
+      });
+    };
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
       rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission: admissionGate(),
-      loadInventoryObject: async (request) => {
-        const stored = inventory.objects.get(request.objectDigest);
-        if (stored === undefined) {
-          return Object.freeze({
-            outcome: 'rejected' as const,
-            wireBytes: 0,
-            rejection: 'not-found' as const,
-          });
-        }
-        return Object.freeze({
-          outcome: 'ok' as const,
-          objectKind: stored.objectKind,
-          canonicalBytes: stored.canonicalBytes,
-          wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
-        });
-      },
-      receiver: receiverWithPreparation(prepareActive),
+      loadInventoryObject,
+      receiver: receiverWithPreparation(prepareCandidate),
     });
 
     await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
@@ -343,11 +349,41 @@ describe('agent-profile System Record reconciler V1', () => {
     await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
       status: 'blocked',
       phase: 'records',
-      reason: 'unsupported-row-state',
+      reason: 'receiver-verification-failed',
       processedRows: 0,
       pendingRows: 1,
     });
+    expect(prepareCandidate).toHaveBeenCalledTimes(1);
+
+    const prepareActive = vi.fn(async () => {
+      throw new Error('legacy active receiver must not see a non-active row');
+    });
+    const receiveActive = vi.fn(async () => {
+      throw new Error('direct reconcile does not use the receive convenience');
+    });
+    const activeOnlyReceiver: AgentProfileReceiverV1 = Object.freeze({
+      prepareActive,
+      receiveActive,
+    });
+    const activeOnlyReconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject,
+      receiver: activeOnlyReceiver,
+    });
+    await activeOnlyReconciler.advance(new AbortController().signal);
+    await expect(activeOnlyReconciler.advance(new AbortController().signal))
+      .resolves.toMatchObject({
+        status: 'blocked',
+        phase: 'records',
+        reason: 'receiver-verification-failed',
+        processedRows: 0,
+        pendingRows: 1,
+      });
     expect(prepareActive).not.toHaveBeenCalled();
+    expect(receiveActive).not.toHaveBeenCalled();
   });
 
   it('defers without timers or I/O when shared admission is occupied', async () => {
@@ -403,10 +439,12 @@ describe('agent-profile System Record reconciler V1', () => {
     }));
     if (held === null) throw new Error('test transport was not initially available');
     const baseReceiver = receiver(fixture.store, vi.fn());
-    const prepareActive = vi.fn(baseReceiver.prepareActive.bind(baseReceiver));
-    const trackedReceiver: AgentProfileContinuationReceiverV1 = Object.freeze({
+    const prepareCandidate = vi.fn(baseReceiver.prepareCandidate.bind(baseReceiver));
+    const trackedReceiver: AgentProfileCandidateContinuationReceiverV1 = Object.freeze({
       openPreparation: baseReceiver.openPreparation.bind(baseReceiver),
-      prepareActive,
+      prepareCandidate,
+      receiveCandidate: baseReceiver.receiveCandidate.bind(baseReceiver),
+      prepareActive: baseReceiver.prepareActive.bind(baseReceiver),
       receiveActive: baseReceiver.receiveActive.bind(baseReceiver),
     });
     const admission = admissionGate(false, () => now);
@@ -426,7 +464,7 @@ describe('agent-profile System Record reconciler V1', () => {
       });
     }
     expect(reconciler.stats()).toMatchObject({ admittedSlices: 0, active: 0, queued: 0 });
-    expect(prepareActive).not.toHaveBeenCalled();
+    expect(prepareCandidate).not.toHaveBeenCalled();
     expect(fetchExact).not.toHaveBeenCalled();
     expect(admission.stats()).toMatchObject({ active: 0 });
 
@@ -436,7 +474,7 @@ describe('agent-profile System Record reconciler V1', () => {
       phase: 'records',
     });
     expect(reconciler.stats()).toMatchObject({ admittedSlices: 1 });
-    expect(prepareActive).not.toHaveBeenCalled();
+    expect(prepareCandidate).not.toHaveBeenCalled();
     expect(fetchExact).toHaveBeenCalledTimes(1);
   });
 
@@ -721,7 +759,7 @@ describe('agent-profile System Record reconciler V1', () => {
     }));
     const activeReceiver = createAgentProfileReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: agentProfileArtifactSources(fixture.store),
       nowMs,
       verifyCurrentBundle: () => true,
       prepareCandidateApply,

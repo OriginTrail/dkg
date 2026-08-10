@@ -5,6 +5,8 @@ import {
   SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
   SYSTEM_RECORD_MAX_FRAME_BYTES,
   SYSTEM_RECORD_MAX_HEADER_BYTES,
+  SYSTEM_RECORD_MAX_SIDECAR_BYTES,
+  SYSTEM_RECORD_MAX_SIDECAR_OBJECTS,
   SYSTEM_RECORD_MAX_SLICE_REQUESTS,
   SYSTEM_RECORD_OBJECT_CAPS_V1,
   type Digest32V1,
@@ -16,6 +18,7 @@ import type {
 } from '../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReconcileTransportV1,
+  type AgentProfileReconcileArtifactContinuationV1,
 } from '../src/system-records/reconcile-transport-v1.js';
 import type {
   SystemRecordExactArtifactLookupV1,
@@ -275,7 +278,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     if (continuation === null) throw new Error('test continuation was not admitted');
 
     const first = openSlice(transport, () => 0);
-    await expect(continuation.bind(first).resolve(
+    await expect(continuation.bind(first).closureArtifacts.resolve(
       LOOKUP_A,
       new AbortController().signal,
     )).resolves.toMatchObject({ objectDigest: DIGEST_A });
@@ -290,7 +293,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     expect(control.activeReservations()).toBe(2);
 
     const second = openSlice(transport, () => 0);
-    await expect(continuation.bind(second).resolve(
+    await expect(continuation.bind(second).closureArtifacts.resolve(
       LOOKUP_A,
       new AbortController().signal,
     )).resolves.toMatchObject({ objectDigest: DIGEST_A });
@@ -346,7 +349,10 @@ describe('agent-profile reconcile exact transport V1', () => {
     const continuation = transport.openArtifactContinuation();
     if (continuation === null) throw new Error('test continuation was not admitted');
     const slice = openSlice(transport, () => 0);
-    await continuation.bind(slice).resolve(LOOKUP_A, new AbortController().signal);
+    await continuation.bind(slice).closureArtifacts.resolve(
+      LOOKUP_A,
+      new AbortController().signal,
+    );
     slice.release();
 
     transport.close();
@@ -396,7 +402,10 @@ describe('agent-profile reconcile exact transport V1', () => {
         request < SYSTEM_RECORD_MAX_SLICE_REQUESTS
           && objectIndex <= SYSTEM_RECORD_MAX_CLOSURE_OBJECTS;
         request += 1, objectIndex += 1) {
-        await source.resolve(controlLookup(objectIndex), new AbortController().signal);
+        await source.closureArtifacts.resolve(
+          controlLookup(objectIndex),
+          new AbortController().signal,
+        );
       }
       slice.release();
     }
@@ -408,7 +417,7 @@ describe('agent-profile reconcile exact transport V1', () => {
 
     const overflowLookup = controlLookup(SYSTEM_RECORD_MAX_CLOSURE_OBJECTS + 1);
     const overflowSlice = openSlice(transport, () => 0);
-    await expect(continuation.bind(overflowSlice).resolve(
+    await expect(continuation.bind(overflowSlice).closureArtifacts.resolve(
       overflowLookup,
       new AbortController().signal,
     )).rejects.toThrow(/retained bound/);
@@ -456,16 +465,137 @@ describe('agent-profile reconcile exact transport V1', () => {
     const slice = openSlice(transport, () => 0);
     const source = continuation.bind(slice);
     for (let index = 1; index <= 3; index += 1) {
-      await source.resolve(bundleLookup(index), new AbortController().signal);
+      await source.closureArtifacts.resolve(bundleLookup(index), new AbortController().signal);
     }
     expect(continuation.stats()).toMatchObject({ artifacts: 3, bytes: SYSTEM_RECORD_MAX_CLOSURE_BYTES });
 
-    await expect(source.resolve(bundleLookup(4), new AbortController().signal))
+    await expect(source.closureArtifacts.resolve(
+      bundleLookup(4),
+      new AbortController().signal,
+    ))
       .rejects.toThrow(/retained bound/);
     expect(releases[3]).toHaveBeenCalledTimes(1);
     expect(continuation.stats()).toMatchObject({ artifacts: 3, bytes: SYSTEM_RECORD_MAX_CLOSURE_BYTES });
     expect(control.activeReservations()).toBe(4);
     slice.release();
+    continuation.release();
+    expect(releases.every((release) => release.mock.calls.length === 1)).toBe(true);
+    expect(control.activeReservations()).toBe(0);
+  });
+
+  it('retains one exact lease while accounting closure and sidecar envelopes separately', async () => {
+    const success = successfulFetch(LOOKUP_A, 41);
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => success.result,
+      controlAdmission: byteAdmission(),
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    const slice = openSlice(transport, () => 0);
+    const source = continuation.bind(slice);
+
+    await source.securitySidecarArtifacts.resolve(LOOKUP_A, new AbortController().signal);
+    await source.closureArtifacts.resolve(LOOKUP_A, new AbortController().signal);
+
+    expect(slice.stats()).toEqual({ requests: 1, wireBytes: 41 });
+    expect(continuation.stats()).toMatchObject({
+      artifacts: 1,
+      bytes: 3,
+      closureArtifacts: 1,
+      closureBytes: 3,
+      sidecarArtifacts: 1,
+      sidecarBytes: 3,
+    });
+    slice.release();
+    continuation.release();
+    expect(success.release).toHaveBeenCalledTimes(1);
+  });
+
+  it('admits 32 closure objects beside the exact 17-object sidecar byte boundary', async () => {
+    const control = byteAdmission();
+    const payloadBytes = new Map<string, number>();
+    const releases: ReturnType<typeof vi.fn>[] = [];
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async (_providerId, lookup) => {
+        const release = vi.fn();
+        releases.push(release);
+        return Object.freeze({
+          outcome: 'ok' as const,
+          lease: Object.freeze({
+            artifact: Object.freeze({
+              objectKind: lookup.objectKind,
+              objectDigest: lookup.objectDigest,
+              canonicalBytes: new Uint8Array(payloadBytes.get(lookup.objectDigest) ?? 1),
+            }),
+            wireBytes: 1,
+            release,
+          }),
+        });
+      },
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+
+    await resolveAcrossSlices(
+      transport,
+      continuation,
+      Array.from({ length: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS }, (_, index) => Object.freeze({
+        type: 'object' as const,
+        objectKind: 'authority-transition' as const,
+        objectDigest: indexedDigest(index + 1),
+      })),
+      false,
+    );
+    const sidecarLookups: SystemRecordExactArtifactLookupV1[] = [Object.freeze({
+      type: 'object',
+      objectKind: 'conflict-evidence',
+      objectDigest: indexedDigest(1_000),
+    })];
+    payloadBytes.set(indexedDigest(1_000), SYSTEM_RECORD_OBJECT_CAPS_V1['conflict-evidence']);
+    for (let index = 1; index < SYSTEM_RECORD_MAX_SIDECAR_OBJECTS; index += 1) {
+      const objectDigest = indexedDigest(1_000 + index);
+      payloadBytes.set(objectDigest, SYSTEM_RECORD_OBJECT_CAPS_V1['agent-profile-head']);
+      sidecarLookups.push(Object.freeze({
+        type: 'object',
+        objectKind: 'agent-profile-head',
+        objectDigest,
+      }));
+    }
+    await resolveAcrossSlices(transport, continuation, sidecarLookups, true);
+
+    expect(continuation.stats()).toMatchObject({
+      artifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS + SYSTEM_RECORD_MAX_SIDECAR_OBJECTS,
+      closureArtifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+      closureBytes: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+      sidecarArtifacts: SYSTEM_RECORD_MAX_SIDECAR_OBJECTS,
+      sidecarBytes: SYSTEM_RECORD_MAX_SIDECAR_BYTES,
+    });
+    expect(transport.stats()).toMatchObject({
+      retainedContinuationClosureArtifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+      retainedContinuationSidecarArtifacts: SYSTEM_RECORD_MAX_SIDECAR_OBJECTS,
+      retainedContinuationSidecarBytes: SYSTEM_RECORD_MAX_SIDECAR_BYTES,
+    });
+
+    const overflowSlice = openSlice(transport, () => 0);
+    const overflowSource = continuation.bind(overflowSlice);
+    const fetchedBeforeOverflow = releases.length;
+    await expect(overflowSource.securitySidecarArtifacts.resolve(Object.freeze({
+      type: 'object',
+      objectKind: 'authority-transition',
+      objectDigest: indexedDigest(1),
+    }), new AbortController().signal)).rejects.toThrow(/sidecar.*retained bound/);
+    expect(releases).toHaveLength(fetchedBeforeOverflow);
+    expect(continuation.stats()).toMatchObject({
+      artifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS + SYSTEM_RECORD_MAX_SIDECAR_OBJECTS,
+      closureArtifacts: SYSTEM_RECORD_MAX_CLOSURE_OBJECTS,
+      sidecarArtifacts: SYSTEM_RECORD_MAX_SIDECAR_OBJECTS,
+    });
+    overflowSlice.release();
     continuation.release();
     expect(releases.every((release) => release.mock.calls.length === 1)).toBe(true);
     expect(control.activeReservations()).toBe(0);
@@ -489,7 +619,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     if (continuation === null) throw new Error('test continuation was not admitted');
     const slice = openSlice(transport, () => 0);
 
-    await expect(continuation.bind(slice).resolve(
+    await expect(continuation.bind(slice).closureArtifacts.resolve(
       LOOKUP_A,
       new AbortController().signal,
     )).rejects.toMatchObject({ outcome: 'capacity', retryable: true });
@@ -511,7 +641,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const continuation = transport.openArtifactContinuation();
     if (continuation === null) throw new Error('test continuation was not admitted');
     const slice = openSlice(transport, () => 0);
-    const resolving = continuation.bind(slice).resolve(
+    const resolving = continuation.bind(slice).closureArtifacts.resolve(
       LOOKUP_A,
       new AbortController().signal,
     );
@@ -1099,7 +1229,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const slice = openSlice(transport, () => 0);
     const repository = continuation.bind(slice);
 
-    await expect(repository.resolve(Object.freeze({
+    await expect(repository.closureArtifacts.resolve(Object.freeze({
       type: 'object',
       objectKind: 'agent-profile-head',
       objectDigest: 'not-a-digest',
@@ -1141,6 +1271,26 @@ function openSlice(
   }));
   if (opened === null) throw new Error('test transport slice was not admitted');
   return opened;
+}
+
+async function resolveAcrossSlices(
+  transport: ReturnType<typeof createAgentProfileReconcileTransportV1>,
+  continuation: AgentProfileReconcileArtifactContinuationV1,
+  lookups: readonly SystemRecordExactArtifactLookupV1[],
+  sidecar: boolean,
+): Promise<void> {
+  let offset = 0;
+  while (offset < lookups.length) {
+    const slice = openSlice(transport, () => 0);
+    const source = continuation.bind(slice);
+    const repository = sidecar ? source.securitySidecarArtifacts : source.closureArtifacts;
+    for (let request = 0;
+      request < SYSTEM_RECORD_MAX_SLICE_REQUESTS && offset < lookups.length;
+      request += 1, offset += 1) {
+      await repository.resolve(lookups[offset]!, new AbortController().signal);
+    }
+    slice.release();
+  }
 }
 
 function successfulFetch(

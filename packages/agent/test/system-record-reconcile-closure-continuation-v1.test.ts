@@ -11,9 +11,9 @@ import {
 import { parseNQuads } from '../src/dkg-agent-utils.js';
 import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
 import {
-  createAgentProfileReceiverV1,
-  type AgentProfileContinuationReceiverV1,
-  type AgentProfileReceiverCandidateV1,
+  createAgentProfileCandidateReceiverV1,
+  type AgentProfileCandidateContinuationReceiverV1,
+  type AgentProfileReceiverAnyCandidateV1,
 } from '../src/system-records/receiver-v1.js';
 import {
   createAgentProfileReconcilerV1,
@@ -31,15 +31,16 @@ import {
   NETWORK,
   PRODUCER_FIXTURE_NOW_MS,
 } from './support/agent-profile-producer-v1-fixture.js';
+import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 
 describe('agent-profile closure continuation V1', () => {
   it('completes a 31-artifact authority closure over three bounded physical slices', async () => {
     const fixture = await maximumAuthorityClosureFixtureV1();
     expect(fixture.artifacts.size).toBe(31);
     const directCandidates: unknown[] = [];
-    const directReceiver = createAgentProfileReceiverV1({
+    const directReceiver = createAgentProfileCandidateReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.repository,
+      artifacts: agentProfileArtifactSources(fixture.repository),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope: () => true,
       verifyCurrentBundle: (_head, bundleBytes) => {
@@ -94,9 +95,9 @@ describe('agent-profile closure continuation V1', () => {
       },
     );
     const transportedCandidates: unknown[] = [];
-    const transportedReceiver = createAgentProfileReceiverV1({
+    const transportedReceiver = createAgentProfileCandidateReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.repository,
+      artifacts: agentProfileArtifactSources(fixture.repository),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope,
       verifyCurrentBundle,
@@ -200,9 +201,9 @@ describe('agent-profile closure continuation V1', () => {
       controlAdmission: trackingByteAdmission(),
     });
     const receiverNowMs = vi.fn(() => now);
-    const receiver = createAgentProfileReceiverV1({
+    const receiver = createAgentProfileCandidateReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.repository,
+      artifacts: agentProfileArtifactSources(fixture.repository),
       nowMs: receiverNowMs,
       verifyAuthorityEnvelope: () => true,
       verifyCurrentBundle: (_head, bundleBytes) => {
@@ -276,9 +277,9 @@ describe('agent-profile closure continuation V1', () => {
       },
       controlAdmission: trackingByteAdmission(),
     });
-    const receiver = createAgentProfileReceiverV1({
+    const receiver = createAgentProfileCandidateReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.repository,
+      artifacts: agentProfileArtifactSources(fixture.repository),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope,
       verifyCurrentBundle: (_head, bundleBytes) => {
@@ -355,9 +356,9 @@ describe('agent-profile closure continuation V1', () => {
       },
       controlAdmission: trackingByteAdmission(),
     });
-    const receiver = createAgentProfileReceiverV1({
+    const receiver = createAgentProfileCandidateReceiverV1({
       networkId: NETWORK,
-      artifacts: fixture.repository,
+      artifacts: agentProfileArtifactSources(fixture.repository),
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope: () => true,
       verifyCurrentBundle,
@@ -461,10 +462,10 @@ describe('agent-profile closure continuation V1', () => {
 });
 
 function candidateApply(
-  consume: (candidate: AgentProfileReceiverCandidateV1) =>
+  consume: (candidate: AgentProfileReceiverAnyCandidateV1) =>
     ReturnType<typeof appliedOutcome> | Promise<ReturnType<typeof appliedOutcome>>,
 ) {
-  return (candidate: AgentProfileReceiverCandidateV1) => Object.freeze({
+  return (candidate: AgentProfileReceiverAnyCandidateV1) => Object.freeze({
     existingMonotonicDeadlineMs: 10_000,
     monotonicNowMs: 1_000,
     apply: () => consume(candidate),
@@ -487,13 +488,13 @@ function appliedOutcome(byte: string) {
   });
 }
 
-function syntheticThirteenArtifactReceiver(): AgentProfileContinuationReceiverV1 {
+function syntheticThirteenArtifactReceiver(): AgentProfileCandidateContinuationReceiverV1 {
   return Object.freeze({
     openPreparation() {
       return Object.freeze({
         async prepare(source, signal) {
           for (let index = 0; index <= SYSTEM_RECORD_MAX_SLICE_REQUESTS; index += 1) {
-            await source.resolve(Object.freeze({
+            await source.closureArtifacts.resolve(Object.freeze({
               type: 'object' as const,
               objectKind: 'agent-profile-head' as const,
               objectDigest: `0x${index.toString(16).padStart(64, '0')}` as Digest32V1,
@@ -510,6 +511,8 @@ function syntheticThirteenArtifactReceiver(): AgentProfileContinuationReceiverV1
         release: () => undefined,
       });
     },
+    prepareCandidate: async () => { throw new Error('test uses stateful preparation'); },
+    receiveCandidate: async () => { throw new Error('test uses stateful preparation'); },
     prepareActive: async () => { throw new Error('test uses stateful preparation'); },
     receiveActive: async () => { throw new Error('test uses stateful preparation'); },
   });
