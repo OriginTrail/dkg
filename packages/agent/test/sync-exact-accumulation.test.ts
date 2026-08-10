@@ -13,8 +13,8 @@ import {
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 import {
-  markSyncTransportFailure,
-  markSyncValidationRejection,
+  toSyncTransportFailureError,
+  toSyncValidationRejectionError,
 } from '../src/sync/error-tags.js';
 
 const EXACT_UAL = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/7';
@@ -123,8 +123,7 @@ describe('exact sync accumulation limits', () => {
         const error = new Error('request timeout');
         error.name = 'AbortError';
         Object.freeze(error);
-        markSyncTransportFailure(error);
-        throw error;
+        throw toSyncTransportFailureError(error);
       },
     }));
 
@@ -160,8 +159,7 @@ describe('exact sync accumulation limits', () => {
         sends += 1;
         if (sends === 1) return encoder.encode('valid-page');
         const error = new Error('operation timed out');
-        markSyncTransportFailure(error);
-        throw error;
+        throw toSyncTransportFailureError(error);
       },
     }))).rejects.toThrow('operation timed out');
   });
@@ -174,8 +172,7 @@ describe('exact sync accumulation limits', () => {
         controller.abort(new Error('caller cancelled'));
         const error = new Error('operation timed out');
         error.name = 'AbortError';
-        markSyncTransportFailure(error);
-        return error;
+        return toSyncTransportFailureError(error);
       },
     },
     {
@@ -193,8 +190,7 @@ describe('exact sync accumulation limits', () => {
       scopeId: 5,
       fail: (_controller: AbortController) => {
         const error = new Error('invalid signed response');
-        markSyncValidationRejection(error);
-        return error;
+        return toSyncValidationRejectionError(error);
       },
     },
     {
@@ -202,8 +198,7 @@ describe('exact sync accumulation limits', () => {
       scopeId: 7,
       fail: (_controller: AbortController) => {
         const error = new Error('operation timed out');
-        markSyncValidationRejection(error);
-        return error;
+        return toSyncValidationRejectionError(error);
       },
     },
     {
