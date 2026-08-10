@@ -79,7 +79,7 @@ export interface ClosureVisitFactsV1 {
   readonly currentHead?: AgentProfileHeadObjectV1;
 }
 
-export interface ClosureVisitExecutionV1 {
+interface ClosureVisitExecutionBaseV1 {
   readonly nowMs: number;
   readonly verifyAuthorityEnvelope: (
     envelope:
@@ -87,17 +87,23 @@ export interface ClosureVisitExecutionV1 {
       | SignedAgentProfileAuthorityTransitionEnvelopeV1
       | SignedAgentProfileForkResolutionEnvelopeV1,
   ) => boolean | Promise<boolean>;
+}
+
+export interface ClosureCurrentBundleVerifierV1 {
   readonly verifyCurrentBundle: (
     head: AgentProfileActiveHeadObjectV1,
     canonicalBundleBytes: Uint8Array,
   ) => boolean | Promise<boolean>;
 }
 
+export type ClosureVisitExecutionV1 = Readonly<ClosureVisitExecutionBaseV1>;
+
 export async function interpretClosureObjectV1(
   facts: ClosureVisitFactsV1,
   context: ClosureVisitContextV1,
   canonicalBytes: Uint8Array,
   execution: ClosureVisitExecutionV1,
+  currentBundleVerifier?: ClosureCurrentBundleVerifierV1,
 ): Promise<ClosureVisitEffectsV1> {
   switch (context.objectKind) {
     case 'agent-profile-head':
@@ -107,7 +113,7 @@ export async function interpretClosureObjectV1(
     case 'fork-resolution':
       return visitClosureResolutionV1(context, canonicalBytes, execution);
     case 'profile-bundle':
-      return visitClosureBundleV1(facts, context, canonicalBytes, execution);
+      return visitClosureBundleV1(facts, context, canonicalBytes, currentBundleVerifier);
     case 'owned-subject-table':
       return visitClosureSubjectTableV1(context, canonicalBytes);
     default:
@@ -233,14 +239,17 @@ async function visitClosureBundleV1(
   facts: ClosureVisitFactsV1,
   context: ClosureVisitContextV1,
   canonicalBytes: Uint8Array,
-  execution: ClosureVisitExecutionV1,
+  currentBundleVerifier: ClosureCurrentBundleVerifierV1 | undefined,
 ): Promise<ClosureVisitEffectsV1> {
+  if (currentBundleVerifier === undefined) {
+    fail('system-record-closure', 'profile bundle visit requires a materialization verifier');
+  }
   const current = facts.currentHead;
   if (
     current?.state !== 'active' ||
     digestSystemRecordBytesV1(SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle, canonicalBytes) !==
       context.digest ||
-    (await execution.verifyCurrentBundle(current, canonicalBytes.slice())) !== true
+    (await currentBundleVerifier.verifyCurrentBundle(current, canonicalBytes.slice())) !== true
   ) {
     fail('system-record-closure', 'current profile bundle verification failed');
   }

@@ -185,6 +185,9 @@ export function evaluateAgentProfileHeadAdvanceV1(
     );
   }
   if (current.state === 'tombstone') {
+    if (candidateVersion === currentVersion) {
+      return { decision: 'quarantine', reason: 'head-fork' };
+    }
     return {
       decision: 'reject',
       reason: 'tombstone is terminal within its authority sequence',
@@ -408,7 +411,12 @@ function evaluateSameSequenceTombstoneAdvanceV1(
       reason: 'tombstone lacks its exact verified active predecessor',
     };
   }
-  if (current.state === 'active') return { decision: 'accept' };
+  if (current.state === 'active') {
+    if (candidateVersion === currentVersion) {
+      return { decision: 'quarantine', reason: 'head-fork' };
+    }
+    return { decision: 'accept' };
+  }
   if (candidateVersion !== currentVersion) {
     return candidateVersion < currentVersion ? { decision: 'accept' } : { decision: 'stale' };
   }

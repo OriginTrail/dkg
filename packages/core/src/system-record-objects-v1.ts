@@ -125,8 +125,10 @@ export {
 
 export {
   assertSystemRecordClosureAlgebraV1,
+  buildAgentProfileForkEvidenceAuthorityClosureV1,
   buildAgentProfileVerificationClosureV1,
   type AgentProfileClosureVerifierV1,
+  type AgentProfileForkEvidenceClosureVerifierV1,
   type SystemRecordClosureArtifactV1,
   type SystemRecordVerificationClosureObjectV1,
   type SystemRecordVerificationClosureV1,

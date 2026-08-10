@@ -12,10 +12,10 @@ import {
 } from '../../src/system-records/admitted-slice-context-v1.js';
 import type { SystemRecordArtifactRepositoryV1 } from '../../src/system-records/artifact-v1.js';
 import {
-  createAgentProfileReceiverV1,
-  type AgentProfileContinuationReceiverV1,
-  type AgentProfileReceiverCandidateV1,
-  type AgentProfileReceiverV1,
+  createAgentProfileCandidateReceiverV1,
+  type AgentProfileCandidateReceiverV1,
+  type AgentProfileCandidateContinuationReceiverV1,
+  type AgentProfileReceiverAnyCandidateV1,
 } from '../../src/system-records/receiver-v1.js';
 import type {
   AgentProfileInventoryLoadRequestV1,
@@ -29,6 +29,7 @@ import {
   PRODUCER_FIXTURE_NOW_MS,
   DEPLOYMENT,
 } from './agent-profile-producer-v1-fixture.js';
+import { agentProfileArtifactSources } from './agent-profile-artifact-sources-v1-fixture.js';
 
 export { NETWORK };
 
@@ -116,14 +117,14 @@ export async function signRootDescriptor(
 export function receiver(
   store: SystemRecordArtifactRepositoryV1,
   consumeCandidate: (
-    input: AgentProfileReceiverCandidateV1,
+    input: AgentProfileReceiverAnyCandidateV1,
     admittedContext: AgentProfileAdmittedSliceContextV1,
     signal: AbortSignal,
   ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
 ) {
-  return createAgentProfileReceiverV1({
+  return createAgentProfileCandidateReceiverV1({
     networkId: NETWORK,
-    artifacts: store,
+    artifacts: agentProfileArtifactSources(store),
     nowMs: () => PRODUCER_FIXTURE_NOW_MS,
     verifyCurrentBundle: () => true,
     prepareCandidateApply: (candidate, admittedContext, signal) => Object.freeze({
@@ -135,9 +136,9 @@ export function receiver(
 }
 
 export function receiverWithPreparation(
-  prepareActive: (
-    row: Parameters<AgentProfileReceiverV1['prepareActive']>[0],
-    signal: Parameters<AgentProfileReceiverV1['prepareActive']>[1],
+  prepareCandidate: (
+    row: Parameters<AgentProfileCandidateReceiverV1['prepareCandidate']>[0],
+    signal: Parameters<AgentProfileCandidateReceiverV1['prepareCandidate']>[1],
   ) => Readonly<{
     apply: (
       admittedContext: AgentProfileAdmittedSliceContextV1,
@@ -149,10 +150,10 @@ export function receiverWithPreparation(
       signal: AbortSignal,
     ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
   }>>,
-): AgentProfileContinuationReceiverV1 {
-  const receiver: AgentProfileContinuationReceiverV1 = Object.freeze({
-    async prepareActive(row, signal) {
-      const prepared = await prepareActive(row, signal);
+): AgentProfileCandidateContinuationReceiverV1 {
+  const receiver: AgentProfileCandidateContinuationReceiverV1 = Object.freeze({
+    async prepareCandidate(row, signal) {
+      const prepared = await prepareCandidate(row, signal);
       let dispatchPrepared = false;
       return Object.freeze({
         async prepareDispatch(admittedContext, dispatchSignal) {
@@ -170,12 +171,18 @@ export function receiverWithPreparation(
         },
       });
     },
-    async receiveActive(row, admittedContext, signal) {
-      const prepared = await receiver.prepareActive(row, signal);
+    async receiveCandidate(row, admittedContext, signal) {
+      const prepared = await receiver.prepareCandidate(row, signal);
       signal.throwIfAborted();
       const dispatch = await prepared.prepareDispatch(admittedContext, signal);
       signal.throwIfAborted();
       return dispatch.dispatch();
+    },
+    prepareActive(row, signal) {
+      return receiver.prepareCandidate(row, signal);
+    },
+    receiveActive(row, admittedContext, signal) {
+      return receiver.receiveCandidate(row, admittedContext, signal);
     },
   });
   return receiver;

@@ -40,6 +40,8 @@ import {
 } from './system-record-authority-verification-v1-internal.js';
 import {
   interpretClosureObjectV1,
+  type ClosureCurrentBundleVerifierV1,
+  type ClosureVisitExecutionV1,
   type ClosureVisitEffectsV1,
 } from './system-record-verification-closure-visitors-v1-internal.js';
 
@@ -139,7 +141,7 @@ export interface SystemRecordClosureArtifactV1 {
   readonly canonicalBytes: Uint8Array;
 }
 
-export interface AgentProfileClosureVerifierV1 {
+export interface AgentProfileForkEvidenceClosureVerifierV1 {
   readonly nowMs: number;
   readonly resolve: (
     reference: Readonly<Pick<SystemRecordClosureArtifactV1, 'objectKind' | 'digest'>>,
@@ -150,11 +152,10 @@ export interface AgentProfileClosureVerifierV1 {
       | SignedAgentProfileAuthorityTransitionEnvelopeV1
       | SignedAgentProfileForkResolutionEnvelopeV1,
   ) => boolean | Promise<boolean>;
-  readonly verifyCurrentBundle: (
-    head: AgentProfileActiveHeadObjectV1,
-    canonicalBundleBytes: Uint8Array,
-  ) => boolean | Promise<boolean>;
 }
+
+export interface AgentProfileClosureVerifierV1
+  extends AgentProfileForkEvidenceClosureVerifierV1, ClosureCurrentBundleVerifierV1 {}
 
 type ClosurePurposeV1 =
   | 'current'
@@ -195,12 +196,20 @@ interface CollectedClosureV1 {
   readonly canonicalBytes: number;
 }
 
-interface ClosureExecutionV1 {
-  readonly nowMs: number;
+type ClosureExecutionV1 = ClosureVisitExecutionV1 & Readonly<{
   readonly resolve: AgentProfileClosureVerifierV1['resolve'];
-  readonly verifyAuthorityEnvelope: AgentProfileClosureVerifierV1['verifyAuthorityEnvelope'];
-  readonly verifyCurrentBundle: AgentProfileClosureVerifierV1['verifyCurrentBundle'];
-}
+}>;
+
+type ClosureCollectionV1 =
+  | Readonly<{
+      rootPurpose: 'current';
+      execution: ClosureExecutionV1;
+      currentBundleVerifier: ClosureCurrentBundleVerifierV1;
+    }>
+  | Readonly<{
+      rootPurpose: 'fork-evidence';
+      execution: ClosureExecutionV1;
+    }>;
 
 function createClosureTraversalStateV1(
   currentHeadDigest: Digest32V1,
@@ -271,8 +280,9 @@ async function visitClosureObjectV1(
   context: ClosurePendingReferenceV1,
   canonicalBytes: Uint8Array,
   references: ClosureReferenceV1[],
-  execution: ClosureExecutionV1,
+  collection: ClosureCollectionV1,
 ): Promise<void> {
+  const { execution } = collection;
   const currentHead = state.parsedHeads.get(state.currentHeadDigest);
   const effects: ClosureVisitEffectsV1 = await interpretClosureObjectV1(
     Object.freeze({
@@ -282,6 +292,7 @@ async function visitClosureObjectV1(
     context,
     canonicalBytes,
     execution,
+    collection.rootPurpose === 'current' ? collection.currentBundleVerifier : undefined,
   );
   for (const reference of effects.references) {
     enqueueClosureReferenceV1(
@@ -319,14 +330,15 @@ async function visitClosureObjectV1(
 
 async function collectVerificationClosureV1(
   currentHeadDigest: Digest32V1,
-  execution: ClosureExecutionV1,
+  collection: ClosureCollectionV1,
 ): Promise<CollectedClosureV1> {
+  const { execution, rootPurpose } = collection;
   const state = createClosureTraversalStateV1(currentHeadDigest);
   enqueueClosureReferenceV1(
     state,
     'agent-profile-head',
     currentHeadDigest,
-    'current',
+    rootPurpose,
   );
 
   while (state.pending.size > 0) {
@@ -375,7 +387,7 @@ async function collectVerificationClosureV1(
       fail('system-record-closure', 'closure artifact exceeds its kind cap', cause);
     }
     const references: ClosureReferenceV1[] = [];
-    await visitClosureObjectV1(state, context, canonicalBytes, references, execution);
+    await visitClosureObjectV1(state, context, canonicalBytes, references, collection);
 
     state.canonicalBytes += canonicalBytes.byteLength;
     if (
@@ -635,7 +647,53 @@ export async function buildAgentProfileVerificationClosureV1(
   currentHeadDigest: Digest32V1,
   verifier: AgentProfileClosureVerifierV1,
 ): Promise<SystemRecordVerificationClosureV1> {
+  return buildAgentProfileVerificationClosureForPurposeV1(
+    currentHeadDigest,
+    Object.freeze({
+      rootPurpose: 'current',
+      execution: createMaterializationClosureExecutionV1(verifier),
+      currentBundleVerifier: Object.freeze({
+        verifyCurrentBundle: verifier.verifyCurrentBundle,
+      }),
+    }),
+  );
+}
+
+/**
+ * Verify one conflict-evidence head's authority lineage without treating its
+ * historical profile bundle as a materialization candidate.
+ */
+export async function buildAgentProfileForkEvidenceAuthorityClosureV1(
+  evidenceHeadDigest: Digest32V1,
+  verifier: AgentProfileForkEvidenceClosureVerifierV1,
+): Promise<SystemRecordVerificationClosureV1> {
+  return buildAgentProfileVerificationClosureForPurposeV1(
+    evidenceHeadDigest,
+    Object.freeze({
+      rootPurpose: 'fork-evidence',
+      execution: createAuthorityOnlyClosureExecutionV1(verifier),
+    }),
+  );
+}
+
+async function buildAgentProfileVerificationClosureForPurposeV1(
+  currentHeadDigest: Digest32V1,
+  collection: ClosureCollectionV1,
+): Promise<SystemRecordVerificationClosureV1> {
   digest(currentHeadDigest, 'currentHeadDigest');
+  const { execution } = collection;
+  const nowMs = execution.nowMs;
+  const collected = await collectVerificationClosureV1(
+    currentHeadDigest,
+    collection,
+  );
+  validateCollectedClosureAuthorityV1(collected, nowMs);
+  return projectVerificationClosureV1(collected);
+}
+
+function createMaterializationClosureExecutionV1(
+  verifier: AgentProfileClosureVerifierV1,
+): ClosureExecutionV1 {
   const nowMs = verifier.nowMs;
   const resolve = verifier.resolve;
   const verifyAuthorityEnvelope = verifier.verifyAuthorityEnvelope;
@@ -648,15 +706,28 @@ export async function buildAgentProfileVerificationClosureV1(
   ) {
     fail('system-record-closure', 'closure verifier callbacks are invalid');
   }
-  const execution: ClosureExecutionV1 = Object.freeze({
+  return Object.freeze({
     nowMs,
     resolve,
     verifyAuthorityEnvelope,
-    verifyCurrentBundle,
   });
-  const collected = await collectVerificationClosureV1(currentHeadDigest, execution);
-  validateCollectedClosureAuthorityV1(collected, nowMs);
-  return projectVerificationClosureV1(collected);
+}
+
+function createAuthorityOnlyClosureExecutionV1(
+  verifier: AgentProfileForkEvidenceClosureVerifierV1,
+): ClosureExecutionV1 {
+  const nowMs = verifier.nowMs;
+  const resolve = verifier.resolve;
+  const verifyAuthorityEnvelope = verifier.verifyAuthorityEnvelope;
+  if (!isSafeNow(nowMs)) fail('system-record-closure', 'closure verifier clock is invalid');
+  if (typeof resolve !== 'function' || typeof verifyAuthorityEnvelope !== 'function') {
+    fail('system-record-closure', 'closure verifier callbacks are invalid');
+  }
+  return Object.freeze({
+    nowMs,
+    resolve,
+    verifyAuthorityEnvelope,
+  });
 }
 
 function compareClosureObjects(

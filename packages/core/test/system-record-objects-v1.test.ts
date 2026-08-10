@@ -5,7 +5,6 @@ import { signAsync as signEd25519 } from '@noble/ed25519';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { keccak256 } from '../src/crypto/keccak.js';
 import { describe, expect, it } from 'vitest';
-
 import {
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   assertCanonicalEip191SignatureV1,
@@ -16,6 +15,7 @@ import {
   assertDerivedAgentEncryptionSubjectV1,
   assertSystemRecordPeerBindingV1,
   assertSystemRecordClosureAlgebraV1,
+  buildAgentProfileForkEvidenceAuthorityClosureV1,
   buildAgentProfileVerificationClosureV1,
   buildSystemRecordSignatureMessageV1,
   classifyAgentProfileOwnedSubjectV1,
@@ -619,7 +619,7 @@ describe('system-record V1 object codecs', () => {
     )).toEqual({ decision: 'reject', reason: 'stable record key changed' });
   });
 
-  it('makes a verified tombstone dominant regardless of active-head delivery order', async () => {
+  it('keeps an unambiguous tombstone terminal but quarantines a same-tuple active fork', async () => {
     const fixture = await authorityFixture();
     const initial = activeHead(fixture);
     const tombstone = tombstoneHead(initial);
@@ -661,7 +661,12 @@ describe('system-record V1 object codecs', () => {
       { current: competingActive, disposition: 'discoverable', transitionLineage: [], historicalRoots: [] },
       tombstone,
       { nowMs, tombstonePredecessor: initial },
-    )).toEqual({ decision: 'accept' });
+    )).toEqual({ decision: 'quarantine', reason: 'head-fork' });
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      { current: tombstone, disposition: 'discoverable', transitionLineage: [], historicalRoots: [] },
+      competingActive,
+      { nowMs },
+    )).toEqual({ decision: 'quarantine', reason: 'head-fork' });
 
     const higherVersionTombstone = {
       ...tombstone,
@@ -1410,6 +1415,27 @@ describe('system-record owned subjects and verification closure', () => {
         [...entry.references.map((reference) => reference.digest)].sort(),
       );
     }
+    const authorityOnlyVerifier = {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference: { objectKind: string; digest: string }) =>
+        artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: (candidate: Parameters<
+        typeof verifySignedSystemRecordEnvelopeV1
+      >[0]) => verifySignedSystemRecordEnvelopeV1(candidate),
+    };
+    Object.defineProperty(authorityOnlyVerifier, 'verifyCurrentBundle', {
+      enumerable: true,
+      get: () => {
+        throw new Error('authority-only closure inspected a bundle verifier');
+      },
+    });
+    const forkEvidenceClosure = await buildAgentProfileForkEvidenceAuthorityClosureV1(
+      envelope.objectDigest,
+      authorityOnlyVerifier,
+    );
+    expect(forkEvidenceClosure.objects.map(({ objectKind }) => objectKind))
+      .toEqual(['agent-profile-head']);
+    expect(forkEvidenceClosure.canonicalBytes).toBe(headBytes.byteLength);
     await expect(buildAgentProfileVerificationClosureV1(envelope.objectDigest, {
       nowMs: Date.parse('2026-08-05T12:10:00Z'),
       resolve: async (reference) => reference.objectKind === 'agent-profile-head'

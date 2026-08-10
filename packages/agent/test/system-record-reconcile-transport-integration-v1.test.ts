@@ -6,10 +6,12 @@ import {
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type { SystemRecordArtifactRepositoryV1 } from '../src/system-records/artifact-v1.js';
 import type {
-  AgentProfileContinuationReceiverV1,
+  AgentProfileArtifactSourcesV1,
+  AgentProfileCandidateContinuationReceiverV1,
+  AgentProfileReceiverAnyCandidateV1,
 } from '../src/system-records/receiver-v1.js';
+import { createAgentProfileCandidateReceiverV1 } from '../src/system-records/receiver-v1.js';
 import { createAgentProfileReconcilerV1 } from '../src/system-records/reconcile-v1.js';
 import { createAgentProfileReconcileTransportV1 } from '../src/system-records/reconcile-transport-v1.js';
 import type {
@@ -22,7 +24,9 @@ import {
   publishedFixture,
   receiver,
 } from './support/agent-profile-reconcile-v1-fixture.js';
+import { conflictReconcileFixture } from './support/agent-profile-conflict-reconcile-v1-fixture.js';
 import { NETWORK } from './support/agent-profile-producer-v1-fixture.js';
+import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 
 describe('agent-profile reconciler exact transport integration V1', () => {
   it('routes inventory and receiver closure fetches through one admitted transport slice', async () => {
@@ -315,10 +319,10 @@ describe('agent-profile reconciler exact transport integration V1', () => {
     const artifacts = fixture.store;
     const prepareFromSource = async (
       row: SystemRecordInventoryRowV1,
-      source: SystemRecordArtifactRepositoryV1,
+      source: AgentProfileArtifactSourcesV1,
       signal: AbortSignal,
     ) => {
-      await source.resolve(Object.freeze({
+      await source.closureArtifacts.resolve(Object.freeze({
         type: 'object',
         objectKind: 'agent-profile-head',
         objectDigest: row.headDigest,
@@ -332,19 +336,26 @@ describe('agent-profile reconciler exact transport integration V1', () => {
         },
       });
     };
-    const receiverWithRemotePreparation: AgentProfileContinuationReceiverV1 = Object.freeze({
+    const receiverWithRemotePreparation: AgentProfileCandidateContinuationReceiverV1 = Object.freeze({
       openPreparation(row) {
         return Object.freeze({
           prepare: (source, signal) => prepareFromSource(row, source, signal),
           release: () => undefined,
         });
       },
-      prepareActive: (row, signal) => prepareFromSource(row, artifacts, signal),
-      async receiveActive(row, admittedContext, signal) {
-        const prepared = await prepareFromSource(row, artifacts, signal);
+      prepareCandidate: (row, signal) => prepareFromSource(
+        row,
+        Object.freeze({ closureArtifacts: artifacts, securitySidecarArtifacts: artifacts }),
+        signal,
+      ),
+      async receiveCandidate(row, admittedContext, signal) {
+        const prepared = await receiverWithRemotePreparation.prepareCandidate(row, signal);
         const dispatch = await prepared.prepareDispatch(admittedContext, signal);
         return dispatch.dispatch();
       },
+      prepareActive: (row, signal) => receiverWithRemotePreparation.prepareCandidate(row, signal),
+      receiveActive: (row, admittedContext, signal) =>
+        receiverWithRemotePreparation.receiveCandidate(row, admittedContext, signal),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -383,5 +394,284 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       closureWireBytes: 0,
     });
     expect(apply).not.toHaveBeenCalled();
+  });
+
+  it('fails over and applies a verified ordinary fork as quarantine', async () => {
+    const fixture = await conflictReconcileFixture('active');
+    const candidates: AgentProfileReceiverAnyCandidateV1[] = [];
+    const fetchExact = vi.fn(async (
+      providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (providerId === 'provider-a'
+          && lookup.type === 'object'
+          && lookup.objectKind === 'conflict-evidence') {
+        return Object.freeze({ outcome: 'not-found', wireBytes: 7 });
+      }
+      const artifact = await fixture.repository.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 3 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a', 'provider-b'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: receiver(fixture.repository, async (candidate) => {
+        candidates.push(candidate);
+        return {
+          outcome: 'applied',
+          stateRevision: '12',
+          appliedStateDigest: `0x${'c'.repeat(64)}`,
+        };
+      }),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      processedRows: 1,
+    });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.operation).toBe('quarantine');
+    expect(fetchExact.mock.calls.filter(([, lookup]) =>
+      lookup.type === 'object' && lookup.objectKind === 'conflict-evidence')
+      .map(([providerId]) => providerId)).toEqual(['provider-a', 'provider-b']);
+    expect(transport.stats()).toMatchObject({
+      activeSlice: 0,
+      retainedContinuationArtifacts: 0,
+      retainedContinuationSidecarArtifacts: 0,
+    });
+  });
+
+  it('resumes disputed-tombstone quarantine across slices without refetching retained artifacts', async () => {
+    const fixture = await conflictReconcileFixture('tombstone');
+    const candidates: AgentProfileReceiverAnyCandidateV1[] = [];
+    const successfulLookups = new Map<string, number>();
+    const fetchExact = vi.fn(async (
+      providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (providerId === 'provider-a') {
+        return Object.freeze({ outcome: 'not-found', wireBytes: 5 });
+      }
+      if (providerId === 'provider-b') {
+        return Object.freeze({ outcome: 'remote-busy', wireBytes: 5 });
+      }
+      const artifact = await fixture.repository.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 3 });
+      const key = `${artifact.objectKind}:${artifact.objectDigest}`;
+      successfulLookups.set(key, (successfulLookups.get(key) ?? 0) + 1);
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a', 'provider-b', 'provider-c'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: receiver(fixture.repository, async (candidate) => {
+        candidates.push(candidate);
+        return {
+          outcome: 'applied',
+          stateRevision: '13',
+          appliedStateDigest: `0x${'d'.repeat(64)}`,
+        };
+      }),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    expect(reconciler.stats()).toMatchObject({
+      retainedSidecarArtifacts: expect.any(Number),
+      retainedClosureArtifacts: expect.any(Number),
+    });
+    expect(reconciler.stats().retainedSidecarArtifacts).toBeGreaterThan(0);
+    const retained = transport.stats();
+    expect(retained.retainedContinuationClosureArtifacts).toBeGreaterThan(0);
+    expect(retained.retainedContinuationSidecarArtifacts).toBeGreaterThan(0);
+    expect(retained.retainedContinuationArtifacts).toBeLessThan(
+      retained.retainedContinuationClosureArtifacts
+        + retained.retainedContinuationSidecarArtifacts,
+    );
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      processedRows: 1,
+    });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.operation).toBe('quarantine');
+    expect(candidates[0]?.head).toEqual(fixture.current);
+    expect([...successfulLookups.values()].every((count) => count === 1)).toBe(true);
+    expect(transport.stats()).toMatchObject({
+      retainedContinuationArtifacts: 0,
+      retainedContinuationClosureArtifacts: 0,
+      retainedContinuationSidecarArtifacts: 0,
+    });
+  });
+
+  it('finishes retryable sidecar preflight before verifying the materialization bundle', async () => {
+    const fixture = await conflictReconcileFixture('active');
+    let pauseEvidence = true;
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (lookup.type === 'object'
+          && lookup.objectKind === 'conflict-evidence'
+          && pauseEvidence) {
+        pauseEvidence = false;
+        return Object.freeze({ outcome: 'remote-busy', wireBytes: 1 });
+      }
+      const artifact = await fixture.repository.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 1 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const verifyCurrentBundle = vi.fn(() => true);
+    const candidates: AgentProfileReceiverAnyCandidateV1[] = [];
+    const candidateReceiver = createAgentProfileCandidateReceiverV1({
+      networkId: NETWORK,
+      artifacts: agentProfileArtifactSources(fixture.repository),
+      verifyCurrentBundle,
+      prepareCandidateApply: (candidate) => Object.freeze({
+        existingMonotonicDeadlineMs: 10_000,
+        monotonicNowMs: 1_000,
+        apply: async () => {
+          candidates.push(candidate);
+          return Object.freeze({
+            outcome: 'applied' as const,
+            stateRevision: '14',
+            appliedStateDigest: `0x${'e'.repeat(64)}`,
+          });
+        },
+      }),
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: candidateReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    expect(pauseEvidence).toBe(false);
+    expect(verifyCurrentBundle).not.toHaveBeenCalled();
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      processedRows: 1,
+    });
+    expect(verifyCurrentBundle).toHaveBeenCalledTimes(1);
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.operation).toBe('quarantine');
+  });
+
+  it('releases conflict continuation ownership when sidecar transport is aborted', async () => {
+    const fixture = await conflictReconcileFixture('active');
+    const controller = new AbortController();
+    let sidecarRequested = false;
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      if (lookup.type === 'object' && lookup.objectKind === 'conflict-evidence') {
+        sidecarRequested = true;
+        await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      }
+      const artifact = await fixture.repository.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 3 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const consumeCandidate = vi.fn();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: receiver(fixture.repository, consumeCandidate),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    const advance = reconciler.advance(controller.signal);
+    await vi.waitFor(() => expect(sidecarRequested).toBe(true));
+    controller.abort(new Error('stop conflict sidecar'));
+    await expect(advance).rejects.toThrow(/stop conflict sidecar/);
+    expect(consumeCandidate).not.toHaveBeenCalled();
+    expect(transport.stats()).toMatchObject({
+      activeSlice: 0,
+      retainedContinuationArtifacts: 0,
+      retainedContinuationClosureArtifacts: 0,
+      retainedContinuationSidecarArtifacts: 0,
+    });
   });
 });
