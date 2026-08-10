@@ -378,6 +378,7 @@ export {
   type SwmCatchupContinuationStop,
   type SwmCatchupContinuationSummary,
   type SwmCatchupContinuationUnit,
+  type SwmCatchupProgressLedger,
   type SwmCatchupStartedContinuation,
   type SwmCatchupStartedResult,
 } from './sync/catchup-pass-policy.js';

@@ -5,8 +5,11 @@ import type {
 import {
   SwmCatchupPassTracker,
   runSwmCatchupContinuations,
+  shouldRunAnotherCatchupPass,
   type CatchupPassConfig,
+  type CatchupPassDecision,
   type CatchupPassDecisionReason,
+  type SwmCatchupProgressLedger,
 } from './catchup-pass-policy.js';
 import { classifyDurableProgress } from './durable-progress.js';
 import {
@@ -82,12 +85,152 @@ export interface RunSelectedSwmContinuationsOptions {
 
 interface SelectedSwmContinuationState {
   unit: SelectedSwmContinuationUnit;
-  tracker: SwmCatchupPassTracker<SwmSnapshotCoverage>;
+  ledger: SelectedSwmContinuationLedger;
   planeProven: boolean;
   recoverableIncomplete: number;
   recoverableMetadataYields: number;
   metadataCompleted: boolean;
   completed: boolean;
+}
+
+type SelectedProgressDomain =
+  | `metadata:${number}`
+  | `post-metadata:${number}`
+  | 'snapshot'
+  | 'none';
+
+/**
+ * Selected-provider progress ledger.
+ *
+ * Metadata offsets and resolved snapshot counts are deliberately different
+ * domains. A domain transition clears only the stall baseline, granting the
+ * newly capable domain its first bounded pass while preserving the one global
+ * continuation count, time budget and pass cap owned by the shared executor.
+ */
+class SelectedSwmContinuationLedger implements SwmCatchupProgressLedger {
+  private readonly snapshotTracker = new SwmCatchupPassTracker<SwmSnapshotCoverage>();
+
+  private metadataGeneration = 0;
+
+  private metadataProgress = 0;
+
+  private domain: SelectedProgressDomain = 'none';
+
+  private progressBaseline = 0;
+
+  private progressBaselineEstablished = false;
+
+  private completedPasses = 0;
+
+  constructor(private readonly providerPeerId: string) {}
+
+  recordRound(input: {
+    coverage: SwmSnapshotCoverage | undefined;
+    completedWithoutFailure: boolean;
+    metadataProgress: number | undefined;
+    metadataGeneration: number;
+    metadataCompleted: boolean;
+  }): void {
+    this.snapshotTracker.recordPeerRound(
+      this.providerPeerId,
+      input.coverage,
+      input.completedWithoutFailure,
+    );
+
+    if (!Number.isSafeInteger(input.metadataGeneration) || input.metadataGeneration < 0) {
+      throw new Error(
+        `Invalid selected SWM metadata continuation generation for ${this.providerPeerId}: `
+        + `${input.metadataGeneration}`,
+      );
+    }
+    if (
+      input.metadataProgress !== undefined
+      && (!Number.isSafeInteger(input.metadataProgress) || input.metadataProgress < 0)
+    ) {
+      throw new Error(
+        `Invalid selected SWM metadata continuation progress for ${this.providerPeerId}: `
+        + `${input.metadataProgress}`,
+      );
+    }
+    if (input.metadataGeneration !== this.metadataGeneration) {
+      this.metadataGeneration = input.metadataGeneration;
+      this.metadataProgress = 0;
+    }
+    if (
+      input.metadataProgress !== undefined
+      && input.metadataProgress > this.metadataProgress
+    ) {
+      this.metadataProgress = input.metadataProgress;
+    }
+
+    const snapshotCapable = this.snapshotTracker.capablePeers().length > 0;
+    let nextDomain: SelectedProgressDomain = 'none';
+    if (snapshotCapable) {
+      nextDomain = 'snapshot';
+    } else if (!input.metadataCompleted && this.metadataProgress > 0) {
+      nextDomain = `metadata:${this.metadataGeneration}`;
+    } else if (
+      input.metadataCompleted
+      && input.metadataProgress !== undefined
+      && !input.completedWithoutFailure
+    ) {
+      // A complete retained manifest can still make another bounded attempt at
+      // aggregate data, verification, materialization or store work before any
+      // incomplete snapshot coverage exists. This is capability, not offset
+      // progress, so it gets its own constant-unit domain.
+      nextDomain = `post-metadata:${this.metadataGeneration}`;
+    } else if (input.coverage?.manifestComplete) {
+      // Preserve a terminal snapshot reading for diagnostics. Capability still
+      // comes from the snapshot tracker, so complete coverage earns no retry.
+      nextDomain = 'snapshot';
+    }
+    if (nextDomain !== this.domain) {
+      this.domain = nextDomain;
+      this.progressBaseline = 0;
+      this.progressBaselineEstablished = false;
+    }
+  }
+
+  private capablePeers(): string[] {
+    if (this.domain === 'snapshot') return this.snapshotTracker.capablePeers();
+    if (this.domain === 'none') return [];
+    return [this.providerPeerId];
+  }
+
+  progress(): number {
+    if (this.domain === 'snapshot') return this.snapshotTracker.progress();
+    if (this.domain.startsWith('metadata:')) return this.metadataProgress;
+    if (this.domain.startsWith('post-metadata:')) return 1;
+    return 0;
+  }
+
+  continuationPasses(): number {
+    return this.completedPasses;
+  }
+
+  decide(input: {
+    nowMs: number;
+    deadlineMs: number;
+    maxPasses: number;
+    planeProven: boolean;
+  }): CatchupPassDecision {
+    return shouldRunAnotherCatchupPass({
+      ...input,
+      passesRun: 1 + this.completedPasses,
+      progressHighWaterMark: this.progressBaseline,
+      lastPassProgress: this.progress(),
+      progressBaselineEstablished: this.progressBaselineEstablished,
+      capablePeers: this.capablePeers(),
+    });
+  }
+
+  startContinuationPass(): number {
+    const before = this.progress();
+    this.progressBaseline = before;
+    this.progressBaselineEstablished = true;
+    this.completedPasses += 1;
+    return before;
+  }
 }
 
 function withoutContinuationPasses(
@@ -118,32 +261,30 @@ export async function runSelectedSwmContinuations(
       );
     }
     const progress = classifyDurableProgress(unit.initialResult);
-    const tracker = new SwmCatchupPassTracker<SwmSnapshotCoverage>();
-    tracker.recordPeerRound(
-      options.providerPeerId,
-      unit.initialResult.swmCoverage,
-      progress.completedWithoutFailure,
-    );
-    tracker.recordPeerAuxiliaryProgress(
-      options.providerPeerId,
-      unit.metadataContinuationProgress?.(),
-      unit.metadataContinuationGeneration?.() ?? 0,
-    );
     const freshness = classifySelectedSwmRoundFreshness(
       contextGraphId,
       unit.initialResult,
     );
+    const metadataCompleted = unit.metadataContinuationCompleted?.() ?? (
+      unit.metadataContinuationProgress?.() === undefined
+      && progress.completedWithoutFailure
+    );
+    const ledger = new SelectedSwmContinuationLedger(options.providerPeerId);
+    ledger.recordRound({
+      coverage: unit.initialResult.swmCoverage,
+      completedWithoutFailure: progress.completedWithoutFailure,
+      metadataProgress: unit.metadataContinuationProgress?.(),
+      metadataGeneration: unit.metadataContinuationGeneration?.() ?? 0,
+      metadataCompleted,
+    });
     stateByContextGraph.set(contextGraphId, {
       unit,
-      tracker,
+      ledger,
       planeProven:
         unit.initialResult.insertedDataTriples > 0 && progress.completedWithoutFailure,
       recoverableIncomplete: freshness.recoverableSnapshotYieldFailures,
       recoverableMetadataYields: freshness.recoverableMetadataContinuationYields,
-      metadataCompleted: unit.metadataContinuationCompleted?.() ?? (
-        unit.metadataContinuationProgress?.() === undefined
-        && progress.completedWithoutFailure
-      ),
+      metadataCompleted,
       completed: freshness.snapshotPlaneComplete,
     });
   }
@@ -158,7 +299,7 @@ export async function runSelectedSwmContinuations(
   const execution = await runSwmCatchupContinuations({
     units: [...stateByContextGraph.values()].map((state) => ({
       key: state,
-      tracker: state.tracker,
+      ledger: state.ledger,
       planeProven: () => state.planeProven,
     })),
     config: options.passConfig,
@@ -177,16 +318,6 @@ export async function runSelectedSwmContinuations(
             const started = await candidate.runStarted(async (pass) => {
               const result = await item.run(remainingContextGraphs);
               const progress = classifyDurableProgress(result);
-              state.tracker.recordPeerRound(
-                options.providerPeerId,
-                result.swmCoverage,
-                progress.completedWithoutFailure,
-              );
-              state.tracker.recordPeerAuxiliaryProgress(
-                options.providerPeerId,
-                state.unit.metadataContinuationProgress?.(),
-                state.unit.metadataContinuationGeneration?.() ?? 0,
-              );
               const freshness = classifySelectedSwmRoundFreshness(
                 item.contextGraphId,
                 result,
@@ -199,6 +330,14 @@ export async function runSelectedSwmContinuations(
                   && progress.completedWithoutFailure
                 )
               );
+              state.ledger.recordRound({
+                coverage: result.swmCoverage,
+                completedWithoutFailure: progress.completedWithoutFailure,
+                metadataProgress: state.unit.metadataContinuationProgress?.(),
+                metadataGeneration:
+                  state.unit.metadataContinuationGeneration?.() ?? 0,
+                metadataCompleted: state.metadataCompleted,
+              });
               state.completed = freshness.snapshotPlaneComplete;
               state.planeProven = state.planeProven || (
                 result.insertedDataTriples > 0 && progress.completedWithoutFailure
