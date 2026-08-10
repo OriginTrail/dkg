@@ -36,9 +36,9 @@ export type ContextGraphBindingSubscriptionState = ContextGraphBindingSubscripti
   coreHosted?: boolean;
 };
 
-export type ContextGraphBindingSubscriptionEffects = {
+export type ContextGraphBindingSubscriptionFacts = {
   readonly reverseCandidateCleared: boolean;
-  readonly vmStateReset: 'none' | 'force' | 'inactive';
+  readonly admitted: boolean;
 };
 
 /** Contract Context Graph ids are positive, canonically formatted decimals. */
@@ -117,14 +117,15 @@ export class ContextGraphBindingState {
   /**
    * Apply the binding-owned portion of one normalized subscription transition.
    * The lifecycle layer supplies the canonical next commitment and consumes
-   * only explicit VM cleanup effects; it does not reconstruct provenance.
+   * binding facts without reconstructing provenance. Consumer-specific cleanup
+   * policy remains outside this registry.
    */
   applySubscriptionTransition(
     localCgId: string,
     previous: ContextGraphBindingSubscriptionState | undefined,
     next: ContextGraphBindingSubscriptionState,
     nextNameHash: string,
-  ): ContextGraphBindingSubscriptionEffects {
+  ): ContextGraphBindingSubscriptionFacts {
     const reverseCandidate = this.reverseCandidates.get(localCgId);
     const admitted = next.subscribed === true || next.coreHosted === true;
     const retainsReverseCandidate = previous !== undefined
@@ -137,11 +138,7 @@ export class ContextGraphBindingState {
       : this.clear(localCgId);
     return {
       reverseCandidateCleared,
-      vmStateReset: reverseCandidateCleared
-        ? 'force'
-        : admitted
-          ? 'none'
-          : 'inactive',
+      admitted,
     };
   }
 

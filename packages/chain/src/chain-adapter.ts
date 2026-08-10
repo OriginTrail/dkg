@@ -307,6 +307,8 @@ export interface KAUpdateVerification {
   onChainMerkleRoot?: Uint8Array;
   /** The block number of the on-chain update transaction. */
   blockNumber?: number;
+  /** The canonical block hash of the on-chain update transaction. */
+  blockHash?: string;
   /** The transaction index within the block (for deterministic same-block ordering). */
   txIndex?: number;
   /** Chain-truth Merkle-root array length after this update. */
@@ -365,7 +367,14 @@ export interface CreateContextGraphParams {
 
 /** One context graph entry from chain (from `NameClaimed` events of ContextGraphNameRegistry). */
 export interface ContextGraphOnChain {
-  /** bytes32 hex — keccak256(bytes(name)). */
+  /**
+   * ContextGraphNameRegistry key: bytes32 hex — keccak256(bytes(name)).
+   *
+   * Despite the legacy field name, this is NOT the positive decimal
+   * ContextGraphStorage id. Consumers that need that id must resolve this
+   * name hash through `resolveContextGraphIdByNameHash` before persisting or
+   * using an authoritative Context Graph binding.
+   */
   contextGraphId: string;
   creator: string;
   accessPolicy: number;

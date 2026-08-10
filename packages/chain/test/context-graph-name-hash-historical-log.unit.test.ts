@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS,
-} from '../src/context-graph-name-hash-resolver.js';
+} from '../src/evm-context-graph-name-hash-fence.js';
 import { CG_REGISTRY_MAX_SCAN_PAGES } from '../src/evm-adapter-base.js';
 import {
   callsForMethod,

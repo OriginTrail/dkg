@@ -31,7 +31,11 @@ import {
   type TripleStore,
   type Quad,
 } from '@origintrail-official/dkg-storage';
-import { type ChainAdapter, type EventFilter } from '@origintrail-official/dkg-chain';
+import {
+  resolvePublicFinalizedMaterializationAuthority,
+  type ChainAdapter,
+  type EventFilter,
+} from '@origintrail-official/dkg-chain';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot, skolemizeByEntity,
   generatedPrivateCatalogFloorQuads,
@@ -54,6 +58,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 const DKG_NS = 'http://dkg.io/ontology/';
 const PROV_NS = 'http://www.w3.org/ns/prov#';
+const CHAIN_FINALIZED_RECONCILE_PEER_ID = 'chain-finalized-reconcile-v1';
 
 // Slow-query / canary tags for the finalization SWM slice (#1549). A healthy fleet
 // sees `.fallbackUnbounded` at ~0 relative to `.bounded`; a spike means the bound is
@@ -94,6 +99,7 @@ import {
   type ParsedGraphScopedFinalization,
   type VerifiedGraphScopedFinalizationEvidence,
 } from './finalization-graph-envelope.js';
+import { recoverReceiptBackedGraphScopedEvidence } from './receipt-backed-graph-scoped-evidence.js';
 import { protobufScalarToBigInt, protobufScalarToNumber } from './protobuf-scalars.js';
 
 /**
@@ -199,6 +205,33 @@ type ExactGraphScopedLayerVerification =
       status: 'head-mismatch';
       graphUri: string;
     };
+
+type VerifiedGraphScopedLayer = Extract<
+  ExactGraphScopedLayerVerification,
+  { status: 'verified' }
+>;
+
+/**
+ * Exact local content accepted by the receiptless public-finalization policy.
+ * The layer is the only semantic difference between metadata-only VM repair
+ * and SWM-to-VM promotion; callers cannot independently choose the associated
+ * `contentAlreadyMaterialized` behavior.
+ */
+type VerifiedPublicFinalizedLayer =
+  | {
+      layer: MemoryLayer.VerifiableMemory;
+      verification: VerifiedGraphScopedLayer;
+    }
+  | {
+      layer: MemoryLayer.SharedWorkingMemory;
+      verification: VerifiedGraphScopedLayer;
+    };
+
+type PublicFinalizedMaterializationOutcome =
+  | 'promoted'
+  | 'already-confirmed'
+  | 'stale-target'
+  | 'verified-vm-metadata-pending';
 
 type GraphScopedMaterializationEnvelope = Pick<
   KnowledgeAssetWorkspaceHead,
@@ -344,6 +377,19 @@ interface ChainReconciledKCInput {
   subGraphName?: string;
   trustedAssertionEvidence?: TrustedGraphScopedAssertionEvidence;
 }
+
+type VerifiedGraphScopedConfirmation =
+  | {
+      kind: 'transaction';
+      txHash: string;
+      publisherAddress: string;
+      blockNumber: number;
+      materializedVersion: MaterializedVersion;
+    }
+  | {
+      kind: 'finalized-materialization';
+      materializedVersion: MaterializedVersion;
+    };
 
 interface PreparedGraphScopedMaterialization
   extends FinalizationRecoveryPreparedMaterialization {
@@ -1217,12 +1263,15 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: layerVerification.merkleRoot,
-      publisherAddress: msg.publisherAddress,
-      txHash: msg.txHash,
-      blockNumber: verifiedBlockNumber,
       batchId,
       authorAddress: verifiedAuthorAddress,
-      materializedVersion,
+      confirmation: {
+        kind: 'transaction',
+        txHash: msg.txHash,
+        publisherAddress: msg.publisherAddress,
+        blockNumber: verifiedBlockNumber,
+        materializedVersion,
+      },
       accessPolicy,
       allowedPeers,
       subGraphName,
@@ -1446,6 +1495,7 @@ export class FinalizationHandler {
    */
   private async reconcileGraphScopedKC(input: {
     contextGraphId: string;
+    onChainCgId?: string;
     ual: string;
     merkleRoot: Uint8Array;
     publisherAddress: string;
@@ -1464,6 +1514,7 @@ export class FinalizationHandler {
   > {
     const {
       contextGraphId,
+      onChainCgId,
       ual,
       merkleRoot,
       publisherAddress,
@@ -1596,6 +1647,7 @@ export class FinalizationHandler {
         expectedTxHash: trustedAssertionEvidence?.transactionHash,
         accessPolicy: access.accessPolicy,
         allowedPeers: access.allowedPeers,
+        confirmationKind: 'transaction',
         authorAddress: evidenceAuthorAddress,
         subGraphName,
       });
@@ -1617,6 +1669,7 @@ export class FinalizationHandler {
           batchId: kaId,
           accessPolicy: 'ownerOnly',
           allowedPeers: [],
+          confirmationKind: 'transaction',
           authorAddress,
           subGraphName,
         });
@@ -1634,47 +1687,82 @@ export class FinalizationHandler {
         }
       }
       if (!trustedAssertionEvidence) {
-        this.log.info(
+        let onChainContextGraphId: bigint;
+        try {
+          if (!onChainCgId) throw new Error('missing on-chain context graph id');
+          onChainContextGraphId = BigInt(onChainCgId);
+          if (onChainContextGraphId < 0n) throw new Error('negative on-chain context graph id');
+        } catch {
+          this.log.info(
+            ctx,
+            `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
+              + 'a valid on-chain context graph id; deferring',
+          );
+          return 'verified-vm-metadata-pending';
+        }
+        const recovery = await recoverReceiptBackedGraphScopedEvidence({
+          store: this.store,
+          chain: this.chain,
+          contextGraphId,
+          scope,
+          head: workspaceHead!,
+          merkleRoot,
+          publisherAddress,
+          kaId,
+          onChainContextGraphId,
+          subGraphName,
+        });
+        if (recovery.status === 'recovered') {
+          this.log.info(
+            ctx,
+            `Chain-reconcile: recovered canonical transaction provenance and verified `
+              + `access controls for ${scope.ual}`,
+          );
+          return this.repairExactGraphScopedVmMetadata({
+            contextGraphId,
+            scope,
+            verifiedQuads: vmVerification.quads,
+            computedMerkleRoot: vmVerification.merkleRoot,
+            evidence: recovery.evidence,
+            privateMerkleRoot,
+            batchId: kaId,
+            preserveNewerWorkspaceLifecycle: false,
+            ctx,
+          });
+        }
+        return this.applyPublicFinalizedMaterialization({
+          contextGraphId,
+          onChainCgId,
+          scope,
+          head,
+          privateMerkleRoot,
+          merkleRoot,
+          batchId: kaId,
+          versionBlock,
+          subGraphName,
+          verifiedLayer: {
+            layer: MemoryLayer.VerifiableMemory,
+            verification: vmVerification,
+          },
+          unavailableReason: `trusted receipt provenance (${recovery.reason})`,
           ctx,
-          `Chain-reconcile: exact VM metadata for ${ual} cannot be repaired without `
-            + 'transaction provenance; deferring',
-        );
-        return 'verified-vm-metadata-pending';
+        });
       }
       // A confirmed publish may have committed the exact VM graph before its
       // graph-scoped metadata survived a crash. Reapply only the metadata tail:
       // SWM writers use a different lock, so this recovery path must not delete
       // a potentially newer staged assertion.
-      const outcome = await this.applyVerifiedGraphScopedFinalization({
+      return this.repairExactGraphScopedVmMetadata({
         contextGraphId,
         scope,
         verifiedQuads: vmVerification.quads,
-        head,
-        privateMerkleRoot,
         computedMerkleRoot: vmVerification.merkleRoot,
-        publisherAddress: evidencePublisherAddress,
-        txHash: trustedAssertionEvidence.transactionHash,
-        blockNumber: evidenceBlockNumber,
+        evidence: trustedAssertionEvidence,
+        privateMerkleRoot,
         batchId: kaId,
-        authorAddress: evidenceAuthorAddress,
-        materializedVersion,
-        accessPolicy: trustedAssertionEvidence?.accessPolicy,
-        allowedPeers: trustedAssertionEvidence?.allowedPeers,
-        subGraphName,
-        source: 'chain-reconcile',
-        contentAlreadyMaterialized: true,
+        preserveNewerWorkspaceLifecycle,
         ctx,
       });
-      if (outcome === 'stale') return 'stale-target';
-      if (outcome === 'preserved-metadata') {
-        this.log.info(
-          ctx,
-          `Chain-reconcile: retained confirmed metadata for an older same-root assertion ${ual}`,
-        );
-        return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
-      }
-      this.log.info(ctx, `Chain-reconcile: exact VM graph already matches ${ual}; repaired metadata`);
-      return preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
     }
 
     const swmVerification = await this.verifyExactGraphScopedLayer({
@@ -1712,17 +1800,29 @@ export class FinalizationHandler {
       return 'no-swm';
     }
 
-    // A generic sweep can prove content and the current chain root, but it has
-    // no assertion-specific transaction provenance. Never synthesize confirmed
-    // metadata with an empty transaction hash; named recovery or an exact VM
-    // snapshot can complete the provenance-bearing transition.
+    // Public VM inventory is the chain itself. Once the current chain binding,
+    // liveness, public policy, root count and exact local SWM projection all
+    // agree, materialize through the explicit receiptless confirmation lane.
+    // This does not invent transaction provenance: metadata records
+    // `finalized-materialization` and deliberately omits transactionHash.
+    // Private/unknown CGs still require assertion-specific receipt evidence.
     if (!trustedAssertionEvidence) {
-      this.log.info(
+      return this.applyPublicFinalizedMaterialization({
+        contextGraphId,
+        onChainCgId,
+        scope,
+        head,
+        privateMerkleRoot,
+        merkleRoot,
+        batchId: kaId,
+        versionBlock,
+        subGraphName,
+        verifiedLayer: {
+          layer: MemoryLayer.SharedWorkingMemory,
+          verification: swmVerification,
+        },
         ctx,
-        `Chain-reconcile: exact SWM content for ${ual} is verified but transaction `
-          + 'provenance is unavailable; deferring VM promotion',
-      );
-      return 'verified-vm-metadata-pending';
+      });
     }
 
     const outcome = await this.applyVerifiedGraphScopedFinalization({
@@ -1732,12 +1832,15 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot: swmVerification.merkleRoot,
-      publisherAddress: evidencePublisherAddress,
-      txHash: trustedAssertionEvidence.transactionHash,
-      blockNumber: evidenceBlockNumber,
       batchId: kaId,
       authorAddress: evidenceAuthorAddress,
-      materializedVersion,
+      confirmation: {
+        kind: 'transaction',
+        txHash: trustedAssertionEvidence.transactionHash,
+        publisherAddress: evidencePublisherAddress,
+        blockNumber: evidenceBlockNumber,
+        materializedVersion,
+      },
       accessPolicy: trustedAssertionEvidence?.accessPolicy,
       allowedPeers: trustedAssertionEvidence?.allowedPeers,
       subGraphName,
@@ -1760,6 +1863,219 @@ export class FinalizationHandler {
   }
 
   /**
+   * Apply one exact public assertion after chain authority has been proven.
+   * Receiptless VM repair and SWM promotion intentionally share this policy so
+   * their authority fence and finalized metadata shape cannot drift apart.
+   */
+  private async applyPublicFinalizedMaterialization(input: {
+    contextGraphId: string;
+    onChainCgId?: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    head: GraphScopedMaterializationEnvelope;
+    privateMerkleRoot?: Uint8Array;
+    merkleRoot: Uint8Array;
+    batchId: bigint;
+    versionBlock: number;
+    subGraphName?: string;
+    verifiedLayer: VerifiedPublicFinalizedLayer;
+    /** VM repair keeps the receipt recovery diagnostic in its defer log. */
+    unavailableReason?: string;
+    ctx: OperationContext;
+  }): Promise<PublicFinalizedMaterializationOutcome> {
+    const {
+      contextGraphId,
+      onChainCgId,
+      scope,
+      head,
+      privateMerkleRoot,
+      merkleRoot,
+      batchId,
+      versionBlock,
+      subGraphName,
+      verifiedLayer,
+      unavailableReason,
+      ctx,
+    } = input;
+    const contentAlreadyMaterialized = verifiedLayer.layer === MemoryLayer.VerifiableMemory;
+    const publicAuthorityResult = await resolvePublicFinalizedMaterializationAuthority({
+      chain: this.chain,
+      onChainContextGraphId: onChainCgId,
+      kaId: batchId,
+      assertionVersion: scope.assertionVersion,
+      merkleRoot,
+    });
+    if (publicAuthorityResult.kind === 'unavailable') {
+      if (publicAuthorityResult.detail) {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: public finalized authority is unavailable for ${scope.ual}: `
+            + publicAuthorityResult.detail,
+        );
+      }
+      if (contentAlreadyMaterialized) {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: exact VM metadata for ${scope.ual} cannot be repaired without `
+            + `${unavailableReason ?? 'public chain authority'}; deferring`,
+        );
+      } else {
+        this.log.info(
+          ctx,
+          `Chain-reconcile: exact SWM content for ${scope.ual} is verified but neither `
+            + 'transaction provenance nor public chain authority is available; deferring VM promotion',
+        );
+      }
+      return 'verified-vm-metadata-pending';
+    }
+    if (publicAuthorityResult.authorUnavailableReason) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: latest-root author is unavailable for ${scope.ual}: `
+          + publicAuthorityResult.authorUnavailableReason,
+      );
+    }
+    const publicAuthority = publicAuthorityResult;
+
+    const finalizedHead: GraphScopedMaterializationEnvelope = {
+      ...head,
+      publisherPeerId: CHAIN_FINALIZED_RECONCILE_PEER_ID,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    };
+    const finalizedVersion = { blockNumber: versionBlock, txIndex: 0 };
+
+    // An exact VM graph may already have a complete receiptless envelope. In
+    // that case only the ordering watermark needs to advance. SWM content has
+    // no VM metadata yet and proceeds directly to the shared atomic apply.
+    if (contentAlreadyMaterialized) {
+      const finalizedMetadataState = await this.graphScopedMetadataState({
+        contextGraphId,
+        scope,
+        head: finalizedHead,
+        merkleRoot,
+        batchId,
+        materializedVersion: finalizedVersion,
+        accessPolicy: 'public',
+        allowedPeers: [],
+        confirmationKind: 'finalized-materialization',
+        authorAddress: publicAuthority.authorAddress,
+        subGraphName,
+      });
+      if (finalizedMetadataState === 'matching') {
+        await this.advanceExactGraphScopedVersion({
+          contextGraphId,
+          scope,
+          materializedVersion: finalizedVersion,
+        });
+        this.log.info(
+          ctx,
+          `Chain-reconcile: ${scope.ual} already has exact receiptless public VM state`,
+        );
+        return 'already-confirmed';
+      }
+    }
+
+    const outcome = await this.applyVerifiedGraphScopedFinalization({
+      contextGraphId,
+      scope,
+      verifiedQuads: verifiedLayer.verification.quads,
+      head: finalizedHead,
+      privateMerkleRoot,
+      computedMerkleRoot: verifiedLayer.verification.merkleRoot,
+      batchId,
+      authorAddress: publicAuthority.authorAddress,
+      confirmation: {
+        kind: 'finalized-materialization',
+        materializedVersion: finalizedVersion,
+      },
+      accessPolicy: 'public',
+      allowedPeers: [],
+      subGraphName,
+      source: 'chain-reconcile',
+      contentAlreadyMaterialized,
+      ctx,
+    });
+    if (outcome === 'stale') return 'stale-target';
+
+    if (contentAlreadyMaterialized) {
+      this.log.info(
+        ctx,
+        `Chain-reconcile: exact public VM graph already matches ${scope.ual}; `
+          + 'repaired receiptless chain metadata',
+      );
+      return 'already-confirmed';
+    }
+    if (outcome === 'preserved-metadata') return 'already-confirmed';
+    this.log.info(
+      ctx,
+      `Chain-reconcile: promoted exact public SWM assertion to VM from chain inventory `
+        + `for ${scope.ual} (ka=${batchId})`,
+    );
+    return 'promoted';
+  }
+
+  private async repairExactGraphScopedVmMetadata(input: {
+    contextGraphId: string;
+    scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+    verifiedQuads: Quad[];
+    computedMerkleRoot: Uint8Array;
+    evidence: TrustedGraphScopedAssertionEvidence;
+    privateMerkleRoot?: Uint8Array;
+    batchId: bigint;
+    preserveNewerWorkspaceLifecycle: boolean;
+    ctx: OperationContext;
+  }): Promise<'already-confirmed' | 'stale-target'> {
+    const { evidence } = input;
+    const head: GraphScopedMaterializationEnvelope = {
+      publicTripleCount: evidence.publicTripleCount,
+      ...(evidence.privateMerkleRoot
+        ? { privateMerkleRoot: evidence.privateMerkleRoot }
+        : {}),
+      privateTripleCount: evidence.privateTripleCount,
+      publisherPeerId: evidence.publisherPeerId,
+      accessPolicy: evidence.accessPolicy,
+      allowedPeers: [...evidence.allowedPeers],
+    };
+    const outcome = await this.applyVerifiedGraphScopedFinalization({
+      contextGraphId: input.contextGraphId,
+      scope: input.scope,
+      verifiedQuads: input.verifiedQuads,
+      head,
+      privateMerkleRoot: input.privateMerkleRoot,
+      computedMerkleRoot: input.computedMerkleRoot,
+      batchId: input.batchId,
+      authorAddress: evidence.authorAddress,
+      confirmation: {
+        kind: 'transaction',
+        txHash: evidence.transactionHash,
+        publisherAddress: evidence.publisherAddress,
+        blockNumber: evidence.blockNumber,
+        materializedVersion: { blockNumber: evidence.blockNumber, txIndex: evidence.txIndex },
+      },
+      accessPolicy: evidence.accessPolicy,
+      allowedPeers: evidence.allowedPeers,
+      subGraphName: evidence.subGraphName,
+      source: 'chain-reconcile',
+      contentAlreadyMaterialized: true,
+      ctx: input.ctx,
+    });
+    if (outcome === 'stale') return 'stale-target';
+    if (outcome === 'preserved-metadata') {
+      this.log.info(
+        input.ctx,
+        `Chain-reconcile: retained confirmed metadata for an older same-root assertion `
+          + evidence.transactionHash,
+      );
+      return input.preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
+    }
+    this.log.info(
+      input.ctx,
+      `Chain-reconcile: exact VM graph already matches ${input.scope.ual}; repaired metadata`,
+    );
+    return input.preserveNewerWorkspaceLifecycle ? 'stale-target' : 'already-confirmed';
+  }
+
+  /**
    * Materialize a graph-scoped assertion after its content and chain binding
    * have been verified. Gossip finalization and chain reconciliation deliberately
    * share this VM transition so a late joiner cannot produce a different
@@ -1774,12 +2090,9 @@ export class FinalizationHandler {
     head: GraphScopedMaterializationEnvelope;
     privateMerkleRoot?: Uint8Array;
     computedMerkleRoot: Uint8Array;
-    publisherAddress: string;
-    txHash: string;
-    blockNumber: number;
     batchId: bigint;
     authorAddress?: string;
-    materializedVersion: MaterializedVersion;
+    confirmation: VerifiedGraphScopedConfirmation;
     accessPolicy?: 'public' | 'ownerOnly' | 'allowList';
     allowedPeers?: string[];
     subGraphName?: string;
@@ -1794,12 +2107,9 @@ export class FinalizationHandler {
       head,
       privateMerkleRoot,
       computedMerkleRoot,
-      publisherAddress,
-      txHash,
-      blockNumber,
       batchId,
       authorAddress,
-      materializedVersion,
+      confirmation,
       accessPolicy: requestedAccessPolicy,
       allowedPeers: requestedAllowedPeers = [],
       subGraphName,
@@ -1807,6 +2117,7 @@ export class FinalizationHandler {
       contentAlreadyMaterialized = false,
       ctx,
     } = input;
+    const materializedVersion = confirmation.materializedVersion;
     const publicTripleCount = head.publicTripleCount;
     const privateTripleCount = head.privateTripleCount;
     const vmGraph = knowledgeAssetLayerGraphUri(
@@ -1883,22 +2194,43 @@ export class FinalizationHandler {
         return 'preserved-metadata' as const;
       }
 
-      let blockTimestamp = Math.floor(Date.now() / 1000);
-      if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
-        try {
-          blockTimestamp = await (this.chain as any).getBlockTimestamp(blockNumber);
-        } catch {
-          this.log.info(ctx, `Could not fetch block timestamp for block ${blockNumber}, using local time`);
+      const effectiveVersion = incomingVersionIsStale
+        ? currentMaterializedVersion
+        : materializedVersion;
+      let metadataConfirmation: Parameters<typeof generateGraphKnowledgeAssetMetadata>[1];
+      if (confirmation.kind === 'transaction') {
+        let blockTimestamp = Math.floor(Date.now() / 1000);
+        if (this.chain && typeof (this.chain as any).getBlockTimestamp === 'function') {
+          try {
+            blockTimestamp = await (this.chain as any).getBlockTimestamp(confirmation.blockNumber);
+          } catch {
+            this.log.info(
+              ctx,
+              `Could not fetch block timestamp for block ${confirmation.blockNumber}, using local time`,
+            );
+          }
         }
+        const provenance: OnChainProvenance = {
+          txHash: confirmation.txHash,
+          blockNumber: confirmation.blockNumber,
+          blockTimestamp,
+          publisherAddress: confirmation.publisherAddress,
+          batchId,
+          chainId: this.chain?.chainId ?? 'unknown',
+        };
+        metadataConfirmation = {
+          status: 'confirmed',
+          confirmation: { kind: 'transaction', provenance },
+        };
+      } else {
+        metadataConfirmation = {
+          status: 'confirmed',
+          confirmation: {
+            kind: 'finalized-materialization',
+            provenance: { batchId, materializedVersion: effectiveVersion },
+          },
+        };
       }
-      const provenance: OnChainProvenance = {
-        txHash,
-        blockNumber,
-        blockTimestamp,
-        publisherAddress,
-        batchId,
-        chainId: this.chain?.chainId ?? 'unknown',
-      };
       const metadata = generateGraphKnowledgeAssetMetadata(
         {
           ual: scope.ual,
@@ -1918,14 +2250,11 @@ export class FinalizationHandler {
           privateTripleCount,
           assertionGraph: vmGraph,
         },
-        {
-          status: 'confirmed',
-          confirmation: { kind: 'transaction', provenance },
-        },
+        metadataConfirmation,
       );
-      const effectiveVersion = incomingVersionIsStale
-        ? currentMaterializedVersion
-        : materializedVersion;
+      const committedMetadata = confirmation.kind === 'transaction'
+        ? [...metadata, materializedVersionQuad(metaGraph, scope.ual, effectiveVersion)]
+        : metadata;
       const vmQuads = verifiedQuads.map((quad) => ({ ...quad, graph: vmGraph }));
       const replaced = await tryReplaceGraphAndSubjectAtomically(
         this.store,
@@ -1933,7 +2262,7 @@ export class FinalizationHandler {
         vmQuads,
         metaGraph,
         scope.ual,
-        [...metadata, materializedVersionQuad(metaGraph, scope.ual, effectiveVersion)],
+        committedMetadata,
         { source: 'agent.finalization.graphScopedAtomicCommit' },
       );
       if (!replaced) {
@@ -2024,6 +2353,7 @@ export class FinalizationHandler {
     materializedVersion?: MaterializedVersion;
     accessPolicy: GraphScopedAccessPolicy;
     allowedPeers: string[];
+    confirmationKind?: 'transaction' | 'finalized-materialization';
     authorAddress?: string;
     subGraphName?: string;
   }): Promise<'matching' | 'different' | 'absent'> {
@@ -2037,6 +2367,7 @@ export class FinalizationHandler {
       materializedVersion,
       accessPolicy,
       allowedPeers,
+      confirmationKind = 'transaction',
       authorAddress,
       subGraphName,
     } = input;
@@ -2097,6 +2428,7 @@ export class FinalizationHandler {
       const actualAllowedPeers = [...new Set(storedAllowedPeers)].sort();
       const storedMaterializedVersion = oneLiteral(`${DKG_NS}materializedVersion`);
       const storedTransactionHash = oneLiteral(`${DKG_NS}transactionHash`);
+      const storedConfirmationKind = oneLiteral(`${DKG_NS}confirmationKind`) ?? 'transaction';
       const parsedMaterializedVersion = /^(\d+):(\d+)$/.exec(storedMaterializedVersion ?? '');
       const expectedMaterializedVersion = materializedVersion
         ? `${materializedVersion.blockNumber}:${materializedVersion.txIndex}`
@@ -2120,9 +2452,12 @@ export class FinalizationHandler {
           !== normalizedHex(ethers.hexlify(merkleRoot))
         || oneLiteral(`${DKG_NS}status`) !== 'confirmed'
         || BigInt(oneLiteral(`${DKG_NS}batchId`) ?? '-1') !== batchId
-        || storedTransactionHash === undefined
-        || (expectedTxHash !== undefined
-          && normalizedHex(storedTransactionHash) !== normalizedHex(expectedTxHash))
+        || storedConfirmationKind !== confirmationKind
+        || (confirmationKind === 'transaction'
+          ? storedTransactionHash === undefined
+            || (expectedTxHash !== undefined
+              && normalizedHex(storedTransactionHash) !== normalizedHex(expectedTxHash))
+          : storedTransactionHash !== undefined)
         || !parsedMaterializedVersion
         || !Number.isSafeInteger(Number(parsedMaterializedVersion[1]))
         || !Number.isSafeInteger(Number(parsedMaterializedVersion[2]))
@@ -2707,6 +3042,7 @@ export class FinalizationHandler {
     // enter the legacy root-operation scan below.
     const graphScopedOutcome = await this.reconcileGraphScopedKC({
       contextGraphId,
+      onChainCgId,
       ual,
       merkleRoot,
       publisherAddress,

@@ -53,6 +53,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { extractV10KCFromStore } from '@origintrail-official/dkg-random-sampling';
 import { writeMaterializedVersion, readMaterializedVersion } from '@origintrail-official/dkg-publisher';
+import { DKGAgent } from '../src/dkg-agent.js';
 import { SwmHostModeMethods } from '../src/dkg-agent-swm-host.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
@@ -106,17 +107,18 @@ async function seedOntology(store: OxigraphStore, localCgId: string, onChainId: 
 
 /** Minimal `this` for the heal — only what the method body touches. */
 function makeAgentLike(store: OxigraphStore): unknown {
-  return {
+  return Object.assign(Object.create(DKGAgent.prototype), {
     store,
     contextGraphBindingState: new ContextGraphBindingState(),
     rsHealCursorByCg: new Map<string, string>(),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },
-  };
+  });
 }
 
 function authoritativeTarget(onChainId: string): unknown {
   const sub = { subscribed: true, synced: true, onChainId };
   return {
+    kind: 'subscription',
     sub,
     bindingKind: 'authoritative',
     onChainId,

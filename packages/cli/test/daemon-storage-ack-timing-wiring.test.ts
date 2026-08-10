@@ -151,7 +151,16 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     tempHome = undefined;
   });
 
-  async function captureCreateArg(configOverrides: Record<string, unknown> = {}): Promise<any> {
+  async function captureCreateArg(
+    configOverrides: Record<string, unknown> = {},
+    inspectDuringCreate?: (createArg: any) => Promise<void>,
+  ): Promise<any> {
+    if (inspectDuringCreate) {
+      mocks.agentCreate.mockImplementationOnce(async (createArg: any) => {
+        await inspectDuringCreate(createArg);
+        throw new Error('after-agent-create');
+      });
+    }
     await expect(runDaemonInner(true, {
       name: 'storage-ack-timing-core-test',
       networkConfig: 'mainnet-gnosis',
@@ -172,6 +181,32 @@ describe('runDaemonInner StorageACK timing wiring', () => {
     closeDashboardDbFromAgentCreateArg(createArg);
     return createArg;
   }
+
+  it('round-trips deployment-scoped selected VM cursors through the daemon DashboardDB wiring', async () => {
+    const record = {
+      deploymentId: 'evm:100:hub=0x1234567890123456789012345678901234567890',
+      contextGraphId: 'rfc64-selected-daemon-wiring',
+      onChainContextGraphId: '298',
+      nameHash: `0x${'ab'.repeat(32)}`,
+      watermark: 47,
+    };
+
+    await captureCreateArg({}, async (createArg) => {
+      const store = createArg.selectedVmReconcileCursorStore;
+      expect(store).toBeDefined();
+      await store.saveSelectedVmReconcileCursor(record);
+      await expect(store.loadSelectedVmReconcileCursor(
+        record.deploymentId,
+        record.contextGraphId,
+        record.onChainContextGraphId,
+      )).resolves.toEqual(record);
+      await expect(store.loadSelectedVmReconcileCursor(
+        `${record.deploymentId}:other`,
+        record.contextGraphId,
+        record.onChainContextGraphId,
+      )).resolves.toBeNull();
+    });
+  });
 
   it('passes resolved default StorageACK timing into DKGAgent.create when config is unset', async () => {
     const createArg = await captureCreateArg();

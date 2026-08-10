@@ -14,14 +14,43 @@ import {
 } from './evm-adapter-constants.js';
 import { withTimeout } from './evm-adapter-rpc.js';
 import { withRpcRequestAbortSignal } from './rpc-request-transport.js';
-import {
-  CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY,
-  ContextGraphNameHashSlotIndex,
-  type ContextGraphNameHashSlot,
-  type ContextGraphNameHashSlotIndexAnchor,
-  type ContextGraphNameHashSlotIndexResult,
-  type ContextGraphNameHashSlotIndexScope,
-} from './context-graph-name-hash-resolver.js';
+
+/**
+ * Maximum current high-water id for the fast getNameHash enumeration. Above
+ * this threshold the adapter switches before any per-id read to its bounded,
+ * deploy-anchored exact-topic event scan.
+ */
+export const CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS = 1_024n;
+
+/** Fixed pressure bound for the current-state getNameHash enumeration. */
+export const CONTEXT_GRAPH_NAME_HASH_ENUMERATION_CONCURRENCY = 4;
+
+interface ContextGraphNameHashSlotScope {
+  readonly storageAddress: string;
+  readonly providers: readonly object[];
+  readonly rpcUrls: readonly string[];
+}
+
+interface ContextGraphNameHashSlot {
+  readonly id: bigint;
+  readonly nameHash: string | null;
+}
+
+interface ContextGraphNameHashSlotAnchor {
+  readonly blockNumber: number;
+  readonly blockHash: string;
+}
+
+type ContextGraphNameHashCurrentResolution =
+  | { readonly mode: 'current'; readonly id: bigint | null; readonly highWater: bigint }
+  | { readonly mode: 'historical' };
+
+interface ContextGraphNameHashSlotState {
+  readonly scope: ContextGraphNameHashSlotScope;
+  readonly highWater: bigint;
+  readonly anchor: ContextGraphNameHashSlotAnchor;
+  readonly idsByHash: ReadonlyMap<string, readonly bigint[]>;
+}
 
 export interface EvmContextGraphNameHashFenceDependencies {
   readonly initialize: () => Promise<void>;
@@ -73,7 +102,7 @@ export interface ContextGraphNameHashProviderHighWaters {
 
 export interface ContextGraphNameHashScopeToken {
   readonly epoch: number;
-  readonly scope: ContextGraphNameHashSlotIndexScope;
+  readonly scope: ContextGraphNameHashSlotScope;
 }
 
 export interface ContextGraphNameHashHistoricalHeadAnchor<TProvider> {
@@ -111,22 +140,69 @@ export interface ContextGraphNameHashHistoricalScan {
 
 /** High-level chain source; temporal fencing remains an implementation detail. */
 export interface EvmContextGraphNameHashSource {
-  resolve(
-    normalizedNameHash: string,
-    onIndexCommit: () => void,
-  ): Promise<bigint | null>;
+  /** Monotonic generation of committed current-slot snapshots. */
+  readonly currentSlotRevision: number;
+  resolve(normalizedNameHash: string): Promise<bigint | null>;
   invalidate(): void;
 }
 
 function sameScope(
-  a: ContextGraphNameHashSlotIndexScope,
-  b: ContextGraphNameHashSlotIndexScope,
+  a: ContextGraphNameHashSlotScope,
+  b: ContextGraphNameHashSlotScope,
 ): boolean {
   return a.storageAddress === b.storageAddress
     && a.providers.length === b.providers.length
     && a.providers.every((provider, index) => provider === b.providers[index])
     && a.rpcUrls.length === b.rpcUrls.length
     && a.rpcUrls.every((url, index) => url === b.rpcUrls[index]);
+}
+
+function copyScope(
+  scope: ContextGraphNameHashSlotScope,
+): ContextGraphNameHashSlotScope {
+  return {
+    storageAddress: scope.storageAddress,
+    providers: [...scope.providers],
+    rpcUrls: [...scope.rpcUrls],
+  };
+}
+
+function cloneIdsByHash(
+  source: ReadonlyMap<string, readonly bigint[]> | undefined,
+): Map<string, bigint[]> {
+  return new Map(
+    [...(source ?? [])].map(([nameHash, ids]) => [nameHash, [...ids]]),
+  );
+}
+
+function appendSlots(
+  idsByHash: Map<string, bigint[]>,
+  slots: readonly ContextGraphNameHashSlot[],
+  firstId: bigint,
+  lastId: bigint,
+): void {
+  const expectedCount = lastId < firstId ? 0 : Number(lastId - firstId + 1n);
+  if (slots.length !== expectedCount) {
+    throw new Error(
+      `resolveContextGraphIdByNameHash: current-slot refresh returned ` +
+      `${slots.length} rows for ${expectedCount} ids`,
+    );
+  }
+  const seen = new Set<bigint>();
+  for (const slot of slots) {
+    if (slot.id < firstId || slot.id > lastId || seen.has(slot.id)) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: invalid current-slot refresh id ` +
+        `${slot.id.toString()} for range [${firstId.toString()}, ${lastId.toString()}]`,
+      );
+    }
+    seen.add(slot.id);
+    if (slot.nameHash === null || slot.nameHash === ethers.ZeroHash) continue;
+    const normalized = slot.nameHash.toLowerCase();
+    const ids = idsByHash.get(normalized) ?? [];
+    ids.push(slot.id);
+    idsByHash.set(normalized, ids);
+  }
 }
 
 function waitForContextGraphSlotRead<T>(
@@ -149,7 +225,15 @@ function waitForContextGraphSlotRead<T>(
 export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSource {
   private bindingEpoch = 0;
 
-  private readonly slotIndex = new ContextGraphNameHashSlotIndex();
+  private currentSlotState: ContextGraphNameHashSlotState | undefined;
+
+  private currentSlotTail: Promise<void> = Promise.resolve();
+
+  private currentSlotGeneration = 0;
+
+  get currentSlotRevision(): number {
+    return this.currentSlotGeneration;
+  }
 
   constructor(
     private readonly dependencies: EvmContextGraphNameHashFenceDependencies,
@@ -161,7 +245,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
 
   invalidate(): void {
     this.bindingEpoch += 1;
-    this.slotIndex.clear();
+    this.currentSlotState = undefined;
   }
 
   /**
@@ -170,62 +254,136 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
    * accidentally omit or reorder a scope, high-water, or canonical-head
    * fence.
    */
-  async resolve(
-    normalizedNameHash: string,
-    onIndexCommit: () => void,
-  ): Promise<bigint | null> {
+  async resolve(normalizedNameHash: string): Promise<bigint | null> {
     await this.initialize();
-    const current = await this.resolveCurrentSlots(normalizedNameHash, onIndexCommit);
+    const requestScope = await this.captureScopeToken();
+    const current = await this.enqueueCurrentSlotResolution(
+      normalizedNameHash,
+      requestScope,
+    );
     return current.mode === 'historical'
       ? this.resolveHistorical(normalizedNameHash)
       : current.id;
   }
 
-  /** Entire current-slot fence choreography, kept behind the chain source. */
+  /** Serialize complete current-slot resolutions onto the one adapter-owned index. */
+  private enqueueCurrentSlotResolution(
+    normalizedNameHash: string,
+    requestScope: ContextGraphNameHashScopeToken,
+  ): Promise<ContextGraphNameHashCurrentResolution> {
+    const run = this.currentSlotTail.then(
+      () => this.resolveCurrentSlots(normalizedNameHash, requestScope),
+      () => this.resolveCurrentSlots(normalizedNameHash, requestScope),
+    );
+    this.currentSlotTail = run.then(() => undefined, () => undefined);
+    return run;
+  }
+
+  /**
+   * Own the complete bounded current-slot refresh, commit, and verification
+   * sequence without delegating chain reads back through a generic callback
+   * layer.
+   */
   private async resolveCurrentSlots(
     normalizedNameHash: string,
-    onIndexCommit: () => void,
-  ): Promise<ContextGraphNameHashSlotIndexResult> {
-    const scopeToken = await this.captureScopeToken();
-    const result = await this.slotIndex.resolve(
-      normalizedNameHash,
-      {
-        captureScope: () => this.captureScope(),
-        captureAnchor: () => this.captureAnchor(),
-        loadAnchorHash: (blockNumber) => this.loadAnchorHash(blockNumber),
-        loadHighWaterSnapshot: () => this.loadProviderHighWaters(),
-        loadRange: (firstId, lastId, snapshot) =>
-          this.loadSlots(firstId, lastId, snapshot),
-        onCommit: onIndexCommit,
-      },
-    );
-    if (result.mode === 'historical') return result;
+    requestScope: ContextGraphNameHashScopeToken,
+  ): Promise<ContextGraphNameHashCurrentResolution> {
+    const highWaterSnapshot = await this.loadProviderHighWaters();
+    const { latestId } = highWaterSnapshot;
+    if (latestId < 0n) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: getLatestContextGraphId returned ` +
+        `invalid negative id ${latestId.toString()}`,
+      );
+    }
+    if (latestId > CONTEXT_GRAPH_NAME_HASH_FAST_ENUMERATION_MAX_IDS) {
+      return { mode: 'historical' };
+    }
+
+    const previous = this.currentSlotState;
+    let rebuild = previous === undefined
+      || !sameScope(previous.scope, requestScope.scope)
+      || latestId < previous.highWater;
+    if (!rebuild && previous !== undefined) {
+      const currentAnchorHash = await this.loadAnchorHash(previous.anchor.blockNumber);
+      rebuild = currentAnchorHash?.toLowerCase() !== previous.anchor.blockHash;
+    }
+
+    const firstId = rebuild ? 1n : (previous?.highWater ?? 0n) + 1n;
+    const nextAnchor = rebuild || firstId <= latestId
+      ? await this.captureAnchor()
+      : previous?.anchor;
+    const staged = firstId <= latestId
+      ? await this.loadSlots(firstId, latestId, highWaterSnapshot)
+      : [];
+
+    if (nextAnchor === undefined) {
+      throw new Error(
+        'resolveContextGraphIdByNameHash: current-slot refresh has no chain anchor',
+      );
+    }
+    if (rebuild || staged.length > 0) {
+      const currentAnchorHash = await this.loadAnchorHash(nextAnchor.blockNumber);
+      if (currentAnchorHash?.toLowerCase() !== nextAnchor.blockHash) {
+        throw new Error(
+          'resolveContextGraphIdByNameHash: canonical chain anchor changed ' +
+          'during current-slot refresh',
+        );
+      }
+    }
+
+    await this.assertScopeCurrent(requestScope, 'current-slot refresh');
+
+    let state = previous;
+    if (rebuild || staged.length > 0) {
+      const idsByHash = rebuild
+        ? new Map<string, bigint[]>()
+        : cloneIdsByHash(previous?.idsByHash);
+      appendSlots(idsByHash, staged, firstId, latestId);
+      state = {
+        scope: copyScope(requestScope.scope),
+        highWater: latestId,
+        anchor: nextAnchor,
+        idsByHash,
+      };
+      this.currentSlotState = state;
+      this.currentSlotGeneration += 1;
+    }
+
+    const ids = state?.idsByHash.get(normalizedNameHash) ?? [];
+    if (ids.length !== 0 && ids.length !== 1) {
+      throw new Error(
+        `resolveContextGraphIdByNameHash: ambiguous ${normalizedNameHash}; ` +
+        `getNameHash commits it to ${ids.length} numeric ids`,
+      );
+    }
+    const id = ids[0] ?? null;
 
     const verification = await this.loadProviderHighWaters();
-    if (verification.latestId !== result.highWater) {
+    if (verification.latestId !== latestId) {
       throw new Error(
         `resolveContextGraphIdByNameHash: Context Graph registry advanced from ` +
-        `${result.highWater.toString()} to ${verification.latestId.toString()} ` +
+        `${latestId.toString()} to ${verification.latestId.toString()} ` +
         'during current-slot resolution',
       );
     }
-    if (result.id !== null) {
+    if (id !== null) {
       const currentHash = await this.readCurrentNameHash(
-        result.id,
+        id,
         undefined,
         verification.providerHighWaters,
       );
       if (currentHash !== normalizedNameHash) {
         throw new Error(
-          `resolveContextGraphIdByNameHash: indexed slot ${result.id.toString()} ` +
+          `resolveContextGraphIdByNameHash: indexed slot ${id.toString()} ` +
           `currently commits ${currentHash ?? ethers.ZeroHash}, expected ` +
           normalizedNameHash,
         );
       }
     }
 
-    await this.assertScopeCurrent(scopeToken, 'current-slot resolution');
-    return result;
+    await this.assertScopeCurrent(requestScope, 'current-slot resolution');
+    return { mode: 'current', id, highWater: latestId };
   }
 
   /** Fixed-concurrency staged range loader for the bounded current lane. */
@@ -271,7 +429,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     return slots;
   }
 
-  async captureScope(): Promise<ContextGraphNameHashSlotIndexScope> {
+  async captureScope(): Promise<ContextGraphNameHashSlotScope> {
     const cgs = this.dependencies.requireContextGraphStorage();
     return {
       storageAddress: (await cgs.getAddress()).toLowerCase(),
@@ -289,7 +447,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
 
   async assertScopeCurrent(
     token: ContextGraphNameHashScopeToken,
-    lane: 'current-slot resolution' | 'historical scan',
+    lane: 'current-slot refresh' | 'current-slot resolution' | 'historical scan',
   ): Promise<void> {
     const scopeAfter = await this.captureScope();
     if (this.bindingEpoch !== token.epoch || !sameScope(token.scope, scopeAfter)) {
@@ -300,7 +458,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     }
   }
 
-  async captureAnchor(): Promise<ContextGraphNameHashSlotIndexAnchor> {
+  async captureAnchor(): Promise<ContextGraphNameHashSlotAnchor> {
     const block = await this.dependencies.readLatestBlock();
     if (block === null || block.hash === null) {
       throw new Error(

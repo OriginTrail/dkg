@@ -53,6 +53,7 @@ describe('EVMChainAdapter historical KA update verification', () => {
   const publisher = '0x1111111111111111111111111111111111111111';
   const storageAddress = '0x2222222222222222222222222222222222222222';
   const root = ethers.keccak256(ethers.toUtf8Bytes('historical-update'));
+  const blockHash = `0x${'34'.repeat(32)}`;
   const iface = new Interface([
     'event KnowledgeAssetUpdated(uint256 indexed id, address indexed author, string updateOperationId, bytes32 merkleRoot, uint256 byteSize, uint96 tokenAmount)',
   ]);
@@ -70,6 +71,7 @@ describe('EVMChainAdapter historical KA update verification', () => {
     adapter.getTransactionReceiptWithFailover = async () => ({
       status: 1,
       blockNumber: 77,
+      blockHash,
       index: 2,
       logs: [{ address: storageAddress, topics: encoded.topics, data: encoded.data }],
     });
@@ -84,6 +86,18 @@ describe('EVMChainAdapter historical KA update verification', () => {
     };
     return { adapter, latestRead };
   }
+
+  it('returns canonical block placement for a verified update receipt', async () => {
+    const { adapter } = adapterWithHistoricalRead([{ publisher, merkleRoot: root }]);
+
+    await expect(adapter.verifyKAUpdate('0xreceipt', kaId, publisher)).resolves.toMatchObject({
+      verified: true,
+      blockNumber: 77,
+      blockHash,
+      txIndex: 2,
+      merkleRootCount: 1n,
+    });
+  });
 
   it.each([
     ['receipt-block history has no matching publisher/root', [{ publisher, merkleRoot: ethers.ZeroHash }]],

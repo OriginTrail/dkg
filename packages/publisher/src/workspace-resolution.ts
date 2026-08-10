@@ -18,7 +18,9 @@ import {
   generateShareMetadata,
   toHex,
 } from './metadata.js';
-import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
+import {
+  computePrivateRootV10 as computePrivateRoot,
+} from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 const DKG = 'http://dkg.io/ontology/';

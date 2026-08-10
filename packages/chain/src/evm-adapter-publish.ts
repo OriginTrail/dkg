@@ -410,6 +410,7 @@ export class PublishMethods extends EVMChainAdapterBase {
         verified: true,
         onChainMerkleRoot,
         blockNumber: receipt.blockNumber,
+        blockHash: receipt.blockHash,
         txIndex: receipt.index,
         merkleRootCount,
       };
