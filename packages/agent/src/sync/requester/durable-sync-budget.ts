@@ -129,6 +129,7 @@ export function createDurableSyncBudget(options: {
   fetchTimeoutMs?: number;
   authenticationTimeoutMs?: number;
   exactRecovery?: boolean;
+  operationFetchDeadline?: number;
   operationDeadline?: number;
   now?: () => number;
 }): DurableSyncBudget {
@@ -143,6 +144,7 @@ export function createDurableSyncBudget(options: {
             : MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
           now: options.now,
         }),
+        options.operationFetchDeadline ?? Number.POSITIVE_INFINITY,
         options.operationDeadline ?? Number.POSITIVE_INFINITY,
       );
       return {

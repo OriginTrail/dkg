@@ -189,7 +189,7 @@ describe('durable sync lifecycle chain binding', () => {
       .toBe(1_800_000_299_000);
   });
 
-  it('keeps totalTimeoutMs as one outer operation boundary without a caller signal', async () => {
+  it('reserves settlement time before the totalTimeoutMs hard boundary', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_800_000_000_000);
     const agentLike: any = {
@@ -233,9 +233,12 @@ describe('durable sync lifecycle chain binding', () => {
         contextGraphId,
         remainingContextGraphs: 1,
       });
-      expect(contextGraphBudget.fetchDeadline).toBe(1_800_000_030_000);
+      expect(contextGraphBudget.fetchDeadline).toBe(1_800_000_024_000);
 
-      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(24_000);
+      expect(capturedContext?.signal?.aborted).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(6_000);
       await sync;
 
       expect(capturedContext?.signal?.aborted).toBe(true);
@@ -496,7 +499,7 @@ describe('durable sync lifecycle chain binding', () => {
     expect(admission).toEqual({ source: 'swm-recovery' });
   });
 
-  it('honors an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
+  it('reserves settlement time for an explicit hard timeout while internal exact recovery keeps 600 seconds', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const agentLike: any = {
@@ -530,7 +533,7 @@ describe('durable sync lifecycle chain binding', () => {
       mockedRunDurableSyncDetailed.mock.calls[0]![0].durableSyncBudget
         .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 })
         .fetchDeadline,
-    ).toBe(1_800_000_030_000);
+    ).toBe(1_800_000_024_000);
 
     mockedRunDurableSyncDetailed.mockClear();
     agentLike.runLegacyDurableSyncDetailed = LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed;

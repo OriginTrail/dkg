@@ -239,6 +239,25 @@ describe('durable sync deadline budget', () => {
       .toBe(1_800_000_030_000);
   });
 
+  it('stops network fetches at a soft boundary while authentication keeps the hard deadline', () => {
+    const now = vi.fn(() => 1_800_000_000_000);
+    const budget = createDurableSyncBudget({
+      fetchTimeoutMs: 60_000,
+      authenticationTimeoutMs: 60_000,
+      operationFetchDeadline: 1_800_000_020_000,
+      operationDeadline: 1_800_000_030_000,
+      now,
+    }).createContextGraphBudget({
+      contextGraphId,
+      remainingContextGraphs: 1,
+    });
+
+    expect(budget.fetchDeadline).toBe(1_800_000_020_000);
+    now.mockReturnValue(1_800_000_019_000);
+    expect(budget.createGraphScopedAuthenticationDeadline())
+      .toBe(1_800_000_030_000);
+  });
+
   it('passes graph identity and remaining work into one explicit budget factory call', async () => {
     const createContextGraphBudget = vi.fn(() => ({
       fetchDeadline: Date.now() + 60_000,

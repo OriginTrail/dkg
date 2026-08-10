@@ -424,6 +424,7 @@ import {
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
+  SYNC_MIN_GRAPH_BUDGET_MS,
   SYNC_PAGE_TIMEOUT_MS,
   SYNC_ROUTER_ATTEMPTS,
   SYNC_PROTOCOL_CHECK_ATTEMPTS,
@@ -879,11 +880,24 @@ function asSyncFetchAbortError(reason: unknown): Error {
   return err;
 }
 
+const DURABLE_SYNC_SETTLEMENT_HEADROOM_FRACTION = 0.2;
+const DURABLE_SYNC_SETTLEMENT_HEADROOM_MAX_MS = 60_000;
+
+function durableSyncFetchDeadline(startedAt: number, timeoutMs: number): number {
+  const settlementHeadroomMs = Math.min(
+    DURABLE_SYNC_SETTLEMENT_HEADROOM_MAX_MS,
+    Math.floor(timeoutMs * DURABLE_SYNC_SETTLEMENT_HEADROOM_FRACTION),
+    Math.max(0, timeoutMs - SYNC_MIN_GRAPH_BUDGET_MS),
+  );
+  return startedAt + timeoutMs - settlementHeadroomMs;
+}
+
 function createDurableSyncOperationBoundary(options: {
   totalTimeoutMs?: number;
   signal?: AbortSignal;
 }): {
   deadline?: number;
+  fetchDeadline?: number;
   signal?: AbortSignal;
   dispose: () => void;
 } {
@@ -895,7 +909,9 @@ function createDurableSyncOperationBoundary(options: {
   }
 
   const timeoutMs = normalizeDurableSyncTimeoutMs(options.totalTimeoutMs);
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  const fetchDeadline = durableSyncFetchDeadline(startedAt, timeoutMs);
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort(
     asSyncFetchAbortError(options.signal?.reason),
@@ -914,6 +930,7 @@ function createDurableSyncOperationBoundary(options: {
 
   return {
     deadline,
+    fetchDeadline,
     signal: controller.signal,
     dispose: () => {
       clearTimeout(timeout);
@@ -1098,6 +1115,7 @@ type LegacyDurableContextGraphOptions = {
   fetchTimeoutMs?: number;
   exactAssetUals?: string[];
   authenticationTimeoutMs?: number;
+  operationFetchDeadline?: number;
   operationDeadline?: number;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
@@ -4786,6 +4804,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 fetchTimeoutMs,
                 exactAssetUals,
                 authenticationTimeoutMs,
+                operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
                 signal: operationBoundary.signal,
                 isCurrent: options?.isCurrent,
@@ -4980,6 +4999,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetUals,
       authenticationTimeoutMs = fetchTimeoutMs,
+      operationFetchDeadline,
       operationDeadline,
       signal,
       isCurrent,
@@ -5033,6 +5053,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs,
       authenticationTimeoutMs,
       exactRecovery: exactAssetUals !== undefined,
+      operationFetchDeadline,
       operationDeadline,
     }).createContextGraphBudget({
       contextGraphId,
