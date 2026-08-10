@@ -62,6 +62,14 @@ type SystemRecordRequesterSettlementV1 =
   | Readonly<{ state: 'retained'; source: SystemRecordRetainedSourceV1 }>
   | Readonly<{ state: 'failed'; result: SystemRecordRequesterFailureV1 }>;
 
+type SystemRecordLeaderAdmissionV1 =
+  | Readonly<{
+    state: 'admitted';
+    streamPermit: SystemRecordRequesterPermitV1;
+    frameReservation: SystemRecordRequesterByteReservationV1;
+  }>
+  | Readonly<{ state: 'busy' | 'capacity' | 'closed' }>;
+
 interface PendingFetchPhaseV1 {
   readonly state: 'pending';
   readonly controller: AbortController;
@@ -364,6 +372,8 @@ export function createSystemRecordRequesterV1(
     signal.throwIfAborted();
     if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
     const exact = createSystemRecordExactRequestV1(networkId, lookup, requestId());
+    signal.throwIfAborted();
+    if (closed) return Object.freeze({ outcome: 'closed', wireBytes: 0 });
     const { key, request, requestFrame } = exact;
     let entry = registry.get(key);
     if (entry !== undefined) {
@@ -380,13 +390,11 @@ export function createSystemRecordRequesterV1(
     if (registry.size >= maxTrackedDigests) {
       return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
     }
-    const streamPermit = streamAdmission.tryAcquire();
-    if (streamPermit === null) return Object.freeze({ outcome: 'busy', wireBytes: 0 });
-    const frameReservation = byteAdmission.tryReserve(SYSTEM_RECORD_MAX_FRAME_BYTES);
-    if (frameReservation === null) {
-      streamPermit.release();
-      return Object.freeze({ outcome: 'capacity', wireBytes: 0 });
+    const admission = admitLeader(signal);
+    if (admission.state !== 'admitted') {
+      return Object.freeze({ outcome: admission.state, wireBytes: 0 });
     }
+    const { streamPermit, frameReservation } = admission;
     entry = registry.create(
       key,
       (createdEntry, pendingSignal) => run(
@@ -402,6 +410,37 @@ export function createSystemRecordRequesterV1(
     activeStream = 1;
     peakActiveStream = 1;
     return entry.subscribe(signal);
+  }
+
+  function admitLeader(signal: AbortSignal): SystemRecordLeaderAdmissionV1 {
+    signal.throwIfAborted();
+    const streamPermit = streamAdmission.tryAcquire();
+    if (streamPermit === null) {
+      signal.throwIfAborted();
+      return Object.freeze({ state: closed ? 'closed' : 'busy' });
+    }
+    let releaseStream = true;
+    try {
+      signal.throwIfAborted();
+      if (closed) return Object.freeze({ state: 'closed' });
+      const frameReservation = byteAdmission.tryReserve(SYSTEM_RECORD_MAX_FRAME_BYTES);
+      if (frameReservation === null) {
+        signal.throwIfAborted();
+        return Object.freeze({ state: closed ? 'closed' : 'capacity' });
+      }
+      let releaseFrame = true;
+      try {
+        signal.throwIfAborted();
+        if (closed) return Object.freeze({ state: 'closed' });
+        releaseStream = false;
+        releaseFrame = false;
+        return Object.freeze({ state: 'admitted', streamPermit, frameReservation });
+      } finally {
+        if (releaseFrame) frameReservation.release();
+      }
+    } finally {
+      if (releaseStream) streamPermit.release();
+    }
   }
 
   async function run(

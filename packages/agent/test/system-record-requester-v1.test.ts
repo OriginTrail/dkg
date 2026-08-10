@@ -353,42 +353,145 @@ describe('system-record requester V1', () => {
     });
   });
 
-  it('cancels a newly created entry when synchronous setup aborts its first caller', async () => {
+  it.each([
+    'request id creation',
+    'stream admission',
+    'byte admission',
+  ] as const)('rejects a synchronous setup abort from %s without retained work', async (hook) => {
     const controller = new AbortController();
     const bytes = byteAdmission();
     const stream = permitAdmission();
     const decode = permitAdmission();
     const exchange = fixtureExchange();
     const openExchange = vi.fn(async () => exchange.value);
+    const requestId = vi.fn(() => {
+      if (hook === 'request id creation') {
+        controller.abort(new Error('caller aborted during request setup'));
+      }
+      return '1'.repeat(32);
+    });
+    const streamAdmission = {
+      tryAcquire: vi.fn(() => {
+        if (hook === 'stream admission') {
+          controller.abort(new Error('caller aborted during request setup'));
+        }
+        return stream.value.tryAcquire();
+      }),
+    };
+    const reentrantBytes: SystemRecordRequesterByteAdmissionV1 = {
+      tryReserve: vi.fn((requested) => {
+        if (hook === 'byte admission') {
+          controller.abort(new Error('caller aborted during request setup'));
+        }
+        return bytes.tryReserve(requested);
+      }),
+    };
     const requester = createSystemRecordRequesterV1({
       networkId: NETWORK,
       openExchange,
-      byteAdmission: bytes,
-      streamAdmission: stream.value,
+      byteAdmission: reentrantBytes,
+      streamAdmission,
       decodeAdmission: decode.value,
-      requestId: () => {
-        controller.abort(new Error('caller aborted during request setup'));
-        return '1'.repeat(32);
-      },
+      requestId,
     });
 
     await expect(requester.fetch(LOOKUP, controller.signal)).rejects.toThrow(
       'caller aborted during request setup',
     );
     await vi.waitFor(() => expect(requester.stats()).toMatchObject({
-      completed: 1,
+      started: 0,
+      completed: 0,
       trackedDigests: 0,
       waitingCallers: 0,
       activeLeases: 0,
       activeStream: 0,
       retainedPayloadBytes: 0,
     }));
-    await vi.waitFor(() => expect(exchange.reset).toHaveBeenCalledWith('cancelled'));
+    expect(openExchange).not.toHaveBeenCalled();
+    expect(exchange.reset).not.toHaveBeenCalled();
     expect(exchange.writeRequestFrame).not.toHaveBeenCalled();
-    expect(bytes.reservations).toHaveLength(1);
-    expect(bytes.reservations[0]?.released).toBe(true);
+    expect(exchange.readResponseFrame).not.toHaveBeenCalled();
+    expect(requestId).toHaveBeenCalledOnce();
+    expect(streamAdmission.tryAcquire).toHaveBeenCalledTimes(
+      hook === 'request id creation' ? 0 : 1,
+    );
+    expect(reentrantBytes.tryReserve).toHaveBeenCalledTimes(
+      hook === 'byte admission' ? 1 : 0,
+    );
+    expect(bytes.reservations).toHaveLength(hook === 'byte admission' ? 1 : 0);
+    expect(bytes.reservations.every(({ released }) => released)).toBe(true);
     expect(stream.active()).toBe(false);
     expect(decode.active()).toBe(false);
+  });
+
+  it.each([
+    'request id creation',
+    'stream admission',
+    'byte admission',
+  ] as const)('fences requester close reentered from %s', async (hook) => {
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const decode = permitAdmission();
+    const exchange = fixtureExchange();
+    const openExchange = vi.fn(async () => exchange.value);
+    let requester: ReturnType<typeof createSystemRecordRequesterV1>;
+    const requestId = vi.fn(() => {
+      if (hook === 'request id creation') requester.close();
+      return '1'.repeat(32);
+    });
+    const streamAdmission = {
+      tryAcquire: vi.fn(() => {
+        if (hook === 'stream admission') requester.close();
+        return stream.value.tryAcquire();
+      }),
+    };
+    const reentrantBytes: SystemRecordRequesterByteAdmissionV1 = {
+      tryReserve: vi.fn((requested) => {
+        if (hook === 'byte admission') requester.close();
+        return bytes.tryReserve(requested);
+      }),
+    };
+    requester = createSystemRecordRequesterV1({
+      networkId: NETWORK,
+      openExchange,
+      byteAdmission: reentrantBytes,
+      streamAdmission,
+      decodeAdmission: decode.value,
+      requestId,
+    });
+
+    await expect(requester.fetch(
+      LOOKUP,
+      new AbortController().signal,
+    )).resolves.toEqual({ outcome: 'closed', wireBytes: 0 });
+    expect(requestId).toHaveBeenCalledOnce();
+    expect(streamAdmission.tryAcquire).toHaveBeenCalledTimes(
+      hook === 'request id creation' ? 0 : 1,
+    );
+    expect(reentrantBytes.tryReserve).toHaveBeenCalledTimes(
+      hook === 'byte admission' ? 1 : 0,
+    );
+    expect(bytes.reservations).toHaveLength(hook === 'byte admission' ? 1 : 0);
+    expect(bytes.reservations.every(({ released }) => released)).toBe(true);
+    expect(stream.active()).toBe(false);
+    expect(decode.active()).toBe(false);
+    expect(openExchange).not.toHaveBeenCalled();
+    expect(exchange.writeRequestFrame).not.toHaveBeenCalled();
+    expect(exchange.readResponseFrame).not.toHaveBeenCalled();
+    expect(exchange.reset).not.toHaveBeenCalled();
+    expect(requester.stats()).toEqual({
+      started: 0,
+      joined: 0,
+      completed: 0,
+      trackedDigests: 0,
+      waitingCallers: 0,
+      activeLeases: 0,
+      activeStream: 0,
+      peakActiveStream: 0,
+      queuedStreams: 0,
+      retainedPayloadBytes: 0,
+      closed: true,
+    });
   });
 
   it('caps followers per digest without opening another stream', async () => {
