@@ -5,7 +5,6 @@ import {
   createGraphKnowledgeAssetScope,
   contextGraphWorkspaceMetaGraphUri,
   knowledgeAssetLayerGraphUri,
-  PROTOCOL_SYNC,
 } from '@origintrail-official/dkg-core';
 import {
   generateKnowledgeAssetShareMetadata,
@@ -18,24 +17,14 @@ import type {
 } from '../src/dkg-agent-types.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import {
-  runSelectedSwmContinuations,
-} from '../src/sync/selected-swm-continuation.js';
-import {
   type SelectedSwmMetaContinuation,
 } from '../src/sync/selected-swm-meta-fetcher.js';
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
-import {
-  applySelectedSwmFreshnessResolution,
-  classifySelectedSwmRoundFreshness,
-  classifySharedMemoryFreshness,
-} from '../src/sync/shared-memory-freshness.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import {
   SyncPageAccumulationLimitError,
   type SyncPageFetchOptions,
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
-import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 
 export const PEER = '12D3KooWSelectedCompleteSwmProvider';
 
@@ -459,14 +448,18 @@ export interface SelectedSwmLifecycleHarness {
   readonly close: () => Promise<void>;
 }
 
-export type SyncSharedMemoryOptions = Parameters<
+export type SelectedSyncSharedMemoryOptions = Parameters<
   typeof LifecycleSyncMethods.prototype.syncSelectedSharedMemoryFromPeerDetailed
+>[2];
+
+export type SyncSharedMemoryOptions = Parameters<
+  typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed
 >[2];
 
 export const callSelectedSharedMemoryFromPeerDetailed = (
   agent: SelectedSwmLifecycleAgentFixture,
   contextGraphIds: string[],
-  options: SyncSharedMemoryOptions,
+  options: SelectedSyncSharedMemoryOptions,
 ): Promise<{
   kind: 'selected-shared-memory';
   shared: SharedMemorySyncResult;
@@ -476,7 +469,7 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
     this: SelectedSwmLifecycleAgentFixture,
     remotePeerId: string,
     ids: string[],
-    syncOptions: SyncSharedMemoryOptions,
+    syncOptions: SelectedSyncSharedMemoryOptions,
   ) => Promise<{
     kind: 'selected-shared-memory';
     shared: SharedMemorySyncResult;
@@ -485,13 +478,27 @@ export const callSelectedSharedMemoryFromPeerDetailed = (
   return method.call(agent, PEER, contextGraphIds, options);
 };
 
+export const callSelectedSharedMemorySummary = async (
+  agent: SelectedSwmLifecycleAgentFixture,
+  contextGraphIds: string[],
+  options: SelectedSyncSharedMemoryOptions,
+): Promise<SharedMemorySyncResult> => (
+  (await callSelectedSharedMemoryFromPeerDetailed(agent, contextGraphIds, options)).shared
+);
+
 export const callSyncSharedMemoryFromPeerDetailed = async (
   agent: SelectedSwmLifecycleAgentFixture,
   contextGraphIds: string[],
   options: SyncSharedMemoryOptions,
-): Promise<SharedMemorySyncResult> => (
-  (await callSelectedSharedMemoryFromPeerDetailed(agent, contextGraphIds, options)).shared
-);
+): Promise<SharedMemorySyncResult> => {
+  const method = LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailed as unknown as (
+    this: SelectedSwmLifecycleAgentFixture,
+    remotePeerId: string,
+    ids: string[],
+    syncOptions: SyncSharedMemoryOptions,
+  ) => Promise<SharedMemorySyncResult>;
+  return method.call(agent, PEER, contextGraphIds, options);
+};
 
 export function createSelectedSwmLifecycleHarness(
   options: SelectedSwmLifecycleHarnessOptions,

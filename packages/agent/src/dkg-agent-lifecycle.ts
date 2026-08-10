@@ -6444,11 +6444,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           stopOnBackoffWorthyFailure,
           snapshotEvidencePolicy: selectedSwmEnabled
             ? {
-              // Non-empty metadata with no store-backed refs can describe
-              // graph-backed KAs. Until this requester has count/digest-bound
-              // transport evidence for them, the selected lane must fail closed.
-              accepts: ({ verifiedMetadataTriples, snapshotReferences }) => (
-                verifiedMetadataTriples === 0 || snapshotReferences > 0
+              // Any graph-backed operation sits outside the immutable snapshot
+              // walk, including when other operations in the same manifest do
+              // have store-backed refs. Until this requester has count/digest-
+              // bound transport evidence for every such operation, the selected
+              // lane must fail closed.
+              accepts: ({
+                verifiedMetadataTriples,
+                snapshotReferences,
+                graphBackedOperations,
+              }) => (
+                verifiedMetadataTriples === 0
+                || (snapshotReferences > 0 && graphBackedOperations === 0)
               ),
             }
             : undefined,

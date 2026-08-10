@@ -1,59 +1,20 @@
 import { describe, expect, it, vi } from 'vitest';
-import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  MemoryLayer,
-  createGraphKnowledgeAssetScope,
-  contextGraphWorkspaceMetaGraphUri,
-  knowledgeAssetLayerGraphUri,
-  PROTOCOL_SYNC,
-} from '@origintrail-official/dkg-core';
-import {
-  generateKnowledgeAssetShareMetadata,
-  workspacePublicQuadsDigest,
-} from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import type {
-  SharedMemorySyncResult,
-  SwmSnapshotCoverage,
-} from '../src/dkg-agent-types.js';
+import { PROTOCOL_SYNC } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import {
-  runSelectedSwmContinuations,
-} from '../src/sync/selected-swm-continuation.js';
-import {
-  type SelectedSwmMetaContinuation,
-} from '../src/sync/selected-swm-meta-fetcher.js';
-import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
-import {
-  applySelectedSwmFreshnessResolution,
-  classifySelectedSwmRoundFreshness,
-  classifySharedMemoryFreshness,
-} from '../src/sync/shared-memory-freshness.js';
+import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
-import {
-  SyncPageAccumulationLimitError,
-  type SyncPageFetchOptions,
-} from '../src/sync/requester/page-fetch.js';
-import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import {
   PEER,
   callSelectedSharedMemoryFromPeerDetailed,
-  callSyncSharedMemoryFromPeerDetailed,
+  callSelectedSharedMemorySummary,
   callTrySyncFromPeer,
   cleanDurableResult,
   createSelectedSwmLifecycleHarness,
   graphBackedManifest,
-  merge,
-  result,
-  selectedUnit,
   snapshotManifest,
-  type AdmissionProbe,
   type SelectedProviderSelectionAgent,
   type SelectedSwmLifecycleAgentFixture,
-  type SelectedSwmLifecycleHarness,
-  type SelectedSwmLifecycleHarnessOptions,
-  type SyncSharedMemoryOptions,
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
@@ -129,6 +90,49 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.insertedMetaTriples).toBe(0);
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.shared.swmCoverage).toBeUndefined();
+      expect(selected.selectedScopeComplete).toBe(false);
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps mixed store-backed and graph-backed metadata incomplete until every operation is proven', async () => {
+    const publicCg = 'selected-mixed-snapshot-evidence';
+    const storeBacked = snapshotManifest(publicCg, 1);
+    const graphBacked = graphBackedManifest(publicCg);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: {
+        meta: [...storeBacked.meta, ...graphBacked.meta],
+        payloadByRef: storeBacked.payloadByRef,
+      },
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(selected.shared.swmCoverage).toMatchObject({
+        contextGraphId: publicCg,
+        snapshotsResolved: 1,
+        snapshotsTotal: 1,
+        missingCount: 0,
+      });
+      expect(selected.shared.insertedMetaTriples).toBe(0);
+      expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.selectedScopeComplete).toBe(false);
       expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
     } finally {
@@ -417,8 +421,6 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
           },
         },
       );
-      const summary = selected.shared;
-
       expect(selected.selectedScopeComplete).toBe(false);
       expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
     } finally {
@@ -454,7 +456,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     });
 
     try {
-      const summary = await callSyncSharedMemoryFromPeerDetailed(
+      const summary = await callSelectedSharedMemorySummary(
         harness.agent,
         [publicCg],
         {
@@ -626,12 +628,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     };
 
     try {
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
       wallNow += DURABLE_DATA_SYNC_SESSION_TTL_MS + 1;
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
@@ -684,11 +686,11 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     };
 
     try {
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
@@ -756,16 +758,16 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     };
 
     try {
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
-      const failed = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      const failed = await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
       expect(failed.failedPhases + failed.failedPeers).toBeGreaterThan(0);
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });

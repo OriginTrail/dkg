@@ -1,59 +1,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  MemoryLayer,
-  createGraphKnowledgeAssetScope,
-  contextGraphWorkspaceMetaGraphUri,
-  knowledgeAssetLayerGraphUri,
-  PROTOCOL_SYNC,
-} from '@origintrail-official/dkg-core';
-import {
-  generateKnowledgeAssetShareMetadata,
-  workspacePublicQuadsDigest,
-} from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import type {
-  SharedMemorySyncResult,
-  SwmSnapshotCoverage,
-} from '../src/dkg-agent-types.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import {
   runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
 import {
-  type SelectedSwmMetaContinuation,
-} from '../src/sync/selected-swm-meta-fetcher.js';
-import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
-import {
-  applySelectedSwmFreshnessResolution,
-  classifySelectedSwmRoundFreshness,
-  classifySharedMemoryFreshness,
-} from '../src/sync/shared-memory-freshness.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
-import {
-  SyncPageAccumulationLimitError,
-  type SyncPageFetchOptions,
-} from '../src/sync/requester/page-fetch.js';
-import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
-import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
-import {
   PEER,
-  callSelectedSharedMemoryFromPeerDetailed,
-  callSyncSharedMemoryFromPeerDetailed,
-  callTrySyncFromPeer,
   cleanDurableResult,
-  createSelectedSwmLifecycleHarness,
-  graphBackedManifest,
   merge,
   result,
   selectedUnit,
-  snapshotManifest,
-  type AdmissionProbe,
-  type SelectedProviderSelectionAgent,
-  type SelectedSwmLifecycleAgentFixture,
-  type SelectedSwmLifecycleHarness,
-  type SelectedSwmLifecycleHarnessOptions,
-  type SyncSharedMemoryOptions,
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM continuation', () => {
