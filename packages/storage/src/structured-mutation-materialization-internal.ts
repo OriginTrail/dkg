@@ -25,9 +25,8 @@ export type MaterializedStructuredMutation =
 export function materializeStructuredMutation(
   snapshot: StructuredMutationSnapshot,
 ): MaterializedStructuredMutation {
-  assertTrustedStructuredMutationSnapshot(snapshot);
+  assertStructuredMutationSnapshotMaterializable(snapshot);
   const mutation = snapshot.mutation;
-  assertMutationOperandBudget(mutation);
   const update = buildSnapshotUpdate(mutation);
   if (update === undefined) {
     if (snapshot.outcome !== 'noop') {
@@ -39,6 +38,14 @@ export function materializeStructuredMutation(
     throw new Error('structured mutation no-op unexpectedly materialized an update');
   }
   return Object.freeze({ outcome: 'execute', snapshot, update });
+}
+
+/** Validate a worker-bound snapshot before structured clone without building backend text. */
+export function assertStructuredMutationSnapshotMaterializable(
+  snapshot: StructuredMutationSnapshot,
+): void {
+  assertTrustedStructuredMutationSnapshot(snapshot);
+  assertMutationOperandBudget(snapshot.mutation);
 }
 
 function buildSnapshotUpdate(mutation: ReadonlyStructuredMutation): string | undefined {

@@ -51,6 +51,7 @@ function internals(store: OxigraphWorkerStore): {
   closePromise: Promise<void> | null;
   respawnPromise: Promise<void> | null;
   consecutiveRespawnFailures: number;
+  nextId: number;
 } {
   return store as unknown as {
     worker: Worker;
@@ -58,6 +59,7 @@ function internals(store: OxigraphWorkerStore): {
     closePromise: Promise<void> | null;
     respawnPromise: Promise<void> | null;
     consecutiveRespawnFailures: number;
+    nextId: number;
   };
 }
 
@@ -168,6 +170,32 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
     }
   }, 15_000);
 
+  it('parks a no-op through respawn without posting or advancing generations', async () => {
+    const store = makeStore(path);
+    try {
+      await killWorker(store);
+      await killWorker(store);
+      expect(internals(store).lifecycle).toBe('respawning');
+      expect(internals(store).respawnPromise).not.toBeNull();
+
+      const nextId = internals(store).nextId;
+      const generation = store.getWriteGen('urn:test:g');
+      const noop = store.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: 'urn:test:g', subjects: [] },
+      });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      expect(internals(store).nextId).toBe(nextId);
+
+      await expect(noop).resolves.toBeUndefined();
+      expect(internals(store).lifecycle).toBe('live');
+      expect(internals(store).nextId).toBe(nextId);
+      expect(store.getWriteGen('urn:test:g')).toBe(generation);
+    } finally {
+      await store.close().catch(() => {});
+    }
+  }, 15_000);
+
   it('a successful op resets the crash-loop counter', async () => {
     const store = makeStore(path);
     try {
@@ -200,6 +228,27 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
     // Post-close ops fail exactly as before this fix — fast and permanent.
     await expect(store.countQuads('urn:test:g')).rejects.toThrow(/store is closed/);
     await expect(store.insert(quads(1))).rejects.toThrow(/store is closed/);
+    const nextId = internals(store).nextId;
+    await expect(store.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: 'urn:test:g', subjects: [] },
+    })).rejects.toThrow(/store is closed/);
+    expect(internals(store).nextId).toBe(nextId);
+  });
+
+  it('rejects a no-op while close is draining without posting another message', async () => {
+    const store = makeStore(path);
+    const close = store.close();
+    expect(internals(store).lifecycle).toBe('closing');
+    const nextId = internals(store).nextId;
+
+    await expect(store.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: 'urn:test:g', subjects: [] },
+    })).rejects.toThrow(/store is closed/);
+    expect(internals(store).nextId).toBe(nextId);
+
+    await close;
   });
 
   it('gives up after MAX consecutive dead-on-arrival respawns and latches closed with guidance', async () => {
@@ -224,6 +273,12 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // The give-up verdict is now the single, explicit terminal state — no
       // cluster of booleans that could disagree with the fail-fast error above.
       expect(internals(store).lifecycle).toBe('gave_up');
+      const nextId = internals(store).nextId;
+      await expect(store.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: 'urn:test:g', subjects: [] },
+      })).rejects.toThrow(/respawn gave up/);
+      expect(internals(store).nextId).toBe(nextId);
     } finally {
       // close() on a latched store must still resolve (idempotent teardown).
       await expect(store.close()).resolves.toBeUndefined();
@@ -245,6 +300,12 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
     // Wait out the backoff so a buggy respawn would have fired by now.
     await new Promise((r) => setTimeout(r, 1_500));
     await expect(store.countQuads('urn:test:g')).rejects.toThrow(/store is closed/);
+    const nextId = internals(store).nextId;
+    await expect(store.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: 'urn:test:g', subjects: [] },
+    })).rejects.toThrow(/store is closed/);
+    expect(internals(store).nextId).toBe(nextId);
   }, 15_000);
 });
 
@@ -289,6 +350,12 @@ describe('OxigraphWorkerStore in-memory fail-closed on unexpected worker exit', 
 
       // Writes fail closed the same way — the store is unusable, not read-only.
       await expect(store.insert(quads(1))).rejects.toThrow(/IN-MEMORY store's worker crashed/);
+      const nextId = internals(store).nextId;
+      await expect(store.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: 'urn:test:g', subjects: [] },
+      })).rejects.toThrow(/IN-MEMORY store's worker crashed/);
+      expect(internals(store).nextId).toBe(nextId);
     } finally {
       // close() on a data-lost store must still resolve (idempotent teardown)
       // and must not resurrect it.

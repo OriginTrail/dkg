@@ -875,6 +875,17 @@ describe('SparqlHttpStore (test server)', () => {
     expect(insertedQuads[0]).not.toContain(';');
   });
 
+  it('structuredMutation sends no request for a valid empty delete', async () => {
+    insertedQuads.length = 0;
+
+    await store.structuredMutation!({
+      kind: 'delete-subjects',
+      input: { graphUri: 'http://ex.org/g1', subjects: [] },
+    });
+
+    expect(insertedQuads).toHaveLength(0);
+  });
+
   it('deleteByPattern sends DELETE WHERE to update endpoint', async () => {
     insertedQuads.length = 0;
     await store.deleteByPattern({ subject: 'http://ex.org/s', graph: 'http://ex.org/g' });

@@ -53,11 +53,9 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
-  buildStructuredMutationUpdate,
-  captureStructuredMutationEffects,
-  normalizeStructuredMutation,
-  structuredMutationGuardedGraphs,
+  captureStructuredMutationSnapshot,
 } from '../bounded-structured-mutation.js';
+import { materializeStructuredMutation } from '../structured-mutation-materialization-internal.js';
 import {
   assertNotReservedInternalGraphV1,
   isInternalGraphUriV1,
@@ -1288,20 +1286,20 @@ export class SparqlHttpStore implements TripleStore {
     mutation: StructuredMutation,
     options?: QueryOptions,
   ): Promise<void> {
-    const normalized = normalizeStructuredMutation(mutation);
-    const effects = captureStructuredMutationEffects(normalized);
-    this.assertGenericMutationScope(structuredMutationGuardedGraphs(normalized), 'structuredMutation');
-    if (normalized.kind === 'replace-subject-predicates') {
-      assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
+    const snapshot = captureStructuredMutationSnapshot(mutation);
+    this.assertGenericMutationScope(snapshot.guardedGraphs, 'structuredMutation');
+    if (snapshot.mutation.kind === 'replace-subject-predicates') {
+      assertQuadLiteralsMutf8Safe(snapshot.mutation.input.replacementQuads, {
         maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
         label: 'SparqlHttpStore.structuredMutation',
       });
     }
-    const update = buildStructuredMutationUpdate(normalized);
-    if (!update || !effects) return;
+    const materialized = materializeStructuredMutation(snapshot);
+    if (materialized.outcome === 'noop') return;
+    const effects = snapshot.effects!;
     try {
       await this.postUpdate(
-        update,
+        materialized.update,
         { ...options, source: options?.source ?? 'sparql-http.structuredMutation' },
         'structuredMutation',
         effects.touchedGraphs,

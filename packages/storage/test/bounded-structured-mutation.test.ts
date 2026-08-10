@@ -440,6 +440,71 @@ describe('bounded structured mutation capabilities', () => {
     expect(update).toHaveBeenCalledTimes(1);
   });
 
+  it('suppresses embedded and live-worker I/O for a valid empty delete', async () => {
+    const embedded = new OxigraphStore();
+    const embeddedStore = (embedded as unknown as {
+      store: { update: (sparql: string) => void };
+    }).store;
+    const update = vi.spyOn(embeddedStore, 'update');
+    const embeddedGeneration = embedded.getWriteGen(GRAPH);
+
+    await embedded.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: GRAPH, subjects: [] },
+    });
+
+    expect(update).not.toHaveBeenCalled();
+    expect(embedded.getWriteGen(GRAPH)).toBe(embeddedGeneration);
+
+    const worker = new OxigraphWorkerStore();
+    const workerInternals = worker as unknown as { nextId: number };
+    try {
+      const nextId = workerInternals.nextId;
+      const workerGeneration = worker.getWriteGen(GRAPH);
+
+      await worker.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: GRAPH, subjects: [] },
+      });
+
+      expect(workerInternals.nextId).toBe(nextId);
+      expect(worker.getWriteGen(GRAPH)).toBe(workerGeneration);
+    } finally {
+      await worker.close();
+    }
+  });
+
+  it('rejects final worker-bound encoding and operand budgets before posting', async () => {
+    const worker = new OxigraphWorkerStore();
+    const workerInternals = worker as unknown as { nextId: number };
+    try {
+      const beforeMutf8 = workerInternals.nextId;
+      await expect(worker.structuredMutation({
+        kind: 'replace-subject-predicates',
+        input: {
+          graphUri: GRAPH,
+          subject: 'urn:test:subject',
+          predicates: [P],
+          replacementQuads: [quad('urn:test:subject', P, `"${'x'.repeat(70_000)}"`)],
+        },
+      })).rejects.toMatchObject({ code: 'OVERSIZED_RDF_LITERAL' });
+      expect(workerInternals.nextId).toBe(beforeMutf8);
+
+      const subjects = Array.from(
+        { length: 65_000 },
+        (_, index) => `urn:test:operand:${index}:${'x'.repeat(55)}`,
+      );
+      const beforeBudget = workerInternals.nextId;
+      await expect(worker.structuredMutation({
+        kind: 'delete-subjects',
+        input: { graphUri: GRAPH, subjects },
+      })).rejects.toThrow(/operand bytes/);
+      expect(workerInternals.nextId).toBe(beforeBudget);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('rejects sparse, duplicate, oversized, and cross-scope descriptors before dispatch', () => {
     const sparse = Array(2) as string[];
     sparse[1] = 'urn:test:a';

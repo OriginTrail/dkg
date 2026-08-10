@@ -27,10 +27,9 @@ import {
   isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
-  buildStructuredMutationUpdate,
-  captureStructuredMutationEffects,
-  normalizeStructuredMutation,
+  captureStructuredMutationSnapshot,
 } from '../bounded-structured-mutation.js';
+import { materializeStructuredMutation } from '../structured-mutation-materialization-internal.js';
 import { quadsToNQuads } from '../bounded-rdf.js';
 import { assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 
@@ -419,19 +418,18 @@ export class OxigraphStore implements TripleStore {
     // dispatch; source/priority are advisory only for scheduled HTTP stores.
     _options?: TripleStoreQueryOptions,
   ): Promise<void> {
-    const normalized = normalizeStructuredMutation(mutation);
-    const effects = captureStructuredMutationEffects(normalized);
-    if (normalized.kind === 'replace-subject-predicates') {
-      assertQuadLiteralsMutf8Safe([...normalized.input.replacementQuads], {
+    const snapshot = captureStructuredMutationSnapshot(mutation);
+    if (snapshot.mutation.kind === 'replace-subject-predicates') {
+      assertQuadLiteralsMutf8Safe(snapshot.mutation.input.replacementQuads, {
         maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
         label: 'OxigraphStore.structuredMutation',
       });
     }
-    const update = buildStructuredMutationUpdate(normalized);
-    if (!update || !effects) return;
-    this.store.update(update);
+    const materialized = materializeStructuredMutation(snapshot);
+    if (materialized.outcome === 'noop') return;
+    this.store.update(materialized.update);
     this.scheduleFlush();
-    this.writeGen.recordGraphWrites(effects.touchedGraphs);
+    this.writeGen.recordGraphWrites(snapshot.effects!.touchedGraphs);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
