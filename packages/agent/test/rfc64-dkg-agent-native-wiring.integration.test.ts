@@ -950,6 +950,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       '12D3KooWCompleteSwmProvider',
       expect.any(Function),
       0,
+      { selectedSwmRetry: true },
     );
   });
 

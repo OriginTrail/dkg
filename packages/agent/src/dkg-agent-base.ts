@@ -1601,6 +1601,14 @@ export class DKGAgentBase {
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
   /**
+   * Complete RFC-64 SWM providers whose most recent selected transfer did not
+   * prove every selected Context Graph complete. The catalog bootstrap may
+   * bypass the generic clean-success freshness gate only while this marker is
+   * present; the ordinary per-peer queue cooldown and reconciler backoff still
+   * bound retries.
+   */
+  protected readonly selectedSwmRetryRequiredPeers = new Set<string>();
+  /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler
