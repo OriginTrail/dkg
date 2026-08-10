@@ -35,6 +35,15 @@ interface SelectedSwmMetaContinuationState {
 export interface SelectedSwmMetaFetcher {
   readonly strategy: SharedMemoryMetadataFetcher;
   continuation(contextGraphId: string): SelectedSwmMetaContinuation;
+}
+
+interface SelectedSwmMetaRetentionState {
+  readonly retained: boolean;
+  /** Earliest independent Context Graph prefix expiry. */
+  readonly nextExpiryAtMs: number | undefined;
+}
+
+interface SelectedSwmMetaFetcherLifecycle {
   /** Release expired inactive prefixes while an outer peer operation is live. */
   pruneExpiredPrefixes(): SelectedSwmMetaRetentionState;
   /**
@@ -45,10 +54,155 @@ export interface SelectedSwmMetaFetcher {
   cleanup(): void;
 }
 
-export interface SelectedSwmMetaRetentionState {
-  readonly retained: boolean;
-  /** Earliest independent Context Graph prefix expiry. */
-  readonly nextExpiryAtMs: number | undefined;
+const selectedSwmMetaFetcherLifecycles = new WeakMap<
+SelectedSwmMetaFetcher,
+SelectedSwmMetaFetcherLifecycle
+>();
+
+/**
+ * One peer's complete retained-prefix lifecycle.
+ *
+ * The coordinator only registers these owners by peer. Serialization, outer
+ * invocation boundaries, independent prefix expiry, failure cleanup, and
+ * shutdown drain all remain behind this single API.
+ */
+export class SelectedSwmMetaTransferOwner {
+  readonly #now: () => number;
+
+  readonly #onIdle: (() => void) | undefined;
+
+  #fetcher: SelectedSwmMetaFetcher | undefined;
+
+  #tail: Promise<void> = Promise.resolve();
+
+  #expiryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  #active = false;
+
+  #pendingRuns = 0;
+
+  #closed = false;
+
+  constructor(options: {
+    readonly now?: () => number;
+    readonly onIdle?: () => void;
+  } = {}) {
+    this.#now = options.now ?? (() => Date.now());
+    this.#onIdle = options.onIdle;
+  }
+
+  run<T>(
+    createFetcher: () => SelectedSwmMetaFetcher,
+    operation: (fetcher: SelectedSwmMetaFetcher) => Promise<T>,
+  ): Promise<T> {
+    if (this.#closed) return Promise.reject(this.#closedError());
+    this.#pendingRuns += 1;
+    const execute = this.#tail.then(async () => {
+      if (this.#closed) throw this.#closedError();
+      this.#active = true;
+      try {
+        const retainedBeforeRun = this.#fetcher
+          ? this.#lifecycle(this.#fetcher).settleOuterInvocation()
+          : undefined;
+        if (this.#fetcher && !retainedBeforeRun?.retained) {
+          this.#releaseFetcher();
+        }
+        const fetcher = this.#fetcher ?? createFetcher();
+        // Resolve the private lifecycle before retaining a newly-created
+        // fetcher, so an invalid factory cannot become owner state.
+        this.#lifecycle(fetcher);
+        this.#fetcher = fetcher;
+        let succeeded = false;
+        try {
+          const result = await operation(fetcher);
+          succeeded = true;
+          return result;
+        } finally {
+          if (!succeeded) {
+            this.#releaseFetcher();
+          } else {
+            const retention = this.#lifecycle(fetcher).settleOuterInvocation();
+            if (!retention.retained) {
+              this.#releaseFetcher();
+            } else {
+              this.#scheduleExpiry(retention.nextExpiryAtMs);
+            }
+          }
+        }
+      } finally {
+        this.#active = false;
+      }
+    });
+    const settled = execute.then(() => undefined, () => undefined);
+    this.#tail = settled;
+    void settled.then(() => {
+      this.#pendingRuns -= 1;
+      this.#notifyIdle();
+    });
+    return execute;
+  }
+
+  isIdle(): boolean {
+    return this.#pendingRuns === 0 && !this.#fetcher;
+  }
+
+  async close(): Promise<void> {
+    this.#closed = true;
+    this.#clearExpiryTimer();
+    await this.#tail;
+    this.#releaseFetcher();
+  }
+
+  #lifecycle(fetcher: SelectedSwmMetaFetcher): SelectedSwmMetaFetcherLifecycle {
+    const lifecycle = selectedSwmMetaFetcherLifecycles.get(fetcher);
+    if (!lifecycle) {
+      throw new Error('Selected SWM metadata owner received an unowned fetcher');
+    }
+    return lifecycle;
+  }
+
+  #releaseFetcher(): void {
+    if (this.#fetcher) this.#lifecycle(this.#fetcher).cleanup();
+    this.#fetcher = undefined;
+    this.#clearExpiryTimer();
+  }
+
+  #clearExpiryTimer(): void {
+    if (this.#expiryTimer) clearTimeout(this.#expiryTimer);
+    this.#expiryTimer = undefined;
+  }
+
+  #scheduleExpiry(nextExpiryAtMs: number | undefined): void {
+    this.#clearExpiryTimer();
+    if (nextExpiryAtMs === undefined || this.#closed) return;
+    const delayMs = Math.max(1, nextExpiryAtMs - this.#now());
+    this.#expiryTimer = setTimeout(() => {
+      this.#expiryTimer = undefined;
+      if (this.#closed || !this.#fetcher) return;
+      // The fetcher protects active CGs, allowing this peer owner to reclaim
+      // expired siblings even while another CG's operation is in flight.
+      const retention = this.#lifecycle(this.#fetcher).pruneExpiredPrefixes();
+      if (!retention.retained) {
+        if (!this.#active) {
+          this.#releaseFetcher();
+          this.#notifyIdle();
+        }
+        return;
+      }
+      this.#scheduleExpiry(retention.nextExpiryAtMs);
+    }, delayMs);
+    this.#expiryTimer.unref?.();
+  }
+
+  #closedError(): Error {
+    const error = new Error('Selected SWM metadata transfer owner is closed');
+    error.name = 'AbortError';
+    return error;
+  }
+
+  #notifyIdle(): void {
+    if (this.isIdle()) this.#onIdle?.();
+  }
 }
 
 /** Immutable continuation evidence captured immediately after one SWM round. */
@@ -299,7 +453,7 @@ export function createSelectedSwmMetaFetcher(options: {
     release,
   };
 
-  return {
+  const fetcher: SelectedSwmMetaFetcher = {
     strategy,
     continuation: (contextGraphId) => {
       const state = states.get(contextGraphId);
@@ -309,6 +463,8 @@ export function createSelectedSwmMetaFetcher(options: {
         completed: completedContextGraphs.has(contextGraphId),
       };
     },
+  };
+  selectedSwmMetaFetcherLifecycles.set(fetcher, {
     pruneExpiredPrefixes() {
       pruneExpiredStates();
       return retentionState();
@@ -334,5 +490,6 @@ export function createSelectedSwmMetaFetcher(options: {
       for (const [contextGraphId, state] of states) release(contextGraphId, state);
       completedContextGraphs.clear();
     },
-  };
+  });
+  return fetcher;
 }

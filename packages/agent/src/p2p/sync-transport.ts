@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { withRetry, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import {
+  markSyncLocalRequestFailure,
   markSyncTransportFailure,
   markSyncValidationRejection,
   isSyncValidationRejection,
@@ -153,7 +154,16 @@ export async function sendSyncRequest(params: SyncSendParams): Promise<Uint8Arra
       let outcome: SyncAttemptOutcome | undefined;
       try {
         throwIfAborted(params.signal);
-        const requestBytes = await params.requestFactory();
+        let requestBytes: Uint8Array;
+        try {
+          requestBytes = await params.requestFactory();
+        } catch (error) {
+          // A request factory may perform chain reads and signing. Preserve
+          // that local boundary so a generic timeout message cannot later be
+          // mistaken for an untagged libp2p/router interruption.
+          markSyncLocalRequestFailure(error);
+          throw error;
+        }
         throwIfAborted(params.signal);
         const messageId = randomUUID();
         let responseBytes: Uint8Array;

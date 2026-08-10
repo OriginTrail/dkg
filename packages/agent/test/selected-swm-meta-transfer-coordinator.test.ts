@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import {
   createSelectedSwmMetaFetcher,
+  SelectedSwmMetaTransferOwner,
 } from '../src/sync/selected-swm-meta-fetcher.js';
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
@@ -21,6 +22,68 @@ function retentionBudget() {
 }
 
 describe('selected SWM metadata transfer ownership', () => {
+  it('keeps retained-prefix lifecycle controls private to the per-peer owner', async () => {
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetcher = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-private-owner',
+      requesterScope: 'selected-swm-meta:retained:private-owner',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage: async () => {
+        throw new Error('unused');
+      },
+    });
+
+    expect(fetcher).not.toHaveProperty('settleOuterInvocation');
+    expect(fetcher).not.toHaveProperty('pruneExpiredPrefixes');
+    expect(fetcher).not.toHaveProperty('cleanup');
+    await coordinator.run('peer-private-owner', () => fetcher, async () => {});
+    await coordinator.close();
+  });
+
+  it('notifies its registry after timer-driven final-prefix expiry', async () => {
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const onIdle = vi.fn();
+    const owner = new SelectedSwmMetaTransferOwner({ now: clock, onIdle });
+    const fetcher = createSelectedSwmMetaFetcher({
+      remotePeerId: 'peer-owner-idle',
+      requesterScope: 'selected-swm-meta:retained:owner-idle',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      now: clock,
+      retentionTtlMs: 20,
+      fetchPage: async () => ({
+        quads: [{ subject: 'urn:idle', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+        bytesReceived: 1,
+        resumedFromOffset: 0,
+        nextOffset: 1,
+        checkpointKey: 'owner-idle-checkpoint',
+        completed: false,
+        timedOut: true,
+      }),
+    });
+
+    try {
+      await owner.run(() => fetcher, (selectedFetcher) => selectedFetcher.strategy.fetch({
+        ctx: testContext,
+        remotePeerId: 'peer-owner-idle',
+        contextGraphId: 'cg-owner-idle',
+        graphUri: 'urn:meta',
+        deadline: clock() + 1_000,
+      }));
+      expect(owner.isIdle()).toBe(false);
+      expect(onIdle).not.toHaveBeenCalled();
+
+      elapsedMs = 21;
+      await vi.waitFor(() => expect(onIdle).toHaveBeenCalledOnce(), { timeout: 250 });
+      expect(owner.isIdle()).toBe(true);
+    } finally {
+      await owner.close();
+    }
+  });
+
   it('eagerly releases an expired prefix without requiring another reconciler invocation', async () => {
     const peerId = 'peer-expiry';
     const contextGraphId = 'cg-expiry';
