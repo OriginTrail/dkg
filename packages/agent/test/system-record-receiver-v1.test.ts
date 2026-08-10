@@ -152,6 +152,7 @@ describe('agent-profile system-record receiver', () => {
     const legacyRepository = Object.freeze({
       resolve,
       closureArtifacts: Object.freeze({ kind: 'legacy-cache' }),
+      securitySidecarArtifacts: Object.freeze({ kind: 'legacy-sidecar-cache' }),
     });
     const verifyCurrentBundle = vi.fn(() => true);
     const prepareCandidateApply = vi.fn(() => preparedFixtureApply('1', 'a'));
@@ -1319,7 +1320,9 @@ describe('agent-profile system-record receiver', () => {
   });
 
   it('rejects terminal transition evidence unrelated to the retained authority lineage', async () => {
-    const fixture = await transitionQuarantineFixture(false, false, true);
+    const fixture = await transitionQuarantineFixture({
+      unrelatedTransitionEvidence: true,
+    });
     const verifyCurrentBundle = vi.fn(() => true);
     const prepareCandidateApply = vi.fn();
     const receiver = createAgentProfileCandidateReceiverV1({
@@ -1340,7 +1343,9 @@ describe('agent-profile system-record receiver', () => {
   });
 
   it('rejects terminal transition evidence without its exact accepted predecessor', async () => {
-    const fixture = await transitionQuarantineFixture(false, false, false, true);
+    const fixture = await transitionQuarantineFixture({
+      invalidCompetingPredecessor: true,
+    });
     const verifyCurrentBundle = vi.fn(() => true);
     const prepareCandidateApply = vi.fn();
     const receiver = createAgentProfileCandidateReceiverV1({
@@ -1394,7 +1399,7 @@ describe('agent-profile system-record receiver', () => {
   });
 
   it('keeps transition equivocation terminal when the sidecar also advertises a tombstone', async () => {
-    const fixture = await transitionQuarantineFixture(false, true);
+    const fixture = await transitionQuarantineFixture({ withTombstoneFork: true });
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverAnyCandidateV1,
     ) => preparedFixtureApply('10', 'a'));

@@ -266,17 +266,17 @@ function normalizeAgentProfileArtifactSourcesV1(
     throw new TypeError('agent-profile artifact input must be a repository or source pair');
   }
   const candidate = input as unknown as Record<PropertyKey, unknown>;
-  if (typeof candidate.resolve === 'function') {
+  const inputKind = classifyAgentProfileArtifactInputV1(candidate);
+  if (inputKind === 'legacy-repository') {
     const repository = bindAgentProfileArtifactRepositoryV1(input, 'artifacts');
     return Object.freeze({
       closureArtifacts: repository,
       securitySidecarArtifacts: repository,
     });
   }
-  const hasClosureArtifacts = 'closureArtifacts' in candidate;
-  const hasSecuritySidecarArtifacts = 'securitySidecarArtifacts' in candidate;
-  if (hasClosureArtifacts || hasSecuritySidecarArtifacts) {
-    if (!hasClosureArtifacts || !hasSecuritySidecarArtifacts) {
+  if (inputKind === 'source-pair') {
+    if (!('closureArtifacts' in candidate)
+        || !('securitySidecarArtifacts' in candidate)) {
       throw new TypeError('agent-profile artifact source pair must provide both repositories');
     }
     return Object.freeze({
@@ -291,6 +291,18 @@ function normalizeAgentProfileArtifactSourcesV1(
     });
   }
   throw new TypeError('agent-profile artifact input must provide a repository resolver');
+}
+
+function classifyAgentProfileArtifactInputV1(
+  candidate: Record<PropertyKey, unknown>,
+): 'legacy-repository' | 'source-pair' | 'invalid' {
+  // The V1 compatibility contract is repository-first: extra structural
+  // properties cannot turn an existing repository into a different input mode.
+  if (typeof candidate.resolve === 'function') return 'legacy-repository';
+  if ('closureArtifacts' in candidate || 'securitySidecarArtifacts' in candidate) {
+    return 'source-pair';
+  }
+  return 'invalid';
 }
 
 function bindAgentProfileArtifactRepositoryV1(
