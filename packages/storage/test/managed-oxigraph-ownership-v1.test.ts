@@ -307,6 +307,72 @@ describe('managed Oxigraph ownership lease V1', () => {
       });
     });
 
+    // Pins the totality invariant that makes window 1 of the proof-discard fix
+    // unreachable. The lane reads this before its first refusal check, so a
+    // throwing read would strand a verified proof's transient reservation and
+    // wedge every later apply in the process. Because the read is total, a
+    // hostile lease yields null and the caller reaches its refusal path, which
+    // already discards. If this goes red, re-examine the proof-discard window
+    // list: window 1 would have become reachable.
+    it('never throws for a hostile lease, so a caller always reaches its refusal path', () => {
+      const throwOnAnyAccess = new Proxy({}, {
+        get() { throw new Error('lease property read must never be reached'); },
+        has() { throw new Error('lease property probe must never be reached'); },
+        getOwnPropertyDescriptor() { throw new Error('lease descriptor read must never be reached'); },
+      });
+      const hostile: readonly unknown[] = [
+        throwOnAnyAccess,
+        Object.create(null),
+        { childGeneration: '1', ready: true, terminal: false },
+        null,
+        undefined,
+        'lease',
+        42,
+      ];
+      for (const candidate of hostile) {
+        expect(() => readManagedOxigraphOwnershipSnapshotV1(candidate)).not.toThrow();
+        expect(readManagedOxigraphOwnershipSnapshotV1(candidate)).toBeNull();
+      }
+    });
+
+    // Second arm of the same invariant. The hostile-input arm never reaches the
+    // snapshot projection at all -- every non-lease is rejected by the
+    // membership guard first -- so alone it pins only the cheap half and leaves
+    // the field reads that actually build a snapshot unexercised. Drive a
+    // registered lease through every state branch instead.
+    it('never throws while projecting a registered lease in any state', () => {
+      for (const withEndpoints of [true, false]) {
+        for (const reason of [
+          undefined,
+          'child-exit',
+          'stop',
+          'listener-ownership-lost',
+          'shutdown',
+          'port-release-unproven',
+        ] as const) {
+          for (const bindFirst of [true, false]) {
+            const controller = withEndpoints
+              ? createManagedOxigraphOwnershipControllerV1(QUERY_ENDPOINT, UPDATE_ENDPOINT)
+              : createManagedOxigraphOwnershipControllerV1();
+            if (bindFirst) controller.bindReadyGeneration();
+            if (reason !== undefined) controller.invalidate(reason);
+
+            expect(() => readManagedOxigraphOwnershipSnapshotV1(controller.lease)).not.toThrow();
+            const snapshot = readManagedOxigraphOwnershipSnapshotV1(controller.lease);
+            expect(snapshot).not.toBeNull();
+            // The lane branches on exactly these fields, so a projection that
+            // silently dropped one would send a live lease down the refusal path.
+            expect(typeof snapshot?.childGeneration).toBe('string');
+            expect(snapshot?.ready).toBe(bindFirst && reason === undefined);
+            expect(snapshot?.terminal)
+              .toBe(reason === 'shutdown' || reason === 'port-release-unproven');
+            expect(snapshot?.queryEndpoint).toBe(withEndpoints ? QUERY_ENDPOINT : undefined);
+            expect(snapshot?.lastInvalidation).toBe(reason);
+          }
+        }
+      }
+    });
+
     it('isolates leases from different supervisors', () => {
       const a = createOwnership();
       const b = createOwnership();
