@@ -25,8 +25,8 @@ function base(overrides: Partial<CatchupPassPolicyInput> = {}): CatchupPassPolic
     deadlineMs: 610_000,
     passesRun: 1,
     maxPasses: 4,
-    progressHighWaterMark: 0,
-    lastPassProgress: 178,
+    coverageHighWaterMark: 0,
+    lastPassCoverage: 178,
     planeProven: false,
     capablePeers: ['peer-a', 'peer-b'],
     ...overrides,
@@ -77,10 +77,10 @@ describe('shouldRunAnotherCatchupPass', () => {
     // `passesRun: 2` throughout: on pass 1 the mark is 0 only because nothing
     // has run, and a capable peer there earns its repeat (see the rows below).
     expect(shouldRunAnotherCatchupPass(
-      base({ passesRun: 2, progressHighWaterMark: 178, lastPassProgress: 178 }),
+      base({ passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 178 }),
     ).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(
-      base({ passesRun: 2, progressHighWaterMark: 178, lastPassProgress: 120 }),
+      base({ passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 120 }),
     ).reason).toBe('coverage-stalled');
   });
 
@@ -89,7 +89,7 @@ describe('shouldRunAnotherCatchupPass', () => {
     // than −1. At −1 a barren first pass would read as "advanced to 0" and earn
     // a repeat — for a peer that has just demonstrated it can deliver nothing.
     expect(shouldRunAnotherCatchupPass(
-      base({ progressHighWaterMark: 0, lastPassProgress: 0, capablePeers: [] }),
+      base({ coverageHighWaterMark: 0, lastPassCoverage: 0, capablePeers: [] }),
     ).reason).toBe('coverage-stalled');
   });
 
@@ -104,7 +104,7 @@ describe('shouldRunAnotherCatchupPass', () => {
     // pay. Stopping here reported "more passes would not help" on a graph 250
     // Knowledge Assets short, with the blobs already cached.
     expect(shouldRunAnotherCatchupPass(base({
-      passesRun: 1, progressHighWaterMark: 0, lastPassProgress: 0,
+      passesRun: 1, coverageHighWaterMark: 0, lastPassCoverage: 0,
       capablePeers: ['peer-holding-250'],
     }))).toEqual({
       continue: true,
@@ -119,7 +119,7 @@ describe('shouldRunAnotherCatchupPass', () => {
     // baseline, a repeat that beats nobody's record is genuine evidence that
     // more passes would not help — which is exactly what the reason says.
     expect(shouldRunAnotherCatchupPass(base({
-      passesRun: 2, progressHighWaterMark: 190, lastPassProgress: 190,
+      passesRun: 2, coverageHighWaterMark: 190, lastPassCoverage: 190,
       capablePeers: ['peer-a'],
     })).reason).toBe('coverage-stalled');
   });
@@ -168,18 +168,18 @@ describe('shouldRunAnotherCatchupPass', () => {
     // of budget must not read as "raise the budget", because raising it buys
     // nothing. Each case below satisfies BOTH stops and pins which is reported.
     expect(shouldRunAnotherCatchupPass(base({
-      planeProven: true, capablePeers: [], progressHighWaterMark: 178, lastPassProgress: 178,
+      planeProven: true, capablePeers: [], coverageHighWaterMark: 178, lastPassCoverage: 178,
     })).reason).toBe('plane-proven');
     // Same two stops, but a capable peer is left: plane-proven no longer applies
     // at all, so the honest reason is the one that actually held.
     expect(shouldRunAnotherCatchupPass(base({
-      planeProven: true, passesRun: 2, progressHighWaterMark: 178, lastPassProgress: 178,
+      planeProven: true, passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 178,
     })).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(base({
-      passesRun: 2, progressHighWaterMark: 178, lastPassProgress: 178, nowMs: 999_999,
+      passesRun: 2, coverageHighWaterMark: 178, lastPassCoverage: 178, nowMs: 999_999,
     })).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(base({
-      progressHighWaterMark: 178, lastPassProgress: 178, passesRun: 4,
+      coverageHighWaterMark: 178, lastPassCoverage: 178, passesRun: 4,
     })).reason).toBe('coverage-stalled');
     expect(shouldRunAnotherCatchupPass(base({
       capablePeers: [], passesRun: 4, nowMs: 999_999,
@@ -244,8 +244,8 @@ describe('runSwmCatchupContinuations', () => {
 
     const summary = await runSwmCatchupContinuations({
       units: [
-        { key: 'complete', ledger: complete, planeProven: () => true },
-        { key: 'incomplete', ledger: incomplete, planeProven: () => false },
+        { key: 'complete', tracker: complete, planeProven: () => true },
+        { key: 'incomplete', tracker: incomplete, planeProven: () => false },
       ],
       config: { maxPasses: 4, budgetMs: 1_000 },
       nowMs: () => 10,
@@ -284,7 +284,7 @@ describe('runSwmCatchupContinuations', () => {
     }, false);
 
     const summary = await runSwmCatchupContinuations({
-      units: [{ key: 'queued', ledger: tracker, planeProven: () => false }],
+      units: [{ key: 'queued', tracker, planeProven: () => false }],
       config: { maxPasses: 4, budgetMs: 1_000 },
       nowMs: () => 10,
       runPass: async () => undefined,
@@ -305,7 +305,7 @@ describe('runSwmCatchupContinuations', () => {
     let now = 10;
 
     const summary = await runSwmCatchupContinuations({
-      units: [{ key: 'queued', ledger: tracker, planeProven: () => false }],
+      units: [{ key: 'queued', tracker, planeProven: () => false }],
       config: { maxPasses: 4, budgetMs: 5 },
       nowMs: () => now,
       runPass: async ([candidate]) => {

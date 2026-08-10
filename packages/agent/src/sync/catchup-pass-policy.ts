@@ -71,9 +71,9 @@ export interface CatchupPassPolicyInput {
    * absorb. In the ordinary snapshot ledger, a pass that resolved zero
    * snapshots has produced no evidence that another one would do better.
    */
-  progressHighWaterMark: number;
+  coverageHighWaterMark: number;
   /** The current ledger-domain progress after the pass that just ran. */
-  lastPassProgress: number;
+  lastPassCoverage: number;
   /**
    * Whether the current progress ledger has already started a continuation
    * pass in this progress domain. Omitted callers retain the historical
@@ -147,7 +147,7 @@ implements SwmCatchupProgressLedger {
 
   private readonly peerProgressHighWater = new Map<string, number>();
 
-  private progressHighWaterMark = 0;
+  private coverageHighWaterMark = 0;
 
   private completedContinuationPasses = 0;
 
@@ -203,8 +203,8 @@ implements SwmCatchupProgressLedger {
     return shouldRunAnotherCatchupPass({
       ...input,
       passesRun: 1 + this.completedContinuationPasses,
-      progressHighWaterMark: this.progressHighWaterMark,
-      lastPassProgress: this.progress(),
+      coverageHighWaterMark: this.coverageHighWaterMark,
+      lastPassCoverage: this.progress(),
       capablePeers: this.capablePeers(),
     });
   }
@@ -212,7 +212,7 @@ implements SwmCatchupProgressLedger {
   /** Mark a continuation as started and return the progress reading before it. */
   startContinuationPass(): number {
     const before = this.progress();
-    this.progressHighWaterMark = before;
+    this.coverageHighWaterMark = before;
     this.completedContinuationPasses += 1;
     return before;
   }
@@ -222,7 +222,12 @@ export interface SwmCatchupContinuationUnit<
   Key,
 > {
   readonly key: Key;
-  readonly ledger: SwmCatchupProgressLedger;
+  /**
+   * Progress ledger for this unit. The historical `tracker` name is retained
+   * for source compatibility; selected RFC-64 callers may supply a staged
+   * ledger rather than the ordinary snapshot-only tracker.
+   */
+  readonly tracker: SwmCatchupProgressLedger;
   readonly planeProven: () => boolean;
 }
 
@@ -310,7 +315,7 @@ export async function runSwmCatchupContinuations<
     const candidates: SwmCatchupContinuationCandidate<Key>[] = [];
     for (const unit of options.units) {
       if (stopped.has(unit.key)) continue;
-      const decision = unit.ledger.decide({
+      const decision = unit.tracker.decide({
         nowMs: options.nowMs(),
         deadlineMs,
         maxPasses: options.config.maxPasses,
@@ -320,7 +325,7 @@ export async function runSwmCatchupContinuations<
         stopped.add(unit.key);
         await options.onStop?.({
           key: unit.key,
-          continuationPasses: unit.ledger.continuationPasses(),
+          continuationPasses: unit.tracker.continuationPasses(),
           reason: decision.reason,
         });
         continue;
@@ -342,13 +347,13 @@ export async function runSwmCatchupContinuations<
           }
           started = true;
           startsThisPass += 1;
-          const progressBefore = unit.ledger.startContinuationPass();
+          const progressBefore = unit.tracker.startContinuationPass();
           const result = await run({
             key: unit.key,
             peers: decision.peers,
             progressBefore,
-            progress: () => unit.ledger.progress(),
-            continuationPass: unit.ledger.continuationPasses(),
+            progress: () => unit.tracker.progress(),
+            continuationPass: unit.tracker.continuationPasses(),
           });
           return { started: true, result } as const;
         },
@@ -373,7 +378,7 @@ export async function runSwmCatchupContinuations<
 
   return {
     continuationPasses: options.units.reduce(
-      (total, unit) => total + unit.ledger.continuationPasses(),
+      (total, unit) => total + unit.tracker.continuationPasses(),
       0,
     ),
     deadlineMs,
@@ -418,7 +423,7 @@ export function shouldRunAnotherCatchupPass(input: CatchupPassPolicyInput): Catc
   //
   // Suppressed before the current progress domain has established a baseline
   // while a capable peer exists. In the ordinary snapshot ledger this is the
-  // pass-1 boundary: `progressHighWaterMark` is 0 by initialization, so the test collapses to
+  // pass-1 boundary: `coverageHighWaterMark` is 0 by initialization, so the test collapses to
   // "the whole walk materialized zero" — and that is a state a CAPABLE peer
   // routinely reports: a store fault that failed every write, or a round whose
   // deadline was spent by the metadata and aggregate phases so the snapshot walk
@@ -440,7 +445,7 @@ export function shouldRunAnotherCatchupPass(input: CatchupPassPolicyInput): Catc
     ?? input.passesRun > 1;
   const firstPassWithCapablePeers = !progressBaselineEstablished
     && input.capablePeers.length > 0;
-  if (input.lastPassProgress <= input.progressHighWaterMark && !firstPassWithCapablePeers) {
+  if (input.lastPassCoverage <= input.coverageHighWaterMark && !firstPassWithCapablePeers) {
     return stop('coverage-stalled');
   }
   if (input.capablePeers.length === 0) return stop('no-capable-peers');

@@ -704,7 +704,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const execution = await runSwmCatchupContinuations({
       units: [{
         key: request.contextGraphId,
-        ledger: passTracker,
+        tracker: passTracker,
         planeProven: () => catchupPlaneProvenByData(cleanPlaneCompletions.sharedMemory),
       }],
       config: passConfig,

@@ -217,8 +217,8 @@ class SelectedSwmContinuationLedger implements SwmCatchupProgressLedger {
     return shouldRunAnotherCatchupPass({
       ...input,
       passesRun: 1 + this.completedPasses,
-      progressHighWaterMark: this.progressBaseline,
-      lastPassProgress: this.progress(),
+      coverageHighWaterMark: this.progressBaseline,
+      lastPassCoverage: this.progress(),
       progressBaselineEstablished: this.progressBaselineEstablished,
       capablePeers: this.capablePeers(),
     });
@@ -299,7 +299,7 @@ export async function runSelectedSwmContinuations(
   const execution = await runSwmCatchupContinuations({
     units: [...stateByContextGraph.values()].map((state) => ({
       key: state,
-      ledger: state.ledger,
+      tracker: state.ledger,
       planeProven: () => state.planeProven,
     })),
     config: options.passConfig,
