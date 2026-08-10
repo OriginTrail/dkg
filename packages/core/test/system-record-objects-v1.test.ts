@@ -38,6 +38,7 @@ import {
   evaluateAuthorityTransitionV1,
   evaluateAuthorityTransitionAgainstAcceptedStateV1,
   evaluateAgentProfileHeadAdvanceV1,
+  isDirectResolvingSuccessorV1,
   preflightSystemRecordCacheAccountingV1,
   recoverEip191SignerV1,
   parseCanonicalAgentProfileAuthorityTransitionV1,
@@ -2054,6 +2055,31 @@ describe('system-record owned subjects and verification closure', () => {
       .toEqual(materialization.authoritySummary.forkResolution);
   });
 
+  // The direct-successor predicate never inspects `state`, and
+  // `forkResolutionDigest` lives on the common head shape, so on those two facts
+  // alone a tombstone looks like it could be summarized as a resolving successor
+  // -- while the authority decision path rejects the same candidate for not
+  // being active. It cannot, and this is the reason: the head codec refuses the
+  // input shape outright, so such a head never parses, never enters a closure,
+  // and never reaches the minting site. That refusal is what makes the state
+  // check redundant at every later layer; if it ever goes, they stop being
+  // redundant and the minting site needs its own gate.
+  it('refuses a tombstone that advertises a fork resolution', async () => {
+    const rotated = await rotatedForkResolutionCase();
+    const terminal = {
+      ...tombstoneHead(rotated.base),
+      version: '4' as const,
+      previousHeadDigest: computeAgentProfileHeadObjectDigestV1(rotated.base),
+      forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(rotated.resolution),
+    };
+    expect(() => computeAgentProfileHeadObjectDigestV1(terminal as AgentProfileHeadObjectV1))
+      .toThrow(/no direct terminal fork-resolution tombstone/);
+    expect(() => isDirectResolvingSuccessorV1(
+      terminal as AgentProfileHeadObjectV1,
+      rotated.resolution,
+    )).toThrow(/no direct terminal fork-resolution tombstone/);
+  });
+
   it('pins the authority/fork closure edge equations', () => {
     expect(assertSystemRecordClosureAlgebraV1(14n, 'active')).toBe(30);
     expect(assertSystemRecordClosureAlgebraV1(14n, 'tombstone')).toBe(31);
@@ -2369,6 +2395,12 @@ async function rotatedForkResolutionCase() {
   };
   return {
     base,
+    left,
+    right,
+    middle,
+    initial,
+    firstTransition,
+    secondTransition,
     resolution,
     successor,
     artifacts: closureArtifacts(
