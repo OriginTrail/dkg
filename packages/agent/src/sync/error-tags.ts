@@ -7,70 +7,101 @@ type SyncErrorTag =
   | 'syncValidationRejected'
   | 'syncLocalRequestFailure';
 
-function markSyncError(error: unknown, tag: SyncErrorTag): void {
-  if (!error || (typeof error !== 'object' && typeof error !== 'function')) return;
+const syncErrorTagSideChannels: Record<SyncErrorTag, WeakSet<object>> = {
+  syncPeerResponded: new WeakSet(),
+  syncTransportFailure: new WeakSet(),
+  syncValidationRejected: new WeakSet(),
+  syncLocalRequestFailure: new WeakSet(),
+};
+
+function isTaggableThrowable(error: unknown): error is object {
+  return error !== null && (typeof error === 'object' || typeof error === 'function');
+}
+
+function markSyncError(error: unknown, tag: SyncErrorTag): unknown {
+  // JavaScript permits throwing primitives. Normalize only those values so a
+  // catch-and-rethrow boundary can carry authoritative classification without
+  // changing the identity, class or stack of ordinary Error/object throwables.
+  const taggedError = isTaggableThrowable(error)
+    ? error
+    : new Error(String(error), { cause: error });
+  syncErrorTagSideChannels[tag].add(taggedError);
   try {
-    Object.defineProperty(error, tag, {
+    Object.defineProperty(taggedError, tag, {
       configurable: true,
       enumerable: false,
       value: true,
     });
   } catch {
     try {
-      (error as Record<string, unknown>)[tag] = true;
+      (taggedError as Record<string, unknown>)[tag] = true;
     } catch {
-      // Best-effort tagging only; never replace the original sync failure.
+      // Frozen/non-extensible values remain tagged by the WeakSet side-channel.
     }
+  }
+  return taggedError;
+}
+
+function hasSyncErrorTag(error: unknown, tag: SyncErrorTag): boolean {
+  if (!isTaggableThrowable(error)) return false;
+  if (syncErrorTagSideChannels[tag].has(error)) return true;
+  try {
+    return Boolean((error as Record<string, unknown>)[tag]);
+  } catch {
+    return false;
   }
 }
 
-export function markSyncPeerResponded(error: unknown): void {
-  markSyncError(error, 'syncPeerResponded');
+export function markSyncPeerResponded(error: unknown): unknown {
+  return markSyncError(error, 'syncPeerResponded');
 }
 
-export function markSyncTransportFailure(error: unknown): void {
-  markSyncError(error, 'syncTransportFailure');
+export function markSyncTransportFailure(error: unknown): unknown {
+  return markSyncError(error, 'syncTransportFailure');
 }
 
-export function markSyncLocalRequestFailure(error: unknown): void {
-  markSyncError(error, 'syncLocalRequestFailure');
+export function markSyncLocalRequestFailure(error: unknown): unknown {
+  return markSyncError(error, 'syncLocalRequestFailure');
 }
 
 /**
  * The peer's response ARRIVED and the in-transport validator then rejected it
  * (W1 attempt outcome `validation_rejected`, whose received bytes still count).
  *
- * Tagging, never replacing: `makeLegacySyncBusyError`'s message is matched by
- * {@link isSyncBackoffWorthyError}, so minting a substitute error would silently
- * change peer backoff, the durable-data verifiable-prefix return and
- * `failedPhases` accounting — a behaviour change dressed as telemetry. The tag
- * is non-enumerable and best-effort, exactly like the two above.
+ * Object throwables are tagged without replacement: `makeLegacySyncBusyError`'s
+ * message is matched by {@link isSyncBackoffWorthyError}, so minting a substitute
+ * error would silently change peer backoff, the durable-data verifiable-prefix
+ * return and `failedPhases` accounting — a behaviour change dressed as
+ * telemetry. Primitive throwables are normalized once at the catch/rethrow
+ * boundary because they cannot carry either a property or WeakSet identity.
  *
  * There is no message fallback for this marker. A rejection that reaches the
  * record site untagged is classified by its terminal state, never guessed from
  * text: the deadline/cancel/reset surfaces are indistinguishable by message.
  */
-export function markSyncValidationRejection(error: unknown): void {
-  markSyncError(error, 'syncValidationRejected');
+export function markSyncValidationRejection(error: unknown): unknown {
+  return markSyncError(error, 'syncValidationRejected');
 }
 
 export function isSyncValidationRejection(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && (error as { syncValidationRejected?: boolean }).syncValidationRejected);
+  return hasSyncErrorTag(error, 'syncValidationRejected');
 }
 
 export function didSyncPeerRespond(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && (
-    (error as { syncPeerResponded?: boolean }).syncPeerResponded ||
-    (error as { syncDenied?: boolean }).syncDenied
-  ));
+  if (hasSyncErrorTag(error, 'syncPeerResponded')) return true;
+  try {
+    return Boolean(isTaggableThrowable(error) && (error as { syncDenied?: boolean }).syncDenied);
+  } catch {
+    return false;
+  }
 }
 
 export function isSyncTransportFailure(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && (error as { syncTransportFailure?: boolean }).syncTransportFailure);
+  return hasSyncErrorTag(error, 'syncTransportFailure');
 }
 
 function isSyncLocalRequestFailure(error: unknown): boolean {
-  return Boolean(error && typeof error === 'object' && (error as { syncLocalRequestFailure?: boolean }).syncLocalRequestFailure);
+  return hasSyncErrorTag(error, 'syncLocalRequestFailure');
 }
 
 function syncErrorMessage(error: unknown): string {
@@ -107,14 +138,22 @@ function hasKnownRetryableSyncTransportMessage(error: unknown): boolean {
  */
 export function isKnownRetryableSyncTransportInterruption(error: unknown): boolean {
   if (
-    (error instanceof Error && error.name === 'AbortError')
-    || isSyncValidationRejection(error)
+    isSyncValidationRejection(error)
     || didSyncPeerRespond(error)
     || isChainRpcTransportError(error)
     || isSyncLocalRequestFailure(error)
   ) return false;
 
-  return isSyncTransportFailure(error) || hasKnownRetryableSyncTransportMessage(error);
+  // The transport boundary is authoritative even when its deadline surfaces
+  // as AbortError. Caller/node cancellation is rejected separately by the
+  // requester's live signal before this classifier is consulted.
+  if (isSyncTransportFailure(error)) return true;
+
+  // Never infer an untagged AbortError from message text: the same shape is
+  // used for caller cancellation and transport deadlines.
+  if (error instanceof Error && error.name === 'AbortError') return false;
+
+  return hasKnownRetryableSyncTransportMessage(error);
 }
 
 /**

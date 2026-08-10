@@ -691,8 +691,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           nextBytesReceived,
           maxAcceptedBytes,
         );
-        markSyncPeerResponded(error);
-        throw error;
+        throw markSyncPeerResponded(error);
       }
 
       let parsed: { quads: Quad[]; totalQuads: number };
@@ -744,8 +743,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         }
         acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
       } catch (error) {
-        markSyncPeerResponded(error);
-        throw error;
+        throw markSyncPeerResponded(error);
       }
 
       const stepDurationMs = transportDurationMs + decodeDurationMs + parseDurationMs;

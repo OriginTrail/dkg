@@ -95,6 +95,54 @@ describe('exact sync accumulation limits', () => {
     expect(checkpointStore.get(result.checkpointKey)?.responderSessionId).toBeTruthy();
   });
 
+  it('retains selected metadata when a tagged transport deadline has AbortError shape', async () => {
+    const requesterScope = 'selected-swm-meta:tagged-abort-deadline' as const;
+    const checkpointStore = new MemorySyncCheckpointStore();
+    let sends = 0;
+    const acceptedQuad = {
+      subject: 'urn:selected:tagged-abort',
+      predicate: 'urn:p',
+      object: '"o"',
+      graph: 'urn:meta',
+    };
+
+    const result = await fetchSyncPages(fetchParams({
+      checkpointStore,
+      includeSharedMemory: true,
+      phase: 'meta',
+      graphUri: 'urn:meta',
+      requesterScope,
+      returnAcceptedPrefixOnRetryableTransportFailure: true,
+      assetUals: undefined,
+      maxAcceptedBytes: undefined,
+      signal: new AbortController().signal,
+      parseAndFilter: async () => ({ quads: [acceptedQuad], totalQuads: 1 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) return encoder.encode('valid-page');
+        const error = new Error('request timeout');
+        error.name = 'AbortError';
+        Object.freeze(error);
+        markSyncTransportFailure(error);
+        throw error;
+      },
+    }));
+
+    expect(result).toMatchObject({
+      quads: [acceptedQuad],
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      completed: false,
+      timedOut: true,
+    });
+    expect(checkpointStore.get(result.checkpointKey)).toMatchObject({
+      // The selected owner, not the generic page fetcher, owns advancement to
+      // result.nextOffset after it has retained this exact private prefix.
+      offset: 0,
+      responderSessionId: expect.any(String),
+    });
+  });
+
   it('does not infer selected metadata retention policy from checkpoint scope', async () => {
     let sends = 0;
     await expect(fetchSyncPages(fetchParams({
@@ -125,6 +173,7 @@ describe('exact sync accumulation limits', () => {
       fail: (controller: AbortController) => {
         controller.abort(new Error('caller cancelled'));
         const error = new Error('operation timed out');
+        error.name = 'AbortError';
         markSyncTransportFailure(error);
         return error;
       },
@@ -168,6 +217,21 @@ describe('exact sync accumulation limits', () => {
       fail: (_controller: AbortController) => new Error('operation timed out'),
     },
     {
+      name: 'frozen local request timeout with transport-like text',
+      scopeId: 10,
+      fail: (_controller: AbortController) => Object.freeze(new Error('operation timed out')),
+    },
+    {
+      name: 'frozen response parse timeout with transport-like text',
+      scopeId: 11,
+      fail: (_controller: AbortController) => Object.freeze(new Error('operation timed out')),
+    },
+    {
+      name: 'primitive response parse timeout with transport-like text',
+      scopeId: 12,
+      fail: (_controller: AbortController) => 'operation timed out',
+    },
+    {
       name: 'chain RPC timeout with transport-like text',
       scopeId: 9,
       fail: (_controller: AbortController) => Object.assign(
@@ -209,6 +273,7 @@ describe('exact sync accumulation limits', () => {
           (
             name === 'local request build failure'
             || name === 'local request timeout with transport-like text'
+            || name === 'frozen local request timeout with transport-like text'
             || name === 'chain RPC timeout with transport-like text'
           )
           && builds === 2
@@ -220,7 +285,9 @@ describe('exact sync accumulation limits', () => {
         if (
           (name === 'integrity rejection'
             || name === 'validation rejection'
-            || name === 'validation rejection with transport-like text')
+            || name === 'validation rejection with transport-like text'
+            || name === 'frozen response parse timeout with transport-like text'
+            || name === 'primitive response parse timeout with transport-like text')
           && parses === 2
         ) {
           throw fail(controller);
@@ -238,6 +305,8 @@ describe('exact sync accumulation limits', () => {
           name === 'integrity rejection'
           || name === 'validation rejection'
           || name === 'validation rejection with transport-like text'
+          || name === 'frozen response parse timeout with transport-like text'
+          || name === 'primitive response parse timeout with transport-like text'
         ) {
           return encoder.encode('invalid-page');
         }
@@ -245,7 +314,19 @@ describe('exact sync accumulation limits', () => {
       },
     });
 
-    await expect(fetchSyncPages(params)).rejects.toBeInstanceOf(Error);
+    let rejected: unknown;
+    try {
+      await fetchSyncPages(params);
+    } catch (error) {
+      rejected = error;
+    }
+    expect(rejected).toBeInstanceOf(Error);
+    if (name === 'primitive response parse timeout with transport-like text') {
+      expect(rejected).toMatchObject({
+        message: 'operation timed out',
+        cause: 'operation timed out',
+      });
+    }
     expect(checkpointStore.get(checkpointKey)).toBeUndefined();
 
     // Recreate only an offset. A leaked process-local responder token would
