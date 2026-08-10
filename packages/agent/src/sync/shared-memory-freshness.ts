@@ -17,6 +17,21 @@ export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
 }
 
 /**
+ * Terminal verdict produced only by the priority selected-SWM lane.
+ *
+ * This contract lives with the shared-memory freshness domain rather than an
+ * orchestration consumer so every producer and consumer shares the same
+ * fail-closed, discriminated result shape.
+ */
+export interface SelectedSharedMemorySyncResult {
+  readonly kind: 'selected-shared-memory';
+  readonly shared: SharedMemoryFreshnessSummary & {
+    readonly insertedTriples: number;
+  };
+  readonly selectedScopeComplete: boolean;
+}
+
+/**
  * Producer-side evidence that a later selected-provider continuation resolved
  * historical voluntary snapshot yields from the same invocation.
  */
