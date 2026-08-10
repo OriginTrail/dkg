@@ -16,7 +16,6 @@ import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import {
   getSyncCheckpointKey,
-  isSelectedSwmMetaRetentionScope,
   type SyncCheckpointScope,
   type SyncCheckpointStore,
 } from '../checkpoint/state.js';
@@ -149,6 +148,16 @@ export interface SyncPageResult {
   checkpointKey: string;
   completed: boolean;
   timedOut: boolean;
+}
+
+function acceptedIncompletePrefixResult(
+  result: Omit<SyncPageResult, 'completed' | 'timedOut'>,
+): SyncPageResult {
+  return {
+    ...result,
+    completed: false,
+    timedOut: true,
+  };
 }
 
 /** Canonical transport path identity for learned requester page sizing. */
@@ -329,6 +338,12 @@ export interface SyncPageFetchOptions {
   readonly recovery?: boolean;
   readonly forceFreshSession?: boolean;
   readonly assetUals?: string[];
+  /**
+   * Permit the selected-SWM transfer owner to retain a validated metadata
+   * prefix after a retryable transport interruption. Checkpoint identity is
+   * intentionally independent of this transfer policy.
+   */
+  readonly returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   readonly requesterScope?: SyncCheckpointScope;
   readonly maxAcceptedQuads?: number;
   readonly maxAcceptedHeapBytesEstimate?: number;
@@ -404,6 +419,8 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Selected-SWM-only policy for returning a validated incomplete prefix. */
+  returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   /** Isolates an internal requester whose retained prefix is not shareable. */
   requesterScope?: SyncCheckpointScope;
   /** Optional cumulative ceilings for proof-sensitive narrow fetches. */
@@ -500,6 +517,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    returnAcceptedPrefixOnRetryableTransportFailure,
     requesterScope,
     maxAcceptedBytes,
     maxAcceptedQuads,
@@ -857,16 +875,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         `Durable data transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; returning a verifiable prefix at raw offset ${offset}`,
       );
       phaseTelemetry.finish('timed_out', allQuads.length);
-      return {
+      return acceptedIncompletePrefixResult({
         quads: allQuads,
         bytesReceived,
         resumedFromOffset,
         responderSessionStartedFresh,
         nextOffset: offset,
         checkpointKey,
-        completed: false,
-        timedOut: true,
-      };
+      });
     }
 
     // Selected RFC-64 SWM metadata has a stricter all-or-nothing activation
@@ -883,7 +899,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     if (
       includeSharedMemory
       && phase === 'meta'
-      && isSelectedSwmMetaRetentionScope(requesterScope)
+      && returnAcceptedPrefixOnRetryableTransportFailure === true
       && responsePages > 0
       && allQuads.length > 0
       && signal?.aborted !== true
@@ -895,16 +911,22 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         `Selected SWM metadata transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; retaining a private prefix at raw offset ${offset}`,
       );
       phaseTelemetry.finish('timed_out', allQuads.length);
-      return {
+      return acceptedIncompletePrefixResult({
         quads: allQuads,
         bytesReceived,
         resumedFromOffset,
         responderSessionStartedFresh,
         nextOffset: offset,
         checkpointKey,
-        completed: false,
-        timedOut: true,
-      };
+      });
+    }
+
+    if (returnAcceptedPrefixOnRetryableTransportFailure === true) {
+      // The selected transfer owner can retain only an explicitly returned
+      // validated prefix. Every thrown boundary invalidates both pieces of its
+      // resume tuple so aborts, denials and local/validation/integrity failures
+      // cannot strand a session without its byte-identical in-memory prefix.
+      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
     }
 
     phaseTelemetry.finish('error', allQuads.length);

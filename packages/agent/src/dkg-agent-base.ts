@@ -161,6 +161,7 @@ import {
   type SignedAgentDelegation,
 } from './auth/agent-delegation.js';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
+import { SelectedSwmMetaTransferCoordinator } from './sync/selected-swm-meta-fetcher.js';
 import { bindRandomSampling, type RandomSamplingDisabledReason, type RandomSamplingHandle, type RandomSamplingStatus } from './random-sampling-bind.js';
 import { connectToMultiaddr, ensurePeerConnected as ensurePeerConnectedAtom, primeCatchupConnections as primeCatchupConnectionsAtom } from './p2p/peer-connect.js';
 import { Messenger, type SloProtocolStats } from './p2p/messenger.js';
@@ -1626,6 +1627,22 @@ export class DKGAgentBase {
   protected syncCheckpoints: SyncCheckpointStore = new MemorySyncCheckpointStore();
   protected changelogCursors: ChangelogCursorStore = new MemoryChangelogCursorStore();
   protected syncVerifyWorker?: SyncVerifyWorker;
+  /** Agent-owned retained selected-SWM transfers, created lazily and drained before store close. */
+  protected selectedSwmMetaTransfers?: SelectedSwmMetaTransferCoordinator;
+
+  protected getSelectedSwmMetaTransfers(): SelectedSwmMetaTransferCoordinator {
+    this.selectedSwmMetaTransfers ??= new SelectedSwmMetaTransferCoordinator();
+    return this.selectedSwmMetaTransfers;
+  }
+
+  protected async closeSelectedSwmMetaTransfers(): Promise<void> {
+    const transfers = this.selectedSwmMetaTransfers;
+    if (!transfers) return;
+    await transfers.close();
+    if (this.selectedSwmMetaTransfers === transfers) {
+      this.selectedSwmMetaTransfers = undefined;
+    }
+  }
 
   /** Registered agents on this node: agentAddress → AgentKeyRecord */
   protected readonly localAgents = new Map<string, AgentKeyRecord>();

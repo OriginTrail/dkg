@@ -295,7 +295,6 @@ import {
 } from './sync/requester/shared-memory-sync.js';
 import {
   createSelectedSwmMetaFetcher,
-  SelectedSwmMetaTransferCoordinator,
   type SelectedSwmMetaFetcher,
 } from './sync/selected-swm-meta-fetcher.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
@@ -736,6 +735,7 @@ function syncPageFetchCoalescingKey(params: {
   recovery?: boolean;
   forceFreshSession?: boolean;
   assetUals?: readonly string[];
+  returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
   maxAcceptedHeapBytesEstimate?: number;
@@ -751,6 +751,7 @@ function syncPageFetchCoalescingKey(params: {
     params.recovery === true,
     params.forceFreshSession === true,
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
+    params.returnAcceptedPrefixOnRetryableTransportFailure === true,
     params.requesterScope ?? null,
     params.maxAcceptedQuads ?? null,
     params.maxAcceptedHeapBytesEstimate ?? null,
@@ -963,30 +964,6 @@ const selectedSwmMetaRetentionBudgets = new WeakMap<
   object,
   { signature: string; budget: SelectedSwmMetaRetentionBudget }
 >();
-
-const selectedSwmMetaTransferCoordinators = new WeakMap<
-  object,
-  SelectedSwmMetaTransferCoordinator
->();
-
-function selectedSwmMetaTransferCoordinatorFor(
-  owner: object,
-): SelectedSwmMetaTransferCoordinator {
-  let coordinator = selectedSwmMetaTransferCoordinators.get(owner);
-  if (!coordinator) {
-    coordinator = new SelectedSwmMetaTransferCoordinator();
-    selectedSwmMetaTransferCoordinators.set(owner, coordinator);
-  }
-  return coordinator;
-}
-
-/** Release every retained selected-SWM prefix before agent storage teardown. */
-export async function closeSelectedSwmMetaTransfers(owner: object): Promise<void> {
-  const coordinator = selectedSwmMetaTransferCoordinators.get(owner);
-  if (!coordinator) return;
-  selectedSwmMetaTransferCoordinators.delete(owner);
-  await coordinator.close();
-}
 
 function selectedSwmMetaRetentionBudgetFor(
   owner: object,
@@ -5872,6 +5849,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
+      returnAcceptedPrefixOnRetryableTransportFailure,
       // Internal namespace for state whose retained prefix is unavailable to
       // ordinary coalesced callers.
       requesterScope,
@@ -5897,6 +5875,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         recovery,
         forceFreshSession,
         assetUals,
+        returnAcceptedPrefixOnRetryableTransportFailure,
         requesterScope,
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
@@ -5947,6 +5926,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope,
       maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
       maxAcceptedQuads: exactAccumulationLimits?.maxQuads === undefined
@@ -6313,6 +6293,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           request.graphUri,
           request.deadline,
           {
+            returnAcceptedPrefixOnRetryableTransportFailure:
+              request.returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope: request.requesterScope,
             maxAcceptedQuads: request.maxAcceptedQuads,
             maxAcceptedHeapBytesEstimate: request.maxAcceptedHeapBytesEstimate,
@@ -6656,7 +6638,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     return runSyncSingleFlight(this, singleFlightKey, () => (
       selectedSwmEnabled
-        ? selectedSwmMetaTransferCoordinatorFor(this).run(
+        ? this.getSelectedSwmMetaTransfers().run(
           remotePeerId,
           createSelectedMetaFetcher,
           runSync,
