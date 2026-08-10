@@ -1033,6 +1033,30 @@ describe('system-record requester V1', () => {
     expect(exchange.reset).toHaveBeenCalledWith('cancelled');
   });
 
+  it('does not open a transport after the sole caller cancels before leader start', async () => {
+    const bytes = byteAdmission();
+    const stream = permitAdmission();
+    const openExchange = vi.fn(async () => fixtureExchange().value);
+    const requester = createRequester({ bytes, stream, openExchange });
+    const controller = new AbortController();
+
+    const result = requester.fetch(LOOKUP, controller.signal);
+    controller.abort(new Error('caller cancelled before leader start'));
+
+    await expect(result).rejects.toThrow('caller cancelled before leader start');
+    await vi.waitFor(() => expect(requester.stats()).toMatchObject({
+      started: 1,
+      completed: 1,
+      trackedDigests: 0,
+      waitingCallers: 0,
+      activeStream: 0,
+    }));
+    expect(openExchange).not.toHaveBeenCalled();
+    expect(stream.active()).toBe(false);
+    expect(bytes.reservations).toHaveLength(1);
+    expect(bytes.reservations[0]?.released).toBe(true);
+  });
+
   it('releases stream and frame ownership when the only caller leaves during open', async () => {
     const bytes = byteAdmission();
     const stream = permitAdmission();

@@ -48,6 +48,7 @@ export async function openSystemRecordRequesterExchangeV1(input: {
   readonly signal: AbortSignal;
   readonly resetReason: () => SystemRecordRequesterResetReasonV1;
 }): Promise<SystemRecordRequesterExchangeV1> {
+  input.signal.throwIfAborted();
   const opening = input.openExchange(input.signal);
   let accepted = false;
   void opening.then((lateExchange) => {
