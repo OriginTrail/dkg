@@ -275,6 +275,27 @@ describe('agent-profile System Record reconciler boundaries V1', () => {
       permitReleaseFailures: 1,
     });
   });
+
+  it('rejects a signed cross-network root before admission or inventory I/O', async () => {
+    const fixture = await publishedFixture();
+    const rootEnvelope = await signRootDescriptor(fixture, Object.freeze({
+      ...fixture.rootEnvelope.object,
+      networkId: 'otp:9999' as const,
+    }));
+    const admission = admissionGate();
+    const loadInventoryObject = vi.fn();
+
+    await expect(createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject,
+      receiver: receiverWithPreparation(vi.fn()),
+    })).rejects.toThrow(/another network/);
+    expect(admission.stats().acquisitions).toBe(0);
+    expect(loadInventoryObject).not.toHaveBeenCalled();
+  });
 });
 
 function admissionThrowingOnRelease(

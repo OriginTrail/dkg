@@ -106,6 +106,37 @@ describe('agent-profile System Record reconciler inventory transport', () => {
     expect(reconciler.stats()).toMatchObject({ inventoryRequests: 1, inventoryWireBytes: 0 });
   });
 
+  it('maps a framed busy response to a released inventory block', async () => {
+    const fixture = await publishedFixture();
+    const admission = admissionGate();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: async () => Object.freeze({
+        outcome: 'rejected' as const,
+        wireBytes: 6,
+        rejection: 'busy' as const,
+      }),
+      receiver: receiver(fixture.store, vi.fn()),
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'inventory',
+      reason: 'inventory-busy',
+      inventoryRequests: 1,
+      inventoryWireBytes: 6,
+    });
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 1 });
+    expect(reconciler.stats()).toMatchObject({
+      inventoryRequests: 1,
+      inventoryWireBytes: 6,
+      active: 0,
+    });
+  });
+
   it('maps a thrown inventory loader failure to a released transport block', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();
