@@ -524,6 +524,51 @@ describe('system-record immutable B+tree objects', () => {
     })).rejects.toBe(abortReason);
   });
 
+  it('preserves validation-only traversal failure translation', async () => {
+    const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, [row(PEER_A)]);
+    const root = snapshot.objects.get(snapshot.descriptor.treeRootDigest)!;
+
+    const invalidSlice = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    let invalidSliceLoads = 0;
+    await expect(invalidSlice.advance(async () => {
+      invalidSliceLoads += 1;
+      return loadedInventoryObject(root);
+    }, {
+      maxRequests: 0,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).rejects.toThrow(/slice budget/);
+    expect(invalidSliceLoads).toBe(0);
+
+    const deadline = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(deadline.advance(() => new Promise<never>(() => undefined), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 20,
+    })).rejects.toThrow(/deadline expired/);
+
+    const abortReason = new Error('public traversal aborted after load');
+    const controller = new AbortController();
+    const requested = Promise.withResolvers<void>();
+    const delivery = Promise.withResolvers<ReturnType<typeof loadedInventoryObject>>();
+    const aborted = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    const abortedAdvance = aborted.advance(() => {
+      requested.resolve();
+      return delivery.promise;
+    }, {
+      signal: controller.signal,
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    });
+    await requested.promise;
+    delivery.resolve(loadedInventoryObject(root));
+    await Promise.resolve();
+    await Promise.resolve();
+    controller.abort(abortReason);
+    await expect(abortedAdvance).rejects.toBe(abortReason);
+  });
+
   it('latches traversal admission before invoking a reentrant clock', async () => {
     const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, [row(PEER_A)]);
     const traversal = createSystemRecordInventoryRowTraversalV1(snapshot.descriptor);
