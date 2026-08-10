@@ -22,6 +22,7 @@ import {
   createTripleStore,
   tryReplaceSubjectAtomically,
   type Quad,
+  type StructuredMutation,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { contextGraphCatalogUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
@@ -206,6 +207,81 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       },
     });
     expect(Object.isFrozen(observedMutation)).toBe(true);
+  });
+
+  it('forwards every structured mutation kind with exact scoped effects', async () => {
+    const structuredMutation = vi.fn(async () => undefined);
+    const inner = { structuredMutation } as unknown as TripleStore;
+    const invalidate = vi.fn();
+    const markProjectionDirty = vi.fn();
+    const store = createListContextGraphsCacheInvalidatingStore(
+      inner,
+      invalidate,
+      markProjectionDirty,
+    );
+    const options = { source: 'agent.test.all-structured-mutations' };
+    const graph = 'urn:test:agent:graph';
+    const target = 'urn:test:agent:target';
+    const predicate = 'urn:test:agent:predicate';
+    const fixtures: Array<{ mutation: StructuredMutation; touched: string }> = [
+      { mutation: { kind: 'delete-subjects', input: {
+        graphUri: graph, subjects: ['urn:test:agent:subject'],
+      } }, touched: graph },
+      { mutation: { kind: 'prune-ranked-subjects', input: {
+        graphUri: graph,
+        subjectPrefix: 'urn:test:agent:ranked:',
+        eligibilityPredicate: predicate,
+        eligibleObjects: ['approved'],
+        primaryRankPredicate: 'urn:test:agent:rank:primary',
+        secondaryRankPredicate: 'urn:test:agent:rank:secondary',
+        retainNewest: 1,
+        maxDelete: 1,
+      } }, touched: graph },
+      { mutation: { kind: 'prune-linked-record-closures', input: {
+        graphUri: graph,
+        matchObjectIris: ['urn:test:agent:member'],
+        linkPredicates: [predicate],
+        recordParentPredicate: 'urn:test:agent:parent',
+        descendantSeparator: '/',
+      } }, touched: graph },
+      { mutation: { kind: 'replace-subject-predicates', input: {
+        graphUri: graph,
+        subject: 'urn:test:agent:subject',
+        predicates: [predicate],
+        replacementQuads: [{
+          graph,
+          subject: 'urn:test:agent:subject',
+          predicate,
+          object: '"value"',
+        }],
+      } }, touched: graph },
+      { mutation: { kind: 'replace-projection-from-graph', input: {
+        targetGraphUri: target,
+        stagingGraphUri: 'urn:test:agent:staging',
+        targetSubject: 'urn:test:agent:subject',
+        preservedTargetPredicates: [predicate],
+        targetSubjectPrefixes: [],
+      } }, touched: target },
+      { mutation: { kind: 'copy-subject-projection', input: {
+        sourceGraphUris: [graph],
+        targetGraphUri: target,
+        roots: ['urn:test:agent:root'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      } }, touched: target },
+    ];
+
+    for (const [index, fixture] of fixtures.entries()) {
+      await store.structuredMutation!(fixture.mutation, options);
+      expect(structuredMutation.mock.calls[index][1]).toBe(options);
+      expect(Object.isFrozen(structuredMutation.mock.calls[index][0])).toBe(true);
+      expect(markProjectionDirty).toHaveBeenNthCalledWith(
+        index + 1,
+        undefined,
+        fixture.touched,
+      );
+    }
+    expect(invalidate).toHaveBeenCalledTimes(fixtures.length);
   });
 
   it('does not invalidate structured mutation failures or structural no-ops', async () => {
