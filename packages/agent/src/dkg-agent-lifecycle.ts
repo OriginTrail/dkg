@@ -4210,24 +4210,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.skippedNoSyncPeers.add(peerId);
       },
       onPeerSynced: (peerId, outcome) => {
-        const selectedSwmRetryRequired = this.selectedSwmRetryRequiredPeers.has(peerId);
-        const effectiveOutcome = outcome && selectedSwmRetryRequired
-          ? { ...outcome, fresh: false }
-          : outcome;
         const progressAt = Math.max(Date.now(), (this.lastSyncProgressAt.get(peerId) ?? 0) + 1);
-        if (effectiveOutcome?.progress) {
+        if (outcome?.progress) {
           this.lastSyncProgressAt.set(peerId, progressAt);
         }
-        // Generic/durable work cannot stamp the whole peer fresh while exact
-        // selected SWM coverage remains incomplete. Existing success evidence
-        // stays diagnostic history; the dedicated bootstrap retry bypasses it.
-        if ((effectiveOutcome?.fresh ?? true) && !selectedSwmRetryRequired) {
+        if (outcome?.fresh ?? true) {
           this.lastSuccessfulSyncAt.set(peerId, progressAt);
         }
         this.skippedNoSyncPeers.delete(peerId);
         this.syncReconcilerBackoff.delete(peerId);
-        if (effectiveOutcome) {
-          onSyncAccounting?.(effectiveOutcome);
+        if (outcome) {
+          onSyncAccounting?.(outcome);
         }
       },
     });
@@ -6584,7 +6577,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             `Selected RFC-64 SWM continuation from ${remotePeerId.slice(-8)} stopped on local backpressure`,
           );
         }
-        return initialSummary;
+        return selectedSwmEnabled
+          ? { ...initialSummary, complete: false }
+          : initialSummary;
       }
 
       const continuationExecution = await runSelectedSwmContinuations({
@@ -6660,10 +6655,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Preserve the raw historical yield/failure counters for diagnostics;
       // the canonical freshness helper bounds the selected continuation's
       // resolution before final on-connect classification consumes it.
-      return applySelectedSwmFreshnessResolution(
-        finalSummary,
-        continuationExecution.freshnessResolution,
-      );
+      return {
+        ...applySelectedSwmFreshnessResolution(
+          finalSummary,
+          continuationExecution.freshnessResolution,
+        ),
+        complete: selectedScopeComplete,
+      };
     };
 
     return runSyncSingleFlight(this, singleFlightKey, () => (

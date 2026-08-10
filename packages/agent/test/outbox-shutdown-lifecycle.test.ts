@@ -17,6 +17,12 @@ import {
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
+function syntheticShutdownAgent(): any {
+  const agent = Object.create(DKGAgent.prototype) as any;
+  agent.selectedSwmRetryRequiredPeers = new Set<string>();
+  return agent;
+}
+
 describe('DKGAgent outbox shutdown lifecycle', () => {
   it('drains an in-flight selected-SWM owner after network stop and before store close', async () => {
     const events: string[] = [];
@@ -69,7 +75,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     deleteCheckpoint.mockClear();
     events.length = 0;
 
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
@@ -119,7 +125,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     await writeStarted;
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
@@ -164,7 +170,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const queuedOutcome = dispatcher.triggerManual('queued').catch((error) => error);
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: {
@@ -222,7 +228,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
       const closeStore = vi.fn(async () => {});
       const stopNode = vi.fn(async () => {});
       const warn = vi.fn();
-      const agent = Object.create(DKGAgent.prototype) as any;
+      const agent = syntheticShutdownAgent();
       Object.assign(agent, {
         started: true,
         chainPoller: null,
@@ -284,7 +290,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     await Promise.resolve();
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
@@ -343,7 +349,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const physical = new Promise<void>((resolve) => { release = resolve; });
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
@@ -387,7 +393,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const physicalCommit = new Promise<void>((resolve) => { release = resolve; });
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
@@ -429,7 +435,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const chainPoller = { stop: vi.fn(() => pollerDrain) };
     const closeStore = vi.fn(async () => {});
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller,
@@ -475,7 +481,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const activeDrain = new Promise<void>((resolve) => { release = resolve; });
     const stopOutboxDrain = vi.fn(() => activeDrain);
     const stopNode = vi.fn(async () => {});
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
@@ -509,7 +515,7 @@ describe('DKGAgent outbox shutdown lifecycle', () => {
     const stopNode = vi.fn(async () => {});
     const closeStore = vi.fn(async () => {});
     const warn = vi.fn();
-    const agent = Object.create(DKGAgent.prototype) as any;
+    const agent = syntheticShutdownAgent();
     Object.assign(agent, {
       started: true,
       chainPoller: null,
