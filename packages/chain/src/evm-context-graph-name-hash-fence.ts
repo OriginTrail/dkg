@@ -338,19 +338,19 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     await this.assertScopeCurrent(requestScope, 'current-slot refresh');
 
     let state = previous;
+    let nextState: ContextGraphNameHashSlotState | undefined;
     if (rebuild || staged.length > 0) {
       const idsByHash = rebuild
         ? new Map<string, bigint[]>()
         : cloneIdsByHash(previous?.idsByHash);
       appendSlots(idsByHash, staged, firstId, latestId);
-      state = {
+      nextState = {
         scope: copyScope(requestScope.scope),
         highWater: latestId,
         anchor: nextAnchor,
         idsByHash,
       };
-      this.currentSlotState = state;
-      this.currentSlotGeneration += 1;
+      state = nextState;
     }
 
     const ids = state?.idsByHash.get(normalizedNameHash) ?? [];
@@ -363,6 +363,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     const id = ids[0] ?? null;
 
     const verification = await this.loadProviderHighWaters();
+    this.assertCompleteProviderHighWaterBoundary(
+      verification,
+      'current-slot resolution',
+    );
     if (verification.latestId !== latestId) {
       throw new Error(
         `resolveContextGraphIdByNameHash: Context Graph registry advanced from ` +
@@ -374,8 +378,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
       const currentHash = await this.readCurrentNameHash(
         id,
         undefined,
-        verification.providerHighWaters,
-        verification.unavailableProviderCount,
+        verification,
       );
       if (currentHash !== normalizedNameHash) {
         throw new Error(
@@ -387,6 +390,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     }
 
     await this.assertScopeCurrent(requestScope, 'current-slot resolution');
+    if (nextState !== undefined) {
+      this.currentSlotState = nextState;
+      this.currentSlotGeneration += 1;
+    }
     return { mode: 'current', id, highWater: latestId };
   }
 
@@ -410,8 +417,7 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
           const currentHash = await this.readCurrentNameHash(
             contextGraphId,
             scanController.signal,
-            highWaterSnapshot.providerHighWaters,
-            highWaterSnapshot.unavailableProviderCount,
+            highWaterSnapshot,
           );
           slots.push({ id: contextGraphId, nameHash: currentHash });
         } catch (cause) {
@@ -522,6 +528,27 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   }
 
   /**
+   * A reverse lookup cannot return a positive or negative result while any
+   * configured backend's registry boundary is unknown. Such a backend may
+   * commit a higher numeric id (including a duplicate name hash) than every
+   * responder. Incomplete snapshots may stage bounded slot reads, but only a
+   * complete follow-up boundary may authorize a result or cache commit.
+   */
+  private assertCompleteProviderHighWaterBoundary(
+    snapshot: ContextGraphNameHashProviderHighWaters,
+    lane: 'current-slot resolution' | 'historical scan',
+  ): void {
+    if (snapshot.unavailableProviderCount === 0) return;
+    const providerCount =
+      snapshot.providerHighWaters.size + snapshot.unavailableProviderCount;
+    throw new Error(
+      `resolveContextGraphIdByNameHash: incomplete registry high-water ` +
+      `coverage during ${lane}; ${snapshot.providerHighWaters.size} of ` +
+      `${providerCount} RPC backends responded`,
+    );
+  }
+
+  /**
    * Require a strict majority of providers at or above the slot to respond,
    * while every response agrees (including null). A transiently unavailable
    * backend is not conflicting chain evidence; a deterministic failure is.
@@ -529,18 +556,15 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
   async readCurrentNameHash(
     contextGraphId: bigint,
     signal?: AbortSignal,
-    providerHighWaters?: ReadonlyMap<JsonRpcProvider, bigint>,
-    capturedUnavailableProviderCount = 0,
+    capturedHighWaterSnapshot?: ContextGraphNameHashProviderHighWaters,
   ): Promise<string | null> {
     await this.dependencies.initialize();
     const cgs = this.dependencies.requireContextGraphStorage();
-    const highWaterSnapshot = providerHighWaters === undefined
+    const highWaterSnapshot = capturedHighWaterSnapshot === undefined
       ? await this.loadProviderHighWaters()
-      : undefined;
-    const highWaters = providerHighWaters ?? highWaterSnapshot!.providerHighWaters;
-    const unavailableProviderCount = providerHighWaters === undefined
-      ? highWaterSnapshot!.unavailableProviderCount
-      : capturedUnavailableProviderCount;
+      : capturedHighWaterSnapshot;
+    const highWaters = highWaterSnapshot.providerHighWaters;
+    const { unavailableProviderCount } = highWaterSnapshot;
     const coveringProviders = [...highWaters].filter(
       ([, highWater]) => highWater >= contextGraphId,
     );
@@ -611,6 +635,10 @@ export class EvmContextGraphNameHashFence implements EvmContextGraphNameHashSour
     );
     const assertHistoricalRegistryCurrent = async (): Promise<void> => {
       const currentBoundary = await this.loadProviderHighWaters();
+      this.assertCompleteProviderHighWaterBoundary(
+        currentBoundary,
+        'historical scan',
+      );
       if (currentBoundary.latestId !== scannedRegistryHighWater) {
         throw new Error(
           `resolveContextGraphIdByNameHash: registry high-water changed from ` +
