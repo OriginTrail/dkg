@@ -272,6 +272,11 @@ type ListContextGraphsUncachedResult = {
   cacheable: boolean;
 };
 type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
+type ContextGraphNameHashBindingTarget = {
+  localId: string;
+  subscription: ContextGraphSub;
+  nameHash?: string;
+};
 class ListContextGraphsBudgetExceeded extends Error {
   constructor(label: string) {
     super(`${label} exceeded listContextGraphs budget`);
@@ -1524,7 +1529,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * Cleartext → numeric resolution probes (in order):
    *   1. `subscribedContextGraphs[cgId].onChainId` (set by the
    *      curator on create and by chain-event auto-discovery).
-   *   2. `BigInt(cgId)` parse (covers the publishes that address the
+   *   2. The typed local current-state resolver (revalidates process-local
+   *      reverse-name-hash candidates before policy use).
+   *   3. `BigInt(cgId)` parse (covers the publishes that address the
    *      CG by its numeric on-chain id directly — see PublishIntent
    *      shape and the matching `isCgCurated` resolver above).
    *
@@ -1533,62 +1540,38 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
    * defensively"); empty `[]` from the chain is cached and returned
    * as-is so a brand-new id doesn't keep paying RPC per envelope.
    */
+  async resolveContextGraphNumericIdForPolicy(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): Promise<bigint | null> {
+    const target = this.resolveContextGraphNameHashBindingTarget(contextGraphId);
+    if (target !== null) {
+      try {
+        const resolved = await this.getContextGraphOnChainId(contextGraphId);
+        if (!resolved) return null;
+        const numericId = BigInt(resolved);
+        return numericId > 0n ? numericId : null;
+      } catch {
+        // A local selection must never fall through to interpreting its name as
+        // a numeric id when its authoritative/reverse binding is unavailable.
+        return null;
+      }
+    }
+    if (/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) return null;
+    try {
+      const numericId = BigInt(contextGraphId);
+      return numericId > 0n ? numericId : null;
+    } catch {
+      return null;
+    }
+  }
+
   async resolveOnChainParticipantAgents(this: DKGAgent, contextGraphId: string): Promise<string[] | null> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return null;
     }
-    let numericId: bigint | null = null;
-    // OT-RFC-38 / LU-6 Phase B — input may be cleartext (member-side
-    // call), hash form (envelope from the wire), or already-numeric
-    // (legacy publish path). Probe in cheapest-first order; we cache
-    // by stringified numeric id below so an early hit reuses the
-    // result regardless of which form the input took.
-    //
-    //   1. Direct hit on `subscribedContextGraphs` — covers cleartext
-    //      (member local id) and hash form when the local node is a
-    //      host-only core whose subscription key IS the hash.
-    const sub = this.subscribedContextGraphs.get(contextGraphId);
-    if (sub?.onChainId) {
-      try { numericId = BigInt(sub.onChainId); } catch { /* fall through */ }
-    }
-    //   2. Hash-form input where the local node is a MEMBER (the
-    //      subscription is keyed by cleartext, not hash). Translate
-    //      via the reverse index and re-probe.
-    if (numericId === null && /^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
-      const localId = this.wireIdToLocalCgId.get(contextGraphId.toLowerCase());
-      if (localId) {
-        const memberSub = this.subscribedContextGraphs.get(localId);
-        if (memberSub?.onChainId) {
-          try { numericId = BigInt(memberSub.onChainId); } catch { /* fall through */ }
-        }
-      }
-    }
-    //   3. Cleartext-form input on a host-only core. Cores subscribed
-    //      via the chain-event path keep their `subscribedContextGraphs`
-    //      keyed by HASH (the curator-committed wire id), not cleartext.
-    //      When a member's envelope arrives with cleartext in
-    //      `contextGraphId` (the publish path keeps cleartext in the
-    //      envelope for inner-consistency reasons — see
-    //      `publishWorkspaceGossip`), the cleartext direct lookup at
-    //      step 1 misses on the core. Hash the cleartext on-the-fly
-    //      and re-probe before falling through to numeric parse.
-    if (numericId === null && !/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
-      try {
-        const computedHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
-        const hostSub = this.subscribedContextGraphs.get(computedHash);
-        if (hostSub?.onChainId) {
-          try { numericId = BigInt(hostSub.onChainId); } catch { /* fall through */ }
-        }
-      } catch { /* malformed cleartext — fall through */ }
-    }
-    //   4. Numeric form input — accept it directly, but only AFTER the
-    //      hash-form branch above. Otherwise a 32-byte hex hash would
-    //      `BigInt(...)` cleanly and we'd treat its raw integer value
-    //      as an on-chain id (it isn't — the on-chain id is sequential).
-    if (numericId === null && !/^0x[0-9a-fA-F]{64}$/.test(contextGraphId)) {
-      try { numericId = BigInt(contextGraphId); } catch { /* not a numeric form */ }
-    }
-    if (numericId === null || numericId <= 0n) return null;
+    const numericId = await this.resolveContextGraphNumericIdForPolicy(contextGraphId);
+    if (numericId === null) return null;
 
     const cacheKey = numericId.toString();
     const cached = this.onChainParticipantAgentsCache.get(cacheKey);
@@ -1820,6 +1803,116 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     // subscribedContextGraphs is keyed by the hash and there's no
     // cleartext to recover.
     return lower;
+  }
+
+  /**
+   * Resolve the one locally indexed subscription relevant to a caller's id and,
+   * when locally admitted, derive the exact curator commitment to enumerate on
+   * chain. Direct keys win over reverse-wire lookup so a legitimate cleartext
+   * id that looks like bytes32 keeps its original spelling.
+   */
+  resolveContextGraphNameHashBindingTarget(
+    this: DKGAgent,
+    requestedId: string,
+  ): ContextGraphNameHashBindingTarget | null {
+    const direct = this.subscribedContextGraphs.get(requestedId);
+    const mappedLocalId = this.localCgIdForWireId(
+      this.contextGraphWireId(requestedId),
+    );
+    const localId = direct === undefined ? mappedLocalId : requestedId;
+    const subscription = direct ?? this.subscribedContextGraphs.get(mappedLocalId);
+    if (subscription === undefined) return null;
+
+    const locallyAdmitted = subscription.subscribed === true
+      || subscription.coreHosted === true;
+    const nameHash = locallyAdmitted
+      ? subscription.onChainHash
+        ? this.contextGraphWireId(subscription.onChainHash)
+        : this.contextGraphNameCommitment(localId)
+      : undefined;
+    return { localId, subscription, nameHash };
+  }
+
+  /**
+   * Current-state cold binding boundary. Trust authoritative numeric bindings
+   * as the fast path, but re-enumerate a process-local reverse-name-hash
+   * candidate before every reuse. The typed return carries provenance to the
+   * caller without mutating shared subscription state; that prevents a second
+   * concurrent lookup from changing whether a later bind is persisted.
+   *
+   * `undefined` means this boundary has no authoritative answer and the caller
+   * may use its legacy ontology fallback. RPC errors and an invalidated cached
+   * reverse binding throw so they cannot be downgraded to that fallback.
+   */
+  async resolveCurrentNameHashContextGraphBinding(
+    this: DKGAgent,
+    requestedId: string,
+    options: { signal?: AbortSignal } = {},
+  ): Promise<(
+    | { onChainId: string; provenance: 'authoritative' }
+    | { onChainId: string; provenance: 'reverse-name-hash'; nameHash: string }
+  ) | undefined> {
+    const target = this.resolveContextGraphNameHashBindingTarget(requestedId);
+    if (target === null) return undefined;
+
+    const currentBinding = this.contextGraphBindingState.currentBindingFor(
+      target.localId,
+      target.subscription,
+    );
+    if (currentBinding?.bindingKind === 'authoritative') {
+      return { onChainId: currentBinding.onChainId, provenance: 'authoritative' };
+    }
+    // A present-but-invalid durable id must not be replaced by a process-local
+    // reverse candidate. Let the strict ontology fallback fail closed instead.
+    if (target.subscription.onChainId !== undefined) return undefined;
+    const cachedReverse = currentBinding?.bindingKind === 'reverse-name-hash'
+      ? currentBinding
+      : undefined;
+    if (!target.nameHash) {
+      if (cachedReverse) {
+        throw new Error(
+          `Context Graph "${target.localId}" reverse binding can no longer be revalidated`,
+        );
+      }
+      return undefined;
+    }
+
+    const resolve = this.chain?.resolveContextGraphIdByNameHash;
+    if (typeof resolve !== 'function') {
+      if (cachedReverse) {
+        throw new Error(
+          `Chain adapter cannot revalidate Context Graph "${target.localId}" reverse binding`,
+        );
+      }
+      return undefined;
+    }
+    const resolved = options.signal === undefined
+      ? await resolve.call(this.chain, target.nameHash)
+      : await resolve.call(this.chain, target.nameHash, { signal: options.signal });
+    if (resolved === null) {
+      if (cachedReverse) {
+        throw new Error(
+          `Context Graph "${target.localId}" reverse binding no longer has a unique on-chain match`,
+        );
+      }
+      return undefined;
+    }
+
+    const resolvedId = resolved.toString();
+    if (
+      cachedReverse
+      && (cachedReverse.onChainId !== resolvedId || cachedReverse.nameHash !== target.nameHash)
+    ) {
+      throw new Error(
+        `Context Graph "${target.localId}" reverse binding changed from ` +
+        `${cachedReverse.onChainId} to ${resolvedId}`,
+      );
+    }
+    return {
+      onChainId: resolvedId,
+      provenance: 'reverse-name-hash',
+      nameHash: target.nameHash,
+    };
   }
 
   /** Bind a name-hash event to its indexed cleartext or hash-only subscription. */
