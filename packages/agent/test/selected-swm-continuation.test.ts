@@ -244,6 +244,8 @@ interface SelectedSwmLifecycleHarnessOptions {
   readonly metaContinuationLimits?: {
     readonly rows: number;
     readonly bytesEstimate: number;
+    readonly globalRows?: number;
+    readonly globalBytesEstimate?: number;
   };
   /** Deterministic metadata slices returned by consecutive selected passes. */
   readonly metaPages?: readonly {
@@ -262,6 +264,7 @@ interface SelectedSwmLifecycleAgentFixture {
   config: {
     syncContextGraphPriorities: Readonly<Record<string, number>>;
     syncResponderSnapshotLimits?: {
+      global?: { rows?: number; bytesEstimate?: number };
       local?: { rows?: number; bytesEstimate?: number };
     };
   };
@@ -377,7 +380,19 @@ function createSelectedSwmLifecycleHarness(
       ...(options.metaContinuationLimits
         ? {
           syncResponderSnapshotLimits: {
-            local: options.metaContinuationLimits,
+            local: {
+              rows: options.metaContinuationLimits.rows,
+              bytesEstimate: options.metaContinuationLimits.bytesEstimate,
+            },
+            ...(options.metaContinuationLimits.globalRows !== undefined
+              || options.metaContinuationLimits.globalBytesEstimate !== undefined
+              ? {
+                global: {
+                  rows: options.metaContinuationLimits.globalRows,
+                  bytesEstimate: options.metaContinuationLimits.globalBytesEstimate,
+                },
+              }
+              : {}),
           },
         }
         : {}),
@@ -1530,6 +1545,82 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
       expect(new Set(harness.probes.metaRequesterScopes).size).toBe(2);
       expect(harness.probes.metaSinceBatchIds).toEqual([undefined, undefined]);
+      expect(harness.agent.syncCheckpoints.size).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('shares one metadata retention budget across overlapping selected lifecycles', async () => {
+    const publicCg = 'selected-overlap-shared-retention-budget';
+    const manifest = snapshotManifest(publicCg, 2);
+    let firstFetchStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { firstFetchStarted = resolve; });
+    let secondFetchStarted!: () => void;
+    const secondStarted = new Promise<void>((resolve) => { secondFetchStarted = resolve; });
+    const acceptedRows: Array<number | undefined> = [];
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      metaContinuationLimits: {
+        rows: manifest.meta.length,
+        bytesEstimate: 1024 * 1024,
+        globalRows: manifest.meta.length,
+        globalBytesEstimate: 1024 * 1024,
+      },
+      metaPages: [
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      onMetaFetch: async ({ fetch, maxAcceptedQuads }) => {
+        acceptedRows.push(maxAcceptedQuads);
+        if (fetch === 1) {
+          firstFetchStarted();
+          await secondStarted;
+        } else if (fetch === 2) {
+          secondFetchStarted();
+        }
+      },
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      const first = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        priority: 2_000,
+        sharedMemorySyncPlan: plan,
+      });
+      await firstStarted;
+      const second = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        priority: 2_001,
+        sharedMemorySyncPlan: plan,
+      });
+
+      const [firstSummary, secondSummary] = await Promise.all([first, second]);
+
+      expect(acceptedRows).toEqual([manifest.meta.length, 0]);
+      expect(harness.probes.metaFetches()).toBe(2);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(firstSummary.failedPhases).toBe(0);
+      expect(secondSummary.failedPhases).toBe(1);
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
       await harness.close();
