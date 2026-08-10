@@ -44,7 +44,7 @@ import {
   type SystemRecordActiveReplacementIssueV1,
   type SystemRecordVerifiedCandidateIssueV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
-import { SYSTEM_RECORD_V1_PREDICATES, systemRecordEpochSubjectV1 } from '../src/system-record-rdf-schema-v1-internal.js';
+import { buildSystemRecordReservedStateQuadsV1, SYSTEM_RECORD_V1_PREDICATES, systemRecordEpochSubjectV1 } from '../src/system-record-rdf-schema-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../src/system-record-materializer-v1.js';
 import type { Quad } from '../src/triple-store.js';
@@ -478,6 +478,95 @@ describe('bounded system-record atomic apply executor V1', () => {
     expect(fixture.issueAgain()).toBeDefined();
   });
 
+  // The shadow tombstone writes status 'dirty' with its deletion scope to the
+  // single shared reserved row and empties only the shadow projection; the
+  // legacy authoritative projection is still present. The authoritative cutover
+  // reads that same row, sees 'dirty', and must delete the legacy projection --
+  // which means it must NOT compare the observed projection against the row's
+  // recorded (empty) one. That skip is the cutover mechanism, so pin it: remove
+  // it and this transition can no longer happen.
+  it('cuts a dirty shadow tombstone over to authoritative against a legacy projection', async () => {
+    const shadow = await makeAuthenticTerminalReplacementFixtureV1('shadow');
+    const shadowRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const shadowFacts = shadowRegistry.consumer.consume(
+      shadowRegistry.issuer.issueCandidate({ operation: 'tombstone', ...shadow.tombstone }),
+      shadow.binding,
+    );
+    const shadowReady = deriveSystemRecordReplacementV1({
+      facts: shadowFacts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: shadowFacts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          shadowFacts.networkId,
+          shadowFacts.head.peerId,
+        ),
+        materializationEpoch: shadowFacts.materializationEpoch,
+        quads: [shadow.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    });
+    if (shadowReady.outcome !== 'ready') {
+      throw new Error(`shadow tombstone derivation was ${shadowReady.outcome}`);
+    }
+    expect(shadowReady.plan.next.appliedState.status).toBe('dirty');
+    const tuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: shadowReady.plan.next.appliedState,
+      headVersion: shadowReady.plan.next.headVersion,
+      ownedSubjectTable: shadowReady.plan.next.ownedSubjectTable,
+      pendingDeletionTable: shadowReady.plan.next.pendingDeletionTable!,
+      rootClaimSet: shadowReady.plan.next.rootClaimSet,
+      capacityState: shadowReady.plan.next.capacityState,
+      receipt: shadowReady.plan.next.receipt,
+    });
+    const reservedQuads = [
+      ...tuple.record,
+      ...tuple.capacity,
+      ...tuple.epoch,
+      ...tuple.receipt,
+    ];
+    const dirty = decodeSystemRecordAppliedSnapshotV1({
+      networkId: shadowFacts.networkId,
+      stableKeyHash: shadowReady.plan.stableKeyHash,
+      materializationEpoch: shadowFacts.materializationEpoch,
+      quads: reservedQuads,
+    });
+    shadowRegistry.consumer.release(shadowFacts);
+
+    const authoritative = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const fixture = makeFixture({
+      candidate: {
+        binding: authoritative.binding,
+        epochQuad: authoritative.epochQuad,
+        issue: { operation: 'tombstone', ...authoritative.tombstone },
+      },
+      postState: 'next',
+      prior: {
+        snapshot: dirty,
+        reservedQuads,
+        rootClaimQuads: shadowReady.plan.next.rootClaimQuads,
+        // Legacy content the shadow pass deliberately left behind. It cannot
+        // match the dirty row's recorded projection, which a tombstone empties.
+        projection: authoritative.active.projectionQuads.map((quad) => ({
+          ...quad,
+          graph: 'did:dkg:context-graph:agents',
+        })),
+      },
+    });
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({ settlement: 'settled', outcome: { outcome: 'applied' } });
+    const update = fixture.client.calls.find((call) =>
+      call.contentType.startsWith('application/sparql-update'));
+    // Bounded: the cutover deletes the recorded scope and inserts no projection.
+    expect(update?.body).not.toContain('VALUES (?insertProjectionSubject');
+    for (const subject of shadowReady.plan.next.pendingDeletionTable!) {
+      expect(update?.body).toContain(subject);
+    }
+  });
+
   it('exact-recovers a cold tombstone and releases its reservation after settlement', async () => {
     const terminal = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
     let settleRecovery!: () => void;
@@ -798,6 +887,13 @@ function makeFixture(options: Readonly<{
     projection: readonly Readonly<Quad>[],
   ) => readonly Readonly<Quad>[];
   observedRootState?: 'foreign-collision';
+  /** Drive the executor against a pre-existing row instead of an absent one. */
+  prior?: Readonly<{
+    snapshot: Parameters<typeof deriveSystemRecordReplacementV1>[0]['snapshot'];
+    reservedQuads: readonly Readonly<Quad>[];
+    rootClaimQuads: readonly Readonly<Quad>[];
+    projection: readonly Readonly<Quad>[];
+  }>;
 }> = {}) {
   const verified = options.verified ?? VERIFIED;
   const order = options.order ?? [];
@@ -839,17 +935,21 @@ function makeFixture(options: Readonly<{
   });
   const ready = deriveSystemRecordReplacementV1({
     facts: expectedFacts,
-    snapshot: absentSnapshot,
-    observedRootClaimQuads: [],
+    snapshot: options.prior?.snapshot ?? absentSnapshot,
+    observedRootClaimQuads: options.prior?.rootClaimQuads ?? [],
   });
   if (ready.outcome !== 'ready') throw new Error(`fixture derivation was ${ready.outcome}`);
 
   const localNext = options.localState === 'next';
   const nextRootSubjects = new Set(ready.plan.next.rootClaimQuads.map((quad) => quad.subject));
-  const initialReserved = localNext
-    ? ready.plan.next.reservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
-    : [epochQuad];
-  const initialRoots = options.observedRootState === 'foreign-collision'
+  const initialReserved = options.prior !== undefined
+    ? options.prior.reservedQuads
+    : localNext
+      ? ready.plan.next.reservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
+      : [epochQuad];
+  const initialRoots = options.prior !== undefined
+    ? options.prior.rootClaimQuads
+    : options.observedRootState === 'foreign-collision'
     ? ready.plan.next.rootClaimQuads.map((quad) =>
       quad.predicate === SYSTEM_RECORD_V1_PREDICATES.claimedBy
         ? { ...quad, object: 'urn:test:foreign-record' }
@@ -858,7 +958,8 @@ function makeFixture(options: Readonly<{
   const faithfulInitialProjection = localNext
     ? ready.plan.next.projectionQuads.map((quad) => ({ ...quad, graph: ready.plan.projectionGraph }))
     : [];
-  const initialProjection = options.priorProjection?.(faithfulInitialProjection)
+  const initialProjection = options.prior?.projection
+    ?? options.priorProjection?.(faithfulInitialProjection)
     ?? faithfulInitialProjection;
   const responses: Array<Readonly<{ status: number; body: string }>> = [
     { status: 200, body: selectJson(initialReserved) },
