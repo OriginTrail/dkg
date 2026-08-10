@@ -282,6 +282,8 @@ interface SelectedSwmLifecycleHarnessOptions {
   }[];
   /** Number of aggregate-data calls that fail after metadata completed. */
   readonly dataFailuresBeforeSuccess?: number;
+  /** Mirror the production verifier's empty-batch classification. */
+  readonly reportEmptyResponse?: boolean;
 }
 
 interface SelectedSwmLifecycleAgentFixture {
@@ -540,7 +542,11 @@ function createSelectedSwmLifecycleHarness(
           totalFetchedDataQuads: dataQuads.length,
           totalFetchedMetaQuads: metaQuads.length,
           droppedDataTriples: 0,
-          emptyResponses: 0,
+          emptyResponses: options.reportEmptyResponse
+            && dataQuads.length === 0
+            && metaQuads.length === 0
+              ? 1
+              : 0,
           entityCreators: [],
         };
       },
@@ -1094,6 +1100,50 @@ describe('selected RFC-64 SWM continuation', () => {
 });
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
+  it('treats a clean selected graph with zero snapshot refs as explicit complete 0/0 coverage', async () => {
+    const publicCg = 'selected-empty-snapshot-plane';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: snapshotManifest(publicCg, 0),
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      reportEmptyResponse: true,
+    });
+
+    try {
+      const summary = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(summary.swmCoverage).toEqual({
+        contextGraphId: publicCg,
+        peerIdSuffix: PEER.slice(-8),
+        snapshotsResolved: 0,
+        snapshotsTotal: 0,
+        manifestComplete: true,
+        descriptorsAuthoritative: true,
+        missingCount: 0,
+        missingSample: [],
+        materializationFailures: 0,
+      });
+      expect(summary.complete).toBe(true);
+      expect(summary.continuationPasses).toBe(0);
+      expect(harness.probes.publicAdmissions()).toBe(1);
+      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('keeps the reserved selected-provider lane public-only and leaves private recovery ordinary', async () => {
     const publicCg = 'selected-public-cg';
     const privateCg = 'did:dkg:agent:0x1111111111111111111111111111111111111111/private-cg';
@@ -2269,21 +2319,27 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
   it('does not lose a queued incomplete retry marker when an earlier call completes', async () => {
     const completeCg = 'selected-overlap-complete';
     const incompleteCg = 'selected-overlap-incomplete';
+    let wallNow = 1_000;
     let signalFirstStarted!: () => void;
     const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
     let releaseFirst!: () => void;
     const firstRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
     let firstBlocked = false;
     const harness = createSelectedSwmLifecycleHarness({
-      contextGraphs: { public: completeCg },
-      manifest: snapshotManifest(completeCg, 2),
-      clock: { now: () => 1_000, deadline: () => 61_000 },
+      // The first selected call is a clean empty 0/0 graph. The queued second
+      // call owns this two-ref manifest and yields after materializing one ref,
+      // so it remains genuinely incomplete after zero-ref completion became
+      // explicit terminal evidence.
+      contextGraphs: { public: incompleteCg },
+      manifest: snapshotManifest(incompleteCg, 2),
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
       beforeAdmissionRun: async ({ contextGraphId }) => {
         if (contextGraphId !== completeCg || firstBlocked) return;
         firstBlocked = true;
         signalFirstStarted();
         await firstRelease;
       },
+      onSnapshotRead: () => { wallNow += 120_000; },
     });
     const completePlan = {
       publicContextGraphIds: [completeCg],
@@ -2314,10 +2370,14 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       const [completeSummary, incompleteSummary] = await Promise.all([first, second]);
       expect(completeSummary.swmCoverage).toMatchObject({
         contextGraphId: completeCg,
-        snapshotsResolved: 2,
+        snapshotsResolved: 0,
+        snapshotsTotal: 0,
+      });
+      expect(incompleteSummary.swmCoverage).toMatchObject({
+        contextGraphId: incompleteCg,
+        snapshotsResolved: 1,
         snapshotsTotal: 2,
       });
-      expect(incompleteSummary.swmCoverage).toBeUndefined();
       expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
     } finally {
       releaseFirst();

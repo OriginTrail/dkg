@@ -429,6 +429,65 @@ describe('sync-on-connect churn gates', () => {
       .toBeGreaterThan(Date.now());
   });
 
+  it('records selected SWM progress without freshness and admits one bounded retry', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmIncompleteProgress');
+    allowAllNetworkAdmission(agent);
+    (agent as any).started = true;
+    (agent as any).config.syncContextGraphs = ['selected-cg'];
+    (agent as any).config.rfc64PublicCatalogBootstrap = {
+      acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
+    };
+    (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
+    (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [PEER_A];
+    (agent as any).planSharedMemorySyncContextGraphs = async () => ({
+      publicContextGraphIds: ['selected-cg'],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: ['selected-cg'],
+    });
+    (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
+    (agent as any).refreshMetaSyncedFlags = async () => undefined;
+    (agent as any).discoverContextGraphsFromStore = async () => 0;
+    (agent as any).syncSharedMemoryFromPeerDetailed = async () => emptyDetailedSync({
+      complete: false,
+      insertedTriples: 4,
+      insertedDataTriples: 4,
+    });
+    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).syncReconcilerBackoff.set(PEER_A, {
+      failures: 1,
+      nextRetryAt: Date.now() + 60_000,
+    });
+
+    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+      connected: true,
+      hasSyncProtocol: true,
+    });
+
+    expect((agent as any).lastSyncProgressAt.has(PEER_A)).toBe(true);
+    expect((agent as any).lastSuccessfulSyncAt.has(PEER_A)).toBe(false);
+    expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
+
+    const calls: string[] = [];
+    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    const handleSyncError = () => undefined;
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(false);
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+  });
+
   it('does not let one peer backoff suppress connection-open sync for another peer', async () => {
     const agent = await createUnstartedAgent('SyncReconnectBackoffPeerScoped');
     const calls: string[] = [];

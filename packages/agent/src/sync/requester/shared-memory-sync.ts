@@ -395,10 +395,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     unwrittenRefSample: readonly string[],
     contextGraphId: string,
   ): void => {
-    // No record for a graph that declared no snapshot refs. `0/0` is not a
-    // shortfall, and a peer with nothing to offer must not look like a peer
-    // that still owes us KAs — an absent record reads as "not capable".
-    if (walk.totalSnapshots <= 0) return;
+    // Keep a coherent 0/0 record for a graph that declared no snapshot refs.
+    // It is not retry capability (`SwmCatchupPassTracker` requires total > 0),
+    // but selected RFC-64 sync needs the explicit complete-manifest evidence to
+    // distinguish a genuinely empty snapshot plane from a round that never
+    // established coverage at all.
     // RESOLVED MEANS LOCALLY MATERIALIZED, not fetched.
     //
     // `walk.readySnapshots` counts refs retrieved and digest-valid in the blob
@@ -515,6 +516,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       summary.emptyResponses += processed.emptyResponses;
 
       if (processed.emptyResponses > 0) {
+        // Both verified phases are empty. A complete metadata response is
+        // authoritative evidence that this graph declared zero snapshot refs;
+        // retain that explicit 0/0 plane proof for selected RFC-64 completion.
+        recordSnapshotCoverage({
+          readySnapshots: 0,
+          totalSnapshots: 0,
+          missingCount: 0,
+          missingSample: [],
+        }, wsMetaResult.completed, true, 0, 0, [], pid);
         // Count a genuinely empty public graph as complete without requiring
         // cursor movement. Each phase still owns its outcome, so a timeout in
         // one phase cannot be hidden by the sibling's clean empty response.
@@ -929,9 +939,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // The counts, the peer they are attributed to and the missing sample all
       // come from this one round and stay together from here on.
       //
-      // No record for a graph that declared no snapshot refs. `0/0` is not a
-      // shortfall, and a peer with nothing to offer must not look like a peer
-      // that still owes us KAs — an absent record reads as "not capable".
+      // A graph that declared no snapshot refs contributes explicit 0/0
+      // coverage. It is terminal evidence for selected RFC-64 sync, while the
+      // pass tracker still treats only a positive unresolved denominator as
+      // retry capability.
       //
       // Across a MULTI-CG call the reduction keeps exactly ONE graph's record,
       // named by its `contextGraphId`; the others are dropped. Foreground
