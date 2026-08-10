@@ -1,59 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
+import type { SharedMemorySyncResult } from '../src/dkg-agent-types.js';
+import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import {
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
-  MemoryLayer,
-  createGraphKnowledgeAssetScope,
-  contextGraphWorkspaceMetaGraphUri,
-  knowledgeAssetLayerGraphUri,
-  PROTOCOL_SYNC,
-} from '@origintrail-official/dkg-core';
-import {
-  generateKnowledgeAssetShareMetadata,
-  workspacePublicQuadsDigest,
-} from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import type {
-  SharedMemorySyncResult,
-  SwmSnapshotCoverage,
-} from '../src/dkg-agent-types.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
-import {
-  runSelectedSwmContinuations,
-} from '../src/sync/selected-swm-continuation.js';
-import {
-  type SelectedSwmMetaContinuation,
-} from '../src/sync/selected-swm-meta-fetcher.js';
-import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
-import {
-  applySelectedSwmFreshnessResolution,
-  classifySelectedSwmRoundFreshness,
-  classifySharedMemoryFreshness,
-} from '../src/sync/shared-memory-freshness.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
-import {
-  SyncPageAccumulationLimitError,
-  type SyncPageFetchOptions,
-} from '../src/sync/requester/page-fetch.js';
-import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
-import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
-import {
-  PEER,
   callSelectedSharedMemoryFromPeerDetailed,
+  callSelectedSharedMemorySummary,
   callSyncSharedMemoryFromPeerDetailed,
-  callTrySyncFromPeer,
-  cleanDurableResult,
   createSelectedSwmLifecycleHarness,
-  graphBackedManifest,
-  merge,
-  result,
-  selectedUnit,
   snapshotManifest,
-  type AdmissionProbe,
-  type SelectedProviderSelectionAgent,
-  type SelectedSwmLifecycleAgentFixture,
-  type SelectedSwmLifecycleHarness,
-  type SelectedSwmLifecycleHarnessOptions,
-  type SyncSharedMemoryOptions,
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle retained sessions', () => {
@@ -90,12 +43,12 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     };
 
     try {
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
       await harness.agent.closeSelectedSwmMetaTransfers();
-      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         sharedMemorySyncPlan: plan,
       });
@@ -149,7 +102,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     });
 
     try {
-      const summary = await callSyncSharedMemoryFromPeerDetailed(
+      const summary = await callSelectedSharedMemorySummary(
         harness.agent,
         [publicCg],
         {
@@ -218,7 +171,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     });
 
     try {
-      const summary = await callSyncSharedMemoryFromPeerDetailed(
+      const summary = await callSelectedSharedMemorySummary(
         harness.agent,
         [publicCg],
         {
@@ -288,7 +241,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     });
 
     try {
-      const summary = await callSyncSharedMemoryFromPeerDetailed(
+      const summary = await callSelectedSharedMemorySummary(
         harness.agent,
         [publicCg],
         {
@@ -358,7 +311,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     });
 
     try {
-      const summary = await callSyncSharedMemoryFromPeerDetailed(
+      const summary = await callSelectedSharedMemorySummary(
         harness.agent,
         [publicCg],
         {
@@ -429,13 +382,13 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
     };
 
     try {
-      const first = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      const first = callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_000,
         sharedMemorySyncPlan: plan,
       });
       await firstStarted;
-      const second = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      const second = callSelectedSharedMemorySummary(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_001,
         sharedMemorySyncPlan: plan,
@@ -515,7 +468,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       eligibleContextGraphIds: [publicCg],
     };
     let ordinary: Promise<SharedMemorySyncResult> | undefined;
-    let selected: Promise<SharedMemorySyncResult> | undefined;
+    let selected: ReturnType<typeof callSelectedSharedMemoryFromPeerDetailed> | undefined;
 
     try {
       ordinary = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
@@ -524,7 +477,7 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       });
       await ordinaryStarted;
 
-      selected = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+      selected = callSelectedSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
         selectedSwmPriority: true,
         priority: 2_000,
         sharedMemorySyncPlan: plan,
@@ -532,7 +485,8 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       await vi.waitFor(() => expect(harness.probes.metaFetches()).toBeGreaterThanOrEqual(2));
       releaseOrdinary();
 
-      const [ordinarySummary, selectedSummary] = await Promise.all([ordinary, selected]);
+      const [ordinarySummary, selectedResult] = await Promise.all([ordinary, selected]);
+      const selectedSummary = selectedResult.shared;
       expect(ordinarySummary).not.toBe(selectedSummary);
       expect(harness.probes.metaFetches()).toBe(3);
       expect(harness.probes.metaRequesterScopes[0]).toBeUndefined();
@@ -551,9 +505,10 @@ describe('selected RFC-64 SWM lifecycle retained sessions', () => {
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
       releaseOrdinary();
-      await Promise.allSettled([ordinary, selected].filter(
-        (promise): promise is Promise<SharedMemorySyncResult> => promise !== undefined,
-      ));
+      const pending: Promise<unknown>[] = [];
+      if (ordinary) pending.push(ordinary);
+      if (selected) pending.push(selected);
+      await Promise.allSettled(pending);
       await harness.close();
     }
   });

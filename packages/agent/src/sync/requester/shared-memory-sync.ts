@@ -275,6 +275,7 @@ interface SharedMemorySyncContext {
     accepts: (evidence: {
       verifiedMetadataTriples: number;
       snapshotReferences: number;
+      graphBackedOperations: number;
     }) => boolean;
   };
   /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
@@ -1016,6 +1017,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const snapshotEvidenceAccepted = snapshotEvidencePolicy?.accepts({
         verifiedMetadataTriples: processed.verifiedMeta.length,
         snapshotReferences: snapshotSync.totalSnapshots,
+        graphBackedOperations: countGraphBackedSnapshotOperations(processed.verifiedMeta),
       }) ?? true;
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
@@ -1463,6 +1465,19 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
     byRef.set(ref, metadata);
   }
   return [...byRef.values()];
+}
+
+/**
+ * Count graph-backed share operations whose content is outside the immutable
+ * snapshot-store walk. The selected SWM lane must fail closed while this
+ * aggregate requester cannot prove those transport graphs by count and digest.
+ */
+function countGraphBackedSnapshotOperations(metaQuads: readonly Quad[]): number {
+  return new Set(
+    metaQuads
+      .filter((quad) => quad.predicate === `${DKG}publicSnapshotGraph`)
+      .map((quad) => quad.subject),
+  ).size;
 }
 
 async function hasValidSnapshot(
