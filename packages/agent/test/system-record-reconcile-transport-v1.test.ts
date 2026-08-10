@@ -83,6 +83,37 @@ describe('agent-profile reconcile exact transport V1', () => {
     expect(transport.stats().negativeMemoHits).toBe(1);
   });
 
+  it.each([
+    ['not-found', 'null'],
+    ['invalid-response', 'invalid-response'],
+    ['deadline', 'deadline'],
+  ] as const)('preserves cached %s semantics without another remote request', async (
+    outcome,
+    expected,
+  ) => {
+    const fetchExact = vi.fn(async () => Object.freeze({ outcome, wireBytes: 7 }));
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const slice = openSlice(transport, () => 0);
+      const resolving = slice.resolve(LOOKUP_A, new AbortController().signal);
+      if (expected === 'null') await expect(resolving).resolves.toBeNull();
+      else await expect(resolving).rejects.toMatchObject({ outcome: expected });
+      slice.release();
+    }
+
+    expect(fetchExact).toHaveBeenCalledTimes(1);
+    expect(transport.stats()).toMatchObject({
+      requests: 1,
+      wireBytes: 7,
+      negativeMemoEntries: 1,
+      negativeMemoHits: 1,
+    });
+  });
+
   it('expires negatives lazily after the fixed monotonic TTL', async () => {
     let nowMs = 1_000;
     let failFirstProvider = true;
@@ -426,6 +457,74 @@ describe('agent-profile reconcile exact transport V1', () => {
       requests: SYSTEM_RECORD_MAX_SLICE_REQUESTS,
       wireBytes: SYSTEM_RECORD_MAX_SLICE_REQUESTS,
     });
+  });
+
+  it('scans past twelve memo hits to a healthy provider without exceeding attempts', async () => {
+    const providerIds = Array.from(
+      { length: SYSTEM_RECORD_MAX_SLICE_REQUESTS + 1 },
+      (_, index) => `provider-${index}`,
+    );
+    const fetchExact = vi.fn(async (
+      providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+    ): Promise<SystemRecordExactFetchResultV1> => providerId === 'provider-12'
+      ? successfulFetch(lookup, 5).result
+      : Object.freeze({ outcome: 'not-found', wireBytes: 1 }));
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => providerIds,
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const first = openSlice(transport, () => 0);
+    await expect(first.resolve(LOOKUP_A, new AbortController().signal)).resolves.toBeNull();
+    first.release();
+    expect(fetchExact).toHaveBeenCalledTimes(SYSTEM_RECORD_MAX_SLICE_REQUESTS);
+
+    const second = openSlice(transport, () => 0);
+    await expect(second.resolve(LOOKUP_A, new AbortController().signal)).resolves.toMatchObject({
+      objectDigest: DIGEST_A,
+    });
+    expect(second.stats()).toEqual({ requests: 1, wireBytes: 5 });
+    second.release();
+
+    expect(fetchExact).toHaveBeenCalledTimes(SYSTEM_RECORD_MAX_SLICE_REQUESTS + 1);
+    expect(fetchExact.mock.calls.at(-1)?.[0]).toBe('provider-12');
+  });
+
+  it('rejects and releases a mismatched successful lease before failing over', async () => {
+    const badRelease = vi.fn();
+    const good = successfulFetch(LOOKUP_A, 9);
+    const fetchExact = vi.fn(async (
+      providerId: string,
+    ): Promise<SystemRecordExactFetchResultV1> => providerId === 'provider-a'
+      ? Object.freeze({
+          outcome: 'ok',
+          lease: Object.freeze({
+            artifact: Object.freeze({
+              objectKind: LOOKUP_A.objectKind,
+              objectDigest: DIGEST_B,
+              canonicalBytes: Uint8Array.of(1),
+            }),
+            wireBytes: 7,
+            release: badRelease,
+          }),
+        })
+      : good.result);
+    const transport = createAgentProfileReconcileTransportV1({
+      listProviderIds: () => ['provider-a', 'provider-b'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const slice = openSlice(transport, () => 0);
+
+    await expect(slice.resolve(LOOKUP_A, new AbortController().signal)).resolves.toMatchObject({
+      objectDigest: DIGEST_A,
+    });
+    expect(badRelease).toHaveBeenCalledTimes(1);
+    expect(slice.stats()).toEqual({ requests: 2, wireBytes: 16 });
+    expect(transport.stats().negativeMemoEntries).toBe(1);
+    slice.release();
+    expect(good.release).toHaveBeenCalledTimes(1);
   });
 
   it('fails closed at the two-MiB slice byte bound and does not poison the unaccepted provider', async () => {

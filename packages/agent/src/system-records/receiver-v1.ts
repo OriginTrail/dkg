@@ -96,8 +96,6 @@ export interface CreateAgentProfileReceiverOptionsV1 {
 }
 
 export interface AgentProfileReceiverV1 {
-  /** Immutable construction-time source used only by the legacy direct path. */
-  readonly artifacts: SystemRecordArtifactRepositoryV1;
   /** Open one bounded logical preparation that may resume across physical slices. */
   openPreparation(row: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1;
   /** Prepare through one explicit admitted-slice artifact source. */
@@ -159,7 +157,6 @@ export function createAgentProfileReceiverV1(
     resolve: resolveArtifact,
   });
   const receiver: AgentProfileReceiverV1 = Object.freeze({
-    artifacts: defaultArtifacts,
     openPreparation(inputRow: SystemRecordInventoryRowV1): AgentProfileActivePreparationV1 {
       const row = canonicalInventoryRow(networkId, inputRow);
       if (!isOrdinaryActiveInventoryRowV1(row)) {
@@ -211,7 +208,7 @@ export function createAgentProfileReceiverV1(
       admittedContext: AgentProfileAdmittedSliceContextV1,
       signal: AbortSignal,
     ): Promise<SystemRecordApplyOutcomeV1> {
-      const prepared = await receiver.prepareActive(row, receiver.artifacts, signal);
+      const prepared = await receiver.prepareActive(row, defaultArtifacts, signal);
       signal.throwIfAborted();
       return prepared.apply(admittedContext, signal);
     },

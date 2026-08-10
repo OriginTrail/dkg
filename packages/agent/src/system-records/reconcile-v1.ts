@@ -85,9 +85,11 @@ export type CreateAgentProfileReconcilerOptionsV1 =
     | Readonly<{
       readonly transport: AgentProfileReconcileTransportV1;
       readonly loadInventoryObject?: never;
+      readonly artifacts?: never;
     }>
     | Readonly<{
       readonly transport?: undefined;
+      readonly artifacts: SystemRecordArtifactRepositoryV1;
       readonly loadInventoryObject: (
         request: AgentProfileInventoryLoadRequestV1,
         signal: AbortSignal,
@@ -266,7 +268,7 @@ function createSliceSourceFactoryV1(
     });
   }
   const loadInventoryObject = options.loadInventoryObject;
-  const artifacts: SystemRecordArtifactRepositoryV1 = receiver.artifacts;
+  const artifacts = options.artifacts;
   return Object.freeze({
     tryOpen(): AgentProfileSliceSourceOpenResultV1 {
       return Object.freeze({
@@ -641,6 +643,7 @@ export async function createAgentProfileReconcilerV1(
   }
 
   function stats(): AgentProfileReconcilerStatsV1 {
+    const retained = sourceFactory.retainedStats();
     return Object.freeze({
       rootDescriptorDigest: rootEnvelope.objectDigest,
       admittedSlices,
@@ -648,8 +651,8 @@ export async function createAgentProfileReconcilerV1(
       inventoryRequests,
       inventoryWireBytes,
       closureWireBytes,
-      retainedClosureArtifacts: sourceFactory.retainedStats().artifacts,
-      retainedClosureBytes: sourceFactory.retainedStats().bytes,
+      retainedClosureArtifacts: retained.artifacts,
+      retainedClosureBytes: retained.bytes,
       processedRows,
       pendingRows: pendingRows.length,
       active: active ? 1 : 0,
