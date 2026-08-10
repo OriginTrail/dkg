@@ -98,6 +98,20 @@ describe('system-record exact requester wire mapping V1', () => {
     expect(Object.isFrozen(request.path)).toBe(true);
     expect(Object.isFrozen(request)).toBe(true);
   });
+
+  it('rejects object kinds outside the Core exact-request taxonomy', () => {
+    const invalid = {
+      type: 'object',
+      objectKind: 'root-descriptor',
+      objectDigest: DIGEST_A,
+    } as unknown as SystemRecordExactArtifactLookupV1;
+
+    expect(() => createSystemRecordExactRequestV1(
+      NETWORK,
+      invalid,
+      REQUEST_ID,
+    )).toThrow('exact request object kind is invalid');
+  });
 });
 
 function writtenRequest(lookup: SystemRecordExactArtifactLookupV1) {

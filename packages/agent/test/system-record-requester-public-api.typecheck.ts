@@ -5,6 +5,7 @@ import type {
   SystemRecordRequesterAdmissionV1,
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterExchangeV1,
+  SystemRecordRequesterLimitsV1,
   SystemRecordRequesterV1,
 } from '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js';
 import { createSystemRecordRequesterV1 } from '@origintrail-official/dkg-agent/dist/system-records/requester-v1.js';
@@ -16,6 +17,9 @@ declare const exchange: SystemRecordRequesterExchangeV1;
 declare const digest: Digest32V1;
 declare const signal: AbortSignal;
 declare const networkId: CreateSystemRecordRequesterOptionsV1['networkId'];
+const limits: Readonly<SystemRecordRequesterLimitsV1> = Object.freeze({
+  maxTrackedDigests: 1,
+});
 
 const options: CreateSystemRecordRequesterOptionsV1 = {
   networkId,
@@ -23,7 +27,7 @@ const options: CreateSystemRecordRequesterOptionsV1 = {
   byteAdmission,
   streamAdmission,
   decodeAdmission,
-  maxTrackedDigests: 1,
+  limits,
 };
 const requester: SystemRecordRequesterV1 = createSystemRecordRequesterV1(options);
 const trackedDigests: number = requester.stats().trackedDigests;

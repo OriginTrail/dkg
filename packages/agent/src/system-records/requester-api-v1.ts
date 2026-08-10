@@ -3,7 +3,7 @@
 import type {
   Digest32V1,
   NetworkIdV1,
-  SystemRecordObjectKindV1,
+  SystemRecordRequestHeaderV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type {
@@ -17,16 +17,16 @@ import type {
   SystemRecordPermitV1,
 } from './resource-admission-v1-internal.js';
 
-type SystemRecordExactControlObjectKindV1 = Exclude<
-  SystemRecordObjectKindV1,
-  'root-descriptor' | 'inventory-internal' | 'inventory-leaf'
->;
+type SystemRecordExactObjectKindV1 = Extract<
+  SystemRecordRequestHeaderV1,
+  Readonly<{ operation: 'get-bundle' | 'get-control-object' }>
+>['objectKind'];
 
 export type SystemRecordExactArtifactLookupV1 =
   | Extract<SystemRecordArtifactLookupV1, Readonly<{ type: 'inventory-object' }>>
   | Readonly<{
     type: 'object';
-    objectKind: SystemRecordExactControlObjectKindV1;
+    objectKind: SystemRecordExactObjectKindV1;
     objectDigest: Digest32V1;
   }>;
 
@@ -99,6 +99,13 @@ export interface SystemRecordRequesterV1 {
   close(): void;
 }
 
+export interface SystemRecordRequesterLimitsV1 {
+  /** Exact coordinates retained or in flight; may only lower the protocol maximum. */
+  readonly maxTrackedDigests?: number;
+  /** Followers admitted behind one exact-coordinate leader; may only lower the protocol maximum. */
+  readonly maxWaitersPerDigest?: number;
+}
+
 export interface CreateSystemRecordRequesterOptionsV1 {
   readonly networkId: NetworkIdV1;
   /** Lifecycle-owned provider selection and transport opening for a leader transfer. */
@@ -108,7 +115,6 @@ export interface CreateSystemRecordRequesterOptionsV1 {
   readonly decodeAdmission: SystemRecordRequesterAdmissionV1;
   readonly requestId?: () => string;
   readonly timeoutMs?: number;
-  /** Test-only cap across in-flight and retained exact coordinates; may only lower the protocol limit. */
-  readonly maxTrackedDigests?: number;
-  readonly maxWaitersPerDigest?: number;
+  /** Lifecycle-owned immutable policy; omitted values use the protocol maxima. */
+  readonly limits?: Readonly<SystemRecordRequesterLimitsV1>;
 }

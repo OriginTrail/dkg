@@ -18,6 +18,7 @@ import type {
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterByteReservationV1,
   SystemRecordRequesterExchangeV1,
+  SystemRecordRequesterLimitsV1,
   SystemRecordRequesterPermitV1,
   SystemRecordRequesterResetReasonV1,
   SystemRecordRequesterStatsV1,
@@ -45,6 +46,7 @@ export type {
   SystemRecordRequesterByteAdmissionV1,
   SystemRecordRequesterByteReservationV1,
   SystemRecordRequesterExchangeV1,
+  SystemRecordRequesterLimitsV1,
   SystemRecordRequesterPermitV1,
   SystemRecordRequesterResetReasonV1,
   SystemRecordRequesterStatsV1,
@@ -328,18 +330,19 @@ export function createSystemRecordRequesterV1(
   const streamAdmission = options.streamAdmission;
   const decodeAdmission = options.decodeAdmission;
   const requestId = options.requestId ?? (() => randomBytes(16).toString('hex'));
+  const limits = options.limits;
   const timeoutMs = boundedPositive(
     options.timeoutMs ?? SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS,
     SYSTEM_RECORD_PROVIDER_EXCHANGE_TIMEOUT_MS,
     'requester timeoutMs',
   );
   const maxTrackedDigests = boundedPositive(
-    options.maxTrackedDigests ?? SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
+    limits?.maxTrackedDigests ?? SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
     SYSTEM_RECORD_MAX_PENDING_EXACT_FETCHES,
     'maxTrackedDigests',
   );
   const maxWaitersPerDigest = boundedPositive(
-    options.maxWaitersPerDigest ?? SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
+    limits?.maxWaitersPerDigest ?? SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
     SYSTEM_RECORD_MAX_EXACT_FETCH_WAITERS,
     'maxWaitersPerDigest',
   );

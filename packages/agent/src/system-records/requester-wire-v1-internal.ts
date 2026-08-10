@@ -28,6 +28,25 @@ type SystemRecordExactRequestHeaderV1 = Extract<
   }>
 >;
 
+type SystemRecordExactObjectKindV1 = Extract<
+  SystemRecordExactArtifactLookupV1,
+  Readonly<{ type: 'object' }>
+>['objectKind'];
+
+const SYSTEM_RECORD_EXACT_OPERATION_BY_OBJECT_KIND_V1 = Object.freeze({
+  'profile-bundle': 'get-bundle',
+  'agent-profile-head': 'get-control-object',
+  'authority-transition': 'get-control-object',
+  'fork-resolution': 'get-control-object',
+  'conflict-evidence': 'get-control-object',
+  'owned-subject-table': 'get-control-object',
+} satisfies Readonly<Record<
+  SystemRecordExactObjectKindV1,
+  Extract<SystemRecordExactRequestHeaderV1, Readonly<{
+    operation: 'get-bundle' | 'get-control-object';
+  }>>['operation']
+>>);
+
 export interface SystemRecordExactRequestV1 {
   readonly request: SystemRecordExactRequestHeaderV1;
   readonly requestFrame: Uint8Array;
@@ -125,17 +144,16 @@ function snapshotSystemRecordExactLookupV1(
   }
   if (type !== 'object') throw new Error('system-record exact lookup type is invalid');
   const objectKind = candidate.objectKind;
-  if (objectKind !== 'profile-bundle'
-    && objectKind !== 'agent-profile-head'
-    && objectKind !== 'authority-transition'
-    && objectKind !== 'fork-resolution'
-    && objectKind !== 'conflict-evidence'
-    && objectKind !== 'owned-subject-table') {
+  if (typeof objectKind !== 'string'
+    || !Object.prototype.hasOwnProperty.call(
+      SYSTEM_RECORD_EXACT_OPERATION_BY_OBJECT_KIND_V1,
+      objectKind,
+    )) {
     throw new Error('exact request object kind is invalid');
   }
   const objectDigest = candidate.objectDigest;
   assertCanonicalDigest(objectDigest, 'exact object digest');
-  return Object.freeze({ type, objectKind, objectDigest });
+  return Object.freeze({ type, objectKind: objectKind as SystemRecordExactObjectKindV1, objectDigest });
 }
 
 function systemRecordExactLookupKeyV1(lookup: SystemRecordExactArtifactLookupV1): string {

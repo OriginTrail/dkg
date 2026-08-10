@@ -854,11 +854,18 @@ function createRequester(overrides: {
     requestId: () => '1'.repeat(32),
     ...(overrides.timeoutMs === undefined ? {} : { timeoutMs: overrides.timeoutMs }),
     ...(overrides.maxWaitersPerDigest === undefined
+      && overrides.maxTrackedDigests === undefined
       ? {}
-      : { maxWaitersPerDigest: overrides.maxWaitersPerDigest }),
-    ...(overrides.maxTrackedDigests === undefined
-      ? {}
-      : { maxTrackedDigests: overrides.maxTrackedDigests }),
+      : {
+        limits: Object.freeze({
+          ...(overrides.maxWaitersPerDigest === undefined
+            ? {}
+            : { maxWaitersPerDigest: overrides.maxWaitersPerDigest }),
+          ...(overrides.maxTrackedDigests === undefined
+            ? {}
+            : { maxTrackedDigests: overrides.maxTrackedDigests }),
+        }),
+      }),
   });
 }
 
