@@ -688,21 +688,29 @@ describe('agent-profile System Record reconciler V1', () => {
 
   it('does not dispatch a prepared apply without the required admitted budget', async () => {
     const fixture = await publishedFixture();
-    let nowMs = 1_000;
-    const admission = admissionGate(false, () => nowMs);
+    let predispatchSlice = false;
+    let activePrepared = false;
+    let activePostcheckObserved = false;
+    const admission = admissionGate(false, () => {
+      if (!predispatchSlice || !activePrepared) return 1_000;
+      if (!activePostcheckObserved) {
+        activePostcheckObserved = true;
+        return 1_000;
+      }
+      return 2_501;
+    });
     const apply = vi.fn(async () => ({
       outcome: 'applied' as const,
       stateRevision: '4',
       appliedStateDigest: `0x${'dd'.repeat(32)}`,
     }));
-    const prepareDispatch = vi.fn(async () => {
-      nowMs = 2_501;
-      return Object.freeze({ dispatch: apply });
+    const prepareDispatch = vi.fn(async () => Object.freeze({ dispatch: apply }));
+    const prepareActive = vi.fn(async () => {
+      activePrepared = true;
+      return Object.freeze({ prepareDispatch });
     });
     const preparedReceiver: AgentProfileReceiverV1 = Object.freeze({
-      async prepareActive() {
-        return Object.freeze({ prepareDispatch });
-      },
+      prepareActive,
       async receiveActive() {
         throw new Error('direct receive is not used by this reconciler test');
       },
@@ -717,6 +725,7 @@ describe('agent-profile System Record reconciler V1', () => {
     });
 
     await reconciler.advance(new AbortController().signal);
+    predispatchSlice = true;
     await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
       status: 'paused',
       phase: 'records',
@@ -724,7 +733,8 @@ describe('agent-profile System Record reconciler V1', () => {
       pendingRows: 1,
       outcomes: [],
     });
-    expect(prepareDispatch).toHaveBeenCalledTimes(1);
+    expect(prepareActive).toHaveBeenCalledTimes(1);
+    expect(prepareDispatch).not.toHaveBeenCalled();
     expect(apply).not.toHaveBeenCalled();
     expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
   });

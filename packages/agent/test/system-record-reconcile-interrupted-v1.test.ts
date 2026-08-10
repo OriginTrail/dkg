@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   computeSystemRecordStableKeyHashV1,
@@ -22,7 +22,17 @@ import {
 } from './support/system-record-reconcile-v1-fixture.js';
 
 describe('agent-profile System Record interrupted inventory retention', () => {
-  it('applies rows returned by an aborted traversal slice without advancing inventory again', async () => {
+  beforeEach(() => {
+    traversalAdvance.mockReset();
+  });
+
+  it.each([
+    { reason: 'aborted' as const, abortCaller: true },
+    { reason: 'deadline' as const, abortCaller: false },
+  ])('applies rows returned by a $reason traversal slice without advancing inventory again', async ({
+    reason,
+    abortCaller,
+  }) => {
     const fixture = await publishedFixture();
     const headEnvelope = fixture.store.snapshot().currentHead;
     if (headEnvelope === null) throw new Error('fixture active head was not retained');
@@ -36,9 +46,9 @@ describe('agent-profile System Record interrupted inventory retention', () => {
       quarantined: false,
     });
     const caller = new AbortController();
-    const abortReason = new Error('caller aborted after a validated leaf');
+    const interruption = new Error(`${reason} after a validated leaf`);
     traversalAdvance.mockImplementationOnce(async () => {
-      caller.abort(abortReason);
+      if (abortCaller) caller.abort(interruption);
       return Object.freeze({
         status: 'failed' as const,
         requests: 1,
@@ -49,8 +59,8 @@ describe('agent-profile System Record interrupted inventory retention', () => {
         }),
         sliceRows: Object.freeze([row]),
         failure: Object.freeze({
-          reason: 'aborted' as const,
-          message: abortReason.message,
+          reason,
+          message: interruption.message,
         }),
       });
     });
@@ -69,7 +79,15 @@ describe('agent-profile System Record interrupted inventory retention', () => {
       receiver: receiverWithPreparation(prepareActive),
     });
 
-    await expect(reconciler.advance(caller.signal)).rejects.toBe(abortReason);
+    const interruptedAdvance = reconciler.advance(caller.signal);
+    if (abortCaller) await expect(interruptedAdvance).rejects.toBe(interruption);
+    else {
+      await expect(interruptedAdvance).resolves.toMatchObject({
+        status: 'paused',
+        phase: 'records',
+        pendingRows: 1,
+      });
+    }
     expect(reconciler.stats()).toMatchObject({
       inventoryRequests: 1,
       inventoryWireBytes: 512,

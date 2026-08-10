@@ -426,6 +426,12 @@ export async function createAgentProfileReconcilerV1(
     outcomes: readonly SystemRecordApplyOutcomeV1[],
     prepare: () => Prepared | Promise<Prepared>,
   ): Promise<AgentProfilePredispatchStageResultV1<Prepared>> {
+    if (predispatchBudgetUnavailable(runtime)) {
+      return Object.freeze({
+        status: 'stopped' as const,
+        result: runtime.stop('records', outcomes),
+      });
+    }
     let preparation: AbortSafePreparationResultV1<Prepared>;
     try {
       preparation = await awaitAbortSafePreparation(
@@ -453,9 +459,7 @@ export async function createAgentProfileReconcilerV1(
     }
     if (
       preparation.status === 'aborted'
-      || runtime.signal.aborted
-      || runtime.deadlineMs - readNow(runtime.nowMs)
-        < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS
+      || predispatchBudgetUnavailable(runtime)
     ) {
       return Object.freeze({
         status: 'stopped' as const,
@@ -463,6 +467,14 @@ export async function createAgentProfileReconcilerV1(
       });
     }
     return Object.freeze({ status: 'prepared' as const, prepared: preparation.prepared });
+  }
+
+  function predispatchBudgetUnavailable(
+    runtime: AgentProfileAdmittedSliceRuntimeV1,
+  ): boolean {
+    return runtime.signal.aborted
+      || runtime.deadlineMs - readNow(runtime.nowMs)
+        < SYSTEM_RECORD_REQUIRED_DISPATCH_BUDGET_MS;
   }
 
   function result(
