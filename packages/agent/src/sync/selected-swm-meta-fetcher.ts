@@ -35,6 +35,8 @@ interface SelectedSwmMetaContinuationState {
 export interface SelectedSwmMetaFetcher {
   readonly strategy: SharedMemoryMetadataFetcher;
   continuation(contextGraphId: string): SelectedSwmMetaContinuation;
+  /** Release expired inactive prefixes while an outer peer operation is live. */
+  pruneExpiredPrefixes(): SelectedSwmMetaRetentionState;
   /**
    * Drop terminal/empty state at an outer reconciler boundary and describe the
    * useful incomplete prefix that remains eligible for a later invocation.
@@ -62,6 +64,7 @@ interface SelectedSwmMetaTransferEntry {
   fetcher: SelectedSwmMetaFetcher | undefined;
   tail: Promise<void>;
   expiryTimer: ReturnType<typeof setTimeout> | undefined;
+  active: boolean;
 }
 
 /**
@@ -98,40 +101,45 @@ export class SelectedSwmMetaTransferCoordinator {
         fetcher: undefined,
         tail: Promise.resolve(),
         expiryTimer: undefined,
+        active: false,
       };
       this.#entries.set(remotePeerId, entry);
     }
 
     const execute = entry.tail.then(async () => {
       if (this.#closed) throw this.#closedError();
-      this.#clearExpiryTimer(entry!);
-      const retainedBeforeRun = entry!.fetcher?.settleOuterInvocation();
-      if (entry!.fetcher && !retainedBeforeRun?.retained) {
-        entry!.fetcher.cleanup();
-        entry!.fetcher = undefined;
-      }
-      const fetcher = entry!.fetcher ?? createFetcher();
-      entry!.fetcher = fetcher;
-      let succeeded = false;
+      entry!.active = true;
       try {
-        const result = await operation(fetcher);
-        succeeded = true;
-        return result;
-      } finally {
-        if (!succeeded) {
-          // An escaping abort, validation/integrity failure, or local build
-          // failure must never leave a cursor whose owner already unwound.
-          fetcher.cleanup();
+        const retainedBeforeRun = entry!.fetcher?.settleOuterInvocation();
+        if (entry!.fetcher && !retainedBeforeRun?.retained) {
+          entry!.fetcher.cleanup();
           entry!.fetcher = undefined;
-        } else {
-          const retention = fetcher.settleOuterInvocation();
-          if (!retention.retained) {
+        }
+        const fetcher = entry!.fetcher ?? createFetcher();
+        entry!.fetcher = fetcher;
+        let succeeded = false;
+        try {
+          const result = await operation(fetcher);
+          succeeded = true;
+          return result;
+        } finally {
+          if (!succeeded) {
+            // An escaping abort, validation/integrity failure, or local build
+            // failure must never leave a cursor whose owner already unwound.
             fetcher.cleanup();
             entry!.fetcher = undefined;
           } else {
-            this.#scheduleExpiry(remotePeerId, entry!, retention.nextExpiryAtMs);
+            const retention = fetcher.settleOuterInvocation();
+            if (!retention.retained) {
+              fetcher.cleanup();
+              entry!.fetcher = undefined;
+            } else {
+              this.#scheduleExpiry(remotePeerId, entry!, retention.nextExpiryAtMs);
+            }
           }
         }
+      } finally {
+        entry!.active = false;
       }
     });
     const settled = execute.then(() => undefined, () => undefined);
@@ -176,18 +184,20 @@ export class SelectedSwmMetaTransferCoordinator {
     entry.expiryTimer = setTimeout(() => {
       entry.expiryTimer = undefined;
       if (this.#closed || this.#entries.get(remotePeerId) !== entry) return;
-      const expire = entry.tail.then(() => {
-        if (this.#closed || this.#entries.get(remotePeerId) !== entry) return;
-        const retention = entry.fetcher?.settleOuterInvocation();
-        if (!retention?.retained) {
+      // Expiry is process-global capacity enforcement, not peer-local work.
+      // Prune inactive CG states immediately even while this peer owns a long
+      // outer operation, otherwise an expired lease can starve another peer.
+      // The fetcher tracks its active CG and never mutates that state here.
+      const retention = entry.fetcher?.pruneExpiredPrefixes();
+      if (!retention?.retained) {
+        if (!entry.active) {
           entry.fetcher?.cleanup();
           entry.fetcher = undefined;
           this.#entries.delete(remotePeerId);
-          return;
         }
-        this.#scheduleExpiry(remotePeerId, entry, retention.nextExpiryAtMs);
-      });
-      entry.tail = expire.then(() => undefined, () => undefined);
+        return;
+      }
+      this.#scheduleExpiry(remotePeerId, entry, retention.nextExpiryAtMs);
     }, delayMs);
     entry.expiryTimer.unref?.();
   }
@@ -229,6 +239,7 @@ export function createSelectedSwmMetaFetcher(options: {
 }): SelectedSwmMetaFetcher {
   const states = new Map<string, SelectedSwmMetaContinuationState>();
   const completedContextGraphs = new Set<string>();
+  const activeContextGraphs = new Set<string>();
   const now = options.now ?? (() => Date.now());
   const retentionTtlMs = options.retentionTtlMs ?? DURABLE_DATA_SYNC_SESSION_TTL_MS;
   if (!Number.isSafeInteger(retentionTtlMs) || retentionTtlMs <= 0) {
@@ -276,6 +287,52 @@ export function createSelectedSwmMetaFetcher(options: {
     };
     states.set(contextGraphId, state);
     return state;
+  };
+
+  const pruneExpiredStates = (): void => {
+    for (const [contextGraphId, state] of states) {
+      // This fetcher owns multiple Context Graphs for one peer. The
+      // coordinator's timer is intentionally peer-wide, so enforce each CG's
+      // independent TTL at every serialized fetch boundary and timer tick.
+      // Completed/empty state keeps its existing outer-invocation lifecycle.
+      if (
+        !activeContextGraphs.has(contextGraphId)
+        && !state.completed
+        && state.nextOffset > 0
+        && state.quads.length > 0
+        && state.expiresAtMs <= now()
+      ) {
+        release(contextGraphId, state);
+        completedContextGraphs.delete(contextGraphId);
+      }
+    }
+  };
+
+  const retentionState = (): SelectedSwmMetaRetentionState => {
+    const retained = [...states.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([contextGraphId, state]) => [
+        contextGraphId,
+        state.requesterScope,
+        state.generation,
+        state.nextOffset,
+        state.quads.length,
+        state.checkpointKey,
+      ]);
+    const expiringInactiveStates = [...states.entries()]
+      .filter(([contextGraphId, state]) => (
+        !activeContextGraphs.has(contextGraphId)
+        && !state.completed
+        && state.nextOffset > 0
+        && state.quads.length > 0
+      ));
+    return {
+      retained: retained.length > 0,
+      progressToken: JSON.stringify(retained),
+      nextExpiryAtMs: expiringInactiveStates.length > 0
+        ? Math.min(...expiringInactiveStates.map(([, state]) => state.expiresAtMs))
+        : undefined,
+    };
   };
 
   const fetchRetained = async (
@@ -376,23 +433,30 @@ export function createSelectedSwmMetaFetcher(options: {
 
   const strategy: SharedMemoryMetadataFetcher = {
     async fetch(request) {
+      pruneExpiredStates();
       const state = ensureState(request.contextGraphId);
-      if (state.completed) {
-        return {
-          result: {
-            quads: state.quads,
-            bytesReceived: 0,
-            resumedFromOffset: state.nextOffset,
-            nextOffset: state.nextOffset,
-            checkpointKey: state.checkpointKey,
-            completed: true,
-            timedOut: false,
-          },
-          continuationYielded: false,
-        };
+      activeContextGraphs.add(request.contextGraphId);
+      try {
+        if (state.completed) {
+          return {
+            result: {
+              quads: state.quads,
+              bytesReceived: 0,
+              resumedFromOffset: state.nextOffset,
+              nextOffset: state.nextOffset,
+              checkpointKey: state.checkpointKey,
+              completed: true,
+              timedOut: false,
+            },
+            continuationYielded: false,
+          };
+        }
+        const result = await fetchRetained(request, state, true);
+        return { result, continuationYielded: !state.completed };
+      } finally {
+        activeContextGraphs.delete(request.contextGraphId);
+        pruneExpiredStates();
       }
-      const result = await fetchRetained(request, state, true);
-      return { result, continuationYielded: !state.completed };
     },
     release,
   };
@@ -407,7 +471,12 @@ export function createSelectedSwmMetaFetcher(options: {
         completed: completedContextGraphs.has(contextGraphId),
       };
     },
+    pruneExpiredPrefixes() {
+      pruneExpiredStates();
+      return retentionState();
+    },
     settleOuterInvocation() {
+      pruneExpiredStates();
       for (const [contextGraphId, state] of states) {
         // Completed manifests may be reused by continuation passes in the same
         // outer invocation, but never become a cross-invocation cache. Empty
@@ -416,29 +485,12 @@ export function createSelectedSwmMetaFetcher(options: {
           state.completed
           || state.nextOffset <= 0
           || state.quads.length === 0
-          || state.expiresAtMs <= now()
         ) {
           release(contextGraphId, state);
           completedContextGraphs.delete(contextGraphId);
         }
       }
-      const retained = [...states.entries()]
-        .sort(([left], [right]) => left.localeCompare(right))
-        .map(([contextGraphId, state]) => [
-          contextGraphId,
-          state.requesterScope,
-          state.generation,
-          state.nextOffset,
-          state.quads.length,
-          state.checkpointKey,
-        ]);
-      return {
-        retained: retained.length > 0,
-        progressToken: JSON.stringify(retained),
-        nextExpiryAtMs: retained.length > 0
-          ? Math.min(...[...states.values()].map((state) => state.expiresAtMs))
-          : undefined,
-      };
+      return retentionState();
     },
     cleanup() {
       for (const [contextGraphId, state] of states) release(contextGraphId, state);
