@@ -257,6 +257,46 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
 }
 
 describe('DKGAgent sync fetch coalescing', () => {
+  it('normalizes the legacy positional fetch tail without losing snapshot scope', async () => {
+    const buildSyncRequest = vi.fn(async () => new Uint8Array([1, 2, 3]));
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    (agent as any).buildSyncRequest = buildSyncRequest;
+
+    try {
+      await agent.fetchSyncPages(
+        createOperationContext('sync'),
+        PEER_A,
+        'legacy-positional-cg',
+        true,
+        'snapshot',
+        '',
+        DEFAULT_DEADLINE,
+        'legacy-snapshot-ref',
+        'legacy-batch-id',
+        undefined,
+        true,
+        true,
+        [EXACT_UAL_7],
+      );
+
+      expect(buildSyncRequest).toHaveBeenCalledWith(
+        'legacy-positional-cg',
+        0,
+        expect.any(Number),
+        true,
+        PEER_A,
+        'snapshot',
+        'legacy-snapshot-ref',
+        'legacy-batch-id',
+        undefined,
+        true,
+        [EXACT_UAL_7],
+      );
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('joins concurrent identical fetches onto one sync page sequence', async () => {
     const response = deferred<Uint8Array>();
     let sends = 0;
