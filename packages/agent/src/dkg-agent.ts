@@ -1923,7 +1923,11 @@ export class DKGAgent extends DKGAgentBase {
       try {
         await this.closeSelectedSwmMetaTransfers();
       } finally {
-        this.selectedSwmRetryRequiredPeers.clear();
+        // Some bounded lifecycle harnesses intentionally construct a partial
+        // agent without running class field initializers. Keep shutdown
+        // best-effort in that state, while real instances still clear the
+        // retry marker before store teardown.
+        this.selectedSwmRetryRequiredPeers?.clear();
       }
     }
     if (this.syncVerifyWorker) {
