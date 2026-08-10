@@ -1942,6 +1942,36 @@ describe('system-record lane session lifecycle V1', () => {
       expect(Object.isFrozen(executor.calls[0])).toBe(true);
     });
 
+    it('discards a proof whose dispatch threw before the executor consumed it', async () => {
+      const session = await build().open(ACTIVATION);
+      const dispatchFailure = new Error('admission barrier closed under dispatch');
+      executor.onDispatch = () => { throw dispatchFailure; };
+      const strandedProof = Object.freeze({ proof: 'never-consumed' });
+
+      await expect(session.applyVerified(strandedProof)).rejects.toBe(dispatchFailure);
+      // The reservation gate is single-slot and registry-wide, so a proof left
+      // undiscarded here fails every later apply in the process, not just this
+      // lane. Releasing it is what keeps the next dispatch admissible.
+      expect(executor.discarded).toEqual([strandedProof]);
+
+      executor.onDispatch = undefined;
+      expect((await session.applyVerified({})).outcome).toBe('applied');
+    });
+
+    it('propagates the dispatch failure even when discarding that proof also throws', async () => {
+      const session = await build().open(ACTIVATION);
+      const dispatchFailure = new Error('admission barrier closed under dispatch');
+      const discardFailure = new Error('verified replacement proof is no longer live and unconsumed');
+      executor.onDispatch = () => { throw dispatchFailure; };
+      executor.discardVerified = () => { throw discardFailure; };
+
+      // A real discard throws whenever the proof was already consumed, already
+      // released, or transferred to recovery ownership. If that throw escaped it
+      // would replace the actual dispatch failure with a misleading reservation
+      // error, and the operator would debug the wrong thing.
+      await expect(session.applyVerified({})).rejects.toBe(dispatchFailure);
+    });
+
     it('keeps an explicit child-generation fallback for the current adapter', async () => {
       const legacyCalls: string[] = [];
       const controller = createSystemRecordLaneControllerV1({
