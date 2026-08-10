@@ -240,6 +240,101 @@ describe('selected SWM metadata transfer ownership', () => {
     }
   });
 
+  it('releases an expired prefix globally while its peer has another active operation', async () => {
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const deleteCheckpoint = vi.fn();
+    const budget = createSelectedSwmMetaRetentionBudget({
+      maxRows: 1,
+      maxBytesEstimate: 1024 * 1024,
+      maxPrefixRows: 1,
+      maxPrefixBytesEstimate: 1024 * 1024,
+    });
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    let releasePeerA!: () => void;
+    const peerAGate = new Promise<void>((resolve) => { releasePeerA = resolve; });
+    let signalPeerAStarted!: () => void;
+    const peerAStarted = new Promise<void>((resolve) => { signalPeerAStarted = resolve; });
+    let peerACompleted = false;
+    let peerBAvailableRows: number | undefined;
+    const createFetcher = (peerId: string) => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: `selected-swm-meta:retained:${peerId}`,
+      retentionBudget: budget,
+      deleteCheckpoint,
+      now: clock,
+      retentionTtlMs: 20,
+      fetchPage: async (request) => {
+        if (peerId === 'peer-b') peerBAvailableRows = request.maxAcceptedQuads;
+        return {
+          quads: [{
+            subject: `urn:${peerId}:${request.contextGraphId}`,
+            predicate: 'urn:p',
+            object: '"o"',
+            graph: 'urn:meta',
+          }],
+          bytesReceived: 1,
+          resumedFromOffset: 0,
+          nextOffset: 1,
+          checkpointKey: `${peerId}:${request.contextGraphId}:checkpoint`,
+          completed: false,
+          timedOut: true,
+        };
+      },
+    });
+    const request = (peerId: string, contextGraphId: string) => ({
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: clock() + 1_000,
+    });
+
+    try {
+      await coordinator.run(
+        'peer-a',
+        () => createFetcher('peer-a'),
+        (fetcher) => fetcher.strategy.fetch(request('peer-a', 'cg-a')),
+      );
+
+      const activePeerA = coordinator.run(
+        'peer-a',
+        () => createFetcher('peer-a'),
+        async () => {
+          signalPeerAStarted();
+          await peerAGate;
+        },
+      );
+      void activePeerA.then(() => { peerACompleted = true; });
+      await peerAStarted;
+      elapsedMs = 21;
+
+      // A's timer must release its expired process-wide lease without waiting
+      // for A's unrelated outer operation. Otherwise concurrent peer B sees a
+      // zero-row reservation even though A has exceeded its independent TTL.
+      await vi.waitFor(
+        () => expect(deleteCheckpoint).toHaveBeenCalledWith('peer-a:cg-a:checkpoint'),
+        { timeout: 250 },
+      );
+      expect(peerACompleted).toBe(false);
+
+      await coordinator.run(
+        'peer-b',
+        () => createFetcher('peer-b'),
+        (fetcher) => fetcher.strategy.fetch(request('peer-b', 'cg-b')),
+      );
+      expect(peerBAvailableRows).toBe(1);
+      expect(peerACompleted).toBe(false);
+
+      releasePeerA();
+      await activePeerA;
+    } finally {
+      releasePeerA();
+      await coordinator.close();
+    }
+  });
+
   it('does not serialize independent peers behind one transfer owner', async () => {
     const coordinator = new SelectedSwmMetaTransferCoordinator();
     let releasePeerA!: () => void;
