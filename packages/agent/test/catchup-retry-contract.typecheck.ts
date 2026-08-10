@@ -2,9 +2,13 @@ import {
   CATCHUP_BACKPRESSURE_MAX_WAIT_MS,
   DKGAgent,
   runCatchupPlaneWithPolicy,
+  runSwmCatchupContinuations,
+  type CatchupPassCoverage,
   type CatchupPlanePolicyClock,
   type CatchupPlanePolicyOptions,
   type CatchupPlaneResult,
+  type RunSwmCatchupContinuationsOptions,
+  type SwmCatchupContinuationUnit,
 } from '@origintrail-official/dkg-agent';
 // @ts-expect-error CATCHUP_BACKPRESSURE_RETRY_DELAYS_MS is REMOVED from the
 // package root. It named the fixed [100, 250, 500] ladder, which no longer
@@ -97,3 +101,23 @@ const staleAdmissionCall = () => staleAdmissionCaller.runContextGraphSyncWithBac
 );
 
 export declare const pinnedAdmission: typeof staleAdmissionCall;
+
+// The bounded SWM continuation policy is exported from the package root. Keep
+// its original explicit generic arity source-compatible even though the
+// selected RFC-64 path now supplies a structural, multi-domain progress ledger
+// rather than the ordinary snapshot-only tracker.
+interface LegacyCoverage extends CatchupPassCoverage {
+  readonly source: 'legacy-explicit-generic';
+}
+
+declare const legacyContinuationUnit: SwmCatchupContinuationUnit<string, LegacyCoverage>;
+declare const legacyContinuationOptions:
+  RunSwmCatchupContinuationsOptions<string, LegacyCoverage, void>;
+const legacyContinuationCall = () =>
+  runSwmCatchupContinuations<string, LegacyCoverage, void>(legacyContinuationOptions);
+
+export declare const pinnedContinuationGenerics: [
+  typeof legacyContinuationUnit,
+  typeof legacyContinuationOptions,
+  typeof legacyContinuationCall,
+];
