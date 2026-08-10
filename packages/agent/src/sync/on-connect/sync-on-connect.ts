@@ -28,6 +28,16 @@ export interface SelectedSharedMemorySyncResult {
   readonly selectedScopeComplete: boolean;
 }
 
+interface SelectedSharedMemorySyncLane {
+  /** Resolve the graph-complete SWM scope that must run before unrelated history. */
+  getContextGraphIds: (remotePeerId: string) => string[] | Promise<string[]>;
+  /** Produce the lane-owned terminal evidence for exactly that selected scope. */
+  syncFromPeer: (
+    peerId: string,
+    contextGraphIds: string[],
+  ) => Promise<SelectedSharedMemorySyncResult>;
+}
+
 type SyncAccountingResult = DurableSyncFromPeerResult | SelectedSharedMemorySyncResult;
 
 export interface SyncOnConnectPeerOutcome {
@@ -45,8 +55,8 @@ interface SyncOnConnectContext {
   /** Exact durable scope for this automatic run; explicit catch-up bypasses it. */
   getDurableSyncContextGraphs?: () => string[];
   getSharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
-  /** Selected graph-complete SWM scope that must run before unrelated history. */
-  getPrioritySharedMemorySyncContextGraphs?: (remotePeerId: string) => string[] | Promise<string[]>;
+  /** Cohesive selected lane; its scope resolver and typed producer cannot be mis-wired separately. */
+  selectedSharedMemoryLane?: SelectedSharedMemorySyncLane;
   syncFromPeer: (peerId: string, contextGraphIds?: string[]) => Promise<DurableSyncFromPeerResult>;
   refreshMetaSyncedFlags: (contextGraphIds: Iterable<string>) => Promise<void>;
   discoverContextGraphsFromStore: () => Promise<number>;
@@ -54,11 +64,6 @@ interface SyncOnConnectContext {
     peerId: string,
     contextGraphIds: string[],
   ) => Promise<SyncFromPeerResult>;
-  /** Dedicated typed boundary for priority selected-SWM whole-scope results. */
-  syncSelectedSharedMemoryFromPeer?: (
-    peerId: string,
-    contextGraphIds: string[],
-  ) => Promise<SelectedSharedMemorySyncResult>;
   syncSharedMemoryOnConnect?: boolean;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
@@ -174,12 +179,11 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     getSyncContextGraphs,
     getDurableSyncContextGraphs,
     getSharedMemorySyncContextGraphs,
-    getPrioritySharedMemorySyncContextGraphs,
+    selectedSharedMemoryLane,
     syncFromPeer,
     refreshMetaSyncedFlags,
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
-    syncSelectedSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
     logInfo,
   } = context;
@@ -304,20 +308,17 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     }
 
     const prioritySharedMemoryContextGraphIds = syncSharedMemoryOnConnect
-      && getPrioritySharedMemorySyncContextGraphs
+      && selectedSharedMemoryLane
         ? [...new Set(await runNonTransportStep(() => Promise.resolve(
-          getPrioritySharedMemorySyncContextGraphs(remotePeer),
+          selectedSharedMemoryLane.getContextGraphIds(remotePeer),
         )))]
         : [];
-    if (prioritySharedMemoryContextGraphIds.length > 0) {
+    if (prioritySharedMemoryContextGraphIds.length > 0 && selectedSharedMemoryLane) {
       logInfo(
         ctx,
         `Prioritizing ${prioritySharedMemoryContextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
       );
-      if (!syncSelectedSharedMemoryFromPeer) {
-        throw new Error('Priority selected SWM scope has no selected result producer');
-      }
-      const priorityWsSynced = await syncSelectedSharedMemoryFromPeer(
+      const priorityWsSynced = await selectedSharedMemoryLane.syncFromPeer(
         remotePeer,
         prioritySharedMemoryContextGraphIds,
       );

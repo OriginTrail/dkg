@@ -270,8 +270,13 @@ interface SharedMemorySyncContext {
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   stopOnBackoffWorthyFailure?: boolean;
-  /** Fail closed on non-empty zero-ref metadata in the selected RFC-64 lane. */
-  requireCompleteSelectedScopeEvidence?: boolean;
+  /** Optional lane-owned policy for deciding whether snapshot evidence is sufficient. */
+  snapshotEvidencePolicy?: {
+    accepts: (evidence: {
+      verifiedMetadataTriples: number;
+      snapshotReferences: number;
+    }) => boolean;
+  };
   /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
   metadataFetcher?: SharedMemoryMetadataFetcher;
   deleteCheckpoint: (key: string) => void;
@@ -312,7 +317,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
     stopOnBackoffWorthyFailure = false,
-    requireCompleteSelectedScopeEvidence = false,
+    snapshotEvidencePolicy,
     metadataFetcher,
     deleteCheckpoint,
     setCheckpoint,
@@ -1004,19 +1009,18 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // `isGraphAssetMaterialized` sees those markers and skips the KAs for
       // good. That is the same permanent-invisibility failure the G7 repair in
       // this PR exists to prevent, arrived at from a different direction.
-      // In the selected RFC-64 lane, non-empty metadata with zero store-backed
-      // refs is NOT an empty graph proof: it can describe graph-backed KAs that
-      // this aggregate requester does not yet fetch or count/digest-verify.
-      // Holding the metadata insert prevents head rows from certifying missing
-      // assertion graphs and preserves a retryable state for the graph-backed
-      // recovery lane. Ordinary SWM keeps its legacy metadata behavior.
-      const selectedZeroRefEvidenceGap = requireCompleteSelectedScopeEvidence
-        && processed.verifiedMeta.length > 0
-        && snapshotSync.totalSnapshots === 0;
+      // The requester applies the caller's evidence policy without knowing
+      // which synchronization lane owns it. A stricter lane can therefore
+      // reject shapes it cannot yet prove while ordinary SWM keeps the
+      // canonical permissive default.
+      const snapshotEvidenceAccepted = snapshotEvidencePolicy?.accepts({
+        verifiedMetadataTriples: processed.verifiedMeta.length,
+        snapshotReferences: snapshotSync.totalSnapshots,
+      }) ?? true;
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
         && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
-        && !selectedZeroRefEvidenceGap;
+        && snapshotEvidenceAccepted;
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
           + `not materialized — holding the phase incomplete so metadata cannot certify them`);
@@ -1025,9 +1029,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         logWarn(ctx, `SWM sync for "${pid}": snapshot descriptors could not be parsed — holding `
           + `the phase incomplete so metadata cannot certify Knowledge Assets that were never written`);
       }
-      if (selectedZeroRefEvidenceGap) {
-        logWarn(ctx, `SWM sync for "${pid}": selected metadata declared no store-backed snapshot refs; `
-          + 'holding the phase incomplete until graph-backed content has count/digest-bound evidence');
+      if (!snapshotEvidenceAccepted) {
+        logWarn(ctx, `SWM sync for "${pid}": snapshot evidence policy rejected the verified metadata shape; `
+          + 'holding the phase incomplete until the caller can prove the referenced content');
       }
       if (!snapshotPhaseUsable) {
         // The responder was reachable, but the snapshot phase did not produce
