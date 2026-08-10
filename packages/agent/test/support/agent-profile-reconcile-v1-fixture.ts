@@ -1,4 +1,3 @@
-import { decodeOpaqueKaBundleV1 } from '@origintrail-official/dkg-core';
 import {
   buildSystemRecordProviderSignatureMessageV1,
   computeSystemRecordRootDescriptorDigestV1,
@@ -6,14 +5,15 @@ import {
   type SignedSystemRecordRootDescriptorEnvelopeV1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
+import type { SystemRecordApplyOutcomeV1 } from '@origintrail-official/dkg-storage';
 
-import { parseNQuads } from '../../src/dkg-agent-utils.js';
 import type { AgentProfileAdmittedSliceContextV1 } from '../../src/system-records/admitted-slice-context-v1.js';
 import type { SystemRecordArtifactRepositoryV1 } from '../../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReceiverV1,
+  type AgentProfileContinuationReceiverV1,
   type AgentProfilePreparedActiveV1,
-  type AgentProfileReceiverV1,
+  type AgentProfileReceiverCandidateV1,
 } from '../../src/system-records/receiver-v1.js';
 import type {
   AgentProfileInventoryLoadRequestV1,
@@ -123,20 +123,22 @@ export async function signRootDescriptor(
 
 export function receiver(
   store: SystemRecordArtifactRepositoryV1,
-  consumeCandidate: Parameters<typeof createAgentProfileReceiverV1>[0]['consumeCandidate'],
+  consumeCandidate: (
+    input: AgentProfileReceiverCandidateV1,
+    admittedContext: AgentProfileAdmittedSliceContextV1,
+    signal: AbortSignal,
+  ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>,
 ) {
   return createAgentProfileReceiverV1({
     networkId: NETWORK,
     artifacts: store,
     nowMs: () => PRODUCER_FIXTURE_NOW_MS,
-    verifyCurrentBundle: (_head, bundleBytes) => {
-      const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
-      return Object.freeze({
-        canonicalProjectionBytes: Uint8Array.from(projectionBytes),
-        projectionQuads: Object.freeze(parseNQuads(new TextDecoder().decode(projectionBytes))),
-      });
-    },
-    consumeCandidate,
+    verifyCurrentBundle: () => true,
+    prepareCandidateApply: (candidate, admittedContext, signal) => Object.freeze({
+      existingMonotonicDeadlineMs: 10_000,
+      monotonicNowMs: 1_000,
+      apply: () => consumeCandidate(candidate, admittedContext, signal),
+    }),
   });
 }
 
@@ -145,14 +147,36 @@ export function receiverWithPreparation(
     row: SystemRecordInventoryRowV1,
     signal: AbortSignal,
   ) => Promise<AgentProfilePreparedActiveV1>,
-): AgentProfileReceiverV1 {
-  return Object.freeze({
+): AgentProfileContinuationReceiverV1 {
+  const adapt = async (
+    row: SystemRecordInventoryRowV1,
+    signal: AbortSignal,
+  ): Promise<AgentProfilePreparedActiveV1> => {
+    const prepared = await prepareActive(row, signal);
+    let dispatchPrepared = false;
+    return Object.freeze({
+      async prepareDispatch(admittedContext, dispatchSignal) {
+        if (dispatchPrepared) throw new Error('test receiver dispatch already prepared');
+        dispatchSignal.throwIfAborted();
+        dispatchPrepared = true;
+        let dispatched = false;
+        return Object.freeze({
+          async dispatch() {
+            if (dispatched) throw new Error('test receiver dispatch already invoked');
+            dispatched = true;
+            return prepared.apply(admittedContext, dispatchSignal);
+          },
+        });
+      },
+    });
+  };
+  const receiver: AgentProfileContinuationReceiverV1 = Object.freeze({
     openPreparation(row) {
       let released = false;
       return Object.freeze({
         prepare(_artifacts: SystemRecordArtifactRepositoryV1, signal: AbortSignal) {
           if (released) throw new Error('test preparation is released');
-          return prepareActive(row, signal);
+          return adapt(row, signal);
         },
         release() {
           released = true;
@@ -160,14 +184,17 @@ export function receiverWithPreparation(
       });
     },
     prepareActive(row, signal) {
-      return prepareActive(row, signal);
+      return adapt(row, signal);
     },
     async receiveActive(row, admittedContext, signal) {
-      const prepared = await prepareActive(row, signal);
+      const prepared = await receiver.prepareActive(row, signal);
       signal.throwIfAborted();
-      return prepared.apply(admittedContext, signal);
+      const dispatch = await prepared.prepareDispatch(admittedContext, signal);
+      signal.throwIfAborted();
+      return dispatch.dispatch();
     },
   });
+  return receiver;
 }
 
 export function byteAdmission() {

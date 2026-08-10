@@ -12,7 +12,8 @@ import { parseNQuads } from '../src/dkg-agent-utils.js';
 import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
 import {
   createAgentProfileReceiverV1,
-  type AgentProfileReceiverV1,
+  type AgentProfileContinuationReceiverV1,
+  type AgentProfileReceiverCandidateV1,
 } from '../src/system-records/receiver-v1.js';
 import {
   createAgentProfileReconcilerV1,
@@ -41,11 +42,14 @@ describe('agent-profile closure continuation V1', () => {
       artifacts: fixture.repository,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope: () => true,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
-      consumeCandidate: async (candidate) => {
+      verifyCurrentBundle: (_head, bundleBytes) => {
+        verifiedFixtureBundle(bundleBytes);
+        return true;
+      },
+      prepareCandidateApply: candidateApply(async (candidate) => {
         directCandidates.push(candidate);
         return appliedOutcome('11');
-      },
+      }),
     });
     await directReceiver.receiveActive(
       fixture.row,
@@ -77,14 +81,17 @@ describe('agent-profile closure continuation V1', () => {
     });
     const control = trackingByteAdmission();
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: control,
     });
     const verifyAuthorityEnvelope = vi.fn(() => true);
     const verifyCurrentBundle = vi.fn(
-      (_head: AgentProfileHeadObjectV1, bundleBytes: Uint8Array) =>
-        verifiedFixtureBundle(bundleBytes),
+      (_head: AgentProfileHeadObjectV1, bundleBytes: Uint8Array) => {
+        verifiedFixtureBundle(bundleBytes);
+        return true;
+      },
     );
     const transportedCandidates: unknown[] = [];
     const transportedReceiver = createAgentProfileReceiverV1({
@@ -93,10 +100,10 @@ describe('agent-profile closure continuation V1', () => {
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope,
       verifyCurrentBundle,
-      consumeCandidate: async (candidate) => {
+      prepareCandidateApply: candidateApply(async (candidate) => {
         transportedCandidates.push(candidate);
         return appliedOutcome('22');
-      },
+      }),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -187,6 +194,7 @@ describe('agent-profile closure continuation V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: trackingByteAdmission(),
@@ -197,8 +205,11 @@ describe('agent-profile closure continuation V1', () => {
       artifacts: fixture.repository,
       nowMs: receiverNowMs,
       verifyAuthorityEnvelope: () => true,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
-      consumeCandidate: async () => appliedOutcome('33'),
+      verifyCurrentBundle: (_head, bundleBytes) => {
+        verifiedFixtureBundle(bundleBytes);
+        return true;
+      },
+      prepareCandidateApply: candidateApply(async () => appliedOutcome('33')),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -243,6 +254,7 @@ describe('agent-profile closure continuation V1', () => {
     const verifyAuthorityEnvelope = vi.fn(() => authorityAllowed);
     const consumeCandidate = vi.fn(async () => appliedOutcome('44'));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async (_providerId, lookup, signal) => {
         if (verifyAuthorityEnvelope.mock.calls.length > 0 && pauseAfterAuthority) {
@@ -269,8 +281,11 @@ describe('agent-profile closure continuation V1', () => {
       artifacts: fixture.repository,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope,
-      verifyCurrentBundle: (_head, bundleBytes) => verifiedFixtureBundle(bundleBytes),
-      consumeCandidate,
+      verifyCurrentBundle: (_head, bundleBytes) => {
+        verifiedFixtureBundle(bundleBytes);
+        return true;
+      },
+      prepareCandidateApply: candidateApply(consumeCandidate),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -312,11 +327,13 @@ describe('agent-profile closure continuation V1', () => {
     const verifyCurrentBundle = vi.fn(
       (_head: AgentProfileHeadObjectV1, bundleBytes: Uint8Array) => {
         if (!bundleAllowed) throw new Error('publication verification was revoked');
-        return verifiedFixtureBundle(bundleBytes);
+        verifiedFixtureBundle(bundleBytes);
+        return true;
       },
     );
     const consumeCandidate = vi.fn(async () => appliedOutcome('55'));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async (_providerId, lookup, signal) => {
         if (verifyCurrentBundle.mock.calls.length > 0 && pauseAfterBundle) {
@@ -344,7 +361,7 @@ describe('agent-profile closure continuation V1', () => {
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyAuthorityEnvelope: () => true,
       verifyCurrentBundle,
-      consumeCandidate,
+      prepareCandidateApply: candidateApply(consumeCandidate),
     });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
@@ -386,6 +403,7 @@ describe('agent-profile closure continuation V1', () => {
     const releases: ReturnType<typeof vi.fn>[] = [];
     const control = trackingByteAdmission();
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async (_providerId, lookup, signal) => {
         const resolved = lookup.type === 'inventory-object'
@@ -442,6 +460,17 @@ describe('agent-profile closure continuation V1', () => {
   });
 });
 
+function candidateApply(
+  consume: (candidate: AgentProfileReceiverCandidateV1) =>
+    ReturnType<typeof appliedOutcome> | Promise<ReturnType<typeof appliedOutcome>>,
+) {
+  return (candidate: AgentProfileReceiverCandidateV1) => Object.freeze({
+    existingMonotonicDeadlineMs: 10_000,
+    monotonicNowMs: 1_000,
+    apply: () => consume(candidate),
+  });
+}
+
 function verifiedFixtureBundle(bundleBytes: Uint8Array) {
   const { projectionBytes } = decodeOpaqueKaBundleV1(bundleBytes);
   return Object.freeze({
@@ -458,7 +487,7 @@ function appliedOutcome(byte: string) {
   });
 }
 
-function syntheticThirteenArtifactReceiver(): AgentProfileReceiverV1 {
+function syntheticThirteenArtifactReceiver(): AgentProfileContinuationReceiverV1 {
   return Object.freeze({
     openPreparation() {
       return Object.freeze({
@@ -470,7 +499,13 @@ function syntheticThirteenArtifactReceiver(): AgentProfileReceiverV1 {
               objectDigest: `0x${index.toString(16).padStart(64, '0')}` as Digest32V1,
             }), signal);
           }
-          return Object.freeze({ apply: async () => appliedOutcome('33') });
+          return Object.freeze({
+            async prepareDispatch() {
+              return Object.freeze({
+                dispatch: async () => appliedOutcome('33'),
+              });
+            },
+          });
         },
         release: () => undefined,
       });

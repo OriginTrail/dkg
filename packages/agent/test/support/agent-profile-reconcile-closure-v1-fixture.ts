@@ -1,4 +1,11 @@
 import {
+  canonicalizeCanonicalGraphScopedAuthorSealV1,
+  encodeCanonicalCgSharedPublicRootProjectionV1,
+  encodeOpaqueKaBundleV1,
+  tripleContentV10,
+} from '@origintrail-official/dkg-core';
+import {
+  SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   buildSystemRecordInventoryTreeV1,
   buildSystemRecordProviderSignatureMessageV1,
   canonicalizeOwnedSubjectTableObjectV1,
@@ -8,6 +15,7 @@ import {
   computeOwnedSubjectTableDigestV1,
   computeSystemRecordRootDescriptorDigestV1,
   computeSystemRecordStableKeyHashV1,
+  digestSystemRecordBytesV1,
   type AgentProfileActiveHeadObjectV1,
   type AgentProfileAuthorityTransitionV1,
   type AgentProfileHeadObjectV1,
@@ -22,7 +30,9 @@ import type {
 import {
   createFixtureAgentProfileProducerV1,
   DEPLOYMENT,
+  makePrepared,
   NETWORK,
+  publicationFor,
   produce,
   producerFixture,
 } from './agent-profile-producer-v1-fixture.js';
@@ -105,14 +115,56 @@ export async function maximumAuthorityClosureFixtureV1(options: Readonly<{
     addEnvelopeArtifact(artifacts, 'authority-transition', transition);
     addEnvelopeArtifact(artifacts, 'agent-profile-head', current);
   }
+  const staleCurrentHeadDigest = computeAgentProfileHeadObjectDigestV1(current);
+  const prepared = makePrepared(fixture.peerSigner, current.evmIssuer, initialEnvelope.object.issuedAt);
+  const projectionQuads = [...prepared.projectionQuads].sort((left, right) => Buffer.compare(
+    tripleContentV10(left.subject, left.predicate, left.object),
+    tripleContentV10(right.subject, right.predicate, right.object),
+  ));
+  const ownedSubjectTable = [...new Set(projectionQuads.map((quad) => quad.subject))]
+    .sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+  const projectionBytes = encodeCanonicalCgSharedPublicRootProjectionV1(projectionQuads);
+  const publication = await publicationFor(
+    prepared,
+    current.evmIssuer,
+    initialEnvelope.object.issuedAt,
+  );
+  const sealBytes = new TextEncoder().encode(
+    canonicalizeCanonicalGraphScopedAuthorSealV1(publication.seal),
+  );
+  const finalBundle = encodeOpaqueKaBundleV1(projectionBytes, sealBytes).bundleBytes;
+  const finalBundleDigest = digestSystemRecordBytesV1(
+    SYSTEM_RECORD_DIGEST_DOMAINS_V1.profileBundle,
+    finalBundle,
+  );
+  artifacts.delete(`agent-profile-head:${staleCurrentHeadDigest}`);
+  current = Object.freeze({
+    ...current,
+    projectionSchemaDigest: publication.projectionSchemaDigest,
+    validUntil: new Date(Date.parse(publication.issuedAt) + 48 * 60 * 60 * 1_000)
+      .toISOString()
+      .replace('.000Z', 'Z'),
+    assertionCoordinate: publication.assertionCoordinate,
+    graphScopedAuthorSeal: publication.seal,
+    contentDigest: publication.seal.assertionMerkleRoot,
+    ownedSubjectTableDigest: computeOwnedSubjectTableDigestV1(
+      current.rootSubject,
+      ownedSubjectTable,
+    ),
+    ownedSubjectCount: String(ownedSubjectTable.length),
+    projectionBytes: String(projectionBytes.byteLength),
+    projectionQuads: String(projectionQuads.length),
+    bundleDigest: finalBundleDigest,
+  });
+  addEnvelopeArtifact(artifacts, 'agent-profile-head', current);
   artifacts.set(`profile-bundle:${current.bundleDigest}`, Object.freeze({
     objectKind: 'profile-bundle',
     objectDigest: current.bundleDigest,
-    canonicalBytes: bundle.canonicalBytes,
+    canonicalBytes: finalBundle,
   }));
   const tableBytes = canonicalizeOwnedSubjectTableObjectV1(
     current.rootSubject,
-    [current.rootSubject],
+    ownedSubjectTable,
   );
   artifacts.set(`owned-subject-table:${current.ownedSubjectTableDigest}`, Object.freeze({
     objectKind: 'owned-subject-table',

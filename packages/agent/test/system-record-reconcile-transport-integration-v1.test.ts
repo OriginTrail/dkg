@@ -7,7 +7,9 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { SystemRecordArtifactRepositoryV1 } from '../src/system-records/artifact-v1.js';
-import type { AgentProfileReceiverV1 } from '../src/system-records/receiver-v1.js';
+import type {
+  AgentProfileContinuationReceiverV1,
+} from '../src/system-records/receiver-v1.js';
 import { createAgentProfileReconcilerV1 } from '../src/system-records/reconcile-v1.js';
 import { createAgentProfileReconcileTransportV1 } from '../src/system-records/reconcile-transport-v1.js';
 import type {
@@ -45,6 +47,7 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -115,6 +118,7 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -166,6 +170,7 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -232,6 +237,7 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -296,6 +302,7 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -316,9 +323,16 @@ describe('agent-profile reconciler exact transport integration V1', () => {
         objectKind: 'agent-profile-head',
         objectDigest: row.headDigest,
       }), signal);
-      return Object.freeze({ apply });
+      return Object.freeze({
+        async prepareDispatch(admittedContext, dispatchSignal) {
+          dispatchSignal.throwIfAborted();
+          return Object.freeze({
+            dispatch: () => apply(admittedContext, dispatchSignal),
+          });
+        },
+      });
     };
-    const receiverWithRemotePreparation: AgentProfileReceiverV1 = Object.freeze({
+    const receiverWithRemotePreparation: AgentProfileContinuationReceiverV1 = Object.freeze({
       openPreparation(row) {
         return Object.freeze({
           prepare: (source, signal) => prepareFromSource(row, source, signal),
@@ -328,7 +342,8 @@ describe('agent-profile reconciler exact transport integration V1', () => {
       prepareActive: (row, signal) => prepareFromSource(row, artifacts, signal),
       async receiveActive(row, admittedContext, signal) {
         const prepared = await prepareFromSource(row, artifacts, signal);
-        return prepared.apply(admittedContext, signal);
+        const dispatch = await prepared.prepareDispatch(admittedContext, signal);
+        return dispatch.dispatch();
       },
     });
     const reconciler = await createAgentProfileReconcilerV1({

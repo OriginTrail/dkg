@@ -13,6 +13,7 @@ import {
 import type { SystemRecordArtifactRepositoryV1 } from '../../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReceiverV1,
+  type AgentProfileContinuationReceiverV1,
   type AgentProfileReceiverCandidateV1,
   type AgentProfileReceiverV1,
 } from '../../src/system-records/receiver-v1.js';
@@ -148,8 +149,8 @@ export function receiverWithPreparation(
       signal: AbortSignal,
     ) => SystemRecordApplyOutcomeV1 | Promise<SystemRecordApplyOutcomeV1>;
   }>>,
-): AgentProfileReceiverV1 {
-  const receiver: AgentProfileReceiverV1 = Object.freeze({
+): AgentProfileContinuationReceiverV1 {
+  const receiver: AgentProfileContinuationReceiverV1 = Object.freeze({
     async prepareActive(row, signal) {
       const prepared = await prepareActive(row, signal);
       let dispatchPrepared = false;

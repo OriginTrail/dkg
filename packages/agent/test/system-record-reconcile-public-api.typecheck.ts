@@ -35,6 +35,19 @@ const directReconciler = createAgentProfileReconcilerV1({
   receiver,
 });
 const prepared = receiver.prepareActive(row, signal);
+const customDirectReceiver: AgentProfileReceiverV1 = {
+  prepareActive: receiver.prepareActive.bind(receiver),
+  receiveActive: receiver.receiveActive.bind(receiver),
+};
+const customDirectReconciler = createAgentProfileReconcilerV1({
+  networkId,
+  rootEnvelope,
+  providerPeerPublicKey,
+  admission,
+  loadInventoryObject,
+  receiver: customDirectReceiver,
+});
 
 void directReconciler;
 void prepared;
+void customDirectReconciler;

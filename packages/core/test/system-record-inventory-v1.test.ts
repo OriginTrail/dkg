@@ -300,8 +300,10 @@ describe('system-record immutable B+tree objects', () => {
     // Settle the response through the loader boundary before cancellation is observed.
     await Promise.resolve();
     await Promise.resolve();
-    controller.abort(new Error('aborted-after-load'));
-    await expect(abortedAdvance).resolves.toMatchObject({
+    const rowAbortReason = new DOMException('aborted-after-load', 'AbortError');
+    controller.abort(rowAbortReason);
+    const abortedResult = await abortedAdvance;
+    expect(abortedResult).toMatchObject({
       status: 'failed',
       requests: 1,
       wireBytes: rootLoaded.wireBytes,
@@ -310,6 +312,8 @@ describe('system-record immutable B+tree objects', () => {
         message: expect.stringMatching(/aborted-after-load/),
       },
     });
+    if (abortedResult.status !== 'failed') throw new Error('expected failed traversal');
+    expect(abortedResult.failure).not.toHaveProperty('cause');
 
     const interrupted = createSystemRecordInventoryRowTraversalV1(snapshot.descriptor);
     await expect(interrupted.advance(async (digest) => (
@@ -547,6 +551,13 @@ describe('system-record immutable B+tree objects', () => {
     const snapshot = buildSystemRecordInventoryTreeV1(NETWORK, [row(PEER_A)]);
     const root = snapshot.objects.get(snapshot.descriptor.treeRootDigest)!;
 
+    const undefinedFailure = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
+    await expect(undefinedFailure.advance(async () => Promise.reject(undefined), {
+      maxRequests: 1,
+      maxWireBytes: 2 * 1024 * 1024,
+      deadlineMs: Date.now() + 3_000,
+    })).rejects.toThrow(/inventory traversal loader failed/);
+
     const invalidSlice = createSystemRecordInventoryTraversalV1(snapshot.descriptor);
     let invalidSliceLoads = 0;
     await expect(invalidSlice.advance(async () => {
@@ -566,7 +577,7 @@ describe('system-record immutable B+tree objects', () => {
       deadlineMs: Date.now() + 20,
     })).rejects.toThrow(/deadline expired/);
 
-    const abortReason = new Error('public traversal aborted after load');
+    const abortReason = new DOMException('public traversal aborted after load', 'AbortError');
     const controller = new AbortController();
     const requested = Promise.withResolvers<void>();
     const delivery = Promise.withResolvers<ReturnType<typeof loadedInventoryObject>>();

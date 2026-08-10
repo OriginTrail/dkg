@@ -15,6 +15,7 @@ import {
   SYSTEM_RECORD_NEGATIVE_MEMO_ENTRY_BASE_BYTES,
   SYSTEM_RECORD_NEGATIVE_MEMO_TTL_MS,
   SYSTEM_RECORD_SLICE_TIMEOUT_MS,
+  type NetworkIdV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type {
@@ -22,7 +23,6 @@ import type {
   SystemRecordArtifactLookupV1,
   SystemRecordArtifactV1,
 } from './artifact-v1.js';
-import { systemRecordArtifactKeyV1 } from './artifact-v1.js';
 import type {
   AgentProfileInventoryLoadRequestV1,
   AgentProfileInventoryLoadResultV1,
@@ -34,9 +34,9 @@ import type {
   SystemRecordRequesterByteAdmissionV1,
 } from './requester-v1.js';
 import {
-  systemRecordExactLookupKeyV1,
-  toSystemRecordExactArtifactLookupV1,
-} from './requester-api-v1.js';
+  normalizeSystemRecordExactLookupV1,
+  type NormalizedSystemRecordExactLookupV1,
+} from './requester-wire-v1-internal.js';
 
 // Fixed control-state charges cover the handle/map entry itself. Requester leases
 // continue to own and account the retained payload bytes without copying them.
@@ -112,6 +112,7 @@ export interface AgentProfileReconcileTransportV1 {
 }
 
 export interface CreateAgentProfileReconcileTransportOptionsV1 {
+  readonly networkId: NetworkIdV1;
   /** Returns an ordered bounded provider candidate set for each exact resolution. */
   readonly listProviderIds: () => readonly string[];
   /** Lifecycle transport binding for the selected provider and shared exact requester. */
@@ -167,6 +168,7 @@ export function createAgentProfileReconcileTransportV1(
   const listProviderIds = options.listProviderIds;
   const fetchExact = options.fetchExact;
   const controlAdmission = options.controlAdmission;
+  const networkId = options.networkId;
   const negativeTtlMs = boundedPositive(
     options.negativeTtlMs ?? SYSTEM_RECORD_NEGATIVE_MEMO_TTL_MS,
     SYSTEM_RECORD_NEGATIVE_MEMO_TTL_MS,
@@ -199,6 +201,7 @@ export function createAgentProfileReconcileTransportV1(
     );
     if (handleReservation === null) return null;
     const continuation = createArtifactContinuationV1({
+      networkId,
       controlAdmission,
       handleReservation,
       onRelease: () => artifactContinuations.delete(continuation),
@@ -238,13 +241,16 @@ export function createAgentProfileReconcileTransportV1(
         lookup: SystemRecordArtifactLookupV1,
         callerSignal: AbortSignal,
       ): Promise<SystemRecordArtifactV1 | null> {
-        const exactLookup = toSystemRecordExactArtifactLookupV1(lookup);
+        const exactLookup = narrowSystemRecordExactArtifactLookupV1(lookup);
         if (exactLookup === null) {
           throw new Error(lookup.type === 'root'
             ? 'agent-profile reconcile transport requires an exact artifact'
             : 'agent-profile reconcile transport requires exact inventory coordinates');
         }
-        const fetched = await resolveExact(exactLookup, callerSignal);
+        const fetched = await resolveExact(
+          normalizeSystemRecordExactLookupV1(networkId, exactLookup),
+          callerSignal,
+        );
         if (fetched.result.outcome === 'ok') return fetched.result.lease.artifact;
         if (fetched.result.outcome === 'not-found'
             || fetched.result.outcome === 'unsupported') return null;
@@ -257,7 +263,10 @@ export function createAgentProfileReconcileTransportV1(
         lookup: SystemRecordExactArtifactLookupV1,
         callerSignal: AbortSignal,
       ): Promise<SystemRecordExactFetchLeaseV1 | null> {
-        const fetched = await resolveExact(lookup, callerSignal);
+        const fetched = await resolveExact(
+          normalizeSystemRecordExactLookupV1(networkId, lookup),
+          callerSignal,
+        );
         if (fetched.result.outcome === 'ok') {
           const lease = fetched.result.lease;
           const ownedIndex = leases.lastIndexOf(lease);
@@ -279,17 +288,21 @@ export function createAgentProfileReconcileTransportV1(
         request: AgentProfileInventoryLoadRequestV1,
         callerSignal: AbortSignal,
       ): Promise<AgentProfileInventoryLoadResultV1> {
-        const fetched = await resolveExact(Object.freeze({
-          type: 'inventory-object',
-          rootDescriptorDigest: request.rootDescriptorDigest,
-          path: Object.freeze([...request.path]),
-          objectKind: request.expectedKind,
-          objectDigest: request.objectDigest,
-        }), callerSignal);
+        const fetched = await resolveExact(
+          normalizeSystemRecordExactLookupV1(networkId, Object.freeze({
+            type: 'inventory-object',
+            rootDescriptorDigest: request.rootDescriptorDigest,
+            path: Object.freeze([...request.path]),
+            objectKind: request.expectedKind,
+            objectDigest: request.objectDigest,
+          })),
+          callerSignal,
+          inventoryLoaderCanReplayCachedFailureV1,
+        );
         if (fetched.result.outcome === 'ok') {
           return Object.freeze({
             outcome: 'ok',
-            objectKind: fetched.result.lease.artifact.objectKind as typeof request.expectedKind,
+            objectKind: request.expectedKind,
             canonicalBytes: fetched.result.lease.artifact.canonicalBytes,
             wireBytes: fetched.wireBytes,
           });
@@ -307,8 +320,11 @@ export function createAgentProfileReconcileTransportV1(
     return slice;
 
     async function resolveExact(
-      lookup: SystemRecordExactArtifactLookupV1,
+      normalized: NormalizedSystemRecordExactLookupV1,
       callerSignal: AbortSignal,
+      canReplayCachedFailure: (
+        failure: Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }>,
+      ) => boolean = anyCachedFailureCanReplayV1,
     ): Promise<AggregateExactFetchResultV1> {
       if (released || closed) return aggregateFailure('closed', 0);
       callerSignal.throwIfAborted();
@@ -317,7 +333,8 @@ export function createAgentProfileReconcileTransportV1(
         listProviderIds(),
         maxNegativeEntries + SYSTEM_RECORD_MAX_SLICE_REQUESTS,
       );
-      const exactLookupKey = systemRecordExactLookupKeyV1(lookup);
+      const lookup = normalized.lookup;
+      const exactLookupKey = normalized.key;
       let selectedFailure: Exclude<
         SystemRecordExactFetchResultV1,
         { outcome: 'ok' }
@@ -331,7 +348,12 @@ export function createAgentProfileReconcileTransportV1(
           callerSignal.throwIfAborted();
           return aggregateFailure('deadline', lookupWireBytes);
         }
-        const cachedFailure = negativeMemo.get(providerId, exactLookupKey, now);
+        const cachedFailure = negativeMemo.get(
+          providerId,
+          exactLookupKey,
+          now,
+          canReplayCachedFailure,
+        );
         if (cachedFailure !== undefined) {
           selectedFailure = selectFailure(selectedFailure, cachedFailure);
           continue;
@@ -345,54 +367,61 @@ export function createAgentProfileReconcileTransportV1(
           await fetchExact(providerId, lookup, attemptSignal),
           lookup,
         );
-        const completedAt = readNow(nowMs);
-        const accountedWireBytes = attempt.wireBytes;
-        if (accountedWireBytes !== null) lookupWireBytes += accountedWireBytes;
-        budget.accountWireBytes(accountedWireBytes);
-        if (released || closed || signal.aborted || callerSignal.aborted) {
-          attempt.releaseRejectedLease();
-          signal.throwIfAborted();
-          callerSignal.throwIfAborted();
-          return aggregateFailure('closed', lookupWireBytes);
-        }
-        if (accountedWireBytes === null) {
-          if (attempt.outcome !== 'failure') {
-            throw new Error('successful exact attempt omitted its accounted wire bytes');
+        let leaseTransferred = false;
+        try {
+          const completedAt = readNow(nowMs);
+          const accountedWireBytes = attempt.wireBytes;
+          if (accountedWireBytes !== null) lookupWireBytes += accountedWireBytes;
+          budget.accountWireBytes(accountedWireBytes);
+          if (released || closed || signal.aborted || callerSignal.aborted) {
+            attempt.releaseRejectedLease();
+            signal.throwIfAborted();
+            callerSignal.throwIfAborted();
+            return aggregateFailure('closed', lookupWireBytes);
+          }
+          if (accountedWireBytes === null) {
+            if (attempt.outcome !== 'failure') {
+              throw new Error('successful exact attempt omitted its accounted wire bytes');
+            }
+            attempt.releaseRejectedLease();
+            selectedFailure = selectFailure(selectedFailure, attempt.failure);
+            negativeMemo.remember(providerId, exactLookupKey, attempt.failure, completedAt);
+            continue;
+          }
+          if (attempt.memoInvalidBeforeSliceCapacity) {
+            if (attempt.outcome !== 'failure') {
+              throw new Error('invalid exact attempt did not expose its failure');
+            }
+            negativeMemo.remember(providerId, exactLookupKey, attempt.failure, completedAt);
+          }
+          if (budget.exceedsWireLimit()) {
+            attempt.releaseRejectedLease();
+            return aggregateFailure('capacity', lookupWireBytes);
+          }
+          if (completedAt >= deadlineMs) {
+            attempt.releaseRejectedLease();
+            negativeMemo.remember(
+              providerId,
+              exactLookupKey,
+              Object.freeze({ outcome: 'deadline', wireBytes: 0 }),
+              completedAt,
+            );
+            return aggregateFailure('deadline', lookupWireBytes);
+          }
+          if (attempt.outcome === 'success') {
+            leases.push(attempt.result.lease);
+            leaseTransferred = true;
+            return Object.freeze({ result: attempt.result, wireBytes: lookupWireBytes });
           }
           attempt.releaseRejectedLease();
           selectedFailure = selectFailure(selectedFailure, attempt.failure);
-          negativeMemo.remember(providerId, exactLookupKey, attempt.failure, completedAt);
-          continue;
-        }
-        if (attempt.memoInvalidBeforeSliceCapacity) {
-          if (attempt.outcome !== 'failure') {
-            throw new Error('invalid exact attempt did not expose its failure');
+          if (exactFailurePolicy(attempt.failure.outcome).memoClass !== null
+              && !attempt.memoInvalidBeforeSliceCapacity) {
+            negativeMemo.remember(providerId, exactLookupKey, attempt.failure, completedAt);
           }
-          negativeMemo.remember(providerId, exactLookupKey, attempt.failure, completedAt);
-        }
-        if (budget.exceedsWireLimit()) {
-          attempt.releaseRejectedLease();
-          return aggregateFailure('capacity', lookupWireBytes);
-        }
-        if (completedAt >= deadlineMs) {
-          attempt.releaseRejectedLease();
-          negativeMemo.remember(
-            providerId,
-            exactLookupKey,
-            Object.freeze({ outcome: 'deadline', wireBytes: 0 }),
-            completedAt,
-          );
-          return aggregateFailure('deadline', lookupWireBytes);
-        }
-        if (attempt.outcome === 'success') {
-          leases.push(attempt.result.lease);
-          return Object.freeze({ result: attempt.result, wireBytes: lookupWireBytes });
-        }
-        attempt.releaseRejectedLease();
-        selectedFailure = selectFailure(selectedFailure, attempt.failure);
-        if (exactFailurePolicy(attempt.failure.outcome).memoClass !== null
-            && !attempt.memoInvalidBeforeSliceCapacity) {
-          negativeMemo.remember(providerId, exactLookupKey, attempt.failure, completedAt);
+        } catch (error) {
+          if (!leaseTransferred) attempt.releaseRejectedLease();
+          throw error;
         }
       }
       const result = selectedFailure
@@ -451,6 +480,31 @@ export function createAgentProfileReconcileTransportV1(
   }
 }
 
+/** Narrow the broad repository surface; canonical validation and keying stay requester-owned. */
+function narrowSystemRecordExactArtifactLookupV1(
+  lookup: SystemRecordArtifactLookupV1,
+): SystemRecordExactArtifactLookupV1 | null {
+  if (lookup.type === 'root') return null;
+  if (lookup.type === 'inventory-object') return lookup;
+  switch (lookup.objectKind) {
+    case 'profile-bundle':
+    case 'agent-profile-head':
+    case 'authority-transition':
+    case 'fork-resolution':
+    case 'conflict-evidence':
+    case 'owned-subject-table':
+      return Object.freeze({
+        type: 'object',
+        objectKind: lookup.objectKind,
+        objectDigest: lookup.objectDigest,
+      });
+    case 'root-descriptor':
+    case 'inventory-internal':
+    case 'inventory-leaf':
+      return null;
+  }
+}
+
 interface RetainedContinuationArtifactV1 {
   readonly lease: SystemRecordExactFetchLeaseV1;
   readonly bytes: number;
@@ -458,6 +512,7 @@ interface RetainedContinuationArtifactV1 {
 }
 
 function createArtifactContinuationV1(options: Readonly<{
+  networkId: NetworkIdV1;
   controlAdmission: SystemRecordRequesterByteAdmissionV1;
   handleReservation: { release(): void };
   onRelease(): void;
@@ -481,18 +536,16 @@ function createArtifactContinuationV1(options: Readonly<{
           throw new Error('agent-profile closure continuation requires an exact object lookup');
         }
         signal.throwIfAborted();
-        const key = systemRecordArtifactKeyV1({
-          objectKind: lookup.objectKind,
-          objectDigest: lookup.objectDigest,
-        });
-        const cached = retained.get(key);
-        if (cached !== undefined) return cached.lease.artifact;
-        const fetchGeneration = generation;
-        const exactLookup = toSystemRecordExactArtifactLookupV1(lookup);
+        const exactLookup = narrowSystemRecordExactArtifactLookupV1(lookup);
         if (exactLookup === null || exactLookup.type !== 'object') {
           throw new Error('agent-profile closure continuation requires a control artifact');
         }
-        const lease = await source.takeExact(exactLookup, signal);
+        const normalized = normalizeSystemRecordExactLookupV1(options.networkId, exactLookup);
+        const key = normalized.key;
+        const cached = retained.get(key);
+        if (cached !== undefined) return cached.lease.artifact;
+        const fetchGeneration = generation;
+        const lease = await source.takeExact(normalized.lookup, signal);
         if (lease === null) return null;
         if (released || generation !== fetchGeneration || signal.aborted) {
           lease.release();
@@ -607,6 +660,9 @@ interface NegativeMemoV1 {
     providerId: string,
     exactLookupKey: string,
     now: number,
+    canReplay: (
+      failure: Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }>,
+    ) => boolean,
   ): Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }> | undefined;
   remember(
     providerId: string,
@@ -643,6 +699,9 @@ function createNegativeMemoV1(options: Readonly<{
     providerId: string,
     exactLookupKey: string,
     now: number,
+    canReplay: (
+      failure: Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }>,
+    ) => boolean,
   ): Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }> | undefined {
     const entry = entries.get(memoKey(providerId, exactLookupKey));
     if (entry === undefined) return undefined;
@@ -650,8 +709,10 @@ function createNegativeMemoV1(options: Readonly<{
       remove(entry, false);
       return undefined;
     }
+    const replay = Object.freeze({ outcome: entry.failure.outcome, wireBytes: 0 });
+    if (!canReplay(replay)) return undefined;
     hits += 1;
-    return Object.freeze({ outcome: entry.failure.outcome, wireBytes: 0 });
+    return replay;
   }
 
   function remember(
@@ -915,6 +976,18 @@ function exactFailurePolicy(
   outcome: AgentProfileReconcileTransportFailureV1,
 ): ExactFailurePolicyV1 {
   return EXACT_FAILURE_POLICY_V1[outcome];
+}
+
+function inventoryLoaderCanReplayCachedFailureV1(
+  failure: Exclude<SystemRecordExactFetchResultV1, { outcome: 'ok' }>,
+): boolean {
+  // Core accepts zero wire bytes only for transport-class rejections. Re-fetch
+  // cached absence/invalid outcomes instead of fabricating inventory wire cost.
+  return exactFailurePolicy(failure.outcome).inventoryRejection === 'transport';
+}
+
+function anyCachedFailureCanReplayV1(): boolean {
+  return true;
 }
 
 function selectFailure(

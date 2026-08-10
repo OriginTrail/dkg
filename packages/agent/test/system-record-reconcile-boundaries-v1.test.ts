@@ -149,11 +149,11 @@ describe('agent-profile System Record reconciler boundaries V1', () => {
       reason: 'continuation-limit',
       inventoryRequests: 0,
     });
-    expect(acquisitions).toBe(SYSTEM_RECORD_MAX_CONTINUATION_SLICES + 1);
+    expect(acquisitions).toBe(SYSTEM_RECORD_MAX_CONTINUATION_SLICES);
     expect(loadInventoryObject).not.toHaveBeenCalled();
     expect(prepareActive).not.toHaveBeenCalled();
     expect(reconciler.stats()).toMatchObject({
-      admittedSlices: SYSTEM_RECORD_MAX_CONTINUATION_SLICES + 1,
+      admittedSlices: SYSTEM_RECORD_MAX_CONTINUATION_SLICES,
       advances: SYSTEM_RECORD_MAX_CONTINUATION_SLICES,
     });
   });

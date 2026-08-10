@@ -2,15 +2,22 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   SYSTEM_RECORD_CONTINUATION_TIMEOUT_MS,
+  SYSTEM_RECORD_MAX_CONTINUATION_CLOSURE_WIRE_BYTES,
   SYSTEM_RECORD_MAX_CONTINUATION_SLICES,
+  SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES,
   buildSystemRecordInventoryTreeV1,
   computeSystemRecordStableKeyHashV1,
   type SystemRecordInventoryRowV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { AgentProfileAdmittedSliceContextV1 } from '../src/system-records/admitted-slice-context-v1.js';
-import type { AgentProfileReceiverV1 } from '../src/system-records/receiver-v1.js';
 import {
+  createAgentProfileReceiverV1,
+  type AgentProfileContinuationReceiverV1,
+  type AgentProfileReceiverV1,
+} from '../src/system-records/receiver-v1.js';
+import {
+  agentProfileReconcileWireContinuationLimitReachedV1,
   createAgentProfileReconcilerV1,
   type AgentProfileReconcileAdmissionV1,
   type AgentProfileInventoryLoadRequestV1,
@@ -35,6 +42,19 @@ import {
 import { NETWORK } from './support/agent-profile-producer-v1-fixture.js';
 
 describe('agent-profile System Record reconciler V1', () => {
+  it('counts inventory and closure bytes together at the continuation limit', () => {
+    const closureWireBytes = 1;
+    expect(closureWireBytes).toBeLessThan(SYSTEM_RECORD_MAX_CONTINUATION_CLOSURE_WIRE_BYTES);
+    expect(agentProfileReconcileWireContinuationLimitReachedV1(
+      SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES - closureWireBytes - 1,
+      closureWireBytes,
+    )).toBe(false);
+    expect(agentProfileReconcileWireContinuationLimitReachedV1(
+      SYSTEM_RECORD_MAX_CONTINUATION_WIRE_BYTES - closureWireBytes,
+      closureWireBytes,
+    )).toBe(true);
+  });
+
   it('pins one provider root and completes one active row across bounded slices', async () => {
     const fixture = await publishedFixture();
     const admission = admissionGate();
@@ -44,13 +64,18 @@ describe('agent-profile System Record reconciler V1', () => {
       appliedStateDigest: `0x${'aa'.repeat(32)}`,
     }));
     const loadInventoryObject = vi.fn(fixture.loadInventoryObject);
+    const continuationReceiver = receiver(fixture.store, consumeCandidate);
+    const directReceiver: AgentProfileReceiverV1 = Object.freeze({
+      prepareActive: continuationReceiver.prepareActive.bind(continuationReceiver),
+      receiveActive: continuationReceiver.receiveActive.bind(continuationReceiver),
+    });
     const reconciler = await createAgentProfileReconcilerV1({
       networkId: NETWORK,
       rootEnvelope: fixture.rootEnvelope,
       providerPeerPublicKey: fixture.peerSigner.publicKey,
       admission,
       loadInventoryObject,
-      receiver: receiver(fixture.store, consumeCandidate),
+      receiver: directReceiver,
     });
 
     const signal = new AbortController().signal;
@@ -366,6 +391,7 @@ describe('agent-profile System Record reconciler V1', () => {
       });
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -378,7 +404,7 @@ describe('agent-profile System Record reconciler V1', () => {
     if (held === null) throw new Error('test transport was not initially available');
     const baseReceiver = receiver(fixture.store, vi.fn());
     const prepareActive = vi.fn(baseReceiver.prepareActive.bind(baseReceiver));
-    const trackedReceiver: AgentProfileReceiverV1 = Object.freeze({
+    const trackedReceiver: AgentProfileContinuationReceiverV1 = Object.freeze({
       openPreparation: baseReceiver.openPreparation.bind(baseReceiver),
       prepareActive,
       receiveActive: baseReceiver.receiveActive.bind(baseReceiver),
@@ -483,6 +509,29 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(consumeCandidate).toHaveBeenCalledTimes(2);
   });
 
+  it('consumes a stale row as a settled outcome', async () => {
+    const fixture = await publishedFixture();
+    const consumeCandidate = vi.fn(async () => ({ outcome: 'stale' as const }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: receiver(fixture.store, consumeCandidate),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'complete',
+      phase: 'complete',
+      processedRows: 1,
+      pendingRows: 0,
+      outcomes: [{ outcome: 'stale' }],
+    });
+    expect(consumeCandidate).toHaveBeenCalledTimes(1);
+  });
+
   it.each([
     {
       outcome: { outcome: 'root-collision' as const },
@@ -578,6 +627,153 @@ describe('agent-profile System Record reconciler V1', () => {
     expect(prepareActive).toHaveBeenCalledTimes(2);
     expect(apply).toHaveBeenCalledTimes(1);
     expect(reconciler.stats()).toMatchObject({ processedRows: 1, pendingRows: 1 });
+  });
+
+  it('returns a committed first-row outcome when the caller aborts during dispatch', async () => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const rows = TEST_PEER_IDS.slice(0, 2).map((peerId): SystemRecordInventoryRowV1 => ({
+      stableKeyHash: computeSystemRecordStableKeyHashV1(NETWORK, peerId),
+      peerId,
+      authoritySequence: headEnvelope.object.authoritySequence,
+      version: headEnvelope.object.version,
+      headDigest: headEnvelope.objectDigest,
+      tombstone: false,
+      quarantined: false,
+    }));
+    const inventory = buildSystemRecordInventoryTreeV1(NETWORK, rows);
+    const rootEnvelope = await signRootDescriptor(fixture, inventory.descriptor);
+    const admission = admissionGate();
+    const dispatched = Promise.withResolvers<void>();
+    const settlement = Promise.withResolvers<{
+      outcome: 'applied';
+      stateRevision: string;
+      appliedStateDigest: `0x${string}`;
+    }>();
+    const apply = vi.fn(async () => {
+      dispatched.resolve();
+      return settlement.promise;
+    });
+    const prepareActive = vi.fn(async () => Object.freeze({ apply }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: async (request) => {
+        const stored = inventory.objects.get(request.objectDigest)!;
+        return Object.freeze({
+          outcome: 'ok' as const,
+          objectKind: stored.objectKind,
+          canonicalBytes: stored.canonicalBytes,
+          wireBytes: 4 + 128 + stored.canonicalBytes.byteLength,
+        });
+      },
+      receiver: receiverWithPreparation(prepareActive),
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    const caller = new AbortController();
+    const active = reconciler.advance(caller.signal);
+    await dispatched.promise;
+    caller.abort(new Error('caller aborted after atomic dispatch'));
+    settlement.resolve({
+      outcome: 'applied',
+      stateRevision: '10',
+      appliedStateDigest: `0x${'ab'.repeat(32)}`,
+    });
+
+    await expect(active).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      processedRows: 1,
+      pendingRows: 1,
+      outcomes: [{
+        outcome: 'applied',
+        stateRevision: '10',
+        appliedStateDigest: `0x${'ab'.repeat(32)}`,
+      }],
+    });
+    expect(prepareActive).toHaveBeenCalledTimes(1);
+    expect(apply).toHaveBeenCalledTimes(1);
+    expect(admission.stats()).toEqual({ active: 0, peak: 1, acquisitions: 2 });
+    expect(reconciler.stats()).toMatchObject({ processedRows: 1, pendingRows: 1, active: 0 });
+  });
+
+  it('blocks when a verified head expires before prepared apply dispatch', async () => {
+    const fixture = await publishedFixture();
+    const headEnvelope = fixture.store.snapshot().currentHead;
+    if (headEnvelope === null) throw new Error('fixture active head was not retained');
+    const validUntilMs = Date.parse(headEnvelope.object.validUntil);
+    const nowMs = vi.fn()
+      .mockReturnValueOnce(validUntilMs - 1)
+      .mockReturnValue(validUntilMs);
+    const materialize = vi.fn(async () => ({
+      outcome: 'applied' as const,
+      stateRevision: '10',
+      appliedStateDigest: `0x${'aa'.repeat(32)}`,
+    }));
+    const prepareCandidateApply = vi.fn(() => Object.freeze({
+      existingMonotonicDeadlineMs: 10_000,
+      monotonicNowMs: 1_000,
+      apply: materialize,
+    }));
+    const activeReceiver = createAgentProfileReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.store,
+      nowMs,
+      verifyCurrentBundle: () => true,
+      prepareCandidateApply,
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: activeReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'receiver-verification-failed',
+      processedRows: 0,
+      pendingRows: 1,
+      outcomes: [],
+    });
+    expect(nowMs).toHaveBeenCalledTimes(2);
+    expect(prepareCandidateApply).toHaveBeenCalledTimes(1);
+    expect(materialize).not.toHaveBeenCalled();
+  });
+
+  it('does not classify a materializer rejection as a predispatch failure', async () => {
+    const fixture = await publishedFixture();
+    const settlementFailure = new Error('atomic materializer settlement failed');
+    const materialize = vi.fn(async () => {
+      throw settlementFailure;
+    });
+    const preparedReceiver = receiverWithPreparation(async () => Object.freeze({
+      apply: materialize,
+    }));
+    const admission = admissionGate();
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject: fixture.loadInventoryObject,
+      receiver: preparedReceiver,
+    });
+
+    await reconciler.advance(new AbortController().signal);
+    await expect(reconciler.advance(new AbortController().signal))
+      .rejects.toBe(settlementFailure);
+    expect(materialize).toHaveBeenCalledTimes(1);
+    expect(admission.stats().active).toBe(0);
+    expect(reconciler.stats()).toMatchObject({ processedRows: 0, pendingRows: 1 });
   });
 
   it('releases admission when close aborts a stalled predispatch receiver', async () => {

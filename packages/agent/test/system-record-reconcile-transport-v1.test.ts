@@ -10,7 +10,10 @@ import {
   type Digest32V1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import type { SystemRecordArtifactV1 } from '../src/system-records/artifact-v1.js';
+import type {
+  SystemRecordArtifactLookupV1,
+  SystemRecordArtifactV1,
+} from '../src/system-records/artifact-v1.js';
 import {
   createAgentProfileReconcileTransportV1,
 } from '../src/system-records/reconcile-transport-v1.js';
@@ -18,6 +21,7 @@ import type {
   SystemRecordExactArtifactLookupV1,
   SystemRecordExactFetchResultV1,
 } from '../src/system-records/requester-v1.js';
+import { NETWORK } from './support/agent-profile-producer-v1-fixture.js';
 
 const DIGEST_A = `0x${'aa'.repeat(32)}` as Digest32V1;
 const DIGEST_B = `0x${'bb'.repeat(32)}` as Digest32V1;
@@ -49,6 +53,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       return success.result;
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: control,
@@ -97,6 +102,7 @@ describe('agent-profile reconcile exact transport V1', () => {
   ) => {
     const fetchExact = vi.fn(async () => Object.freeze({ outcome, wireBytes: 7 }));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -130,6 +136,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       ? Object.freeze({ outcome: 'deadline', wireBytes: 7 })
       : successfulFetch(lookup, 11).result);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: control,
@@ -159,6 +166,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     let nowMs = 0;
     const control = byteAdmission();
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => Object.freeze({ outcome: 'invalid-response', wireBytes: 3 }),
       controlAdmission: control,
@@ -202,6 +210,7 @@ describe('agent-profile reconcile exact transport V1', () => {
   ] as const)('does not poison a provider after %s', async (outcome) => {
     let calls = 0;
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => {
         calls += 1;
@@ -228,6 +237,7 @@ describe('agent-profile reconcile exact transport V1', () => {
   it('closes an active slice and releases retained leases immediately', async () => {
     const success = successfulFetch(LOOKUP_A, 41);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => success.result,
       controlAdmission: byteAdmission(),
@@ -256,6 +266,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const success = successfulFetch(LOOKUP_A, 41);
     const fetchExact = vi.fn(async () => success.result);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: control,
@@ -300,6 +311,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     let active = 0;
     const release = vi.fn(() => { active -= 1; });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: vi.fn(),
       controlAdmission: {
@@ -326,6 +338,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const control = byteAdmission();
     const success = successfulFetch(LOOKUP_A, 41);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => success.result,
       controlAdmission: control,
@@ -353,6 +366,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const control = byteAdmission();
     const releaseByDigest = new Map<string, ReturnType<typeof vi.fn>>();
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async (_providerId, lookup) => {
         const release = vi.fn();
@@ -417,6 +431,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const releases: ReturnType<typeof vi.fn>[] = [];
     const payloadBytes = SYSTEM_RECORD_OBJECT_CAPS_V1['profile-bundle'];
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async (_providerId, lookup) => {
         const release = vi.fn();
@@ -460,6 +475,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const success = successfulFetch(LOOKUP_A, 41);
     let reservations = 0;
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => success.result,
       controlAdmission: {
@@ -487,6 +503,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     const control = byteAdmission();
     const pending = Promise.withResolvers<SystemRecordExactFetchResultV1>();
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => pending.promise,
       controlAdmission: control,
@@ -514,11 +531,41 @@ describe('agent-profile reconcile exact transport V1', () => {
     });
   });
 
+  it('releases a successful lease when the post-fetch clock regresses', async () => {
+    const success = successfulFetch(LOOKUP_A, 41);
+    const nowMs = vi.fn()
+      .mockReturnValueOnce(100)
+      .mockReturnValueOnce(101)
+      .mockReturnValue(100);
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact: async () => success.result,
+      controlAdmission: byteAdmission(),
+    });
+    const slice = transport.openSlice(Object.freeze({
+      signal: new AbortController().signal,
+      deadlineMs: 3_100,
+      nowMs,
+    }));
+    if (slice === null) throw new Error('test transport slice was not admitted');
+
+    await expect(slice.resolve(LOOKUP_A, new AbortController().signal))
+      .rejects.toThrow(/clock is not monotonic/);
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(slice.stats()).toEqual({ requests: 1, wireBytes: 0 });
+
+    slice.release();
+    expect(success.release).toHaveBeenCalledTimes(1);
+    expect(transport.stats()).toMatchObject({ activeSlice: 0, requests: 1, wireBytes: 0 });
+  });
+
   it('does not memoize cancellation and releases a late successful lease after slice abort', async () => {
     let settle!: (result: SystemRecordExactFetchResultV1) => void;
     const pending = new Promise<SystemRecordExactFetchResultV1>((resolve) => { settle = resolve; });
     const fetchExact = vi.fn(async () => pending);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -550,6 +597,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       wireBytes: 1,
     }));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => providerIds,
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -583,6 +631,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       ? successfulFetch(lookup, 5).result
       : Object.freeze({ outcome: 'not-found', wireBytes: 1 }));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => providerIds,
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -619,6 +668,7 @@ describe('agent-profile reconcile exact transport V1', () => {
         : successful.result;
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -663,6 +713,7 @@ describe('agent-profile reconcile exact transport V1', () => {
         })
       : good.result);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -698,6 +749,7 @@ describe('agent-profile reconcile exact transport V1', () => {
           }),
         }));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -725,6 +777,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     vi.useFakeTimers();
     try {
       const transport = createAgentProfileReconcileTransportV1({
+        networkId: NETWORK,
         listProviderIds: () => ['provider-a'],
         fetchExact: async () => Object.freeze({ outcome: 'not-found', wireBytes: 1 }),
         controlAdmission: byteAdmission(),
@@ -754,6 +807,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       return successfulFetch(lookup, 1).result;
     });
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -791,6 +845,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       }),
     }));
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -832,6 +887,7 @@ describe('agent-profile reconcile exact transport V1', () => {
         })
       : successfulFetch(lookup, 1).result);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -873,6 +929,7 @@ describe('agent-profile reconcile exact transport V1', () => {
         })
       : successfulFetch(lookup, 1).result);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a', 'provider-b'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -896,6 +953,7 @@ describe('agent-profile reconcile exact transport V1', () => {
       ? Object.freeze({ outcome: 'not-found', wireBytes: 1 })
       : successfulFetch(lookup, 2).result);
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -927,6 +985,50 @@ describe('agent-profile reconcile exact transport V1', () => {
     });
   });
 
+  it('re-fetches cached inventory misses instead of returning zero-byte rejections', async () => {
+    const fetchExact = vi.fn(async (): Promise<SystemRecordExactFetchResultV1> => (
+      Object.freeze({ outcome: 'not-found', wireBytes: 7 })
+    ));
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const request = Object.freeze({
+      rootDescriptorDigest: DIGEST_A,
+      objectDigest: DIGEST_B,
+      expectedKind: 'inventory-leaf' as const,
+      path: Object.freeze([0]),
+    });
+
+    const first = openSlice(transport, () => 0);
+    await expect(first.loadInventoryObject(request, new AbortController().signal))
+      .resolves.toEqual({
+        outcome: 'rejected',
+        rejection: 'not-found',
+        wireBytes: 7,
+      });
+    first.release();
+
+    const second = openSlice(transport, () => 0);
+    await expect(second.loadInventoryObject(request, new AbortController().signal))
+      .resolves.toEqual({
+        outcome: 'rejected',
+        rejection: 'not-found',
+        wireBytes: 7,
+      });
+    second.release();
+
+    expect(fetchExact).toHaveBeenCalledTimes(2);
+    expect(transport.stats()).toMatchObject({
+      requests: 2,
+      wireBytes: 14,
+      negativeMemoEntries: 1,
+      negativeMemoHits: 0,
+    });
+  });
+
   it.each([
     ['not-found', 'not-found'],
     ['unsupported', 'not-found'],
@@ -941,6 +1043,7 @@ describe('agent-profile reconcile exact transport V1', () => {
     ['closed', 'transport'],
   ] as const)('maps exact inventory %s to %s rejection', async (outcome, rejection) => {
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact: async () => Object.freeze({ outcome, wireBytes: 7 }),
       controlAdmission: byteAdmission(),
@@ -962,6 +1065,7 @@ describe('agent-profile reconcile exact transport V1', () => {
   it('rejects broad root and inventory lookups before opening an exact fetch', async () => {
     const fetchExact = vi.fn();
     const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
       listProviderIds: () => ['provider-a'],
       fetchExact,
       controlAdmission: byteAdmission(),
@@ -976,6 +1080,53 @@ describe('agent-profile reconcile exact transport V1', () => {
     }), new AbortController().signal)).rejects.toThrow(/exact inventory coordinates/);
     slice.release();
     expect(fetchExact).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed exact coordinates before provider, memo, budget, or admission effects', async () => {
+    const listProviderIds = vi.fn(() => ['provider-a']);
+    const fetchExact = vi.fn();
+    const control = byteAdmission();
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds,
+      fetchExact,
+      controlAdmission: control,
+    });
+    const continuation = transport.openArtifactContinuation();
+    if (continuation === null) throw new Error('test continuation was not admitted');
+    const admittedBytes = control.activeBytes();
+    const admittedReservations = control.activeReservations();
+    const slice = openSlice(transport, () => 0);
+    const repository = continuation.bind(slice);
+
+    await expect(repository.resolve(Object.freeze({
+      type: 'object',
+      objectKind: 'agent-profile-head',
+      objectDigest: 'not-a-digest',
+    }) as unknown as SystemRecordArtifactLookupV1, new AbortController().signal))
+      .rejects.toThrow(/digest/i);
+    await expect(slice.loadInventoryObject(Object.freeze({
+      rootDescriptorDigest: DIGEST_A,
+      objectDigest: DIGEST_B,
+      expectedKind: 'inventory-leaf',
+      path: Object.freeze([-1]),
+    }), new AbortController().signal)).rejects.toThrow(/path/i);
+
+    expect(listProviderIds).not.toHaveBeenCalled();
+    expect(fetchExact).not.toHaveBeenCalled();
+    expect(slice.stats()).toEqual({ requests: 0, wireBytes: 0 });
+    expect(transport.stats()).toMatchObject({
+      negativeMemoEntries: 0,
+      negativeMemoHits: 0,
+      negativeMemoWrites: 0,
+    });
+    expect(control.activeBytes()).toBe(admittedBytes);
+    expect(control.activeReservations()).toBe(admittedReservations);
+
+    slice.release();
+    continuation.release();
+    expect(control.activeBytes()).toBe(0);
+    expect(control.activeReservations()).toBe(0);
   });
 });
 
