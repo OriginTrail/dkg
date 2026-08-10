@@ -16,6 +16,7 @@ import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import {
   getSyncCheckpointKey,
+  isSelectedSwmMetaRetentionScope,
   type SyncCheckpointScope,
   type SyncCheckpointStore,
 } from '../checkpoint/state.js';
@@ -846,6 +847,44 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       logWarn(
         ctx,
         `Durable data transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; returning a verifiable prefix at raw offset ${offset}`,
+      );
+      phaseTelemetry.finish('timed_out', allQuads.length);
+      return {
+        quads: allQuads,
+        bytesReceived,
+        resumedFromOffset,
+        responderSessionStartedFresh,
+        nextOffset: offset,
+        checkpointKey,
+        completed: false,
+        timedOut: true,
+      };
+    }
+
+    // Selected RFC-64 SWM metadata has a stricter all-or-nothing activation
+    // boundary than its transfer boundary. Once at least one page from this
+    // exact scoped responder session has passed decode/parse/accumulation
+    // checks, a later retryable TRANSPORT exhaustion may return that validated
+    // prefix to its single in-memory owner. The owner retains it with this
+    // checkpoint/session and never exposes it to Blazegraph until the metadata
+    // response completes and the ordinary SWM verification path runs.
+    //
+    // Keep this narrower than `isSyncBackoffWorthyError`: responder denials,
+    // validation/integrity rejection, local request construction/signing, and
+    // caller/node aborts all throw and force the owner to discard its prefix.
+    if (
+      includeSharedMemory
+      && phase === 'meta'
+      && isSelectedSwmMetaRetentionScope(requesterScope)
+      && responsePages > 0
+      && allQuads.length > 0
+      && signal?.aborted !== true
+      && isSyncTransportFailure(err)
+      && isSyncBackoffWorthyError(err)
+    ) {
+      logWarn(
+        ctx,
+        `Selected SWM metadata transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; retaining a private prefix at raw offset ${offset}`,
       );
       phaseTelemetry.finish('timed_out', allQuads.length);
       return {

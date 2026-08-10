@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   contextGraphWorkspaceMetaGraphUri,
   PROTOCOL_SYNC,
+  type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -9,11 +10,18 @@ import type {
   SharedMemorySyncResult,
   SwmSnapshotCoverage,
 } from '../src/dkg-agent-types.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import {
+  closeSelectedSwmMetaTransfers,
+  LifecycleSyncMethods,
+} from '../src/dkg-agent-lifecycle.js';
 import {
   runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
-import type { SelectedSwmMetaContinuation } from '../src/sync/selected-swm-meta-fetcher.js';
+import {
+  createSelectedSwmMetaFetcher,
+  SelectedSwmMetaTransferCoordinator,
+  type SelectedSwmMetaContinuation,
+} from '../src/sync/selected-swm-meta-fetcher.js';
 import {
   applySelectedSwmFreshnessResolution,
   classifySelectedSwmRoundFreshness,
@@ -25,6 +33,8 @@ import {
   type SyncPageFetchOptions,
 } from '../src/sync/requester/page-fetch.js';
 import { estimateQuadHeapBytes } from '../src/sync/memory-telemetry.js';
+import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
+import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
 const PEER = '12D3KooWSelectedCompleteSwmProvider';
 
@@ -63,6 +73,20 @@ function snapshotManifest(contextGraphId: string, count: number): {
     payloadByRef.set(digest, payload);
   }
   return { meta, payloadByRef };
+}
+
+const selectedMetaTestContext = {
+  operationId: 'selected-meta-owner-test',
+  operationName: 'sync',
+} as OperationContext;
+
+function selectedMetaRetentionBudget() {
+  return createSelectedSwmMetaRetentionBudget({
+    maxRows: 100,
+    maxBytesEstimate: 1024 * 1024,
+    maxPrefixRows: 100,
+    maxPrefixBytesEstimate: 1024 * 1024,
+  });
 }
 
 function cleanDurableResult(): SharedMemorySyncResult {
@@ -577,10 +601,162 @@ function createSelectedSwmLifecycleHarness(
     },
     close: async () => {
       dateNow.mockRestore();
+      await closeSelectedSwmMetaTransfers(agent);
       await store.close();
     },
   };
 }
+
+describe('selected SWM metadata transfer ownership', () => {
+  it('eagerly releases an expired prefix without requiring another reconciler invocation', async () => {
+    const peerId = 'peer-expiry';
+    const contextGraphId = 'cg-expiry';
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const deleteCheckpoint = vi.fn();
+    let ownedFetcher: ReturnType<typeof createSelectedSwmMetaFetcher> | undefined;
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+
+    const createFetcher = () => {
+      ownedFetcher = createSelectedSwmMetaFetcher({
+        remotePeerId: peerId,
+        requesterScope: 'selected-swm-meta:retained:eager-expiry',
+        retentionBudget: selectedMetaRetentionBudget(),
+        deleteCheckpoint,
+        now: clock,
+        retentionTtlMs: 20,
+        fetchPage: async () => ({
+          quads: [{ subject: 'urn:expiry', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+          bytesReceived: 1,
+          resumedFromOffset: 0,
+          nextOffset: 1,
+          checkpointKey: 'expiry-checkpoint',
+          completed: false,
+          timedOut: true,
+        }),
+      });
+      return ownedFetcher;
+    };
+
+    try {
+      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch({
+        ctx: selectedMetaTestContext,
+        remotePeerId: peerId,
+        contextGraphId,
+        graphUri: 'urn:meta',
+        deadline: clock() + 1_000,
+      }));
+      expect(ownedFetcher?.continuation(contextGraphId).progress).toBe(1);
+
+      elapsedMs = 21;
+      await vi.waitFor(
+        () => expect(ownedFetcher?.continuation(contextGraphId).progress).toBeUndefined(),
+        { timeout: 250 },
+      );
+      expect(deleteCheckpoint).toHaveBeenCalledWith('expiry-checkpoint');
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('expires Context Graph prefixes independently inside one peer owner', async () => {
+    const peerId = 'peer-multi-cg';
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    let ownedFetcher: ReturnType<typeof createSelectedSwmMetaFetcher> | undefined;
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    const createFetcher = () => {
+      ownedFetcher = createSelectedSwmMetaFetcher({
+        remotePeerId: peerId,
+        requesterScope: 'selected-swm-meta:retained:multi-cg',
+        retentionBudget: selectedMetaRetentionBudget(),
+        deleteCheckpoint: () => {},
+        now: clock,
+        retentionTtlMs: 30,
+        fetchPage: async ({ contextGraphId }) => ({
+          quads: [{
+            subject: `urn:${contextGraphId}`,
+            predicate: 'urn:p',
+            object: '"o"',
+            graph: 'urn:meta',
+          }],
+          bytesReceived: 1,
+          resumedFromOffset: 0,
+          nextOffset: 1,
+          checkpointKey: `${contextGraphId}:checkpoint`,
+          completed: false,
+          timedOut: true,
+        }),
+      });
+      return ownedFetcher;
+    };
+    const fetch = (contextGraphId: string) => coordinator.run(
+      peerId,
+      createFetcher,
+      (fetcher) => fetcher.strategy.fetch({
+        ctx: selectedMetaTestContext,
+        remotePeerId: peerId,
+        contextGraphId,
+        graphUri: 'urn:meta',
+        deadline: clock() + 1_000,
+      }),
+    );
+
+    try {
+      const first = await fetch('cg-a');
+      expect(first.result.quads.map((quad) => quad.subject)).toEqual(['urn:cg-a']);
+      elapsedMs = 20;
+      const second = await fetch('cg-b');
+      expect(second.result.quads.map((quad) => quad.subject)).toEqual(['urn:cg-b']);
+
+      elapsedMs = 31;
+      await vi.waitFor(
+        () => expect(ownedFetcher?.continuation('cg-a').progress).toBeUndefined(),
+        { timeout: 250 },
+      );
+      expect(ownedFetcher?.continuation('cg-b').progress).toBe(1);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('does not serialize independent peers behind one transfer owner', async () => {
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    let releasePeerA!: () => void;
+    const peerARelease = new Promise<void>((resolve) => { releasePeerA = resolve; });
+    let signalPeerAStarted!: () => void;
+    const peerAStarted = new Promise<void>((resolve) => { signalPeerAStarted = resolve; });
+    const createEmptyFetcher = (peerId: string) => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: `selected-swm-meta:retained:${peerId}`,
+      retentionBudget: selectedMetaRetentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage: async () => {
+        throw new Error('unused');
+      },
+    });
+
+    try {
+      const peerA = coordinator.run('peer-a', () => createEmptyFetcher('peer-a'), async () => {
+        signalPeerAStarted();
+        await peerARelease;
+      });
+      await peerAStarted;
+      let peerBStarted = false;
+      await coordinator.run('peer-b', () => createEmptyFetcher('peer-b'), async () => {
+        peerBStarted = true;
+      });
+      expect(peerBStarted).toBe(true);
+      releasePeerA();
+      await peerA;
+    } finally {
+      releasePeerA();
+      await coordinator.close();
+    }
+  });
+});
 
 describe('shared-memory freshness classification', () => {
   it('owns producer recovery, bounding, and final classification as one invariant', () => {
@@ -1228,7 +1404,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
       expect(harness.probes.metaFetches()).toBe(2);
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
-      expect(harness.probes.metaRequesterScopes[0]).toMatch(/^selected-swm-meta:\d+$/);
+      expect(harness.probes.metaRequesterScopes[0]).toMatch(/^selected-swm-meta:retained:\d+$/);
       expect(harness.probes.metaRequesterScopes[1]).toBe(
         harness.probes.metaRequesterScopes[0],
       );
@@ -1248,6 +1424,326 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       });
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
+      await harness.close();
+    }
+  });
+
+  it('resumes one exact metadata prefix across outer reconciler invocations without partial activation', async () => {
+    const publicCg = 'selected-cross-outer-metadata';
+    const manifest = snapshotManifest(publicCg, 3);
+    const firstPrefix = manifest.meta.slice(0, 4);
+    const finalSuffix = manifest.meta.slice(4);
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: firstPrefix,
+          resumedFromOffset: 0,
+          nextOffset: firstPrefix.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: finalSuffix,
+          resumedFromOffset: firstPrefix.length,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      const first = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+      );
+
+      expect(first.metadataContinuationYields).toBe(1);
+      expect(harness.probes.processedMetaBatches).toEqual([]);
+
+      const second = await callSyncSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+      );
+
+      expect(second.failedPhases).toBe(0);
+      expect(harness.probes.metaRequesterScopes).toHaveLength(2);
+      expect(harness.probes.metaRequesterScopes[1]).toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+    } finally {
+      if (previousBudget === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      } else {
+        process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      }
+      await harness.close();
+    }
+  });
+
+  it('expires a cross-invocation prefix and starts a fresh responder scope', async () => {
+    const publicCg = 'selected-cross-outer-expiry';
+    const manifest = snapshotManifest(publicCg, 2);
+    let wallNow = 1_000;
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      metaPages: [
+        {
+          quads: manifest.meta.slice(0, 2),
+          resumedFromOffset: 0,
+          nextOffset: 2,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+      wallNow += DURABLE_DATA_SYNC_SESSION_TTL_MS + 1;
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+
+      expect(harness.probes.metaRequesterScopes).toHaveLength(2);
+      expect(harness.probes.metaRequesterScopes[1]).not.toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+    } finally {
+      if (previousBudget === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      } else {
+        process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      }
+      await harness.close();
+    }
+  });
+
+  it('drops an old cross-invocation prefix when the responder replaces its session', async () => {
+    const publicCg = 'selected-cross-outer-session-replacement';
+    const manifest = snapshotManifest(publicCg, 2);
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: manifest.meta.slice(0, 2),
+          resumedFromOffset: 0,
+          nextOffset: 14_000,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+
+      expect(harness.probes.metaRequesterScopes[1]).toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+    } finally {
+      if (previousBudget === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      } else {
+        process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      }
+      await harness.close();
+    }
+  });
+
+  it.each([
+    ['caller abort', Object.assign(new Error('caller cancelled'), { name: 'AbortError' })],
+    ['integrity rejection', new Error('metadata integrity rejected')],
+    ['local request build failure', new Error('wallet signing failed')],
+  ])('discards retained state after a cross-invocation %s', async (_label, failure) => {
+    const publicCg = `selected-cross-outer-failure-${_label.replaceAll(' ', '-')}`;
+    const manifest = snapshotManifest(publicCg, 2);
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: manifest.meta.slice(0, 2),
+          resumedFromOffset: 0,
+          nextOffset: 2,
+          completed: false,
+          timedOut: true,
+        },
+        // Fetch two throws from onMetaFetch. Fetch three must therefore begin
+        // a new owner at offset zero and may accept this full replacement.
+        {
+          quads: [],
+          resumedFromOffset: 0,
+          nextOffset: 0,
+          completed: false,
+          timedOut: false,
+        },
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      onMetaFetch: ({ fetch }) => {
+        if (fetch === 2) throw failure;
+      },
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+      const failed = await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+      expect(failed.failedPhases + failed.failedPeers).toBeGreaterThan(0);
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+
+      expect(harness.probes.metaRequesterScopes).toHaveLength(3);
+      expect(harness.probes.metaRequesterScopes[1]).toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.metaRequesterScopes[2]).not.toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+    } finally {
+      if (previousBudget === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      } else {
+        process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      }
+      await harness.close();
+    }
+  });
+
+  it('releases retained prefixes on node-lifecycle cleanup', async () => {
+    const publicCg = 'selected-cross-outer-node-close';
+    const manifest = snapshotManifest(publicCg, 2);
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 1_001 },
+      metaPages: [
+        {
+          quads: manifest.meta.slice(0, 2),
+          resumedFromOffset: 0,
+          nextOffset: 2,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: manifest.meta,
+          resumedFromOffset: 0,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+      await closeSelectedSwmMetaTransfers(harness.agent);
+      await callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        sharedMemorySyncPlan: plan,
+      });
+
+      expect(harness.probes.metaRequesterScopes).toHaveLength(2);
+      expect(harness.probes.metaRequesterScopes[1]).not.toBe(
+        harness.probes.metaRequesterScopes[0],
+      );
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+    } finally {
+      if (previousBudget === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      } else {
+        process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      }
       await harness.close();
     }
   });
@@ -1521,18 +2017,42 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
-  it('isolates overlapping selected invocations with unique requester scopes', async () => {
+  it('serializes overlapping selected invocations behind one retained-prefix owner', async () => {
     const publicCg = 'selected-overlap-isolation';
-    const manifest = snapshotManifest(publicCg, 0);
-    let releaseBoth!: () => void;
-    const bothStarted = new Promise<void>((resolve) => { releaseBoth = resolve; });
+    const manifest = snapshotManifest(publicCg, 2);
+    const firstPrefix = manifest.meta.slice(0, 2);
+    const finalSuffix = manifest.meta.slice(2);
+    const previousBudget = process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+    process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = '0';
+    let signalFirstStarted!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirstStarted = resolve; });
+    let releaseFirst!: () => void;
+    const firstRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const harness = createSelectedSwmLifecycleHarness({
       contextGraphs: { public: publicCg },
       manifest,
       clock: { now: () => 1_000, deadline: () => 61_000 },
-      onMetaFetch: ({ fetch }) => {
-        if (fetch === 2) releaseBoth();
-        return bothStarted;
+      metaPages: [
+        {
+          quads: firstPrefix,
+          resumedFromOffset: 0,
+          nextOffset: firstPrefix.length,
+          completed: false,
+          timedOut: true,
+        },
+        {
+          quads: finalSuffix,
+          resumedFromOffset: firstPrefix.length,
+          nextOffset: manifest.meta.length,
+          completed: true,
+          timedOut: false,
+        },
+      ],
+      onMetaFetch: async ({ fetch }) => {
+        if (fetch === 1) {
+          signalFirstStarted();
+          await firstRelease;
+        }
       },
     });
     const plan = {
@@ -1542,24 +2062,35 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     };
 
     try {
-      await Promise.all([
-        callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
-          selectedSwmPriority: true,
-          priority: 2_000,
-          sharedMemorySyncPlan: plan,
-        }),
-        callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
-          selectedSwmPriority: true,
-          priority: 2_001,
-          sharedMemorySyncPlan: plan,
-        }),
-      ]);
+      const first = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        priority: 2_000,
+        sharedMemorySyncPlan: plan,
+      });
+      await firstStarted;
+      const second = callSyncSharedMemoryFromPeerDetailed(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        priority: 2_001,
+        sharedMemorySyncPlan: plan,
+      });
+      await Promise.resolve();
+      expect(harness.probes.metaFetches()).toBe(1);
+      releaseFirst();
+      await Promise.all([first, second]);
 
       expect(harness.probes.metaRequesterScopes).toHaveLength(2);
-      expect(new Set(harness.probes.metaRequesterScopes).size).toBe(2);
+      expect(new Set(harness.probes.metaRequesterScopes).size).toBe(1);
       expect(harness.probes.metaSinceBatchIds).toEqual([undefined, undefined]);
+      expect(harness.probes.maxActiveAdmissions()).toBe(1);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
+      releaseFirst();
+      if (previousBudget === undefined) {
+        delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
+      } else {
+        process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS = previousBudget;
+      }
       await harness.close();
     }
   });
@@ -1638,7 +2169,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(ordinarySummary).not.toBe(selectedSummary);
       expect(harness.probes.metaFetches()).toBe(3);
       expect(harness.probes.metaRequesterScopes[0]).toBeUndefined();
-      expect(harness.probes.metaRequesterScopes[1]).toMatch(/^selected-swm-meta:\d+$/);
+      expect(harness.probes.metaRequesterScopes[1]).toMatch(/^selected-swm-meta:retained:\d+$/);
       expect(harness.probes.metaRequesterScopes[2]).toBe(
         harness.probes.metaRequesterScopes[1],
       );
@@ -1660,13 +2191,13 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
-  it('shares one metadata retention budget across overlapping selected lifecycles', async () => {
+  it('releases the shared metadata budget before the next serialized owner generation', async () => {
     const publicCg = 'selected-overlap-shared-retention-budget';
     const manifest = snapshotManifest(publicCg, 2);
     let firstFetchStarted!: () => void;
     const firstStarted = new Promise<void>((resolve) => { firstFetchStarted = resolve; });
-    let secondFetchStarted!: () => void;
-    const secondStarted = new Promise<void>((resolve) => { secondFetchStarted = resolve; });
+    let releaseFirst!: () => void;
+    const firstRelease = new Promise<void>((resolve) => { releaseFirst = resolve; });
     const acceptedRows: Array<number | undefined> = [];
     const harness = createSelectedSwmLifecycleHarness({
       contextGraphs: { public: publicCg },
@@ -1698,9 +2229,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         acceptedRows.push(maxAcceptedQuads);
         if (fetch === 1) {
           firstFetchStarted();
-          await secondStarted;
-        } else if (fetch === 2) {
-          secondFetchStarted();
+          await firstRelease;
         }
       },
     });
@@ -1722,16 +2251,20 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         priority: 2_001,
         sharedMemorySyncPlan: plan,
       });
+      await Promise.resolve();
+      expect(harness.probes.metaFetches()).toBe(1);
+      releaseFirst();
 
       const [firstSummary, secondSummary] = await Promise.all([first, second]);
 
-      expect(acceptedRows).toEqual([manifest.meta.length, 0]);
+      expect(acceptedRows).toEqual([manifest.meta.length, manifest.meta.length]);
       expect(harness.probes.metaFetches()).toBe(2);
-      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
+      expect(harness.probes.processedMetaBatches).toEqual([manifest.meta, manifest.meta]);
       expect(firstSummary.failedPhases).toBe(0);
-      expect(secondSummary.failedPhases).toBe(1);
+      expect(secondSummary.failedPhases).toBe(0);
       expect(harness.agent.syncCheckpoints.size).toBe(0);
     } finally {
+      releaseFirst();
       await harness.close();
     }
   });

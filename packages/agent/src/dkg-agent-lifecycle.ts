@@ -263,6 +263,7 @@ import {
 import { insertWithOversizeGuard, type OversizeGuardHooks } from './sync/oversize-filter.js';
 import { runOversizeSweep } from './sync/oversize-sweep.js';
 import {
+  type SelectedSwmMetaRetentionScope,
   type SyncCheckpointScope,
 } from './sync/checkpoint/state.js';
 import {
@@ -292,7 +293,11 @@ import {
   selectSwmSnapshotCoverage,
   sharedMemoryOwnershipKeyFromGraph,
 } from './sync/requester/shared-memory-sync.js';
-import { createSelectedSwmMetaFetcher } from './sync/selected-swm-meta-fetcher.js';
+import {
+  createSelectedSwmMetaFetcher,
+  SelectedSwmMetaTransferCoordinator,
+  type SelectedSwmMetaFetcher,
+} from './sync/selected-swm-meta-fetcher.js';
 import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
@@ -963,6 +968,30 @@ const selectedSwmMetaRetentionBudgets = new WeakMap<
   { signature: string; budget: SelectedSwmMetaRetentionBudget }
 >();
 
+const selectedSwmMetaTransferCoordinators = new WeakMap<
+  object,
+  SelectedSwmMetaTransferCoordinator
+>();
+
+function selectedSwmMetaTransferCoordinatorFor(
+  owner: object,
+): SelectedSwmMetaTransferCoordinator {
+  let coordinator = selectedSwmMetaTransferCoordinators.get(owner);
+  if (!coordinator) {
+    coordinator = new SelectedSwmMetaTransferCoordinator();
+    selectedSwmMetaTransferCoordinators.set(owner, coordinator);
+  }
+  return coordinator;
+}
+
+/** Release every retained selected-SWM prefix before agent storage teardown. */
+export async function closeSelectedSwmMetaTransfers(owner: object): Promise<void> {
+  const coordinator = selectedSwmMetaTransferCoordinators.get(owner);
+  if (!coordinator) return;
+  selectedSwmMetaTransferCoordinators.delete(owner);
+  await coordinator.close();
+}
+
 function selectedSwmMetaRetentionBudgetFor(
   owner: object,
   limits: SelectedSwmMetaRetentionLimits,
@@ -975,9 +1004,9 @@ function selectedSwmMetaRetentionBudgetFor(
   return budget;
 }
 
-function nextSelectedSwmMetaRequesterScope(): SyncCheckpointScope {
+function nextSelectedSwmMetaRequesterScope(): SelectedSwmMetaRetentionScope {
   selectedSwmMetaInvocationSequence += 1;
-  return `selected-swm-meta:${selectedSwmMetaInvocationSequence}`;
+  return `selected-swm-meta:retained:${selectedSwmMetaInvocationSequence}`;
 }
 
 function asSyncFetchAbortError(reason: unknown): Error {
@@ -6265,12 +6294,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const selectedSwmEnabled = Boolean(
       options?.selectedSwmPriority && publicContextGraphIds.length > 0,
     );
-    // This scope is unique even when two selected calls overlap on the same
-    // peer/CG through different top-level single-flight keys. Their in-memory
-    // prefixes must never share a responder cursor or pooled fetch session.
-    const selectedMetaRequesterScope = selectedSwmEnabled
-      ? nextSelectedSwmMetaRequesterScope()
-      : undefined;
     const selectedMetaRetentionBudget = selectedSwmEnabled
       ? (() => {
         const budget = resolveSyncResponderSnapshotPolicy(
@@ -6285,10 +6308,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       })()
       : undefined;
-    const selectedMetaFetcher = selectedSwmEnabled
-      ? createSelectedSwmMetaFetcher({
+    const createSelectedMetaFetcher = (): SelectedSwmMetaFetcher => {
+      const requesterScope = nextSelectedSwmMetaRequesterScope();
+      return createSelectedSwmMetaFetcher({
         remotePeerId,
-        requesterScope: selectedMetaRequesterScope!,
+        requesterScope,
         retentionBudget: selectedMetaRetentionBudget!,
         deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
         fetchPage: (request) => this.fetchSyncPages(
@@ -6305,8 +6329,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             maxAcceptedHeapBytesEstimate: request.maxAcceptedHeapBytesEstimate,
           },
         ),
-      })
-      : undefined;
+      });
+    };
     const singleFlightKey = sharedMemorySyncSingleFlightKey({
       remotePeerId,
       contextGraphIds,
@@ -6317,7 +6341,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       selectedSwm: selectedSwmEnabled,
     });
 
-    const runSync = async (): Promise<SharedMemorySyncResult> => {
+    const runSync = async (
+      selectedMetaFetcher?: SelectedSwmMetaFetcher,
+    ): Promise<SharedMemorySyncResult> => {
       const subGraphAdmissionByContextGraph = new Map<string, Promise<{ registered: string[]; excluded: string[] }>>();
       const getSubGraphAdmission = (contextGraphId: string) => {
         let admission = subGraphAdmissionByContextGraph.get(contextGraphId);
@@ -6639,13 +6665,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
     };
 
-    return runSyncSingleFlight(this, singleFlightKey, runSync, {
+    return runSyncSingleFlight(this, singleFlightKey, () => (
+      selectedSwmEnabled
+        ? selectedSwmMetaTransferCoordinatorFor(this).run(
+          remotePeerId,
+          createSelectedMetaFetcher,
+          runSync,
+        )
+        : runSync()
+    ), {
       scope: 'shared-memory',
       source: options?.source,
-    }).finally(() => {
-      // Never leave a non-zero persisted cursor after its in-memory prefix has
-      // gone out of scope. A later invocation must start at offset zero.
-      selectedMetaFetcher?.cleanup();
     });
   }
 

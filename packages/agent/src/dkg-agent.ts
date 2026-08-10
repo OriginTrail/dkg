@@ -425,7 +425,10 @@ import { SwmSubstrateMethods } from './dkg-agent-swm-substrate.js';
 import { QueryMethods } from './dkg-agent-query.js';
 import { AgentRegistryMethods } from './dkg-agent-registry.js';
 import { WorkspaceCryptoMethods } from './dkg-agent-crypto.js';
-import { LifecycleSyncMethods } from './dkg-agent-lifecycle.js';
+import {
+  closeSelectedSwmMetaTransfers,
+  LifecycleSyncMethods,
+} from './dkg-agent-lifecycle.js';
 import {
   PublishMethods,
   SEAL_CAPABILITY_GAP_CODE,
@@ -1917,6 +1920,10 @@ export class DKGAgent extends DKGAgentBase {
       await this.node.stop();
     } finally {
       this.finalizationRuntime.markStopped();
+      // Node stop aborts active transport first; now drain the peer-serial
+      // owners and release every retained selected-SWM prefix/checkpoint before
+      // the backing store closes.
+      await closeSelectedSwmMetaTransfers(this);
     }
     if (this.syncVerifyWorker) {
       await this.syncVerifyWorker.close();
