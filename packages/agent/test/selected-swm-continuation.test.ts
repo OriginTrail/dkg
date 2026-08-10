@@ -853,6 +853,47 @@ describe('selected RFC-64 SWM continuation', () => {
     }));
   });
 
+  it('keeps the total pass cap global across metadata-to-snapshot transition', async () => {
+    const contextGraphId = 'selected-domain-transition-bounded';
+    let metadataCompleted = false;
+    const run = vi.fn(async () => {
+      metadataCompleted = true;
+      return result(contextGraphId, 0, 3);
+    });
+    const stop = vi.fn();
+    const initialResult = {
+      ...cleanDurableResult(),
+      timedOutPhases: 1,
+      metadataContinuationYields: 1,
+    };
+    const unit = {
+      ...selectedUnit(contextGraphId, initialResult, run),
+      metadataContinuationProgress: () => 1_000,
+      metadataContinuationGeneration: () => 0,
+      metadataContinuationCompleted: () => metadataCompleted,
+    };
+
+    const { summary } = await runSelectedSwmContinuations({
+      providerPeerId: PEER,
+      units: [unit],
+      passConfig: { maxPasses: 2, budgetMs: 600_000 },
+      nowMs: () => 1,
+      emptyResult: cleanDurableResult,
+      runWithAdmission: async (_item, work) => work(),
+      merge,
+      markDeferred: (current) => current,
+      onStop: stop,
+    });
+
+    expect(run).toHaveBeenCalledOnce();
+    expect(summary.continuationPasses).toBe(1);
+    expect(stop).toHaveBeenCalledWith(expect.objectContaining({
+      contextGraphId,
+      continuationPasses: 1,
+      reason: 'max-passes-reached',
+    }));
+  });
+
   it('does not start a continuation after the absolute budget expires', async () => {
     const contextGraphId = 'selected-expired';
     const run = vi.fn(async () => result(contextGraphId, 2, 2));
