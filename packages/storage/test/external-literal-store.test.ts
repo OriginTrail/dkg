@@ -335,6 +335,28 @@ describe('SharedMemoryLiteralBlobStore', () => {
     expect(hydrated.type === 'bindings' ? hydrated.bindings : []).toEqual([{ o: largeLiteral }]);
   });
 
+  it('forwards a structural no-op without externalization and preserves options identity', async () => {
+    const blobDir = await tempBlobDir();
+    const inner = new OxigraphStore();
+    const mutationSpy = vi.spyOn(inner, 'structuredMutation');
+    const store = new SharedMemoryLiteralBlobStore(inner, { blobDir, thresholdBytes: 20 });
+    const externalize = vi.spyOn(
+      store as unknown as { externalizeInsertQuad: (quad: Quad) => Promise<Quad> },
+      'externalizeInsertQuad',
+    );
+    const options = { source: 'literal-blob.noop' };
+
+    await store.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: SWM_GRAPH, subjects: [] },
+    }, options);
+
+    expect(externalize).not.toHaveBeenCalled();
+    expect(mutationSpy).toHaveBeenCalledOnce();
+    expect(mutationSpy.mock.calls[0][1]).toBe(options);
+    expect(Object.isFrozen(mutationSpy.mock.calls[0][0])).toBe(true);
+  });
+
   it('externalizes an over-budget replacement literal before validating the rewritten mutation', async () => {
     const blobDir = await tempBlobDir();
     const inner = new OxigraphStore();

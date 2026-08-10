@@ -156,13 +156,15 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     const inFlight = new Promise<void>((resolve) => { release = resolve; });
     const options = { source: 'agent.test.structured-mutation-effects' };
     let inner!: TripleStore;
+    let observedMutation: unknown;
     const structuredMutation = vi.fn(function (
       this: TripleStore,
-      _mutation: unknown,
+      receivedMutation: unknown,
       receivedOptions: unknown,
     ) {
       expect(this).toBe(inner);
       expect(receivedOptions).toBe(options);
+      observedMutation = receivedMutation;
       return inFlight;
     });
     inner = { structuredMutation } as unknown as TripleStore;
@@ -193,6 +195,17 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     expect(invalidate).toHaveBeenCalledOnce();
     expect(markProjectionDirty).toHaveBeenCalledOnce();
     expect(markProjectionDirty).toHaveBeenCalledWith(undefined, 'urn:test:target');
+    expect(observedMutation).toEqual({
+      kind: 'copy-subject-projection',
+      input: {
+        sourceGraphUris: ['urn:test:source'],
+        targetGraphUri: 'urn:test:target',
+        roots: ['urn:test:root'],
+        descendantSuffix: '/',
+        excludedPredicates: [],
+      },
+    });
+    expect(Object.isFrozen(observedMutation)).toBe(true);
   });
 
   it('does not invalidate structured mutation failures or structural no-ops', async () => {
@@ -211,6 +224,8 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       kind: 'delete-subjects',
       input: { graphUri: 'urn:test:target', subjects: [] },
     });
+    expect(inner.structuredMutation).toHaveBeenCalledOnce();
+    expect(Object.isFrozen(inner.structuredMutation.mock.calls[0][0])).toBe(true);
     expect(invalidate).not.toHaveBeenCalled();
     expect(markProjectionDirty).not.toHaveBeenCalled();
 
@@ -221,5 +236,22 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     })).rejects.toThrow('commit failed');
     expect(invalidate).not.toHaveBeenCalled();
     expect(markProjectionDirty).not.toHaveBeenCalled();
+  });
+
+  it('converts synchronous snapshot validation failures into rejected Promises', async () => {
+    const inner = {
+      structuredMutation: vi.fn(async () => undefined),
+    } as unknown as TripleStore;
+    const store = createListContextGraphsCacheInvalidatingStore(inner, vi.fn(), vi.fn());
+    let result!: Promise<void>;
+
+    expect(() => {
+      result = store.structuredMutation!({
+        kind: 'delete-subjects',
+        input: { graphUri: 'relative', subjects: [] },
+      });
+    }).not.toThrow();
+    await expect(result).rejects.toThrow(/absolute IRI/);
+    expect(inner.structuredMutation).not.toHaveBeenCalled();
   });
 });

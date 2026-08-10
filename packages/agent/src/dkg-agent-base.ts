@@ -110,7 +110,7 @@ import {
   pickNetworkTunables,
   isSparqlUpdateOperation,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, SystemRecordLaneForwarderV1, captureStructuredMutationEffects, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, SystemRecordLaneForwarderV1, captureStructuredMutationSnapshot, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -577,12 +577,12 @@ export function createListContextGraphsCacheInvalidatingStore(
           )
       : undefined,
     structuredMutation: innerStore.structuredMutation
-      ? (mutation, options) => {
-          const effects = captureStructuredMutationEffects(mutation);
-          return invalidateAfterMutation(
-            () => innerStore.structuredMutation!(mutation, options),
-            () => effects !== undefined,
-            () => effects?.touchedGraphs.forEach(
+      ? async (mutation, options) => {
+          const snapshot = captureStructuredMutationSnapshot(mutation);
+          await invalidateAfterMutation(
+            () => innerStore.structuredMutation!(snapshot.mutation, options),
+            () => snapshot.outcome !== 'noop',
+            () => snapshot.effects?.touchedGraphs.forEach(
               (graph) => markProjectionDirty?.(undefined, graph),
             ),
           );

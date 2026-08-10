@@ -156,6 +156,47 @@ describe('GraphSetIndexStore', () => {
     await inner.close();
   });
 
+  it('forwards a known no-op without maintenance and never schedules recovery for its failure', async () => {
+    const graph = 'did:dkg:context-graph:noop';
+    const inner = new OxigraphStore();
+    await inner.insert([q(graph)]);
+    let observed: StructuredMutation | undefined;
+    let observedOptions: QueryOptions | undefined;
+    const failing = new (class extends CountingStore {
+      override async structuredMutation(
+        mutation: StructuredMutation,
+        options?: QueryOptions,
+      ): Promise<void> {
+        observed = mutation;
+        observedOptions = options;
+        throw new Error('no-op preflight failed');
+      }
+    })(inner);
+    const events: GraphSetMutationEvent[] = [];
+    const store = new GraphSetIndexStore(failing, {
+      onMutation: (event) => events.push(event),
+    });
+    const options = { source: 'graph-set.noop' };
+
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    events.length = 0;
+    await expect(store.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: graph, subjects: [] },
+    }, options)).rejects.toThrow('no-op preflight failed');
+
+    expect(observedOptions).toBe(options);
+    expect(observed).toEqual({
+      kind: 'delete-subjects',
+      input: { graphUri: graph, subjects: [] },
+    });
+    expect(Object.isFrozen(observed)).toBe(true);
+    expect(events).toEqual([]);
+    await expect(store.listGraphs()).resolves.toEqual([graph]);
+    expect(failing.listGraphsCalls).toBe(1);
+    await inner.close();
+  });
+
   it('rebuilds a warm graph index after an indeterminate structured mutation failure', async () => {
     const source = 'did:dkg:context-graph:indeterminate-source';
     const target = 'did:dkg:context-graph:indeterminate-target';

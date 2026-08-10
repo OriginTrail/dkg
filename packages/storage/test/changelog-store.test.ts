@@ -286,6 +286,88 @@ describe('ChangelogStore — opaque update handling', () => {
     await base.close();
   });
 
+  it('does not flag reconcile when a known no-op fails during inner preflight', async () => {
+    const base = new OxigraphStore();
+    const failing = new Proxy(base, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') {
+          return async () => { throw new Error('no-op preflight failed'); };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const log = new ChangelogStore(failing);
+
+    await expect(log.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: G1, subjects: [] },
+    })).rejects.toThrow('no-op preflight failed');
+
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+
+  it('keeps an enabled no-op inside the write tail while close drains it', async () => {
+    const base = new OxigraphStore();
+    await base.insert([q('http://ex.org/delete-me', G1)]);
+    let release!: () => void;
+    let started!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+    const calls: Array<{ mutation: StructuredMutation; options?: QueryOptions }> = [];
+    const gated = new Proxy(base, {
+      get(target, property, receiver) {
+        if (property === 'structuredMutation') {
+          return async (mutation: StructuredMutation, options?: QueryOptions) => {
+            calls.push({ mutation, options });
+            if (calls.length === 1) {
+              started();
+              await gate;
+            }
+            await target.structuredMutation(mutation, options);
+          };
+        }
+        const value = Reflect.get(target, property, receiver) as unknown;
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    }) as TripleStore;
+    const appended: unknown[] = [];
+    const log = new ChangelogStore(gated, { onAppend: (record) => appended.push(record) });
+    const options = { source: 'changelog.noop' };
+
+    const mutation = log.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: G1, subjects: ['http://ex.org/delete-me'] },
+    });
+    await firstStarted;
+    const noop = log.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: G1, subjects: [] },
+    }, options);
+    const close = log.close();
+
+    await expect(Promise.race([
+      noop.then(() => 'settled'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('pending'), 25)),
+    ])).resolves.toBe('pending');
+    await expect(log.structuredMutation({
+      kind: 'delete-subjects',
+      input: { graphUri: G1, subjects: [] },
+    })).rejects.toThrow(/store is closing/);
+
+    release();
+    await mutation;
+    await noop;
+    await close;
+
+    expect(calls).toHaveLength(2);
+    expect(calls[1].options).toBe(options);
+    expect(Object.isFrozen(calls[1].mutation)).toBe(true);
+    expect(appended).toHaveLength(1);
+    expect(log.needsReconcile).toBe(false);
+  });
+
   it('an update() with touchedGraphs emits markers; without, it flags reconcile', async () => {
     const base = new OxigraphStore();
     const log = new ChangelogStore(base);
