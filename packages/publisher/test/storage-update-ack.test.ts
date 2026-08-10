@@ -16,6 +16,7 @@ import {
   TypedEventBus,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { catalogPersistSource, type CatalogPersistStep } from '../src/catalog-persistence.js';
 import { ethers } from 'ethers';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 
@@ -40,8 +41,8 @@ function makeQuad(s: string, p: string, o: string, g = 'urn:test:swm'): Quad {
  * injected, and this dead-air guard was inert until CI caught it. Naming more
  * methods would only have moved the next silent break one refactor further out.
  */
-function storeFailingCatalogPersistStep(base: OxigraphStore, step: string): TripleStore {
-  const source = `storage-ack.persistCatalog.${step}`;
+function storeFailingCatalogPersistStep(base: OxigraphStore, step: CatalogPersistStep): TripleStore {
+  const source = catalogPersistSource(step);
   const targetsStep = (args: readonly unknown[]): boolean => args.some(
     (arg) => typeof arg === 'object' && arg !== null
       && (arg as { source?: unknown }).source === source,

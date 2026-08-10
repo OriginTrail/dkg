@@ -5,10 +5,22 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
-function catalogStoreOptions(operation: string, signal?: AbortSignal): QueryOptions {
+/**
+ * The catalog-persist steps, as a closed set. Failure-injection tests target a
+ * step by name, so a renamed step must be a compile error at every call site
+ * rather than a string that silently stops matching.
+ */
+export type CatalogPersistStep = 'deleteSubjects' | 'deleteByPattern' | 'insert' | 'flush';
+
+/** The canonical `QueryOptions.source` tag for one catalog-persist step. */
+export function catalogPersistSource(step: CatalogPersistStep): string {
+  return `storage-ack.persistCatalog.${step}`;
+}
+
+function catalogStoreOptions(step: CatalogPersistStep, signal?: AbortSignal): QueryOptions {
   return {
     priority: 'ack',
-    source: `storage-ack.persistCatalog.${operation}`,
+    source: catalogPersistSource(step),
     ...(signal ? { signal } : {}),
   };
 }

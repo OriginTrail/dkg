@@ -1,5 +1,6 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { StorageACKHandler, type StorageACKHandlerConfig } from '../src/storage-ack-handler.js';
+import { catalogPersistSource } from '../src/catalog-persistence.js';
 import { createStorageAckLifecycleObserver } from '../src/storage-ack-lifecycle-observer.js';
 import {
   computeFlatKCRootV10 as computeFlatKCRoot,
@@ -1085,7 +1086,7 @@ describe('StorageACKHandler', () => {
       expect(deletes).toHaveLength(1);
       expect(deletes[0]?.input).toEqual({ graphUri: catalogGraph, subjects: [cgDid] });
       expect(deletes[0]?.options).toMatchObject({
-        source: 'storage-ack.persistCatalog.deleteSubjects',
+        source: catalogPersistSource('deleteSubjects'),
         priority: 'ack',
       });
       const stale = await base.query(`ASK { GRAPH <${catalogGraph}> { <${cgDid}> <${stalePredicate}> ?o } }`);
