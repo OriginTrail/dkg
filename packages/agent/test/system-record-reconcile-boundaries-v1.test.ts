@@ -50,6 +50,55 @@ function deterministicPeerIds(count: number): string[] {
 }
 
 describe('agent-profile System Record reconciler boundaries V1', () => {
+  it('latches the active slice before invoking reentrant admission code', async () => {
+    const fixture = await publishedFixture();
+    const contextAuthority = createAgentProfileAdmittedSliceContextAuthorityV1(() => 1_000);
+    let acquisitions = 0;
+    let attemptedReentry = false;
+    let invokeNested: (() => Promise<unknown>) | undefined;
+    let nestedAdvance: Promise<unknown> | undefined;
+    const admission: AgentProfileReconcileAdmissionV1 = Object.freeze({
+      tryAcquire() {
+        acquisitions += 1;
+        if (!attemptedReentry) {
+          attemptedReentry = true;
+          nestedAdvance = invokeNested!();
+        }
+        const context = contextAuthority.mint(4_000);
+        return Object.freeze({
+          admittedContext: context,
+          release: () => contextAuthority.revoke(context),
+        });
+      },
+      inspectAdmittedContext: contextAuthority.inspect,
+    });
+    const loadInventoryObject = vi.fn(async () => Object.freeze({
+      outcome: 'rejected' as const,
+      wireBytes: 6,
+      rejection: 'not-found' as const,
+    }));
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission,
+      loadInventoryObject,
+      receiver: receiverWithPreparation(vi.fn()),
+    });
+    const signal = new AbortController().signal;
+    invokeNested = () => reconciler.advance(signal);
+
+    await expect(reconciler.advance(signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'inventory',
+      reason: 'inventory-not-found',
+    });
+    await expect(nestedAdvance).rejects.toThrow(/already has an active slice/);
+    expect(acquisitions).toBe(1);
+    expect(loadInventoryObject).toHaveBeenCalledTimes(1);
+    expect(reconciler.stats()).toMatchObject({ active: 0, peakActive: 1, admittedSlices: 1 });
+  });
+
   it('blocks the next slice after the physical continuation slice cap', async () => {
     const fixture = await publishedFixture();
     const contextAuthority = createAgentProfileAdmittedSliceContextAuthorityV1(() => 0);

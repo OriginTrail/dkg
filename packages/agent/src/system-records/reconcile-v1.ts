@@ -208,13 +208,23 @@ export async function createAgentProfileReconcilerV1(
       runtime: AgentProfileAdmittedSliceRuntimeV1,
     ) => Promise<AgentProfileReconcileSliceResultV1>,
   ): Promise<AgentProfileReconcileSliceResultV1> {
-    const permit = tryAcquire();
-    if (permit === null) return result('deferred', currentPhase(), 0, 0, []);
+    active = true;
+    let permit: AgentProfileReconcilePermitV1 | null;
+    try {
+      permit = tryAcquire();
+    } catch (error) {
+      active = false;
+      throw error;
+    }
+    if (permit === null) {
+      active = false;
+      return result('deferred', currentPhase(), 0, 0, []);
+    }
     let onAbort: (() => void) | undefined;
     let listening = false;
     let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      active = true;
+      if (closed) return result('closed', currentPhase(), 0, 0, []);
       peakActive = 1;
       const controller = new AbortController();
       activeController = controller;
