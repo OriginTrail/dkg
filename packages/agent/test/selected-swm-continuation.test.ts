@@ -14,9 +14,9 @@ import {
   runSelectedSwmContinuations,
 } from '../src/sync/selected-swm-continuation.js';
 import {
-  SelectedSwmMetaTransferCoordinator,
   type SelectedSwmMetaContinuation,
 } from '../src/sync/selected-swm-meta-fetcher.js';
+import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import {
   applySelectedSwmFreshnessResolution,
   classifySelectedSwmRoundFreshness,
@@ -356,6 +356,7 @@ interface SelectedSwmLifecycleHarness {
     readonly dataFetches: () => number;
     readonly metaRequesterScopes: readonly (string | undefined)[];
     readonly metaSinceBatchIds: readonly (string | undefined)[];
+    readonly metaReturnAcceptedPrefixOnRetryableTransportFailure: readonly boolean[];
     readonly maxActiveAdmissions: () => number;
   };
   readonly close: () => Promise<void>;
@@ -393,6 +394,7 @@ function createSelectedSwmLifecycleHarness(
   let dataFetches = 0;
   const metaRequesterScopes: Array<string | undefined> = [];
   const metaSinceBatchIds: Array<string | undefined> = [];
+  const metaReturnAcceptedPrefixOnRetryableTransportFailure: boolean[] = [];
   const processedMetaBatches: Quad[][] = [];
   const dateNow = vi.spyOn(Date, 'now').mockImplementation(options.clock.now);
   let selectedSwmMetaTransfers: SelectedSwmMetaTransferCoordinator | undefined;
@@ -448,6 +450,7 @@ function createSelectedSwmLifecycleHarness(
         requesterScope,
         maxAcceptedQuads,
         maxAcceptedHeapBytesEstimate,
+        returnAcceptedPrefixOnRetryableTransportFailure,
       } = fetchOptions;
       if (phase === 'snapshot') {
         snapshotFetches.push(snapshotRef ?? 'missing-ref');
@@ -457,6 +460,9 @@ function createSelectedSwmLifecycleHarness(
         metaFetches += 1;
         metaRequesterScopes.push(requesterScope);
         metaSinceBatchIds.push(sinceBatchId);
+        metaReturnAcceptedPrefixOnRetryableTransportFailure.push(
+          returnAcceptedPrefixOnRetryableTransportFailure === true,
+        );
         await options.onMetaFetch?.({
           fetch: metaFetches,
           requesterScope,
@@ -590,6 +596,7 @@ function createSelectedSwmLifecycleHarness(
       dataFetches: () => dataFetches,
       metaRequesterScopes,
       metaSinceBatchIds,
+      metaReturnAcceptedPrefixOnRetryableTransportFailure,
       maxActiveAdmissions: () => maxActiveAdmissions,
     },
     close: async () => {
@@ -1325,6 +1332,9 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(harness.probes.metaRequesterScopes[1]).toBe(
         harness.probes.metaRequesterScopes[0],
       );
+      expect(
+        harness.probes.metaReturnAcceptedPrefixOnRetryableTransportFailure,
+      ).toEqual([true, true]);
       expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
     } finally {
       if (previousBudget === undefined) {
