@@ -12,7 +12,6 @@ import {
   type DurableSyncBudget,
 } from '../src/sync/requester/durable-sync-budget.js';
 import {
-  normalizeDurableSyncAbortReason,
   runDurableSync,
   type DurableSyncContext,
   type DurableSyncFetchContext,
@@ -726,18 +725,35 @@ describe('durable sync deadline budget', () => {
     expect(warnings.some((message) => message.includes('only a getter'))).toBe(false);
   });
 
-  it('wraps an immutable non-abort Error reason without mutating it', () => {
+  it('handles an immutable non-abort Error reason without mutating it', async () => {
+    const controller = new AbortController();
     const reason = Object.freeze(new Error('shutdown lifecycle fence'));
+    const logWarn = vi.fn<DurableSyncContext['logWarn']>();
+    const storeInsert = vi.fn(async (_request: DurableSyncStoreInsertRequest) => {});
 
-    const normalized = normalizeDurableSyncAbortReason(reason);
-
-    expect(normalized).not.toBe(reason);
-    expect(normalized).toMatchObject({
-      name: 'AbortError',
-      message: 'shutdown lifecycle fence',
-      cause: reason,
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      graphScoped: false,
+      onVerify: () => controller.abort(reason),
+      storeInsert,
+      storeGraphScopedAsset: async () => 'applied',
+      logWarn,
     });
+
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(controller.signal.reason).toBe(reason);
     expect(reason.name).toBe('Error');
+    expect(storeInsert).not.toHaveBeenCalled();
+    const warnings = logWarn.mock.calls.map(([, message]) => message);
+    expect(warnings.some((message) => message.includes('shutdown lifecycle fence'))).toBe(true);
+    expect(warnings.some((message) => message.includes('read only'))).toBe(false);
+    expect(warnings.some((message) => message.includes('read-only'))).toBe(false);
+    expect(warnings.some((message) => message.includes('only a getter'))).toBe(false);
   });
 });
 

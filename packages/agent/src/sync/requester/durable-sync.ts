@@ -59,8 +59,8 @@ export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 export { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
 export type { ExactDurableFetchDisposition } from './exact-durable-fetch.js';
 
-/** @internal Normalize arbitrary AbortSignal reasons without mutating caller-owned errors. */
-export function normalizeDurableSyncAbortReason(reason: unknown): Error {
+/** Normalize arbitrary AbortSignal reasons without mutating caller-owned errors. */
+function normalizeDurableSyncAbortReason(reason: unknown): Error {
   if (reason instanceof Error && reason.name === 'AbortError') return reason;
 
   const error = new Error(
