@@ -240,11 +240,22 @@ export async function activeTombstoneConflictFixture() {
   };
 }
 
+export interface TransitionQuarantineFixtureOptions {
+  readonly reverseDelivery?: boolean;
+  readonly withTombstoneFork?: boolean;
+  readonly unrelatedTransitionEvidence?: boolean;
+  readonly invalidCompetingPredecessor?: boolean;
+}
+
 export async function transitionQuarantineFixture(
-  reverseDelivery = false,
-  withTombstoneFork = false,
-  unrelatedTransitionEvidence = false,
+  options: TransitionQuarantineFixtureOptions = {},
 ) {
+  const {
+    reverseDelivery = false,
+    withTombstoneFork = false,
+    unrelatedTransitionEvidence = false,
+    invalidCompetingPredecessor = false,
+  } = options;
   const prior = await publishedFixture();
   const nextSigner = createEvmPersonalMessageSignerV1({
     mode: 'custodial',
@@ -313,6 +324,9 @@ export async function transitionQuarantineFixture(
   });
   const competingTransition: AgentProfileAuthorityTransitionV1 = Object.freeze({
     ...transitionBase,
+    ...(invalidCompetingPredecessor
+      ? { priorHeadDigest: nextSeedEnvelope.objectDigest }
+      : {}),
     nextEvmIssuer: alternateSigner.address.toLowerCase(),
     nextRoot: `did:dkg:agent:${alternateSigner.address.toLowerCase()}`,
   });

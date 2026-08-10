@@ -82,10 +82,16 @@ interface CreateAgentProfileReconcilerCommonOptionsV1 {
 }
 
 interface AgentProfileReconcileReceiverAdapterV1 {
+  supportsRow(row: SystemRecordInventoryRowV1): boolean;
   prepare(
     row: SystemRecordInventoryRowV1,
     signal: AbortSignal,
   ): Promise<AgentProfilePreparedCandidateV1>;
+}
+
+interface AgentProfileReconcileContinuationAdapterV1 {
+  supportsRow(row: SystemRecordInventoryRowV1): boolean;
+  openPreparation: AgentProfileContinuationReceiverV1['openPreparation'];
 }
 
 export type CreateAgentProfileReconcilerOptionsV1 =
@@ -113,6 +119,7 @@ export type AgentProfileReconcileBlockReasonV1 =
   | 'inventory-busy'
   | 'inventory-transport'
   | 'activation-leaf-limit'
+  | 'unsupported-row-state'
   | 'receiver-verification-failed'
   | 'apply-root-collision'
   | 'apply-capacity-exhausted'
@@ -200,6 +207,7 @@ interface AgentProfileSliceSourceOpenInputV1 {
 }
 
 interface AgentProfileSliceSourceFactoryV1 {
+  supportsRow(row: SystemRecordInventoryRowV1): boolean;
   tryOpen(input: AgentProfileSliceSourceOpenInputV1): AgentProfileSliceSourceOpenResultV1;
   clearPreparation(): void;
   retainedStats(): Readonly<{
@@ -215,7 +223,7 @@ function createSliceSourceFactoryV1(
   options: CreateAgentProfileReconcilerOptionsV1,
 ): AgentProfileSliceSourceFactoryV1 {
   const networkId = options.networkId;
-  const openPreparation = options.transport === undefined
+  const continuationReceiver = options.transport === undefined
     ? undefined
     : normalizeAgentProfileContinuationForReconcileV1(options.receiver);
   let preparation: AgentProfilePreparationV1 | undefined;
@@ -240,11 +248,11 @@ function createSliceSourceFactoryV1(
     signal: AbortSignal,
   ): Promise<AgentProfilePreparedCandidateV1> => {
     if (closed) throw new Error('agent-profile slice source factory is closed');
-    if (openPreparation === undefined) {
+    if (continuationReceiver === undefined) {
       throw new Error('agent-profile transport receiver does not support continuation');
     }
     selectRow(row);
-    preparation ??= openPreparation(row);
+    preparation ??= continuationReceiver.openPreparation(row);
     return preparation.prepare(artifacts, signal);
   };
   const retainedStats = () => {
@@ -262,11 +270,15 @@ function createSliceSourceFactoryV1(
     clearPreparation();
   };
   if (options.transport !== undefined) {
+    if (continuationReceiver === undefined) {
+      throw new Error('agent-profile transport receiver does not support continuation');
+    }
     const openTransportSlice = options.transport.openSlice.bind(options.transport);
     const openArtifactContinuation = options.transport.openArtifactContinuation.bind(
       options.transport,
     );
     return Object.freeze({
+      supportsRow: continuationReceiver.supportsRow,
       tryOpen(input: AgentProfileSliceSourceOpenInputV1): AgentProfileSliceSourceOpenResultV1 {
         const transportSlice = openTransportSlice(input);
         if (transportSlice === null) return Object.freeze({ status: 'deferred' });
@@ -300,6 +312,7 @@ function createSliceSourceFactoryV1(
   const loadInventoryObject = options.loadInventoryObject;
   const receiver = normalizeAgentProfileReceiverForReconcileV1(options.receiver);
   return Object.freeze({
+    supportsRow: receiver.supportsRow,
     tryOpen(): AgentProfileSliceSourceOpenResultV1 {
       return Object.freeze({
         status: 'opened',
@@ -322,34 +335,30 @@ function normalizeAgentProfileReceiverForReconcileV1(
 ): AgentProfileReconcileReceiverAdapterV1 {
   if (isAgentProfileCandidateReceiverV1(receiver)) {
     return Object.freeze({
+      supportsRow: () => true,
       prepare: receiver.prepareCandidate.bind(receiver),
     });
   }
   return Object.freeze({
-    prepare(row: SystemRecordInventoryRowV1, signal: AbortSignal) {
-      if (row.tombstone || row.quarantined) {
-        throw new Error(
-          'active-only agent-profile receiver rejected a non-active inventory row',
-        );
-      }
-      return receiver.prepareActive(row, signal);
-    },
+    supportsRow: isOrdinaryActiveInventoryRowV1,
+    prepare: receiver.prepareActive.bind(receiver),
   });
 }
 
 function normalizeAgentProfileContinuationForReconcileV1(
   receiver: AgentProfileContinuationReceiverV1,
-): AgentProfileContinuationReceiverV1['openPreparation'] {
+): AgentProfileReconcileContinuationAdapterV1 {
   const openPreparation = receiver.openPreparation.bind(receiver);
-  if (isAgentProfileCandidateReceiverV1(receiver)) return openPreparation;
-  return (row: SystemRecordInventoryRowV1) => {
-    if (row.tombstone || row.quarantined) {
-      throw new Error(
-        'active-only agent-profile continuation rejected a non-active inventory row',
-      );
-    }
-    return openPreparation(row);
-  };
+  return Object.freeze({
+    supportsRow: isAgentProfileCandidateReceiverV1(receiver)
+      ? () => true
+      : isOrdinaryActiveInventoryRowV1,
+    openPreparation,
+  });
+}
+
+function isOrdinaryActiveInventoryRowV1(row: SystemRecordInventoryRowV1): boolean {
+  return !row.tombstone && !row.quarantined;
 }
 
 function isAgentProfileCandidateReceiverV1(
@@ -656,6 +665,10 @@ export async function createAgentProfileReconcilerV1(
         return result('blocked', 'records', 0, 0, outcomes, 'continuation-limit');
       }
       const row = pendingRows[0]!;
+      if (!sourceFactory.supportsRow(row)) {
+        sourceFactory.clearPreparation();
+        return result('blocked', 'records', 0, 0, outcomes, 'unsupported-row-state');
+      }
       if (predispatchBudgetUnavailable(runtime)) {
         sourceFactory.clearPreparation();
         return runtime.stop('records', outcomes);

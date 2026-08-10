@@ -9,6 +9,7 @@ import {
 import type {
   AgentProfileArtifactSourcesV1,
   AgentProfileCandidateContinuationReceiverV1,
+  AgentProfileContinuationReceiverV1,
   AgentProfileReceiverAnyCandidateV1,
 } from '../src/system-records/receiver-v1.js';
 import { createAgentProfileCandidateReceiverV1 } from '../src/system-records/receiver-v1.js';
@@ -29,6 +30,76 @@ import { NETWORK } from './support/agent-profile-producer-v1-fixture.js';
 import { agentProfileArtifactSources } from './support/agent-profile-artifact-sources-v1-fixture.js';
 
 describe('agent-profile reconciler exact transport integration V1', () => {
+  it('reports unsupported non-active rows before transport receiver preparation', async () => {
+    const fixture = await conflictReconcileFixture('active');
+    const fetchExact = vi.fn(async (
+      _providerId: string,
+      lookup: SystemRecordExactArtifactLookupV1,
+      signal: AbortSignal,
+    ): Promise<SystemRecordExactFetchResultV1> => {
+      const artifact = await fixture.repository.resolve(lookup, signal);
+      if (artifact === null) return Object.freeze({ outcome: 'not-found', wireBytes: 1 });
+      return Object.freeze({
+        outcome: 'ok',
+        lease: Object.freeze({
+          artifact,
+          wireBytes: 4 + 128 + artifact.canonicalBytes.byteLength,
+          release: vi.fn(),
+        }),
+      });
+    });
+    const transport = createAgentProfileReconcileTransportV1({
+      networkId: NETWORK,
+      listProviderIds: () => ['provider-a'],
+      fetchExact,
+      controlAdmission: byteAdmission(),
+    });
+    const openPreparation = vi.fn();
+    const prepareActive = vi.fn(async () => {
+      throw new Error('active-only receiver must not prepare a quarantined row');
+    });
+    const receiveActive = vi.fn(async () => {
+      throw new Error('active-only receiver must not receive a quarantined row');
+    });
+    const activeOnlyReceiver: AgentProfileContinuationReceiverV1 = Object.freeze({
+      openPreparation(row) {
+        openPreparation(row);
+        throw new Error('active-only continuation must not open a quarantined row');
+      },
+      prepareActive,
+      receiveActive,
+    });
+    const reconciler = await createAgentProfileReconcilerV1({
+      networkId: NETWORK,
+      rootEnvelope: fixture.rootEnvelope,
+      providerPeerPublicKey: fixture.peerSigner.publicKey,
+      admission: admissionGate(),
+      transport,
+      receiver: activeOnlyReceiver,
+    });
+
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'paused',
+      phase: 'records',
+      pendingRows: 1,
+    });
+    const requestsAfterInventory = fetchExact.mock.calls.length;
+    await expect(reconciler.advance(new AbortController().signal)).resolves.toMatchObject({
+      status: 'blocked',
+      phase: 'records',
+      reason: 'unsupported-row-state',
+      pendingRows: 1,
+    });
+    expect(fetchExact).toHaveBeenCalledTimes(requestsAfterInventory);
+    expect(openPreparation).not.toHaveBeenCalled();
+    expect(prepareActive).not.toHaveBeenCalled();
+    expect(receiveActive).not.toHaveBeenCalled();
+    expect(reconciler.stats()).toMatchObject({
+      retainedClosureArtifacts: 0,
+      retainedSidecarArtifacts: 0,
+    });
+  });
+
   it('routes inventory and receiver closure fetches through one admitted transport slice', async () => {
     const fixture = await publishedFixture();
     const released: ReturnType<typeof vi.fn>[] = [];

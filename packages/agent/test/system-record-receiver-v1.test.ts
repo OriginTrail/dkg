@@ -145,14 +145,20 @@ describe('agent-profile system-record receiver', () => {
     expect(prepareCandidateApply.mock.calls[0]).toHaveLength(3);
   });
 
-  it('accepts the legacy artifact repository at constructor and preparation boundaries', async () => {
+  it('accepts a structural legacy repository with a reserved extra field', async () => {
     const fixture = await publishedFixture();
     const signal = new AbortController().signal;
+    const resolve = vi.fn(fixture.store.resolve.bind(fixture.store));
+    const legacyRepository = Object.freeze({
+      resolve,
+      closureArtifacts: Object.freeze({ kind: 'legacy-cache' }),
+      securitySidecarArtifacts: Object.freeze({ kind: 'legacy-sidecar-cache' }),
+    });
     const verifyCurrentBundle = vi.fn(() => true);
     const prepareCandidateApply = vi.fn(() => preparedFixtureApply('1', 'a'));
     const receiver = createReceiverWithArtifactSources({
       networkId: NETWORK,
-      artifacts: fixture.store,
+      artifacts: legacyRepository,
       nowMs: () => PRODUCER_FIXTURE_NOW_MS,
       verifyCurrentBundle,
       prepareCandidateApply,
@@ -163,7 +169,7 @@ describe('agent-profile system-record receiver', () => {
 
     const preparation = receiver.openPreparation(fixture.row);
     try {
-      const prepared = await preparation.prepare(fixture.store, signal);
+      const prepared = await preparation.prepare(legacyRepository, signal);
       const dispatch = await prepared.prepareDispatch(ADMITTED_CONTEXT, signal);
       await expect(dispatch.dispatch()).resolves.toMatchObject({ outcome: 'applied' });
     } finally {
@@ -172,6 +178,7 @@ describe('agent-profile system-record receiver', () => {
 
     expect(verifyCurrentBundle).toHaveBeenCalledTimes(2);
     expect(prepareCandidateApply).toHaveBeenCalledTimes(2);
+    expect(resolve).toHaveBeenCalled();
   });
 
   it('rejects malformed split artifact sources instead of treating them as legacy', async () => {
@@ -1313,7 +1320,9 @@ describe('agent-profile system-record receiver', () => {
   });
 
   it('rejects terminal transition evidence unrelated to the retained authority lineage', async () => {
-    const fixture = await transitionQuarantineFixture(false, false, true);
+    const fixture = await transitionQuarantineFixture({
+      unrelatedTransitionEvidence: true,
+    });
     const verifyCurrentBundle = vi.fn(() => true);
     const prepareCandidateApply = vi.fn();
     const receiver = createAgentProfileCandidateReceiverV1({
@@ -1329,6 +1338,29 @@ describe('agent-profile system-record receiver', () => {
       ADMITTED_CONTEXT,
       new AbortController().signal,
     )).rejects.toThrow(/unrelated to the retained authority lineage/);
+    expect(verifyCurrentBundle).not.toHaveBeenCalled();
+    expect(prepareCandidateApply).not.toHaveBeenCalled();
+  });
+
+  it('rejects terminal transition evidence without its exact accepted predecessor', async () => {
+    const fixture = await transitionQuarantineFixture({
+      invalidCompetingPredecessor: true,
+    });
+    const verifyCurrentBundle = vi.fn(() => true);
+    const prepareCandidateApply = vi.fn();
+    const receiver = createAgentProfileCandidateReceiverV1({
+      networkId: NETWORK,
+      artifacts: fixture.artifacts,
+      nowMs: () => PRODUCER_FIXTURE_NOW_MS,
+      verifyCurrentBundle,
+      prepareCandidateApply,
+    });
+
+    await expect(receiver.receiveCandidate(
+      fixture.row,
+      ADMITTED_CONTEXT,
+      new AbortController().signal,
+    )).rejects.toThrow(/transition conflict lacks its exact accepted predecessor/);
     expect(verifyCurrentBundle).not.toHaveBeenCalled();
     expect(prepareCandidateApply).not.toHaveBeenCalled();
   });
@@ -1367,7 +1399,7 @@ describe('agent-profile system-record receiver', () => {
   });
 
   it('keeps transition equivocation terminal when the sidecar also advertises a tombstone', async () => {
-    const fixture = await transitionQuarantineFixture(false, true);
+    const fixture = await transitionQuarantineFixture({ withTombstoneFork: true });
     const prepareCandidateApply = vi.fn((
       _candidate: AgentProfileReceiverAnyCandidateV1,
     ) => preparedFixtureApply('10', 'a'));
