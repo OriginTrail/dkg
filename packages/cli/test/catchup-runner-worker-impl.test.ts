@@ -166,11 +166,23 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           case 'syncDurable':
             durableCalls.push(args[0] as string);
             return durableResult();
-          case 'syncSelectedSharedMemory':
+          case 'syncSharedMemory': {
+            if (args[4] !== true) {
+              throw new Error('complete SWM provider must select the RFC-64 lane');
+            }
             sharedCalls.push(args[0] as string);
-            return sharedResult();
-          case 'syncSharedMemory':
-            throw new Error('complete SWM provider must use the selected RFC-64 lane');
+            const shared = sharedResult();
+            return {
+              kind: 'selected-shared-memory',
+              shared: {
+                ...shared,
+                failedPhases: 1,
+                snapshotPlaneIncomplete: 1,
+                resolvedSnapshotPlaneIncomplete: 1,
+              },
+              selectedScopeComplete: true,
+            };
+          }
           case 'finalizeCatchup':
             return null;
           default:
@@ -185,6 +197,8 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersNotAttempted).toBe(2);
     expect(result.diagnostics?.durable.authorityUnanswered).toBe(false);
     expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(false);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(1);
+    expect(result.peersSucceeded).toBe(2);
   });
 
   it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {

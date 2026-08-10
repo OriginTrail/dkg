@@ -267,9 +267,18 @@ describe('WorkerCatchupRunner agent bridge', () => {
 
     await invokeThroughBridge(agent, 'syncDurable', ['peer-a', 'cg-x', 2000, 'durable:urn:cg:private:abc']);
     await invokeThroughBridge(agent, 'syncSharedMemory', ['peer-a', 'cg-x', 2000, { not: 'a string' }]);
+    await invokeThroughBridge(
+      agent,
+      'syncSharedMemory',
+      ['peer-swm', 'cg-x', 2000, 'durable:urn:cg:private:abc', true],
+    );
 
     expect(calls.durable[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
     expect(calls.shared[0]!.at(-1)).toMatchObject({ source: 'unspecified' });
+    expect(calls.selectedShared[0]!.at(-1)).toMatchObject({
+      source: 'unspecified',
+      selectedSwmPriority: true,
+    });
   });
 
   it('hands the resolved peer into selection and returns an authority-ranked list', async () => {
@@ -403,8 +412,8 @@ describe('WorkerCatchupRunner agent bridge', () => {
 
     const posted = await invokeThroughBridge(
       agent,
-      'syncSelectedSharedMemory',
-      ['peer-swm', 'cg-x', 2000, 'catchup-foreground'],
+      'syncSharedMemory',
+      ['peer-swm', 'cg-x', 2000, 'catchup-foreground', true],
     );
 
     expect(calls.shared).toEqual([]);
@@ -414,7 +423,11 @@ describe('WorkerCatchupRunner agent bridge', () => {
       source: 'catchup-foreground',
       selectedSwmPriority: true,
     });
-    expect(posted.result).toEqual({ insertedDataTriples: 7 });
+    expect(posted.result).toEqual({
+      kind: 'selected-shared-memory',
+      shared: { insertedDataTriples: 7 },
+      selectedScopeComplete: true,
+    });
   });
 
   it('emits worker pass diagnostics through the parent logger bridge', async () => {

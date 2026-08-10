@@ -25,9 +25,8 @@ export interface SharedMemoryFreshnessSummary extends DurableProgressSummary {
  */
 export interface SelectedSharedMemorySyncResult {
   readonly kind: 'selected-shared-memory';
-  readonly shared: SharedMemoryFreshnessSummary & {
-    readonly insertedTriples: number;
-  };
+  /** Full diagnostics stay available even though completion is lane-specific. */
+  readonly shared: SharedMemorySyncResult;
   readonly selectedScopeComplete: boolean;
 }
 

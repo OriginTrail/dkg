@@ -5,6 +5,7 @@ import {
   SwmCatchupPassTracker,
   catchupPassNowMs,
   catchupWaveSizes,
+  classifySharedMemoryFreshness,
   createFailedPeerDurableSyncResult,
   mapWithConcurrency,
   resolveSwmCatchupPassConfig,
@@ -14,6 +15,7 @@ import {
   type CatchupPlaneContext,
   type DurableSyncResult,
   type SharedMemorySyncResult,
+  type SelectedSharedMemorySyncResult,
   type SwmSnapshotCoverage,
 } from '@origintrail-official/dkg-agent';
 import {
@@ -77,8 +79,36 @@ parentPort!.on('message', async (message: any) => {
  */
 type CatchupDurableResult = DurableSyncResult & { verifiedPrivateOnlyResponses: number };
 
-/** One peer's shared-memory plane, as returned across the Worker RPC. */
-type CatchupSharedMemoryResult = SharedMemorySyncResult;
+/**
+ * One peer's shared-memory plane, as returned across the Worker RPC.
+ *
+ * Ordinary fan-out keeps the historical raw result. An RFC-64 selected
+ * provider returns its discriminated terminal verdict as well, so the Worker
+ * never has to infer completion from diagnostic counters that deliberately
+ * retain resolved voluntary yields.
+ */
+type CatchupSelectedSharedMemoryResult = SelectedSharedMemorySyncResult & {
+  /** Projected for the generic catch-up admission retry policy. */
+  readonly deferredBackpressure?: number;
+};
+
+type CatchupSharedMemoryResult = SharedMemorySyncResult | CatchupSelectedSharedMemoryResult;
+
+function selectedSharedMemoryResult(
+  result: CatchupSharedMemoryResult | null | undefined,
+): SelectedSharedMemorySyncResult | undefined {
+  return result && 'kind' in result && result.kind === 'selected-shared-memory'
+    ? result
+    : undefined;
+}
+
+function sharedMemoryPayload(
+  result: CatchupSharedMemoryResult | null | undefined,
+): SharedMemorySyncResult | null {
+  if (!result) return null;
+  const selected = selectedSharedMemoryResult(result);
+  return selected ? selected.shared : result as SharedMemorySyncResult;
+}
 
 /**
  * One peer's sync round. A plane is `null` when the walk deliberately skipped
@@ -390,14 +420,22 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       { priority, source }: CatchupPlaneContext,
     ): Promise<CatchupSharedMemoryResult> =>
       invoke<CatchupSharedMemoryResult>(
-        authoritativeSharedMemoryPeerIds.has(peerId)
-          ? 'syncSelectedSharedMemory'
-          : 'syncSharedMemory',
+        'syncSharedMemory',
         peerId,
         request.contextGraphId,
         priority,
         source,
+        authoritativeSharedMemoryPeerIds.has(peerId),
       )
+        .then((result) => {
+          const selected = selectedSharedMemoryResult(result);
+          return selected
+            ? {
+              ...selected,
+              deferredBackpressure: selected.shared.deferredBackpressure,
+            }
+            : result;
+        })
         .catch(() => emptyShared());
 
     // Narrow each fallback peer to the planes the AUTHORITY has not already
@@ -461,18 +499,27 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     {
       peerId,
       durable,
-      shared,
+      shared: sharedResult,
       fromDurableAuthority,
       fromSharedMemoryAuthority,
     }: PeerRound,
     isContinuationRound = false,
   ): void => {
     let peerDenied = false;
+    const selectedShared = selectedSharedMemoryResult(sharedResult);
+    const shared = sharedMemoryPayload(sharedResult);
+    const sharedCompletedWithoutFailure = shared
+      ? selectedShared
+        ? classifySharedMemoryFreshness(shared, {
+          complete: selectedShared.selectedScopeComplete,
+        }).completedWithoutFailure
+        : catchupPlaneCompletedWithoutFailure(shared)
+      : false;
     if (shared) {
       passTracker.recordPeerRound(
         peerId,
         shared.swmCoverage,
-        catchupPlaneCompletedWithoutFailure(shared),
+        sharedCompletedWithoutFailure,
       );
     }
     if (durable) {
@@ -576,13 +623,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // Shared memory carries no verified-private-only signal, so the shared
       // evidence only ever has data/empty set — the same reducer still applies.
       const sharedEvidence = catchupPeerPlaneEvidence(shared, {
+        completedWithoutFailure: sharedCompletedWithoutFailure,
         fromAuthority: fromSharedMemoryAuthority,
         plane: 'shared-memory',
       });
       addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, sharedEvidence);
       if (fromSharedMemoryAuthority) {
         addCatchupPlaneEvidence(authorityEvidence.sharedMemory, sharedEvidence);
-        if (catchupPlaneCompletedWithoutFailure(shared)) {
+        if (sharedCompletedWithoutFailure) {
           authorityAnswered.sharedMemory = true;
         }
       }
@@ -601,7 +649,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // completed with no timeout. Mirrors the inline
     // `syncContextGraphFromConnectedPeers` path so both runners report the
     // same shape.
-    if (catchupPeerSucceeded(durable, shared, peerDenied, durable?.complete)) {
+    if (catchupPeerSucceeded(
+      durable,
+      shared,
+      peerDenied,
+      durable?.complete,
+      selectedShared?.selectedScopeComplete,
+    )) {
       peersSucceeded.add(peerId);
     }
   };

@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import {
   authoritativeSyncPeerId,
   classifyDurableProgress,
+  classifySharedMemoryFreshness,
   normalizeDurableSyncResult,
   normalizeSyncAdmissionSource,
   type DKGAgent,
@@ -620,8 +621,15 @@ export function catchupPeerPlaneEvidence(
      * mistake here settles a plane nobody proved.
      */
     plane: 'durable' | 'shared-memory';
-    /** Durable-only lifecycle state; the shared plane has no `complete` concept. */
+    /** Durable lifecycle state; selected SWM supplies its own typed equivalent. */
     complete?: boolean;
+    /**
+     * Lane-specific clean-completion verdict when raw diagnostics deliberately
+     * retain superseded failures. Selected SWM is the current producer: its
+     * freshness classifier resolves bounded historical yields while preserving
+     * those counters for telemetry.
+     */
+    completedWithoutFailure?: boolean;
     fromAuthority?: boolean;
   },
 ): CatchupPlaneCompletionEvidence {
@@ -632,7 +640,8 @@ export function catchupPeerPlaneEvidence(
     authorityEmptyPeers: 0,
   };
   if (!plane) return none;
-  if (!catchupPlaneCompletedWithoutFailure(plane, options.complete)) {
+  if (!(options.completedWithoutFailure
+    ?? catchupPlaneCompletedWithoutFailure(plane, options.complete))) {
     // The peer answered and its round was not clean. A pure transport failure is
     // NOT that: we never heard from it, it is already counted in `failedPeers`,
     // and treating unreachable strangers as unresolved evidence would stop a
@@ -889,9 +898,14 @@ export function catchupPeerSucceeded(
   shared: CatchupPhaseProgress | null | undefined,
   peerDenied: boolean,
   durableComplete?: boolean,
+  selectedSharedComplete?: boolean,
 ): boolean {
   const durableProgress = classifyDurableProgress(durable, { complete: durableComplete });
-  const sharedProgress = shared ? classifyDurableProgress(shared) : null;
+  const sharedProgress = shared
+    ? selectedSharedComplete === undefined
+      ? classifyDurableProgress(shared)
+      : classifySharedMemoryFreshness(shared, { complete: selectedSharedComplete })
+    : null;
   if (
     !catchupPeerResponded(durable, shared)
     || peerDenied
@@ -1150,40 +1164,30 @@ class WorkerCatchupRunner implements CatchupRunner {
         );
       }
       case 'syncSharedMemory': {
-        const [peerId, contextGraphId, priority, source] = args as [
-          string, string, number | undefined, unknown,
+        const [peerId, contextGraphId, priority, source, selected] = args as [
+          string, string, number | undefined, unknown, unknown,
         ];
+        const admission = {
+          ...(priority === undefined ? {} : { priority }),
+          source: normalizeSyncAdmissionSource(
+            typeof source === 'string' ? source : undefined,
+          ),
+        };
+        // One bridge operation owns producer selection. The Worker supplies a
+        // closed boolean, and only literal `true` may enter the selected lane;
+        // malformed structured-clone values retain ordinary behavior.
+        if (selected === true) {
+          return agent.syncSelectedSharedMemoryFromPeerDetailed(
+            peerId,
+            [contextGraphId],
+            { ...admission, selectedSwmPriority: true },
+          );
+        }
         return agent.syncSharedMemoryFromPeerDetailed(
           peerId,
           [contextGraphId],
-          {
-            ...(priority === undefined ? {} : { priority }),
-            source: normalizeSyncAdmissionSource(
-              typeof source === 'string' ? source : undefined,
-            ),
-          },
+          admission,
         );
-      }
-      case 'syncSelectedSharedMemory': {
-        const [peerId, contextGraphId, priority, source] = args as [
-          string, string, number | undefined, unknown,
-        ];
-        const selected = await agent.syncSelectedSharedMemoryFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          {
-            ...(priority === undefined ? {} : { priority }),
-            source: normalizeSyncAdmissionSource(
-              typeof source === 'string' ? source : undefined,
-            ),
-            selectedSwmPriority: true,
-          },
-        );
-        // The worker already owns the authority verdict and attaches
-        // `fromAuthority` to the returned coverage. Keep the RPC payload on the
-        // historical SharedMemorySyncResult shape while selecting the typed
-        // RFC-64 producer here, at the in-process agent boundary.
-        return selected.shared;
       }
       case 'logCatchupPass': {
         // The pass loop runs inside the Worker, which has no logger of its own,
