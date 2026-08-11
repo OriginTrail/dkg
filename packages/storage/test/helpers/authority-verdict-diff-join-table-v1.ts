@@ -94,6 +94,14 @@ export const JOIN_ROWS_V1 = 164_160;
 /**
  * The exact per-row pin, over the sorted
  * `coreKey>>storageKey=>verdict|coreLabel|storageLabel` list.
+ *
+ * DO NOT DELETE THIS AS BELT-AND-BRACES OVER THE DISTRIBUTIONS BELOW. That was
+ * tested rather than argued, and the result is in the ledger as mutant M2: a
+ * compensating swap that exchanges which projection pair carries an AGREEMENT
+ * and which carries a DIVERGENCE leaves every distribution's multiset in this
+ * file IDENTICAL, because none of them keys on a projection key. It failed
+ * EXACTLY ONE assertion out of sixteen -- this one. Without it that mutation
+ * ships green.
  */
 export const JOIN_TABLE_DIGEST_V1 =
   'edc66a0acc2d10bbc30e0bea2df54620441dcc9b27426829239f8200d96cbb8b';
@@ -571,11 +579,39 @@ export const JOIN_FINDINGS_V1: readonly string[] = [
   + '123,840-cell CORE-ONLY bucket rests on a bind-check in the code at :863, not on chain depth, '
   + 'and two harness limits on the core side do not imply a third here.',
 
-  // Scoped precisely, because the same claim is false at a wider scope.
-  'AXIS J DISCRIMINATES ON EXACTLY 4 OF THE 114 COMPARABLE STORAGE PROJECTIONS, all four in the '
-  + 'ABSENT-snapshot region, where naming `verifiedAuthoritySummary` turns core\'s '
-  + 'reject(cold noninitial head requires its verified authority closure) into `accept` at '
-  + ':230-237. On the other 110 the core label is identical with and without the summary. The '
-  + 'claim is scoped to the COMPARABLE bucket and says nothing about the 123,840 CORE-ONLY '
-  + 'cells, where naming the summary is precisely what retires them.',
+  // TWO POPULATIONS, BOTH NAMED, because this is the third time in this slice
+  // that a true claim was dangerous at the wrong scope. Neither sentence below
+  // may be quoted without its population.
+  'AXIS J IS NON-DISCRIMINATING ON PRESENT-SNAPSHOT CELLS AND DISCRIMINATING ON ABSENT ONES, and '
+  + 'the two facts were measured over DIFFERENT populations. Over the present-path cells measured '
+  + 'by the summary-independence probe, naming `verifiedAuthoritySummary` moves no core verdict. '
+  + 'Over the 114 COMPARABLE storage projections measured here, it moves one on exactly 4 of them '
+  + '-- all four ABSENT-snapshot, where naming the summary turns core\'s reject(cold noninitial '
+  + 'head requires its verified authority closure) into `accept` at :230-237, while the other 110 '
+  + 'carry an identical core label with and without it. So "axis J is dead" is TRUE of the '
+  + 'present region and FALSE as a statement about the axis. Neither claim says anything about '
+  + 'the 123,840 CORE-ONLY cells, where naming the summary is precisely what used to retire them.',
+
+  // The wrong number I produced, kept as the general shape rather than as an
+  // apology, because the shape is what recurs.
+  'A STORAGE-SIDE AGGREGATE IS NOT ANY ONE CORE DECISION\'S IMAGE. Storage emits '
+  + 'deferred(authority-fork) on 1,728 comparable cells, and that total was briefly attributed to '
+  + 'core\'s quarantine(head-fork) as though the two named the same set. They do not: the 1,728 '
+  + 'arrive from THREE core decisions -- 768 head-fork, 576 reject(head issuedAt exceeds the '
+  + 'future clock-skew bound), 384 quarantine(transition-equivocation) -- while quarantine('
+  + 'head-fork) itself covers 2,048 comparable cells of which 1,280 never reach the candidate at '
+  + 'all. Every one of those four numbers is different from 1,728. THE SHAPE IS ATTRIBUTING A '
+  + 'GROUP TOTAL TO ONE MEMBER, and it is available in both directions on every row of a join: '
+  + 'the level-1 table is keyed on the PAIR for exactly this reason.',
+
+  // The gate that fired, recorded because it fired for a reason that is not
+  // obvious until it has cost something.
+  'THE PROVENANCE GATE HASHES THE CORE SWEEP\'S OWN OUTPUT, NOT THE CORE TABLE\'S PUBLISHED '
+  + 'CONSTANT, AND THAT DISTINCTION WAS NOT ACADEMIC. The S1 constructibility rule was retired in '
+  + 'the core sweep while this join was being measured. For the duration of that window core\'s '
+  + 'behaviour had already changed and `CORE_VERDICT_TABLE_DIGEST_V1` still carried the previous '
+  + 'hash, because behaviour and published pin move at different times. A gate comparing this '
+  + 'file\'s provenance against that constant would have compared one stale value to another and '
+  + 'sat green through precisely the window it exists for. Hashing the sweep output makes the '
+  + 'gate independent of whether anyone has re-pinned yet.',
 ];

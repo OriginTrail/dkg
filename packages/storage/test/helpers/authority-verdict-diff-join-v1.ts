@@ -305,7 +305,15 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
       + 'V1` branches on `acceptedState.disposition === \'head-fork-quarantined\'` and '
       + 'routes the NEXT candidate down the fork-resolution-successor path. Storage\'s '
       + 'defer leaves no trace at all: the next candidate is evaluated identically to '
-      + 'the first.',
+      + 'the first. '
+      + 'THE ENTRY MATCHES 768 CELLS, NOT THE 1,728 A STORAGE-SIDE COUNT SUGGESTS, and '
+      + 'the gap is a trap worth naming at the site. Storage emits '
+      + 'deferred(authority-fork) on 1,728 comparable cells, but those arrive from THREE '
+      + 'different core decisions -- 768 here, 576 from reject(head issuedAt exceeds the '
+      + 'future clock-skew bound) and 384 from quarantine(transition-equivocation). A '
+      + 'STORAGE-SIDE AGGREGATE IS NOT ANY ONE CORE DECISION\'S IMAGE. Reading one as the '
+      + 'other produced a wrong count during this entry\'s design, and it is the same '
+      + 'shape as attributing a group total to one of its members.',
   },
   {
     coreDecisionKey: 'quarantine|transition-equivocation',
