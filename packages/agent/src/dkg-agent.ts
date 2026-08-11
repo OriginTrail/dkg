@@ -1954,6 +1954,7 @@ export class DKGAgent extends DKGAgentBase {
         await this.closeSelectedSwmMetaTransfers();
       } finally {
         this.selectedSwmRetryRequiredPeers.clear();
+        this.selectedSwmBootstrapSeededPeers.clear();
       }
     }
     if (this.syncVerifyWorker) {

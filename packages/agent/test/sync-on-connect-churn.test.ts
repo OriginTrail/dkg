@@ -338,10 +338,12 @@ describe('sync-on-connect churn gates', () => {
   it('clears selected SWM retry state when network admission rejects a peer', async () => {
     const agent = await createUnstartedAgent('SelectedSwmRetryRejectedPeerCleanup');
     (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).selectedSwmBootstrapSeededPeers.add(PEER_A);
 
     (agent as any).clearNetworkRejectedPeerState(PEER_A);
 
     expect((agent as any).selectedSwmRetryRequiredPeers.has(PEER_A)).toBe(false);
+    expect((agent as any).selectedSwmBootstrapSeededPeers.has(PEER_A)).toBe(false);
   });
 
   it('clears selected SWM retry state after stop drains transfer owners', async () => {
@@ -355,10 +357,12 @@ describe('sync-on-connect churn gates', () => {
     try {
       await agent.start();
       (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+      (agent as any).selectedSwmBootstrapSeededPeers.add(PEER_A);
 
       await agent.stop();
 
       expect((agent as any).selectedSwmRetryRequiredPeers.size).toBe(0);
+      expect((agent as any).selectedSwmBootstrapSeededPeers.size).toBe(0);
     } finally {
       if ((agent as any).started) await agent.stop().catch(() => undefined);
     }

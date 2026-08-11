@@ -1616,6 +1616,13 @@ export class DKGAgentBase {
    */
   protected readonly selectedSwmRetryRequiredPeers = new Set<string>();
   /**
+   * Complete RFC-64 SWM providers whose one cold-start seed has already been
+   * admitted during this node lifecycle. The lifecycle scheduler owns this
+   * alongside the retry-required marker so bootstrap never has to coordinate
+   * two halves of the same state transition.
+   */
+  protected readonly selectedSwmBootstrapSeededPeers = new Set<string>();
+  /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful
    * sync; `nextRetryAt` is the epoch-ms before which the reconciler

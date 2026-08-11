@@ -69,8 +69,6 @@ interface BootstrapStateV1 {
   readonly config: Readonly<Rfc64PublicCatalogBootstrapConfigV1>;
   readonly targets: MutableTargetStatusV1[];
   readonly ctx: OperationContext;
-  /** Providers whose cold-start selected pull has already been seeded. */
-  readonly seededCompleteSwmProviders: Set<string>;
   closed: boolean;
   running: boolean;
   pass: number;
@@ -156,7 +154,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
         updatedAtMs: null,
       })),
       ctx,
-      seededCompleteSwmProviders: new Set(),
       closed: false,
       running: false,
       pass: 0,
@@ -261,27 +258,20 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             await this.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
             });
-            // A pre-existing connection has no new connection:open event. Seed
-            // exactly one selected pull per node lifecycle, then only re-admit
-            // it while the selected lane retains its incomplete marker. A
-            // successful plane-proven pass clears that marker, so periodic
-            // catalog refreshes cannot manufacture a new full SWM walk.
-            if (
-              !state.seededCompleteSwmProviders.has(providerPeerId)
-              || this.selectedSwmRetryRequiredPeers.has(providerPeerId)
-            ) {
-              state.seededCompleteSwmProviders.add(providerPeerId);
-              this.queueSelectedSwmFromPeerOnConnect(
-                providerPeerId,
-                (_peerId, error) => {
-                  this.log.warn(
-                    state.ctx,
-                    `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
-                  );
-                },
-                0,
-              );
-            }
+            // A pre-existing connection has no new connection:open event. Ask
+            // the lifecycle scheduler to seed or resume the selected lane; it
+            // owns the seed/incomplete/complete state transition and becomes a
+            // no-op after exact plane proof.
+            this.queueSelectedSwmFromPeerOnConnect(
+              providerPeerId,
+              (_peerId, error) => {
+                this.log.warn(
+                  state.ctx,
+                  `RFC-64 complete SWM provider sync failed for ${providerPeerId.slice(-8)}: ${errorMessageV1(error)}`,
+                );
+              },
+              0,
+            );
           } catch (error) {
             this.log.warn(
               state.ctx,

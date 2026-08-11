@@ -4018,6 +4018,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
     this.selectedSwmRetryRequiredPeers.delete(remotePeer);
+    this.selectedSwmBootstrapSeededPeers.delete(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
@@ -4029,12 +4030,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     handleSyncError: (remotePeer: string, err: unknown) => void,
     delayMs = 3000,
   ): boolean {
-    // The same marker represents both an RFC-64-selected provider's first
-    // bounded pull and any continuation required after incomplete coverage.
-    // Establish it before entering the generic scheduler: selected recovery
-    // is independently enabled and must be able to start when broad
-    // sync-on-connect is disabled. Completion clears the marker; cooldown and
-    // reconciler backoff retain it so a later bootstrap pass can resume.
+    const alreadySeeded = this.selectedSwmBootstrapSeededPeers.has(remotePeer);
+    const retryRequired = this.selectedSwmRetryRequiredPeers.has(remotePeer);
+    // This API owns the selected provider's small admission state machine:
+    // seed once per node lifecycle, resume only while exact coverage remains
+    // incomplete, and become a no-op after plane proof clears the retry
+    // marker. Bootstrap therefore never reads or mutates scheduler internals.
+    if (alreadySeeded && !retryRequired) return false;
+    this.selectedSwmBootstrapSeededPeers.add(remotePeer);
     this.selectedSwmRetryRequiredPeers.add(remotePeer);
     return this.queueSyncFromPeerOnConnect(
       remotePeer,
@@ -4379,6 +4382,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
     );
+    if (sharedMemorySyncPlan.publicContextGraphIds.length === 0) {
+      // A provider pin without a matching selected CG is a clean no-work
+      // terminal state, not an incomplete recovery. Clear the retry marker so
+      // periodic bootstrap refreshes do not manufacture an endless loop; the
+      // per-lifecycle seed still prevents immediate reseeding.
+      this.selectedSwmRetryRequiredPeers.delete(remotePeer);
+      return 'not-started';
+    }
     return runSelectedSharedMemoryRetry({
       remotePeer,
       syncingPeers: this.syncingPeers,
