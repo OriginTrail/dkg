@@ -110,6 +110,10 @@ import {
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
+  reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinFromDescriptor,
+} from './sync/requester/finalized-swm-twin-reconciliation.js';
+import {
   EVMChainAdapter,
   NoChainAdapter,
   buildKnowledgeAssetUal,
@@ -5772,6 +5776,45 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (outcome === 'applied') {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
+            try {
+              const retirement = await reconcileFinalizedSwmTwin({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                asset: authentication.asset,
+                retire: async (candidate) => {
+                  await this.publisher.clearPublishedKnowledgeAssetSwm(
+                    candidate.contextGraphId,
+                    {
+                      kind: 'named-lifecycle',
+                      identity: {
+                        agentAddress: candidate.agentAddress,
+                        kaNumber: candidate.kaNumber,
+                      },
+                    },
+                    candidate.subGraphName,
+                    ctx,
+                    candidate.kaUal,
+                  );
+                },
+              });
+              if (retirement === 'retired') {
+                this.invalidateListContextGraphsCache();
+                this.log.info(
+                  ctx,
+                  `Retired byte-identical SWM twin after durable VM materialization for ${asset.ual}`,
+                );
+              }
+            } catch (cause) {
+              // VM materialization is already durable and independently
+              // verified. A best-effort tier cleanup must never turn that
+              // success into a failed sync; the untouched SWM copy remains
+              // safe and the next durable replay can reconcile it again.
+              this.log.warn(
+                ctx,
+                `Deferred SWM twin reconciliation for ${asset.ual}: `
+                + `${cause instanceof Error ? cause.message : String(cause)}`,
+              );
+            }
           }
           return outcome;
         });
@@ -6835,6 +6878,49 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             store: this.store,
             writeLocks: this.writeLocks,
             invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+            reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
+              try {
+                const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
+                  store: this.store,
+                  writeLocks: this.writeLocks,
+                  contextGraphId,
+                  descriptor,
+                  retire: async (candidate) => {
+                    await this.publisher.clearPublishedKnowledgeAssetSwm(
+                      candidate.contextGraphId,
+                      {
+                        kind: 'named-lifecycle',
+                        identity: {
+                          agentAddress: candidate.agentAddress,
+                          kaNumber: candidate.kaNumber,
+                        },
+                      },
+                      candidate.subGraphName,
+                      ctx,
+                      candidate.kaUal,
+                    );
+                  },
+                });
+                if (retirement === 'retired') {
+                  this.invalidateListContextGraphsCache();
+                  this.log.info(
+                    ctx,
+                    `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
+                  );
+                }
+                return retirement === 'retired';
+              } catch (cause) {
+                // Snapshot materialization is already complete. Preserve the
+                // SWM graph and retry on a later pass rather than changing a
+                // successful sync into a failure.
+                this.log.warn(
+                  ctx,
+                  `Deferred finalized SWM twin reconciliation for ${descriptor.kaUal}: `
+                  + `${cause instanceof Error ? cause.message : String(cause)}`,
+                );
+                return false;
+              }
+            },
           }),
           storeInsert: async (quads) => {
             // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating

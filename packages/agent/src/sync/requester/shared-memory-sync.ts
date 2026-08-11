@@ -680,6 +680,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // descriptor by the parser's grouping key, and an operation subject is
       // pinned to a single `kaUal`/`assertionVersion` by `validateOperationRows`.
       const perKaInsertedMetaKeys = new Set<string>();
+      /** Head/op rows retired because the same exact KA is finalized in VM. */
+      const retiredMetaKeys = new Set<string>();
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
@@ -866,6 +868,30 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
               },
             );
+            // The opposite ordering from durable VM catch-up is equally
+            // possible: VM may already be present when this SWM snapshot
+            // arrives. Reconcile only after releasing the materialization
+            // lock; the production callback reacquires the same per-KA lock
+            // and re-verifies current head + both graph digests before delete.
+            try {
+              const retired = await snapshotMaterializer.reconcileFinalizedTwin?.(pid, descriptor);
+              if (retired) {
+                // The callback removed this exact SWM graph AND its head/op
+                // rows. Suppress the later bulk metadata append too; without
+                // this, an already-materialized retry would recreate dangling
+                // SWM metadata after the graph had been correctly retired.
+                for (const quad of descriptor.metadataQuads) {
+                  retiredMetaKeys.add(quadKey(quad));
+                }
+              }
+            } catch (err) {
+              // The verified snapshot and its head are already durable. Tier
+              // cleanup is best-effort and must not reclassify that completed
+              // materialization as missing; leaving SWM intact is the safe
+              // fallback and a later pass can retry the exact reconciliation.
+              logWarn(ctx, `SWM sync deferred finalized-twin reconciliation for ${descriptor.kaUal}: `
+                + `${err instanceof Error ? err.message : String(err)}`);
+            }
           } catch (err) {
             // A failed replace must never be able to look materialized later.
             // Suppressing it here while the surrounding sync still inserts the
@@ -1072,9 +1098,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedDataTriples += validWsQuads.length;
       }
       if (verifiedMetaForInsert.length > 0) {
-        // Still written in full — an RDF store is a set, so rewriting the rows
-        // the per-KA path already wrote is a no-op, and the rows for KAs that
-        // were NOT materialized still have to land.
+        // Rows written by the per-KA path are ordinarily harmless to replay —
+        // an RDF store is a set. Rows for a twin retired after that path are
+        // different: replaying them would recreate a dangling SWM head/op after
+        // its exact graph was removed, so those rows are excluded from the
+        // actual bulk write.
         //
         // The COUNT subtracts what was already counted, which makes
         // `insertedMetaTriples` mean this:
@@ -1090,14 +1118,19 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // and zero means nothing was materialized rather than that the writes
         // were thrown away.
         //
-        // Subtracting the ledger SIZE rather than re-filtering `verifiedMeta` is
-        // what keeps the usable-round identity exact if a meta response ever
-        // carries the same quad twice (an OFFSET-window overlap under concurrent
-        // insert is the plausible source): a re-filter drops both copies and
-        // undercounts by one. Valid because every per-KA row is filtered through
-        // `verifiedMetaKeys`, so the ledger is always a subset of these keys.
-        await storeInsert(verifiedMetaForInsert);
-        const newlyCountedMeta = verifiedMetaForInsert.length - perKaInsertedMetaKeys.size;
+        // Keep the old count identity for ordinary rows. Only retired rows are
+        // filtered, while the per-KA ledger remains a key-set subset of the
+        // verified input and is subtracted solely when its row survives.
+        const metaForBulkInsert = retiredMetaKeys.size === 0
+          ? verifiedMetaForInsert
+          : verifiedMetaForInsert.filter((quad) => !retiredMetaKeys.has(quadKey(quad)));
+        if (metaForBulkInsert.length > 0) {
+          await storeInsert(metaForBulkInsert);
+        }
+        const retainedAlreadyCounted = [...perKaInsertedMetaKeys]
+          .filter((key) => !retiredMetaKeys.has(key))
+          .length;
+        const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
         summary.insertedTriples += newlyCountedMeta;
         summary.insertedMetaTriples += newlyCountedMeta;
       }
