@@ -598,7 +598,10 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
-import { resolveRfc64SelectedRecoveryContextGraphIdsV1 } from './dkg-agent-rfc64-catalog-bootstrap.js';
+import {
+  resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
+  resolveRfc64SelectedRecoveryContextGraphIdsV1,
+} from './dkg-agent-rfc64-catalog-bootstrap.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
@@ -4017,10 +4020,42 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
-    this.selectedSwmRetryRequiredPeers.delete(remotePeer);
+    this.selectedSwmBootstrapAdmission.clear(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
     this.warmCoreFailedUnpins.delete(remotePeer);
+  }
+
+  queueSelectedSwmFromPeerOnConnect(
+    this: DKGAgent,
+    remotePeer: string,
+    handleSyncError: (remotePeer: string, err: unknown) => void,
+    delayMs = 3000,
+  ): boolean {
+    const selectedContextGraphIds = this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer);
+    // One graph-scoped owner decides whether this exact peer/scope pair is a
+    // first seed, an incomplete retry, or already terminal. A changed runtime
+    // subscription scope is a new bounded admission.
+    if (!this.selectedSwmBootstrapAdmission.request(remotePeer, selectedContextGraphIds)) {
+      return false;
+    }
+    return this.queueSyncFromPeerOnConnect(
+      remotePeer,
+      handleSyncError,
+      delayMs,
+      { selectedSwmRetry: true },
+    );
+  }
+
+  selectedSwmBootstrapContextGraphIdsForPeer(
+    this: DKGAgent,
+    remotePeer: string,
+  ): readonly string[] {
+    const selected = new Set(this.config.syncContextGraphs ?? []);
+    return resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
+      this.config.rfc64PublicCatalogBootstrap,
+      remotePeer,
+    ).filter((contextGraphId) => selected.has(contextGraphId));
   }
 
   queueSyncFromPeerOnConnect(
@@ -4031,7 +4066,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
     const selectedSwmRetryRequired = options.selectedSwmRetry === true
-      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
+      && this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer);
     // RFC-64 bootstrap is an independently enabled, graph-scoped recovery
     // authority. Its selected provider must be able to resume an incomplete
     // bounded walk even when the operator disabled broad peer-on-connect sync.
@@ -4101,7 +4136,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
   ): Promise<void> {
-    if (!this.selectedSwmRetryRequiredPeers.has(remotePeer)) return;
+    if (!this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)) return;
     const now = Date.now();
     const backoff = this.syncReconcilerBackoff.get(remotePeer);
     if (backoff && now < backoff.nextRetryAt) return;
@@ -4138,7 +4173,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncReconcilerAttemptOutcome> {
-    if (!this.selectedSwmRetryRequiredPeers.has(remotePeer)) return 'not-started';
+    if (!this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)) return 'not-started';
     return this.accountSyncAttemptWithReconciler(
       remotePeer,
       probe,
@@ -4346,10 +4381,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
-    if (!this.started || !this.selectedSwmRetryRequiredPeers.has(remotePeer)) {
+    if (!this.started || !this.selectedSwmBootstrapAdmission.isRetryRequired(remotePeer)) {
       return 'not-started';
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
+      return 'not-started';
+    }
+    const requestedContextGraphIds = this.selectedSwmBootstrapContextGraphIdsForPeer(remotePeer);
+    if (requestedContextGraphIds.length === 0) {
+      this.selectedSwmBootstrapAdmission.request(remotePeer, requestedContextGraphIds);
       return 'not-started';
     }
     const sharedMemorySyncPlan = await this.planSharedMemorySyncContextGraphs(
@@ -4358,6 +4398,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       createOperationContext('sync'),
       { requireCompleteProviderMatch: true },
     );
+    if (sharedMemorySyncPlan.publicContextGraphIds.length === 0) {
+      // A configured scope that cannot yet be planned remains retryable. RPC,
+      // binding, or policy evidence may become available on a later bounded
+      // bootstrap pass; only an actually empty operator scope is terminal.
+      return 'not-started';
+    }
     return runSelectedSharedMemoryRetry({
       remotePeer,
       syncingPeers: this.syncingPeers,
@@ -6464,6 +6510,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const selectedSwmEnabled = Boolean(
       options?.selectedSwmPriority && publicContextGraphIds.length > 0,
     );
+    const selectedBootstrapOwner = selectedSwmEnabled
+      ? this.selectedSwmBootstrapAdmission.beginTransfer(
+        remotePeerId,
+        publicContextGraphIds,
+      )
+      : null;
     const selectedMetaRetentionBudget = selectedSwmEnabled
       ? (() => {
         const budget = resolveSyncResponderSnapshotPolicy(
@@ -6851,7 +6903,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         === expectedSelectedContextGraphs.size
         && continuationExecution.incompleteContextGraphIds.length === 0;
       if (selectedScopeComplete) {
-        this.selectedSwmRetryRequiredPeers.delete(remotePeerId);
+        this.selectedSwmBootstrapAdmission.markTransferTerminal(selectedBootstrapOwner!);
       }
       // Preserve the raw historical yield/failure counters for diagnostics;
       // the canonical freshness helper bounds the selected continuation's
@@ -6870,13 +6922,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ? this.getSelectedSwmMetaTransfers().run(
           remotePeerId,
           createSelectedMetaFetcher,
-          (selectedMetaFetcher) => {
-            // Different selected calls for one peer serialize behind this
-            // owner. Mark after ownership begins so an earlier complete call
-            // cannot clear a later queued call's retry requirement.
-            this.selectedSwmRetryRequiredPeers.add(remotePeerId);
-            return runSync(selectedMetaFetcher);
-          },
+          (selectedMetaFetcher) => runSync(selectedMetaFetcher),
         )
         : runSync()
     ), {

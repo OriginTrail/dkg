@@ -95,6 +95,17 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
+/** Selected recovery scopes for which one peer is explicitly graph-complete. */
+export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
+  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+  providerPeerId: string,
+): readonly string[] {
+  if (config === undefined) return Object.freeze([]);
+  return Object.freeze(config.acceptedPublicPolicies
+    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId))
+    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
+}
+
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**
    * Exact operator-pinned graph-complete SWM providers for one accepted policy.
@@ -258,10 +269,11 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
             await this.connectToPeerId(providerPeerId, {
               timeoutMs: COMPLETE_SWM_PROVIDER_DIAL_TIMEOUT_MS_V1,
             });
-            // A pre-existing connection has no new connection:open event. Feed
-            // it through the normal cooldown/backoff-aware automatic scheduler
-            // so a selected provider is actionable after every cold start.
-            this.queueSyncFromPeerOnConnect(
+            // A pre-existing connection has no new connection:open event. Ask
+            // the lifecycle scheduler to seed or resume the selected lane; it
+            // owns the seed/incomplete/complete state transition and becomes a
+            // no-op after exact plane proof.
+            this.queueSelectedSwmFromPeerOnConnect(
               providerPeerId,
               (_peerId, error) => {
                 this.log.warn(
@@ -270,7 +282,6 @@ export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
                 );
               },
               0,
-              { selectedSwmRetry: true },
             );
           } catch (error) {
             this.log.warn(
