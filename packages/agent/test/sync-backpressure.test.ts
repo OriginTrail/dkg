@@ -1717,6 +1717,123 @@ describe('sync global backpressure', () => {
     ]);
   });
 
+  it.each([
+    { label: 'explicit Edge', nodeRole: 'edge' as const },
+    { label: 'default Edge', nodeRole: undefined },
+  ])('reserves $label capacity for a runtime-selected Context Graph', async ({ nodeRole }) => {
+    const selectedCg = 'urn:cg:edge-selected';
+    const agentLike = {
+      config: {
+        ...(nodeRole === undefined ? {} : { nodeRole }),
+        syncContextGraphs: [selectedCg],
+        syncGlobalMaxInflight: 2,
+        syncGlobalQueueLimit: 6,
+      },
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const events: string[] = [];
+    let releaseSelected!: () => void;
+    let releaseRecovery!: () => void;
+
+    const run = (
+      contextGraphId: string,
+      label: string,
+      source: 'catchup-foreground' | 'vm-recovery',
+      work: () => Promise<void>,
+    ) => LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agentLike as never,
+      createOperationContext('sync'),
+      contextGraphId,
+      'durable' as never,
+      label,
+      work,
+      { source },
+    );
+
+    const selected = run(
+      selectedCg,
+      'durable:selected-catchup',
+      'catchup-foreground',
+      async () => new Promise<void>((resolve) => {
+        events.push('selected-start');
+        releaseSelected = resolve;
+      }),
+    );
+    await tick();
+    const unrelatedRecovery = run(
+      'urn:cg:unrelated',
+      'durable:unrelated-recovery',
+      'vm-recovery',
+      async () => { events.push('unrelated-recovery-start'); },
+    );
+    await tick();
+    expect(events).toEqual(['selected-start']);
+
+    const selectedRecovery = run(
+      selectedCg,
+      'durable:selected-recovery',
+      'vm-recovery',
+      async () => new Promise<void>((resolve) => {
+        events.push('selected-recovery-start');
+        releaseRecovery = resolve;
+      }),
+    );
+    await tick();
+    expect(events).toEqual(['selected-start', 'selected-recovery-start']);
+
+    releaseRecovery();
+    await selectedRecovery;
+    expect(events).toEqual(['selected-start', 'selected-recovery-start']);
+    releaseSelected();
+    await Promise.all([selected, unrelatedRecovery]);
+    expect(events).toEqual([
+      'selected-start',
+      'selected-recovery-start',
+      'unrelated-recovery-start',
+    ]);
+  });
+
+  it('does not reserve Core capacity for its all-CG sync inventory', async () => {
+    const trackedCg = 'urn:cg:core-hosted';
+    const agentLike = {
+      config: {
+        nodeRole: 'core',
+        syncContextGraphs: [trackedCg],
+        syncGlobalMaxInflight: 2,
+        syncGlobalQueueLimit: 4,
+      },
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const run = (label: string, capture: (release: () => void) => void) => (
+      LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+        agentLike as never,
+        createOperationContext('sync'),
+        trackedCg,
+        'durable' as never,
+        label,
+        () => new Promise<void>((resolve) => {
+          events.push(label);
+          capture(resolve);
+        }),
+        { source: 'catchup-foreground' },
+      )
+    );
+
+    const first = run('first', (release) => { releaseFirst = release; });
+    await tick();
+    const second = run('second', (release) => { releaseSecond = release; });
+    await tick();
+    expect(events).toEqual(['first', 'second']);
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([first, second]);
+  });
+
   it('does not derive a reservation from an RFC-64 policy without complete providers', async () => {
     const contextGraphId = 'urn:cg:rfc64-no-complete-provider';
     const agentLike = {
