@@ -9,12 +9,15 @@ import {
 import {
   buildAgentProfileVerificationClosureV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
+  computeAgentProfileForkResolutionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   computeSystemRecordStableKeyHashV1,
   digestSystemRecordBytesV1,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileForkResolutionV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
+  type Digest32V1,
   type NetworkIdV1,
   type SignedAgentProfileHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -71,6 +74,7 @@ const verified = await (async () => {
   return Object.freeze({
     head,
     authority: await mintAuthority(head, bundle),
+    bundle,
     projectionQuads,
     canonicalProjectionBytes,
   });
@@ -141,6 +145,100 @@ export function makeSystemRecordActiveReplacementIssueV1(
     projectionQuads: structuredClone(verified.projectionQuads),
     ownedSubjectTable: [verified.head.rootSubject],
   };
+}
+
+const SIBLING_BUNDLE_DIGEST = `0x${'c7'.repeat(32)}` as Digest32V1;
+
+export interface ForkResolvingSuccessorFixtureV1 {
+  readonly resolution: AgentProfileForkResolutionV1;
+  readonly head: AgentProfileActiveHeadObjectV1;
+  readonly issue: SystemRecordActiveReplacementIssueV1;
+}
+
+/**
+ * A version-zero fork resolved by a successor descending from neither sibling,
+ * so the resolution names no common base. The closure is the real one, so the
+ * minted summary carries verified fork-resolution facts rather than a stub.
+ */
+export async function makeForkResolvingSuccessorFixtureV1(
+  binding: SystemRecordLaneExecutionBindingV1,
+): Promise<ForkResolvingSuccessorFixtureV1> {
+  const forked = structuredClone(verified.head);
+  const sibling = { ...forked, bundleDigest: SIBLING_BUNDLE_DIGEST };
+  const resolution = Object.freeze({
+    objectType: 'fork-resolution',
+    kind: 'agents',
+    networkId: forked.networkId,
+    peerId: forked.peerId,
+    peerPublicKey: forked.peerPublicKey,
+    evmIssuer: forked.evmIssuer,
+    authoritySequence: forked.authoritySequence,
+    forkedVersion: forked.version,
+    resolutionVersion: '2',
+    evidenceHeadDigests: Object.freeze(
+      [forked, sibling].map(computeAgentProfileHeadObjectDigestV1).sort(),
+    ),
+    issuedAt: '2026-08-05T12:05:00Z',
+  }) as AgentProfileForkResolutionV1;
+  const head = {
+    ...forked,
+    version: '3',
+    forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+  } as AgentProfileActiveHeadObjectV1;
+  const headDigest = computeAgentProfileHeadObjectDigestV1(head);
+  const artifacts = new Map<string, {
+    objectKind: 'agent-profile-head' | 'fork-resolution' | 'profile-bundle';
+    digest: Digest32V1;
+    canonicalBytes: Uint8Array;
+  }>([
+    envelopeArtifact('agent-profile-head', head),
+    envelopeArtifact('agent-profile-head', forked),
+    envelopeArtifact('agent-profile-head', sibling),
+    envelopeArtifact('fork-resolution', resolution),
+    [`profile-bundle:${head.bundleDigest}`, {
+      objectKind: 'profile-bundle',
+      digest: head.bundleDigest,
+      canonicalBytes: verified.bundle,
+    }],
+  ]);
+  const closure = await buildAgentProfileVerificationClosureV1(headDigest, {
+    nowMs: Date.parse('2026-08-05T12:10:00Z'),
+    resolve: async (reference) => artifacts.get(`${reference.objectKind}:${reference.digest}`),
+    verifyAuthorityEnvelope: () => true,
+    verifyCurrentBundle: (_head, bytes) =>
+      Buffer.from(bytes).equals(Buffer.from(verified.bundle)),
+  });
+  return Object.freeze({
+    resolution,
+    head,
+    issue: {
+      ...makeSystemRecordActiveReplacementIssueV1(binding),
+      head,
+      verifiedAuthoritySummary: closure.authoritySummary,
+    },
+  });
+}
+
+function envelopeArtifact(
+  objectKind: 'agent-profile-head' | 'fork-resolution',
+  object: AgentProfileActiveHeadObjectV1 | AgentProfileForkResolutionV1,
+): [string, {
+  objectKind: 'agent-profile-head' | 'fork-resolution';
+  digest: Digest32V1;
+  canonicalBytes: Uint8Array;
+}] {
+  const digest = object.objectType === 'agent-profile-head'
+    ? computeAgentProfileHeadObjectDigestV1(object)
+    : computeAgentProfileForkResolutionDigestV1(object);
+  return [`${objectKind}:${digest}`, {
+    objectKind,
+    digest,
+    canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1({
+      ...structuredClone(vectors.signed.activeEip191.envelope),
+      object,
+      objectDigest: digest,
+    } as SignedAgentProfileHeadEnvelopeV1),
+  }];
 }
 
 function projectionFor(head: Pick<AgentProfileActiveHeadObjectV1,

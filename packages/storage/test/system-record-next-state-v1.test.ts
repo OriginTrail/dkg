@@ -64,6 +64,10 @@ import {
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
 import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
+import {
+  makeAuthenticActiveReplacementFixtureV1,
+  makeForkResolvingSuccessorFixtureV1,
+} from './helpers/system-record-active-replacement-fixture.js';
 import { makeAuthenticTerminalReplacementFixtureV1 } from './helpers/system-record-terminal-replacement-fixture.js';
 
 interface Vectors {
@@ -740,6 +744,18 @@ describe('system-record terminal and quarantine next-state derivation', () => {
   // the head it had quarantined. Every conjunct of the advance matches here,
   // which is the point: without the gate this fixture advances and plans a
   // deletion.
+  it('carries verified fork-resolution facts on the fork-resolving successor', async () => {
+    const { binding } = makeAuthenticActiveReplacementFixtureV1('authoritative');
+    const fork = await makeForkResolvingSuccessorFixtureV1(binding);
+    expect(fork.issue.verifiedAuthoritySummary.forkResolution).toEqual({
+      resolutionDigest: fork.head.forkResolutionDigest,
+      authoritySequence: '0',
+      forkedVersion: '0',
+      resolutionVersion: '2',
+    });
+    expect(fork.head.version).toBe('3');
+  });
+
   it('never lets a tombstone advance over a fork-quarantined row', async () => {
     const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
     const initialRegistry = createSystemRecordVerifiedReplacementRegistryV1();
