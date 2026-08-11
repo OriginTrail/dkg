@@ -61,16 +61,38 @@ export type _EveryForwardedControlIsDeclared = Expect<IsEmpty<NotDeclared>>;
  * this one is about the published surface, and only a root import can fail when
  * the barrel changes.
  */
-import {
+import type {
   pickSystemRecordConfigControlsV1 as rootPickSystemRecordConfigControlsV1,
-  type SystemRecordConfigControlsV1 as RootSystemRecordConfigControlsV1,
+  SystemRecordConfigControlsV1 as RootSystemRecordConfigControlsV1,
 } from '@origintrail-official/dkg-agent';
 
-declare const rootControls: RootSystemRecordConfigControlsV1;
+type RootPickerReturn = ReturnType<typeof rootPickSystemRecordConfigControlsV1>;
 
-/** The root picker's return type must BE the root's published control type. */
-export const _rootPickerReturnsThePublicType: RootSystemRecordConfigControlsV1 =
-  rootPickSystemRecordConfigControlsV1({});
-export const _thePublicTypeIsThePickerReturn: ReturnType<
-  typeof rootPickSystemRecordConfigControlsV1
-> = rootControls;
+/**
+ * KEY-SET equality, not mutual assignability. Every control field is optional,
+ * and two object types whose keys differ only by optional members are mutually
+ * assignable — so a pair of assignment checks would pass while the root's
+ * published type gained a control the picker never forwards, or lost one it
+ * does. That is a pin that cannot fail for the drift it exists to catch, which
+ * is why this reuses the `Exclude<keyof A, keyof B>` shape above rather than
+ * asserting the two types are compatible.
+ */
+type PublishedButNotReturned = Exclude<
+  keyof RootSystemRecordConfigControlsV1,
+  keyof RootPickerReturn
+>;
+type ReturnedButNotPublished = Exclude<
+  keyof RootPickerReturn,
+  keyof RootSystemRecordConfigControlsV1
+>;
+
+export type _RootTypePublishesExactlyWhatThePickerReturns = Expect<
+  IsEmpty<PublishedButNotReturned>
+>;
+export type _RootPickerReturnsExactlyWhatTheRootTypePublishes = Expect<
+  IsEmpty<ReturnedButNotPublished>
+>;
+
+/** The published type must still describe the picker's value, not merely share keys. */
+export type _RootTypeIsAssignableFromThePickerReturn =
+  Expect<RootPickerReturn extends RootSystemRecordConfigControlsV1 ? true : false>;
