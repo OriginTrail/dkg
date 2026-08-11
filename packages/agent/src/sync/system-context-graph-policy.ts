@@ -59,10 +59,10 @@ export type ChangelogLaneDisposition =
  * stop satisfying the constraint, and `tsc` rejects it until that graph is given
  * a disposition (verified by adding a third member experimentally).
  *
- * Its bound, so it is not trusted past its range: it forces a STATEMENT, not a
- * decision — a graph can be added as `'undecided-rides-changelog-lane'` and
- * shipped. What it buys is that the choice becomes visible in a diff and
- * greppable.
+ * It is bounded, and the bound is written down so the guard is not trusted past
+ * its range: it forces a STATEMENT, not a decision — a graph can be added as
+ * `'undecided-rides-changelog-lane'` and shipped. What it buys is that the
+ * choice becomes visible in a diff and greppable.
  *
  * The enforcement lives entirely in that type boundary, and weakening the
  * boundary removes it silently, with nothing failing: swapping `satisfies` for
