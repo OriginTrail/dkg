@@ -873,6 +873,54 @@ describe('system-record V1 object codecs', () => {
     )).toEqual({ decision: 'quarantine', reason: 'transition-equivocation' });
   });
 
+  // Pins the weld between a resolution's authority sequence and its fork base's.
+  // A consumer matching a resolution against its own recorded quarantine leans on
+  // it: because the two are welded, a resolution disagreeing on sequence must name
+  // a base at that other sequence -- a different digest -- so comparing base
+  // digests carries the sequence property too, and a separate sequence conjunct
+  // downstream would be a re-check of this one.
+  //
+  // Both arms come from one construction with the base's sequence as the only free
+  // coordinate, so the refusal cannot be an incidental malformation of a hand-built
+  // head. Every sibling disjunct is falsified deliberately: the base stays active,
+  // its digest is the one the resolution names, network/peer/issuer are untouched,
+  // and its version stays below the forked version. The accepted-transition digest
+  // is asserted equal across the arms because that is the trap here -- a base at
+  // another sequence would ordinarily carry another lineage digest and be refused
+  // further down, which would leave this conjunct's removal undetected.
+  it('welds a fork resolution to a base at its own authority sequence', async () => {
+    const rotated = await rotatedForkResolutionCase();
+    const withBaseSequence = (authoritySequence: string) => {
+      const base = { ...rotated.base, authoritySequence };
+      const forkBaseHeadDigest = computeAgentProfileHeadObjectDigestV1(base);
+      const evidenceHeads = [rotated.left, rotated.right].map((head) => {
+        return { ...head, previousHeadDigest: forkBaseHeadDigest };
+      });
+      return {
+        base,
+        evidenceHeads,
+        resolution: {
+          ...rotated.resolution,
+          forkBaseHeadDigest,
+          evidenceHeadDigests: evidenceHeads.map(computeAgentProfileHeadObjectDigestV1).sort(),
+        },
+      };
+    };
+
+    const matched = withBaseSequence(rotated.resolution.authoritySequence);
+    expect(matched.base.authoritySequence).toBe('2');
+    expect(() => assertAgentProfileForkResolutionEvidenceV1(
+      matched.resolution, matched.evidenceHeads, matched.base,
+    )).not.toThrow();
+
+    const mismatched = withBaseSequence('1');
+    expect(mismatched.base.acceptedTransitionDigest)
+      .toBe(matched.base.acceptedTransitionDigest);
+    expect(() => assertAgentProfileForkResolutionEvidenceV1(
+      mismatched.resolution, mismatched.evidenceHeads, mismatched.base,
+    )).toThrow(/lower same-authority head/);
+  });
+
   it('enforces the exact five-minute future boundary and discards historical resolutions', async () => {
     const fixture = await authorityFixture();
     const now = Date.parse('2026-08-05T12:00:00Z');
