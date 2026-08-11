@@ -19,7 +19,10 @@ import {
 } from '../src/dkg-agent-constants.js';
 import { buildSyncRequestEnvelope } from '../src/sync/auth/request-build.js';
 import { encodeExactAssetUals, MAX_EXACT_SYNC_ASSETS } from '../src/sync/exact-assets.js';
-import { serializeResponderRows } from '../src/sync/responder/graph-plan.js';
+import {
+  readDurableDataPage,
+  serializeResponderRows,
+} from '../src/sync/responder/graph-plan.js';
 import {
   linesFromNquads,
   registerTestSyncHandler,
@@ -178,8 +181,8 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     expect(parsed.sinceBatchId).toBe('42');
   });
 
-  it('paginates nine public exact KAs through the production pipe builder and parser with exact parity', async () => {
-    const contextGraphId = 'nine-ka-public-exact';
+  it('paginates exactly MAX_EXACT_SYNC_ASSETS through the production wire and responder', async () => {
+    const contextGraphId = 'max-ka-public-exact';
     const rowsPerKa = 77;
     const store = new OxigraphStore();
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -189,7 +192,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     const manifestQuads: Quad[] = [];
     const expectedRows: Array<{ s: string; p: string; o: string; g: string }> = [];
 
-    for (let assetIndex = 0; assetIndex < 9; assetIndex += 1) {
+    for (let assetIndex = 0; assetIndex < MAX_EXACT_SYNC_ASSETS; assetIndex += 1) {
       const ual = `did:dkg:base:84532/${AUTHOR}/${assetIndex + 1}`;
       const graph = knowledgeAssetLayerGraphUri(
         contextGraphId,
@@ -227,6 +230,18 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       })),
     ]);
 
+    const directPage = await readDurableDataPage({
+      store,
+      graphList: payloadGraphs,
+      contextGraphId,
+      sinceBatchId: null,
+      offset: 0,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      assetUals,
+      exactGraphReadMode: 'page-only',
+    });
+    expect(directPage).toHaveLength(SYNC_REQUEST_SAFE_PAGE_SIZE);
+
     const originalQuery = store.query.bind(store);
     const payloadReadLimits: number[] = [];
     let maxPayloadBindings = 0;
@@ -248,9 +263,14 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     }) as OxigraphStore['query'];
 
     const agent = await getAgent();
+    const parsedAssetUalPages: string[][] = [];
     const cap = registerTestSyncHandler(store, {
       syncPageSize: SYNC_PAGE_SIZE,
-      parseSyncRequest: (data) => (agent as any).parseSyncRequest(data),
+      parseSyncRequest: (data) => {
+        const parsed = (agent as any).parseSyncRequest(data);
+        parsedAssetUalPages.push([...(parsed.assetUals ?? [])]);
+        return parsed;
+      },
     });
     const received: string[] = [];
     const requestedOffsets: number[] = [];
@@ -265,7 +285,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
         targetPeerId: 'peer-responder',
         requesterPeerId: 'peer-requester',
         phase: 'data',
-        syncSessionId: 'nine-ka-session',
+        syncSessionId: 'max-ka-session',
         assetUals,
         needsAuth: false,
         computeSyncDigest: () => new Uint8Array(32),
@@ -282,10 +302,21 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     }
 
     const expected = linesFromNquads(serializeResponderRows(expectedRows));
-    expect(received).toHaveLength(9 * rowsPerKa);
+    expect(parsedAssetUalPages[0]).toHaveLength(MAX_EXACT_SYNC_ASSETS);
+    expect(received).toHaveLength(MAX_EXACT_SYNC_ASSETS * rowsPerKa);
     expect(new Set(received)).toEqual(new Set(expected));
+    expect(parsedAssetUalPages).toHaveLength(requestedOffsets.length);
+    const canonicalAssetUals = [...assetUals].sort();
+    expect(parsedAssetUalPages.every((page) =>
+      page.length === MAX_EXACT_SYNC_ASSETS
+      && page.every((ual, index) => ual === canonicalAssetUals[index]))).toBe(true);
+    const totalRows = MAX_EXACT_SYNC_ASSETS * rowsPerKa;
     expect(requestedOffsets).toEqual([
-      0, 64, 128, 192, 256, 320, 384, 448, 512, 576, 640, 693,
+      ...Array.from(
+        { length: Math.ceil(totalRows / SYNC_REQUEST_SAFE_PAGE_SIZE) },
+        (_, index) => index * SYNC_REQUEST_SAFE_PAGE_SIZE,
+      ),
+      totalRows,
     ]);
     expect(payloadReadLimits.length).toBeGreaterThan(0);
     expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
