@@ -1075,6 +1075,8 @@ export class DKGAgentBase {
   protected vmReconcileLifecycleController = new AbortController();
   /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
   protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
+  /** Process-local ownership tokens prevent stale lifecycles clearing a replacement cooldown. */
+  protected readonly vmReconcileFetchCooldownOwner = new Map<string, symbol>();
   /** Last stranded UAL visited by the bounded RS-heal sweep for each CG. */
   protected readonly rsHealCursorByCg = new Map<string, string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */

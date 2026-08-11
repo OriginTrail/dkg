@@ -44,9 +44,12 @@ export interface VmRecoveryHostInternals {
   };
   preferredSyncPeers: Map<string, string>;
   vmReconcileFetchCooldownAt: Map<string, number>;
+  vmReconcileFetchCooldownOwner: Map<string, symbol>;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
+  shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
+  clearVmReconcileActiveFetchCooldown(localCgId: string, expectedOwner?: symbol): boolean;
   resolveCuratorPeerIdsForCg(
     contextGraphId: string,
     options?: {
