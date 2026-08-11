@@ -65,6 +65,38 @@ if (packageManifest.exports['./dist/system-records/*'] !== null) {
   throw new Error('unclassified System Record deep imports are not blocked by default');
 }
 
+// #2052 D-10 — pin the package-root contract for the system-record config
+// controls, in BOTH directions. It sits with the System Record surface checks
+// above rather than further down, so one audit of this domain sees the whole
+// policy: the deep-import block, then what the root itself offers.
+//
+// The CLI forwarding hop needs the picker on the root; the four per-control
+// resolvers are deliberately NOT on it, because they have no production caller
+// and `./dist/system-records/*` is blocked just above, so publishing them would
+// commit us to names and shapes before their consuming lanes exist. Without
+// this pin both drifts are silent: a re-export would widen the public surface,
+// an accidental removal of the picker would break the CLI hop, and every other
+// check stays green either way — the resolver tests import the source module
+// directly, and the CLI wiring test proves the value survives the hop, never
+// what the package root offers.
+if (typeof root.pickSystemRecordConfigControlsV1 !== 'function') {
+  throw new Error(
+    'package root no longer exports pickSystemRecordConfigControlsV1; the CLI forwarding hop consumes it',
+  );
+}
+for (const name of [
+  'systemRecordProducerTrackingEnabledV1',
+  'systemRecordProviderAdvertisementEnabledV1',
+  'systemRecordRequesterLaneEnabledV1',
+  'systemRecordLegacyCapablePeerSelectionEnabledV1',
+]) {
+  if (Object.hasOwn(root, name)) {
+    throw new Error(
+      `package root exports system-record control resolver ${name}; keep it internal until its lane has a caller`,
+    );
+  }
+}
+
 const profileArtifact = (objectKind, byte) => Object.freeze({
   objectKind,
   objectDigest: `0x${byte.toString(16).padStart(64, '0')}`,
@@ -269,34 +301,6 @@ for (const path of blockedRfc64Modules) {
     throw new Error(`internal RFC-64 module unexpectedly resolved: ${path}`);
   } catch (error) {
     if (error?.code !== 'ERR_PACKAGE_PATH_NOT_EXPORTED') throw error;
-  }
-}
-
-// #2052 D-10 — pin the package-root contract for the system-record config
-// controls, in BOTH directions. The CLI forwarding hop needs the picker on the
-// root; the four per-control resolvers are deliberately NOT on it, because they
-// have no production caller and `./dist/system-records/*` is blocked, so
-// publishing them would commit us to names and shapes before their consuming
-// lanes exist. Without this pin both drifts are silent: a re-export would widen
-// the public surface, an accidental removal of the picker would break the CLI
-// hop, and every other check stays green either way — the resolver tests import
-// the source module directly, and the CLI wiring test proves the value survives
-// the hop, never what the package root offers.
-if (typeof root.pickSystemRecordConfigControlsV1 !== 'function') {
-  throw new Error(
-    'package root no longer exports pickSystemRecordConfigControlsV1; the CLI forwarding hop consumes it',
-  );
-}
-for (const name of [
-  'systemRecordProducerTrackingEnabledV1',
-  'systemRecordProviderAdvertisementEnabledV1',
-  'systemRecordRequesterLaneEnabledV1',
-  'systemRecordLegacyCapablePeerSelectionEnabledV1',
-]) {
-  if (Object.hasOwn(root, name)) {
-    throw new Error(
-      `package root exports system-record control resolver ${name}; keep it internal until its lane has a caller`,
-    );
   }
 }
 
