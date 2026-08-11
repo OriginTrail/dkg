@@ -515,6 +515,9 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const round = await runCatchupPlanesWithPolicy({
       mode: 'foreground',
       includeSharedMemory: needSharedMemory,
+      planeOrder: needSharedMemory && authoritativeSharedMemoryPeerIds.has(peerId)
+        ? 'shared-first'
+        : 'durable-first',
       syncDurable,
       syncSharedMemory,
     });

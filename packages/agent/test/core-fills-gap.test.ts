@@ -744,7 +744,10 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
     const recent = (internals as any).recentReconciledUals as { add(key: string): void; has(key: string): boolean };
     const negativeCache = (internals as any).vmReconcileNegativeCache as Map<string, unknown>;
     const negativeKeysByCg = (internals as any).vmReconcileNegativeCacheKeysByCg as Map<string, Set<string>>;
-    const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
+    const fetchCooldown = (internals as any).vmReconcileFetchCooldowns as Map<
+      string,
+      { startedAt: number; owner: symbol }
+    >;
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, unknown>;
     const reconcileCursors = (internals as any).reconcileCursors as Map<string, unknown>;
@@ -758,7 +761,7 @@ describe('Phase D — recordCoreHostedPublicCg', () => {
       peerTopologyKey: '',
     });
     negativeKeysByCg.set(localCgId, new Set([recentKey]));
-    fetchCooldown.set(localCgId, Date.now());
+    fetchCooldown.set(localCgId, { startedAt: Date.now(), owner: Symbol(localCgId) });
     peerCursor.set(localCgId, 2);
     peerOrder.set(localCgId, { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
     reconcileCursors.set(localCgId, { pending: new Set([0]) });
@@ -1834,7 +1837,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     expect(fetch.calls).toHaveLength(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
-    expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('50')).toBe(false);
+    expect(((internals as any).vmReconcileFetchCooldowns as Map<string, unknown>).has('50')).toBe(false);
   });
 
   it('does not negative-cache no-swm when every active fetch attempt fails', async () => {
@@ -1853,7 +1856,7 @@ describe('Phase D - VM reconcile damping', () => {
 
     expect(fetch.calls).toHaveLength(2);
     expect(((internals as any).vmReconcileNegativeCache as Map<string, unknown>).size).toBe(0);
-    expect(((internals as any).vmReconcileFetchCooldownAt as Map<string, unknown>).has('51')).toBe(false);
+    expect(((internals as any).vmReconcileFetchCooldowns as Map<string, unknown>).has('51')).toBe(false);
   });
 
   it('does not prune newer root cache state when a stale root is replayed', async () => {
@@ -1965,7 +1968,10 @@ describe('Phase D - VM reconcile damping', () => {
       candidateNamespaces: unknown[];
       peerTopologyKey: string;
     }>;
-    const fetchCooldown = (internals as any).vmReconcileFetchCooldownAt as Map<string, number>;
+    const fetchCooldown = (internals as any).vmReconcileFetchCooldowns as Map<
+      string,
+      { startedAt: number; owner: symbol }
+    >;
     const peerCursor = (internals as any).vmReconcileCatchupPeerCursor as Map<string, number>;
     const peerOrder = (internals as any).vmReconcileCatchupPeerOrder as Map<string, { orderedPeers: string[]; nextPeerId?: string }>;
     const rotationState = (internals as any).vmReconcileRotationState as Map<string, unknown>;
@@ -1983,9 +1989,12 @@ describe('Phase D - VM reconcile damping', () => {
         peerTopologyKey: '',
       });
     }
-    fetchCooldown.set('expired-cg', now - DKGAgent.VM_RECONCILE_SWEEP_INTERVAL_MS - 1);
+    fetchCooldown.set('expired-cg', {
+      startedAt: now - DKGAgent.VM_RECONCILE_SWEEP_INTERVAL_MS - 1,
+      owner: Symbol('expired-cg'),
+    });
     for (let i = 0; i < DKGAgent.VM_RECONCILE_CG_STATE_MAX_ENTRIES + 2; i += 1) {
-      fetchCooldown.set(`fetch-${i}`, now);
+      fetchCooldown.set(`fetch-${i}`, { startedAt: now, owner: Symbol(`fetch-${i}`) });
       peerCursor.set(`cursor-${i}`, i);
       peerOrder.set(`cursor-${i}`, { orderedPeers: [`peer-${i}`], nextPeerId: `peer-${i}` });
     }
@@ -2009,7 +2018,7 @@ describe('Phase D - VM reconcile damping', () => {
     });
     (internals as any).indexVmReconcileNegativeCacheEntry('cleanup-cg', 'cleanup-cache');
     (internals as any).markVmReconcileNegativeCacheHydrated('cleanup-hydrated', 'cleanup-cg');
-    fetchCooldown.set('cleanup-cg', now);
+    fetchCooldown.set('cleanup-cg', { startedAt: now, owner: Symbol('cleanup-cg') });
     peerCursor.set('cleanup-cg', 7);
     peerOrder.set('cleanup-cg', { orderedPeers: ['peer-a'], nextPeerId: 'peer-a' });
     const cleanupRotationKey = (internals as any).vmReconcileRotationSlotKey(
@@ -2405,7 +2414,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       expect((internals as any).vmReconcileRotationState.get(
         (internals as any).vmReconcileRotationSlotKey(target),
       )).toMatchObject({ phase: 'collecting' });
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     }
     const recovered = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -2504,7 +2513,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
           expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
             phase: 'collecting', curatorRosterConfirmed: false,
           });
-          (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+          (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
         }
       }
 
@@ -2817,7 +2826,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(first.attemptedOrdinals).toEqual([0, 1]);
     expect(first.continuationOrdinal).toBeUndefined();
     expect(first.hasImmediateRecoveryWork).toBe(true);
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(false);
 
     // Both targets retain one untried provider. The next bounded pass rotates
     // to those providers immediately instead of sleeping for the 60s sweep.
@@ -2832,7 +2841,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(second.continuationOrdinal).toBeUndefined();
     expect(second.hasImmediateRecoveryWork).toBe(false);
     expect(second.cooldownOnly).toBe(false);
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(true);
   });
 
   it('suppresses completed incomplete cycles after every pending target receives an attempt', async () => {
@@ -2888,7 +2897,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(first.attemptedOrdinals).toEqual([0]);
     expect(first.continuationOrdinal).toBe(1);
 
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const second = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [targets[1]!], 100, () => true,
     );
@@ -2902,7 +2911,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
         (internals as any).vmReconcileRotationSlotKey(target),
       )).toMatchObject({ phase: 'backoff', backoffKind: 'incomplete-cycle' });
     }
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const wrapped = await internals.recoverVmReconcileBatch(
       localCgId, 1n, targets, 100, () => true,
     );
@@ -2964,7 +2973,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(first.outcomes.get(0)).toMatchObject({ status: 'pending' });
     expect(first.continuationOrdinal).toBeUndefined();
     expect(first.hasImmediateRecoveryWork).toBe(true);
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(false);
 
     const second = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -3021,7 +3030,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     expect(first.outcomes.size).toBe(0);
     expect(first.hasImmediateRecoveryWork).toBe(true);
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(false);
 
     const second = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -3091,7 +3100,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
 
     await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const recovered = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [activeTarget], 100, () => true,
     );
@@ -3100,9 +3109,9 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     activeTarget = vmRecoveryTarget(localCgId, 1, '77');
     lastDisposition = 'incomplete';
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
     expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB]);
     const slotKey = (internals as any).vmReconcileRotationSlotKey(activeTarget);
@@ -3111,10 +3120,10 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
     });
     expect([...incompleteBackoff.cleanAbsentPeerIds]).toEqual([]);
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(true);
 
     now = incompleteBackoff.nextRetryAt + 1;
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const retried = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [activeTarget], 100, () => true,
     );
@@ -3124,7 +3133,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       phase: 'collecting', failures: 1,
     });
 
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [activeTarget], 100, () => true);
     expect(attemptsByUal.get(activeTarget.ual)).toEqual([peerA, peerB, peerA, peerB]);
     expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
@@ -3174,7 +3183,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     });
 
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
 
     const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
@@ -3189,14 +3198,14 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(curatorResolutions).toBe(2);
 
     now = firstBackoff.nextRetryAt + 1;
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     const freshPartial = (internals as any).vmReconcileRotationState.get(slotKey);
     expect(networkAttempts).toEqual([peerA, peerB, peerA]);
     expect(freshPartial).toMatchObject({ phase: 'collecting', failures: 1 });
     expect([...freshPartial.cleanAbsentPeerIds]).toEqual([peerA]);
 
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
     expect(networkAttempts).toEqual([peerA, peerB, peerA, peerB]);
     expect((internals as any).vmReconcileRotationState.get(slotKey))
@@ -3246,7 +3255,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     expect(first.attemptedOrdinals).toEqual([0]);
     expect(networkAttempts).toEqual([]);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const result = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
     );
@@ -3260,7 +3269,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect([...incompleteBackoff.attemptedPeerIds])
       .toEqual([rejectedPeer, incompletePeer]);
     expect([...incompleteBackoff.cleanAbsentPeerIds]).toEqual([]);
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(true);
 
     const damped = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -3360,7 +3369,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
     for (let attempt = 0; attempt < 3; attempt += 1) {
       await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     }
     expect(networkAttempts).toEqual([peerA, peerD, peerB]);
     expect(curatorResolutions).toBe(3);
@@ -3487,7 +3496,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
 
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     await internals.recoverVmReconcileBatch(localCgId, 1n, [target], 100, () => true);
 
     const slotKey = (internals as any).vmReconcileRotationSlotKey(target);
@@ -3496,7 +3505,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(incompleteBackoff).toMatchObject({
       phase: 'backoff', backoffKind: 'incomplete-cycle', failures: 1,
     });
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(true);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(true);
 
     const damped = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -3505,7 +3514,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(damped.cooldownOnly).toBe(false);
 
     now = incompleteBackoff.nextRetryAt + 1;
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const recovered = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
     );
@@ -3592,7 +3601,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       expect(attemptsByUal.get(overflow.ual)).toBeUndefined();
       expect(attemptsByUal.get(secondOverflow.ual)).toBeUndefined();
 
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
       await internals.recoverVmReconcileBatch(
         localCgId, 1n, targets, 100, () => true,
       );
@@ -3604,7 +3613,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       // A batch containing only an unowned target can be rejected from the
       // live capacity state without paying curator discovery or transport.
       const resolutionsBeforeCapacityDeferral = curatorResolutions;
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
       await internals.recoverVmReconcileBatch(
         localCgId, 1n, [overflow], 100, () => true,
       );
@@ -3613,7 +3622,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
       // An unexpired backoff remains installed and the overflow target performs
       // no evidence-free exact request.
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
       await internals.recoverVmReconcileBatch(
         localCgId, 1n, targets, 100, () => true,
       );
@@ -3625,7 +3634,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
       const firstBackoff = rotationState.get(firstKey) as any;
       (internals as any).vmReconcileRotationNow = () => firstBackoff.nextRetryAt + 1;
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
       await internals.recoverVmReconcileBatch(
         localCgId, 1n, targets, 100, () => true,
       );
@@ -3636,7 +3645,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
 
       // Complete B's roster, expire it, and prove the third stable-order waiter
       // receives the next slot instead of A/B alternating forever.
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
       await internals.recoverVmReconcileBatch(
         localCgId, 1n, targets, 100, () => true,
       );
@@ -3645,7 +3654,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       expect(attemptsByUal.get(overflow.ual)).toEqual([peerA, peerB]);
 
       (internals as any).vmReconcileRotationNow = () => overflowBackoff.nextRetryAt + 1;
-      (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
       await internals.recoverVmReconcileBatch(
         localCgId, 1n, targets, 100, () => true,
       );
@@ -4233,7 +4242,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect((internals as any).vmReconcileRotationState.get(slotKey)).toMatchObject({
       phase: 'collecting', curatorRosterConfirmed: false,
     });
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const suppressed = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
     );
@@ -4299,7 +4308,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     expect(first.outcomes.get(0)).toEqual({ status: 'pending' });
     expect(fetches).toEqual([ordinaryPeer]);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
 
     const second = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
@@ -4539,13 +4548,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       );
       await boundaryStarted;
       current = false;
-      (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
       releaseBoundary();
 
       await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
       expect(fetch).not.toHaveBeenCalled();
-      expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
-      expect((internals as any).vmReconcileRotationState.size).toBe(0);
+      expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(false);
     },
   );
 
@@ -4591,13 +4598,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     await fetchStarted;
     current = false;
-    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
     releaseFetch();
 
     await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
     expect(reconcile).not.toHaveBeenCalled();
-    expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
-    expect((internals as any).vmReconcileRotationState.size).toBe(0);
+    expect((internals as any).vmReconcileFetchCooldowns.has(localCgId)).toBe(false);
   });
 
   it('does not resurrect a rotation record evicted while the exact request is pending', async () => {
@@ -4743,7 +4748,7 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     expect(first.attemptedOrdinals).toEqual([0]);
     expect(fetches).toEqual([]);
-    (internals as any).vmReconcileFetchCooldownAt.delete(localCgId);
+    (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
     const result = await internals.recoverVmReconcileBatch(
       localCgId, 1n, [target], 100, () => true,
     );

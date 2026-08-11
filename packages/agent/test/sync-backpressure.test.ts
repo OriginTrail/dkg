@@ -1437,9 +1437,7 @@ describe('sync global backpressure', () => {
     const policy = resolveSyncGlobalBackpressure({
       syncGlobalMaxInflight: 2,
       syncGlobalQueueLimit: 4,
-      rfc64PublicCatalogBootstrap: {
-        acceptedPublicPolicies: [{ completeSwmProviders: ['12D3KooWCompleteSwmProvider'] }],
-      },
+      selectedRecoveryContextGraphIds: ['urn:cg:selected'],
     });
     const events: string[] = [];
     let releaseRoutine!: () => void;
@@ -1480,6 +1478,7 @@ describe('sync global backpressure', () => {
     const shared = withGlobalSyncBackpressure({
       policy,
       ctx,
+      contextGraphId: 'urn:cg:selected',
       label: 'shared-memory:selected-provider',
       lane: 'shared_memory',
       priority: 2_000,
@@ -1503,5 +1502,296 @@ describe('sync global backpressure', () => {
       'vm-recovery-start',
       'ordinary-shared-start',
     ]);
+  });
+
+  it('keeps one selected-scope slot available while foreground catch-up fans out', async () => {
+    const ctx = createOperationContext('sync');
+    const selectedCg = 'urn:cg:selected';
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 6,
+      selectedRecoveryContextGraphIds: [selectedCg],
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseRecovery!: () => void;
+
+    const first = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-a',
+      lane: 'durable',
+      source: 'catchup-foreground',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('first-catchup-start');
+      releaseFirst = resolve;
+    }));
+    await tick();
+    const duplicate = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-b',
+      lane: 'durable',
+      source: 'catchup-foreground',
+    }, async () => {
+      events.push('duplicate-catchup-start');
+    });
+    await tick();
+    expect(events).toEqual(['first-catchup-start']);
+
+    const recovery = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-recovery',
+      lane: 'durable',
+      priority: 1_000,
+      source: 'vm-recovery',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('recovery-start');
+      releaseRecovery = resolve;
+    }));
+    await tick();
+    expect(events).toEqual(['first-catchup-start', 'recovery-start']);
+
+    releaseRecovery();
+    await recovery;
+    expect(events).toEqual(['first-catchup-start', 'recovery-start']);
+    releaseFirst();
+    await Promise.all([first, duplicate]);
+    expect(events).toEqual([
+      'first-catchup-start',
+      'recovery-start',
+      'duplicate-catchup-start',
+    ]);
+  });
+
+  it('admits selected SWM recovery before queued same-scope foreground fanout', async () => {
+    const ctx = createOperationContext('sync');
+    const selectedCg = 'urn:cg:selected-swm';
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 6,
+      selectedRecoveryContextGraphIds: [selectedCg],
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSelectedSwm!: () => void;
+
+    const first = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-first',
+      lane: 'durable',
+      source: 'catchup-foreground',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('first-catchup-start');
+      releaseFirst = resolve;
+    }));
+    await tick();
+    const duplicate = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-duplicate',
+      lane: 'durable',
+      source: 'catchup-foreground',
+    }, async () => {
+      events.push('duplicate-catchup-start');
+    });
+    await tick();
+
+    const selectedSwm = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'shared-memory:selected-recovery',
+      lane: 'shared_memory',
+      priority: 2_000,
+      source: 'on-connect',
+      selectedSwmPriority: true,
+    }, async () => new Promise<void>((resolve) => {
+      events.push('selected-swm-start');
+      releaseSelectedSwm = resolve;
+    }));
+    await tick();
+
+    expect(events).toEqual(['first-catchup-start', 'selected-swm-start']);
+    releaseSelectedSwm();
+    await selectedSwm;
+    releaseFirst();
+    await Promise.all([first, duplicate]);
+    expect(events).toEqual([
+      'first-catchup-start',
+      'selected-swm-start',
+      'duplicate-catchup-start',
+    ]);
+  });
+
+  it('derives the selected reservation from RFC-64 config and excludes unrelated recovery', async () => {
+    const selectedCg = 'urn:cg:rfc64-selected';
+    const agentLike = {
+      config: {
+        syncGlobalMaxInflight: 2,
+        syncGlobalQueueLimit: 6,
+        rfc64PublicCatalogBootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: { payload: { contextGraphId: selectedCg } },
+            completeSwmProviders: ['12D3KooWSelectedProvider'],
+          }],
+        },
+      },
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const events: string[] = [];
+    let releaseFallback!: () => void;
+    let releaseSelected!: () => void;
+
+    const run = (
+      contextGraphId: string,
+      label: string,
+      source: 'catchup-foreground' | 'vm-recovery' | 'on-connect',
+      selectedSwmPriority: boolean,
+      work: () => Promise<void>,
+    ) => LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+      agentLike as never,
+      createOperationContext('sync'),
+      contextGraphId,
+      selectedSwmPriority ? 'shared_memory' : 'durable' as never,
+      label,
+      work,
+      {
+        source,
+        ...(selectedSwmPriority ? { priorityOverride: 2_000, selectedSwmPriority: true } : {}),
+      },
+    );
+
+    const fallback = run(
+      selectedCg,
+      'durable:selected-fallback',
+      'catchup-foreground',
+      false,
+      async () => new Promise<void>((resolve) => {
+        events.push('selected-fallback-start');
+        releaseFallback = resolve;
+      }),
+    );
+    await tick();
+    const unrelatedRecovery = run(
+      'urn:cg:unrelated',
+      'durable:unrelated-recovery',
+      'vm-recovery',
+      false,
+      async () => { events.push('unrelated-recovery-start'); },
+    );
+    await tick();
+    expect(events).toEqual(['selected-fallback-start']);
+
+    const selectedRecovery = run(
+      selectedCg,
+      'shared-memory:selected-recovery',
+      'on-connect',
+      true,
+      async () => new Promise<void>((resolve) => {
+        events.push('selected-recovery-start');
+        releaseSelected = resolve;
+      }),
+    );
+    await tick();
+    expect(events).toEqual(['selected-fallback-start', 'selected-recovery-start']);
+
+    releaseSelected();
+    await selectedRecovery;
+    await tick();
+    expect(events).toEqual(['selected-fallback-start', 'selected-recovery-start']);
+    releaseFallback();
+    await Promise.all([fallback, unrelatedRecovery]);
+    expect(events).toEqual([
+      'selected-fallback-start',
+      'selected-recovery-start',
+      'unrelated-recovery-start',
+    ]);
+  });
+
+  it('does not derive a reservation from an RFC-64 policy without complete providers', async () => {
+    const contextGraphId = 'urn:cg:rfc64-no-complete-provider';
+    const agentLike = {
+      config: {
+        syncGlobalMaxInflight: 2,
+        syncGlobalQueueLimit: 4,
+        rfc64PublicCatalogBootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: { payload: { contextGraphId } },
+            completeSwmProviders: [],
+          }],
+        },
+      },
+      node: { stopSignal: undefined },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    const run = (label: string, capture: (release: () => void) => void) => (
+      LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure.call(
+        agentLike as never,
+        createOperationContext('sync'),
+        contextGraphId,
+        'durable' as never,
+        label,
+        () => new Promise<void>((resolve) => {
+          events.push(label);
+          capture(resolve);
+        }),
+        { source: 'catchup-foreground' },
+      )
+    );
+
+    const first = run('first', (release) => { releaseFirst = release; });
+    await tick();
+    const second = run('second', (release) => { releaseSecond = release; });
+    await tick();
+    expect(events).toEqual(['first', 'second']);
+    releaseFirst();
+    releaseSecond();
+    await Promise.all([first, second]);
+  });
+
+  it('does not reserve capacity for unrelated foreground catch-up', async () => {
+    const ctx = createOperationContext('sync');
+    const selectedCg = 'urn:cg:selected';
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 4,
+      selectedRecoveryContextGraphIds: [selectedCg],
+    });
+    const events: string[] = [];
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const run = (label: string, onRelease: (release: () => void) => void) => (
+      withGlobalSyncBackpressure({
+        policy,
+        ctx,
+        contextGraphId: 'urn:cg:ordinary',
+        label,
+        lane: 'durable',
+        source: 'catchup-foreground',
+      }, async () => new Promise<void>((resolve) => {
+        events.push(label);
+        onRelease(resolve);
+      }))
+    );
+    const first = run('ordinary-a', (release) => { releaseA = release; });
+    await tick();
+    const second = run('ordinary-b', (release) => { releaseB = release; });
+    await tick();
+    expect(events).toEqual(['ordinary-a', 'ordinary-b']);
+    releaseA();
+    releaseB();
+    await Promise.all([first, second]);
   });
 });

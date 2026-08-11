@@ -4407,7 +4407,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       if (await this.vmReconcilePeerTopologyKey(localCgId) !== cached.peerTopologyKey) {
         this.deleteVmReconcileNegativeCacheEntry(cacheKey);
-        this.vmReconcileFetchCooldownAt.delete(localCgId);
+        this.clearVmReconcileActiveFetchCooldown(localCgId);
         return false;
       }
       const currentNamespaces = await this.collectVmReconcileSwmCandidateNamespacesBestEffort(localCgId);
@@ -4987,15 +4987,39 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
   }
 
+  installVmReconcileActiveFetchCooldown(this: DKGAgent, localCgId: string, now: number): symbol {
+    const owner = Symbol(localCgId);
+    this.vmReconcileFetchCooldowns.delete(localCgId);
+    this.vmReconcileFetchCooldowns.set(localCgId, { startedAt: now, owner });
+    return owner;
+  }
+
+  readVmReconcileActiveFetchCooldown(
+    this: DKGAgent,
+    localCgId: string,
+  ): Readonly<{ startedAt: number; owner: symbol }> | undefined {
+    return this.vmReconcileFetchCooldowns.get(localCgId);
+  }
+
+  clearVmReconcileActiveFetchCooldown(
+    this: DKGAgent,
+    localCgId: string,
+    expectedOwner?: symbol,
+  ): boolean {
+    const current = this.vmReconcileFetchCooldowns.get(localCgId);
+    if (expectedOwner !== undefined && current?.owner !== expectedOwner) return false;
+    return this.vmReconcileFetchCooldowns.delete(localCgId);
+  }
+
   shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
     const now = Date.now();
     this.pruneVmReconcileState(now);
-    const lastFetchAt = this.vmReconcileFetchCooldownAt.get(localCgId);
+    const lastFetchAt = this.vmReconcileFetchCooldowns.get(localCgId)?.startedAt;
     if (lastFetchAt !== undefined && now - lastFetchAt < DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
       return false;
     }
-    if (lastFetchAt !== undefined) this.vmReconcileFetchCooldownAt.delete(localCgId);
-    this.vmReconcileFetchCooldownAt.set(localCgId, now);
+    if (lastFetchAt !== undefined) this.clearVmReconcileActiveFetchCooldown(localCgId);
+    this.installVmReconcileActiveFetchCooldown(localCgId, now);
     return true;
   }
 
@@ -5021,15 +5045,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.deleteVmReconcileNegativeCacheEntry(oldestKey);
     }
 
-    for (const [localCgId, lastFetchAt] of this.vmReconcileFetchCooldownAt) {
-      if (now - lastFetchAt >= DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
-        this.vmReconcileFetchCooldownAt.delete(localCgId);
+    for (const [localCgId, cooldown] of this.vmReconcileFetchCooldowns) {
+      if (now - cooldown.startedAt >= DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
+        this.clearVmReconcileActiveFetchCooldown(localCgId);
       }
     }
-    while (this.vmReconcileFetchCooldownAt.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
-      const oldestKey = this.vmReconcileFetchCooldownAt.keys().next().value;
+    while (this.vmReconcileFetchCooldowns.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileFetchCooldowns.keys().next().value;
       if (oldestKey === undefined) break;
-      this.vmReconcileFetchCooldownAt.delete(oldestKey);
+      this.clearVmReconcileActiveFetchCooldown(oldestKey);
     }
 
     while (this.vmReconcileCatchupPeerCursor.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
@@ -5109,7 +5133,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.clearVmReconcileRotationStateForContextGraph(localCgId);
     this.vmReconcileCuratorPeersByCg.delete(localCgId);
     this.vmReconcileCuratorPageCursorByCg.delete(localCgId);
-    this.vmReconcileFetchCooldownAt.delete(localCgId);
+    this.clearVmReconcileActiveFetchCooldown(localCgId);
     this.vmReconcileCatchupPeerCursor.delete(localCgId);
     this.vmReconcileCatchupPeerOrder.delete(localCgId);
     this.clearRecentVmReconcileStateForContextGraph(localCgId);
@@ -5340,7 +5364,20 @@ export class SwmHostModeMethods extends DKGAgentBase {
       hasImmediateRecoveryWork: false,
       cooldownOnly,
     });
-    if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
+    let activeFetchCooldownOwner: symbol | undefined;
+    const staleRecovery = (): PendingOrdinalRecoveryResult => {
+      // Active-fetch admission installs this cooldown before any async
+      // provider or transport boundary. If the target lifecycle changes while
+      // one of those boundaries is pending, the discarded attempt must not
+      // delay the replacement lifecycle by a full reconcile sweep. Ownership
+      // prevents a late stale attempt from clearing the replacement's token.
+      if (activeFetchCooldownOwner !== undefined) {
+        this.clearVmReconcileActiveFetchCooldown(localCgId, activeFetchCooldownOwner);
+      }
+      return noRecovery();
+    };
+    if (!isRecoveryCurrent()) return staleRecovery();
+    if (targets.length === 0) return noRecovery();
 
     const expectedOnChainCgId = onChainCgId.toString();
     const currentTargets = targets.filter((target) =>
@@ -5454,6 +5491,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
       return noRecovery(initiallyEligible[0]?.ordinal, true);
     }
+    activeFetchCooldownOwner = this.readVmReconcileActiveFetchCooldown(localCgId)?.owner;
 
     // Capture the authenticated join-approval hint before consulting metadata:
     // older member snapshots can contain a legacy creator self-stamp that is
@@ -5483,7 +5521,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         overflowed: false,
         nextPageAfterPeerId: undefined,
       }));
-    if (!isRecoveryCurrent()) return noRecovery();
+    if (!isRecoveryCurrent()) return staleRecovery();
     const allResolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
       .sort((left, right) => left.localeCompare(right));
@@ -5534,7 +5572,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && resolvedCuratorPeerIds.length === 0) {
       legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
     }
-    if (!isRecoveryCurrent()) return noRecovery();
+    if (!isRecoveryCurrent()) return staleRecovery();
     const authoritativeCuratorPeerIds = resolutionSucceeded
       ? resolvedCuratorPeerIds
       : curatorRosterOverflow
@@ -5698,7 +5736,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               `VM exact fetch could not connect candidate peer ${candidatePeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
             );
           });
-          if (!isRecoveryCurrent()) return noRecovery();
+          if (!isRecoveryCurrent()) return staleRecovery();
           const connection = this.node.libp2p.getConnections()
             .find((candidate) => candidate.remotePeer.toString() === candidatePeerId);
           connectedPeer = connection?.remotePeer;
@@ -5708,7 +5746,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const protocolReady = connectedPeer
           ? await this.waitForSyncProtocol(connectedPeer, signal)
           : false;
-        if (!isRecoveryCurrent()) return noRecovery();
+        if (!isRecoveryCurrent()) return staleRecovery();
         if (!connectedPeer || !protocolReady) {
           providerPolicy.markUnavailable(candidatePeerId);
         } else {
@@ -5721,7 +5759,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             'VM exact fetch',
             signal,
           );
-          if (!isRecoveryCurrent()) return noRecovery();
+          if (!isRecoveryCurrent()) return staleRecovery();
           if (!peerAdmitted) providerPolicy.markUnavailable(candidatePeerId);
           else peerId = candidatePeerId;
         }
@@ -5869,7 +5907,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         revalidateTarget,
         ctx,
       });
-      if (execution.kind !== 'completed') return noRecovery();
+      if (execution.kind !== 'completed') return staleRecovery();
       for (const [ordinal, outcome] of execution.outcomes) outcomes.set(ordinal, outcome);
       for (const ordinal of execution.handledOrdinals) handledBatchOrdinals.add(ordinal);
       for (const ordinal of execution.attemptedOrdinals) attemptedOrdinals.add(ordinal);
@@ -5912,7 +5950,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // or untried provider without waiting for the periodic safety-net sweep.
     // Once every retained provider cycle is exhausted, the ordinary cooldown /
     // negative backoff applies exactly as before.
-    if (!isRecoveryCurrent()) return noRecovery();
+    if (!isRecoveryCurrent()) return staleRecovery();
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (
@@ -5921,10 +5959,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       || continuationOrdinal !== undefined
       || hasImmediateRecoveryWork
     ) {
-      this.vmReconcileFetchCooldownAt.delete(localCgId);
+      if (activeFetchCooldownOwner !== undefined) {
+        this.clearVmReconcileActiveFetchCooldown(localCgId, activeFetchCooldownOwner);
+      }
     } else {
-      this.vmReconcileFetchCooldownAt.delete(localCgId);
-      this.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
+      if (
+        activeFetchCooldownOwner !== undefined
+        && this.readVmReconcileActiveFetchCooldown(localCgId)?.owner === activeFetchCooldownOwner
+      ) {
+        this.installVmReconcileActiveFetchCooldown(localCgId, Date.now());
+      }
     }
     return {
       outcomes,
@@ -6179,7 +6223,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         return { status: 'already', blockNumber: versionBlock };
       case 'no-swm':
         if (activeFetchRan && !activeFetchHadUsableResponse) {
-          this.vmReconcileFetchCooldownAt.delete(localCgId);
+          this.clearVmReconcileActiveFetchCooldown(localCgId);
         } else {
           this.recordVmReconcileNegativeCache(
             cacheKey,

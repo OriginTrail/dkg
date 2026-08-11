@@ -24,11 +24,8 @@ export interface SyncGlobalBackpressureConfig {
   syncGlobalMaxInflight?: number;
   syncGlobalLimit?: number;
   syncGlobalQueueLimit?: number;
-  rfc64PublicCatalogBootstrap?: {
-    acceptedPublicPolicies?: readonly {
-      completeSwmProviders?: readonly string[];
-    }[];
-  };
+  /** Scheduler-native scopes whose exact recovery must retain one slot. */
+  selectedRecoveryContextGraphIds?: readonly string[];
 }
 
 declare const syncGlobalBackpressurePolicyBrand: unique symbol;
@@ -44,8 +41,21 @@ interface GlobalQueuePayload {
   label: string;
   contextGraphId?: string;
   source: SyncAdmissionSource;
-  selectedSwmPriority: boolean;
+  capacityClaim: SyncCapacityClaim;
 }
+
+type SyncCapacityClaim =
+  | { readonly kind: 'unrestricted' }
+  | { readonly kind: 'automatic-background' }
+  | {
+    readonly kind: 'ordinary-selected-scope';
+    readonly contextGraphId: string;
+    readonly automaticBackground: boolean;
+  }
+  | {
+    readonly kind: 'selected-recovery';
+    readonly contextGraphId: string;
+  };
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
 export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
@@ -77,39 +87,155 @@ function syncAdmissionOperation(payload: GlobalQueuePayload): string {
   return `${syncOperationClass(payload.label)}:${normalizeSyncAdmissionSource(payload.source)}`;
 }
 
-let inflight = 0;
-let automaticBackgroundInflight = 0;
+class SyncCapacityTracker {
+  private inflight = 0;
+  private automaticBackgroundInflight = 0;
+  private selectedRecoveryInflight = 0;
+  private ordinarySelectedScopeInflightTotal = 0;
+  private readonly ordinarySelectedScopeInflight = new Map<string, number>();
+
+  get inflightCount(): number {
+    return this.inflight;
+  }
+
+  classify(input: {
+    contextGraphId?: string;
+    source: SyncAdmissionSource;
+    selectedSwmPriority: boolean;
+    selectedRecoveryScope: boolean;
+  }): SyncCapacityClaim {
+    const automaticBackground = input.source === 'on-connect'
+      || input.source === 'reconcile'
+      || input.source === 'vm-recovery'
+      || input.source === 'swm-recovery'
+      || input.source === 'catchup-background';
+    if (
+      input.selectedRecoveryScope
+      && input.contextGraphId !== undefined
+      && (
+        input.selectedSwmPriority
+        || input.source === 'vm-recovery'
+        || input.source === 'swm-recovery'
+      )
+    ) {
+      return { kind: 'selected-recovery', contextGraphId: input.contextGraphId };
+    }
+    if (input.selectedRecoveryScope && input.contextGraphId !== undefined) {
+      return {
+        kind: 'ordinary-selected-scope',
+        contextGraphId: input.contextGraphId,
+        automaticBackground,
+      };
+    }
+    return automaticBackground ? { kind: 'automatic-background' } : { kind: 'unrestricted' };
+  }
+
+  canRun(claim: SyncCapacityClaim, limit: number, automaticBackgroundLimit: number): boolean {
+    if (this.inflight >= limit) return false;
+    if (
+      this.isAutomaticBackground(claim)
+      && this.automaticBackgroundInflight >= automaticBackgroundLimit
+    ) return false;
+    if (
+      limit > 1
+      && claim.kind === 'ordinary-selected-scope'
+      && (this.ordinarySelectedScopeInflight.get(claim.contextGraphId) ?? 0) >= limit - 1
+    ) return false;
+
+    // As soon as selected-scope fallback is active (or asks to become active),
+    // every non-selected claim shares only limit - 1 slots. This keeps the last
+    // slot available for exact VM or selected-SWM recovery instead of allowing
+    // unrelated foreground/recovery work to consume it. Existing work is never
+    // pre-empted; admission simply waits for a safe boundary.
+    const selectedReservationActive = this.ordinarySelectedScopeInflightTotal > 0
+      || claim.kind === 'ordinary-selected-scope';
+    const nonSelectedInflight = this.inflight - this.selectedRecoveryInflight;
+    return !(
+      limit > 1
+      && selectedReservationActive
+      && claim.kind !== 'selected-recovery'
+      && nonSelectedInflight >= limit - 1
+    );
+  }
+
+  start(claim: SyncCapacityClaim): () => void {
+    this.increment(claim);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.decrement(claim);
+    };
+  }
+
+  rollback(claim: SyncCapacityClaim): void {
+    this.decrement(claim);
+  }
+
+  private isAutomaticBackground(claim: SyncCapacityClaim): boolean {
+    return claim.kind === 'automatic-background'
+      || (claim.kind === 'ordinary-selected-scope' && claim.automaticBackground);
+  }
+
+  private increment(claim: SyncCapacityClaim): void {
+    this.inflight += 1;
+    if (this.isAutomaticBackground(claim)) this.automaticBackgroundInflight += 1;
+    if (claim.kind === 'selected-recovery') this.selectedRecoveryInflight += 1;
+    if (claim.kind === 'ordinary-selected-scope') {
+      this.ordinarySelectedScopeInflightTotal += 1;
+      this.ordinarySelectedScopeInflight.set(
+        claim.contextGraphId,
+        (this.ordinarySelectedScopeInflight.get(claim.contextGraphId) ?? 0) + 1,
+      );
+    }
+  }
+
+  private decrement(claim: SyncCapacityClaim): void {
+    this.inflight = Math.max(0, this.inflight - 1);
+    if (this.isAutomaticBackground(claim)) {
+      this.automaticBackgroundInflight = Math.max(0, this.automaticBackgroundInflight - 1);
+    }
+    if (claim.kind === 'selected-recovery') {
+      this.selectedRecoveryInflight = Math.max(0, this.selectedRecoveryInflight - 1);
+    }
+    if (claim.kind === 'ordinary-selected-scope') {
+      this.ordinarySelectedScopeInflightTotal = Math.max(
+        0,
+        this.ordinarySelectedScopeInflightTotal - 1,
+      );
+      const next = Math.max(
+        0,
+        (this.ordinarySelectedScopeInflight.get(claim.contextGraphId) ?? 0) - 1,
+      );
+      if (next === 0) this.ordinarySelectedScopeInflight.delete(claim.contextGraphId);
+      else this.ordinarySelectedScopeInflight.set(claim.contextGraphId, next);
+    }
+  }
+}
+
+const capacityTracker = new SyncCapacityTracker();
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   now: () => performance.now(),
-  canRun: (entry) => (
-    inflight < entry.payload.limit
-    && (
-      !isAutomaticBackgroundSync(entry)
-      || automaticBackgroundInflight < entry.payload.automaticBackgroundLimit
-    )
+  canRun: (entry) => capacityTracker.canRun(
+    entry.payload.capacityClaim,
+    entry.payload.limit,
+    entry.payload.automaticBackgroundLimit,
   ),
   onStart: (entry) => {
-    inflight += 1;
-    const automaticBackground = isAutomaticBackgroundSync(entry);
-    if (automaticBackground) automaticBackgroundInflight += 1;
+    const { capacityClaim } = entry.payload;
+    const releaseCapacity = capacityTracker.start(capacityClaim);
     lastLimit = entry.payload.limit;
-    getMetrics().syncGlobalInflight.record(inflight);
+    getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
     return () => {
-      inflight = Math.max(0, inflight - 1);
-      if (automaticBackground) {
-        automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
-      }
-      getMetrics().syncGlobalInflight.record(inflight);
+      releaseCapacity();
+      getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
     };
   },
   onStartFailureRollback: (entry) => {
-    inflight = Math.max(0, inflight - 1);
-    if (isAutomaticBackgroundSync(entry)) {
-      automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
-    }
-    getMetrics().syncGlobalInflight.record(inflight);
+    capacityTracker.rollback(entry.payload.capacityClaim);
+    getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
   observability: {
@@ -127,15 +253,7 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   },
 });
 const automaticBackgroundLimits = new WeakMap<object, number>();
-
-function isAutomaticBackgroundSync(entry: { payload: GlobalQueuePayload }): boolean {
-  if (entry.payload.selectedSwmPriority) return false;
-  return entry.payload.source === 'on-connect'
-    || entry.payload.source === 'reconcile'
-    || entry.payload.source === 'vm-recovery'
-    || entry.payload.source === 'swm-recovery'
-    || entry.payload.source === 'catchup-background';
-}
+const selectedRecoveryScopeIds = new WeakMap<object, ReadonlySet<string>>();
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'displaced';
 
@@ -183,6 +301,8 @@ function acquire(
   lastLimit = limit;
   lastQueueLimit = queueLimit;
   const queuedBefore = queue.length;
+  const selectedRecoveryScope = options.contextGraphId !== undefined
+    && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false);
   return queue.acquire({
     payload: {
       limit,
@@ -190,7 +310,12 @@ function acquire(
       label: options.label,
       contextGraphId: options.contextGraphId,
       source: options.source,
-      selectedSwmPriority: options.selectedSwmPriority,
+      capacityClaim: capacityTracker.classify({
+        contextGraphId: options.contextGraphId,
+        source: options.source,
+        selectedSwmPriority: options.selectedSwmPriority,
+        selectedRecoveryScope,
+      }),
     },
     ownerKey: 'global',
     lane: options.lane,
@@ -201,7 +326,7 @@ function acquire(
     queueLimit,
     createBusyError: () => new SyncBackpressureBusyError(
       `Sync backpressure rejected ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${queuedBefore}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit})`,
     ),
     createDisplacedError: (victim) => new SyncBackpressureBusyError(
         `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
@@ -288,18 +413,23 @@ export function resolveSyncGlobalBackpressure(
   const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
     ?? nonNegativeInteger(config.syncGlobalQueueLimit)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
-  const hasCompleteSwmProvider = config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-    ?.some((acceptedPolicy) => (acceptedPolicy.completeSwmProviders?.length ?? 0) > 0) ?? false;
+  const selectedRecoveryIds = new Set(
+    config.selectedRecoveryContextGraphIds?.filter(
+      (contextGraphId) => typeof contextGraphId === 'string' && contextGraphId.length > 0,
+    ) ?? [],
+  );
   const policy = Object.freeze({
     limit,
     queueLimit,
   }) as SyncGlobalBackpressurePolicy;
   // A selected complete SWM provider is useful only if its transfer can enter
-  // the scheduler. Keep one slot out of every automatic background source,
-  // including VM/SWM recovery, because those sources can start during daemon
-  // bootstrap before the selected Edge provider becomes dialable. Explicit
-  // foreground catch-up retains the full cap.
-  automaticBackgroundLimits.set(policy, hasCompleteSwmProvider && limit > 1 ? limit - 1 : limit);
+  // the scheduler. Keep one slot out of every automatic background source
+  // because those sources can start during daemon bootstrap before the
+  // selected Edge provider becomes dialable. For the selected CG itself, the
+  // scope-aware guard above also prevents explicit fallback fanout from
+  // consuming that slot before exact VM or selected-SWM recovery arrives.
+  automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
+  selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
   return policy;
 }
 
@@ -313,7 +443,7 @@ export function getSyncBackpressureSnapshot(
   };
   for (const entry of queue.entries()) queuedByPriorityClass[entry.priorityClass] += 1;
   return {
-    inflight,
+    inflight: capacityTracker.inflightCount,
     queued: queue.length,
     limit: policy ? policy.limit ?? null : lastLimit,
     queueLimit: policy ? policy.queueLimit ?? null : lastQueueLimit,
@@ -385,7 +515,7 @@ export async function withGlobalSyncBackpressure<T>(
     options.logInfo?.(
       options.ctx,
       `Sync backpressure queued ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
     );
   }
   const release = await admission.release;
@@ -393,7 +523,7 @@ export async function withGlobalSyncBackpressure<T>(
     options.logInfo?.(
       options.ctx,
       `Sync backpressure running ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit})`,
     );
     return await work();
   } finally {

@@ -304,7 +304,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     });
     agents.push(harness.agent);
     const unknownTargets = harness.targets;
-    harness.internals.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
+    harness.internals.installVmReconcileActiveFetchCooldown(localCgId, Date.now());
     const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
     const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
     const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext');
@@ -634,5 +634,62 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(harness.fetched).toEqual([]);
     expect(harness.internals.vmReconcileRotationState.size).toBe(0);
     expect(replication).not.toHaveBeenCalled();
+  });
+
+  it('does not let a stale attempt clear a replacement lifecycle cooldown', async () => {
+    const peerId = '12D3KooWReplacementCooldownHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/replacement-cooldown';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchReplacementCooldown',
+      localCgId,
+      peers: [peerId],
+      targetCount: 1,
+      onFetch: () => {
+        throw new Error('stale attempt must stop before exact fetch');
+      },
+    });
+    agents.push(harness.agent);
+    let enteredProtocolWait!: () => void;
+    const protocolWaitEntered = new Promise<void>((resolve) => {
+      enteredProtocolWait = resolve;
+    });
+    let releaseProtocolWait!: () => void;
+    const protocolWaitRelease = new Promise<void>((resolve) => {
+      releaseProtocolWait = resolve;
+    });
+    harness.internals.waitForSyncProtocol = async () => {
+      enteredProtocolWait();
+      await protocolWaitRelease;
+      return true;
+    };
+    let firstLifecycleCurrent = true;
+
+    const staleAttempt = harness.internals.recoverVmReconcileBatch(
+      localCgId,
+      1n,
+      harness.targets,
+      100,
+      () => firstLifecycleCurrent,
+    );
+    await protocolWaitEntered;
+    const staleOwner = harness.internals.readVmReconcileActiveFetchCooldown(localCgId)?.owner;
+    expect(staleOwner).toBeDefined();
+
+    firstLifecycleCurrent = false;
+    harness.internals.clearVmReconcileActiveFetchCooldown(localCgId);
+    expect(harness.internals.shouldRunVmReconcileActiveFetch(localCgId)).toBe(true);
+    const replacementCooldown = harness.internals.readVmReconcileActiveFetchCooldown(localCgId);
+    const replacementOwner = replacementCooldown?.owner;
+    const replacementTimestamp = replacementCooldown?.startedAt;
+    expect(replacementOwner).toBeDefined();
+    expect(replacementOwner).not.toBe(staleOwner);
+
+    releaseProtocolWait();
+    const result = await staleAttempt;
+
+    expect(result.attemptedOrdinals).toEqual([]);
+    expect(harness.fetched).toEqual([]);
+    expect(harness.internals.readVmReconcileActiveFetchCooldown(localCgId))
+      .toEqual({ owner: replacementOwner, startedAt: replacementTimestamp });
   });
 });

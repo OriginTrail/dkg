@@ -216,6 +216,99 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.peersSucceeded).toBe(2);
   });
 
+  it('runs selected SWM before durable when one peer owns both authorities', async () => {
+    const calls: string[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-one-selected-authority', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-both',
+              authoritativePeerId: 'peer-both',
+              authoritativeSharedMemoryPeerIds: ['peer-both'],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-both', 'peer-fallback'],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            calls.push('shared');
+            return {
+              kind: 'selected-shared-memory',
+              shared: sharedResult(),
+              selectedScopeComplete: true,
+            };
+          case 'syncDurable':
+            calls.push('durable');
+            return durableResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(calls).toEqual(['shared', 'durable']);
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers).toBe(1);
+    expect(result.cleanPlaneCompletions?.durable.verifiedDataPeers).toBe(1);
+  });
+
+  it('does not run durable after selected SWM is deferred by backpressure', async () => {
+    let selectedCalls = 0;
+    let durableCalls = 0;
+    const finalizeCalls: unknown[][] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-selected-authority-deferred', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-both',
+              authoritativePeerId: 'peer-both',
+              authoritativeSharedMemoryPeerIds: ['peer-both'],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-both'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncSharedMemory':
+            selectedCalls += 1;
+            return {
+              kind: 'selected-shared-memory',
+              shared: {
+                ...sharedResult(),
+                insertedTriples: 0,
+                insertedDataTriples: 0,
+                completedPhases: 0,
+                deferredBackpressure: 1,
+              },
+              selectedScopeComplete: false,
+            };
+          case 'syncDurable':
+            durableCalls += 1;
+            return durableResult();
+          case 'finalizeCatchup':
+            finalizeCalls.push([]);
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(selectedCalls).toBeGreaterThanOrEqual(2);
+    expect(durableCalls).toBe(0);
+    expect(result.deferredBackpressure).toBe(1);
+    expect(finalizeCalls).toEqual([]);
+  });
+
   it('fails selected SWM closed when its explicit scope is incomplete', async () => {
     const peerIds = ['peer-swm', 'peer-curator'];
     const selectedCalls: string[] = [];
