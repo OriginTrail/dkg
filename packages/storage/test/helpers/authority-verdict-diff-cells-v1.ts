@@ -10,8 +10,10 @@ import { VERDICT_DIFF_AXES_V1 } from './authority-verdict-diff-fixture-v1.js';
  * implementation:
  *
  *   - axis B (applied status) applies only when A is 'present'.
+ *   - axis D (sequence relation) applies only when A is 'present'.
  *   - axis E (version relation) applies only when D is 'equal'.
  *   - axis F (head digest)     applies only when D and E are both 'equal'.
+ *   - axis G (accepted transition digest) applies only when A is 'present'.
  *
  * Where an axis does not apply, the cell records `undefined` rather than a
  * default. That distinction is load-bearing: a defaulted axis silently claims a
@@ -27,7 +29,7 @@ export interface VerdictDiffCellV1 {
   readonly sequenceRelation?: 'below' | 'equal' | 'plusOne' | 'abovePlusOne';
   readonly versionRelation?: 'below' | 'equal' | 'above';
   readonly headDigest?: 'equal' | 'differ';
-  readonly acceptedTransitionDigest: 'equal' | 'differ';
+  readonly acceptedTransitionDigest?: 'equal' | 'differ';
   readonly storageOperation: 'active' | 'tombstone' | 'quarantine';
   readonly coreDisposition:
     | 'discoverable' | 'head-fork-quarantined' | 'transition-equivocation-quarantined';
@@ -138,7 +140,31 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
               ? [...A.F_headDigest] as (VerdictDiffCellV1['headDigest'])[]
               : [undefined];
             for (const headDigest of digests) {
-              for (const acceptedTransitionDigest of A.G_acceptedTransitionDigest) {
+              // Axis G relates the candidate's acceptedTransitionDigest to the
+              // CURRENT head's, so like axis D it has no referent when the
+              // snapshot is absent. Ruled 2026-08-11 after measurement: the
+              // transition-equivocation decision the spec names this axis for is
+              // core system-record-authority-v1-internal.ts:171, whose referent is
+              // `current`, and :111 diverts to the absent branch before it ever
+              // runs; storage returns at next-state-v1-internal.ts:1092 for an
+              // absent snapshot without reading the field at all. Left ungated the
+              // fixture could not build 'equal' and 'differ' as DISTINCT inputs
+              // there -- both cells would carry identical inputs, so it is not an
+              // axis in that region.
+              //
+              // THE FIELD IS STILL LIVE ON THE ABSENT-TOMBSTONE SUB-PATH, against
+              // a different referent: :254 calls isTombstoneBoundToPredecessorV1,
+              // which compares the candidate's acceptedTransitionDigest to
+              // summary.tombstonePredecessor's -- EVIDENCE, not the accepted head.
+              // That is a fixture obligation rather than an axis, and it ships
+              // WITH A DRIVER (authority-verdict-diff-evidence-binding-v1.test.ts)
+              // because a demotion without one lets the pin arithmetic reconcile
+              // while the coverage driving that refusal quietly falls.
+              const transitionDigests = snapshot === 'present'
+                ? [...A.G_acceptedTransitionDigest] as
+                  (VerdictDiffCellV1['acceptedTransitionDigest'])[]
+                : [undefined];
+              for (const acceptedTransitionDigest of transitionDigests) {
                 for (const storageOperation of A.H_storageOperation) {
                   for (const coreDisposition of A.I_coreDisposition) {
                     for (const evidence of evidenceSubsets()) {
@@ -154,7 +180,8 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
                               ? {} : { sequenceRelation }),
                             ...(versionRelation === undefined ? {} : { versionRelation }),
                             ...(headDigest === undefined ? {} : { headDigest }),
-                            acceptedTransitionDigest,
+                            ...(acceptedTransitionDigest === undefined
+                              ? {} : { acceptedTransitionDigest }),
                             storageOperation,
                             coreDisposition,
                             evidence,

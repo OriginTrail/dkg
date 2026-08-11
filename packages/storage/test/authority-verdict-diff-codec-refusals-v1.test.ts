@@ -122,7 +122,7 @@ describe('head-codec tombstone-branch refusals', () => {
 });
 
 /**
- * R2, R3 and R4 retire 33,408 cells between them -- a third of the space -- on
+ * R2, R3 and R4 retire 32,832 cells between them -- a third of the space -- on
  * the claim that the verified-replacement registry refuses three of the six
  * (storage operation x candidate head state) pairs. A citation shows the string
  * sits at the line; it does NOT show the site refuses that combination. So each
@@ -164,7 +164,7 @@ describe('verified-replacement registry operation/head-state refusals', () => {
   });
 
   // THE RULE ORDER IS A MEASUREMENT, NOT A PREFERENCE, and the per-rule counts
-  // rest on it: R2 and R3 retire 8,352 cells each rather than 16,704 precisely
+  // rest on it: R2 and R3 retire 8,208 cells each rather than 16,416 precisely
   // because R1 owns the fork-resolution half first. That is only true if the
   // codec really refuses before the state check does -- issueActive validates
   // the head at :637 and tests its state at :641 -- so the pairing that trips

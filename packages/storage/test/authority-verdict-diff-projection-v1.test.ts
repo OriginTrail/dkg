@@ -61,14 +61,23 @@ describe('verdict-diff evaluator input projections', () => {
     }
   });
 
-  // THE PIN THAT MAKES THE SWEEP'S COST CHECKABLE. 41,760 rows need 7,782
-  // evaluator runs, not 83,520 -- and if a later change breaks a projection the
+  // THE PIN THAT MAKES THE SWEEP'S COST CHECKABLE. 41,040 rows need 7,335
+  // evaluator runs, not 82,080 -- and if a later change breaks a projection the
   // run count moves here before the table quietly doubles in cost or, worse,
   // merges two cells that were never the same input.
+  //
+  // These moved with the axis-G gating and were RE-DERIVED, not scaled -- core's
+  // group sizes are ragged, so a ratio applied to the old figure would have been
+  // a guess wearing an arithmetic costume. The derivation: core's key drops axes
+  // B and H, leaving (A,D,E,F,G) x C x I x J x K x L over the constructible set,
+  // where the surviving (C,K) pairs number 3 and the (A,D,E,F,G) substructure
+  // is 1 (absent) + 7 x 2 (present) = 15, giving 15 x 3 x 3 x 16 x 3 = 6,480.
+  // Storage's key drops I and J: 5 surviving (C,H,K) triples x L = 15 in the
+  // absent region, plus B x 7 x G x 5 x L = 840 present, giving 855.
   it('pins the distinct input count on each side', () => {
-    expect(cells).toHaveLength(41_760);
-    expect(groupSizes(coreInputProjectionKeyV1).distinct).toBe(6_912);
-    expect(groupSizes(storageInputProjectionKeyV1).distinct).toBe(870);
+    expect(cells).toHaveLength(41_040);
+    expect(groupSizes(coreInputProjectionKeyV1).distinct).toBe(6_480);
+    expect(groupSizes(storageInputProjectionKeyV1).distinct).toBe(855);
   });
 
   // THE FINDING ITSELF. Storage's blindness is UNIFORM: every one of its inputs

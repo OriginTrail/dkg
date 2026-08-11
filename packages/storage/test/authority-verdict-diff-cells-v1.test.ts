@@ -19,20 +19,27 @@ describe('verdict-diff case generator', () => {
   // and the dependency rules come from the spec's own axis definitions, so the
   // reachable space is far smaller. Pinning the number is what makes a later
   // "the sweep covered every cell" claim checkable rather than rhetorical.
-  // 100,224 = 3,456 (absent) + 96,768 (present).
-  //   absent : C(2) x G(2) x H(3) x I(3) x J(16) x K(2) x L(3) = 3,456
-  //   present: B(4) x [that same 1,728] x [D,E,F = 7] = 96,768
+  // 98,496 = 1,728 (absent) + 96,768 (present).
+  //   absent : C(2) x H(3) x I(3) x J(16) x K(2) x L(3)         =  1,728
+  //   present: B(4) x [that same 1,728] x G(2) x [D,E,F = 7]    = 96,768
   // The D/E/F factor is 7 rather than 4x3x2=24 because E and F apply only where
   // the spec defines them. Raw cross-product without dependencies is ~1.3M.
   //
-  // THIS PIN MOVED, AND WHY -- it was 120,960 until axis D was found to be
-  // dependent too. D relates the candidate to the CURRENT head, so it has no
-  // referent when the snapshot is absent, exactly like axis B. That is measured,
-  // not assumed: both evaluators branch on an absent current before any sequence
-  // logic runs (core :111/:531/:678; storage next-state :1092 returns
-  // rematerialize immediately). A relation with no referent is not a cell the
-  // fixture can build, so those 20,736 combinations were never real cells.
-  // The pin moves with the reason attached; it must never move silently.
+  // THIS PIN HAS MOVED TWICE, AND BOTH REASONS ARE THE SAME REASON -- a relation
+  // has no referent when the snapshot is absent, so it is not an axis there:
+  //   120,960 -> 100,224  axis D (sequence relation). Measured: both evaluators
+  //     branch on an absent current before any sequence logic runs (core
+  //     :111/:531/:678; storage next-state :1092 returns rematerialize at once).
+  //   100,224 ->  98,496  axis G (accepted transition digest), ruled 2026-08-11.
+  //     The decision the spec names axis G for is core :171, comparing candidate
+  //     to `current`; :111 diverts before it. Storage never reads the field on
+  //     that path. Ungated, 'equal' and 'differ' would be the SAME inputs there.
+  // Neither was a set of unconstructible cells -- recording them as refused would
+  // have attributed a refusal to code never reached. They were a generator
+  // modelling error, and the pin moves with the reason attached, never silently.
+  //
+  // The absent region is now exactly the (C,H,K) unit x I x J x L, which is why
+  // the constructibility numbers downstream divide so cleanly.
   //
   // THIS IS THE REACHABLE COUNT, NOT THE CONSTRUCTIBLE ONE. Most of these cells
   // describe states no fixture can build, and each of those is a RESULT to be
@@ -40,7 +47,7 @@ describe('verdict-diff case generator', () => {
   // number first is what makes the later constructible/unconstructible split
   // add up to something checkable.
   it("pins the reachable cell count under the spec's axis dependencies", () => {
-    expect(cells.length).toBe(100_224);
+    expect(cells.length).toBe(98_496);
   });
 
   it('gives every cell a unique id', () => {
@@ -64,12 +71,14 @@ describe('verdict-diff case generator', () => {
     expect(offenders).toHaveLength(0);
   });
 
-  // Axis E applies only at an equal sequence; axis F only when sequence AND
-  // version are both equal. These are the spec's stated dependencies, pinned so
-  // a later widening of the generator cannot quietly change what the table means.
-  // Each dependency is collected separately so a failure names WHICH axis
-  // widened, rather than reporting one anonymous boolean for all three.
-  it('applies the sequence, version and head-digest axes only where defined', () => {
+  // Axes D and G apply only to a present snapshot -- both are relations against
+  // the CURRENT head, and a relation with no referent is not an axis. Axis E
+  // applies only at an equal sequence; axis F only when sequence AND version are
+  // both equal. These are the spec's stated dependencies plus the two measured
+  // ones, pinned so a later widening of the generator cannot quietly change what
+  // the table means. Each dependency is collected separately so a failure names
+  // WHICH axis widened, rather than reporting one anonymous boolean for all four.
+  it('applies the sequence, version, head-digest and transition axes only where defined', () => {
     const sequenceOffenders = cells.filter(
       (c) => (c.sequenceRelation === undefined) !== (c.snapshot === 'absent'),
     );
@@ -80,11 +89,19 @@ describe('verdict-diff case generator', () => {
       (c) => (c.headDigest === undefined)
         !== !(c.sequenceRelation === 'equal' && c.versionRelation === 'equal'),
     );
+    const transitionOffenders = cells.filter(
+      (c) => (c.acceptedTransitionDigest === undefined) !== (c.snapshot === 'absent'),
+    );
     expect(sequenceOffenders.slice(0, 3)).toEqual([]);
     expect(versionOffenders.slice(0, 3)).toEqual([]);
     expect(digestOffenders.slice(0, 3)).toEqual([]);
-    expect([sequenceOffenders.length, versionOffenders.length, digestOffenders.length])
-      .toEqual([0, 0, 0]);
+    expect(transitionOffenders.slice(0, 3)).toEqual([]);
+    expect([
+      sequenceOffenders.length,
+      versionOffenders.length,
+      digestOffenders.length,
+      transitionOffenders.length,
+    ]).toEqual([0, 0, 0, 0]);
   });
 
   // Axis J is a presence subset, so all sixteen combinations of the four
@@ -103,8 +120,6 @@ describe('verdict-diff case generator', () => {
     expect(new Set(cells.map((c) => c.snapshot)).size).toBe(VERDICT_DIFF_AXES_V1.A_snapshot.length);
     expect(new Set(cells.map((c) => c.candidateHeadState)).size)
       .toBe(VERDICT_DIFF_AXES_V1.C_candidateHeadState.length);
-    expect(new Set(cells.map((c) => c.acceptedTransitionDigest)).size)
-      .toBe(VERDICT_DIFF_AXES_V1.G_acceptedTransitionDigest.length);
     expect(new Set(cells.map((c) => c.storageOperation)).size)
       .toBe(VERDICT_DIFF_AXES_V1.H_storageOperation.length);
     expect(new Set(cells.map((c) => c.coreDisposition)).size)
@@ -121,5 +136,9 @@ describe('verdict-diff case generator', () => {
       .toBe(VERDICT_DIFF_AXES_V1.E_versionRelation.length);
     expect(new Set(cells.filter((c) => c.headDigest).map((c) => c.headDigest)).size)
       .toBe(VERDICT_DIFF_AXES_V1.F_headDigest.length);
+    expect(new Set(cells
+      .filter((c) => c.acceptedTransitionDigest)
+      .map((c) => c.acceptedTransitionDigest)).size)
+      .toBe(VERDICT_DIFF_AXES_V1.G_acceptedTransitionDigest.length);
   });
 });
