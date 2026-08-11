@@ -4238,7 +4238,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
-      getDurableSyncContextGraphs: () => selectedSwmRetryOnly ? [] : automaticDurableSyncContextGraphs(
+      getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
         {
           nodeRole: this.config.nodeRole,
@@ -4255,9 +4255,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // unrelated Edge peers should do neither plane in the automatic sweep.
         return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
       }),
-      getSharedMemorySyncContextGraphs: async (peerId) => selectedSwmRetryOnly
-        ? []
-        : (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
+      getSharedMemorySyncContextGraphs: async (peerId) => (
+        await getSharedMemorySyncPlan(peerId)
+      ).eligibleContextGraphIds,
       ...(automaticPeerSweep && remotePeerIsCompleteSwmProvider
         ? {
           selectedSharedMemoryLane: {
@@ -4285,9 +4285,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         { stopOnBackoffWorthyFailure: true, source },
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
-      discoverContextGraphsFromStore: () => selectedSwmRetryOnly
-        ? Promise.resolve(0)
-        : this.discoverContextGraphsFromStore(),
+      discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
       syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
         const sharedMemorySyncPlan = await getSharedMemorySyncPlan(peerId);
         return this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
@@ -4296,8 +4294,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           sharedMemorySyncPlan,
         });
       },
-      syncSharedMemoryOnConnect: selectedSwmRetryOnly
-        || (syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true)),
+      syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config)
+        && (this.config.syncSharedMemoryOnConnect ?? true),
+      executionPlan: selectedSwmRetryOnly
+        ? { kind: 'selected-swm-retry-only' }
+        : { kind: 'full' },
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);

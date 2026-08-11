@@ -35,6 +35,10 @@ export interface SyncOnConnectPeerOutcome {
   progress?: boolean;
 }
 
+export type SyncOnConnectExecutionPlan =
+  | { readonly kind: 'full' }
+  | { readonly kind: 'selected-swm-retry-only' };
+
 interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
@@ -55,6 +59,8 @@ interface SyncOnConnectContext {
     contextGraphIds: string[],
   ) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
+  /** One explicit lane plan; retry-only never falls through to broad catch-up. */
+  executionPlan?: SyncOnConnectExecutionPlan;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
@@ -175,6 +181,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
+    executionPlan = { kind: 'full' },
     logInfo,
   } = context;
 
@@ -297,7 +304,9 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       return 'skipped-no-sync';
     }
 
-    const prioritySharedMemoryContextGraphIds = syncSharedMemoryOnConnect
+    const prioritySharedMemoryContextGraphIds = (
+      syncSharedMemoryOnConnect || executionPlan.kind === 'selected-swm-retry-only'
+    )
       && selectedSharedMemoryLane
         ? [...new Set(await runNonTransportStep(() => Promise.resolve(
           selectedSharedMemoryLane.getContextGraphIds(remotePeer),
@@ -324,6 +333,13 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
         );
         return finishSyncAccounting();
       }
+    }
+
+    // This narrow plan is the complete execution boundary for an RFC-64 retry.
+    // It deliberately cannot fall through to durable, discovery, or ordinary
+    // shared-memory callbacks, even if a future caller supplies all of them.
+    if (executionPlan.kind === 'selected-swm-retry-only') {
+      return finishSyncAccounting();
     }
 
     const durableContextGraphIds = getDurableSyncContextGraphs?.() ?? [
