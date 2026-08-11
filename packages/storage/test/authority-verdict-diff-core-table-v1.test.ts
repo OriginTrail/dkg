@@ -185,7 +185,7 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
   });
 
   it('carries its findings as data rather than as a commit message', () => {
-    expect(CORE_SWEEP_FINDINGS_V1.length).toBe(3);
+    expect(CORE_SWEEP_FINDINGS_V1.length).toBe(4);
     for (const finding of CORE_SWEEP_FINDINGS_V1) expect(finding.length).toBeGreaterThan(80);
   });
 });

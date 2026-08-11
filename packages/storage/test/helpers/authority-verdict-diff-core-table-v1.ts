@@ -171,4 +171,27 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   + 'head shapes. Anything wanting to observe this subsystem from outside pays a '
   + 'factory-only capability as its entry fee, and the fixture builders are the '
   + 'reusable asset -- the same wall both halves of this diff hit independently.',
+
+  // THE COVERAGE BOUNDARY THIS TABLE'S OWN NUMBERS DO NOT ANNOUNCE. Recorded
+  // after measurement because the alternative is a reader concluding that core
+  // rejects next-sequence rotations, which this table does not show and cannot.
+  'THREE OF THE FOUR SEQUENCE RELATIONS ARE OUTSIDE THIS TABLE\'S REACH. Measured '
+  + 'over all 40 buildable shapes: D=below 23,040 buildable cells / 0 able to mint, '
+  + 'D=plusOne 23,040 / 0, D=abovePlusOne 23,040 / 0, against D=equal 73,728 / 20,736 '
+  + 'and the absent-snapshot region 2,880 / 1,152. So 69,120 of 145,728 buildable '
+  + 'cells -- 47% -- sit where no verified authority summary can be obtained, and '
+  + 'the cause is the fixture rather than the domain: the chain is '
+  + 'makeRotatedAuthorityChainV1(2) with the current head at sequence 2, its top, so '
+  + 'a sequence-3 candidate needs a 2->3 transition that does not exist and the '
+  + 'helper\'s own signature (steps: 1 | 2) caps the depth. D=below is a separate '
+  + 'and cheaper defect: the sequence-1 candidate is built with previousHeadDigest '
+  + 'naming the sequence-2 current head while a real sequence-1 ancestor sits unused. '
+  + 'THE ARITHMETIC TIES IT TO THE PINS ABOVE: 145,728 - 21,888 mintable = 123,840 '
+  + 'cells on an unmintable shape, and exactly half of those name '
+  + 'verifiedAuthoritySummary in their axis-J subset = 61,920 = the S1 row, to the '
+  + 'cell. This is NOT a wrong verdict and conservation is unaffected; what it bounds '
+  + 'is the COVERAGE CLAIM. Contrast axis G=differ and axis K=present, which also '
+  + 'never mint and are NOT fixture gaps -- they are refused as authority-transition '
+  + 'equivocation and as a head not binding its fork resolution, which is core being '
+  + 'correct about what those axis values mean.',
 ];
