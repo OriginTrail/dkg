@@ -217,7 +217,29 @@ function twiceRotatedChain() {
   const base = rotatedActiveHead(middle, ROTATION_ISSUERS[1], '2', '0', {
     acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(second),
   });
-  return { initial, middle, base, transitions: [first, second] as const };
+  return {
+    base,
+    ancestors: [middle, initial] as readonly AgentProfileActiveHeadObjectV1[],
+    transitions: [first, second] as readonly AgentProfileAuthorityTransitionV1[],
+  };
+}
+
+/**
+ * One real authority rotation. A resolution built on the result is internally
+ * valid at the NEXT authority sequence, which is what a peer offers when it
+ * rotates instead of adjudicating the fork it created.
+ */
+function onceRotatedChain() {
+  const initial = structuredClone(verified.head);
+  const first = rotationTransition(initial, '1', ROTATION_ISSUERS[0]);
+  const base = rotatedActiveHead(initial, ROTATION_ISSUERS[0], '1', '0', {
+    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(first),
+  });
+  return {
+    base,
+    ancestors: [initial] as readonly AgentProfileActiveHeadObjectV1[],
+    transitions: [first] as readonly AgentProfileAuthorityTransitionV1[],
+  };
 }
 
 function rotationTransition(
@@ -264,14 +286,22 @@ export interface ForkResolvingSuccessorFixtureV1 {
  * sequence, forked version, resolution version and successor version are four
  * distinct numbers, so a predicate comparing the wrong pair cannot pass by
  * coincidence. Use `based` for anything asserting on individual conjuncts.
+ *
+ * `after-rotate` forks at the same version as `based` but off a base one
+ * authority rotation later, so its resolution is valid on its own terms while
+ * naming a fork event that is not the one a receiver quarantined at the earlier
+ * sequence.
  */
 export async function makeForkResolvingSuccessorFixtureV1(
   binding: SystemRecordLaneExecutionBindingV1,
-  shape: 'genesis' | 'based' | 'other-version' | 'other-base' | 'rotated' = 'genesis',
+  shape: 'genesis' | 'based' | 'other-version' | 'other-base' | 'rotated' | 'after-rotate'
+    = 'genesis',
   terminalTransitionConflict = false,
 ): Promise<ForkResolvingSuccessorFixtureV1> {
   const genesis = shape === 'genesis';
-  const chain = shape === 'rotated' ? twiceRotatedChain() : undefined;
+  const chain = shape === 'rotated'
+    ? twiceRotatedChain()
+    : shape === 'after-rotate' ? onceRotatedChain() : undefined;
   const origin = chain?.base ?? structuredClone(verified.head);
   // A second version-zero head of the same authority: a different common base,
   // which is what distinguishes two fork events that agree on every other
@@ -309,7 +339,7 @@ export async function makeForkResolvingSuccessorFixtureV1(
     forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
   } as AgentProfileActiveHeadObjectV1;
   const artifacts = closureArtifactsFor(
-    [head, forked, sibling, base, ...(chain === undefined ? [] : [chain.middle, chain.initial])],
+    [head, forked, sibling, base, ...(chain?.ancestors ?? [])],
     resolution,
     chain?.transitions ?? [],
   );

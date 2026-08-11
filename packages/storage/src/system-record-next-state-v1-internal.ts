@@ -1035,28 +1035,26 @@ function persistedStateMatchesVerifiedTombstone(
  * without the original equivocation ever being adjudicated. Each conjunct pins
  * one coordinate of the fork event against state the candidate does not own.
  *
- * P-forkedVersion / P-authoritySeq / P-forkBase name the fork event: the
- * version it happened at, the authority sequence it happened under, and the
- * base its branches descend from. P-resolutionDigest binds the summary to the
- * head in hand. P-absentRefusal refuses a head that advertises a resolution the
- * summary does not carry -- load-bearing because summary validation is identity
- * only, so a summary minted on a traversal that never ran the directness check
- * is indistinguishable here from one that did.
+ * P-forkedVersion and P-forkBase name the fork event: the version it happened
+ * at and the base its branches descend from. P-resolutionDigest binds the
+ * summary to the head in hand. P-absentRefusal refuses a head that advertises a
+ * resolution the summary does not carry -- load-bearing because summary
+ * validation is identity only, so a summary minted on a traversal that never ran
+ * the directness check is indistinguishable here from one that did.
  *
- * P-authoritySeq deliberately compares against OUR persisted lineage rather
- * than the summary's. Core forces a resolution's authority sequence to equal
- * its successor's, so the summary form could never fail. The consequence is
- * intended: a resolution issued after the peer rotated authority is refused,
- * because resolving at the next sequence moves past the equivocation instead of
- * adjudicating it. The supported order is resolve, clear, then rotate.
+ * There is deliberately NO authority-sequence conjunct, and adding one back
+ * would be a re-check rather than a restored guard. Core welds a resolution's
+ * authority sequence to its fork base's, so a resolution disagreeing with us on
+ * sequence must name a base sitting at that other sequence -- a different digest
+ * -- and P-forkBase refuses it on the same candidate. The weld is pinned in core
+ * by 'welds a fork resolution to a base at its own authority sequence'; if that
+ * test is ever removed, the sequence coordinate stops being covered here.
  *
- * Do not drop the sequence conjunct for looking untested. Deleting it alone
- * changes no test, and that is structural rather than a coverage hole: a
- * resolution cannot disagree with us on sequence ALONE, because the evidence
- * check welds a resolution's sequence to its fork base's, so any sequence
- * mismatch drags a base mismatch along and the base conjunct decides first.
- * What the tests do catch is either comparison being wired to the other's
- * operand, which is the mistake this shape actually invites.
+ * One consequence is intended and is the reason the coordinate matters: a
+ * resolution issued only after the peer rotated authority is refused, because
+ * resolving at the next sequence moves past the equivocation instead of
+ * adjudicating it. The supported order is resolve, clear, then rotate. That case
+ * is held by 'refuses a resolution issued only after the peer rotated authority'.
  */
 function resolutionAdjudicatesThisQuarantineV1(
   current: SystemRecordAppliedStatePresentV1,
@@ -1075,7 +1073,6 @@ function resolutionAdjudicatesThisQuarantineV1(
   // identity-only validator cannot tell apart from one that did.
   if (resolution === undefined) return false;
   return resolution.forkedVersion === headVersion
-    && resolution.authoritySequence === String(current.transitionLineage.length)
     && resolution.resolutionDigest === advertisedResolutionDigest
     && resolution.forkBaseHeadDigest === current.conflictForkBaseHeadDigest;
 }

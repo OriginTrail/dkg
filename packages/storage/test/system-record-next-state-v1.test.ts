@@ -872,6 +872,33 @@ describe('system-record terminal and quarantine next-state derivation', () => {
     })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
   });
 
+  // Resolve-after-rotate, which no longer has a conjunct of its own. A peer forks
+  // at our sequence, rotates authority, then offers a resolution issued at the NEW
+  // sequence. That has not adjudicated the equivocation, it has moved past it --
+  // the AC-5 move -- so it must still be refused. Core welds a resolution's
+  // authority sequence to its fork base's, so a rotated resolution necessarily
+  // names a base in the rotated lineage, and the fork-base conjunct is what
+  // refuses it. The assertions before the act are what make that specific: the
+  // forked version still equals ours, so the version conjunct cannot be deciding.
+  it('refuses a resolution issued only after the peer rotated authority', async () => {
+    const fork = await quarantinedForkFixtureV1();
+    if (fork.quarantinedSnapshot.state !== 'present') throw new Error('expected a present row');
+    const rotated = await makeForkResolvingSuccessorFixtureV1(fork.binding, 'after-rotate');
+    expect(rotated.resolution.forkedVersion).toBe(fork.quarantinedSnapshot.headVersion);
+    expect(rotated.resolution.authoritySequence)
+      .toBe(String(fork.quarantinedSnapshot.appliedState.transitionLineage.length + 1));
+    expect(rotated.forkBaseHeadDigest).not.toBe(fork.forkBaseHeadDigest);
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    expect(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(rotated.issue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
+  });
+
   // The tombstone classifier is a parallel path to the active one and had no
   // quarantine gate, so a peer that equivocated could delete the quarantined row
   // -- and the evidence of its own equivocation -- by publishing a tombstone for
