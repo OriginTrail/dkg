@@ -16,7 +16,6 @@ type VmRecoveryProviderPhase =
 
 interface VmRecoveryPeerState {
   phase: VmRecoveryProviderPhase;
-  readonly ualDispositions: Map<string, VmRecoveryUalDisposition>;
 }
 
 /** One recovery slice's explicit provider-affinity state machine. */
@@ -27,7 +26,7 @@ export class VmRecoveryProviderPolicy {
   #state(peerId: string): VmRecoveryPeerState {
     let state = this.#peers.get(peerId);
     if (!state) {
-      state = { phase: { kind: 'fresh' }, ualDispositions: new Map() };
+      state = { phase: { kind: 'fresh' } };
       this.#peers.set(peerId, state);
     }
     return state;
@@ -84,18 +83,11 @@ export class VmRecoveryProviderPolicy {
     if (activeAttempt !== attempt) {
       throw new Error(`VM recovery provider attempt is not active for ${attempt.peerId}`);
     }
-    for (const [ual, disposition] of perUalDispositions) {
-      state.ualDispositions.set(ual, disposition);
-    }
     const earnedReuse = state.phase.kind === 'attempting-probe'
       && aggregateDisposition === 'found'
       && perUalDispositions.size > 0
       && [...perUalDispositions.values()].every((disposition) => disposition === 'found');
     state.phase = earnedReuse ? { kind: 'holder-reusable' } : { kind: 'spent' };
-  }
-
-  ualDisposition(peerId: string, ual: string): VmRecoveryUalDisposition | undefined {
-    return this.#peers.get(peerId)?.ualDispositions.get(ual);
   }
 
   unavailablePeerIds(): ReadonlySet<string> {

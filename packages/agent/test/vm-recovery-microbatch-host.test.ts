@@ -496,6 +496,58 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     );
   });
 
+  it('revokes a proven-holder hint when the reuse transport throws', async () => {
+    const holder = '12D3KooWThrowingAHolder';
+    const fallback = '12D3KooWThrowingZFallback';
+    const localCgId = '0x0000000000000000000000000000000000000001/throwing-reuse';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchThrownReuseRevocation',
+      localCgId,
+      peers: [holder, fallback],
+      targetCount: 5,
+      onFetch: (peerId, requested, recovered) => {
+        if (peerId === holder && requested.length === 1 && requested[0]!.ordinal === 0) {
+          recovered.add(0);
+          return 'found';
+        }
+        if (peerId === holder) throw new Error('stream reset');
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+
+    const first = await harness.internals.recoverVmReconcileBatch(
+      localCgId, 1n, harness.targets, 100, () => true,
+    );
+
+    expect(harness.fetched).toEqual([
+      { peerId: holder, uals: [harness.targets[0]!.ual] },
+      { peerId: holder, uals: harness.targets.slice(1).map(({ ual }) => ual) },
+    ]);
+    expect(first.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+    const unresolved = harness.targets.slice(1).map((target) => {
+      const outcome = first.outcomes.get(target.ordinal);
+      if (outcome?.status !== 'pending' || !outcome.recovery) {
+        throw new Error(`expected pending recovery target for ordinal ${target.ordinal}`);
+      }
+      return outcome.recovery as RecoveryTarget;
+    });
+
+    const second = await harness.internals.recoverVmReconcileBatch(
+      localCgId, 1n, unresolved, 100, () => true,
+    );
+
+    expect(harness.fetched.slice(2)).toEqual([
+      { peerId: fallback, uals: [unresolved[0]!.ual] },
+      { peerId: fallback, uals: unresolved.slice(1).map(({ ual }) => ual) },
+    ]);
+    expect(second.attemptedOrdinals).toEqual(unresolved.map(({ ordinal }) => ordinal));
+    expect([...second.outcomes.values()]).toEqual(
+      unresolved.map(() => ({ status: 'reconciled', blockNumber: 100 })),
+    );
+  });
+
   it('stops after lifecycle abort without installing outcomes or starting another batch', async () => {
     const controller = new AbortController();
     const localCgId = '0x0000000000000000000000000000000000000001/abort';

@@ -28,8 +28,6 @@ describe('VM recovery provider policy — adversarial transitions', () => {
       ['ual-2', 'incomplete'],
     ));
 
-    expect(policy.ualDisposition(peerId, 'ual-1')).toBe('found');
-    expect(policy.ualDisposition(peerId, 'ual-2')).toBe('incomplete');
     expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
 
     const nextSweep = new VmRecoveryProviderPolicy();
@@ -83,5 +81,29 @@ describe('VM recovery provider policy — adversarial transitions', () => {
 
     policy.finishAttempt(attempt, 'found', dispositions(['ual-0', 'found']));
     expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
+  });
+
+  it('does not admit a second fresh peer after the considered-peer cap is spent', () => {
+    const first = '12D3KooWFirstCappedPeer';
+    const second = '12D3KooWSecondCappedPeer';
+    const policy = new VmRecoveryProviderPolicy();
+
+    expect(policy.selectNextCandidate([first, second], 1)).toBe(first);
+    policy.markUnavailable(first);
+
+    expect(policy.selectNextCandidate([first, second], 1)).toBeUndefined();
+  });
+
+  it('reuses an already-considered proven holder without widening the peer cap', () => {
+    const holder = '12D3KooWReusableCappedHolder';
+    const fresh = '12D3KooWFreshOutsideCap';
+    const policy = new VmRecoveryProviderPolicy();
+
+    expect(policy.selectNextCandidate([holder, fresh], 1)).toBe(holder);
+    const probe = policy.beginAttempt(holder)!;
+    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
+
+    expect(policy.selectNextCandidate([fresh, holder], 1)).toBe(holder);
+    expect(policy.beginAttempt(holder)?.kind).toBe('proven-holder-reuse');
   });
 });
