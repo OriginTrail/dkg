@@ -9,7 +9,9 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
   SYNC_PAGE_SIZE,
+  SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../src/dkg-agent-constants.js';
@@ -226,8 +228,8 @@ describe('byte-budget sync pagination', () => {
     });
 
     expect(requested).toEqual([
-      { offset: 0, limit: SYNC_REQUEST_PAGE_SIZE },
-      { offset: SYNC_PAGE_SIZE, limit: SYNC_REQUEST_PAGE_SIZE },
+      { offset: 0, limit: SYNC_REQUEST_INITIAL_PAGE_SIZE },
+      { offset: SYNC_PAGE_SIZE, limit: SYNC_REQUEST_INITIAL_PAGE_SIZE },
     ]);
     expect(result.nextOffset).toBe(SYNC_PAGE_SIZE);
     expect(result.completed).toBe(true);
@@ -249,17 +251,18 @@ describe('byte-budget sync pagination', () => {
       send: async () => {
         sends += 1;
         if (sends === 1) throw new Error('relay stream reset');
-        return sends <= 4
+        return sends <= SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD + 1
           ? new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .')
           : new Uint8Array();
       },
     }));
 
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
-      SYNC_REQUEST_SAFE_PAGE_SIZE,
-      SYNC_REQUEST_SAFE_PAGE_SIZE,
-      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+      ...Array.from(
+        { length: SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD },
+        () => SYNC_REQUEST_SAFE_PAGE_SIZE,
+      ),
       SYNC_REQUEST_SAFE_PAGE_SIZE * 2,
     ]);
     expect(result.completed).toBe(true);
@@ -288,7 +291,7 @@ describe('byte-budget sync pagination', () => {
 
     await expect(run()).rejects.toThrow('sync responder queue wait exceeded');
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
     ]);
@@ -321,13 +324,13 @@ describe('byte-budget sync pagination', () => {
     }));
 
     await expect(run()).rejects.toThrow('terminal relay stream reset');
-    expect(requestedSizes).toEqual([SYNC_REQUEST_PAGE_SIZE]);
+    expect(requestedSizes).toEqual([SYNC_REQUEST_INITIAL_PAGE_SIZE]);
     expect(pageSizeProfileCache.preferred(scope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
 
     failTransport = false;
     await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
     ]);
   });

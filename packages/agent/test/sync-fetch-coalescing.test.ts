@@ -9,7 +9,12 @@ import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
 } from '../src/index.js';
 import type { ContextGraphMembershipStore, SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
-import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
+import {
+  getSyncBackpressureSnapshot,
+  resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
+  withGlobalSyncBackpressure,
+} from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncCheckpointScope } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -744,8 +749,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       );
       await waitFor(() => fetchCalls === 1);
       // Different budgets remain separate operations, but the second physical
-      // stream must wait instead of racing/superseding the first session.
+      // stream must wait outside admission instead of racing/superseding the
+      // first session or occupying a second scarce slow-lane slot.
       expect(fetchCalls).toBe(1);
+      expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 1, queued: 0 });
 
       firstMetaFetch.resolve(emptySyncPage('meta'));
       const [automaticResult, recoveryResult] = await Promise.all([automatic, recovery]);

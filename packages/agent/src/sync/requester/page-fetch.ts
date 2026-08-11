@@ -31,6 +31,8 @@ import {
 } from '../memory-telemetry.js';
 import {
   SYNC_PAGE_SIZE,
+  SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
+  SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 
@@ -262,9 +264,10 @@ class AdaptiveSyncPageSizer {
     private readonly rememberPreferredPageSize?: (pageSize: number) => void,
   ) {
     this.safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
+    const initialPageSize = Math.min(syncPageSize, SYNC_REQUEST_INITIAL_PAGE_SIZE);
     this.activePageSize = Number.isSafeInteger(preferredPageSize)
       ? Math.max(this.safePageSize, Math.min(syncPageSize, preferredPageSize!))
-      : syncPageSize;
+      : Math.max(this.safePageSize, initialPageSize);
   }
 
   current(): number {
@@ -303,7 +306,7 @@ class AdaptiveSyncPageSizer {
     this.rememberCurrentPageSize();
     if (this.usesByteBudgetPagination && this.activePageSize < this.syncPageSize) {
       this.consecutiveSuccessfulPages += 1;
-      if (this.consecutiveSuccessfulPages >= 3) {
+      if (this.consecutiveSuccessfulPages >= SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD) {
         this.activePageSize = Math.min(
           this.syncPageSize,
           this.activePageSize * 2,
@@ -579,8 +582,10 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
   let timedOut = false;
-  // Start with the throughput-oriented page size, but reduce it within the
-  // existing bounded retry budget if a response cannot traverse the wire.
+  // Start an unknown peer/path at the conservative initial page size, then
+  // grow toward the throughput ceiling only after sustained success. Reduce
+  // within the existing bounded retry budget if a response cannot traverse
+  // the wire.
   // ProtocolRouter may surface an oversized response as a generic stream reset,
   // so the reduction intentionally applies to any retryable transport failure.
   // A transient failure merely makes the remainder of this phase conservative;
@@ -588,11 +593,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   // Byte-budget pagination: a SHORT page is NOT EOF — only an empty response is
   // (see the loop's EOF checks). This is a REQUESTER-SIDE default derived from
   // `syncPageSize > SYNC_PAGE_SIZE` (the fetch wrapper passes
-  // SYNC_REQUEST_PAGE_SIZE=8192 for every phase), NOT a wire-negotiated
+  // a ceiling above SYNC_PAGE_SIZE for every phase), NOT a wire-negotiated
   // capability. Durable meta relies on it: since #1916 the responder byte-caps
   // durable-meta pages, so a page can be short for byte reasons; a requester
   // that treated "short = EOF" for meta could end the phase early. Every
-  // testnet-canary+ requester uses 8192 here, so short≠EOF holds for meta and
+  // testnet-canary+ requester uses a byte-budget ceiling here, so short≠EOF holds for meta and
   // data alike; a pre-canary requester using the 500-row cap is the only one
   // that would regress, and only on an oversized (>4 MiB) meta subject.
   const usesByteBudgetPagination = syncPageSize > SYNC_PAGE_SIZE;
@@ -610,7 +615,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       ? (pageSize) => pageSizeProfileCache.remember(pageSizeProfileScope, pageSize)
       : undefined,
   );
-  let successfulPageSize = syncPageSize;
+  let successfulPageSize = adaptivePageSizer.current();
   const syncSessionId = usesPageSession
     ? (savedResponderSession?.syncSessionId ?? createResponderSessionId(includeSharedMemory, phase))
     : undefined;
