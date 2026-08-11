@@ -158,6 +158,56 @@ function compareUnicodeCodePoints(leftValue: string, rightValue: string): number
   return left.length - right.length;
 }
 
+function readOrderedGraphScopedDescriptors(
+  dataQuads: readonly Quad[],
+  metaQuads: readonly Quad[],
+): GraphScopedDescriptor[] | null {
+  // #1921 — verification must never see non-IRI `_meta` subjects: a peer's
+  // `_:bad dkg:partOf "<valid-ual>"` row would otherwise be scanned by
+  // readIntegrityMetadata and falsely invalidate that valid graph-scoped UAL.
+  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
+  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
+  const parsed = readIntegrityMetadata(metadata, false);
+  if (
+    parsed.fatalUnscopedFailure
+    || parsed.invalidKcUals.size > 0
+    || parsed.candidates.length === 0
+    || parsed.candidates.some((candidate) => candidate.kind !== 'graph-scoped')
+  ) return null;
+
+  const descriptors = (parsed.candidates as GraphScopedCandidate[])
+    .map((candidate) => candidate.descriptor)
+    .sort((left, right) => compareUnicodeCodePoints(left.assertionGraph, right.assertionGraph));
+  const descriptorByGraph = new Map(
+    descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
+  );
+  return descriptorByGraph.size === descriptors.length ? descriptors : null;
+}
+
+/**
+ * Check whether a persisted OFFSET is an exact graph boundary in the current
+ * rootless manifest. `null` means the metadata is not a pure, structurally
+ * valid graph-scoped manifest and therefore cannot justify boundary repair.
+ */
+export function isGraphScopedDurableManifestBoundary(
+  metaQuads: readonly Quad[],
+  offset: number,
+): boolean | null {
+  if (!Number.isSafeInteger(offset) || offset < 0) return false;
+  const descriptors = readOrderedGraphScopedDescriptors([], metaQuads);
+  if (!descriptors) return null;
+  if (offset === 0) return true;
+
+  let boundary = 0;
+  for (const descriptor of descriptors) {
+    boundary += descriptor.publicTripleCount;
+    if (!Number.isSafeInteger(boundary)) return false;
+    if (offset === boundary) return true;
+    if (offset < boundary) return false;
+  }
+  return false;
+}
+
 /**
  * Project an incomplete/resumed full snapshot onto a safe V2 graph prefix.
  *
@@ -185,28 +235,11 @@ export function planBoundedGraphScopedDurableBatch(
     || metaQuads.length === 0
   ) return null;
 
-  // #1921 — verification must never see non-IRI `_meta` subjects: a peer's
-  // `_:bad dkg:partOf "<valid-ual>"` row would otherwise be scanned by
-  // readIntegrityMetadata and falsely invalidate the valid graph-scoped UAL.
-  // Sanitize before indexing. The bounded planner returns only data offsets,
-  // so dropping non-IRI meta rows here is loss-free.
-  const iriMetaQuads = metaQuads.filter((quad) => isIriMetaSubject(quad.subject));
-  const metadata = indexIntegrityMetadata(dataQuads, iriMetaQuads);
-  const parsed = readIntegrityMetadata(metadata, false);
-  if (
-    parsed.fatalUnscopedFailure
-    || parsed.invalidKcUals.size > 0
-    || parsed.candidates.length === 0
-    || parsed.candidates.some((candidate) => candidate.kind !== 'graph-scoped')
-  ) return null;
-
-  const descriptors = (parsed.candidates as GraphScopedCandidate[])
-    .map((candidate) => candidate.descriptor)
-    .sort((left, right) => compareUnicodeCodePoints(left.assertionGraph, right.assertionGraph));
+  const descriptors = readOrderedGraphScopedDescriptors(dataQuads, metaQuads);
+  if (!descriptors) return null;
   const descriptorByGraph = new Map(
     descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
   );
-  if (descriptorByGraph.size !== descriptors.length) return null;
 
   const observedCounts = new Map<string, number>();
   for (const quad of dataQuads) {

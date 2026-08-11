@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
+  isGraphScopedDurableManifestBoundary,
   planBoundedGraphScopedDurableBatch,
 } from '../src/sync/durable-integrity.js';
 import {
@@ -581,6 +582,68 @@ describe('bounded rootless durable progress', () => {
     expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
     expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual(suffix);
     expect(inserted.flat().some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
+  });
+
+  it('resets a checkpoint that resumes inside an exact assertion graph', async () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const misalignedOffset = 1;
+    const suffix = [
+      ...fixtures[0]!.payload.slice(misalignedOffset),
+      ...fixtures[1]!.payload,
+    ];
+    const deleted: string[] = [];
+    const materialized: string[] = [];
+    const warnings: string[] = [];
+    let verificationCalls = 0;
+
+    expect(isGraphScopedDurableManifestBoundary(meta, 0)).toBe(true);
+    expect(isGraphScopedDurableManifestBoundary(meta, 4)).toBe(true);
+    expect(isGraphScopedDurableManifestBoundary(meta, misalignedOffset)).toBe(false);
+    expect(isGraphScopedDurableManifestBoundary(meta, 13)).toBe(false);
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-misaligned-resume',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
+        phase,
+      }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', {
+          quads: suffix,
+          resumedFromOffset: misalignedOffset,
+          nextOffset: misalignedOffset + suffix.length,
+          completed: false,
+          timedOut: true,
+        }),
+      processDurableBatchInWorker: (...args) => {
+        verificationCalls += 1;
+        return processBatch(...args);
+      },
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: (_ctx, message) => { warnings.push(message); },
+      logDebug: () => {},
+    });
+
+    expect(summary.insertedTriples).toBe(0);
+    expect(summary.failedPhases).toBe(1);
+    expect(verificationCalls).toBe(0);
+    expect(materialized).toEqual([]);
+    expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(warnings.some((message) => message.includes(
+      'resumed offset 1 is inside an assertion graph',
+    ))).toBe(true);
   });
 
   it('fails closed for mixed legacy and graph-scoped metadata', () => {

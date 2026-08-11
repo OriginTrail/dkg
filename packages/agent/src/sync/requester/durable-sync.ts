@@ -12,7 +12,10 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
-import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
+import {
+  isGraphScopedDurableManifestBoundary,
+  planBoundedGraphScopedDurableBatch,
+} from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
   createDurableSyncAccumulator,
@@ -459,6 +462,28 @@ async function runDurableSyncWithBudget(
         sinceBatchId === undefined
         && !isSystemContextGraph
       ) {
+        const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
+          ? isGraphScopedDurableManifestBoundary(
+            effectiveMetaResult.quads,
+            dataResult.resumedFromOffset,
+          )
+          : true;
+        if (resumeIsManifestBoundary === false) {
+          // An OFFSET inside an exact assertion graph can never produce a
+          // complete first graph in this round. Keeping it creates a permanent
+          // N-1 verification loop (for example 9,999/10,000 rows). Delete the
+          // paired responder session/checkpoint and retry from offset zero on
+          // the next bounded sync; never store this non-contiguous suffix.
+          deleteCheckpoint(dataResult.checkpointKey);
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": resumed offset `
+              + `${dataResult.resumedFromOffset} is inside an assertion graph; `
+              + 'resetting the data checkpoint to a manifest boundary',
+            ),
+            { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
+          );
+        }
         const bounded = planBoundedGraphScopedDurableBatch(
           dataResult.quads,
           effectiveMetaResult.quads,
