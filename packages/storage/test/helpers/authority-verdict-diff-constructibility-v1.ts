@@ -41,6 +41,83 @@ export function readCitedSourceLineV1(site: string, base: URL): string {
 }
 
 /**
+ * A source citation this harness makes as a load-bearing claim, in the one
+ * shape every citation uses.
+ *
+ * The manifest exists so citations have a single mechanism rather than a
+ * structured form in the rule tables and hand-rolled `file:line` strings
+ * wherever a test happens to need one. Two mechanisms for one contract is
+ * worse than either, because only one of them gets maintained.
+ *
+ * THE LINE ANCHOR IS DELIBERATE AND IS NOT A COST TO BE OPTIMISED AWAY. The
+ * weaker file-contains form is what this harness used until a rule cited :273 --
+ * a closing brace -- while its failure string sat on :272, and the assertion
+ * stayed green because "the file contains this string" is true for any line
+ * number at all. The pin whose whole job was keeping citations followable was
+ * green on an unfollowable one.
+ *
+ * The accepted consequence: a behaviour-preserving refactor that inserts a line
+ * above a cited call turns this suite red. That is the intended trade. These
+ * citations exist so a reader can follow them to a specific line to check an
+ * architectural finding, and a citation that survives its target moving has
+ * stopped tracking the thing it cites.
+ */
+export interface SourceCitationV1 {
+  readonly id: string;
+  /** file:line, relative to the repo root. */
+  readonly site: string;
+  /** A substring the cited LINE must contain. */
+  readonly contains: string;
+  /** The claim this citation supports, so a broken one can be re-aimed. */
+  readonly why: string;
+}
+
+/**
+ * THE SAME-PREDICATE FINDING, pinned rather than narrated.
+ *
+ * A mis-bound tombstone predecessor is refused at the CLOSURE BUILDER, not at
+ * core's evaluator -- and both sites call the SAME predicate on the same
+ * operands. The closure walk checks every parsed tombstone head against the
+ * predecessor its own `previousHeadDigest` resolves to; the evaluator re-checks
+ * the root head against `summary.tombstonePredecessor`, which the minter derived
+ * from exactly that lookup. A verified authority summary is a WeakSet-guarded,
+ * factory-only capability that cannot be forged, spread or cloned, so the
+ * evaluator's conjunct cannot observe a pair the closure builder did not already
+ * accept.
+ *
+ * Compared by OPERANDS AND WINDOW rather than by field name, because
+ * same-fields-different-operands is exactly how a subsumption claim goes wrong:
+ * here the operands genuinely coincide (the summary's `candidateHeadDigest` gate
+ * forces the evaluator's candidate to BE the closure root) and the window is
+ * closed by the summary being frozen at mint.
+ *
+ * So core's `:254` conjunct is UNREACHABLE-BY-CONSTRUCTION and the reject at
+ * `:259` has no producer -- which is why nothing in the repo emits 'cold
+ * tombstone closure lacks its exact deletion predecessor'. A comment saying this
+ * would rot silently; these fail loudly.
+ */
+export const SAME_PREDICATE_CITATIONS_V1: readonly SourceCitationV1[] = [
+  {
+    id: 'closure-builder-binding-call',
+    site: 'packages/core/src/system-record-verification-closure-v1-internal.ts:591',
+    contains: 'isTombstoneBoundToPredecessorV1(head, predecessor)',
+    why: 'The minting site: the closure walk applies the binding predicate itself.',
+  },
+  {
+    id: 'evaluator-binding-call',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:254',
+    contains: 'isTombstoneBoundToPredecessorV1(candidateState, predecessor)',
+    why: 'The evaluating site: the same predicate, same operands, later window.',
+  },
+  {
+    id: 'closure-builder-refusal',
+    site: 'packages/core/src/system-record-verification-closure-v1-internal.ts:595',
+    contains: 'tombstone predecessor is not the exact prior active authority state',
+    why: 'The refusal a mis-bound pair actually receives, quoted from its site.',
+  },
+];
+
+/**
  * WHICH CANDIDATE-HEAD FIELD EACH AXIS PINS, AND HOW TIGHTLY.
  *
  * This is the table that decides whether a codec refusal becomes a

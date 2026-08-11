@@ -8,7 +8,10 @@ import {
   computeAgentProfileConflictEvidenceDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+  type AgentProfileActiveHeadObjectV1,
+  type AgentProfileAuthorityTransitionV1,
   type AgentProfileConflictEvidenceV1,
+  type AgentProfileHeadObjectV1,
   type AgentProfileTombstoneHeadObjectV1,
   type Digest32V1,
   type SignedAgentProfileHeadEnvelopeV1,
@@ -21,8 +24,11 @@ import type {
   SystemRecordTombstoneReplacementIssueV1,
 } from '../../src/system-record-verified-replacement-v1-internal.js';
 import {
+  buildSystemRecordClosureArtifactsV1,
   makeAuthenticActiveReplacementFixtureV1,
+  makeRotatedAuthorityChainV1,
   makeSystemRecordActiveReplacementIssueV1,
+  systemRecordClosureResolveOptionsV1,
 } from './system-record-active-replacement-fixture.js';
 
 interface Vectors {
@@ -33,6 +39,116 @@ const vectors = JSON.parse(readFileSync(new URL(
   '../../../core/test/fixtures/system-record-v1/vectors.json',
   import.meta.url,
 ), 'utf8')) as Vectors;
+
+/** The clock every tombstone closure in these fixtures is minted against. */
+export const TERMINAL_FIXTURE_NOW_MS_V1 = Date.parse('2026-08-05T12:12:00Z');
+
+export interface TombstoneClosureMintV1 {
+  readonly tombstone: AgentProfileHeadObjectV1;
+  readonly predecessor: AgentProfileActiveHeadObjectV1;
+  /** The PREDECESSOR's owned subjects: the deletion proof is about what it owned. */
+  readonly ownedSubjectTable: readonly string[];
+  /** Prior heads a non-genesis lineage walks back through. */
+  readonly ancestors?: readonly AgentProfileHeadObjectV1[];
+  readonly transitions?: readonly AgentProfileAuthorityTransitionV1[];
+  readonly nowMs?: number;
+}
+
+/**
+ * Mints a tombstone-rooted verification closure over an ARBITRARY (tombstone,
+ * predecessor) pair, so the pair itself is the variable a caller controls.
+ *
+ * This lives here rather than in a test because a verified authority summary is
+ * a WeakSet-guarded, factory-only capability: it cannot be fabricated, so every
+ * caller needing one has to mint it, and a second hand-rolled minter beside this
+ * one is how envelope construction drifts between them. Callers supply heads and
+ * lineage; envelope assembly and artifact keying stay here -- including the
+ * detail that the owned-subject table is keyed on the PREDECESSOR's digest,
+ * because a tombstone commits the canonical EMPTY table.
+ */
+export async function mintAgentProfileTombstoneClosureV1(mint: TombstoneClosureMintV1) {
+  const artifacts = buildSystemRecordClosureArtifactsV1(
+    [mint.tombstone, mint.predecessor, ...(mint.ancestors ?? [])],
+    undefined,
+    mint.transitions ?? [],
+  );
+  artifacts.set(`owned-subject-table:${mint.predecessor.ownedSubjectTableDigest}`, {
+    objectKind: 'owned-subject-table' as never,
+    digest: mint.predecessor.ownedSubjectTableDigest,
+    canonicalBytes: canonicalizeOwnedSubjectTableObjectV1(
+      mint.predecessor.rootSubject,
+      mint.ownedSubjectTable,
+    ),
+  });
+  return buildAgentProfileVerificationClosureV1(
+    computeAgentProfileHeadObjectDigestV1(mint.tombstone),
+    {
+      ...systemRecordClosureResolveOptionsV1(
+        artifacts,
+        mint.nowMs ?? TERMINAL_FIXTURE_NOW_MS_V1,
+      ),
+      // A tombstone closure must never request the predecessor's projection; if
+      // it does, the fixture is proving something other than a deletion.
+      verifyCurrentBundle: () => {
+        throw new Error('a tombstone closure must not request a predecessor projection');
+      },
+    } as never,
+  );
+}
+
+export interface NonGenesisTerminalPairV1 {
+  readonly tombstone: AgentProfileTombstoneHeadObjectV1;
+  readonly predecessor: AgentProfileActiveHeadObjectV1;
+  readonly ownedSubjectTable: readonly string[];
+  readonly ancestors: readonly AgentProfileHeadObjectV1[];
+  readonly transitions: readonly AgentProfileAuthorityTransitionV1[];
+}
+
+/**
+ * A tombstone and its predecessor at authority sequence >= 1, both carrying a
+ * REAL `acceptedTransitionDigest`.
+ *
+ * The default terminal fixture is genesis -- sequence 0, and the head codec
+ * forbids `acceptedTransitionDigest` there (:194) -- so on that fixture the
+ * field is absent on BOTH heads and every predicate comparing it holds
+ * vacuously. Anything asserting about that comparison needs this pair instead.
+ *
+ * Note what it costs, because it is not a free parameter: a non-genesis head
+ * requires a transition, and a transition must rotate to a new wallet root, so
+ * the predecessor here has a DIFFERENT `evmIssuer` and `rootSubject` from the
+ * genesis head, with its seal and owned-subject table rebuilt to match.
+ */
+export function makeNonGenesisTerminalPairV1(steps: 1 | 2 = 1): NonGenesisTerminalPairV1 {
+  const chain = makeRotatedAuthorityChainV1(steps);
+  const predecessor = chain.base;
+  const tombstone = Object.freeze({
+    objectType: 'agent-profile-head',
+    kind: 'agents',
+    state: 'tombstone',
+    networkId: predecessor.networkId,
+    peerId: predecessor.peerId,
+    peerPublicKey: predecessor.peerPublicKey,
+    authoritySequence: predecessor.authoritySequence,
+    version: String(BigInt(predecessor.version) + 1n),
+    previousHeadDigest: computeAgentProfileHeadObjectDigestV1(predecessor),
+    acceptedTransitionDigest: predecessor.acceptedTransitionDigest,
+    evmIssuer: predecessor.evmIssuer,
+    rootSubject: predecessor.rootSubject,
+    projectionSchemaDigest: predecessor.projectionSchemaDigest,
+    issuedAt: '2026-08-05T12:11:00Z',
+    ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+    ownedSubjectCount: '0',
+    projectionBytes: '0',
+    projectionQuads: '0',
+  }) as AgentProfileTombstoneHeadObjectV1;
+  return Object.freeze({
+    tombstone,
+    predecessor,
+    ownedSubjectTable: [predecessor.rootSubject],
+    ancestors: chain.ancestors,
+    transitions: chain.transitions,
+  });
+}
 
 export interface AuthenticTerminalReplacementFixtureV1 {
   readonly binding: SystemRecordLaneExecutionBindingV1;
