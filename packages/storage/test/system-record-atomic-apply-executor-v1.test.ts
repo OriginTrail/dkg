@@ -33,7 +33,7 @@ import {
   type SystemRecordAtomicRecoveryRequestV1,
 } from '../src/system-record-atomic-apply-executor-v1-internal.js';
 import {
-  deriveSystemRecordActiveReplacementV1,
+  deriveSystemRecordReplacementV1,
 } from '../src/system-record-next-state-v1-internal.js';
 import { parseSystemRecordInspectionResponseV1 } from '../src/system-record-inspection-v1-internal.js';
 import {
@@ -42,12 +42,14 @@ import {
 import {
   createSystemRecordVerifiedReplacementRegistryV1,
   type SystemRecordActiveReplacementIssueV1,
+  type SystemRecordVerifiedCandidateIssueV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
-import { SYSTEM_RECORD_V1_PREDICATES, systemRecordEpochSubjectV1 } from '../src/system-record-rdf-schema-v1-internal.js';
+import { buildSystemRecordReservedStateQuadsV1, SYSTEM_RECORD_V1_PREDICATES, systemRecordEpochSubjectV1 } from '../src/system-record-rdf-schema-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../src/system-record-materializer-v1.js';
 import type { Quad } from '../src/triple-store.js';
 import { agentProfileIdentityProjectionV1 } from './helpers/agent-profile-identity-projection-v1.js';
+import { makeAuthenticTerminalReplacementFixtureV1 } from './helpers/system-record-terminal-replacement-fixture.js';
 
 interface Vectors {
   readonly variants: { readonly active: { readonly object: AgentProfileActiveHeadObjectV1 } };
@@ -448,6 +450,190 @@ describe('bounded system-record atomic apply executor V1', () => {
     expect(fixture.client.updateCalls).toBe(1);
   });
 
+  it('cold-applies one authoritative tombstone without inserting predecessor projection', async () => {
+    const terminal = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const fixture = makeFixture({
+      candidate: {
+        binding: terminal.binding,
+        epochQuad: terminal.epochQuad,
+        issue: { operation: 'tombstone', ...terminal.tombstone },
+      },
+      postState: 'next',
+      priorProjection: () => terminal.active.projectionQuads.map((quad) => ({
+        ...quad,
+        graph: 'did:dkg:context-graph:agents',
+      })),
+    });
+    expect(fixture.exactNextProjection).toEqual([]);
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({ settlement: 'settled', outcome: { outcome: 'applied' } });
+    expect(fixture.client.updateCalls).toBe(1);
+    const update = fixture.client.calls.find((call) =>
+      call.contentType.startsWith('application/sparql-update'));
+    expect(update?.body).not.toContain('VALUES (?insertProjectionSubject');
+    expect(fixture.issueAgain()).toBeDefined();
+  });
+
+  // The shadow tombstone writes status 'dirty' with its deletion scope to the
+  // single shared reserved row and empties only the shadow projection; the
+  // legacy authoritative projection is still present. The authoritative cutover
+  // reads that same row, sees 'dirty', and must delete the legacy projection --
+  // which means it must NOT compare the observed projection against the row's
+  // recorded (empty) one. That skip is the cutover mechanism, so pin it: remove
+  // it and this transition can no longer happen.
+  it('cuts a dirty shadow tombstone over to authoritative against a legacy projection', async () => {
+    const shadow = await makeAuthenticTerminalReplacementFixtureV1('shadow');
+    const shadowRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const shadowFacts = shadowRegistry.consumer.consume(
+      shadowRegistry.issuer.issueCandidate({ operation: 'tombstone', ...shadow.tombstone }),
+      shadow.binding,
+    );
+    const shadowReady = deriveSystemRecordReplacementV1({
+      facts: shadowFacts,
+      snapshot: decodeSystemRecordAppliedSnapshotV1({
+        networkId: shadowFacts.networkId,
+        stableKeyHash: computeSystemRecordStableKeyHashV1(
+          shadowFacts.networkId,
+          shadowFacts.head.peerId,
+        ),
+        materializationEpoch: shadowFacts.materializationEpoch,
+        quads: [shadow.epochQuad],
+      }),
+      observedRootClaimQuads: [],
+    });
+    if (shadowReady.outcome !== 'ready') {
+      throw new Error(`shadow tombstone derivation was ${shadowReady.outcome}`);
+    }
+    expect(shadowReady.plan.next.appliedState.status).toBe('dirty');
+    const tuple = buildSystemRecordReservedStateQuadsV1({
+      appliedState: shadowReady.plan.next.appliedState,
+      headVersion: shadowReady.plan.next.headVersion,
+      ownedSubjectTable: shadowReady.plan.next.ownedSubjectTable,
+      pendingDeletionTable: shadowReady.plan.next.pendingDeletionTable!,
+      rootClaimSet: shadowReady.plan.next.rootClaimSet,
+      capacityState: shadowReady.plan.next.capacityState,
+      receipt: shadowReady.plan.next.receipt,
+    });
+    const reservedQuads = [
+      ...tuple.record,
+      ...tuple.capacity,
+      ...tuple.epoch,
+      ...tuple.receipt,
+    ];
+    const dirty = decodeSystemRecordAppliedSnapshotV1({
+      networkId: shadowFacts.networkId,
+      stableKeyHash: shadowReady.plan.stableKeyHash,
+      materializationEpoch: shadowFacts.materializationEpoch,
+      quads: reservedQuads,
+    });
+    shadowRegistry.consumer.release(shadowFacts);
+
+    const authoritative = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const fixture = makeFixture({
+      candidate: {
+        binding: authoritative.binding,
+        epochQuad: authoritative.epochQuad,
+        issue: { operation: 'tombstone', ...authoritative.tombstone },
+      },
+      postState: 'next',
+      prior: {
+        snapshot: dirty,
+        reservedQuads,
+        rootClaimQuads: shadowReady.plan.next.rootClaimQuads,
+        // Legacy content the shadow pass deliberately left behind. It cannot
+        // match the dirty row's recorded projection, which a tombstone empties.
+        projection: authoritative.active.projectionQuads.map((quad) => ({
+          ...quad,
+          graph: 'did:dkg:context-graph:agents',
+        })),
+      },
+    });
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({ settlement: 'settled', outcome: { outcome: 'applied' } });
+    const update = fixture.client.calls.find((call) =>
+      call.contentType.startsWith('application/sparql-update'));
+    // Bounded: the cutover deletes the recorded scope and inserts no projection.
+    expect(update?.body).not.toContain('VALUES (?insertProjectionSubject');
+    for (const subject of shadowReady.plan.next.pendingDeletionTable!) {
+      expect(update?.body).toContain(subject);
+    }
+  });
+
+  it('exact-recovers a cold tombstone and releases its reservation after settlement', async () => {
+    const terminal = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    let settleRecovery!: () => void;
+    const recoveryCompletion = new Promise<{
+      readonly resolution: 'unavailable';
+    }>((resolve) => {
+      settleRecovery = () => resolve(Object.freeze({ resolution: 'unavailable' as const }));
+    });
+    const fixture = makeFixture({
+      candidate: {
+        binding: terminal.binding,
+        epochQuad: terminal.epochQuad,
+        issue: { operation: 'tombstone', ...terminal.tombstone },
+      },
+      postState: 'malformed',
+      recoveryCompletion,
+    });
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({ settlement: 'recovery-owned' });
+    expect(() => fixture.issueAgain()).toThrow(/reservation is already live/);
+
+    const responses = [
+      { status: 200, body: selectJson(fixture.exactNextReserved) },
+      { status: 200, body: selectJson([]) },
+    ];
+    const recoveryClient: SystemRecordAtomicApplyHttpClientV1 = {
+      childGeneration: '3',
+      isDestroyed: false,
+      post: async () => responses.shift() ?? (() => { throw new Error('unexpected recovery read'); })(),
+    };
+    await expect(fixture.registeredRequest()!.reconcile({
+      client: recoveryClient,
+      queryEndpoint: 'http://127.0.0.1:7878/query',
+      absoluteDeadlineMs: performance.now() + 30_000,
+      signal: new AbortController().signal,
+      assertAttributable: () => true,
+    })).resolves.toMatchObject({ resolution: 'applied' });
+    settleRecovery();
+    await recoveryCompletion;
+    await Promise.resolve();
+    expect(fixture.issueAgain()).toBeDefined();
+  });
+
+  it('atomically persists verified quarantine evidence through the same executor', async () => {
+    const terminal = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
+    const fixture = makeFixture({
+      candidate: {
+        binding: terminal.binding,
+        epochQuad: terminal.epochQuad,
+        issue: { operation: 'quarantine', ...terminal.quarantine },
+      },
+      postState: 'next',
+    });
+    const result = await fixture.executor.execute(
+      fixture.proof,
+      fixture.binding,
+      fixture.registerRecovery,
+    );
+    expect(result).toMatchObject({ settlement: 'settled', outcome: { outcome: 'applied' } });
+    expect(fixture.exactNextReserved.some((quad) =>
+      quad.object.includes(terminal.quarantine.conflictEvidenceDigest))).toBe(true);
+  });
+
   it('exact-recovers a derived-subject projection in a replacement generation', async () => {
     const recoveryCompletion = new Promise<{ readonly resolution: 'unavailable' }>(() => undefined);
     const fixture = makeFixture({
@@ -680,6 +866,11 @@ describe('bounded system-record atomic apply executor V1', () => {
 
 function makeFixture(options: Readonly<{
   verified?: typeof VERIFIED;
+  candidate?: Readonly<{
+    binding: SystemRecordLaneExecutionBindingV1;
+    epochQuad: Readonly<Quad>;
+    issue: SystemRecordVerifiedCandidateIssueV1;
+  }>;
   admittedDeadlineMs?: number;
   localState?: 'absent' | 'next';
   mode?: SystemRecordLaneExecutionBindingV1['mode'];
@@ -696,12 +887,19 @@ function makeFixture(options: Readonly<{
     projection: readonly Readonly<Quad>[],
   ) => readonly Readonly<Quad>[];
   observedRootState?: 'foreign-collision';
+  /** Drive the executor against a pre-existing row instead of an absent one. */
+  prior?: Readonly<{
+    snapshot: Parameters<typeof deriveSystemRecordReplacementV1>[0]['snapshot'];
+    reservedQuads: readonly Readonly<Quad>[];
+    rootClaimQuads: readonly Readonly<Quad>[];
+    projection: readonly Readonly<Quad>[];
+  }>;
 }> = {}) {
   const verified = options.verified ?? VERIFIED;
   const order = options.order ?? [];
   const accountingEvents: string[] = [];
   const admittedDeadlineMs = options.admittedDeadlineMs ?? 10_000;
-  const binding = Object.freeze({
+  const binding = options.candidate?.binding ?? Object.freeze({
     activationGeneration: '1',
     networkId: NETWORK,
     kind: 'agents',
@@ -716,29 +914,42 @@ function makeFixture(options: Readonly<{
   // one-shot handle from the same verifier fixture.
   const expectedRegistry = createSystemRecordVerifiedReplacementRegistryV1();
   const expectedIssue = issue(binding, admittedDeadlineMs, verified);
+  const expectedProof = options.candidate === undefined
+    ? expectedRegistry.issuer.issueActive(expectedIssue)
+    : expectedRegistry.issuer.issueCandidate(options.candidate.issue);
   const expectedFacts = expectedRegistry.consumer.consume(
-    expectedRegistry.issuer.issueActive(expectedIssue),
+    expectedProof,
     binding,
   );
+  const networkId = expectedFacts.networkId;
+  const stableKeyHash = computeSystemRecordStableKeyHashV1(
+    networkId,
+    expectedFacts.head.peerId,
+  );
+  const epochQuad = options.candidate?.epochQuad ?? EPOCH;
   const absentSnapshot = decodeSystemRecordAppliedSnapshotV1({
-    networkId: NETWORK,
-    stableKeyHash: computeStableKey(),
-    materializationEpoch: '2',
-    quads: [EPOCH],
+    networkId,
+    stableKeyHash,
+    materializationEpoch: binding.materializationEpoch,
+    quads: [epochQuad],
   });
-  const ready = deriveSystemRecordActiveReplacementV1({
+  const ready = deriveSystemRecordReplacementV1({
     facts: expectedFacts,
-    snapshot: absentSnapshot,
-    observedRootClaimQuads: [],
+    snapshot: options.prior?.snapshot ?? absentSnapshot,
+    observedRootClaimQuads: options.prior?.rootClaimQuads ?? [],
   });
   if (ready.outcome !== 'ready') throw new Error(`fixture derivation was ${ready.outcome}`);
 
   const localNext = options.localState === 'next';
   const nextRootSubjects = new Set(ready.plan.next.rootClaimQuads.map((quad) => quad.subject));
-  const initialReserved = localNext
-    ? ready.plan.next.reservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
-    : [EPOCH];
-  const initialRoots = options.observedRootState === 'foreign-collision'
+  const initialReserved = options.prior !== undefined
+    ? options.prior.reservedQuads
+    : localNext
+      ? ready.plan.next.reservedQuads.filter((quad) => !nextRootSubjects.has(quad.subject))
+      : [epochQuad];
+  const initialRoots = options.prior !== undefined
+    ? options.prior.rootClaimQuads
+    : options.observedRootState === 'foreign-collision'
     ? ready.plan.next.rootClaimQuads.map((quad) =>
       quad.predicate === SYSTEM_RECORD_V1_PREDICATES.claimedBy
         ? { ...quad, object: 'urn:test:foreign-record' }
@@ -747,7 +958,8 @@ function makeFixture(options: Readonly<{
   const faithfulInitialProjection = localNext
     ? ready.plan.next.projectionQuads.map((quad) => ({ ...quad, graph: ready.plan.projectionGraph }))
     : [];
-  const initialProjection = options.priorProjection?.(faithfulInitialProjection)
+  const initialProjection = options.prior?.projection
+    ?? options.priorProjection?.(faithfulInitialProjection)
     ?? faithfulInitialProjection;
   const responses: Array<Readonly<{ status: number; body: string }>> = [
     { status: 200, body: selectJson(initialReserved) },
@@ -760,7 +972,7 @@ function makeFixture(options: Readonly<{
       responses.push({ status: 200, body: '{' });
     } else if (options.postState === 'prior') {
       responses.push(
-        { status: 200, body: selectJson([EPOCH]) },
+        { status: 200, body: selectJson([epochQuad]) },
         { status: 200, body: selectJson([]) },
       );
     } else {
@@ -786,7 +998,9 @@ function makeFixture(options: Readonly<{
     options.updateFailure,
   );
   const registry = createSystemRecordVerifiedReplacementRegistryV1();
-  const proof = registry.issuer.issueActive(issue(binding, admittedDeadlineMs, verified));
+  const proof = options.candidate === undefined
+    ? registry.issuer.issueActive(issue(binding, admittedDeadlineMs, verified))
+    : registry.issuer.issueCandidate(options.candidate.issue);
   const accountedConsumer: typeof registry.consumer = Object.freeze({
     ...registry.consumer,
     replaceCharge: (facts, category, bytes) => {
@@ -845,7 +1059,9 @@ function makeFixture(options: Readonly<{
     inspectProof: () => registry.consumer.inspectDeadline(proof, binding),
     consumeProof: () => registry.consumer.consume(proof, binding),
     releaseFacts: (facts: unknown) => registry.consumer.release(facts),
-    issueAgain: () => registry.issuer.issueActive(issue(binding, admittedDeadlineMs, verified)),
+    issueAgain: () => options.candidate === undefined
+      ? registry.issuer.issueActive(issue(binding, admittedDeadlineMs, verified))
+      : registry.issuer.issueCandidate(options.candidate.issue),
   };
 }
 

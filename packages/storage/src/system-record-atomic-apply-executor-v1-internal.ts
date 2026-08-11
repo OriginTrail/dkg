@@ -51,7 +51,7 @@ import {
 } from './system-record-state-snapshot-v1-internal.js';
 import {
   assertAuthenticSystemRecordActiveReplacementCompleteV1,
-  deriveSystemRecordActiveReplacementV1,
+  deriveSystemRecordReplacementV1,
   type SystemRecordActiveReplacementCompleteV1,
   type SystemRecordActiveReplacementReadyV1,
 } from './system-record-next-state-v1-internal.js';
@@ -405,9 +405,9 @@ class SystemRecordAtomicApplyAttemptV1 {
     inspectionDeadlineMs: number,
     inspection: SystemRecordPriorInspectionPhaseV1,
   ): Promise<SystemRecordDispatchPreparationPhaseV1> {
-    let derived: ReturnType<typeof deriveSystemRecordActiveReplacementV1>;
+    let derived: ReturnType<typeof deriveSystemRecordReplacementV1>;
     try {
-      derived = deriveSystemRecordActiveReplacementV1(Object.freeze({
+      derived = deriveSystemRecordReplacementV1(Object.freeze({
         facts: this.facts,
         snapshot: inspection.snapshot,
         observedRootClaimQuads: inspection.rootClaimQuads,
@@ -496,6 +496,7 @@ class SystemRecordAtomicApplyAttemptV1 {
         inspection.snapshot,
         exactPrior.projectionQuads,
         this.binding.mode,
+        derived,
       )) {
         return this.completePreparation(
           noMutation({ outcome: 'deferred', reason: 'validation-mismatch' }),
@@ -1190,6 +1191,7 @@ function matchesProjectionSnapshot(
   snapshot: SystemRecordAppliedSnapshotV1,
   projectionQuads: readonly Readonly<Quad>[],
   mode: SystemRecordLaneExecutionBindingV1['mode'],
+  prepared: SystemRecordActiveReplacementCompleteV1,
 ): boolean {
   const observed = fingerprintSystemRecordProjectionV1(projectionQuads);
   // No applied state owns authoritative projection subjects yet, so bounded
@@ -1197,6 +1199,22 @@ function matchesProjectionSnapshot(
   // atomic transaction must replace. Shadow storage is protocol-owned from
   // inception and therefore remains strict-empty when its state is absent.
   if (snapshot.state === 'absent' && mode === 'authoritative') return true;
+  // A shadow tombstone writes status 'dirty' and its deletion scope to the
+  // single shared reserved row while emptying only the shadow projection, so the
+  // legacy authoritative projection is still in place. The authoritative cutover
+  // reads that same row, sees the empty projection the shadow pass recorded, and
+  // must DELETE the legacy content rather than match against it -- the skip is the
+  // cutover mechanism, not an exemption from it. Bounded on both sides: the
+  // observed projection is read over the exact next-subject union and the delete
+  // is bound by that same union, and the reserved-state precondition is untouched.
+  // Pinned by 'cuts a dirty shadow tombstone over to authoritative against a
+  // legacy projection'; remove this and the transition defers on
+  // validation-mismatch forever, because the row's recorded projection can never
+  // match the legacy rows still in the store.
+  if (snapshot.state === 'present'
+      && snapshot.appliedState.status === 'dirty'
+      && mode === 'authoritative'
+      && prepared.plan.projectionDeletionTable !== undefined) return true;
   const expected = snapshot.state === 'present'
     ? snapshot.appliedState
     : Object.freeze({
@@ -1257,7 +1275,7 @@ function classifyInspectionFailure(
 
 function mapZeroWrite(
   prepared: Exclude<
-    ReturnType<typeof deriveSystemRecordActiveReplacementV1>,
+    ReturnType<typeof deriveSystemRecordReplacementV1>,
     SystemRecordActiveReplacementCompleteV1
   >,
 ): Exclude<SystemRecordApplyOutcomeV1, { outcome: 'applied' | 'already-applied' | 'indeterminate' }> {

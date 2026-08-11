@@ -30,6 +30,8 @@ import {
   releaseReplacementSystemRecordControllerV1,
   trackSystemRecordControllerReleaseV1,
 } from './helpers/system-record-lifecycle-race-v1.js';
+import { createSystemRecordVerifiedReplacementRegistryV1 } from '../src/system-record-verified-replacement-v1-internal.js';
+import { makeRuntimeActiveIssueInputV1 } from './helpers/system-record-runtime-issue-input-v1.js';
 
 const ACTIVATION: SystemRecordLaneActivationV1 = {
   networkId: 'testnet',
@@ -1940,6 +1942,62 @@ describe('system-record lane session lifecycle V1', () => {
       expect(Reflect.ownKeys(executor.calls[0]?.sessionIdentity ?? {})).toHaveLength(0);
       expect(Object.isFrozen(executor.calls[0]?.sessionIdentity)).toBe(true);
       expect(Object.isFrozen(executor.calls[0])).toBe(true);
+    });
+
+    it('discards a proof whose dispatch threw before the executor consumed it', async () => {
+      const session = await build().open(ACTIVATION);
+      const dispatchFailure = new Error('admission barrier closed under dispatch');
+      executor.onDispatch = () => { throw dispatchFailure; };
+      const strandedProof = Object.freeze({ proof: 'never-consumed' });
+
+      await expect(session.applyVerified(strandedProof)).rejects.toBe(dispatchFailure);
+      // The reservation gate is single-slot and registry-wide, so a proof left
+      // undiscarded here fails every later apply in the process, not just this
+      // lane. Releasing it is what keeps the next dispatch admissible.
+      expect(executor.discarded).toEqual([strandedProof]);
+
+      executor.onDispatch = undefined;
+      expect((await session.applyVerified({})).outcome).toBe('applied');
+    });
+
+    it('frees the real transient reservation when dispatch throws, so the next issuance succeeds', async () => {
+      // The guarantee lives at the real single-slot gate, so the proof has to be
+      // a real one: a stubbed executor holds no reservation and would report
+      // success no matter what the lane did with it.
+      const registry = createSystemRecordVerifiedReplacementRegistryV1();
+      const liveProof = registry.issuer.issueActive(makeRuntimeActiveIssueInputV1());
+      const dispatchFailure = new Error('admission barrier closed under dispatch');
+      const controller = createSystemRecordLaneControllerV1({
+        lease: ownership.lease,
+        handoff,
+        executor: {
+          applyVerified: async () => { throw dispatchFailure; },
+          discardVerified: (proof) => { registry.consumer.discardProof(proof); },
+        },
+        barrier: barrier.run,
+      });
+
+      const session = await controller.open(ACTIVATION);
+      await expect(session.applyVerified(liveProof)).rejects.toBe(dispatchFailure);
+
+      // The assertion that actually proves release. The gate is single-slot, so
+      // a stranded proof makes this throw "reservation is already live" and
+      // every later apply in the process fails the same way until restart.
+      expect(() => registry.issuer.issueActive(makeRuntimeActiveIssueInputV1())).not.toThrow();
+    });
+
+    it('propagates the dispatch failure even when discarding that proof also throws', async () => {
+      const session = await build().open(ACTIVATION);
+      const dispatchFailure = new Error('admission barrier closed under dispatch');
+      const discardFailure = new Error('verified replacement proof is no longer live and unconsumed');
+      executor.onDispatch = () => { throw dispatchFailure; };
+      executor.discardVerified = () => { throw discardFailure; };
+
+      // A real discard throws whenever the proof was already consumed, already
+      // released, or transferred to recovery ownership. If that throw escaped it
+      // would replace the actual dispatch failure with a misleading reservation
+      // error, and the operator would debug the wrong thing.
+      await expect(session.applyVerified({})).rejects.toBe(dispatchFailure);
     });
 
     it('keeps an explicit child-generation fallback for the current adapter', async () => {

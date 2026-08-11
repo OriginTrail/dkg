@@ -31,6 +31,8 @@ const internalAgentSpecifiers = [
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-commit-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/requester-api-v1.js',
   '@origintrail-official/dkg-agent/dist/system-records/resource-admission-v1-internal.js',
+  '@origintrail-official/dkg-agent/dist/system-records/agent-profile-materializer-bridge-v1-internal.js',
+  '@origintrail-official/dkg-agent/dist/system-records/receiver-v1.js',
 ];
 const publicSystemRecordSpecifiers = [
   '@origintrail-official/dkg-agent/dist/system-records/agent-profile-producer-v1.js',

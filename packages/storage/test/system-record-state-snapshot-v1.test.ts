@@ -10,6 +10,8 @@ import {
   computeSystemRecordMaterializationReceiptDigestV1,
   computeSystemRecordRootClaimSetDigestV1,
   computeSystemRecordStableKeyHashV1,
+  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+  SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
   SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
   type OwnedSubjectTableObjectV1,
   type SystemRecordAppliedStatePresentV1,
@@ -94,6 +96,50 @@ describe('system-record reserved-state snapshot decoder', () => {
     expect(Object.isFrozen(decoded)).toBe(true);
     expect(() => assertAuthenticSystemRecordAppliedSnapshotV1(decoded)).not.toThrow();
     expect(() => assertAuthenticSystemRecordAppliedSnapshotV1({ ...decoded })).toThrow(/exact decoder/);
+  });
+
+  it('round-trips the exact pending deletion table and rejects metadata-only restart state', () => {
+    const pendingBytes = canonicalizeOwnedSubjectTableObjectV1(ROOT, TABLE).byteLength;
+    const dirty = state({
+      status: 'dirty',
+      projectionDigest: SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
+      projectionBytes: '0',
+      projectionQuads: '0',
+      ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+      ownedSubjectCount: '0',
+      ownedSubjectTableBytes: '0',
+      pendingDeletionTableDigest: computeOwnedSubjectTableDigestV1(ROOT, TABLE),
+      pendingDeletionSubjectCount: '1',
+      pendingDeletionTableBytes: String(pendingBytes),
+      accountedBytes: computeSystemRecordAccountedBytesV1(0, 0, pendingBytes).toString(),
+    });
+    const canonical = tuple({
+      appliedState: dirty,
+      ownedSubjectTable: Object.freeze([]) as OwnedSubjectTableObjectV1,
+      pendingDeletionTable: TABLE,
+      capacityState: {
+        objectType: 'system-record-capacity-state',
+        kind: 'agents',
+        networkId: NETWORK,
+        revision: '8',
+        liveRecordCount: '1',
+        stateBytes: '65536',
+        tableBytes: String(pendingBytes),
+        projectionBytes: '0',
+        projectionQuads: '0',
+      },
+    });
+    const decoded = decodeTuple(canonical);
+    expect(decoded.state).toBe('present');
+    if (decoded.state !== 'present') throw new Error('expected dirty present state');
+    expect(decoded.pendingDeletionTable).toEqual(TABLE);
+    expect(Object.isFrozen(decoded.pendingDeletionTable)).toBe(true);
+
+    expect(() => decodeTuple({
+      ...canonical,
+      record: canonical.record.filter((quad) =>
+        quad.predicate !== SYSTEM_RECORD_V1_PREDICATES.pendingDeletionTable),
+    })).toThrow(/pending deletion table/);
   });
 
   it('decodes an exact prior-epoch tuple against the current durable epoch', () => {
@@ -402,6 +448,8 @@ function decodeTuple(value: ReturnType<typeof tuple>) {
 
 function tuple(overrides: {
   readonly appliedState?: SystemRecordAppliedStatePresentV1;
+  readonly ownedSubjectTable?: OwnedSubjectTableObjectV1;
+  readonly pendingDeletionTable?: OwnedSubjectTableObjectV1;
   readonly rootClaimSet?: Parameters<typeof buildSystemRecordReservedStateQuadsV1>[0]['rootClaimSet'];
   readonly capacityState?: SystemRecordCapacityStateV1;
 } = {}) {
@@ -420,7 +468,10 @@ function tuple(overrides: {
   return buildSystemRecordReservedStateQuadsV1({
     appliedState,
     headVersion: '0',
-    ownedSubjectTable: TABLE,
+    ownedSubjectTable: overrides.ownedSubjectTable ?? TABLE,
+    ...(overrides.pendingDeletionTable === undefined
+      ? {}
+      : { pendingDeletionTable: overrides.pendingDeletionTable }),
     rootClaimSet,
     capacityState: overrides.capacityState ?? {
       objectType: 'system-record-capacity-state',

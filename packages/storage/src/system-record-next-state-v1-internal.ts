@@ -10,6 +10,7 @@ import {
 import {
   assertAgentProfileHeadObjectV1,
   assertAgentProfileVerifiedAuthoritySummaryV1,
+  type AgentProfileVerifiedAuthoritySummaryV1,
   canonicalizeOwnedSubjectTableObjectV1,
   canonicalizeSystemRecordAppliedStateV1,
   canonicalizeSystemRecordCapacityStateV1,
@@ -22,6 +23,7 @@ import {
   computeSystemRecordMaterializationReceiptDigestV1,
   computeSystemRecordRootClaimSetDigestV1,
   computeSystemRecordStableKeyHashV1,
+  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   parseCanonicalOwnedSubjectTableObjectV1,
   parseCanonicalSystemRecordAppliedStateV1,
   parseCanonicalSystemRecordCapacityStateV1,
@@ -30,8 +32,10 @@ import {
   SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_BYTES,
   SYSTEM_RECORD_MAX_APPLIED_AGGREGATE_QUADS,
   SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES,
+  SYSTEM_RECORD_MAX_CONFLICT_DIGESTS,
   SYSTEM_RECORD_MAX_INVENTORY_RECORDS,
   SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
+  SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
   type AgentProfileAppliedTransitionV1,
   type OwnedSubjectTableObjectV1,
   type SystemRecordAppliedStatePresentV1,
@@ -56,7 +60,9 @@ import {
 } from './system-record-state-snapshot-v1-internal.js';
 import {
   assertAuthenticSystemRecordVerifiedReplacementFactsV1,
+  type SystemRecordVerifiedQuarantineReplacementFactsV1,
   type SystemRecordVerifiedReplacementFactsV1,
+  type SystemRecordVerifiedTombstoneReplacementFactsV1,
 } from './system-record-verified-replacement-v1-internal.js';
 
 export type SystemRecordActiveDerivationDeferredReasonV1 =
@@ -79,6 +85,7 @@ export interface SystemRecordPriorMaterializationV1 {
   readonly capacityState: SystemRecordCapacityStateV1;
   readonly materializationEpoch: string;
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly pendingDeletionTable?: OwnedSubjectTableObjectV1;
   readonly rootClaimSet?: SystemRecordRootClaimSetV1;
   readonly receipt?: SystemRecordMaterializationReceiptV1;
   readonly rootClaimQuads: readonly Readonly<Quad>[];
@@ -93,6 +100,7 @@ export interface SystemRecordNextMaterializationV1 {
   readonly capacityState: SystemRecordCapacityStateV1;
   readonly materializationEpoch: string;
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly pendingDeletionTable?: OwnedSubjectTableObjectV1;
   readonly rootClaimSet: SystemRecordRootClaimSetV1;
   readonly receipt: SystemRecordMaterializationReceiptV1;
   readonly receiptDigest: Digest32V1;
@@ -109,6 +117,8 @@ export interface SystemRecordRootClaimGuardV1 {
 export interface SystemRecordMaterializationPlanV1 {
   readonly stableKeyHash: Digest32V1;
   readonly projectionGraph: string;
+  /** Extra verified subjects that must be deleted but never become next projection. */
+  readonly projectionDeletionTable?: OwnedSubjectTableObjectV1;
   readonly prior: SystemRecordPriorMaterializationV1;
   readonly next: SystemRecordNextMaterializationV1;
   readonly rootClaimGuards: readonly SystemRecordRootClaimGuardV1[];
@@ -148,6 +158,28 @@ export type SystemRecordActiveReplacementDerivationV1 =
       readonly outcome: 'capacity-exhausted';
       readonly reason: SystemRecordActiveDerivationCapacityReasonV1;
     }>;
+
+export type SystemRecordReplacementDerivationV1 = SystemRecordActiveReplacementDerivationV1;
+
+/** Closed verified candidate transition; every complete variant uses the same CAS plan. */
+export function deriveSystemRecordReplacementV1(input: {
+  readonly facts: SystemRecordVerifiedReplacementFactsV1;
+  readonly snapshot: SystemRecordAppliedSnapshotV1;
+  readonly observedRootClaimQuads: readonly Readonly<Quad>[];
+}): SystemRecordReplacementDerivationV1 {
+  assertAuthenticSystemRecordVerifiedReplacementFactsV1(input.facts);
+  if (input.facts.operation === 'tombstone') {
+    return deriveSystemRecordTombstoneReplacementV1({
+      facts: input.facts,
+      snapshot: input.snapshot,
+      observedRootClaimQuads: input.observedRootClaimQuads,
+    });
+  }
+  const active = deriveSystemRecordActiveReplacementV1(input);
+  return input.facts.operation === 'quarantine'
+    ? quarantineSystemRecordDerivationV1(active, input.facts)
+    : active;
+}
 
 /**
  * Pure active-only state transition. Its `ready` variant is complete: callers
@@ -407,6 +439,357 @@ export function deriveSystemRecordActiveReplacementV1(input: {
   }));
 }
 
+function quarantineSystemRecordDerivationV1(
+  derived: SystemRecordActiveReplacementDerivationV1,
+  facts: SystemRecordVerifiedQuarantineReplacementFactsV1,
+): SystemRecordActiveReplacementDerivationV1 {
+  if (derived.outcome !== 'ready' && derived.outcome !== 'already-applied') return derived;
+  if (derived.outcome === 'already-applied'
+      && derived.plan.next.appliedState.status === 'quarantined'
+      && derived.plan.next.appliedState.conflictEvidenceDigest === facts.conflictEvidenceDigest) {
+    return derived;
+  }
+  if (derived.outcome !== 'ready') {
+    return Object.freeze({ outcome: 'deferred', reason: 'verified-state-mismatch' });
+  }
+
+  const currentSlots = derived.plan.next.appliedState.conflictDigestSlots;
+  const terminalDigests = facts.terminalTransitionConflict
+    ? facts.conflictEvidence.entries.flatMap((entry) =>
+        entry.type === 'transition' ? [...entry.objectDigests] : [])
+    : [];
+  const allSlots = canonicalDigests([...currentSlots, ...terminalDigests]);
+  const conflictOverflow = derived.plan.next.appliedState.conflictOverflow
+    || allSlots.length > SYSTEM_RECORD_MAX_CONFLICT_DIGESTS;
+  const conflictDigestSlots = Object.freeze(allSlots.slice(0, SYSTEM_RECORD_MAX_CONFLICT_DIGESTS));
+  const appliedState = canonicalAppliedState({
+    ...withoutConflictSaga(derived.plan.next.appliedState),
+    status: 'quarantined',
+    conflictEvidenceDigest: facts.conflictEvidenceDigest,
+    // Captured here because this is the only moment the receiver still knows
+    // which head it is quarantining; a later resolution names a fork base, and
+    // without our own base the two cannot be compared.
+    ...(facts.head.previousHeadDigest === undefined
+      ? {}
+      : { conflictForkBaseHeadDigest: facts.head.previousHeadDigest }),
+    conflictDigestSlots,
+    conflictOverflow,
+  });
+  const appliedStateDigest = computeSystemRecordAppliedStateDigestV1(appliedState);
+  const receipt = canonicalReceipt({
+    ...derived.plan.next.receipt,
+    appliedStateDigest,
+    headDigest: appliedState.headDigest,
+  });
+  const reserved = buildSystemRecordReservedStateQuadsV1({
+    appliedState,
+    headVersion: derived.plan.next.headVersion,
+    ownedSubjectTable: derived.plan.next.ownedSubjectTable,
+    rootClaimSet: derived.plan.next.rootClaimSet,
+    capacityState: derived.plan.next.capacityState,
+    receipt,
+  });
+  const next = Object.freeze({
+    ...derived.plan.next,
+    appliedState,
+    appliedStateDigest,
+    receipt,
+    receiptDigest: computeSystemRecordMaterializationReceiptDigestV1(receipt),
+    reservedQuads: Object.freeze([
+      ...reserved.record,
+      ...reserved.capacity,
+      ...reserved.epoch,
+      ...reserved.receipt,
+      ...reserved.rootClaims,
+    ]),
+  });
+  return markComplete(Object.freeze({
+    outcome: 'ready',
+    plan: Object.freeze({
+      ...derived.plan,
+      next,
+      success: Object.freeze({
+        stateRevision: appliedState.stateRevision,
+        appliedStateDigest,
+      }),
+    }),
+  }));
+}
+
+function deriveSystemRecordTombstoneReplacementV1(input: {
+  readonly facts: SystemRecordVerifiedTombstoneReplacementFactsV1;
+  readonly snapshot: SystemRecordAppliedSnapshotV1;
+  readonly observedRootClaimQuads: readonly Readonly<Quad>[];
+}): SystemRecordActiveReplacementDerivationV1 {
+  const { facts, snapshot } = input;
+  assertAuthenticSystemRecordAppliedSnapshotV1(snapshot);
+  assertTrustedTombstoneReplacement(facts, snapshot);
+  const { head, verifiedAuthoritySummary: summary } = facts;
+  const headDigest = computeAgentProfileHeadObjectDigestV1(head);
+  const stableKeyHash = computeSystemRecordStableKeyHashV1(head.networkId, head.peerId);
+  const authority = classifyTombstoneAdvance(snapshot, facts, headDigest);
+  if (authority.outcome !== 'advance') return authority;
+
+  const rootClaimSet = canonicalRootClaimSet({
+    objectType: 'system-record-root-claim-set',
+    kind: 'agents',
+    networkId: head.networkId,
+    stableKeyHash,
+    currentRoot: head.rootSubject,
+    historicalRoots: summary.historicalRoots,
+  });
+  const recordSubject = systemRecordRecordSubjectV1(head.networkId, stableKeyHash);
+  const priorRootQuads = snapshot.state === 'present'
+    ? snapshot.expectedRootClaimQuads
+    : Object.freeze([]);
+  const priorRootSubjects = new Set(priorRootQuads.map((quad) => quad.subject));
+  const nextRootSubjects = [rootClaimSet.currentRoot, ...rootClaimSet.historicalRoots]
+    .map((root) => systemRecordRootClaimSubjectV1(head.networkId, root));
+  const requiredAbsentRootSubjects = canonicalSubjects(
+    nextRootSubjects.filter((subject) => !priorRootSubjects.has(subject)),
+  );
+  const rootSnapshot = classifyRootSnapshot(
+    input.observedRootClaimQuads,
+    priorRootQuads,
+    requiredAbsentRootSubjects,
+    facts.networkId,
+    recordSubject,
+  );
+  if (rootSnapshot.outcome !== 'match') return rootSnapshot;
+
+  const emptyTable = Object.freeze([]) as unknown as OwnedSubjectTableObjectV1;
+  const priorTable = snapshot.state === 'present'
+    ? snapshot.ownedSubjectTable
+    : emptyTable;
+  const pendingDeletionTable = facts.mode === 'shadow'
+    ? facts.deletionOwnedSubjectTable
+    : undefined;
+  const pendingTableBytes = pendingDeletionTable === undefined
+    ? 0
+    : canonicalizeOwnedSubjectTableObjectV1(
+        head.rootSubject,
+        pendingDeletionTable,
+      ).byteLength;
+  const rootClaimSetDigest = computeSystemRecordRootClaimSetDigestV1(rootClaimSet);
+
+  // The dirty cutover plans its deletion from the incoming candidate's table
+  // while the durably recorded scope is read only for the CAS and capacity, so
+  // the two being the same scope is what makes the cutover bounded. Two
+  // fail-closed points already force it, which is why there is no third check
+  // here: a row can never persist a pending table that disagrees with its own
+  // applied-state binding, refused when written by buildSystemRecordReservedStateQuadsV1
+  // and again when read by decodeSystemRecordAppliedSnapshotV1 (both pinned --
+  // see 'refuses to encode a pending deletion table' and 'round-trips the exact
+  // pending deletion table'), and classifyTombstoneAdvance only advances a
+  // candidate whose head digest matches the persisted one -- same head, same
+  // predecessor, same table.
+  if (snapshot.state === 'present'
+      && persistedStateMatchesVerifiedTombstone(
+        snapshot,
+        facts,
+        rootClaimSetDigest,
+        pendingDeletionTable,
+      )) {
+    const appliedStateDigest = computeSystemRecordAppliedStateDigestV1(snapshot.appliedState);
+    const reservedQuads = Object.freeze([
+      ...snapshot.previousReservedQuads,
+      ...priorRootQuads,
+    ]);
+    const requiredAbsentReservedSubjects = canonicalSubjects([
+      ...snapshot.requiredAbsentReservedSubjects,
+      ...requiredAbsentRootSubjects,
+    ]);
+    const prior = Object.freeze({
+      appliedState: snapshot.appliedState,
+      headVersion: snapshot.headVersion,
+      capacityState: snapshot.capacityState,
+      materializationEpoch: snapshot.materializationEpoch,
+      ownedSubjectTable: priorTable,
+      ...(snapshot.pendingDeletionTable === undefined
+        ? {}
+        : { pendingDeletionTable: snapshot.pendingDeletionTable }),
+      rootClaimSet: snapshot.rootClaimSet,
+      receipt: snapshot.receipt,
+      rootClaimQuads: priorRootQuads,
+      reservedQuads,
+      requiredAbsentReservedSubjects,
+    });
+    const next = Object.freeze({
+      appliedState: snapshot.appliedState,
+      headVersion: snapshot.headVersion,
+      appliedStateDigest,
+      capacityState: snapshot.capacityState,
+      materializationEpoch: snapshot.materializationEpoch,
+      ownedSubjectTable: emptyTable,
+      ...(snapshot.pendingDeletionTable === undefined
+        ? {}
+        : { pendingDeletionTable: snapshot.pendingDeletionTable }),
+      rootClaimSet: snapshot.rootClaimSet,
+      receipt: snapshot.receipt,
+      receiptDigest: computeSystemRecordMaterializationReceiptDigestV1(snapshot.receipt),
+      rootClaimQuads: priorRootQuads,
+      reservedQuads,
+      projectionQuads: Object.freeze([]),
+    });
+    return markComplete(Object.freeze({
+      outcome: 'already-applied',
+      plan: Object.freeze({
+        stableKeyHash,
+        projectionGraph: systemRecordProjectionGraphV1(facts.mode),
+        projectionDeletionTable: facts.deletionOwnedSubjectTable,
+        prior,
+        next,
+        rootClaimGuards: rootGuards(nextRootSubjects, recordSubject),
+        success: Object.freeze({
+          stateRevision: snapshot.appliedState.stateRevision,
+          appliedStateDigest,
+        }),
+      }),
+    }));
+  }
+
+  if (mergedSubjectCount(
+    priorTable,
+    facts.deletionOwnedSubjectTable,
+  ) > SYSTEM_RECORD_MAX_OWNED_SUBJECTS) {
+    return Object.freeze({ outcome: 'capacity-exhausted', reason: 'subject-union-cap' });
+  }
+  const nextStateRevision = incrementU64(
+    snapshot.state === 'present' ? snapshot.appliedState.stateRevision : '0',
+  );
+  if (nextStateRevision === null) {
+    return Object.freeze({ outcome: 'capacity-exhausted', reason: 'state-revision-overflow' });
+  }
+  const capacityRevision = incrementU64(snapshot.capacityState.revision);
+  if (capacityRevision === null) {
+    return Object.freeze({ outcome: 'capacity-exhausted', reason: 'capacity-revision-overflow' });
+  }
+  const deletionTableDigest = computeOwnedSubjectTableDigestV1(
+    head.rootSubject,
+    facts.deletionOwnedSubjectTable,
+  );
+  const appliedState = canonicalAppliedState({
+    objectType: 'system-record-applied-state',
+    state: 'present',
+    kind: 'agents',
+    networkId: head.networkId,
+    stableKeyHash,
+    peerId: head.peerId,
+    stateRevision: nextStateRevision,
+    status: facts.mode === 'shadow' ? 'dirty' : 'tombstone',
+    headDigest,
+    transitionLineage: summary.transitionLineage,
+    projectionDigest: SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
+    projectionBytes: '0',
+    projectionQuads: '0',
+    ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+    ownedSubjectCount: '0',
+    ownedSubjectTableBytes: '0',
+    ...(pendingDeletionTable === undefined ? {} : {
+      pendingDeletionTableDigest: deletionTableDigest,
+      pendingDeletionSubjectCount: String(pendingDeletionTable.length),
+      pendingDeletionTableBytes: String(pendingTableBytes),
+    }),
+    currentRoot: head.rootSubject,
+    historicalRoots: summary.historicalRoots,
+    conflictDigestSlots: snapshot.state === 'present'
+      ? snapshot.appliedState.conflictDigestSlots
+      : Object.freeze([]),
+    conflictOverflow: snapshot.state === 'present'
+      ? snapshot.appliedState.conflictOverflow
+      : false,
+    materializationEpoch: facts.materializationEpoch,
+    rootClaimSetDigest,
+    accountedBytes: computeSystemRecordAccountedBytesV1(0, 0, pendingTableBytes).toString(),
+  });
+  const nextCapacity = deriveCapacity(
+    snapshot,
+    appliedState,
+    0,
+    capacityRevision,
+    pendingTableBytes,
+  );
+  if (nextCapacity.outcome !== 'capacity') return nextCapacity;
+  const appliedStateDigest = computeSystemRecordAppliedStateDigestV1(appliedState);
+  const receipt = canonicalReceipt({
+    objectType: 'system-record-materialization-receipt',
+    kind: 'agents',
+    networkId: head.networkId,
+    stableKeyHash,
+    stateRevision: nextStateRevision,
+    appliedStateDigest,
+    headDigest,
+    materializationEpoch: facts.materializationEpoch,
+  });
+  const nextReserved = buildSystemRecordReservedStateQuadsV1({
+    appliedState,
+    headVersion: head.version,
+    ownedSubjectTable: emptyTable,
+    ...(pendingDeletionTable === undefined ? {} : { pendingDeletionTable }),
+    rootClaimSet,
+    capacityState: nextCapacity.state,
+    receipt,
+  });
+  const priorReservedQuads = Object.freeze([
+    ...snapshot.previousReservedQuads,
+    ...priorRootQuads,
+  ]);
+  const requiredAbsentReservedSubjects = canonicalSubjects([
+    ...snapshot.requiredAbsentReservedSubjects,
+    ...requiredAbsentRootSubjects,
+  ]);
+  const prior = Object.freeze({
+    appliedState: snapshot.appliedState,
+    ...(snapshot.state === 'present' ? { headVersion: snapshot.headVersion } : {}),
+    capacityState: snapshot.capacityState,
+    materializationEpoch: snapshot.materializationEpoch,
+    ownedSubjectTable: priorTable,
+    ...(snapshot.state === 'present' && snapshot.pendingDeletionTable !== undefined
+      ? { pendingDeletionTable: snapshot.pendingDeletionTable }
+      : {}),
+    ...(snapshot.state === 'present' ? {
+      rootClaimSet: snapshot.rootClaimSet,
+      receipt: snapshot.receipt,
+    } : {}),
+    rootClaimQuads: priorRootQuads,
+    reservedQuads: priorReservedQuads,
+    requiredAbsentReservedSubjects,
+  });
+  const next = Object.freeze({
+    appliedState,
+    headVersion: head.version,
+    appliedStateDigest,
+    capacityState: nextCapacity.state,
+    materializationEpoch: facts.materializationEpoch,
+    ownedSubjectTable: emptyTable,
+    ...(pendingDeletionTable === undefined ? {} : { pendingDeletionTable }),
+    rootClaimSet,
+    receipt,
+    receiptDigest: computeSystemRecordMaterializationReceiptDigestV1(receipt),
+    rootClaimQuads: nextReserved.rootClaims,
+    reservedQuads: Object.freeze([
+      ...nextReserved.record,
+      ...nextReserved.capacity,
+      ...nextReserved.epoch,
+      ...nextReserved.receipt,
+      ...nextReserved.rootClaims,
+    ]),
+    projectionQuads: Object.freeze([]),
+  });
+  return markComplete(Object.freeze({
+    outcome: 'ready',
+    plan: Object.freeze({
+      stableKeyHash,
+      projectionGraph: systemRecordProjectionGraphV1(facts.mode),
+      projectionDeletionTable: facts.deletionOwnedSubjectTable,
+      prior,
+      next,
+      rootClaimGuards: rootGuards(nextRootSubjects, recordSubject),
+      success: Object.freeze({ stateRevision: nextStateRevision, appliedStateDigest }),
+    }),
+  }));
+}
+
 /** Equal digest is necessary but not sufficient for an already-applied result. */
 function persistedStateMatchesVerifiedHead(
   snapshot: Extract<SystemRecordAppliedSnapshotV1, { readonly state: 'present' }>,
@@ -421,7 +804,18 @@ function persistedStateMatchesVerifiedHead(
     table,
   ).byteLength;
   const rootClaimSetDigest = computeSystemRecordRootClaimSetDigestV1(rootClaimSet);
-  return state.status === 'active'
+  const eligibleStatus = state.status === 'active'
+    || (facts.operation === 'quarantine'
+      && state.status === 'quarantined'
+      && state.conflictEvidenceDigest === facts.conflictEvidenceDigest);
+  const terminalEvidenceRetained = facts.operation !== 'quarantine'
+    || !facts.terminalTransitionConflict
+    || state.conflictOverflow
+    || facts.conflictEvidence.entries.every((entry) => entry.type !== 'transition'
+      || entry.objectDigests.every((digest) => state.conflictDigestSlots.includes(digest)));
+  return eligibleStatus
+    && terminalEvidenceRetained
+    && state.conflictSidecarIntentOperation === undefined
     && state.headDigest === headDigest
     && String(state.transitionLineage.length) === facts.head.authoritySequence
     && snapshot.headVersion === facts.head.version
@@ -455,6 +849,7 @@ function assertTrustedReplacement(
   assertAgentProfileHeadObjectV1(facts.head);
   assertAgentProfileVerifiedAuthoritySummaryV1(facts.verifiedAuthoritySummary);
   if (facts.head.state !== 'active'
+      || (facts.operation !== 'active' && facts.operation !== 'quarantine')
       || facts.kind !== 'agents'
       || facts.networkId !== facts.head.networkId
       || facts.materializationEpoch !== snapshot.materializationEpoch
@@ -493,6 +888,195 @@ function assertTrustedReplacement(
   }
 }
 
+/**
+ * No `kind` clause here on purpose, and its absence is not an oversight to
+ * "restore parity" with the active twin. Only registry-minted facts reach this
+ * assert, and both binding snapshots refuse a non-agents kind at mint
+ * (system-record-verified-replacement-v1-internal.ts:343 and :361, each pinning
+ * kind to 'agents'), a precondition covered by
+ * system-record-verified-replacement-v1.test.ts:541. Re-checking it here would
+ * be a guard nothing can make fail.
+ */
+function assertTrustedTombstoneReplacement(
+  facts: SystemRecordVerifiedTombstoneReplacementFactsV1,
+  snapshot: SystemRecordAppliedSnapshotV1,
+): void {
+  assertAuthenticSystemRecordVerifiedReplacementFactsV1(facts);
+  assertAgentProfileHeadObjectV1(facts.head);
+  assertAgentProfileVerifiedAuthoritySummaryV1(facts.verifiedAuthoritySummary);
+  const summary = facts.verifiedAuthoritySummary;
+  const predecessor = summary.tombstonePredecessor;
+  if (facts.operation !== 'tombstone'
+      || facts.head.state !== 'tombstone'
+      || facts.networkId !== facts.head.networkId
+      || facts.materializationEpoch !== snapshot.materializationEpoch
+      || predecessor === undefined
+      || summary.candidateHeadDigest !== computeAgentProfileHeadObjectDigestV1(facts.head)
+      || summary.deletionTableDigest !== predecessor.ownedSubjectTableDigest
+      || facts.head.previousHeadDigest !== computeAgentProfileHeadObjectDigestV1(predecessor)
+      || facts.head.peerId !== predecessor.peerId
+      || facts.head.authoritySequence !== predecessor.authoritySequence
+      || facts.head.rootSubject !== predecessor.rootSubject
+      || computeOwnedSubjectTableDigestV1(
+        predecessor.rootSubject,
+        facts.deletionOwnedSubjectTable,
+      ) !== predecessor.ownedSubjectTableDigest
+      || BigInt(facts.deletionOwnedSubjectTable.length)
+        !== BigInt(predecessor.ownedSubjectCount)) {
+    throw new Error('verified tombstone replacement facts no longer bind their predecessor');
+  }
+}
+
+type TombstoneAdvance =
+  | Readonly<{ readonly outcome: 'advance' }>
+  | Exclude<SystemRecordActiveReplacementDerivationV1, SystemRecordActiveReplacementReadyV1>;
+
+function classifyTombstoneAdvance(
+  snapshot: SystemRecordAppliedSnapshotV1,
+  facts: SystemRecordVerifiedTombstoneReplacementFactsV1,
+  headDigest: Digest32V1,
+): TombstoneAdvance {
+  if (snapshot.state === 'absent') return Object.freeze({ outcome: 'advance' });
+  const current = snapshot.appliedState;
+  if (current.headDigest === headDigest) return Object.freeze({ outcome: 'advance' });
+  // A tombstone must never advance over a fork quarantine. The quarantined row
+  // persists the quarantined ACTIVE head's digest, version, peer, root and
+  // lineage, so a tombstone naming that head as its predecessor satisfies every
+  // conjunct below -- it would delete the row, resolving the equivocation by
+  // omission and taking the evidence with it, on nothing more than the peer
+  // declining to advertise the competing branch. Only a verified direct
+  // fork-resolving successor clears a quarantine, and that path is the active
+  // classifier's, not this one. Checked after the equal-head return, so that if
+  // a tombstone row ever carries conflict slots forward its replay stays
+  // idempotent. No reachable row does today: slots populate only on a terminal
+  // transition conflict, which can never clear (unquarantine defers while slots
+  // are non-empty) and, with this gate, can never be tombstoned either. The
+  // ordering is a cheap default, not a defended state -- do not read it as
+  // evidence that such a row exists.
+  if (current.status === 'quarantined'
+      || current.conflictEvidenceDigest !== undefined
+      || current.conflictDigestSlots.length > 0
+      || current.conflictOverflow) {
+    return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
+  }
+  const predecessor = facts.verifiedAuthoritySummary.tombstonePredecessor;
+  if (predecessor === undefined) {
+    return Object.freeze({ outcome: 'deferred', reason: 'verified-state-mismatch' });
+  }
+  if (current.headDigest === computeAgentProfileHeadObjectDigestV1(predecessor)
+      && snapshot.headVersion === predecessor.version
+      && current.peerId === predecessor.peerId
+      && current.currentRoot === predecessor.rootSubject
+      && sameTransitions(
+        current.transitionLineage,
+        facts.verifiedAuthoritySummary.transitionLineage,
+      )
+      && sameStrings(
+        current.historicalRoots,
+        facts.verifiedAuthoritySummary.historicalRoots,
+      )) {
+    return Object.freeze({ outcome: 'advance' });
+  }
+  if (BigInt(facts.head.authoritySequence) < BigInt(current.transitionLineage.length)
+      || (facts.head.authoritySequence === String(current.transitionLineage.length)
+        && BigInt(facts.head.version) < BigInt(snapshot.headVersion))) {
+    return Object.freeze({ outcome: 'stale' });
+  }
+  return Object.freeze({ outcome: 'deferred', reason: 'authority-history-mismatch' });
+}
+
+function persistedStateMatchesVerifiedTombstone(
+  snapshot: Extract<SystemRecordAppliedSnapshotV1, { readonly state: 'present' }>,
+  facts: SystemRecordVerifiedTombstoneReplacementFactsV1,
+  rootClaimSetDigest: Digest32V1,
+  pendingDeletionTable: OwnedSubjectTableObjectV1 | undefined,
+): boolean {
+  const state = snapshot.appliedState;
+  const expectedStatus = facts.mode === 'shadow' ? 'dirty' : 'tombstone';
+  const pendingBytes = pendingDeletionTable === undefined
+    ? undefined
+    : canonicalizeOwnedSubjectTableObjectV1(
+        facts.head.rootSubject,
+        pendingDeletionTable,
+      ).byteLength;
+  return snapshot.appliedTupleEpoch === snapshot.materializationEpoch
+    && state.status === expectedStatus
+    && state.headDigest === computeAgentProfileHeadObjectDigestV1(facts.head)
+    && snapshot.headVersion === facts.head.version
+    && state.projectionDigest === SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1
+    && state.projectionBytes === '0'
+    && state.projectionQuads === '0'
+    && state.ownedSubjectTableDigest === EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1
+    && state.ownedSubjectCount === '0'
+    && state.ownedSubjectTableBytes === '0'
+    && snapshot.ownedSubjectTable.length === 0
+    && state.rootClaimSetDigest === rootClaimSetDigest
+    && state.conflictSidecarIntentOperation === undefined
+    && state.conflictEvidenceDigest === undefined
+    && (pendingDeletionTable === undefined
+      ? state.pendingDeletionTableDigest === undefined
+        && snapshot.pendingDeletionTable === undefined
+      : state.pendingDeletionTableDigest === computeOwnedSubjectTableDigestV1(
+          facts.head.rootSubject,
+          pendingDeletionTable,
+        )
+        && state.pendingDeletionSubjectCount === String(pendingDeletionTable.length)
+        && state.pendingDeletionTableBytes === String(pendingBytes)
+        && snapshot.pendingDeletionTable !== undefined
+        && sameStrings(snapshot.pendingDeletionTable, pendingDeletionTable));
+}
+
+/**
+ * Decide whether a fork resolution adjudicates *this* quarantine.
+ *
+ * A head advertising some resolution is not enough. A peer that equivocated at
+ * one point can hold a perfectly valid resolution of a different fork of its
+ * own history, and presenting that would otherwise walk the quarantine off
+ * without the original equivocation ever being adjudicated. Each conjunct pins
+ * one coordinate of the fork event against state the candidate does not own.
+ *
+ * P-forkedVersion and P-forkBase name the fork event: the version it happened
+ * at and the base its branches descend from. P-resolutionDigest binds the
+ * summary to the head in hand. P-absentRefusal refuses a head that advertises a
+ * resolution the summary does not carry -- load-bearing because summary
+ * validation is identity only, so a summary minted on a traversal that never ran
+ * the directness check is indistinguishable here from one that did.
+ *
+ * There is deliberately NO authority-sequence conjunct, and adding one back
+ * would be a re-check rather than a restored guard. Core welds a resolution's
+ * authority sequence to its fork base's, so a resolution disagreeing with us on
+ * sequence must name a base sitting at that other sequence -- a different digest
+ * -- and P-forkBase refuses it on the same candidate. The weld is pinned in core
+ * by 'welds a fork resolution to a base at its own authority sequence'; if that
+ * test is ever removed, the sequence coordinate stops being covered here.
+ *
+ * One consequence is intended and is the reason the coordinate matters: a
+ * resolution issued only after the peer rotated authority is refused, because
+ * resolving at the next sequence moves past the equivocation instead of
+ * adjudicating it. The supported order is resolve, clear, then rotate. That case
+ * is held by 'refuses a resolution issued only after the peer rotated authority'.
+ */
+function resolutionAdjudicatesThisQuarantineV1(
+  current: SystemRecordAppliedStatePresentV1,
+  headVersion: string,
+  advertisedResolutionDigest: Digest32V1,
+  summary: AgentProfileVerifiedAuthoritySummaryV1,
+): boolean {
+  const resolution = summary.forkResolution;
+  // P-absentRefusal. Not removable: every conjunct below reads `resolution`, so
+  // deleting this line fails to compile rather than admitting anything -- the
+  // type carries the refusal. It never fires today, and the precondition that
+  // keeps it silent is pinned by 'carries verified fork-resolution facts on the
+  // fork-resolving successor': a summary minted through the closure for a head
+  // advertising a resolution always carries the facts. It exists for a summary
+  // minted on a traversal that never ran the directness check, which the
+  // identity-only validator cannot tell apart from one that did.
+  if (resolution === undefined) return false;
+  return resolution.forkedVersion === headVersion
+    && resolution.resolutionDigest === advertisedResolutionDigest
+    && resolution.forkBaseHeadDigest === current.conflictForkBaseHeadDigest;
+}
+
 type AuthorityAdvance =
   | Readonly<{
       readonly outcome: 'advance';
@@ -509,7 +1093,24 @@ function classifyAuthorityAdvance(
     return Object.freeze({ outcome: 'advance', materialization: 'rematerialize' });
   }
   const current = snapshot.appliedState;
-  if (current.status !== 'active') {
+  if (current.status === 'quarantined') {
+    if (facts.operation === 'active') {
+      if (current.conflictDigestSlots.length > 0 || current.conflictOverflow
+          || facts.head.forkResolutionDigest === undefined
+          || parseCanonicalDecimalU64(facts.head.version)
+            <= parseCanonicalDecimalU64(snapshot.headVersion)
+          || !resolutionAdjudicatesThisQuarantineV1(
+            current,
+            snapshot.headVersion,
+            facts.head.forkResolutionDigest,
+            facts.verifiedAuthoritySummary,
+          )) {
+        return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
+      }
+    } else if (facts.operation !== 'quarantine') {
+      return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
+    }
+  } else if (current.status !== 'active') {
     return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
   }
   const candidate = facts.head;
@@ -536,6 +1137,9 @@ function classifyAuthorityAdvance(
         ? Object.freeze({
             outcome: 'advance',
             materialization: requiresSystemRecordSnapshotRematerializationV1(snapshot)
+              || (facts.operation === 'quarantine'
+                && (current.status !== 'quarantined'
+                  || current.conflictEvidenceDigest !== facts.conflictEvidenceDigest))
               ? 'rematerialize'
               : 'reuse',
           })
@@ -632,6 +1236,7 @@ function deriveCapacity(
   next: SystemRecordAppliedStatePresentV1,
   nextTableBytes: number,
   revision: string,
+  nextPendingTableBytes = 0,
 ): CapacityDerivation {
   const current = snapshot.capacityState;
   const wasPresent = snapshot.state === 'present';
@@ -654,7 +1259,11 @@ function deriveCapacity(
       prior.stateBytes,
       BigInt(SYSTEM_RECORD_MAX_APPLIED_STATE_BYTES),
     ),
-    tableBytes: replaceContribution(current.tableBytes, prior.tableBytes, BigInt(nextTableBytes)),
+    tableBytes: replaceContribution(
+      current.tableBytes,
+      prior.tableBytes,
+      BigInt(nextTableBytes) + BigInt(nextPendingTableBytes),
+    ),
     projectionBytes: replaceContribution(
       current.projectionBytes,
       prior.projectionBytes,
@@ -805,6 +1414,29 @@ function sameTransitions(
 
 function sameStrings(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function canonicalDigests(values: readonly Digest32V1[]): readonly Digest32V1[] {
+  const unique = [...new Set(values)];
+  unique.sort(compareUtf8);
+  return Object.freeze(unique);
+}
+
+function withoutConflictSaga(
+  state: SystemRecordAppliedStatePresentV1,
+): Omit<SystemRecordAppliedStatePresentV1,
+  | 'conflictEvidenceDigest'
+  | 'conflictSidecarIntentOperation'
+  | 'conflictSidecarIntentEvidenceDigest'
+  | 'conflictSidecarIntentStateRevision'> {
+  const {
+    conflictEvidenceDigest: _evidence,
+    conflictSidecarIntentOperation: _operation,
+    conflictSidecarIntentEvidenceDigest: _intentEvidence,
+    conflictSidecarIntentStateRevision: _intentRevision,
+    ...rest
+  } = state;
+  return rest;
 }
 
 function compareUtf8(left: string, right: string): number {

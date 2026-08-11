@@ -873,6 +873,54 @@ describe('system-record V1 object codecs', () => {
     )).toEqual({ decision: 'quarantine', reason: 'transition-equivocation' });
   });
 
+  // Pins the weld between a resolution's authority sequence and its fork base's.
+  // A consumer matching a resolution against its own recorded quarantine leans on
+  // it: because the two are welded, a resolution disagreeing on sequence must name
+  // a base at that other sequence -- a different digest -- so comparing base
+  // digests carries the sequence property too, and a separate sequence conjunct
+  // downstream would be a re-check of this one.
+  //
+  // Both arms come from one construction with the base's sequence as the only free
+  // coordinate, so the refusal cannot be an incidental malformation of a hand-built
+  // head. Every sibling disjunct is falsified deliberately: the base stays active,
+  // its digest is the one the resolution names, network/peer/issuer are untouched,
+  // and its version stays below the forked version. The accepted-transition digest
+  // is asserted equal across the arms because that is the trap here -- a base at
+  // another sequence would ordinarily carry another lineage digest and be refused
+  // further down, which would leave this conjunct's removal undetected.
+  it('welds a fork resolution to a base at its own authority sequence', async () => {
+    const rotated = await rotatedForkResolutionCase();
+    const withBaseSequence = (authoritySequence: string) => {
+      const base = { ...rotated.base, authoritySequence };
+      const forkBaseHeadDigest = computeAgentProfileHeadObjectDigestV1(base);
+      const evidenceHeads = [rotated.left, rotated.right].map((head) => {
+        return { ...head, previousHeadDigest: forkBaseHeadDigest };
+      });
+      return {
+        base,
+        evidenceHeads,
+        resolution: {
+          ...rotated.resolution,
+          forkBaseHeadDigest,
+          evidenceHeadDigests: evidenceHeads.map(computeAgentProfileHeadObjectDigestV1).sort(),
+        },
+      };
+    };
+
+    const matched = withBaseSequence(rotated.resolution.authoritySequence);
+    expect(matched.base.authoritySequence).toBe('2');
+    expect(() => assertAgentProfileForkResolutionEvidenceV1(
+      matched.resolution, matched.evidenceHeads, matched.base,
+    )).not.toThrow();
+
+    const mismatched = withBaseSequence('1');
+    expect(mismatched.base.acceptedTransitionDigest)
+      .toBe(matched.base.acceptedTransitionDigest);
+    expect(() => assertAgentProfileForkResolutionEvidenceV1(
+      mismatched.resolution, mismatched.evidenceHeads, mismatched.base,
+    )).toThrow(/lower same-authority head/);
+  });
+
   it('enforces the exact five-minute future boundary and discards historical resolutions', async () => {
     const fixture = await authorityFixture();
     const now = Date.parse('2026-08-05T12:00:00Z');
@@ -1961,13 +2009,19 @@ describe('system-record owned subjects and verification closure', () => {
     await expect(buildClosure(current, artifacts)).rejects.toThrow(/reuses a historical wallet root/);
   });
 
-  // A consumer comparing the summary against a recorded quarantine matches the
-  // resolution's authority sequence against its own applied lineage length. That
-  // equality is an inference from how the closure walks the lineage, not a
-  // declared invariant, so pin it directly -- if it ever goes off by one, the
-  // consumer's fork-resolution gate silently never fires. Two sequences, because
-  // a sequence-zero case alone is satisfied by a constant as well as by the
-  // real derivation.
+  // Pins this closure's own construction invariant: the lineage it walks is
+  // exactly as long as the head's authority sequence. Worth pinning because the
+  // traversal that builds the lineage is being reshaped, and an off-by-one
+  // there would otherwise go unnoticed.
+  //
+  // It is NOT the pin for a consumer matching a resolution against a recorded
+  // quarantine. Read against the summary that equality is forced -- the
+  // directness check already requires a resolution and its successor to share an
+  // authority sequence -- so a consumer-side conjunct phrased against the summary
+  // could never fail. A consumer has to compare against its OWN persisted
+  // lineage, and owes its own removal test there. Two sequences, because a
+  // sequence-zero case alone is satisfied by a constant as well as by the real
+  // derivation.
   it('mints a resolution authority sequence equal to the lineage length', async () => {
     const genesis = await genesisForkResolutionCase();
     const genesisSummary = (await buildClosure(genesis.successor, genesis.artifacts)).authoritySummary;

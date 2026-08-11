@@ -58,6 +58,8 @@ export const SYSTEM_RECORD_V1_PREDICATES = Object.freeze({
   headVersion: `${NS}head-version`,
   ownedSubjectTable: `${NS}owned-subject-table`,
   ownedSubjectTableDigest: `${NS}owned-subject-table-digest`,
+  pendingDeletionTable: `${NS}pending-deletion-table`,
+  pendingDeletionTableDigest: `${NS}pending-deletion-table-digest`,
   rootClaimSet: `${NS}root-claim-set`,
   rootClaimSetDigest: `${NS}root-claim-set-digest`,
   capacityState: `${NS}capacity-state`,
@@ -132,6 +134,7 @@ export function buildSystemRecordReservedStateQuadsV1(input: {
   readonly appliedState: SystemRecordAppliedStatePresentV1;
   readonly headVersion: string;
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly pendingDeletionTable?: OwnedSubjectTableObjectV1;
   readonly rootClaimSet: SystemRecordRootClaimSetV1;
   readonly capacityState: SystemRecordCapacityStateV1;
   readonly receipt: SystemRecordMaterializationReceiptV1;
@@ -154,6 +157,18 @@ export function buildSystemRecordReservedStateQuadsV1(input: {
     appliedState.currentRoot,
     tableBytes,
   );
+  const pendingDeletionTableBytes = outer.pendingDeletionTable === undefined
+    ? undefined
+    : canonicalizeOwnedSubjectTableObjectV1(
+        appliedState.currentRoot,
+        outer.pendingDeletionTable,
+      );
+  const pendingDeletionTable = pendingDeletionTableBytes === undefined
+    ? undefined
+    : parseCanonicalOwnedSubjectTableObjectV1(
+        appliedState.currentRoot,
+        pendingDeletionTableBytes,
+      );
   const claimsBytes = canonicalizeSystemRecordRootClaimSetV1(outer.rootClaimSet);
   const rootClaimSet = parseCanonicalSystemRecordRootClaimSetV1(claimsBytes);
   const capacityBytes = canonicalizeSystemRecordCapacityStateV1(outer.capacityState);
@@ -168,6 +183,18 @@ export function buildSystemRecordReservedStateQuadsV1(input: {
   if (computeOwnedSubjectTableDigestV1(appliedState.currentRoot, ownedSubjectTable)
       !== appliedState.ownedSubjectTableDigest) {
     throw new Error('owned-subject table does not bind the applied state');
+  }
+  const expectedPendingDigest = appliedState.pendingDeletionTableDigest;
+  if ((expectedPendingDigest === undefined) !== (pendingDeletionTable === undefined)) {
+    throw new Error('pending deletion table presence does not bind the applied state');
+  }
+  if (pendingDeletionTable !== undefined && pendingDeletionTableBytes !== undefined
+      && (computeOwnedSubjectTableDigestV1(appliedState.currentRoot, pendingDeletionTable)
+          !== expectedPendingDigest
+        || String(pendingDeletionTable.length) !== appliedState.pendingDeletionSubjectCount
+        || String(pendingDeletionTableBytes.byteLength)
+          !== appliedState.pendingDeletionTableBytes)) {
+    throw new Error('pending deletion table does not bind the applied state');
   }
   if (computeSystemRecordRootClaimSetDigestV1(rootClaimSet)
       !== appliedState.rootClaimSetDigest) {
@@ -213,6 +240,25 @@ export function buildSystemRecordReservedStateQuadsV1(input: {
         stringLiteral(appliedState.ownedSubjectTableDigest),
         graph,
       ),
+      ...(pendingDeletionTableBytes === undefined || pendingDeletionTable === undefined
+        ? []
+        : [
+          quad(
+            record,
+            SYSTEM_RECORD_V1_PREDICATES.pendingDeletionTable,
+            jsonLiteral(pendingDeletionTableBytes),
+            graph,
+          ),
+          quad(
+            record,
+            SYSTEM_RECORD_V1_PREDICATES.pendingDeletionTableDigest,
+            stringLiteral(computeOwnedSubjectTableDigestV1(
+              appliedState.currentRoot,
+              pendingDeletionTable,
+            )),
+            graph,
+          ),
+        ]),
       quad(record, SYSTEM_RECORD_V1_PREDICATES.rootClaimSet, jsonLiteral(claimsBytes), graph),
       quad(
         record,
@@ -263,6 +309,7 @@ function snapshotBuildInput(input: unknown): {
   readonly appliedState: SystemRecordAppliedStatePresentV1;
   readonly headVersion: string;
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly pendingDeletionTable?: OwnedSubjectTableObjectV1;
   readonly rootClaimSet: SystemRecordRootClaimSetV1;
   readonly capacityState: SystemRecordCapacityStateV1;
   readonly receipt: SystemRecordMaterializationReceiptV1;
@@ -272,15 +319,20 @@ function snapshotBuildInput(input: unknown): {
       || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) {
     throw new Error('reserved-state build input must be a plain data object');
   }
-  const expected = [
+  const hasPendingDeletionTable = Object.prototype.hasOwnProperty.call(
+    input,
+    'pendingDeletionTable',
+  );
+  const expected: readonly string[] = [
     'appliedState', 'headVersion', 'ownedSubjectTable', 'rootClaimSet', 'capacityState', 'receipt',
-  ] as const;
+    ...(hasPendingDeletionTable ? ['pendingDeletionTable'] as const : []),
+  ];
   const keys = Reflect.ownKeys(input);
   if (keys.length !== expected.length
-      || keys.some((key) => typeof key !== 'string' || !expected.includes(key as typeof expected[number]))) {
+      || keys.some((key) => typeof key !== 'string' || !expected.includes(key))) {
     throw new Error('reserved-state build input has unknown or missing fields');
   }
-  const read = (key: typeof expected[number]): unknown => {
+  const read = (key: string): unknown => {
     const descriptor = Object.getOwnPropertyDescriptor(input, key);
     if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
       throw new Error('reserved-state build input fields must be enumerable data properties');
@@ -291,6 +343,9 @@ function snapshotBuildInput(input: unknown): {
     appliedState: read('appliedState') as SystemRecordAppliedStatePresentV1,
     headVersion: read('headVersion') as string,
     ownedSubjectTable: read('ownedSubjectTable') as OwnedSubjectTableObjectV1,
+    ...(hasPendingDeletionTable ? {
+      pendingDeletionTable: read('pendingDeletionTable') as OwnedSubjectTableObjectV1,
+    } : {}),
     rootClaimSet: read('rootClaimSet') as SystemRecordRootClaimSetV1,
     capacityState: read('capacityState') as SystemRecordCapacityStateV1,
     receipt: read('receipt') as SystemRecordMaterializationReceiptV1,

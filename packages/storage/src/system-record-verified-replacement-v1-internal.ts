@@ -15,20 +15,29 @@ import {
   assertAgentProfileProjectionIdentityV1,
   assertAgentProfileProjectionSchemaV1,
   assertAgentProfileVerifiedAuthoritySummaryV1,
+  canonicalizeAgentProfileConflictEvidenceV1,
   assertNetworkIdV1,
   canonicalizeAgentProfileHeadObjectV1,
   canonicalizeOwnedSubjectTableObjectV1,
   classifyAgentProfileOwnedSubjectV1,
   copyBoundedSystemRecordBytesV1,
+  computeAgentProfileConflictEvidenceDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   computeOwnedSubjectTableDigestV1,
   isAllowedAgentProfilePredicateV1,
+  parseCanonicalAgentProfileConflictEvidenceV1,
   parseCanonicalAgentProfileHeadObjectV1,
   parseCanonicalOwnedSubjectTableObjectV1,
+  SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
   SYSTEM_RECORD_MAX_ATOMIC_TRANSIENT_BYTES,
   SYSTEM_RECORD_MAX_PROJECTION_BYTES,
+  SYSTEM_RECORD_OBJECT_CAPS_V1,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileConflictEvidenceV1,
+  type AgentProfileHeadObjectV1,
+  type AgentProfileTombstoneHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
+  type Digest32V1,
   type NetworkIdV1,
   type OwnedSubjectTableObjectV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -87,8 +96,28 @@ export interface SystemRecordActiveReplacementIssueV1
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
 }
 
+export interface SystemRecordTombstoneReplacementIssueV1
+  extends SystemRecordVerifiedReplacementBindingsV1 {
+  readonly head: AgentProfileTombstoneHeadObjectV1;
+  readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
+  /** Exact deletion-only table authenticated by the predecessor closure. */
+  readonly deletionOwnedSubjectTable: OwnedSubjectTableObjectV1;
+}
+
+export interface SystemRecordQuarantineReplacementIssueV1
+  extends SystemRecordActiveReplacementIssueV1 {
+  readonly conflictEvidenceDigest: Digest32V1;
+  readonly canonicalConflictEvidenceBytes: Uint8Array;
+  readonly terminalTransitionConflict: boolean;
+}
+
+export type SystemRecordVerifiedCandidateIssueV1 =
+  | Readonly<{ readonly operation: 'active' } & SystemRecordActiveReplacementIssueV1>
+  | Readonly<{ readonly operation: 'tombstone' } & SystemRecordTombstoneReplacementIssueV1>
+  | Readonly<{ readonly operation: 'quarantine' } & SystemRecordQuarantineReplacementIssueV1>;
+
 /** Deep-owned immutable facts returned once to the storage-side consumer. */
-export interface SystemRecordVerifiedReplacementFactsV1 {
+interface SystemRecordVerifiedReplacementCommonFactsV1 {
   readonly networkId: NetworkIdV1;
   readonly kind: 'agents';
   readonly mode: SystemRecordMaterializationModeV1;
@@ -98,6 +127,11 @@ export interface SystemRecordVerifiedReplacementFactsV1 {
   readonly admittedDeadlineMs: number;
   /** Opaque accountant capability; it carries no mutable or inspectable data. */
   readonly reservationIdentity: object;
+}
+
+export interface SystemRecordVerifiedActiveReplacementFactsV1
+  extends SystemRecordVerifiedReplacementCommonFactsV1 {
+  readonly operation: 'active';
   readonly head: AgentProfileActiveHeadObjectV1;
   readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
   readonly projectionDigest: ReturnType<typeof computeKaBundleProjectionDigestV1>;
@@ -106,8 +140,38 @@ export interface SystemRecordVerifiedReplacementFactsV1 {
   readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
 }
 
+export interface SystemRecordVerifiedTombstoneReplacementFactsV1
+  extends SystemRecordVerifiedReplacementCommonFactsV1 {
+  readonly operation: 'tombstone';
+  readonly head: AgentProfileTombstoneHeadObjectV1;
+  readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
+  readonly projectionDigest: typeof SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1;
+  readonly projectionQuads: readonly Readonly<Quad>[];
+  readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly deletionOwnedSubjectTable: OwnedSubjectTableObjectV1;
+}
+
+export interface SystemRecordVerifiedQuarantineReplacementFactsV1
+  extends SystemRecordVerifiedReplacementCommonFactsV1 {
+  readonly operation: 'quarantine';
+  readonly head: AgentProfileActiveHeadObjectV1;
+  readonly verifiedAuthoritySummary: AgentProfileVerifiedAuthoritySummaryV1;
+  readonly projectionDigest: ReturnType<typeof computeKaBundleProjectionDigestV1>;
+  readonly projectionQuads: readonly Readonly<Quad>[];
+  readonly ownedSubjectTable: OwnedSubjectTableObjectV1;
+  readonly conflictEvidence: AgentProfileConflictEvidenceV1;
+  readonly conflictEvidenceDigest: Digest32V1;
+  readonly terminalTransitionConflict: boolean;
+}
+
+export type SystemRecordVerifiedReplacementFactsV1 =
+  | SystemRecordVerifiedActiveReplacementFactsV1
+  | SystemRecordVerifiedTombstoneReplacementFactsV1
+  | SystemRecordVerifiedQuarantineReplacementFactsV1;
+
 export interface SystemRecordVerifiedReplacementIssuerV1 {
   issueActive(input: SystemRecordActiveReplacementIssueV1): SystemRecordVerifiedReplacementHandleV1;
+  issueCandidate(input: SystemRecordVerifiedCandidateIssueV1): SystemRecordVerifiedReplacementHandleV1;
 }
 
 export interface SystemRecordVerifiedReplacementConsumerV1 {
@@ -152,7 +216,7 @@ export interface SystemRecordVerifiedReplacementRegistryV1 {
 interface RegisteredReplacementV1 {
   readonly registryIdentity: object;
   readonly bindings: SystemRecordVerifiedReplacementBindingsV1;
-  readonly facts: SystemRecordVerifiedReplacementFactsV1;
+  facts: SystemRecordVerifiedReplacementFactsV1;
   readonly reservation: RuntimeReservationV1;
   used: boolean;
 }
@@ -210,6 +274,29 @@ const ISSUE_KEYS = [
   'canonicalProjectionBytes',
   'projectionQuads',
   'ownedSubjectTable',
+] as const;
+
+const TAGGED_ACTIVE_ISSUE_KEYS = ['operation', ...ISSUE_KEYS] as const;
+const TOMBSTONE_ISSUE_KEYS = [
+  'operation',
+  'networkId',
+  'kind',
+  'mode',
+  'sessionIdentity',
+  'activationGeneration',
+  'childGeneration',
+  'materializationEpoch',
+  'admittedDeadlineMs',
+  'head',
+  'verifiedAuthoritySummary',
+  'deletionOwnedSubjectTable',
+] as const;
+const QUARANTINE_ISSUE_KEYS = [
+  'operation',
+  ...ISSUE_KEYS,
+  'conflictEvidenceDigest',
+  'canonicalConflictEvidenceBytes',
+  'terminalTransitionConflict',
 ] as const;
 
 const BINDING_KEYS = [
@@ -420,6 +507,43 @@ function bindingsEqual(
     && actual.materializationEpoch === expected.materializationEpoch;
 }
 
+function candidateIssueKeys(value: unknown): readonly string[] {
+  if (value === null || typeof value !== 'object' || utilTypes.isProxy(value)) {
+    throw new Error('verified replacement candidate must be a non-Proxy data object');
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, 'operation');
+  if (!descriptor?.enumerable || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) {
+    throw new Error('verified replacement candidate operation must be an enumerable data property');
+  }
+  if (descriptor.value === 'active') return TAGGED_ACTIVE_ISSUE_KEYS;
+  if (descriptor.value === 'tombstone') return TOMBSTONE_ISSUE_KEYS;
+  if (descriptor.value === 'quarantine') return QUARANTINE_ISSUE_KEYS;
+  throw new Error('verified replacement candidate operation is invalid');
+}
+
+function stripOperation(
+  value: Readonly<Record<string, unknown>>,
+  keys: readonly string[],
+): Record<string, unknown> {
+  return Object.fromEntries(keys.map((key) => [key, value[key]]));
+}
+
+function tombstoneBindsPredecessor(
+  tombstone: AgentProfileTombstoneHeadObjectV1,
+  predecessor: AgentProfileActiveHeadObjectV1,
+): boolean {
+  return tombstone.previousHeadDigest === computeAgentProfileHeadObjectDigestV1(predecessor)
+    && tombstone.networkId === predecessor.networkId
+    && tombstone.peerId === predecessor.peerId
+    && tombstone.peerPublicKey === predecessor.peerPublicKey
+    && tombstone.authoritySequence === predecessor.authoritySequence
+    && tombstone.acceptedTransitionDigest === predecessor.acceptedTransitionDigest
+    && tombstone.evmIssuer === predecessor.evmIssuer
+    && tombstone.rootSubject === predecessor.rootSubject
+    && tombstone.projectionSchemaDigest === predecessor.projectionSchemaDigest
+    && BigInt(tombstone.version) > BigInt(predecessor.version);
+}
+
 /**
  * Create one non-interchangeable issuer/consumer pair. Only the consumer half belongs
  * in the storage executor; only the issuer half belongs in the verifier closure.
@@ -581,6 +705,7 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
       reservation.charges.decoded = decodedBytes;
 
       const facts: SystemRecordVerifiedReplacementFactsV1 = Object.freeze({
+        operation: 'active',
         networkId: bindings.networkId,
         kind: bindings.kind,
         mode: bindings.mode,
@@ -608,6 +733,173 @@ export function createSystemRecordVerifiedReplacementRegistryForRuntimeV1(
         used: false,
       });
       return handle;
+      } catch (error) {
+        if (reservation.phase !== 'released') releaseReservation(reservation);
+        throw error;
+      }
+    },
+    issueCandidate(value: SystemRecordVerifiedCandidateIssueV1): SystemRecordVerifiedReplacementHandleV1 {
+      const tagged = exactRecord(
+        value,
+        candidateIssueKeys(value),
+        'verified replacement candidate',
+      );
+      if (tagged.operation === 'active') {
+        return issuer.issueActive(
+          stripOperation(tagged, ISSUE_KEYS) as unknown as SystemRecordActiveReplacementIssueV1,
+        );
+      }
+      if (tagged.operation === 'quarantine') {
+        const activeInput = stripOperation(
+          tagged,
+          ISSUE_KEYS,
+        ) as unknown as SystemRecordActiveReplacementIssueV1;
+        const handle = issuer.issueActive(activeInput);
+        const registered = registeredHandle(handle);
+        try {
+          const canonicalEvidenceBytes = copyBoundedSystemRecordBytesV1(
+            tagged.canonicalConflictEvidenceBytes,
+            SYSTEM_RECORD_OBJECT_CAPS_V1['conflict-evidence'],
+            'canonical conflict evidence',
+          );
+          const evidence = parseCanonicalAgentProfileConflictEvidenceV1(canonicalEvidenceBytes);
+          const canonicalEvidence = canonicalizeAgentProfileConflictEvidenceV1(evidence);
+          if (!Buffer.from(canonicalEvidence).equals(Buffer.from(canonicalEvidenceBytes))) {
+            throw new Error('conflict evidence bytes are not the canonical evidence object');
+          }
+          const evidenceDigest = computeAgentProfileConflictEvidenceDigestV1(evidence);
+          if (evidenceDigest !== tagged.conflictEvidenceDigest
+              || evidence.networkId !== registered.facts.networkId
+              || evidence.peerId !== registered.facts.head.peerId) {
+            throw new Error('conflict evidence does not bind the verified active candidate');
+          }
+          const terminalTransitionConflict = evidence.entries.some((entry) =>
+            entry.type === 'transition');
+          if (tagged.terminalTransitionConflict !== terminalTransitionConflict) {
+            throw new Error('conflict evidence terminal classification is inconsistent');
+          }
+          const headDigest = computeAgentProfileHeadObjectDigestV1(registered.facts.head);
+          for (const entry of evidence.entries) {
+            if (entry.type === 'fork'
+                && (entry.authoritySequence !== registered.facts.head.authoritySequence
+                  || entry.version !== registered.facts.head.version
+                  || !entry.objectDigests.includes(headDigest))) {
+              throw new Error('fork evidence does not bind the verified active candidate frontier');
+            }
+          }
+          if (registered.facts.operation !== 'active') {
+            throw new Error('quarantine candidate did not produce active verified facts');
+          }
+          const decodedBytes = registered.reservation.charges.decoded
+            + retainedVerifiedConflictEvidenceBytes(evidence);
+          if (decodedBytes > registered.reservation.bytes) {
+            throw new Error('verified replacement decoded state exceeds its transient lease');
+          }
+          registered.reservation.charges.decoded = decodedBytes;
+          const facts: SystemRecordVerifiedQuarantineReplacementFactsV1 = Object.freeze({
+            ...registered.facts,
+            operation: 'quarantine',
+            conflictEvidence: evidence,
+            conflictEvidenceDigest: evidenceDigest,
+            terminalTransitionConflict,
+          });
+          AUTHENTIC_VERIFIED_REPLACEMENT_FACTS.add(facts);
+          FACT_RESERVATIONS.set(facts, registered.reservation);
+          // The active facts this promotion supersedes must stop being authentic
+          // at the same moment, or one reservation backs two facts objects that
+          // both pass the authenticity check.
+          const superseded = registered.facts;
+          registered.facts = facts;
+          AUTHENTIC_VERIFIED_REPLACEMENT_FACTS.delete(superseded);
+          FACT_RESERVATIONS.delete(superseded);
+          return handle;
+        } catch (error) {
+          if (registered.reservation.phase !== 'released') releaseReservation(registered.reservation);
+          throw error;
+        }
+      }
+
+      const bindings = snapshotBindings(stripOperation(tagged, BINDING_KEYS));
+      const reservation = reserveAtomic(bindings.admittedDeadlineMs, 0);
+      try {
+        if (tagged.head !== null && typeof tagged.head === 'object' && utilTypes.isProxy(tagged.head)) {
+          throw new Error('verified replacement head must not be a Proxy');
+        }
+        assertAgentProfileHeadObjectV1(tagged.head);
+        const parsedHead = parseCanonicalAgentProfileHeadObjectV1(
+          canonicalizeAgentProfileHeadObjectV1(tagged.head as AgentProfileHeadObjectV1),
+        );
+        if (parsedHead.state !== 'tombstone') {
+          throw new Error('verified tombstone replacement head must be tombstone');
+        }
+        if (parsedHead.networkId !== bindings.networkId) {
+          throw new Error('verified tombstone replacement head does not bind networkId');
+        }
+        assertAgentProfileVerifiedAuthoritySummaryV1(tagged.verifiedAuthoritySummary);
+        const authority = tagged.verifiedAuthoritySummary;
+        const predecessor = authority.tombstonePredecessor;
+        if (authority.candidateHeadDigest !== computeAgentProfileHeadObjectDigestV1(parsedHead)
+            || predecessor === undefined
+            || authority.deletionTableDigest !== predecessor.ownedSubjectTableDigest
+            || !tombstoneBindsPredecessor(parsedHead, predecessor)) {
+          throw new Error('verified tombstone authority summary lacks its exact predecessor');
+        }
+        if (utilTypes.isProxy(tagged.deletionOwnedSubjectTable)) {
+          throw new Error('tombstone deletion table must not be a Proxy');
+        }
+        const deletionTable = parseCanonicalOwnedSubjectTableObjectV1(
+          predecessor.rootSubject,
+          canonicalizeOwnedSubjectTableObjectV1(
+            predecessor.rootSubject,
+            tagged.deletionOwnedSubjectTable as OwnedSubjectTableObjectV1,
+          ),
+        );
+        if (computeOwnedSubjectTableDigestV1(predecessor.rootSubject, deletionTable)
+              !== predecessor.ownedSubjectTableDigest
+            || BigInt(deletionTable.length) !== BigInt(predecessor.ownedSubjectCount)) {
+          throw new Error('tombstone deletion table does not bind the verified predecessor');
+        }
+        const emptyTable = Object.freeze([]) as unknown as OwnedSubjectTableObjectV1;
+        const emptyProjection = Object.freeze([]) as readonly Readonly<Quad>[];
+        const decodedBytes = retainedVerifiedTerminalFactsBytes(
+          parsedHead,
+          authority,
+          deletionTable,
+        );
+        if (decodedBytes > reservation.bytes) {
+          throw new Error('verified replacement decoded state exceeds its transient lease');
+        }
+        reservation.charges.decoded = decodedBytes;
+        const facts: SystemRecordVerifiedTombstoneReplacementFactsV1 = Object.freeze({
+          operation: 'tombstone',
+          networkId: bindings.networkId,
+          kind: bindings.kind,
+          mode: bindings.mode,
+          activationGeneration: bindings.activationGeneration,
+          childGeneration: bindings.childGeneration,
+          materializationEpoch: bindings.materializationEpoch,
+          admittedDeadlineMs: bindings.admittedDeadlineMs,
+          reservationIdentity: reservation.identity,
+          head: parsedHead,
+          verifiedAuthoritySummary: authority,
+          projectionDigest: SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
+          projectionQuads: emptyProjection,
+          ownedSubjectTable: emptyTable,
+          deletionOwnedSubjectTable: deletionTable,
+        });
+        AUTHENTIC_VERIFIED_REPLACEMENT_FACTS.add(facts);
+        FACT_RESERVATIONS.set(facts, reservation);
+        const handle = Object.freeze(
+          Object.create(null) as object,
+        ) as SystemRecordVerifiedReplacementHandleV1;
+        REGISTERED_REPLACEMENTS.set(handle, {
+          registryIdentity,
+          bindings,
+          facts,
+          reservation,
+          used: false,
+        });
+        return handle;
       } catch (error) {
         if (reservation.phase !== 'released') releaseReservation(reservation);
         throw error;
@@ -761,4 +1053,22 @@ function retainedVerifiedFactsBytes(
     if (!Number.isSafeInteger(bytes)) return Number.MAX_SAFE_INTEGER;
   }
   return bytes;
+}
+
+function retainedVerifiedTerminalFactsBytes(
+  head: AgentProfileTombstoneHeadObjectV1,
+  authority: AgentProfileVerifiedAuthoritySummaryV1,
+  deletionTable: OwnedSubjectTableObjectV1,
+): number {
+  return 2 * (
+    Buffer.byteLength(JSON.stringify(head), 'utf8')
+    + Buffer.byteLength(JSON.stringify(authority), 'utf8')
+    + Buffer.byteLength(JSON.stringify(deletionTable), 'utf8')
+  );
+}
+
+function retainedVerifiedConflictEvidenceBytes(
+  evidence: AgentProfileConflictEvidenceV1,
+): number {
+  return 2 * Buffer.byteLength(JSON.stringify(evidence), 'utf8');
 }
