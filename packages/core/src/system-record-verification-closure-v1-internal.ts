@@ -1,5 +1,9 @@
 import { snapshotExactDataRecord } from './sync-wire-objects.js';
-import { parseCanonicalDecimalU64, type Digest32V1 } from './sync-wire-scalars.js';
+import {
+  parseCanonicalDecimalU64,
+  type DecimalU64V1,
+  type Digest32V1,
+} from './sync-wire-scalars.js';
 import {
   copyBoundedSystemRecordBytesV1,
   failSystemRecordObjectV1 as fail,
@@ -50,6 +54,29 @@ const MINT_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARY_V1 = Symbol(
 );
 const MINTED_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARIES_V1 = new WeakSet<object>();
 
+/**
+ * Identity of the fork this candidate resolves, as verified by the closure.
+ *
+ * Present only when the closure actually ran the direct-successor check for the
+ * current head. Consumers hold local state the closure cannot see -- a recorded
+ * quarantine -- and need these to decide whether the resolution adjudicates
+ * *their* fork rather than some other fork of the same peer. `forkedVersion`
+ * plus `authoritySequence` name the fork event; `forkBaseHeadDigest` names the
+ * common base, which is what distinguishes two fork events that share a
+ * sequence and version but descend from different predecessors.
+ *
+ * Deliberately carries no evidence-head list: the plan makes that list a
+ * verified subset rather than a completeness claim, so a consumer must not
+ * reject a resolution for omitting a conflict it happens to know about.
+ */
+export interface AgentProfileVerifiedForkResolutionFactsV1 {
+  readonly resolutionDigest: Digest32V1;
+  readonly authoritySequence: DecimalU64V1;
+  readonly forkedVersion: DecimalU64V1;
+  readonly resolutionVersion: DecimalU64V1;
+  readonly forkBaseHeadDigest?: Digest32V1;
+}
+
 class AgentProfileVerifiedAuthoritySummaryValueV1 {
   declare private readonly __opaqueAgentProfileVerifiedAuthoritySummaryV1: void;
 
@@ -61,6 +88,7 @@ class AgentProfileVerifiedAuthoritySummaryValueV1 {
     public readonly lastAuthorityTransitionPriorHeadDigest?: Digest32V1,
     public readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1,
     public readonly deletionTableDigest?: Digest32V1,
+    public readonly forkResolution?: AgentProfileVerifiedForkResolutionFactsV1,
   ) {
     if (token !== MINT_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARY_V1) {
       fail('system-record-closure', 'verified authority summary is factory-only');
@@ -104,6 +132,7 @@ function mintAgentProfileVerifiedAuthoritySummaryV1(
     lastAuthorityTransitionPriorHeadDigest?: Digest32V1;
     tombstonePredecessor?: AgentProfileActiveHeadObjectV1;
     deletionTableDigest?: Digest32V1;
+    forkResolution?: AgentProfileVerifiedForkResolutionFactsV1;
   }>,
 ): AgentProfileVerifiedAuthoritySummaryV1 {
   return new AgentProfileVerifiedAuthoritySummaryValueV1(
@@ -114,6 +143,7 @@ function mintAgentProfileVerifiedAuthoritySummaryV1(
     input.lastAuthorityTransitionPriorHeadDigest,
     input.tombstonePredecessor,
     input.deletionTableDigest,
+    input.forkResolution,
   );
 }
 
@@ -423,10 +453,47 @@ async function collectVerificationClosureV1(
   });
 }
 
+/**
+ * The closure after authority validation, carrying what validation actually
+ * verified so projection cannot rediscover it.
+ *
+ * Absent means the current head advertises no resolution. "Validation did not
+ * run" is not a third case to guard against -- it is unrepresentable, because
+ * the only way to obtain this value is to return from the validator.
+ *
+ * The brand is what makes "only the validator produces this" a fact about the
+ * type rather than a convention about this file. Without it a new function here
+ * could write `{ collected }` and typecheck, and the guarantee the summary rests
+ * on would hold only for as long as nobody did. A deliberate cast still defeats
+ * it -- that is the intended strength: this value never leaves the module, so
+ * the risk is an honest mistake during a refactor, not a forgery, and a cast is
+ * visible in review where a plain literal is not.
+ *
+ * It carries the verified FACTS rather than the resolution they came from, so
+ * the summary is built without naming the control object. That matters beyond
+ * tidiness: the raw resolution carries `evidenceHeadDigests`, a verified subset
+ * no consumer may treat as a completeness claim, and the mint site now has no
+ * expression for it.
+ *
+ * Not an inaccessibility claim -- `collected` is right here, and its
+ * `parsedResolutions` with it. The property is narrower and worth stating
+ * exactly, because a reader who finds that field after being told otherwise
+ * will reasonably conclude the comment lied and reopen a settled question: the
+ * summary reads only `currentForkResolutionFacts`, and the helper that builds
+ * those facts takes only a resolution, so neither can express the mistake.
+ */
+declare const VALIDATED_CLOSURE_V1_BRAND: unique symbol;
+
+interface ValidatedClosureV1 {
+  readonly [VALIDATED_CLOSURE_V1_BRAND]: true;
+  readonly collected: CollectedClosureV1;
+  readonly currentForkResolutionFacts?: AgentProfileVerifiedForkResolutionFactsV1;
+}
+
 function validateCollectedClosureAuthorityV1(
   state: CollectedClosureV1,
   nowMs: number,
-): void {
+): ValidatedClosureV1 {
   for (const resolution of state.parsedResolutions) {
     const evidence = resolution.evidenceHeadDigests.map((headDigest) =>
       state.parsedHeads.get(headDigest),
@@ -483,6 +550,7 @@ function validateCollectedClosureAuthorityV1(
     transitionTupleDigests.set(tuple, transitionDigest);
   }
 
+  let currentForkResolutionFacts: AgentProfileVerifiedForkResolutionFactsV1 | undefined;
   for (const [headDigest, head] of state.parsedHeads) {
     assertCompleteUniqueRootLineageV1(state, headDigest, head);
     if (head.acceptedTransitionDigest !== undefined) {
@@ -511,6 +579,7 @@ function validateCollectedClosureAuthorityV1(
           `head ${headDigest} does not directly bind its fork resolution`,
         );
       }
+      currentForkResolutionFacts = verifiedForkResolutionFactsV1(resolution);
     }
   }
 
@@ -528,6 +597,12 @@ function validateCollectedClosureAuthorityV1(
       }
     }
   }
+
+  // The one sanctioned construction site, cast where the proof happens.
+  return Object.freeze({
+    collected: state,
+    ...(currentForkResolutionFacts === undefined ? {} : { currentForkResolutionFacts }),
+  }) as ValidatedClosureV1;
 }
 
 function assertCompleteUniqueRootLineageV1(
@@ -570,9 +645,10 @@ function assertCompleteUniqueRootLineageV1(
 }
 
 function projectVerificationClosureV1(
-  state: CollectedClosureV1,
+  validated: ValidatedClosureV1,
 ): SystemRecordVerificationClosureV1 {
-  const authoritySummary = createVerifiedAuthoritySummaryV1(state);
+  const state = validated.collected;
+  const authoritySummary = createVerifiedAuthoritySummaryV1(validated);
   const objects = Object.freeze([...state.artifacts].sort(compareClosureObjects));
   return Object.freeze({
     objects,
@@ -584,8 +660,9 @@ function projectVerificationClosureV1(
 }
 
 function createVerifiedAuthoritySummaryV1(
-  state: CollectedClosureV1,
+  validated: ValidatedClosureV1,
 ): AgentProfileVerifiedAuthoritySummaryV1 {
+  const state = validated.collected;
   const current = state.parsedHeads.get(state.currentHeadDigest);
   if (current === undefined) {
     fail('system-record-closure', 'verified closure lost its current head');
@@ -635,6 +712,28 @@ function createVerifiedAuthoritySummaryV1(
     tombstonePredecessor:
       tombstonePredecessor?.state === 'active' ? tombstonePredecessor : undefined,
     deletionTableDigest: tombstonePredecessor?.ownedSubjectTableDigest,
+    forkResolution: validated.currentForkResolutionFacts,
+  });
+}
+
+/**
+ * Mint the facts at the point of proof.
+ *
+ * Called only where `isDirectResolvingSuccessorV1` has just succeeded, so the
+ * verified subset is fixed where it is verified rather than re-derived later
+ * from an object that also carries unverified-by-this-check fields.
+ */
+function verifiedForkResolutionFactsV1(
+  resolution: AgentProfileForkResolutionV1,
+): AgentProfileVerifiedForkResolutionFactsV1 {
+  return Object.freeze({
+    resolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
+    authoritySequence: resolution.authoritySequence,
+    forkedVersion: resolution.forkedVersion,
+    resolutionVersion: resolution.resolutionVersion,
+    ...(resolution.forkBaseHeadDigest === undefined
+      ? {}
+      : { forkBaseHeadDigest: resolution.forkBaseHeadDigest }),
   });
 }
 
@@ -687,8 +786,9 @@ async function buildAgentProfileVerificationClosureForPurposeV1(
     currentHeadDigest,
     collection,
   );
-  validateCollectedClosureAuthorityV1(collected, nowMs);
-  return projectVerificationClosureV1(collected);
+  return projectVerificationClosureV1(
+    validateCollectedClosureAuthorityV1(collected, nowMs),
+  );
 }
 
 function createMaterializationClosureExecutionV1(

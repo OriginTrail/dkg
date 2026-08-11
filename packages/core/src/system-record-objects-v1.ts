@@ -121,6 +121,7 @@ export type { AgentProfileAppliedTransitionV1 } from './system-record-authority-
 export {
   assertAgentProfileVerifiedAuthoritySummaryV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
+  type AgentProfileVerifiedForkResolutionFactsV1,
 } from './system-record-verification-closure-v1-internal.js';
 
 export {

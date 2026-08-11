@@ -67,4 +67,12 @@ describe('frozen system-record V1 limits', () => {
     expect(limits.SYSTEM_RECORD_MAX_CACHE_LIVE_METADATA_BYTES).toBe(32 * 1024 * 1024);
     expect(limits.SYSTEM_RECORD_MAX_CACHE_RESERVE_METADATA_BYTES).toBe(32 * 1024 * 1024);
   });
+
+  it('pins the owned-subject, conflict-slot, and sidecar-envelope ceilings', () => {
+    expect(limits.SYSTEM_RECORD_MAX_OWNED_SUBJECTS).toBe(2_048);
+    expect(limits.SYSTEM_RECORD_MAX_CONFLICT_DIGESTS).toBe(16);
+    expect(limits.SYSTEM_RECORD_MAX_CONFLICT_ENTRIES).toBe(8);
+    expect(limits.SYSTEM_RECORD_MAX_SIDECAR_OBJECTS).toBe(17);
+    expect(limits.SYSTEM_RECORD_MAX_SIDECAR_BYTES).toBe(1_064_960);
+  });
 });
