@@ -293,6 +293,54 @@ describe('system-record verified replacement V1', () => {
     }
   });
 
+  // The tagged bridge is the entry point the agent-side receiver dispatches
+  // through, but every storage test reached active facts via issueActive instead:
+  // 17 issueCandidate call sites in this package and not one passed
+  // operation: 'active'. So the active arm had no storage-side coverage, and it
+  // can regress on its own. candidateIssueKeys hands exactRecord
+  // TAGGED_ACTIVE_ISSUE_KEYS, then stripOperation re-picks ISSUE_KEYS to drop the
+  // tag before delegating; the two sets must stay exactly one key apart. Drop
+  // 'operation' from the tagged set and exactRecord rejects the tag it was just
+  // handed. Widen the strip to the tagged set and issueActive receives a key its
+  // own exact shape refuses. Either way this test goes red and no other one does.
+  it('accepts a tagged active candidate through the generic bridge, not only issueActive', () => {
+    const legacyRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const legacy = fixture();
+    const legacyFacts = legacyRegistry.consumer.consume(
+      legacyRegistry.issuer.issueActive(legacy.input),
+      legacy.bindings,
+    );
+    const expected = {
+      keys: Object.keys(legacyFacts).sort(),
+      head: legacyFacts.head,
+      projectionDigest: legacyFacts.projectionDigest,
+      projectionQuads: legacyFacts.projectionQuads,
+      ownedSubjectTable: legacyFacts.ownedSubjectTable,
+      summary: legacyFacts.verifiedAuthoritySummary,
+    };
+    // Released before the second issue so this measures dispatch equivalence
+    // rather than whether two leases can be held at once.
+    legacyRegistry.consumer.release(legacyFacts);
+
+    const taggedRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+    const tagged = fixture();
+    const taggedFacts = taggedRegistry.consumer.consume(
+      taggedRegistry.issuer.issueCandidate({ operation: 'active', ...tagged.input }),
+      tagged.bindings,
+    );
+
+    expect(taggedFacts.operation).toBe('active');
+    // The tag is consumed by dispatch and must not survive into the facts; an
+    // extra key here is what a widened strip would produce.
+    expect(Object.keys(taggedFacts).sort()).toEqual(expected.keys);
+    expect(taggedFacts.head).toEqual(expected.head);
+    expect(taggedFacts.projectionDigest).toBe(expected.projectionDigest);
+    expect(taggedFacts.projectionQuads).toEqual(expected.projectionQuads);
+    expect(taggedFacts.ownedSubjectTable).toEqual(expected.ownedSubjectTable);
+    expect(taggedFacts.verifiedAuthoritySummary).toBe(expected.summary);
+    taggedRegistry.consumer.release(taggedFacts);
+  });
+
   it('issues an empty frozen handle and returns one deep-owned immutable snapshot', () => {
     const registry = createSystemRecordVerifiedReplacementRegistryV1();
     const { input, bindings } = fixture();
