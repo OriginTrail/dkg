@@ -180,6 +180,62 @@ describe('agent-profile private materializer prepare bridge', () => {
       change: (harness: MaterializerBridgeHarness) => harness.rotateChildGeneration(),
       expected: { outcome: 'deferred', reason: 'generation-changed' },
     },
+    // The bridge is a proof-authority boundary, so every binding coordinate it
+    // compares needs a negative case: a guard deleted or wired to the wrong field
+    // would otherwise leave this suite green.
+    //
+    // What each row pins was MEASURED by neutralising one comparison at a time
+    // (replacing it with `true`) and re-running this file. Three of the five
+    // coordinates have a single comparison and so have a sole detector:
+    //   mode -> 'the lane mode changes'
+    //   sessionIdentity -> 'the session identity changes'
+    //   materializationEpoch -> 'the materialization epoch changes'
+    // (childGeneration was already pinned by 'binding generation changes'.)
+    //
+    // networkId and activationGeneration are different, and the difference is
+    // worth stating because it looks like dead code and is not. Each is compared
+    // TWICE -- in matchingBinding against the candidate head / the session, and
+    // again in sameBinding between prepared and current. Neutralising either copy
+    // alone leaves this file green, because the twin still refuses. That is
+    // redundancy, not inertness: neutralising BOTH copies of a coordinate turns
+    // exactly its row red, which is what the last two rows below are for. Read a
+    // green single-copy mutant here as "not isolated", never as "the guard is
+    // dead".
+    //
+    // kind is compared twice as well, and neither copy is testable at all: the
+    // field is typed `'agents'`, so a differing kind is unrepresentable without a
+    // cast. Both copies survive even when neutralised together. It is left
+    // untested deliberately rather than pinned through a cast that would assert
+    // about a state the type forbids.
+    {
+      label: 'the binding leaves the candidate network',
+      change: (harness: MaterializerBridgeHarness) => harness.rebind({
+        networkId: 'base:8453' as AgentProfileMaterializerLaneBindingV1['networkId'],
+      }),
+      expected: { outcome: 'deferred', reason: 'generation-changed' },
+    },
+    {
+      label: 'the binding leaves the session activation',
+      change: (harness: MaterializerBridgeHarness) => harness.rebind({ activationGeneration: '2' }),
+      expected: { outcome: 'deferred', reason: 'generation-changed' },
+    },
+    {
+      label: 'the lane mode changes',
+      change: (harness: MaterializerBridgeHarness) => harness.rebind({ mode: 'shadow' }),
+      expected: { outcome: 'deferred', reason: 'generation-changed' },
+    },
+    {
+      label: 'the session identity changes',
+      change: (harness: MaterializerBridgeHarness) => harness.rebind({
+        sessionIdentity: Object.freeze(Object.create(null) as object),
+      }),
+      expected: { outcome: 'deferred', reason: 'generation-changed' },
+    },
+    {
+      label: 'the materialization epoch changes',
+      change: (harness: MaterializerBridgeHarness) => harness.rebind({ materializationEpoch: '4' }),
+      expected: { outcome: 'deferred', reason: 'generation-changed' },
+    },
     {
       label: 'session capability is lost',
       change: (harness: MaterializerBridgeHarness) => harness.setSessionState('shutdown'),
@@ -250,6 +306,7 @@ interface MaterializerBridgeHarness {
   readonly discardProof: ReturnType<typeof vi.fn>;
   readonly applyVerified: ReturnType<typeof vi.fn>;
   readonly issues: AgentProfileMaterializerCandidateIssueV1[];
+  rebind(patch: Partial<AgentProfileMaterializerLaneBindingV1>): void;
   rotateChildGeneration(): void;
   setSessionState(state: SystemRecordLaneStateV1): void;
 }
@@ -332,6 +389,9 @@ function materializerBridgeHarness(options: Readonly<{
     discardProof,
     applyVerified,
     issues,
+    rebind(patch) {
+      binding = Object.freeze({ ...binding, ...patch });
+    },
     rotateChildGeneration() {
       binding = Object.freeze({
         ...binding,
