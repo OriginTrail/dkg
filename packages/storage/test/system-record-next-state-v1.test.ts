@@ -776,6 +776,34 @@ describe('system-record terminal and quarantine next-state derivation', () => {
     expect(cleared.plan.next.appliedState.status).toBe('active');
   });
 
+  // The absent-base arm of the fork-base conjunct. A version-zero head has no
+  // predecessor, so the quarantine records no fork base; a genesis resolution is
+  // forbidden from naming one, so both sides are absent and the row must still
+  // clear. The two absences cannot drift apart: only a genesis resolution reaches
+  // the base comparison at all, because the version conjunct first demands the
+  // resolution's forked version equal our head version of zero.
+  //
+  // Without this case the conjunct can be narrowed to reject an absent base and
+  // nothing goes red -- which would strand every genesis quarantine permanently.
+  it('clears a genesis fork quarantine that recorded no fork base', async () => {
+    const fork = await quarantinedForkFixtureV1('genesis');
+    if (fork.quarantinedSnapshot.state !== 'present') throw new Error('expected a present row');
+    expect(fork.quarantinedSnapshot.headVersion).toBe('0');
+    expect(fork.quarantinedSnapshot.appliedState.conflictForkBaseHeadDigest).toBeUndefined();
+    expect(fork.forkBaseHeadDigest).toBeUndefined();
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const cleared = expectReady(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(fork.successorIssue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    }));
+    expect(cleared.plan.next.appliedState.status).toBe('active');
+    expect(cleared.plan.next.appliedState.conflictForkBaseHeadDigest).toBeUndefined();
+  });
+
   it('clears a fork quarantine for the successor resolving that exact fork', async () => {
     const fork = await quarantinedForkFixtureV1();
     const registry = createSystemRecordVerifiedReplacementRegistryV1();
@@ -1580,9 +1608,9 @@ function compareUtf8(left: string, right: string): number {
 
 /** Apply our branch of a fork, then quarantine it, and hand back that row. */
 async function quarantinedForkFixtureV1(
-  shape: 'based' | 'rotated' = 'based',
+  shape: 'based' | 'rotated' | 'genesis' = 'based',
   terminalTransitionConflict = false,
-  expectedHeadVersion = '1',
+  expectedHeadVersion = shape === 'genesis' ? '0' : '1',
   expectedLineageLength = shape === 'rotated' ? 2 : 0,
 ) {
   const { binding, epochQuad } = makeAuthenticActiveReplacementFixtureV1('authoritative');
