@@ -597,9 +597,19 @@ import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
+import { resolveRfc64SelectedRecoveryContextGraphIdsV1 } from './dkg-agent-rfc64-catalog-bootstrap.js';
 
 const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
+
+function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
+  return resolveSyncGlobalBackpressure({
+    ...config,
+    selectedRecoveryContextGraphIds: resolveRfc64SelectedRecoveryContextGraphIdsV1(
+      config.rfc64PublicCatalogBootstrap,
+    ),
+  });
+}
 
 interface SharedMemorySyncFromPeerOptions {
   stopOnBackoffWorthyFailure?: boolean;
@@ -1160,6 +1170,15 @@ interface RecoverContextGraphSwmFromPeerDependencies {
 
 type SyncReconcilerAttemptOutcome = SyncOnConnectOutcome | 'not-started' | 'deferred-backpressure';
 
+/**
+ * Narrow authority carried from the RFC-64 continuation scheduler into the
+ * on-connect worker. It deliberately authorizes only the selected public SWM
+ * lane; it is not a second way to enable broad durable/on-connect catch-up.
+ */
+type SyncOnConnectExecutionClaim = {
+  readonly kind: 'selected-swm-retry-only';
+};
+
 export interface ContextGraphCatchupOptions {
   includeSharedMemory?: boolean;
   maxPeers?: number;
@@ -1601,7 +1620,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     try {
       return await withGlobalSyncBackpressure(
         {
-          policy: resolveSyncGlobalBackpressure(this.config),
+          policy: resolveAgentSyncGlobalBackpressure(this.config),
           ctx,
           label,
           contextGraphId,
@@ -2411,7 +2430,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 );
               },
               onDecline: (details) => {
-                const syncPressure = getSyncBackpressureSnapshot(resolveSyncGlobalBackpressure(this.config));
+                const syncPressure = getSyncBackpressureSnapshot(resolveAgentSyncGlobalBackpressure(this.config));
                 const syncPressureLabel =
                   `syncGlobalInflight=${syncPressure.inflight} ` +
                   `syncGlobalQueued=${syncPressure.queued} ` +
@@ -2933,7 +2952,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       process.env,
       (message) => this.log.warn(ctx, message),
     );
-    const syncGlobalPolicy = resolveSyncGlobalBackpressure(this.config);
+    const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config);
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
       snapshotGlobalRows: snapshotPolicy.budget.maxRows,
@@ -4019,11 +4038,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     delayMs = 3000,
     options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
+    const broadSyncEnabled = syncOnConnectEnabled(this.config);
+    const selectedSwmRetryRequired = options.selectedSwmRetry === true
+      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
     // RFC-64 bootstrap is an independently enabled, graph-scoped recovery
     // authority. Its selected provider must be able to resume an incomplete
     // bounded walk even when the operator disabled broad peer-on-connect sync.
     // Ordinary connection events still obey the generic kill switch.
-    if (!syncOnConnectEnabled(this.config) && options.selectedSwmRetry !== true) {
+    if (!broadSyncEnabled && !selectedSwmRetryRequired) {
       return false;
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
@@ -4032,8 +4054,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const now = Date.now();
     const disconnectBoundary = this.syncOnConnectDisconnectBoundary(remotePeer, now);
     const lastSuccessfulSync = this.lastSuccessfulSyncAt.get(remotePeer);
-    const selectedSwmRetryRequired = options.selectedSwmRetry === true
-      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
     if (
       !selectedSwmRetryRequired &&
       lastSuccessfulSync != null &&
@@ -4054,8 +4074,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }
 
     this.catchupOnConnectAt.set(remotePeer, now);
+    const executionClaim: SyncOnConnectExecutionClaim | undefined =
+      !broadSyncEnabled && selectedSwmRetryRequired
+        ? { kind: 'selected-swm-retry-only' }
+        : undefined;
     setTimeout(() => {
-      this.runSyncFromPeerOnConnect(remotePeer, handleSyncError).catch((err: unknown) => {
+      this.runSyncFromPeerOnConnect(remotePeer, handleSyncError, executionClaim).catch((err: unknown) => {
         handleSyncError(remotePeer, err);
       });
     }, delayMs);
@@ -4066,8 +4090,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     remotePeer: string,
     handleSyncError: (remotePeer: string, err: unknown) => void,
+    executionClaim?: SyncOnConnectExecutionClaim,
   ): Promise<void> {
-    if (!syncOnConnectEnabled(this.config)) {
+    const selectedSwmRetryOnly = executionClaim?.kind === 'selected-swm-retry-only'
+      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
+    if (!syncOnConnectEnabled(this.config) && !selectedSwmRetryOnly) {
       return;
     }
     const now = Date.now();
@@ -4076,7 +4103,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     const probe = await this.getSyncReconcilerProbe(remotePeer);
     try {
-      await this.attemptSyncFromPeerWithReconcilerAccounting(remotePeer, probe);
+      await this.attemptSyncFromPeerWithReconcilerAccounting(
+        remotePeer,
+        probe,
+        'on-connect',
+        selectedSwmRetryOnly ? executionClaim : undefined,
+      );
     } catch (err: unknown) {
       handleSyncError(remotePeer, err);
     }
@@ -4087,14 +4119,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     probe: SyncReconcilerProbe,
     source: SyncAdmissionSource = 'on-connect',
+    executionClaim?: SyncOnConnectExecutionClaim,
   ): Promise<SyncReconcilerAttemptOutcome> {
     const lastOk = this.lastSuccessfulSyncAt.get(remotePeer);
     const lastProgress = this.lastSyncProgressAt.get(remotePeer);
     let syncAccountingClearedBackoff = false;
     try {
-      const outcome = await this.trySyncFromPeer(remotePeer, () => {
+      const onSyncAccounting = () => {
         syncAccountingClearedBackoff = true;
-      }, source);
+      };
+      const outcome = executionClaim
+        ? await this.trySyncFromPeer(remotePeer, onSyncAccounting, source, executionClaim)
+        : await this.trySyncFromPeer(remotePeer, onSyncAccounting, source);
       if (outcome === 'deferred-backpressure') {
         this.log.info(
           createOperationContext('sync'),
@@ -4143,11 +4179,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeer: string,
     onSyncAccounting?: (outcome: SyncOnConnectPeerOutcome) => void,
     source: SyncAdmissionSource = 'on-connect',
+    executionClaim?: SyncOnConnectExecutionClaim,
   ): Promise<SyncOnConnectOutcome | 'not-started'> {
     if (!this.started) {
       return 'not-started';
     }
-    if (!syncOnConnectEnabled(this.config)) {
+    const selectedSwmRetryOnly = executionClaim?.kind === 'selected-swm-retry-only';
+    const selectedSwmRetryAuthorized = selectedSwmRetryOnly
+      && this.selectedSwmRetryRequiredPeers.has(remotePeer);
+    if (selectedSwmRetryOnly && !selectedSwmRetryAuthorized) {
+      return 'not-started';
+    }
+    if (!syncOnConnectEnabled(this.config) && !selectedSwmRetryAuthorized) {
       return 'not-started';
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
@@ -4195,7 +4238,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       knownCorePeerIds: this.knownCorePeerIds,
       knownCorePeerIdsV2: this.knownCorePeerIdsV2,
       getSyncContextGraphs: () => this.config.syncContextGraphs ?? [],
-      getDurableSyncContextGraphs: () => automaticDurableSyncContextGraphs(
+      getDurableSyncContextGraphs: () => selectedSwmRetryOnly ? [] : automaticDurableSyncContextGraphs(
         this.config.syncContextGraphs ?? [],
         {
           nodeRole: this.config.nodeRole,
@@ -4212,7 +4255,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // unrelated Edge peers should do neither plane in the automatic sweep.
         return completeSwmProviders.length === 0 || this.knownCorePeerIds.has(remotePeer);
       }),
-      getSharedMemorySyncContextGraphs: async (peerId) => (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
+      getSharedMemorySyncContextGraphs: async (peerId) => selectedSwmRetryOnly
+        ? []
+        : (await getSharedMemorySyncPlan(peerId)).eligibleContextGraphIds,
       ...(automaticPeerSweep && remotePeerIsCompleteSwmProvider
         ? {
           selectedSharedMemoryLane: {
@@ -4240,7 +4285,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         { stopOnBackoffWorthyFailure: true, source },
       ),
       refreshMetaSyncedFlags: (contextGraphIds) => this.refreshMetaSyncedFlags(contextGraphIds),
-      discoverContextGraphsFromStore: () => this.discoverContextGraphsFromStore(),
+      discoverContextGraphsFromStore: () => selectedSwmRetryOnly
+        ? Promise.resolve(0)
+        : this.discoverContextGraphsFromStore(),
       syncSharedMemoryFromPeer: async (peerId, contextGraphIds) => {
         const sharedMemorySyncPlan = await getSharedMemorySyncPlan(peerId);
         return this.syncSharedMemoryFromPeerDetailed(peerId, contextGraphIds, {
@@ -4249,7 +4296,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           sharedMemorySyncPlan,
         });
       },
-      syncSharedMemoryOnConnect: syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true),
+      syncSharedMemoryOnConnect: selectedSwmRetryOnly
+        || (syncOnConnectEnabled(this.config) && (this.config.syncSharedMemoryOnConnect ?? true)),
       logInfo: (ctx, message) => this.log.info(ctx, message),
       onPeerSkippedNoSync: (peerId) => {
         this.skippedNoSyncPeers.add(peerId);

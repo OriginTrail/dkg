@@ -81,6 +81,20 @@ interface BootstrapStateV1 {
 
 const STATES = new WeakMap<DKGAgent, BootstrapStateV1>();
 
+/**
+ * Normalize catalog authority into the scheduler's feature-neutral reserved
+ * recovery scope. Policies without a graph-complete SWM provider confer no
+ * reservation.
+ */
+export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
+  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+): readonly string[] {
+  if (config === undefined) return Object.freeze([]);
+  return Object.freeze(config.acceptedPublicPolicies
+    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.length > 0)
+    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
+}
+
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**
    * Exact operator-pinned graph-complete SWM providers for one accepted policy.
