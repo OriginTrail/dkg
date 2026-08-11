@@ -392,9 +392,9 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).trySyncFromPeer = async (
       _peer: string,
       _onAccounting: unknown,
-      source: unknown,
+      invocation: unknown,
     ) => {
-      sources.push(source);
+      sources.push(invocation);
       return undefined;
     };
 
@@ -403,7 +403,11 @@ describe('sync-on-connect churn gates', () => {
       hasSyncProtocol: true,
     });
 
-    expect(sources).toEqual(['on-connect']);
+    expect(sources).toEqual([{
+      source: 'on-connect',
+      trigger: 'ordinary',
+      executionPlan: { kind: 'full' },
+    }]);
   });
 
   it('reconciler still retries stale connected peers', async () => {
@@ -423,7 +427,15 @@ describe('sync-on-connect churn gates', () => {
     // The third argument is the bounded admission origin (issue #2006): the
     // reconciler's queue pressure must be attributable to `reconcile`, not
     // indistinguishable from sync-on-connect.
-    expect(trySyncFromPeer.calls).toEqual([[PEER_A, expect.any(Function), 'reconcile']]);
+    expect(trySyncFromPeer.calls).toEqual([[
+      PEER_A,
+      expect.any(Function),
+      {
+        source: 'reconcile',
+        trigger: 'ordinary',
+        executionPlan: { kind: 'full' },
+      },
+    ]]);
   });
 
   it('records backoff after a failed sync round and blocks connection-open rescheduling', async () => {

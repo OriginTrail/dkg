@@ -1073,10 +1073,15 @@ export class DKGAgentBase {
   protected vmReconcileLifecycleGeneration = 0;
   /** Abortable boundary paired with the generation guard for restart-safe async work. */
   protected vmReconcileLifecycleController = new AbortController();
-  /** Phase D/A4 — per-CG active-fetch cooldown so one sweep cannot fan out repeated fetches. */
-  protected readonly vmReconcileFetchCooldownAt = new Map<string, number>();
-  /** Process-local ownership tokens prevent stale lifecycles clearing a replacement cooldown. */
-  protected readonly vmReconcileFetchCooldownOwner = new Map<string, symbol>();
+  /**
+   * Phase D/A4 — one owned per-CG active-fetch cooldown record. Keeping the
+   * timestamp and lifecycle owner together makes it impossible for stale
+   * cleanup to observe or leave half of the suppression state behind.
+   */
+  protected readonly vmReconcileFetchCooldowns = new Map<string, {
+    startedAt: number;
+    owner: symbol;
+  }>();
   /** Last stranded UAL visited by the bounded RS-heal sweep for each CG. */
   protected readonly rsHealCursorByCg = new Map<string, string>();
   /** Phase D/A4 — round-robin cursor over the already ordered catch-up peer list. */

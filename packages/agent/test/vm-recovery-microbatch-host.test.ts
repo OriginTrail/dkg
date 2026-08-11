@@ -304,7 +304,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     });
     agents.push(harness.agent);
     const unknownTargets = harness.targets;
-    harness.internals.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
+    harness.internals.installVmReconcileActiveFetchCooldown(localCgId, Date.now());
     const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
     const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
     const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext');
@@ -672,14 +672,15 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       () => firstLifecycleCurrent,
     );
     await protocolWaitEntered;
-    const staleOwner = harness.internals.vmReconcileFetchCooldownOwner.get(localCgId);
+    const staleOwner = harness.internals.readVmReconcileActiveFetchCooldown(localCgId)?.owner;
     expect(staleOwner).toBeDefined();
 
     firstLifecycleCurrent = false;
     harness.internals.clearVmReconcileActiveFetchCooldown(localCgId);
     expect(harness.internals.shouldRunVmReconcileActiveFetch(localCgId)).toBe(true);
-    const replacementOwner = harness.internals.vmReconcileFetchCooldownOwner.get(localCgId);
-    const replacementTimestamp = harness.internals.vmReconcileFetchCooldownAt.get(localCgId);
+    const replacementCooldown = harness.internals.readVmReconcileActiveFetchCooldown(localCgId);
+    const replacementOwner = replacementCooldown?.owner;
+    const replacementTimestamp = replacementCooldown?.startedAt;
     expect(replacementOwner).toBeDefined();
     expect(replacementOwner).not.toBe(staleOwner);
 
@@ -688,9 +689,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
 
     expect(result.attemptedOrdinals).toEqual([]);
     expect(harness.fetched).toEqual([]);
-    expect(harness.internals.vmReconcileFetchCooldownOwner.get(localCgId))
-      .toBe(replacementOwner);
-    expect(harness.internals.vmReconcileFetchCooldownAt.get(localCgId))
-      .toBe(replacementTimestamp);
+    expect(harness.internals.readVmReconcileActiveFetchCooldown(localCgId))
+      .toEqual({ owner: replacementOwner, startedAt: replacementTimestamp });
   });
 });
