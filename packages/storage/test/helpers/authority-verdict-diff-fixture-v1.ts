@@ -70,6 +70,41 @@ export const CORE_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly numbe
 };
 
 /**
+ * THE DELEGATED HALF OF CORE'S REJECT CODOMAIN -- and the reason the harvest
+ * above is not the whole of it.
+ *
+ * `evaluateAgentProfileHeadAdvanceV1` delegates to `evaluateAuthorityTransitionV1`
+ * at :353 and returns its decision VERBATIM at :358. Those rejects are minted in
+ * a DIFFERENT FILE and carry no marker of their origin, so a caller observing
+ * `{ decision: 'reject', reason }` cannot tell which file produced it.
+ *
+ * The map above was harvested from system-record-authority-v1-internal.ts alone
+ * and its docstring says an unmapped observed literal is a FAILURE. The sweep
+ * observed 'transition does not bind the accepted predecessor' on its first real
+ * run and it was unmapped -- the pin fired, correctly, on a real gap. The lesson
+ * is the scoping one: "27 literals across 32 sites" was a property of the FILE
+ * measured, stated as though it were a property of core.
+ *
+ * Harvested from packages/core/src/system-record-authority-verification-v1-internal.ts.
+ */
+export const CORE_DELEGATED_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly number[]>> = {
+  'verification clock is invalid': [30],
+  'transition issuedAt exceeds the future clock-skew bound': [34],
+  'transition does not bind the accepted predecessor': [48],
+  'expired-prior transition cannot resurrect a tombstone': [55],
+  'expired-prior transition does not bind prior validity': [61],
+  'prior authority has not passed the expiry skew': [70],
+};
+
+/** Every reject literal a caller can observe from the exported entry. */
+export const CORE_ALL_REJECT_LITERALS_V1: readonly string[] = Object.freeze([
+  ...new Set([
+    ...Object.keys(CORE_REJECT_REASON_SITES_V1),
+    ...Object.keys(CORE_DELEGATED_REJECT_REASON_SITES_V1),
+  ]),
+]);
+
+/**
  * THE FIVE OBSERVATIONALLY AMBIGUOUS LITERALS -- a Phase 1 FINDING, not a
  * harness limitation.
  *

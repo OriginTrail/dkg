@@ -1,13 +1,20 @@
 import {
   assertAgentProfileHeadObjectV1,
+  computeAgentProfileAuthorityTransitionDigestV1,
+  computeAgentProfileForkResolutionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileAuthorityTransitionV1,
+  type AgentProfileForkResolutionV1,
   type AgentProfileHeadObjectV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { VerdictDiffCellV1 } from './authority-verdict-diff-cells-v1.js';
 import { makeRotatedAuthorityChainV1 } from './system-record-active-replacement-fixture.js';
+
+/** The wallet root the competing transition rotates to; not on the real chain. */
+const EQUIVOCATING_ISSUER = `0x${'77'.repeat(20)}`;
 
 /**
  * THE CANDIDATE-HEAD LAYER OF THE CORE SWEEP.
@@ -56,10 +63,75 @@ export const CORE_CURRENT_SEQUENCE_V1 = BigInt(CORE_CURRENT_HEAD_V1.authoritySeq
 export const CORE_CURRENT_VERSION_V1 = BigInt(CORE_CURRENT_HEAD_V1.version);
 export const CORE_CHAIN_V1 = CHAIN;
 
-/** An acceptedTransitionDigest that is well-formed but is not the current's. */
-export const CORE_OTHER_TRANSITION_DIGEST_V1 = `0x${'7e'.repeat(32)}`;
-/** A well-formed fork-resolution digest, for axis K = 'present'. */
-export const CORE_FORK_RESOLUTION_DIGEST_V1 = `0x${'cd'.repeat(32)}`;
+/**
+ * Axis G's 'differ' value: a REAL competing transition into the current's own
+ * authority sequence, rotating to a different wallet root.
+ *
+ * It is a real object rather than a well-formed constant, and the difference is
+ * not cosmetic. A verification closure RESOLVES every digest a head names, so a
+ * head naming an invented transition digest is refused with
+ * '[system-record-closure] verification closure is missing 0x...' -- a refusal
+ * produced by the fixture's own omission, not by the system. Measured before
+ * this was fixed: 18 of 40 buildable head shapes were refused that way, which
+ * would have retired roughly 46,000 cells while every count summed and every
+ * citation quoted a real message from a real site.
+ *
+ * A competing rotation is also what axis G's 'differ' MEANS: two transitions out
+ * of the same prior head into the same sequence is transition equivocation,
+ * which is the decision the axis exists to reach.
+ */
+export const CORE_EQUIVOCATING_TRANSITION_V1 = Object.freeze({
+  ...CHAIN.transitions[CHAIN.transitions.length - 1],
+  nextEvmIssuer: EQUIVOCATING_ISSUER,
+  nextRoot: `did:dkg:agent:${EQUIVOCATING_ISSUER}`,
+}) as AgentProfileAuthorityTransitionV1;
+
+export const CORE_OTHER_TRANSITION_DIGEST_V1 = computeAgentProfileAuthorityTransitionDigestV1(
+  CORE_EQUIVOCATING_TRANSITION_V1,
+);
+
+/** Two same-sequence conflicting heads -- the evidence a fork resolution names. */
+export const CORE_FORK_CONFLICT_HEADS_V1: readonly AgentProfileActiveHeadObjectV1[] = Object.freeze(
+  ['12:07:00Z', '12:08:00Z'].map((time) => Object.freeze({
+    ...CHAIN.base,
+    version: '2',
+    previousHeadDigest: computeAgentProfileHeadObjectDigestV1(CHAIN.base),
+    issuedAt: `2026-08-05T${time}`,
+  }) as AgentProfileActiveHeadObjectV1),
+);
+
+/**
+ * Axis K's 'present' value, as a REAL fork resolution over the current frontier
+ * -- same reason as the transition above: the closure resolves what the head
+ * names, and 7 further shapes were being refused for a missing 0xcdcd... object.
+ *
+ * `forkedVersion` is the current's version because core :456 refuses anything
+ * else; `resolutionVersion` is one above it because the control codec refuses
+ * `resolutionVersion <= forkedVersion` (:262).
+ */
+export const CORE_FORK_RESOLUTION_V1 = Object.freeze({
+  objectType: 'fork-resolution',
+  kind: 'agents',
+  networkId: CORE_CURRENT_HEAD_V1.networkId,
+  peerId: CORE_CURRENT_HEAD_V1.peerId,
+  peerPublicKey: CORE_CURRENT_HEAD_V1.peerPublicKey,
+  evmIssuer: CORE_CURRENT_HEAD_V1.evmIssuer,
+  authoritySequence: CORE_CURRENT_HEAD_V1.authoritySequence,
+  forkedVersion: CORE_CURRENT_HEAD_V1.version,
+  resolutionVersion: String(BigInt(CORE_CURRENT_HEAD_V1.version) + 1n),
+  // The base must be a verified LOWER head of the same authority, so it is the
+  // chain base at version zero -- not the current head, which sits AT the forked
+  // version and is refused as a base by the closure collector.
+  forkBaseHeadDigest: computeAgentProfileHeadObjectDigestV1(CHAIN.base),
+  evidenceHeadDigests: Object.freeze(
+    CORE_FORK_CONFLICT_HEADS_V1.map(computeAgentProfileHeadObjectDigestV1).sort(),
+  ),
+  issuedAt: '2026-08-05T12:05:00Z',
+}) as unknown as AgentProfileForkResolutionV1;
+
+export const CORE_FORK_RESOLUTION_DIGEST_V1 = computeAgentProfileForkResolutionDigestV1(
+  CORE_FORK_RESOLUTION_V1,
+);
 
 /** The candidate's authority sequence for each axis-D value. */
 function candidateSequence(relation: VerdictDiffCellV1['sequenceRelation']): bigint {
