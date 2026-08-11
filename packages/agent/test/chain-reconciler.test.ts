@@ -220,6 +220,65 @@ describe('reconcileContextGraph — sweep', () => {
     expect(state.scanOrdinal).toBe(0);
   });
 
+  it('makes the recent head useful while preserving bounded historical progress', async () => {
+    const attempts: number[][] = [[], [], []];
+    let pass = 0;
+    const { deps } = makeDeps({
+      getKCCount: async () => 30,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        return { status: 'reconciled', blockNumber: 0 };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 23, 24, 25, 26, 27, 28, 29],
+      [3, 4, 5, 16, 17, 18, 19, 20, 21, 22],
+      [6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    ]);
+    expect([first.hasMore, second.hasMore, third.hasMore]).toEqual([true, true, false]);
+    expect([first.watermark, second.watermark, third.watermark]).toEqual([3, 6, 30]);
+    expect(state.scanOrdinal).toBe(30);
+  });
+
+  it('spends selected exact-recovery budget on recent ordinals before history', async () => {
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => 30,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => ({
+        status: 'pending',
+        recovery: recoveryTarget(ordinal),
+      }),
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        recoveryCalls.push(targets.map(({ ordinal }) => ordinal));
+        return {
+          outcomes: new Map(),
+          attemptedOrdinals: [targets[0]!.ordinal],
+          continuationOrdinal: targets[1]!.ordinal,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+
+    await reconcileContextGraph(deps, createCursorState(0), 'cg', 1n);
+
+    expect(recoveryCalls).toEqual([[
+      29, 28, 27, 26, 25, 24, 23,
+      0, 1, 2,
+    ]]);
+  });
+
   it('runs each bounded slice with capped ordinal concurrency', async () => {
     let active = 0;
     let maxActive = 0;

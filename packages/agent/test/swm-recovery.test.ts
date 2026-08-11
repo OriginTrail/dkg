@@ -20,7 +20,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  orderPublicSnapshotsForBalancedRecency,
+  syncPublicSnapshotsForMeta,
+  type PublicSnapshotMetadata,
+} from '../src/sync/requester/shared-memory-sync.js';
 import {
   recoverContextGraphSwm,
   recoverContextGraphSwmWithProgressRetries,
@@ -160,6 +164,42 @@ describe('recoverContextGraphSwmWithProgressRetries', () => {
 });
 
 describe('syncPublicSnapshotsForMeta', () => {
+  it('prioritizes three recent snapshots for every historical snapshot', () => {
+    const snapshots: PublicSnapshotMetadata[] = Array.from({ length: 8 }, (_, index) => ({
+      ref: `sha256:${index.toString(16).padStart(64, '0')}`,
+      digest: `sha256:${index.toString(16).padStart(64, '0')}`,
+      count: 1,
+    }));
+    const metaQuads: Quad[] = snapshots.flatMap((snapshot, index) => {
+      const subject = `urn:dkg:share:balanced-${index}`;
+      return [
+        { subject, predicate: `${DKG}publicQuadsDigest`, object: `"${snapshot.digest}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publishedAt`, object: `"2026-08-10T22:00:${index.toString().padStart(2, '0')}.000Z"`, graph: WS_META },
+        { subject, predicate: `${DKG}kaUal`, object: `"did:dkg:base:84532/0x0000000000000000000000000000000000000001/${100 + index}"`, graph: WS_META },
+      ];
+    });
+
+    expect(orderPublicSnapshotsForBalancedRecency(snapshots, metaQuads).map(({ ref }) => ref))
+      .toEqual([
+        snapshots[7]!.ref,
+        snapshots[6]!.ref,
+        snapshots[5]!.ref,
+        snapshots[0]!.ref,
+        snapshots[4]!.ref,
+        snapshots[3]!.ref,
+        snapshots[2]!.ref,
+        snapshots[1]!.ref,
+      ]);
+  });
+
+  it('preserves manifest order when no recency evidence exists', () => {
+    const snapshots: PublicSnapshotMetadata[] = [
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+    ];
+    expect(orderPublicSnapshotsForBalancedRecency(snapshots, [])).toEqual(snapshots);
+  });
+
   it('retries a cleanly-closed short snapshot response without caching its prefix', async () => {
     const expected: Quad[] = [
       { subject: 'urn:snapshot:a', predicate: STATUS, object: '"one"', graph: '' },

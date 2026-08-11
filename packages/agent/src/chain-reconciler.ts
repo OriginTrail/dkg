@@ -115,6 +115,15 @@ export interface ChainReconcilerDeps {
   /** Maximum ordinal reconciliations allowed to run concurrently in one pass. */
   maxOrdinalConcurrency?: number;
   /**
+   * Number of slots in a bounded pass reserved for the newest outstanding
+   * ordinals. The remaining slots keep advancing the historical scan cursor.
+   *
+   * This is intentionally opt-in. Ordinary member/Core reconciliation keeps
+   * strict oldest-first behaviour, while an explicitly selected cold Edge can
+   * make the current head useful quickly without starving durable history.
+   */
+  recentOrdinalsPerPass?: number;
+  /**
    * Fetch one exact batch containing only locally-missing KAs, then re-run
    * local verification for those ordinals. Undefined preserves scan-only
    * behavior for callers/tests that do not provide network recovery.
@@ -220,8 +229,32 @@ export async function reconcileContextGraph(
     state.scanOrdinal = state.watermark;
     candidates = outstandingBefore;
   }
-  const ordinals = candidates.slice(0, passLimit);
+  const requestedRecent = Number.isFinite(deps.recentOrdinalsPerPass)
+    ? Math.max(0, Math.floor(deps.recentOrdinalsPerPass ?? 0))
+    : 0;
+  const recentCount = Number.isFinite(passLimit) && passLimit >= 2
+    ? Math.min(requestedRecent, passLimit - 1)
+    : 0;
+  let historicalOrdinals: number[];
+  let recentOrdinals: number[] = [];
+  if (recentCount > 0 && candidates.length > passLimit) {
+    const historicalCount = passLimit - recentCount;
+    historicalOrdinals = candidates.slice(0, historicalCount);
+    const historicalSet = new Set(historicalOrdinals);
+    recentOrdinals = candidates
+      .slice(-recentCount)
+      .filter((ordinal) => !historicalSet.has(ordinal));
+  } else {
+    historicalOrdinals = candidates.slice(0, passLimit);
+  }
+  // Cursor mutation and completion absorption stay ordinal-ordered even when
+  // the selected lane used both ends of the outstanding inventory.
+  const ordinals = [...historicalOrdinals, ...recentOrdinals]
+    .sort((a, b) => a - b);
   const hasUnvisitedCandidates = candidates.length > ordinals.length;
+  const historicalContinuationOrdinal = historicalOrdinals.length > 0
+    ? historicalOrdinals[historicalOrdinals.length - 1]! + 1
+    : state.watermark;
   if (headUnavailable) {
     state.scanOrdinal = state.watermark;
   } else {
@@ -271,12 +304,24 @@ export async function reconcileContextGraph(
     await Promise.all(Array.from({ length: workerCount }, () => runOrdinalWorker()));
     if (workerFailed) throw workerError;
 
+    const recentOrdinalSet = new Set(recentOrdinals);
     const recoveryTargets = ordinals
       .map((ordinal) => outcomes.get(ordinal))
       .filter((outcome): outcome is Extract<OrdinalOutcome, { status: 'pending' }> =>
         outcome?.status === 'pending' && outcome.recovery !== undefined,
       )
-      .map((outcome) => outcome.recovery!);
+      .map((outcome) => outcome.recovery!)
+      // The exact-recovery executor has a tighter physical peer/request budget
+      // than the ordinal scanner. Spend that scarce budget on the recent slots
+      // this selected pass deliberately reserved, then use any remainder for
+      // the historical side. Cursor completion is still merged below in
+      // ordinal order, so this changes latency rather than correctness.
+      .sort((left, right) => {
+        const leftRecent = recentOrdinalSet.has(left.ordinal);
+        const rightRecent = recentOrdinalSet.has(right.ordinal);
+        if (leftRecent !== rightRecent) return leftRecent ? -1 : 1;
+        return leftRecent ? right.ordinal - left.ordinal : left.ordinal - right.ordinal;
+      });
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
       const recovery = await deps.recoverPendingOrdinals(
         localCgId,
@@ -331,7 +376,11 @@ export async function reconcileContextGraph(
   } else if (!hasUnvisitedCandidates) {
     state.scanOrdinal = state.watermark;
   } else if (ordinals.length > 0) {
-    state.scanOrdinal = ordinals[ordinals.length - 1]! + 1;
+    // A recent-priority ordinal is deliberately held in `ahead`; it must not
+    // jump the historical scan cursor to the chain head. Only the oldest-side
+    // slice advances that cursor, preserving eventual completeness under a
+    // continuously growing graph.
+    state.scanOrdinal = Math.max(state.watermark, historicalContinuationOrdinal);
   }
 
   const pending = ordinalsToReconcile(state, head).length;

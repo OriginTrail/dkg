@@ -240,6 +240,57 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(internals.subscribedContextGraphs.size).toBe(0);
   });
 
+  it('gives explicit Edge subscriptions balanced recent VM slots without changing Core ordering', async () => {
+    const target = {
+      kind: 'subscription',
+      sub: {
+        syncMode: 'always-on',
+        subscribed: true,
+        synced: true,
+        onChainId: '298',
+      },
+      onChainId: '298',
+      onChainCgId: 298n,
+      cursor: { watermark: 0, scanOrdinal: 0, ahead: new Map() },
+      watermarkBefore: 0,
+      bindingGeneration: 0,
+      bindingKind: 'authoritative',
+    };
+
+    const edgeChain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'Rfc64EdgeSubscribedVmPriority',
+      chainAdapter: edgeChain,
+      nodeRole: 'edge',
+    });
+    stubNode(agent);
+    let deps = (agent as any).createVmReconcileDeps(
+      'edge-selected-cg',
+      (agent as any).vmReconcileLifecycleGeneration,
+      target,
+    );
+    expect(deps.recentOrdinalsPerPass).toBeGreaterThan(0);
+
+    await agent.stop();
+    agent = null;
+    const coreChain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'Rfc64CoreHostedVmHistory',
+      chainAdapter: coreChain,
+      nodeRole: 'core',
+    });
+    stubNode(agent);
+    deps = (agent as any).createVmReconcileDeps(
+      'core-hosted-cg',
+      (agent as any).vmReconcileLifecycleGeneration,
+      {
+        ...target,
+        sub: { ...target.sub, coreHosted: true },
+      },
+    );
+    expect(deps.recentOrdinalsPerPass).toBe(0);
+  });
+
   it('preserves selected-only chain binding safety failures without creating cursor state', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'Rfc64SelectedVmAmbiguousBinding', chainAdapter: chain });

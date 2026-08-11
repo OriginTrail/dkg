@@ -6460,6 +6460,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             }
             : undefined,
           metadataFetcher: selectedMetaFetcher?.strategy,
+          snapshotRecoveryOrder: selectedSwmEnabled ? 'recent-balanced' : 'manifest',
           ensureContextGraph: async (contextGraphId) => {
             const graphManager = new GraphManager(this.store);
             await graphManager.ensureContextGraph(contextGraphId);

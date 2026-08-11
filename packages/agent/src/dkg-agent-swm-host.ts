@@ -3515,6 +3515,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ),
       maxOrdinalsPerPass: DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
       maxOrdinalConcurrency: DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY,
+      // Selected-only Edges are often cold and explicitly ask for a useful
+      // current view. Reserve 75% of each bounded slice for the newest missing
+      // chain ordinals while the remaining 25% advances history. Member/Core
+      // targets retain strict oldest-first order.
+      // Both RFC-64 configuration-only targets and ordinary Edge
+      // subscriptions represent explicit user intent.  A durable Edge
+      // subscription must not silently fall back to the historical-first
+      // Core lane merely because it has a ContextGraphSub row (the public
+      // subscribe API creates exactly that row).  Keep Core reconciliation
+      // historical-first: Core nodes own whole-corpus completeness, while an
+      // Edge user first needs a useful current view without starving history.
+      recentOrdinalsPerPass: (
+        target.kind === 'rfc64-selected'
+        || (
+          (this.config.nodeRole ?? 'edge') === 'edge'
+          && target.kind === 'subscription'
+          && target.sub.subscribed
+        )
+      )
+        ? Math.max(1, Math.floor(DKGAgentBase.VM_RECONCILE_BATCH_SIZE * 0.75))
+        : 0,
       isTargetCurrent: () => isTargetCurrent(),
       persistWatermark: (lcg, watermark) => {
         if (!isTargetCurrent()) return;

@@ -280,6 +280,11 @@ interface SharedMemorySyncContext {
   };
   /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
   metadataFetcher?: SharedMemoryMetadataFetcher;
+  /**
+   * Selected cold-join recovery may interleave recent snapshots with the
+   * oldest outstanding history. Ordinary sync preserves manifest order.
+   */
+  snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -320,6 +325,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     stopOnBackoffWorthyFailure = false,
     snapshotEvidencePolicy,
     metadataFetcher,
+    snapshotRecoveryOrder = 'manifest',
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -910,6 +916,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         contextGraphId: pid,
         deadline,
         metaQuads: processed.verifiedMeta,
+        recoveryOrder: snapshotRecoveryOrder,
         publicSnapshotStore,
         fetchSyncPages,
         deleteCheckpoint,
@@ -1202,6 +1209,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   contextGraphId: string;
   deadline: number;
   metaQuads: readonly Quad[];
+  recoveryOrder?: 'manifest' | 'recent-balanced';
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1241,7 +1249,10 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   yieldedAtDeadline: boolean;
 }> {
-  const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
+  const manifestSnapshots = collectPublicSnapshotMetadata(params.metaQuads);
+  const snapshots = params.recoveryOrder === 'recent-balanced'
+    ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots, params.metaQuads)
+    : manifestSnapshots;
   if (snapshots.length === 0) {
     return {
       bytesReceived: 0,
@@ -1465,6 +1476,113 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
     byRef.set(ref, metadata);
   }
   return [...byRef.values()];
+}
+
+interface PublicSnapshotRecency {
+  publishedAtMs?: number;
+  ualOrdinal?: bigint;
+}
+
+/**
+ * Build a deterministic 3:1 recent/history walk from verified metadata.
+ *
+ * `publishedAt` and the UAL suffix affect scheduling only; digest/count remain
+ * the integrity boundary. Missing or malformed recency hints fall back to the
+ * manifest index, and a manifest with no usable hints keeps its original order.
+ */
+export function orderPublicSnapshotsForBalancedRecency(
+  snapshots: readonly PublicSnapshotMetadata[],
+  metaQuads: readonly Quad[],
+): PublicSnapshotMetadata[] {
+  const bySubject = new Map<string, {
+    ref?: string;
+    digest?: string;
+    hasSnapshotGraph?: boolean;
+    publishedAtMs?: number;
+    ualOrdinal?: bigint;
+  }>();
+  for (const quad of metaQuads) {
+    if (
+      quad.predicate !== `${DKG}publicSnapshotRef`
+      && quad.predicate !== `${DKG}publicSnapshotGraph`
+      && quad.predicate !== `${DKG}publicQuadsDigest`
+      && quad.predicate !== `${DKG}publishedAt`
+      && quad.predicate !== `${DKG}kaUal`
+    ) continue;
+    const entry = bySubject.get(quad.subject) ?? {};
+    const value = stripLiteral(quad.object)?.trim();
+    if (quad.predicate === `${DKG}publicSnapshotRef`) entry.ref = value;
+    if (quad.predicate === `${DKG}publicSnapshotGraph`) entry.hasSnapshotGraph = true;
+    if (quad.predicate === `${DKG}publicQuadsDigest`) entry.digest = value;
+    if (quad.predicate === `${DKG}publishedAt` && value) {
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) entry.publishedAtMs = parsed;
+    }
+    if (quad.predicate === `${DKG}kaUal` && value) {
+      const match = value.match(/\/(\d+)$/);
+      if (match) {
+        try { entry.ualOrdinal = BigInt(match[1]!); } catch { /* scheduling hint only */ }
+      }
+    }
+    bySubject.set(quad.subject, entry);
+  }
+
+  const recencyByRef = new Map<string, PublicSnapshotRecency>();
+  const newer = (a: PublicSnapshotRecency, b: PublicSnapshotRecency): PublicSnapshotRecency => {
+    if ((b.publishedAtMs ?? -1) !== (a.publishedAtMs ?? -1)) {
+      return (b.publishedAtMs ?? -1) > (a.publishedAtMs ?? -1) ? b : a;
+    }
+    return (b.ualOrdinal ?? -1n) > (a.ualOrdinal ?? -1n) ? b : a;
+  };
+  for (const entry of bySubject.values()) {
+    if (entry.hasSnapshotGraph) continue;
+    const ref = entry.ref ?? entry.digest;
+    if (!ref) continue;
+    const recency: PublicSnapshotRecency = {
+      ...(entry.publishedAtMs !== undefined ? { publishedAtMs: entry.publishedAtMs } : {}),
+      ...(entry.ualOrdinal !== undefined ? { ualOrdinal: entry.ualOrdinal } : {}),
+    };
+    if (recency.publishedAtMs === undefined && recency.ualOrdinal === undefined) continue;
+    const current = recencyByRef.get(ref);
+    recencyByRef.set(ref, current ? newer(current, recency) : recency);
+  }
+  if (recencyByRef.size === 0 || snapshots.length < 2) return [...snapshots];
+
+  const manifestIndex = new Map(snapshots.map((snapshot, index) => [snapshot.ref, index]));
+  const ranked = [...snapshots].sort((a, b) => {
+    const aKey = recencyByRef.get(a.ref);
+    const bKey = recencyByRef.get(b.ref);
+    const aTime = aKey?.publishedAtMs;
+    const bTime = bKey?.publishedAtMs;
+    if (aTime !== undefined || bTime !== undefined) {
+      if (aTime === undefined) return -1;
+      if (bTime === undefined) return 1;
+      if (aTime !== bTime) return aTime - bTime;
+    }
+    const aOrdinal = aKey?.ualOrdinal;
+    const bOrdinal = bKey?.ualOrdinal;
+    if (aOrdinal !== undefined || bOrdinal !== undefined) {
+      if (aOrdinal === undefined) return -1;
+      if (bOrdinal === undefined) return 1;
+      if (aOrdinal !== bOrdinal) return aOrdinal < bOrdinal ? -1 : 1;
+    }
+    return (manifestIndex.get(a.ref) ?? 0) - (manifestIndex.get(b.ref) ?? 0);
+  });
+
+  const ordered: PublicSnapshotMetadata[] = [];
+  let oldest = 0;
+  let newest = ranked.length - 1;
+  while (oldest <= newest) {
+    for (let recent = 0; recent < 3 && oldest <= newest; recent += 1) {
+      ordered.push(ranked[newest]!);
+      newest -= 1;
+    }
+    if (oldest <= newest) {
+      ordered.push(ranked[oldest]!);
+      oldest += 1;
+    }
+  }
+  return ordered;
 }
 
 /**
