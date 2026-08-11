@@ -139,7 +139,9 @@ void rowTraversalSubpathContract;
 type ForkResolutionScalarsAreStrings =
   AgentProfileVerifiedForkResolutionFactsV1['forkedVersion'] extends string
     ? AgentProfileVerifiedForkResolutionFactsV1['authoritySequence'] extends string
-      ? true
+      ? AgentProfileVerifiedForkResolutionFactsV1['resolutionVersion'] extends string
+        ? true
+        : never
       : never
     : never;
 const forkResolutionScalarsAreStrings: ForkResolutionScalarsAreStrings = true;
