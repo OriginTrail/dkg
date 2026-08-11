@@ -2963,14 +2963,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       (message) => this.log.warn(ctx, message),
     );
     const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config);
+    const syncPartitions = 'partitions' in syncGlobalPolicy
+      ? syncGlobalPolicy.partitions
+      : undefined;
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
+      syncAdmissionMode: syncPartitions ? 'partitioned' : 'shared',
       snapshotGlobalRows: snapshotPolicy.budget.maxRows,
       snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,
       snapshotLocalRows: snapshotPolicy.budget.maxSnapshotRows,
       snapshotLocalBytesEstimate: snapshotPolicy.budget.maxSnapshotBytesEstimate,
       syncGlobalInflightLimit: syncGlobalPolicy.limit ?? 0,
       syncGlobalQueueLimit: syncGlobalPolicy.queueLimit ?? 0,
+      syncFastInflightLimit: syncPartitions?.fast.maxInflight,
+      syncFastQueueLimit: syncPartitions?.fast.queueLimit,
+      syncSlowInflightLimit: syncPartitions?.slow.maxInflight,
+      syncSlowForegroundReserved: syncPartitions?.slow.foregroundReserved,
+      syncSlowForegroundQueueLimit: syncPartitions?.slow.foregroundQueueLimit,
+      syncSlowBackgroundInflightLimit: syncPartitions?.slow.backgroundMaxInflight,
+      syncSlowBackgroundQueueLimit: syncPartitions?.slow.backgroundQueueLimit,
       configuredPriorities: configuredPriorityCounts,
       snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
     })}`);

@@ -63,6 +63,7 @@ import type {
   ResolvedRfc64PublicCatalogAutoPublishPolicyV1,
 } from './rfc64/public-catalog-activation-config-v1.js';
 import type {
+  SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from './sync/policy.js';
@@ -1480,6 +1481,8 @@ export interface DKGAgentConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
   /** Daemon-local retained responder snapshot row/estimated-byte policy. */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**

@@ -154,6 +154,7 @@ export {
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
   type SyncAdmissionSource,
+  type SyncAdmissionConfig,
   type SyncContextGraphPriorityConfig,
   type SyncPriorityClass,
   type SyncResponderSnapshotLimitsConfig,

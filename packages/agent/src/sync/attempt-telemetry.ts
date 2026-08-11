@@ -104,6 +104,7 @@ export type SyncOperationOutcome = (typeof SYNC_OPERATION_OUTCOMES)[number];
 
 export const SYNC_OPERATION_REJECTION_REASONS = [
   'queue_full',
+  'queue_timeout',
   'displaced',
   'aborted_before_start',
 ] as const;

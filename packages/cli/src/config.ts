@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
+  SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
@@ -662,6 +663,8 @@ export interface DkgConfig {
   syncGlobalLimit?: number;
   /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
   /** Retained sync responder snapshot limits (rows and estimated bytes). */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**

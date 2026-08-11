@@ -24,7 +24,36 @@ export type SyncSchedulerLane =
   | 'shared_memory'
   | 'swm_recovery'
   | 'pre_authorization'
-  | 'responder';
+  | 'responder'
+  | 'fast'
+  | 'slow';
+
+/**
+ * Optional node-wide sync admission partitions. Omitting this block preserves
+ * the legacy shared limiter (`syncGlobalMaxInflight` / `syncGlobalQueueLimit`).
+ *
+ * A partitioned scheduler protects short changelog/control-plane work from
+ * snapshot transfers, and reserves part of the slow partition for explicit
+ * foreground recovery. Automatic work is non-queueing by default: the
+ * on-connect/reconcile drivers already retry it, so retaining duplicate bulk
+ * jobs here can convert transient pressure into a permanent backlog.
+ */
+export interface SyncAdmissionConfig {
+  mode?: 'shared' | 'partitioned';
+  globalMaxInflight?: number;
+  fast?: {
+    maxInflight?: number;
+    queueLimit?: number;
+    queueTimeoutMs?: number;
+  };
+  slow?: {
+    maxInflight?: number;
+    foregroundReserved?: number;
+    foregroundQueueLimit?: number;
+    backgroundMaxInflight?: number;
+    backgroundQueueLimit?: number;
+  };
+}
 
 /**
  * Which trigger enqueued a `sync-global` admission.

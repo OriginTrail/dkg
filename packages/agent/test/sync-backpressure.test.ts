@@ -1126,6 +1126,85 @@ describe('sync global backpressure', () => {
     }
   });
 
+  it('resolves the safe partitioned policy when syncAdmission is present', () => {
+    const oldMaxInflight = process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
+    const oldLegacyLimit = process.env.DKG_SYNC_GLOBAL_LIMIT;
+    try {
+      delete process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
+      delete process.env.DKG_SYNC_GLOBAL_LIMIT;
+
+      expect(resolveSyncGlobalBackpressure({ syncAdmission: {} })).toEqual({
+        limit: 10,
+        queueLimit: 72,
+        partitions: {
+          fast: { maxInflight: 8, queueLimit: 64, queueTimeoutMs: 5_000 },
+          slow: {
+            maxInflight: 2,
+            foregroundReserved: 1,
+            foregroundQueueLimit: 8,
+            backgroundMaxInflight: 1,
+            backgroundQueueLimit: 0,
+          },
+        },
+      });
+      expect(resolveSyncGlobalBackpressure({
+        syncGlobalMaxInflight: 1,
+        syncGlobalQueueLimit: 0,
+        syncAdmission: {
+          globalMaxInflight: 5,
+          fast: { maxInflight: 3, queueLimit: 4, queueTimeoutMs: 25 },
+          slow: {
+            maxInflight: 2,
+            foregroundReserved: 1,
+            foregroundQueueLimit: 2,
+            backgroundMaxInflight: 1,
+            backgroundQueueLimit: 0,
+          },
+        },
+      })).toEqual({
+        limit: 5,
+        queueLimit: 6,
+        partitions: {
+          fast: { maxInflight: 3, queueLimit: 4, queueTimeoutMs: 25 },
+          slow: {
+            maxInflight: 2,
+            foregroundReserved: 1,
+            foregroundQueueLimit: 2,
+            backgroundMaxInflight: 1,
+            backgroundQueueLimit: 0,
+          },
+        },
+      });
+      expect(resolveSyncGlobalBackpressure({
+        syncGlobalMaxInflight: 3,
+        syncGlobalQueueLimit: 1,
+        syncAdmission: { mode: 'shared' },
+      })).toEqual({ limit: 3, queueLimit: 1 });
+    } finally {
+      if (oldMaxInflight === undefined) delete process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
+      else process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT = oldMaxInflight;
+      if (oldLegacyLimit === undefined) delete process.env.DKG_SYNC_GLOBAL_LIMIT;
+      else process.env.DKG_SYNC_GLOBAL_LIMIT = oldLegacyLimit;
+    }
+  });
+
+  it('rejects partition settings that consume the reserved foreground capacity', () => {
+    expect(() => resolveSyncGlobalBackpressure({
+      syncAdmission: {
+        globalMaxInflight: 4,
+        fast: { maxInflight: 2 },
+        slow: {
+          maxInflight: 2,
+          foregroundReserved: 1,
+          backgroundMaxInflight: 2,
+        },
+      },
+    })).toThrow('must leave foregroundReserved slow slots');
+    expect(() => resolveSyncGlobalBackpressure({
+      syncAdmission: { mode: 'invalid' } as never,
+    })).toThrow('Invalid syncAdmission.mode');
+  });
+
   it('disables the complete policy when the inflight limit is zero', () => {
     const oldMaxInflight = process.env.DKG_SYNC_GLOBAL_MAX_INFLIGHT;
     const oldLegacyLimit = process.env.DKG_SYNC_GLOBAL_LIMIT;
@@ -1910,5 +1989,224 @@ describe('sync global backpressure', () => {
     releaseA();
     releaseB();
     await Promise.all([first, second]);
+  });
+
+  it('keeps fast capacity and one slow foreground slot available while background sync is active', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncAdmission: {
+        globalMaxInflight: 3,
+        fast: { maxInflight: 1, queueLimit: 2, queueTimeoutMs: 100 },
+        slow: {
+          maxInflight: 2,
+          foregroundReserved: 1,
+          foregroundQueueLimit: 2,
+          backgroundMaxInflight: 1,
+          backgroundQueueLimit: 0,
+        },
+      },
+    });
+    const events: string[] = [];
+    let releaseBackground: (() => void) | undefined;
+    let releaseForeground: (() => void) | undefined;
+    let releaseFast: (() => void) | undefined;
+
+    const background = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:background', lane: 'durable', source: 'on-connect',
+    }, async () => {
+      events.push('background-start');
+      await new Promise<void>((resolve) => { releaseBackground = resolve; });
+    });
+    await tick();
+
+    await expect(withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:background-duplicate', lane: 'durable', source: 'reconcile',
+    }, async () => { events.push('background-duplicate-start'); }))
+      .rejects.toMatchObject({ reason: 'queue_full' });
+
+    const foreground = withGlobalSyncBackpressure({
+      policy, ctx, label: 'durable:foreground', lane: 'durable', source: 'catchup-foreground',
+    }, async () => {
+      events.push('foreground-start');
+      await new Promise<void>((resolve) => { releaseForeground = resolve; });
+    });
+    const fast = withGlobalSyncBackpressure({
+      policy, ctx, label: 'changelog:delta', lane: 'changelog', source: 'reconcile',
+    }, async () => {
+      events.push('fast-start');
+      await new Promise<void>((resolve) => { releaseFast = resolve; });
+    });
+    await tick();
+
+    try {
+      expect(events).toEqual(['background-start', 'foreground-start', 'fast-start']);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({
+        inflight: 3,
+        queued: 0,
+        limit: 3,
+        queueLimit: 4,
+      });
+    } finally {
+      releaseBackground?.();
+      releaseForeground?.();
+      releaseFast?.();
+      await Promise.all([background, foreground, fast]);
+    }
+  });
+
+  it('keeps selected recovery reserved inside the partitioned slow lane', async () => {
+    const ctx = createOperationContext('sync');
+    const selectedCg = 'urn:cg:partitioned-selected';
+    const policy = resolveSyncGlobalBackpressure({
+      selectedRecoveryContextGraphIds: [selectedCg],
+      syncAdmission: {
+        globalMaxInflight: 3,
+        fast: { maxInflight: 1, queueLimit: 2, queueTimeoutMs: 100 },
+        slow: {
+          maxInflight: 2,
+          foregroundReserved: 1,
+          foregroundQueueLimit: 2,
+          backgroundMaxInflight: 1,
+          backgroundQueueLimit: 0,
+        },
+      },
+    });
+    const events: string[] = [];
+    let releaseBackground!: () => void;
+    let releaseSelected!: () => void;
+    let releaseFast!: () => void;
+
+    const background = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: 'urn:cg:unrelated',
+      label: 'durable:unrelated-vm-recovery',
+      lane: 'durable',
+      source: 'vm-recovery',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('background-start');
+      releaseBackground = resolve;
+    }));
+    await tick();
+
+    await expect(withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: 'urn:cg:another-unrelated',
+      label: 'swm-recovery:unrelated',
+      lane: 'swm_recovery',
+      source: 'swm-recovery',
+    }, async () => { events.push('second-background-start'); }))
+      .rejects.toMatchObject({ reason: 'queue_full' });
+
+    const selected = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-vm-recovery',
+      lane: 'durable',
+      source: 'vm-recovery',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('selected-start');
+      releaseSelected = resolve;
+    }));
+    const fast = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      label: 'changelog:selected-delta',
+      lane: 'changelog',
+      source: 'reconcile',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('fast-start');
+      releaseFast = resolve;
+    }));
+    await tick();
+
+    try {
+      expect(events).toEqual(['background-start', 'selected-start', 'fast-start']);
+      expect(getSyncBackpressureSnapshot(policy)).toMatchObject({
+        inflight: 3,
+        queued: 0,
+        limit: 3,
+      });
+    } finally {
+      releaseBackground();
+      releaseSelected();
+      releaseFast();
+      await Promise.all([background, selected, fast]);
+    }
+  });
+
+  it('bounds fast queue wait with the configured timeout', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncAdmission: {
+        globalMaxInflight: 2,
+        fast: { maxInflight: 1, queueLimit: 1, queueTimeoutMs: 10 },
+        slow: {
+          maxInflight: 1,
+          foregroundReserved: 1,
+          foregroundQueueLimit: 0,
+          backgroundMaxInflight: 0,
+          backgroundQueueLimit: 0,
+        },
+      },
+    });
+    let releaseRunning!: () => void;
+    const running = withGlobalSyncBackpressure({
+      policy, ctx, label: 'changelog:running', lane: 'changelog', source: 'reconcile',
+    }, async () => new Promise<void>((resolve) => { releaseRunning = resolve; }));
+    await tick();
+
+    try {
+      await expect(withGlobalSyncBackpressure({
+        policy, ctx, label: 'changelog:queued', lane: 'changelog', source: 'reconcile',
+      }, async () => {})).rejects.toMatchObject({ reason: 'queue_timeout' });
+    } finally {
+      releaseRunning();
+      await running;
+    }
+  });
+
+  it('publishes real fast/slow partitions from the production sync-global queue', async () => {
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({ syncAdmission: {} });
+    let releaseFast!: () => void;
+    let releaseSlow!: () => void;
+    const fastWork = withGlobalSyncBackpressure(
+      { policy, ctx, label: 'changelog:delta', lane: 'changelog', source: 'reconcile' },
+      async () => new Promise<void>((resolve) => { releaseFast = resolve; }),
+    );
+    const slowWork = withGlobalSyncBackpressure(
+      { policy, ctx, label: 'durable:snapshot', lane: 'durable', source: 'on-connect' },
+      async () => new Promise<void>((resolve) => { releaseSlow = resolve; }),
+    );
+    await tick();
+
+    try {
+      const snapshot = backpressureRegistry.capture().schedulers.find(
+        (scheduler) => scheduler.scheduler === 'sync-global',
+      );
+      expect(snapshot).toMatchObject({
+        capacityModel: 'partitioned',
+        totals: { queueLimit: 72, inflightLimit: 10, inflight: 2 },
+      });
+      expect(snapshot!.lanes.find((lane) => lane.lane === 'fast')).toMatchObject({
+        capacityModel: 'partitioned',
+        queueLimit: 64,
+        inflightLimit: 8,
+        inflight: 1,
+      });
+      expect(snapshot!.lanes.find((lane) => lane.lane === 'slow')).toMatchObject({
+        capacityModel: 'partitioned',
+        queueLimit: 8,
+        inflightLimit: 2,
+        inflight: 1,
+      });
+    } finally {
+      releaseFast();
+      releaseSlow();
+      await Promise.all([fastWork, slowWork]);
+    }
   });
 });

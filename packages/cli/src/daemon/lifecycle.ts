@@ -1802,6 +1802,7 @@ export async function runDaemonInner(
     syncGlobalMaxInflight: config.syncGlobalMaxInflight,
     syncGlobalLimit: config.syncGlobalLimit,
     syncGlobalQueueLimit: config.syncGlobalQueueLimit,
+    syncAdmission: config.syncAdmission,
     syncResponderSnapshotLimits: config.syncResponderSnapshotLimits,
     syncContextGraphPriorities: config.syncContextGraphPriorities,
     storageAckHandlerDeadlineMs: config.storageAckHandlerDeadlineMs,
