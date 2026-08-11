@@ -77,5 +77,14 @@ describe('changelog lane exclusion policy (#2052 D-13)', () => {
   // Pinning either value would convert that question into a contract: asserting
   // `false` today would read as clearance it never received, and a later
   // decision to exclude it would then surface as a regression rather than as
-  // the decision it is. The policy's docblock is where that status is recorded.
+  // the decision it is. The policy records it as `undecided-rides-changelog-lane`,
+  // which is a state, not a permission.
+  //
+  // EXHAUSTIVENESS IS NOT TESTED HERE BECAUSE IT IS ENFORCED EARLIER. The
+  // disposition table is `satisfies Record<SystemContextGraphId, ...>`, so a new
+  // member of SYSTEM_CONTEXT_GRAPHS fails the BUILD, not a test. That was
+  // verified by counterfactual rather than assumed: adding a third member made
+  // `tsc` reject the table with TS1360 until it was given a disposition. A
+  // runtime mirror would need a new export whose only consumer is this file,
+  // and would fire strictly later than the compile error it duplicates.
 });

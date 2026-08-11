@@ -31,19 +31,47 @@ export function automaticDurableSyncContextGraphs(
   return [...new Set(ordered)];
 }
 
+type SystemContextGraphId = (typeof SYSTEM_CONTEXT_GRAPHS)[keyof typeof SYSTEM_CONTEXT_GRAPHS];
+
 /**
- * System Context Graphs excluded from the OT-RFC-59 changelog lane, i.e. the
- * ones that ride the legacy durable lane whatever the peer advertises.
+ * What a system Context Graph does at the durable-sync lane fork.
  *
- * `ontology` is deliberately ABSENT rather than cleared. Its changelog
- * disposition has not been decided and belongs to the ontology-plane work; do
- * not read its absence here as "we considered it and let it ride the lane."
- * That distinction is the reason this list exists as a policy rather than as an
- * inline comparison — an identity test has nowhere to record an open question.
+ * The two states are NOT "excluded" and "included" — they are "decided" and
+ * "not decided". Collapsing the second into a boolean `false` is exactly the
+ * loss this type exists to prevent, because it makes an unanswered question
+ * indistinguishable from an answered one.
  */
-const CHANGELOG_LANE_EXCLUDED_SYSTEM_CONTEXT_GRAPHS: readonly string[] = [
-  SYSTEM_CONTEXT_GRAPHS.AGENTS,
-];
+export type ChangelogLaneDisposition =
+  /** DECIDED: rides the legacy durable lane, never the changelog lane. */
+  | 'excluded-rides-legacy'
+  /**
+   * NOT DECIDED. The graph currently reaches the changelog lane because nothing
+   * excludes it — the absence of a decision, not a decision to allow it. Do not
+   * cite this value as clearance.
+   */
+  | 'undecided-rides-changelog-lane';
+
+/**
+ * Lane disposition for EVERY system Context Graph.
+ *
+ * The `satisfies Record<SystemContextGraphId, ...>` is the enforcement, and it
+ * is the point of this table rather than a decoration: adding a member to
+ * `SYSTEM_CONTEXT_GRAPHS` makes this object stop satisfying the constraint and
+ * FAILS THE BUILD until someone states that graph's lane disposition. Verified
+ * by construction — a third member was added experimentally and `tsc` rejected
+ * this table until it was given a value.
+ *
+ * That matters because the sibling policy cannot ask the same question: the
+ * verification-posture check (`acceptUnverified`) keys on membership of the
+ * WHOLE set via `Object.values(SYSTEM_CONTEXT_GRAPHS).includes(...)`, so it
+ * absorbs a new member SILENTLY and grants it the merkle bypass with nobody
+ * deciding anything. This table cannot close that gap on the verification side;
+ * it closes it on the lane side and makes the omission loud.
+ */
+const CHANGELOG_LANE_DISPOSITIONS = {
+  [SYSTEM_CONTEXT_GRAPHS.AGENTS]: 'excluded-rides-legacy',
+  [SYSTEM_CONTEXT_GRAPHS.ONTOLOGY]: 'undecided-rides-changelog-lane',
+} as const satisfies Record<SystemContextGraphId, ChangelogLaneDisposition>;
 
 /**
  * Does this Context Graph stay on the legacy durable lane instead of riding the
@@ -72,18 +100,20 @@ const CHANGELOG_LANE_EXCLUDED_SYSTEM_CONTEXT_GRAPHS: readonly string[] = [
  * cursor is ever established for it, which is the only shape that stays
  * reversible.
  *
- * DRIFT WARNING — the reason this is a named policy and not a branch. Lane
- * exclusion (this set) and verification posture (`acceptUnverified`, which keys
- * on membership of the WHOLE `SYSTEM_CONTEXT_GRAPHS` set) are related policies
- * maintained in SEPARATE places. A system Context Graph added tomorrow joins
- * the verification-bypass set automatically and this set not at all, so it
- * silently inherits `ontology`'s posture. Adding a member to
- * `SYSTEM_CONTEXT_GRAPHS` therefore obliges an explicit decision here, and
- * nothing in the type system will ask for it.
+ * RESIDUAL DRIFT, now HALF closed rather than merely documented. Lane
+ * disposition (this table) and verification posture (`acceptUnverified`) are
+ * related policies maintained in separate places and keyed differently: this
+ * table is EXHAUSTIVE over the system graphs and fails the build when a member
+ * is added, whereas `acceptUnverified` keys on membership of the whole set and
+ * therefore absorbs a new member silently. So a graph added tomorrow can no
+ * longer slip past the LANE decision, but it still receives the merkle bypass
+ * with nobody deciding. Closing that second half is not this module's to do.
  *
  * Pure by construction: no store reads, no async. The private-graph divert is a
  * separate, asynchronous decision and stays at its call site.
  */
 export function isSystemContextGraphExcludedFromChangelogLane(contextGraphId: string): boolean {
-  return CHANGELOG_LANE_EXCLUDED_SYSTEM_CONTEXT_GRAPHS.includes(contextGraphId);
+  const disposition: ChangelogLaneDisposition | undefined =
+    (CHANGELOG_LANE_DISPOSITIONS as Record<string, ChangelogLaneDisposition>)[contextGraphId];
+  return disposition === 'excluded-rides-legacy';
 }
