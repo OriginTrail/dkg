@@ -58,6 +58,7 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(result).toEqual({
       durable: null,
       shared: { deferredBackpressure: 1 },
+      skippedPlanes: { durable: 'leading-plane-deferred' },
     });
     expect(order).toEqual(['shared']);
     expect(syncDurable).not.toHaveBeenCalled();
@@ -94,6 +95,7 @@ describe('runCatchupPlanesWithPolicy', () => {
     expect(result).toEqual({
       durable: { deferredBackpressure: 0 },
       shared: { deferredBackpressure: 0 },
+      skippedPlanes: {},
     });
     expect(order).toEqual(['durable-1', 'durable-2', 'shared']);
     expect(priorities).toEqual([
@@ -152,6 +154,7 @@ describe('runCatchupPlanesWithPolicy', () => {
 
     expect(result.durable.deferredBackpressure).toBe(1);
     expect(result.shared).toBeNull();
+    expect(result.skippedPlanes).toEqual({ shared: 'leading-plane-deferred' });
     expect(syncSharedMemory).not.toHaveBeenCalled();
     // Far past the four attempts the fixed ladder allowed.
     expect(syncDurable.mock.calls.length).toBeGreaterThan(4);
@@ -290,6 +293,7 @@ describe('runCatchupPlanesWithPolicy', () => {
 
     expect(result.durable.deferredBackpressure).toBe(1);
     expect(result.shared).toBeNull();
+    expect(result.skippedPlanes).toEqual({ shared: 'leading-plane-deferred' });
     expect(syncDurable).toHaveBeenCalledTimes(1);
     expect(syncSharedMemory).not.toHaveBeenCalled();
     expect(priorities).toEqual([undefined]);

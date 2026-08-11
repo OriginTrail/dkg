@@ -54,7 +54,7 @@ type SyncCapacityClaim =
   }
   | {
     readonly kind: 'selected-recovery';
-    readonly automaticBackground: boolean;
+    readonly contextGraphId: string;
   };
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
@@ -87,61 +87,155 @@ function syncAdmissionOperation(payload: GlobalQueuePayload): string {
   return `${syncOperationClass(payload.label)}:${normalizeSyncAdmissionSource(payload.source)}`;
 }
 
-let inflight = 0;
-let automaticBackgroundInflight = 0;
-const ordinarySelectedScopeInflight = new Map<string, number>();
+class SyncCapacityTracker {
+  private inflight = 0;
+  private automaticBackgroundInflight = 0;
+  private selectedRecoveryInflight = 0;
+  private ordinarySelectedScopeInflightTotal = 0;
+  private readonly ordinarySelectedScopeInflight = new Map<string, number>();
+
+  get inflightCount(): number {
+    return this.inflight;
+  }
+
+  classify(input: {
+    contextGraphId?: string;
+    source: SyncAdmissionSource;
+    selectedSwmPriority: boolean;
+    selectedRecoveryScope: boolean;
+  }): SyncCapacityClaim {
+    const automaticBackground = input.source === 'on-connect'
+      || input.source === 'reconcile'
+      || input.source === 'vm-recovery'
+      || input.source === 'swm-recovery'
+      || input.source === 'catchup-background';
+    if (
+      input.selectedRecoveryScope
+      && input.contextGraphId !== undefined
+      && (
+        input.selectedSwmPriority
+        || input.source === 'vm-recovery'
+        || input.source === 'swm-recovery'
+      )
+    ) {
+      return { kind: 'selected-recovery', contextGraphId: input.contextGraphId };
+    }
+    if (input.selectedRecoveryScope && input.contextGraphId !== undefined) {
+      return {
+        kind: 'ordinary-selected-scope',
+        contextGraphId: input.contextGraphId,
+        automaticBackground,
+      };
+    }
+    return automaticBackground ? { kind: 'automatic-background' } : { kind: 'unrestricted' };
+  }
+
+  canRun(claim: SyncCapacityClaim, limit: number, automaticBackgroundLimit: number): boolean {
+    if (this.inflight >= limit) return false;
+    if (
+      this.isAutomaticBackground(claim)
+      && this.automaticBackgroundInflight >= automaticBackgroundLimit
+    ) return false;
+    if (
+      limit > 1
+      && claim.kind === 'ordinary-selected-scope'
+      && (this.ordinarySelectedScopeInflight.get(claim.contextGraphId) ?? 0) >= limit - 1
+    ) return false;
+
+    // As soon as selected-scope fallback is active (or asks to become active),
+    // every non-selected claim shares only limit - 1 slots. This keeps the last
+    // slot available for exact VM or selected-SWM recovery instead of allowing
+    // unrelated foreground/recovery work to consume it. Existing work is never
+    // pre-empted; admission simply waits for a safe boundary.
+    const selectedReservationActive = this.ordinarySelectedScopeInflightTotal > 0
+      || claim.kind === 'ordinary-selected-scope';
+    const nonSelectedInflight = this.inflight - this.selectedRecoveryInflight;
+    return !(
+      limit > 1
+      && selectedReservationActive
+      && claim.kind !== 'selected-recovery'
+      && nonSelectedInflight >= limit - 1
+    );
+  }
+
+  start(claim: SyncCapacityClaim): () => void {
+    this.increment(claim);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.decrement(claim);
+    };
+  }
+
+  rollback(claim: SyncCapacityClaim): void {
+    this.decrement(claim);
+  }
+
+  private isAutomaticBackground(claim: SyncCapacityClaim): boolean {
+    return claim.kind === 'automatic-background'
+      || (claim.kind === 'ordinary-selected-scope' && claim.automaticBackground);
+  }
+
+  private increment(claim: SyncCapacityClaim): void {
+    this.inflight += 1;
+    if (this.isAutomaticBackground(claim)) this.automaticBackgroundInflight += 1;
+    if (claim.kind === 'selected-recovery') this.selectedRecoveryInflight += 1;
+    if (claim.kind === 'ordinary-selected-scope') {
+      this.ordinarySelectedScopeInflightTotal += 1;
+      this.ordinarySelectedScopeInflight.set(
+        claim.contextGraphId,
+        (this.ordinarySelectedScopeInflight.get(claim.contextGraphId) ?? 0) + 1,
+      );
+    }
+  }
+
+  private decrement(claim: SyncCapacityClaim): void {
+    this.inflight = Math.max(0, this.inflight - 1);
+    if (this.isAutomaticBackground(claim)) {
+      this.automaticBackgroundInflight = Math.max(0, this.automaticBackgroundInflight - 1);
+    }
+    if (claim.kind === 'selected-recovery') {
+      this.selectedRecoveryInflight = Math.max(0, this.selectedRecoveryInflight - 1);
+    }
+    if (claim.kind === 'ordinary-selected-scope') {
+      this.ordinarySelectedScopeInflightTotal = Math.max(
+        0,
+        this.ordinarySelectedScopeInflightTotal - 1,
+      );
+      const next = Math.max(
+        0,
+        (this.ordinarySelectedScopeInflight.get(claim.contextGraphId) ?? 0) - 1,
+      );
+      if (next === 0) this.ordinarySelectedScopeInflight.delete(claim.contextGraphId);
+      else this.ordinarySelectedScopeInflight.set(claim.contextGraphId, next);
+    }
+  }
+}
+
+const capacityTracker = new SyncCapacityTracker();
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   now: () => performance.now(),
-  canRun: (entry) => (
-    inflight < entry.payload.limit
-    && (
-      !claimIsAutomaticBackground(entry.payload.capacityClaim)
-      || automaticBackgroundInflight < entry.payload.automaticBackgroundLimit
-    )
-    && (
-      entry.payload.limit <= 1
-      || entry.payload.capacityClaim.kind !== 'ordinary-selected-scope'
-      || (ordinarySelectedScopeInflight.get(entry.payload.capacityClaim.contextGraphId) ?? 0)
-        < entry.payload.limit - 1
-    )
+  canRun: (entry) => capacityTracker.canRun(
+    entry.payload.capacityClaim,
+    entry.payload.limit,
+    entry.payload.automaticBackgroundLimit,
   ),
   onStart: (entry) => {
-    inflight += 1;
     const { capacityClaim } = entry.payload;
-    const automaticBackground = claimIsAutomaticBackground(capacityClaim);
-    if (automaticBackground) automaticBackgroundInflight += 1;
-    if (capacityClaim.kind === 'ordinary-selected-scope') {
-      const { contextGraphId } = capacityClaim;
-      ordinarySelectedScopeInflight.set(
-        contextGraphId,
-        (ordinarySelectedScopeInflight.get(contextGraphId) ?? 0) + 1,
-      );
-    }
+    const releaseCapacity = capacityTracker.start(capacityClaim);
     lastLimit = entry.payload.limit;
-    getMetrics().syncGlobalInflight.record(inflight);
+    getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
     return () => {
-      inflight = Math.max(0, inflight - 1);
-      if (automaticBackground) {
-        automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
-      }
-      if (capacityClaim.kind === 'ordinary-selected-scope') {
-        decrementOrdinarySelectedScopeInflight(capacityClaim.contextGraphId);
-      }
-      getMetrics().syncGlobalInflight.record(inflight);
+      releaseCapacity();
+      getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
     };
   },
   onStartFailureRollback: (entry) => {
-    inflight = Math.max(0, inflight - 1);
-    const { capacityClaim } = entry.payload;
-    if (claimIsAutomaticBackground(capacityClaim)) {
-      automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
-    }
-    if (capacityClaim.kind === 'ordinary-selected-scope') {
-      decrementOrdinarySelectedScopeInflight(capacityClaim.contextGraphId);
-    }
-    getMetrics().syncGlobalInflight.record(inflight);
+    capacityTracker.rollback(entry.payload.capacityClaim);
+    getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
   observability: {
@@ -160,50 +254,6 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
 });
 const automaticBackgroundLimits = new WeakMap<object, number>();
 const selectedRecoveryScopeIds = new WeakMap<object, ReadonlySet<string>>();
-
-function decrementOrdinarySelectedScopeInflight(contextGraphId: string): void {
-  const next = Math.max(0, (ordinarySelectedScopeInflight.get(contextGraphId) ?? 0) - 1);
-  if (next === 0) ordinarySelectedScopeInflight.delete(contextGraphId);
-  else ordinarySelectedScopeInflight.set(contextGraphId, next);
-}
-
-function claimIsAutomaticBackground(claim: SyncCapacityClaim): boolean {
-  return claim.kind === 'automatic-background'
-    || (
-      (claim.kind === 'ordinary-selected-scope' || claim.kind === 'selected-recovery')
-      && claim.automaticBackground
-    );
-}
-
-function capacityClaimFor(input: {
-  contextGraphId?: string;
-  source: SyncAdmissionSource;
-  selectedSwmPriority: boolean;
-  selectedRecoveryScope: boolean;
-}): SyncCapacityClaim {
-  const automaticBackground = !input.selectedSwmPriority && (
-    input.source === 'on-connect'
-    || input.source === 'reconcile'
-    || input.source === 'vm-recovery'
-    || input.source === 'swm-recovery'
-    || input.source === 'catchup-background'
-  );
-  if (
-    input.selectedSwmPriority
-    || input.source === 'vm-recovery'
-    || input.source === 'swm-recovery'
-  ) {
-    return { kind: 'selected-recovery', automaticBackground };
-  }
-  if (input.selectedRecoveryScope && input.contextGraphId !== undefined) {
-    return {
-      kind: 'ordinary-selected-scope',
-      contextGraphId: input.contextGraphId,
-      automaticBackground,
-    };
-  }
-  return automaticBackground ? { kind: 'automatic-background' } : { kind: 'unrestricted' };
-}
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'displaced';
 
@@ -260,7 +310,7 @@ function acquire(
       label: options.label,
       contextGraphId: options.contextGraphId,
       source: options.source,
-      capacityClaim: capacityClaimFor({
+      capacityClaim: capacityTracker.classify({
         contextGraphId: options.contextGraphId,
         source: options.source,
         selectedSwmPriority: options.selectedSwmPriority,
@@ -276,7 +326,7 @@ function acquire(
     queueLimit,
     createBusyError: () => new SyncBackpressureBusyError(
       `Sync backpressure rejected ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${queuedBefore}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit})`,
     ),
     createDisplacedError: (victim) => new SyncBackpressureBusyError(
         `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
@@ -393,7 +443,7 @@ export function getSyncBackpressureSnapshot(
   };
   for (const entry of queue.entries()) queuedByPriorityClass[entry.priorityClass] += 1;
   return {
-    inflight,
+    inflight: capacityTracker.inflightCount,
     queued: queue.length,
     limit: policy ? policy.limit ?? null : lastLimit,
     queueLimit: policy ? policy.queueLimit ?? null : lastQueueLimit,
@@ -465,7 +515,7 @@ export async function withGlobalSyncBackpressure<T>(
     options.logInfo?.(
       options.ctx,
       `Sync backpressure queued ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
     );
   }
   const release = await admission.release;
@@ -473,7 +523,7 @@ export async function withGlobalSyncBackpressure<T>(
     options.logInfo?.(
       options.ctx,
       `Sync backpressure running ${options.label} `
-        + `(global inflight=${inflight}/${limit}, queued=${queue.length}/${queueLimit})`,
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit})`,
     );
     return await work();
   } finally {

@@ -167,6 +167,11 @@ export interface CatchupPlanePolicyResult<
 > {
   durable: TDurable | null;
   shared: TShared | null;
+  /** Explicit reason for every plane this policy intentionally did not run. */
+  skippedPlanes: Readonly<Partial<Record<
+    'durable' | 'shared',
+    'not-requested' | 'leading-plane-deferred'
+  >>>;
 }
 
 export interface CatchupDurableFirstPolicyResult<
@@ -387,16 +392,26 @@ export async function runCatchupPlanesWithPolicy<
   if (options.planeOrder === 'shared-first' && options.includeSharedMemory) {
     const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, options);
     if ((shared.deferredBackpressure ?? 0) > 0) {
-      return { durable: null, shared };
+      return {
+        durable: null,
+        shared,
+        skippedPlanes: { durable: 'leading-plane-deferred' },
+      };
     }
     const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, options);
-    return { durable, shared };
+    return { durable, shared, skippedPlanes: {} };
   }
   const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, options);
   if (!options.includeSharedMemory || (durable.deferredBackpressure ?? 0) > 0) {
-    return { durable, shared: null };
+    return {
+      durable,
+      shared: null,
+      skippedPlanes: {
+        shared: options.includeSharedMemory ? 'leading-plane-deferred' : 'not-requested',
+      },
+    };
   }
 
   const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, options);
-  return { durable, shared };
+  return { durable, shared, skippedPlanes: {} };
 }
