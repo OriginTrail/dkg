@@ -78,6 +78,14 @@ describe('core candidate head construction', { timeout: SUITE_TIMEOUT_MS }, () =
   // contradiction itself -- change the field the other axis names and the
   // digest moves -- which is the evidence a contradiction rule owes in place of
   // a citation.
+  //
+  // WHAT THIS DEMONSTRATES AND WHAT IT DOES NOT. It is a statement about THIS
+  // referent, and only F2 generalises past it: F and G are both relative to the
+  // current head, so no referent satisfies both. F1 and F3 pair relative F with
+  // an ABSOLUTE axis, and their escape is a second referent rather than a second
+  // object -- so they are HARNESS LIMITATIONS, relabelled as such in
+  // CORE_HARNESS_LIMITATIONS_V1. The digests below still move; the inference
+  // 'therefore the system refuses it' is the part that was wrong.
   it('demonstrates that digest equality forces every field an axis could vary', () => {
     const current = CORE_CURRENT_HEAD_V1 as unknown as Record<string, unknown>;
 
@@ -129,8 +137,9 @@ describe('core candidate head construction', { timeout: SUITE_TIMEOUT_MS }, () =
    * The derivation. Axis F applies only where D and E are both 'equal', which is
    * 1 of the 7 (D,E,F) combinations, so F='equal' owns 1/7 of the present
    * region: 5 surviving (C,H,K) triples x B(4) x G(2) x I(3) x J(64) x L(3) =
-   * 23,040 constructible cells. The three contradiction rules then split it, in
-   * the order the builder tests them:
+   * 23,040 constructible cells. The three axis-F rules then split it -- one
+   * contradiction (F2) and two harness limitations (F1, F3), whose COUNTS are
+   * unaffected by that relabelling -- in the order the builder tests them:
    *   F1 state:      C=tombstone, which is 1 of the 5 triples
    *                    1 x 4 x 2 x 3 x 64 x 3  =  4,608
    *   F2 transition: G='differ' over the 4 remaining C=active triples

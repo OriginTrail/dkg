@@ -449,15 +449,28 @@ export function buildSystemRecordClosureArtifactsV1(
 /**
  * The resolve/verify options every closure in these fixtures is built with, so
  * the callers differ only in the artifacts they supply and the clock they read.
+ *
+ * `onUnresolved` FIRES ON EVERY LOOKUP THIS MAP CANNOT ANSWER, and it exists so
+ * a caller can tell the two refusal MECHANISMS apart. A closure resolves every
+ * digest a head names, so a fixture that omits one gets a refusal phrased exactly
+ * like a domain refusal -- and pinning that retires cells on the harness's own
+ * omission. The distinction is not in the message, which is why a guard reading
+ * the message keys on wording; it is in whether a lookup went unanswered, which
+ * is what this reports.
  */
 export function systemRecordClosureResolveOptionsV1(
   artifacts: ReadonlyMap<string, { canonicalBytes: Uint8Array }>,
   nowMs: number = Date.parse('2026-08-05T12:10:00Z'),
+  onUnresolved?: (reference: string) => void,
 ) {
   return {
     nowMs,
-    resolve: async (reference: { objectKind: string; digest: string }) =>
-      artifacts.get(`${reference.objectKind}:${reference.digest}`),
+    resolve: async (reference: { objectKind: string; digest: string }) => {
+      const key = `${reference.objectKind}:${reference.digest}`;
+      const found = artifacts.get(key);
+      if (found === undefined) onUnresolved?.(key);
+      return found;
+    },
     verifyAuthorityEnvelope: () => true,
     verifyCurrentBundle: (_head: unknown, bytes: Uint8Array) =>
       Buffer.from(bytes).equals(Buffer.from(verified.bundle)),

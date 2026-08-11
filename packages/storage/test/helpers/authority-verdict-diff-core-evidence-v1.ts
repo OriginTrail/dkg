@@ -177,13 +177,28 @@ export interface CoreSummaryMintV1 {
 }
 
 /**
+ * The mint index, and the audit that says WHOSE refusals are in it.
+ *
+ * `unresolvedArtifacts` names every `objectKind:digest` the closure walk asked
+ * for while minting and this fixture could not answer. It is a MECHANISM
+ * record rather than a message record, and the distinction is the whole reason
+ * it exists: a refusal reached through an unanswered lookup is this harness's
+ * own omission wearing a domain refusal's wording, and no amount of reading the
+ * message tells the two apart.
+ */
+export interface CoreSummaryIndexV1 {
+  readonly summaries: ReadonlyMap<string, CoreSummaryMintV1 | CoreSummaryRefusalV1>;
+  readonly unresolvedArtifacts: readonly string[];
+}
+
+/**
  * Mints one verified authority summary per candidate head SHAPE.
  *
  * A summary is a WeakSet-branded, factory-only capability: it cannot be
- * fabricated, so a cell naming `verifiedAuthoritySummary` can only exist if the
- * closure builder will mint one for that head. Where it refuses, the refusal is
- * a construction result carrying the builder's own message -- recorded, never
- * swallowed as a skipped case.
+ * fabricated, so a cell naming `verifiedAuthoritySummary` receives one only
+ * where the closure builder will mint one for that head. Where it refuses, the
+ * refusal is recorded with the builder's own message rather than swallowed --
+ * and audited, because a refusal and a missing artifact read alike.
  *
  * Keyed on the shape rather than the cell because the summary depends only on
  * the candidate head and its lineage, which is what keeps 25,920 projections to
@@ -191,20 +206,22 @@ export interface CoreSummaryMintV1 {
  */
 export async function buildCoreSummaryIndexV1(
   cells: readonly VerdictDiffCellV1[],
-): Promise<ReadonlyMap<string, CoreSummaryMintV1 | CoreSummaryRefusalV1>> {
-  const index = new Map<string, CoreSummaryMintV1 | CoreSummaryRefusalV1>();
+): Promise<CoreSummaryIndexV1> {
+  const summaries = new Map<string, CoreSummaryMintV1 | CoreSummaryRefusalV1>();
+  const unresolved = new Set<string>();
   for (const cell of cells) {
     const shapeKey = coreHeadShapeKeyV1(cell);
-    if (index.has(shapeKey)) continue;
+    if (summaries.has(shapeKey)) continue;
     const build = buildCoreCandidateHeadV1(cell);
     if (!build.built) continue;
-    index.set(shapeKey, await mintForHeadV1(build.candidate));
+    summaries.set(shapeKey, await mintForHeadV1(build.candidate, (key) => unresolved.add(key)));
   }
-  return index;
+  return { summaries, unresolvedArtifacts: [...unresolved].sort() };
 }
 
 async function mintForHeadV1(
   candidate: AgentProfileHeadObjectV1,
+  onUnresolved: (reference: string) => void,
 ): Promise<CoreSummaryMintV1 | CoreSummaryRefusalV1> {
   // The walk follows previousHeadDigest and the transitions, so the current head
   // AND the chain base must both be resolvable: the current's own
@@ -231,6 +248,7 @@ async function mintForHeadV1(
         ownedSubjectTable: [CORE_TOMBSTONE_PREDECESSOR_V1.rootSubject],
         ancestors: ancestry,
         transitions,
+        onUnresolvedArtifact: onUnresolved,
       });
       return { minted: true, summary: closure.authoritySummary };
     }
@@ -241,7 +259,11 @@ async function mintForHeadV1(
     );
     const closure = await buildAgentProfileVerificationClosureV1(
       computeAgentProfileHeadObjectDigestV1(candidate),
-      systemRecordClosureResolveOptionsV1(artifacts, TERMINAL_FIXTURE_NOW_MS_V1) as never,
+      systemRecordClosureResolveOptionsV1(
+        artifacts,
+        TERMINAL_FIXTURE_NOW_MS_V1,
+        onUnresolved,
+      ) as never,
     );
     return { minted: true, summary: closure.authoritySummary };
   } catch (error) {
@@ -249,26 +271,38 @@ async function mintForHeadV1(
   }
 }
 
-export interface CoreEvidenceRefusalV1 {
-  readonly built: false;
-  readonly ruleId: string;
-  readonly message: string;
-}
-export interface CoreEvidenceBuildV1 {
-  readonly built: true;
-  readonly evidence: Record<string, unknown>;
-}
-
 /**
- * The evidence object a cell names, or the rule that refuses it.
+ * The evidence object a cell names. AXIS J IS TOTAL: every member is data this
+ * fixture always holds, so nothing in this layer retires a cell.
  *
- * The only refusal here is an unmintable summary. Every other member is plain
- * data the fixture always holds, so axis J is otherwise total.
+ * WHY AN UNMINTABLE SUMMARY IS OMITTED RATHER THAN REFUSED. Until this rule was
+ * removed, a cell naming `verifiedAuthoritySummary` whose head shape could not
+ * mint one was retired here -- rule S1, 61,920 cells, 38% of the space. The
+ * rule was wrong, and wrong in the direction this harness exists to catch: a
+ * summary is a factory-only capability, so a REAL caller holding an unmintable
+ * head has exactly one evidence object it can assemble, the one WITHOUT that
+ * member. The cell was always instantiable; the harness was declining to build
+ * the only form it has, and then pinning the decline as though it were the
+ * system's.
+ *
+ * OMITTING DOES NOT MOVE THE VERDICT, AND THAT IS MEASURED RATHER THAN ARGUED.
+ * All 9,792 affected projections were driven twice -- once with a summary minted
+ * for a DIFFERENT head, once with the member absent -- and the verdicts were
+ * identical 9,792/9,792 with zero throws, against two discrimination controls
+ * that prove the instrument is not simply blind. The result is pinned as
+ * CORE_SUMMARY_INDEPENDENCE_V1 and re-run by
+ * authority-verdict-diff-summary-independence-v1.test.ts.
+ *
+ * NO FOREIGN SUBSTITUTE, ON EITHER PATH. Handing a cell a summary minted for
+ * another head would pin evidence no caller could ever assemble, which is the
+ * same error S1 made from the other side. On the absent path the omission
+ * yields reject('cold noninitial head requires its verified authority closure')
+ * at core :237 -- an honest verdict the table already carries as its own row.
  */
 export function buildCoreEvidenceV1(
   cell: VerdictDiffCellV1,
   summaries: ReadonlyMap<string, CoreSummaryMintV1 | CoreSummaryRefusalV1>,
-): CoreEvidenceBuildV1 | CoreEvidenceRefusalV1 {
+): Record<string, unknown> {
   const evidence: Record<string, unknown> = { nowMs: CORE_CLOCK_MS_V1[cell.clock] };
   const wants = new Set(cell.evidence);
   if (wants.has('acceptedTransition')) evidence.acceptedTransition = CORE_ACCEPTED_TRANSITION_V1;
@@ -280,14 +314,7 @@ export function buildCoreEvidenceV1(
   if (wants.has('forkBaseHead')) evidence.forkBaseHead = CORE_FORK_BASE_HEAD_V1;
   if (wants.has('verifiedAuthoritySummary')) {
     const mint = summaries.get(coreHeadShapeKeyV1(cell));
-    if (mint === undefined || !mint.minted) {
-      return {
-        built: false,
-        ruleId: 'S1-verified-authority-summary-is-unmintable-for-this-head',
-        message: mint === undefined ? 'no candidate head for this shape' : mint.message,
-      };
-    }
-    evidence.verifiedAuthoritySummary = mint.summary;
+    if (mint !== undefined && mint.minted) evidence.verifiedAuthoritySummary = mint.summary;
   }
-  return { built: true, evidence };
+  return evidence;
 }

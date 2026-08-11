@@ -89,7 +89,25 @@ function projectionKeyV1(cell: VerdictDiffCellV1, invisible: readonly string[]):
     .join('|');
 }
 
-/** Two cells sharing this key present IDENTICAL inputs to core. */
+/**
+ * Two cells sharing this key present IDENTICAL inputs to core.
+ *
+ * THE KEY OVER-DISCRIMINATES SINCE RULE S1 WAS REMOVED, AND IT IS LEFT ALONE.
+ * A cell naming `verifiedAuthoritySummary` on a head shape that cannot mint one
+ * now builds the same evidence object as the cell without that member, so the
+ * two sit in different projections while presenting byte-identical inputs. The
+ * key's contract is only that cells SHARING a key present identical inputs,
+ * which over-discrimination cannot violate, and editing a reviewed key to merge
+ * groups would change the thing being measured for no gain.
+ *
+ * THE MEASUREMENT GOES BESIDE THE PIN INSTEAD -- the axis-L precedent, where the
+ * clock's invisibility to storage was recorded as a number rather than legislated
+ * into the key. Here it is CORE_SUMMARY_INDEPENDENCE_V1: all 9,792 affected
+ * projections returned identical verdicts with a foreign summary and with the
+ * member absent. That is also the strongest projection-equivalence evidence this
+ * harness holds, because it is an equality established over the evaluator's
+ * OUTPUT rather than over its constructed input.
+ */
 export function coreInputProjectionKeyV1(cell: VerdictDiffCellV1): string {
   return projectionKeyV1(cell, CORE_INVISIBLE_AXES_V1);
 }

@@ -197,23 +197,36 @@ export function coreHeadShapeKeyV1(cell: VerdictDiffCellV1): string {
 /**
  * Builds the candidate head a cell names, or names the rule that refuses it.
  *
- * THE REFUSALS HERE ARE OF TWO KINDS AND THE DISTINCTION IS LOAD-BEARING.
+ * THE REFUSALS HERE ARE OF THREE KINDS AND THE DISTINCTION IS LOAD-BEARING.
  *
  * Most are SITE refusals: the head codec throws, and the rule quotes the string
  * that site emits. Those look like every other rule in this harness.
  *
- * Axis F's are not. `headDigest: 'equal'` says the candidate hashes to the
- * current's digest, and a digest covers the whole head -- so a candidate can
- * only be digest-equal to the current by BEING the current, field for field.
- * Any cell asking for digest equality AND a different state, transition digest
- * or fork-resolution presence is asking for two things that cannot both be true
- * of one object. Nothing throws; the combination is simply contradictory.
+ * F2 IS A GENUINE CONTRADICTION. Axes F and G are BOTH relative to the same
+ * referent: F='equal' says the candidate hashes to the current's digest, G='differ'
+ * says it disagrees with the current on `acceptedTransitionDigest`. A digest covers
+ * the whole head, so no object satisfies both -- against ANY referent. Nothing
+ * throws; the combination is simply impossible, and what the rule owes in place of
+ * a citation is a demonstration, which is what the sweep's own test gives it.
  *
- * These are recorded as their own rule class rather than folded in with the
- * codec refusals, because a contradiction rule cannot cite a failure string and
- * pretending otherwise would mean inventing one. What it CAN do is demonstrate
- * the contradiction -- build the head the other axis asks for and show the
- * digest moves -- which is what the sweep's own test does with them.
+ * F1 AND F3 ARE HARNESS LIMITATIONS WEARING A CONTRADICTION'S CLOTHES, and they
+ * fail a discriminator this harness already carries. AXIS_CANDIDATE_HEAD_BINDING_V1
+ * says a codec refusal is a RULE only where an axis pins its field ABSOLUTELY,
+ * because a RELATIVE axis is satisfied by moving the REFERENT. F1 pairs relative F
+ * with absolute C; F3 pairs relative F with absolute K. In both the escape is to
+ * move the referent -- and this fixture never does, because it builds exactly one.
+ * The current head is active and carries no fork resolution, so nothing digest-equal
+ * to IT can be a tombstone or carry a resolution. THE SYSTEM FORBIDS NEITHER: the
+ * codec builds a tombstone at this authority sequence, and it builds an active head
+ * carrying a `forkResolutionDigest` above version zero. This very sweep builds both.
+ *
+ * THE COUNTS STAND; THE LABELS DID NOT. F1's 4,608 and F3's 4,608 are what this
+ * fixture really retires -- the DATA is true, only the attribution was false, which
+ * is why these are relabelled rather than re-pinned. They are not fixed here on
+ * purpose: a resolver reopened mid-assembly stops the table being comparable with
+ * itself. Their dispositions, escapes and existence proofs live in
+ * CORE_HARNESS_LIMITATIONS_V1, which is a SEPARATE register from the system
+ * findings for exactly this reason.
  */
 export function buildCoreCandidateHeadV1(
   cell: VerdictDiffCellV1,
@@ -224,7 +237,9 @@ export function buildCoreCandidateHeadV1(
     return {
       built: false,
       ruleId: 'F1-digest-equality-forces-the-current-state',
-      message: 'a head digest-equal to the current must BE the current, which is active',
+      message: 'this fixture builds ONE referent and it is active, so nothing digest-equal '
+        + 'to it can be a tombstone -- a limitation of the referent, not a refusal by the '
+        + 'system, which builds such a head at this authority sequence',
     };
   }
   if (digestEqual && cell.acceptedTransitionDigest === 'differ') {
@@ -238,7 +253,9 @@ export function buildCoreCandidateHeadV1(
     return {
       built: false,
       ruleId: 'F3-digest-equality-forces-the-current-fork-resolution-absence',
-      message: 'a head digest-equal to the current cannot carry a key the current omits',
+      message: 'this fixture\'s only referent carries no fork resolution, so nothing '
+        + 'digest-equal to it can carry one -- a limitation of the referent, not a refusal '
+        + 'by the system, whose codec permits it above version zero',
     };
   }
   if (digestEqual) {

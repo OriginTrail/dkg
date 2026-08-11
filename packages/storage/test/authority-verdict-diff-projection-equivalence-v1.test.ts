@@ -42,6 +42,14 @@ import {
  * is what previously turned a correct suite into an intermittent timeout, and
  * the collected form also names the offending group instead of failing on an
  * anonymous row.
+ *
+ * THE STRONGEST EVIDENCE THIS SUITE CAN CITE IS NOT ITS OWN. Everything here
+ * compares CONSTRUCTED INPUTS, which is a claim about the builders. The equality
+ * pinned as CORE_SUMMARY_INDEPENDENCE_V1 compares the evaluator's OUTPUT over
+ * 9,792 projections with the summary member present and absent, and got identity
+ * with two live discrimination controls. Input equality implies output equality;
+ * the converse does not hold, so that result is the harder half of the same claim
+ * and is re-run by authority-verdict-diff-summary-independence-v1.test.ts.
  */
 const VERDICT_DIFF_SUITE_TIMEOUT_MS = 600_000;
 
@@ -66,10 +74,7 @@ function coreInputFingerprintV1(cell: VerdictDiffCellV1): string {
   // the one member that cannot be compared by value, and its identity is fully
   // determined by the head shape recorded below. Everything else is plain data
   // and is compared exactly.
-  const evidence = buildCoreEvidenceV1(cell, new Map());
-  const evidencePart = evidence.built
-    ? `evidence:${JSON.stringify(evidence.evidence)}`
-    : `evidence-refused:${evidence.ruleId}`;
+  const evidencePart = `evidence:${JSON.stringify(buildCoreEvidenceV1(cell, new Map()))}`;
 
   const wantsSummary = cell.evidence.includes('verifiedAuthoritySummary');
   const summaryPart = `summary:${wantsSummary ? coreHeadShapeKeyV1(cell) : 'absent'}`;

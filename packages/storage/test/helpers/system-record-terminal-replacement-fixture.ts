@@ -52,6 +52,13 @@ export interface TombstoneClosureMintV1 {
   readonly ancestors?: readonly AgentProfileHeadObjectV1[];
   readonly transitions?: readonly AgentProfileAuthorityTransitionV1[];
   readonly nowMs?: number;
+  /**
+   * Notified for every artifact the closure walk requests and this mint cannot
+   * supply. A caller auditing its own refusals needs the MECHANISM, not the
+   * message: an unanswered lookup means the refusal is the fixture's, however
+   * domain-shaped its wording.
+   */
+  readonly onUnresolvedArtifact?: (reference: string) => void;
 }
 
 /**
@@ -86,6 +93,7 @@ export async function mintAgentProfileTombstoneClosureV1(mint: TombstoneClosureM
       ...systemRecordClosureResolveOptionsV1(
         artifacts,
         mint.nowMs ?? TERMINAL_FIXTURE_NOW_MS_V1,
+        mint.onUnresolvedArtifact,
       ),
       // A tombstone closure must never request the predecessor's projection; if
       // it does, the fixture is proving something other than a deletion.

@@ -8,6 +8,7 @@ import {
   buildCoreAcceptedStateV1,
   buildCoreEvidenceV1,
   buildCoreSummaryIndexV1,
+  type CoreSummaryIndexV1,
 } from './authority-verdict-diff-core-evidence-v1.js';
 import { buildCoreCandidateHeadV1 } from './authority-verdict-diff-core-heads-v1.js';
 
@@ -40,7 +41,7 @@ export interface CoreProjectionRowV1 {
 export async function runCoreSweepV1(
   cells: readonly VerdictDiffCellV1[],
 ): Promise<readonly CoreProjectionRowV1[]> {
-  const summaries = await buildCoreSummaryIndexV1(cells);
+  const { summaries } = await buildCoreSummaryIndexV1(cells);
   const groups = new Map<string, { representative: VerdictDiffCellV1; count: number }>();
   for (const cell of cells) {
     const key = coreInputProjectionKeyV1(cell);
@@ -62,19 +63,19 @@ export async function runCoreSweepV1(
 
 function evaluateProjectionV1(
   cell: VerdictDiffCellV1,
-  summaries: Awaited<ReturnType<typeof buildCoreSummaryIndexV1>>,
+  summaries: CoreSummaryIndexV1['summaries'],
 ): CoreProjectionOutcomeV1 {
   const head = buildCoreCandidateHeadV1(cell);
   if (!head.built) return { kind: 'refused', ruleId: head.ruleId, message: head.message };
-  const evidence = buildCoreEvidenceV1(cell, summaries);
-  if (!evidence.built) {
-    return { kind: 'refused', ruleId: evidence.ruleId, message: evidence.message };
-  }
+  // NO EVIDENCE REFUSAL ARM. Axis J is total: every member is data the fixture
+  // holds, and an unmintable summary is OMITTED rather than refused. An arm here
+  // would be a branch nothing can reach -- the shape of a check that cannot
+  // fail, in the file whose job is to refuse those.
   try {
     const decision = evaluateAgentProfileHeadAdvanceV1(
       buildCoreAcceptedStateV1(cell) as never,
       head.candidate,
-      evidence.evidence as never,
+      buildCoreEvidenceV1(cell, summaries) as never,
     ) as { decision: string; reason?: string };
     return decision.reason === undefined
       ? { kind: 'decision', decision: decision.decision }
