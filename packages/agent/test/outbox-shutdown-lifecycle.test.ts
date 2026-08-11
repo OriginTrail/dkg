@@ -20,6 +20,7 @@ import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-m
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.selectedSwmRetryRequiredPeers = new Set<string>();
+  agent.selectedSwmBootstrapSeededPeers = new Set<string>();
   return agent;
 }
 

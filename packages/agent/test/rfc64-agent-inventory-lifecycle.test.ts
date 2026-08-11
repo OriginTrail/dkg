@@ -54,6 +54,7 @@ function syntheticAgent(dataDirectory?: string): any {
     finalizationRuntime: new FinalizationRuntime(),
     rfc64PersistenceV1: undefined,
     selectedSwmRetryRequiredPeers: new Set<string>(),
+    selectedSwmBootstrapSeededPeers: new Set<string>(),
   });
   return agent;
 }
