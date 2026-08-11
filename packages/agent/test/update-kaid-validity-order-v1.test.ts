@@ -8,6 +8,11 @@ import { PublishMethods } from '../src/dkg-agent-publish.js';
 // an invalid id was reported as a missing seal, the same wrong-subsystem
 // diagnosis the publisher produced.
 //
+// Scope of the pin, stated exactly because an earlier revision of this file
+// overclaimed it: these rows pin the guard ahead of the ATTESTATION and ahead of
+// any `this` access. The lock boundary specifically is NOT pinned -- see the
+// note on the last row.
+//
 // The discriminating call therefore supplies an invalid id AND no attestation:
 // both guards would fire, and which message comes back says which ran first.
 // Before the reorder this returned the attestation error; it must now name the
@@ -26,11 +31,20 @@ describe('agent update() rejects an invalid id before capability or effect', () 
     );
   });
 
-  it('rejects before taking the rootless-update lock', async () => {
-    // The lock is keyed on kaId and the whole body runs inside its callback, so
-    // a guard placed inside would contend a lock for an id about to be refused.
-    // With an empty receiver the callback cannot run at all: reaching the lock
-    // throws a TypeError on `this.log` instead of this message.
+  // NOTE ON WHAT THIS ROW DOES *NOT* PROVE, measured rather than assumed.
+  // It proves the guard runs before any `this` access -- with an empty receiver,
+  // reaching the callback body throws a TypeError on `this.log` instead of this
+  // message. It does NOT prove the guard runs before `withRootlessUpdateLock`.
+  // Moving the guard to be the callback's first statement leaves this file
+  // 3/3 green: the lock would be taken and the id still refused with this exact
+  // error. The guard IS above the lock in source, and the rationale is at the
+  // site, but that position is currently unpinned -- see the residual on #2052.
+  // Asserting it needs the lock held pending across the call, and both
+  // `withRootlessUpdateLock` and `rootlessUpdateLocks` are module-private while
+  // the first `await` inside the callback (`skolemizeKnowledgeAssetParts`) sits
+  // past a working `this.log`, a supplied attestation and the named-graph
+  // assertion -- i.e. a near-real agent, not a prototype call.
+  it('rejects before any dependency access', async () => {
     await expect(callUpdate(-5n)).rejects.toThrow(
       'Invalid graph-scoped kaId -5: expected a positive uint256',
     );
