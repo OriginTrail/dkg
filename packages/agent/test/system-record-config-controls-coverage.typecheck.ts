@@ -47,3 +47,30 @@ type NotDeclared = Exclude<keyof SystemRecordConfigControlsV1, ControlKeysOnAgen
 
 export type _EveryAgentControlIsForwarded = Expect<IsEmpty<NotForwarded>>;
 export type _EveryForwardedControlIsDeclared = Expect<IsEmpty<NotDeclared>>;
+
+/**
+ * Root-level TYPE contract, which the runtime package-root script cannot reach:
+ * TypeScript types are erased, so `test-package-root.mjs` can prove the picker
+ * is exported from the package root and prove the four resolvers are not, but
+ * it is blind to whether `SystemRecordConfigControlsV1` still comes with it.
+ * Dropping the type export while keeping the picker would leave that script
+ * green and break every consumer that names the picker's return type.
+ *
+ * These imports deliberately come from the PACKAGE ROOT rather than the source
+ * module the rest of this file uses: the assertions above are about the code,
+ * this one is about the published surface, and only a root import can fail when
+ * the barrel changes.
+ */
+import {
+  pickSystemRecordConfigControlsV1 as rootPickSystemRecordConfigControlsV1,
+  type SystemRecordConfigControlsV1 as RootSystemRecordConfigControlsV1,
+} from '@origintrail-official/dkg-agent';
+
+declare const rootControls: RootSystemRecordConfigControlsV1;
+
+/** The root picker's return type must BE the root's published control type. */
+export const _rootPickerReturnsThePublicType: RootSystemRecordConfigControlsV1 =
+  rootPickSystemRecordConfigControlsV1({});
+export const _thePublicTypeIsThePickerReturn: ReturnType<
+  typeof rootPickSystemRecordConfigControlsV1
+> = rootControls;
