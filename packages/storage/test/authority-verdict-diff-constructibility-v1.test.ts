@@ -30,8 +30,8 @@ describe('verdict-diff constructibility split', () => {
   // holds -- which is why the per-rule counts below matter too. Together they
   // localise a change rather than merely detecting one.
   it('conserves the pinned cell total across the split', () => {
-    expect(split.total).toBe(120_960);
-    expect(split.constructible.length + split.unconstructible.length).toBe(120_960);
+    expect(split.total).toBe(100_224);
+    expect(split.constructible.length + split.unconstructible.length).toBe(100_224);
   });
 
   it('attributes every retired cell to exactly one rule that exists', () => {
@@ -47,8 +47,8 @@ describe('verdict-diff constructibility split', () => {
   // rule silently widening -- a predicate typo that dropped one conjunct would
   // retire half the space and every other row here would still pass.
   it('retires exactly the tombstone-with-fork-resolution quarter', () => {
-    expect(split.byRule['R1-tombstone-carries-fork-resolution']).toBe(30_240);
-    expect(split.constructible.length).toBe(90_720);
+    expect(split.byRule['R1-tombstone-carries-fork-resolution']).toBe(25_056);
+    expect(split.constructible.length).toBe(75_168);
   });
 
   // A retirement is a citation, not an opinion: the failure string each rule

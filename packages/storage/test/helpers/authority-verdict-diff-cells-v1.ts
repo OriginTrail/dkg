@@ -24,7 +24,7 @@ export interface VerdictDiffCellV1 {
   readonly snapshot: 'absent' | 'present';
   readonly appliedStatus?: 'active' | 'quarantined' | 'tombstone' | 'dirty';
   readonly candidateHeadState: 'active' | 'tombstone';
-  readonly sequenceRelation: 'below' | 'equal' | 'plusOne' | 'abovePlusOne';
+  readonly sequenceRelation?: 'below' | 'equal' | 'plusOne' | 'abovePlusOne';
   readonly versionRelation?: 'below' | 'equal' | 'above';
   readonly headDigest?: 'equal' | 'differ';
   readonly acceptedTransitionDigest: 'equal' | 'differ';
@@ -58,7 +58,16 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
       : [undefined];
     for (const appliedStatus of statuses) {
       for (const candidateHeadState of A.C_candidateHeadState) {
-        for (const sequenceRelation of A.D_sequenceRelation) {
+        // Axis D relates the candidate to the CURRENT head, so it has no
+        // referent when the snapshot is absent -- the same dependency axis B
+        // already has, measured rather than assumed: both evaluators branch on
+        // an absent current before any sequence logic runs (core
+        // system-record-authority-v1-internal.ts:111/:531/:678; storage
+        // next-state-v1-internal.ts:1092 returns rematerialize immediately).
+        const sequences = snapshot === 'present'
+          ? [...A.D_sequenceRelation] as (VerdictDiffCellV1['sequenceRelation'])[]
+          : [undefined];
+        for (const sequenceRelation of sequences) {
           // Axis E applies only at an equal sequence.
           const versions = sequenceRelation === 'equal'
             ? [...A.E_versionRelation] as (VerdictDiffCellV1['versionRelation'])[]
@@ -81,7 +90,8 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
                             snapshot,
                             ...(appliedStatus === undefined ? {} : { appliedStatus }),
                             candidateHeadState,
-                            sequenceRelation,
+                            ...(sequenceRelation === undefined
+                              ? {} : { sequenceRelation }),
                             ...(versionRelation === undefined ? {} : { versionRelation }),
                             ...(headDigest === undefined ? {} : { headDigest }),
                             acceptedTransitionDigest,
