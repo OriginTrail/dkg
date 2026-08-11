@@ -24,16 +24,8 @@ export interface SyncGlobalBackpressureConfig {
   syncGlobalMaxInflight?: number;
   syncGlobalLimit?: number;
   syncGlobalQueueLimit?: number;
-  rfc64PublicCatalogBootstrap?: {
-    acceptedPublicPolicies?: readonly {
-      completeSwmProviders?: readonly string[];
-      policyEnvelope?: {
-        payload?: {
-          contextGraphId?: string;
-        };
-      };
-    }[];
-  };
+  /** Scheduler-native scopes whose exact recovery must retain one slot. */
+  selectedRecoveryContextGraphIds?: readonly string[];
 }
 
 declare const syncGlobalBackpressurePolicyBrand: unique symbol;
@@ -49,9 +41,21 @@ interface GlobalQueuePayload {
   label: string;
   contextGraphId?: string;
   source: SyncAdmissionSource;
-  selectedSwmPriority: boolean;
-  selectedRecoveryScope: boolean;
+  capacityClaim: SyncCapacityClaim;
 }
+
+type SyncCapacityClaim =
+  | { readonly kind: 'unrestricted' }
+  | { readonly kind: 'automatic-background' }
+  | {
+    readonly kind: 'ordinary-selected-scope';
+    readonly contextGraphId: string;
+    readonly automaticBackground: boolean;
+  }
+  | {
+    readonly kind: 'selected-recovery';
+    readonly automaticBackground: boolean;
+  };
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
 export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
@@ -93,23 +97,23 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   canRun: (entry) => (
     inflight < entry.payload.limit
     && (
-      !isAutomaticBackgroundSync(entry)
+      !claimIsAutomaticBackground(entry.payload.capacityClaim)
       || automaticBackgroundInflight < entry.payload.automaticBackgroundLimit
     )
     && (
       entry.payload.limit <= 1
-      || !isOrdinarySelectedScopeSync(entry)
-      || (ordinarySelectedScopeInflight.get(entry.payload.contextGraphId!) ?? 0)
+      || entry.payload.capacityClaim.kind !== 'ordinary-selected-scope'
+      || (ordinarySelectedScopeInflight.get(entry.payload.capacityClaim.contextGraphId) ?? 0)
         < entry.payload.limit - 1
     )
   ),
   onStart: (entry) => {
     inflight += 1;
-    const automaticBackground = isAutomaticBackgroundSync(entry);
+    const { capacityClaim } = entry.payload;
+    const automaticBackground = claimIsAutomaticBackground(capacityClaim);
     if (automaticBackground) automaticBackgroundInflight += 1;
-    const ordinarySelectedScope = isOrdinarySelectedScopeSync(entry);
-    if (ordinarySelectedScope) {
-      const contextGraphId = entry.payload.contextGraphId!;
+    if (capacityClaim.kind === 'ordinary-selected-scope') {
+      const { contextGraphId } = capacityClaim;
       ordinarySelectedScopeInflight.set(
         contextGraphId,
         (ordinarySelectedScopeInflight.get(contextGraphId) ?? 0) + 1,
@@ -122,19 +126,20 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
       if (automaticBackground) {
         automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
       }
-      if (ordinarySelectedScope) {
-        decrementOrdinarySelectedScopeInflight(entry.payload.contextGraphId!);
+      if (capacityClaim.kind === 'ordinary-selected-scope') {
+        decrementOrdinarySelectedScopeInflight(capacityClaim.contextGraphId);
       }
       getMetrics().syncGlobalInflight.record(inflight);
     };
   },
   onStartFailureRollback: (entry) => {
     inflight = Math.max(0, inflight - 1);
-    if (isAutomaticBackgroundSync(entry)) {
+    const { capacityClaim } = entry.payload;
+    if (claimIsAutomaticBackground(capacityClaim)) {
       automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
     }
-    if (isOrdinarySelectedScopeSync(entry)) {
-      decrementOrdinarySelectedScopeInflight(entry.payload.contextGraphId!);
+    if (capacityClaim.kind === 'ordinary-selected-scope') {
+      decrementOrdinarySelectedScopeInflight(capacityClaim.contextGraphId);
     }
     getMetrics().syncGlobalInflight.record(inflight);
   },
@@ -162,25 +167,42 @@ function decrementOrdinarySelectedScopeInflight(contextGraphId: string): void {
   else ordinarySelectedScopeInflight.set(contextGraphId, next);
 }
 
-function isSelectedRecoverySync(entry: { payload: GlobalQueuePayload }): boolean {
-  return entry.payload.selectedSwmPriority
-    || entry.payload.source === 'vm-recovery'
-    || entry.payload.source === 'swm-recovery';
+function claimIsAutomaticBackground(claim: SyncCapacityClaim): boolean {
+  return claim.kind === 'automatic-background'
+    || (
+      (claim.kind === 'ordinary-selected-scope' || claim.kind === 'selected-recovery')
+      && claim.automaticBackground
+    );
 }
 
-function isOrdinarySelectedScopeSync(entry: { payload: GlobalQueuePayload }): boolean {
-  return entry.payload.selectedRecoveryScope
-    && entry.payload.contextGraphId !== undefined
-    && !isSelectedRecoverySync(entry);
-}
-
-function isAutomaticBackgroundSync(entry: { payload: GlobalQueuePayload }): boolean {
-  if (entry.payload.selectedSwmPriority) return false;
-  return entry.payload.source === 'on-connect'
-    || entry.payload.source === 'reconcile'
-    || entry.payload.source === 'vm-recovery'
-    || entry.payload.source === 'swm-recovery'
-    || entry.payload.source === 'catchup-background';
+function capacityClaimFor(input: {
+  contextGraphId?: string;
+  source: SyncAdmissionSource;
+  selectedSwmPriority: boolean;
+  selectedRecoveryScope: boolean;
+}): SyncCapacityClaim {
+  const automaticBackground = !input.selectedSwmPriority && (
+    input.source === 'on-connect'
+    || input.source === 'reconcile'
+    || input.source === 'vm-recovery'
+    || input.source === 'swm-recovery'
+    || input.source === 'catchup-background'
+  );
+  if (
+    input.selectedSwmPriority
+    || input.source === 'vm-recovery'
+    || input.source === 'swm-recovery'
+  ) {
+    return { kind: 'selected-recovery', automaticBackground };
+  }
+  if (input.selectedRecoveryScope && input.contextGraphId !== undefined) {
+    return {
+      kind: 'ordinary-selected-scope',
+      contextGraphId: input.contextGraphId,
+      automaticBackground,
+    };
+  }
+  return automaticBackground ? { kind: 'automatic-background' } : { kind: 'unrestricted' };
 }
 
 export type SyncBackpressureBusyReason = 'queue_full' | 'displaced';
@@ -229,6 +251,8 @@ function acquire(
   lastLimit = limit;
   lastQueueLimit = queueLimit;
   const queuedBefore = queue.length;
+  const selectedRecoveryScope = options.contextGraphId !== undefined
+    && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false);
   return queue.acquire({
     payload: {
       limit,
@@ -236,9 +260,12 @@ function acquire(
       label: options.label,
       contextGraphId: options.contextGraphId,
       source: options.source,
-      selectedSwmPriority: options.selectedSwmPriority,
-      selectedRecoveryScope: options.contextGraphId !== undefined
-        && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false),
+      capacityClaim: capacityClaimFor({
+        contextGraphId: options.contextGraphId,
+        source: options.source,
+        selectedSwmPriority: options.selectedSwmPriority,
+        selectedRecoveryScope,
+      }),
     },
     ownerKey: 'global',
     lane: options.lane,
@@ -336,8 +363,11 @@ export function resolveSyncGlobalBackpressure(
   const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
     ?? nonNegativeInteger(config.syncGlobalQueueLimit)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
-  const hasCompleteSwmProvider = config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-    ?.some((acceptedPolicy) => (acceptedPolicy.completeSwmProviders?.length ?? 0) > 0) ?? false;
+  const selectedRecoveryIds = new Set(
+    config.selectedRecoveryContextGraphIds?.filter(
+      (contextGraphId) => typeof contextGraphId === 'string' && contextGraphId.length > 0,
+    ) ?? [],
+  );
   const policy = Object.freeze({
     limit,
     queueLimit,
@@ -348,15 +378,8 @@ export function resolveSyncGlobalBackpressure(
   // selected Edge provider becomes dialable. For the selected CG itself, the
   // scope-aware guard above also prevents explicit fallback fanout from
   // consuming that slot before exact VM or selected-SWM recovery arrives.
-  automaticBackgroundLimits.set(policy, hasCompleteSwmProvider && limit > 1 ? limit - 1 : limit);
-  selectedRecoveryScopeIds.set(policy, new Set(
-    config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
-      ?.filter((acceptedPolicy) => (acceptedPolicy.completeSwmProviders?.length ?? 0) > 0)
-      .map((acceptedPolicy) => acceptedPolicy.policyEnvelope?.payload?.contextGraphId)
-      .filter((contextGraphId): contextGraphId is string => (
-        typeof contextGraphId === 'string' && contextGraphId.length > 0
-      )) ?? [],
-  ));
+  automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
+  selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
   return policy;
 }
 
