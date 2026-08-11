@@ -143,6 +143,13 @@ export interface VmRecoveryHostHarnessOptions<TTarget extends OrdinalRecoveryTar
   readonly targetCount: number;
   readonly targetForOrdinal: (ordinal: number) => TTarget;
   readonly sizingUnavailable?: boolean;
+  /**
+   * Keep MockChainAdapter's prototype implementation so integration tests can
+   * exercise the real stateful adapter boundary after seeding KAs with
+   * `__registerKC`. Narrow planner tests use the synthetic footprint callback
+   * below instead.
+   */
+  readonly useRegisteredChainFootprints?: boolean;
   readonly footprintForOrdinal?: (
     ordinal: number,
   ) => Readonly<{ byteSize: bigint; merkleLeafCount: number | bigint; merkleRootsCount?: bigint }>;
@@ -201,18 +208,20 @@ export async function createVmRecoveryHostHarness<
   let activeFetches = 0;
   let maxActiveFetches = 0;
 
-  chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
-    const ordinal = Number(kaId);
-    if (options.sizingUnavailable) {
-      return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
-    }
-    const footprint = options.footprintForOrdinal?.(ordinal);
-    return {
-      merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
-      byteSize: footprint?.byteSize ?? 1_024n,
-      merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
+  if (!options.useRegisteredChainFootprints) {
+    chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
+      const ordinal = Number(kaId);
+      if (options.sizingUnavailable) {
+        return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
+      }
+      const footprint = options.footprintForOrdinal?.(ordinal);
+      return {
+        merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
+        byteSize: footprint?.byteSize ?? 1_024n,
+        merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
+      };
     };
-  };
+  }
   internals.syncExactKnowledgeAssetsFromPeerDetailed = async (
     peerId,
     _contextGraphId,

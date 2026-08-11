@@ -36,6 +36,7 @@ async function createRecoveryHarness(options: {
   peers: readonly string[];
   targetCount: number;
   unknownFootprints?: boolean;
+  useRegisteredChainFootprints?: boolean;
   footprintForOrdinal?: (
     ordinal: number,
   ) => Readonly<{ byteSize: bigint; merkleLeafCount: bigint }>;
@@ -49,6 +50,7 @@ async function createRecoveryHarness(options: {
   return createVmRecoveryHostHarness({
     ...options,
     sizingUnavailable: options.unknownFootprints,
+    useRegisteredChainFootprints: options.useRegisteredChainFootprints,
     footprintForOrdinal: options.footprintForOrdinal,
     targetForOrdinal: (ordinal) => recoveryTarget(options.localCgId, ordinal),
   });
@@ -237,12 +239,14 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       localCgId,
       peers: [holder],
       targetCount: 8,
+      useRegisteredChainFootprints: true,
       onFetch: (_peerId, requested, recovered) => {
         for (const target of requested) recovered.add(target.ordinal);
         return 'found';
       },
     });
     agents.push(harness.agent);
+    expect(Object.hasOwn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext')).toBe(false);
     for (const target of harness.targets) {
       const kaId = BigInt(target.kaId);
       harness.chainAdapter.__registerKC({
