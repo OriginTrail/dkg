@@ -109,11 +109,23 @@ if (typeof root.pickSystemRecordConfigControlsV1 !== 'function') {
     'package root no longer exports pickSystemRecordConfigControlsV1; the CLI forwarding hop consumes it',
   );
 }
-for (const name of configControlsExports) {
+// Compared by VALUE, not by name. A name comparison passes an alias — re-export
+// `systemRecordRequesterLaneEnabledV1 as resolveSystemRecordRequesterLaneV1`
+// from the barrel and the internal function is published under a name the check
+// never looks for. The contract is that these functions stay off the root, not
+// that these spellings do.
+const internalByValue = new Map();
+for (const [name, value] of Object.entries(configControlsModule)) {
   if (publicOnRoot.has(name)) continue;
-  if (Object.hasOwn(root, name)) {
+  internalByValue.set(value, name);
+}
+for (const [rootName, rootValue] of Object.entries(root)) {
+  const internalName = internalByValue.get(rootValue);
+  if (internalName !== undefined) {
     throw new Error(
-      `package root exports internal system-record control export ${name}; keep it internal until its lane has a caller`,
+      `package root exports internal system-record control export ${internalName}${
+        rootName === internalName ? '' : ` (aliased as ${rootName})`
+      }; keep it internal until its lane has a caller`,
     );
   }
 }
