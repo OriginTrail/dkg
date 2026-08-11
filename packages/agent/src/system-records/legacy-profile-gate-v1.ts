@@ -70,7 +70,15 @@ export interface LegacyAgentProfileAppliedRootV1 {
  * page and never per root or per quad.
  */
 export interface LegacyAgentProfileGateLookupV1 {
-  /** Request one: which of these derived roots carry an applied signed record. */
+  /**
+   * Request one: which of these derived roots carry an applied signed record.
+   *
+   * :926 puts the owned-subject lists in this response and caps it at 1 MiB. That byte
+   * cap belongs to the implementation, because by the time the gate holds the result the
+   * bytes have already been transferred — the gate can only refuse to trust an oversized
+   * answer, which it does per record below. An implementation that cannot honour the cap
+   * must return fewer roots rather than a larger response.
+   */
   lookupAppliedRoots(
     roots: readonly string[],
     signal?: AbortSignal,
@@ -139,14 +147,14 @@ export function deriveLegacyAgentProfileRootV1(subject: string): string | null {
   return null;
 }
 
+const PROJECTION_KEY_DECODER_V1 = new TextDecoder();
+
 /**
  * Projection membership identity: the canonical graphless N-Triples line, the same
  * encoding storage's projection inspection uses. Graph is deliberately excluded — the
  * applied projection lives in its own graph while the legacy page carries the aggregate
  * `agents` graph, so a graph-sensitive key would call every real duplicate a conflict.
  */
-const PROJECTION_KEY_DECODER_V1 = new TextDecoder();
-
 function projectionKeyV1(quad: Quad): string {
   // The decoder is module-scope on purpose: this runs once per projection row and again
   // per page quad, so a per-call decoder would allocate up to 10,000 of them on a
@@ -201,10 +209,24 @@ export function createLegacyAgentProfileGateV1(
         const applied = await lookup.lookupAppliedRoots(selected, signal);
         storeRequests += 1;
         const appliedByRoot = new Map<string, LegacyAgentProfileAppliedRootV1>();
+        const untrusted = new Set<string>();
         for (const record of applied) {
-          if (roots.has(record.root)) appliedByRoot.set(record.root, record);
+          if (!roots.has(record.root)) continue;
+          // Fail closed on data crossing the injected lookup boundary. A well-formed
+          // record cannot exceed the owned-subject cap, so an over-cap table means this
+          // response is not the exact applied set and its root must not be classified
+          // against it — withholding is the safe answer, insertion is not.
+          if (record.ownedSubjects.length > SYSTEM_RECORD_MAX_OWNED_SUBJECTS) {
+            untrusted.add(record.root);
+            continue;
+          }
+          appliedByRoot.set(record.root, record);
         }
         for (const root of selected) {
+          if (untrusted.has(root)) {
+            disposition.set(root, { kind: 'unclassified' });
+            continue;
+          }
           disposition.set(root, appliedByRoot.has(root) ? { kind: 'covered' } : { kind: 'uncovered' });
         }
 

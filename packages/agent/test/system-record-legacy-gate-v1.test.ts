@@ -363,20 +363,52 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
   });
 
   it('withholds covered roots whose page subjects exceed the membership batch', async () => {
-    const owned = Array.from(
+    // TWO records, each with a VALID owned-subject table, whose combined page subjects
+    // exceed the membership cap. Deliberately kept under the per-record cap so this
+    // exercises the aggregate guard and not the untrusted-response guard below — without
+    // that separation, one guard would silently take credit for the other's kill.
+    const each = Math.floor(SYSTEM_RECORD_MAX_OWNED_SUBJECTS / 2) + 100;
+    const ownedFor = (root: string) => Array.from(
+      { length: each },
+      (_, i) => deriveAgentProfileOwnedSubjectV1(root, 'capability', i + 1),
+    );
+    const first = ownedFor(ROOT);
+    const second = ownedFor(OTHER_ROOT);
+    const applied = [
+      { root: ROOT, ownedSubjects: first },
+      { root: OTHER_ROOT, ownedSubjects: second },
+    ];
+    const { lookup, lookupProjectionMembership } = fakeLookup(applied, []);
+    const page = [...first, ...second].map((subject) => quad(subject, 'p', 'o'));
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(page);
+
+    expect(each).toBeLessThanOrEqual(SYSTEM_RECORD_MAX_OWNED_SUBJECTS);
+    expect(first.length + second.length).toBeGreaterThan(SYSTEM_RECORD_MAX_OWNED_SUBJECTS);
+    expect(result.insert).toEqual([]);
+    expect(result.withheld).toHaveLength(page.length);
+    expect(result.unclassifiedRoots).toBe(2);
+    // The over-cap membership read is never issued.
+    expect(lookupProjectionMembership).not.toHaveBeenCalled();
+    expect(result.storeRequests).toBe(1);
+  });
+
+  // The lookup port is an injected boundary, so its answer is incoming input. A
+  // well-formed record cannot exceed the owned-subject cap, so an over-cap table means
+  // the response is not the exact applied set; withholding is the only safe reading.
+  it('refuses an applied record whose owned-subject table exceeds the cap', async () => {
+    const oversized = Array.from(
       { length: SYSTEM_RECORD_MAX_OWNED_SUBJECTS + 1 },
       (_, i) => deriveAgentProfileOwnedSubjectV1(ROOT, 'capability', i + 1),
     );
-    const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: owned };
+    const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: oversized };
     const { lookup, lookupProjectionMembership } = fakeLookup([applied], []);
 
-    const result = await createLegacyAgentProfileGateV1(lookup)
-      .filterPage(owned.map((subject) => quad(subject, 'p', 'o')));
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage([quad(ROOT, 'p', 'o')]);
 
     expect(result.insert).toEqual([]);
-    expect(result.withheld).toHaveLength(owned.length);
+    expect(result.withheld).toHaveLength(1);
     expect(result.unclassifiedRoots).toBe(1);
-    // The over-cap membership read is never issued.
     expect(lookupProjectionMembership).not.toHaveBeenCalled();
     expect(result.storeRequests).toBe(1);
   });
