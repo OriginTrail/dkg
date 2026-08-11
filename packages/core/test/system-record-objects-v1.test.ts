@@ -1961,13 +1961,19 @@ describe('system-record owned subjects and verification closure', () => {
     await expect(buildClosure(current, artifacts)).rejects.toThrow(/reuses a historical wallet root/);
   });
 
-  // A consumer comparing the summary against a recorded quarantine matches the
-  // resolution's authority sequence against its own applied lineage length. That
-  // equality is an inference from how the closure walks the lineage, not a
-  // declared invariant, so pin it directly -- if it ever goes off by one, the
-  // consumer's fork-resolution gate silently never fires. Two sequences, because
-  // a sequence-zero case alone is satisfied by a constant as well as by the
-  // real derivation.
+  // Pins this closure's own construction invariant: the lineage it walks is
+  // exactly as long as the head's authority sequence. Worth pinning because the
+  // traversal that builds the lineage is being reshaped, and an off-by-one
+  // there would otherwise go unnoticed.
+  //
+  // It is NOT the pin for a consumer matching a resolution against a recorded
+  // quarantine. Read against the summary that equality is forced -- the
+  // directness check already requires a resolution and its successor to share an
+  // authority sequence -- so a consumer-side conjunct phrased against the summary
+  // could never fail. A consumer has to compare against its OWN persisted
+  // lineage, and owes its own removal test there. Two sequences, because a
+  // sequence-zero case alone is satisfied by a constant as well as by the real
+  // derivation.
   it('mints a resolution authority sequence equal to the lineage length', async () => {
     const genesis = await genesisForkResolutionCase();
     const genesisSummary = (await buildClosure(genesis.successor, genesis.artifacts)).authoritySummary;
