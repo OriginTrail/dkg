@@ -1504,4 +1504,112 @@ describe('sync global backpressure', () => {
       'ordinary-shared-start',
     ]);
   });
+
+  it('keeps one selected-scope slot available while foreground catch-up fans out', async () => {
+    const ctx = createOperationContext('sync');
+    const selectedCg = 'urn:cg:selected';
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 6,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          completeSwmProviders: ['12D3KooWCompleteSwmProvider'],
+          policyEnvelope: { payload: { contextGraphId: selectedCg } },
+        }],
+      },
+    });
+    const events: string[] = [];
+    let releaseFirst!: () => void;
+    let releaseRecovery!: () => void;
+
+    const first = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-a',
+      lane: 'durable',
+      source: 'catchup-foreground',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('first-catchup-start');
+      releaseFirst = resolve;
+    }));
+    await tick();
+    const duplicate = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-b',
+      lane: 'durable',
+      source: 'catchup-foreground',
+    }, async () => {
+      events.push('duplicate-catchup-start');
+    });
+    await tick();
+    expect(events).toEqual(['first-catchup-start']);
+
+    const recovery = withGlobalSyncBackpressure({
+      policy,
+      ctx,
+      contextGraphId: selectedCg,
+      label: 'durable:selected-recovery',
+      lane: 'durable',
+      priority: 1_000,
+      source: 'vm-recovery',
+    }, async () => new Promise<void>((resolve) => {
+      events.push('recovery-start');
+      releaseRecovery = resolve;
+    }));
+    await tick();
+    expect(events).toEqual(['first-catchup-start', 'recovery-start']);
+
+    releaseRecovery();
+    await recovery;
+    expect(events).toEqual(['first-catchup-start', 'recovery-start']);
+    releaseFirst();
+    await Promise.all([first, duplicate]);
+    expect(events).toEqual([
+      'first-catchup-start',
+      'recovery-start',
+      'duplicate-catchup-start',
+    ]);
+  });
+
+  it('does not reserve capacity for unrelated foreground catch-up', async () => {
+    const ctx = createOperationContext('sync');
+    const selectedCg = 'urn:cg:selected';
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 2,
+      syncGlobalQueueLimit: 4,
+      rfc64PublicCatalogBootstrap: {
+        acceptedPublicPolicies: [{
+          completeSwmProviders: ['12D3KooWCompleteSwmProvider'],
+          policyEnvelope: { payload: { contextGraphId: selectedCg } },
+        }],
+      },
+    });
+    const events: string[] = [];
+    let releaseA!: () => void;
+    let releaseB!: () => void;
+    const run = (label: string, onRelease: (release: () => void) => void) => (
+      withGlobalSyncBackpressure({
+        policy,
+        ctx,
+        contextGraphId: 'urn:cg:ordinary',
+        label,
+        lane: 'durable',
+        source: 'catchup-foreground',
+      }, async () => new Promise<void>((resolve) => {
+        events.push(label);
+        onRelease(resolve);
+      }))
+    );
+    const first = run('ordinary-a', (release) => { releaseA = release; });
+    await tick();
+    const second = run('ordinary-b', (release) => { releaseB = release; });
+    await tick();
+    expect(events).toEqual(['ordinary-a', 'ordinary-b']);
+    releaseA();
+    releaseB();
+    await Promise.all([first, second]);
+  });
 });
