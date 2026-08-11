@@ -57,9 +57,19 @@ export type ChangelogLaneDisposition =
  * The `satisfies Record<SystemContextGraphId, ...>` is the enforcement, and it
  * is the point of this table rather than a decoration: adding a member to
  * `SYSTEM_CONTEXT_GRAPHS` makes this object stop satisfying the constraint and
- * FAILS THE BUILD until someone states that graph's lane disposition. Verified
- * by construction — a third member was added experimentally and `tsc` rejected
- * this table until it was given a value.
+ * FAILS THE BUILD until that graph is given a lane disposition. Verified by
+ * construction — a third member was added experimentally and `tsc` rejected this
+ * table until it was given a value.
+ *
+ * THE HONEST BOUND ON THAT GUARD: it forces a STATEMENT, not a DECISION. Someone
+ * adding a system graph under deadline can discharge the error by writing
+ * `'undecided-rides-changelog-lane'` and shipping. What it buys is that the
+ * choice becomes visible in a diff and greppable — strictly more than a comment
+ * achieved, and strictly less than a decision. Do not cite it as more.
+ *
+ * IT ALSO HAS EXACTLY ONE BYPASS, named here so that taking it reads as a
+ * downgrade rather than a tidy-up: replacing `satisfies` with `as` silences the
+ * constraint entirely, and the enforcement is gone with nothing failing.
  *
  * That matters because the sibling policy cannot ask the same question: the
  * verification-posture check (`acceptUnverified`) keys on membership of the
