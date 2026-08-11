@@ -79,17 +79,33 @@ if (packageManifest.exports['./dist/system-records/*'] !== null) {
 // check stays green either way — the resolver tests import the source module
 // directly, and the CLI wiring test proves the value survives the hop, never
 // what the package root offers.
+// The forbidden set is DERIVED from the module that owns the resolvers, never
+// mirrored here: a hardcoded list is only ever a snapshot of today's inventory,
+// so the fifth resolver would leak through the root while this check stayed
+// green. Measured, not assumed — under the hardcoded list this file used to
+// carry, a fifth resolver exported from the root passed cleanly. The module is
+// imported by file path because `./dist/system-records/*` is blocked above, and
+// that block is the point: a package specifier could not reach it.
+const configControlsModule = await import(
+  new URL('../dist/system-records/config-controls-v1.js', import.meta.url).href
+);
+const perControlResolvers = Object.keys(configControlsModule).filter((name) =>
+  /^systemRecord.+EnabledV1$/.test(name),
+);
+// A derived list that silently becomes empty is a check that cannot fail:
+// rename the resolvers and the loop below would assert nothing while passing.
+if (perControlResolvers.length === 0) {
+  throw new Error(
+    'derived no per-control resolvers from config-controls-v1.js; the naming predicate no longer matches, so the root-exposure check below would assert nothing',
+  );
+}
+
 if (typeof root.pickSystemRecordConfigControlsV1 !== 'function') {
   throw new Error(
     'package root no longer exports pickSystemRecordConfigControlsV1; the CLI forwarding hop consumes it',
   );
 }
-for (const name of [
-  'systemRecordProducerTrackingEnabledV1',
-  'systemRecordProviderAdvertisementEnabledV1',
-  'systemRecordRequesterLaneEnabledV1',
-  'systemRecordLegacyCapablePeerSelectionEnabledV1',
-]) {
+for (const name of perControlResolvers) {
   if (Object.hasOwn(root, name)) {
     throw new Error(
       `package root exports system-record control resolver ${name}; keep it internal until its lane has a caller`,
