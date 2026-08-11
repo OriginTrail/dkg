@@ -131,4 +131,18 @@ void forgedCacheMetadata;
 void forkEvidenceClosureVerifier;
 void rowTraversalSubpathContract;
 
+// The storage quarantine-exit predicate compares these fork-resolution scalars
+// directly against a persisted head version typed plain `string`. Both sides must
+// stay strings at runtime: a branded string qualifies and is preferred, but a
+// `bigint` on either side would make every comparison false, refusing every
+// legitimate unquarantine while looking fail-closed.
+type ForkResolutionScalarsAreStrings =
+  AgentProfileVerifiedForkResolutionFactsV1['forkedVersion'] extends string
+    ? AgentProfileVerifiedForkResolutionFactsV1['authoritySequence'] extends string
+      ? true
+      : never
+    : never;
+const forkResolutionScalarsAreStrings: ForkResolutionScalarsAreStrings = true;
+void forkResolutionScalarsAreStrings;
+
 export {};

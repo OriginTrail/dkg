@@ -1,5 +1,9 @@
 import { snapshotExactDataRecord } from './sync-wire-objects.js';
-import { parseCanonicalDecimalU64, type Digest32V1 } from './sync-wire-scalars.js';
+import {
+  parseCanonicalDecimalU64,
+  type DecimalU64V1,
+  type Digest32V1,
+} from './sync-wire-scalars.js';
 import {
   copyBoundedSystemRecordBytesV1,
   failSystemRecordObjectV1 as fail,
@@ -67,9 +71,9 @@ const MINTED_AGENT_PROFILE_VERIFIED_AUTHORITY_SUMMARIES_V1 = new WeakSet<object>
  */
 export interface AgentProfileVerifiedForkResolutionFactsV1 {
   readonly resolutionDigest: Digest32V1;
-  readonly authoritySequence: string;
-  readonly forkedVersion: string;
-  readonly resolutionVersion: string;
+  readonly authoritySequence: DecimalU64V1;
+  readonly forkedVersion: DecimalU64V1;
+  readonly resolutionVersion: DecimalU64V1;
   readonly forkBaseHeadDigest?: Digest32V1;
 }
 
@@ -457,6 +461,14 @@ async function collectVerificationClosureV1(
  * run" is not a third case to guard against -- it is unrepresentable, because
  * the only way to obtain this value is to return from the validator.
  *
+ * The brand is what makes "only the validator produces this" a fact about the
+ * type rather than a convention about this file. Without it a new function here
+ * could write `{ collected }` and typecheck, and the guarantee the summary rests
+ * on would hold only for as long as nobody did. A deliberate cast still defeats
+ * it -- that is the intended strength: this value never leaves the module, so
+ * the risk is an honest mistake during a refactor, not a forgery, and a cast is
+ * visible in review where a plain literal is not.
+ *
  * It carries the verified FACTS rather than the resolution they came from, so
  * the summary is built without naming the control object. That matters beyond
  * tidiness: the raw resolution carries `evidenceHeadDigests`, a verified subset
@@ -470,7 +482,10 @@ async function collectVerificationClosureV1(
  * summary reads only `currentForkResolutionFacts`, and the helper that builds
  * those facts takes only a resolution, so neither can express the mistake.
  */
+declare const VALIDATED_CLOSURE_V1_BRAND: unique symbol;
+
 interface ValidatedClosureV1 {
+  readonly [VALIDATED_CLOSURE_V1_BRAND]: true;
   readonly collected: CollectedClosureV1;
   readonly currentForkResolutionFacts?: AgentProfileVerifiedForkResolutionFactsV1;
 }
@@ -583,10 +598,11 @@ function validateCollectedClosureAuthorityV1(
     }
   }
 
+  // The one sanctioned construction site, cast where the proof happens.
   return Object.freeze({
     collected: state,
     ...(currentForkResolutionFacts === undefined ? {} : { currentForkResolutionFacts }),
-  });
+  }) as ValidatedClosureV1;
 }
 
 function assertCompleteUniqueRootLineageV1(
