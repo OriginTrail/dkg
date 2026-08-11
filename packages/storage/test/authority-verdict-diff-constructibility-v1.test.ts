@@ -33,9 +33,14 @@ describe('verdict-diff constructibility split', () => {
     expect(split.constructible.length + split.unconstructible.length).toBe(100_224);
   });
 
+  // Collected rather than asserted per retired cell, for the same reason as the
+  // generator's dependency pins: 25k assertions for one property is a timeout
+  // risk that reports nothing about the rules.
   it('attributes every retired cell to exactly one rule that exists', () => {
     const ids = new Set(CONSTRUCTIBILITY_RULES_V1.map((r) => r.id));
-    for (const { ruleId } of split.unconstructible) expect(ids.has(ruleId)).toBe(true);
+    const unattributed = split.unconstructible.filter(({ ruleId }) => !ids.has(ruleId));
+    expect(unattributed.slice(0, 3)).toEqual([]);
+    expect(unattributed).toHaveLength(0);
     const summed = Object.values(split.byRule).reduce((a, b) => a + b, 0);
     expect(summed).toBe(split.unconstructible.length);
   });

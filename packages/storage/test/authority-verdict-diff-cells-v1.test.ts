@@ -50,22 +50,41 @@ describe('verdict-diff case generator', () => {
   // Axis B applies only to a present snapshot. An absent snapshot has no applied
   // status at all, and recording `undefined` rather than a default is what stops
   // the table asserting coverage of a state the case never had.
+  //
+  // Asserted over a COLLECTED violation set rather than per cell. An `expect`
+  // per cell is ~100k assertions for one property: it ran 2.2s idle and blew
+  // the 5s timeout the moment the lane was loaded, which is a red that says
+  // nothing about the generator. Collecting first also names the offending
+  // cell instead of reporting `expected true to be false`.
   it('omits applied status exactly when the snapshot is absent', () => {
-    for (const c of cells) {
-      expect(c.appliedStatus === undefined).toBe(c.snapshot === 'absent');
-    }
+    const offenders = cells.filter(
+      (c) => (c.appliedStatus === undefined) !== (c.snapshot === 'absent'),
+    );
+    expect(offenders.slice(0, 3)).toEqual([]);
+    expect(offenders).toHaveLength(0);
   });
 
   // Axis E applies only at an equal sequence; axis F only when sequence AND
   // version are both equal. These are the spec's stated dependencies, pinned so
   // a later widening of the generator cannot quietly change what the table means.
+  // Each dependency is collected separately so a failure names WHICH axis
+  // widened, rather than reporting one anonymous boolean for all three.
   it('applies the sequence, version and head-digest axes only where defined', () => {
-    for (const c of cells) {
-      expect(c.sequenceRelation === undefined).toBe(c.snapshot === 'absent');
-      expect(c.versionRelation === undefined).toBe(c.sequenceRelation !== 'equal');
-      const digestApplies = c.sequenceRelation === 'equal' && c.versionRelation === 'equal';
-      expect(c.headDigest === undefined).toBe(!digestApplies);
-    }
+    const sequenceOffenders = cells.filter(
+      (c) => (c.sequenceRelation === undefined) !== (c.snapshot === 'absent'),
+    );
+    const versionOffenders = cells.filter(
+      (c) => (c.versionRelation === undefined) !== (c.sequenceRelation !== 'equal'),
+    );
+    const digestOffenders = cells.filter(
+      (c) => (c.headDigest === undefined)
+        !== !(c.sequenceRelation === 'equal' && c.versionRelation === 'equal'),
+    );
+    expect(sequenceOffenders.slice(0, 3)).toEqual([]);
+    expect(versionOffenders.slice(0, 3)).toEqual([]);
+    expect(digestOffenders.slice(0, 3)).toEqual([]);
+    expect([sequenceOffenders.length, versionOffenders.length, digestOffenders.length])
+      .toEqual([0, 0, 0]);
   });
 
   // Axis J is a presence subset, so all sixteen combinations of the four
