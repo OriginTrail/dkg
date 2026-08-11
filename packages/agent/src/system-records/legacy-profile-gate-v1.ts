@@ -145,8 +145,15 @@ export function deriveLegacyAgentProfileRootV1(subject: string): string | null {
  * applied projection lives in its own graph while the legacy page carries the aggregate
  * `agents` graph, so a graph-sensitive key would call every real duplicate a conflict.
  */
+const PROJECTION_KEY_DECODER_V1 = new TextDecoder();
+
 function projectionKeyV1(quad: Quad): string {
-  return new TextDecoder().decode(tripleContentV10(quad.subject, quad.predicate, quad.object));
+  // The decoder is module-scope on purpose: this runs once per projection row and again
+  // per page quad, so a per-call decoder would allocate up to 10,000 of them on a
+  // maximum-size page — and :926 exists to bound exactly that per-page cost.
+  return PROJECTION_KEY_DECODER_V1.decode(
+    tripleContentV10(quad.subject, quad.predicate, quad.object),
+  );
 }
 
 export interface LegacyAgentProfileGateV1 {
@@ -254,6 +261,11 @@ export function createLegacyAgentProfileGateV1(
         withheld.push(quad);
         conflicted.add(root);
       }
+      // These two counts are disjoint today — a root is either withheld whole by a cap or
+      // classified and possibly conflicted, never both — but they derive asymmetrically:
+      // one from a set built in the pass above, one from a scan of the dispositions. If a
+      // third withhold reason is ever added, derive BOTH from `disposition`, or the scan
+      // will adapt and the set silently will not.
       for (const plan of disposition.values()) {
         if (plan.kind === 'unclassified') unclassifiedRoots += 1;
       }
