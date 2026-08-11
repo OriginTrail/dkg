@@ -1,10 +1,9 @@
-import { readFileSync } from 'node:fs';
-
 import { describe, expect, it } from 'vitest';
 
 import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-cells-v1.js';
 import {
   CONSTRUCTIBILITY_RULES_V1,
+  readCitedSourceLineV1,
   resolveConstructibilityV1,
 } from './helpers/authority-verdict-diff-constructibility-v1.js';
 
@@ -43,7 +42,7 @@ describe('verdict-diff constructibility split', () => {
 
   // R1 retires a clean quarter: candidate head state and the candidate's
   // fork-resolution digest are both independent of every other axis, so
-  // 1/2 x 1/2 of 120,960 = 30,240. Pinning the number is what would catch the
+  // 1/2 x 1/2 of 100,224 = 25,056. Pinning the number is what would catch the
   // rule silently widening -- a predicate typo that dropped one conjunct would
   // retire half the space and every other row here would still pass.
   it('retires exactly the tombstone-with-fork-resolution quarter', () => {
@@ -52,14 +51,14 @@ describe('verdict-diff constructibility split', () => {
   });
 
   // A retirement is a citation, not an opinion: the failure string each rule
-  // claims must actually be present at the file it names. Without this a rule
-  // could cite a site that never refuses anything and the split would look
-  // just as principled.
-  it('verifies every rule quotes a failure string that exists at its site', () => {
+  // claims must actually be present at the LINE it names. The weaker
+  // file-contains form is what let R1's site sit one line past its own
+  // `fail(...)` call -- a citation nobody could follow, passing a test whose
+  // whole job was to make citations followable.
+  it('verifies every rule quotes a failure string that exists at its cited line', () => {
     for (const rule of CONSTRUCTIBILITY_RULES_V1) {
-      const [path] = rule.site.split(':');
-      const source = readFileSync(new URL(`../../../${path}`, import.meta.url), 'utf8');
-      expect(source).toContain(rule.failure);
+      expect(readCitedSourceLineV1(rule.site, new URL('../../../', import.meta.url)))
+        .toContain(rule.failure);
     }
   });
 
