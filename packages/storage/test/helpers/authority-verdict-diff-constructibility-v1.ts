@@ -151,6 +151,56 @@ export const CONSTRUCTIBILITY_RULES_V1: readonly ConstructibilityRuleV1[] = [
       cell.candidateHeadState === 'tombstone'
       && cell.candidateForkResolutionDigest === 'present',
   },
+  // R2-R4 come from the OTHER construction surface. The harness drives storage
+  // through the exported derivation, whose facts must first be issued by the
+  // verified-replacement registry -- and that registry refuses three of the six
+  // (storage operation x candidate head state) combinations outright. Both axes
+  // are pinned absolutely, so these cells are forced onto the refusal with no
+  // fixture free to avoid them.
+  //
+  // ORDER IS NOT ARBITRARY: rules are listed in the order the refusals actually
+  // FIRE. issueActive validates the head at :637 BEFORE testing its state at
+  // :641, so a tombstone candidate carrying a fork resolution really does hit
+  // the codec first -- which is why R1 stays ahead of R2/R3 and owns those
+  // cells. The consequence to read carefully: R2 and R3 retire the
+  // K='absent' remainder, not their full (operation, state) territory.
+  {
+    id: 'R2-active-operation-needs-active-head',
+    site: 'packages/storage/src/system-record-verified-replacement-v1-internal.ts:641',
+    failure: 'verified replacement head must be active',
+    because:
+      'issueCandidate routes operation \'active\' straight to issueActive (:747), '
+      + 'which refuses any head whose state is not active. A tombstone candidate '
+      + 'can never be issued as an active replacement.',
+    refuses: (cell) =>
+      cell.storageOperation === 'active' && cell.candidateHeadState === 'tombstone',
+  },
+  {
+    id: 'R3-quarantine-operation-needs-active-head',
+    site: 'packages/storage/src/system-record-verified-replacement-v1-internal.ts:641',
+    failure: 'verified replacement head must be active',
+    because:
+      'The quarantine branch does NOT validate its own head -- it delegates to '
+      + 'issuer.issueActive at :757 and only then promotes the facts to '
+      + '\'quarantine\'. So quarantine inherits the active-head requirement whole, '
+      + 'and a tombstone can no more be quarantined than made active. Kept apart '
+      + 'from R2 because the route differs: same refusal, reached by delegation.',
+    refuses: (cell) =>
+      cell.storageOperation === 'quarantine' && cell.candidateHeadState === 'tombstone',
+  },
+  {
+    id: 'R4-tombstone-operation-needs-tombstone-head',
+    site: 'packages/storage/src/system-record-verified-replacement-v1-internal.ts:833',
+    failure: 'verified tombstone replacement head must be tombstone',
+    because:
+      'The tombstone branch is issueCandidate\'s fall-through (:822 onward) and '
+      + 'refuses any head whose state is not tombstone. Unlike R2/R3 this rule '
+      + 'retires BOTH fork-resolution values, because the head codec permits an '
+      + 'ACTIVE head to carry forkResolutionDigest -- R1 is a tombstone-only '
+      + 'refusal, so nothing retires these cells ahead of it.',
+    refuses: (cell) =>
+      cell.storageOperation === 'tombstone' && cell.candidateHeadState === 'active',
+  },
 ];
 
 export interface ConstructibilitySplitV1 {

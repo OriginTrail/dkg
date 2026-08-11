@@ -45,14 +45,33 @@ describe('verdict-diff constructibility split', () => {
     expect(summed).toBe(split.unconstructible.length);
   });
 
-  // R1 retires a clean quarter: candidate head state and the candidate's
-  // fork-resolution digest are both independent of every other axis, so
-  // 1/2 x 1/2 of 100,224 = 25,056. Pinning the number is what would catch the
-  // rule silently widening -- a predicate typo that dropped one conjunct would
-  // retire half the space and every other row here would still pass.
-  it('retires exactly the tombstone-with-fork-resolution quarter', () => {
+  // Per-rule counts, because the conservation sum above DETECTS a change while
+  // these LOCALISE it. A predicate typo that dropped one conjunct would double
+  // a rule's territory with every other row here still passing.
+  //
+  // Axes C (head state), H (storage operation) and K (fork resolution) are
+  // independent of every other axis, so each (C,H,K) triple owns exactly
+  // 100,224 / 12 = 8,352 cells. That is the unit every number below is built
+  // from, and it is what makes them predictable rather than merely observed:
+  //   R1  C=tombstone & K=present, all three operations   3 x 8,352 = 25,056
+  //   R2  C=tombstone & H=active, K=absent remainder      1 x 8,352 =  8,352
+  //   R3  C=tombstone & H=quarantine, K=absent remainder  1 x 8,352 =  8,352
+  //   R4  C=active    & H=tombstone, both K values        2 x 8,352 = 16,704
+  // R2 and R3 see only the K='absent' remainder because R1 fires first, which
+  // mirrors the real refusal order: issueActive validates the head at :637
+  // before testing its state at :641.
+  //
+  // Cross-check from the other direction: the registry refuses three of the six
+  // (operation, head state) pairs outright, which is half the space (50,112),
+  // plus R1's tombstone-with-resolution cells in the one surviving pair
+  // (C=tombstone & H=tombstone & K=present, 8,352) = 58,464.
+  it('retires each rule\'s exact territory', () => {
     expect(split.byRule['R1-tombstone-carries-fork-resolution']).toBe(25_056);
-    expect(split.constructible.length).toBe(75_168);
+    expect(split.byRule['R2-active-operation-needs-active-head']).toBe(8_352);
+    expect(split.byRule['R3-quarantine-operation-needs-active-head']).toBe(8_352);
+    expect(split.byRule['R4-tombstone-operation-needs-tombstone-head']).toBe(16_704);
+    expect(split.unconstructible.length).toBe(58_464);
+    expect(split.constructible.length).toBe(41_760);
   });
 
   // A retirement is a citation, not an opinion: the failure string each rule

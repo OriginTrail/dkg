@@ -5,6 +5,7 @@ import {
   computeAgentProfileHeadObjectDigestV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
+import { createSystemRecordVerifiedReplacementRegistryV1 } from '../src/system-record-verified-replacement-v1-internal.js';
 import { VERDICT_DIFF_AXES_V1 } from './helpers/authority-verdict-diff-fixture-v1.js';
 import {
   AXIS_CANDIDATE_HEAD_BINDING_V1,
@@ -116,6 +117,86 @@ describe('head-codec tombstone-branch refusals', () => {
     expect(refusalOf(current)).toBe('MINTS');
     for (const version of ['1', '2', '3']) {
       expect(refusalOf({ ...tombstone, version })).toBe('MINTS');
+    }
+  });
+});
+
+/**
+ * R2, R3 and R4 retire 33,408 cells between them -- a third of the space -- on
+ * the claim that the verified-replacement registry refuses three of the six
+ * (storage operation x candidate head state) pairs. A citation shows the string
+ * sits at the line; it does NOT show the site refuses that combination. So each
+ * is FIRED here through the real registry with the exact pairing its rule
+ * names.
+ *
+ * The registry is the right instrument: the harness drives storage through the
+ * exported derivation, and the derivation's facts can only come from here.
+ */
+describe('verified-replacement registry operation/head-state refusals', () => {
+  it('refuses every operation/head-state pair the rules retire', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1();
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const tombstoneHead = fixture.tombstone.head;
+    const activeHead = fixture.active.head;
+
+    // R2 -- operation 'active' routes straight to issueActive.
+    expect(() => registry.issuer.issueCandidate({
+      operation: 'active',
+      ...fixture.active,
+      head: tombstoneHead,
+    } as never)).toThrow('verified replacement head must be active');
+
+    // R3 -- operation 'quarantine' reaches the SAME refusal by delegation, which
+    // is the whole reason it is a separate rule: nothing in the quarantine
+    // branch checks the head, it just inherits issueActive's requirement.
+    expect(() => registry.issuer.issueCandidate({
+      operation: 'quarantine',
+      ...fixture.quarantine,
+      head: tombstoneHead,
+    } as never)).toThrow('verified replacement head must be active');
+
+    // R4 -- and the mirror image on the tombstone fall-through.
+    expect(() => registry.issuer.issueCandidate({
+      operation: 'tombstone',
+      ...fixture.tombstone,
+      head: activeHead,
+    } as never)).toThrow('verified tombstone replacement head must be tombstone');
+  });
+
+  // THE RULE ORDER IS A MEASUREMENT, NOT A PREFERENCE, and the per-rule counts
+  // rest on it: R2 and R3 retire 8,352 cells each rather than 16,704 precisely
+  // because R1 owns the fork-resolution half first. That is only true if the
+  // codec really refuses before the state check does -- issueActive validates
+  // the head at :637 and tests its state at :641 -- so the pairing that trips
+  // both must report the CODEC's message.
+  it('lets the head codec refuse ahead of the operation/head-state check', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1();
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    expect(() => registry.issuer.issueCandidate({
+      operation: 'active',
+      ...fixture.active,
+      head: {
+        ...(fixture.tombstone.head as unknown as Record<string, unknown>),
+        forkResolutionDigest: `0x${'cd'.repeat(32)}`,
+      },
+    } as never)).toThrow('V1 has no direct terminal fork-resolution tombstone');
+  });
+
+  // The positive control. Without it the three refusals above are equally
+  // consistent with a registry that refuses everything, and the rules would
+  // retire a third of the space on a fixture defect.
+  it('accepts each operation paired with the head state its rule leaves alone', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1();
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    for (const issue of [
+      { operation: 'active' as const, ...fixture.active },
+      { operation: 'quarantine' as const, ...fixture.quarantine },
+      { operation: 'tombstone' as const, ...fixture.tombstone },
+    ]) {
+      const handle = registry.issuer.issueCandidate(issue as never);
+      const facts = registry.consumer.consume(handle, fixture.binding);
+      expect(facts.operation).toBe(issue.operation);
+      registry.consumer.release(facts);
     }
   });
 });
