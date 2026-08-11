@@ -35,6 +35,34 @@ function virtualClock(startMs = 1_000) {
 }
 
 describe('runCatchupPlanesWithPolicy', () => {
+  it('runs selected shared memory first and suppresses durable after its deferral', async () => {
+    const order: string[] = [];
+    const syncSharedMemory = vi.fn(async () => {
+      order.push('shared');
+      return { deferredBackpressure: 1 };
+    });
+    const syncDurable = vi.fn(async () => {
+      order.push('durable');
+      return { deferredBackpressure: 0 };
+    });
+
+    const result = await runCatchupPlanesWithPolicy({
+      mode: 'foreground',
+      includeSharedMemory: true,
+      planeOrder: 'shared-first',
+      syncDurable,
+      syncSharedMemory,
+      retry: { maxWaitMs: 0 },
+    });
+
+    expect(result).toEqual({
+      durable: null,
+      shared: { deferredBackpressure: 1 },
+    });
+    expect(order).toEqual(['shared']);
+    expect(syncDurable).not.toHaveBeenCalled();
+  });
+
   it('derives foreground priority and source and retries durable before starting SWM', async () => {
     const order: string[] = [];
     const priorities: Array<number | undefined> = [];
