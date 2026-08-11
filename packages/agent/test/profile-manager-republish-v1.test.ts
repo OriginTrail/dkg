@@ -31,10 +31,13 @@ function stubStore(): TripleStore {
   } as unknown as TripleStore;
 }
 
-/** Mirrors the real update guard, which rejects before validating the id. */
+/** Mirrors the real update guard: id validity first, then the seal requirement. */
 function stubPublisher(mintedKaId: bigint) {
   const publish = vi.fn(async (_options: PublishOptions) => publishResult(mintedKaId));
-  const update = vi.fn(async (_kaId: bigint, _options: PublishOptions) => {
+  const update = vi.fn(async (kaId: bigint, _options: PublishOptions) => {
+    if (kaId <= 0n || kaId >= (1n << 256n)) {
+      throw new Error(`Invalid update kaId ${kaId.toString()}: expected a positive uint256`);
+    }
     throw new Error(
       'Update rejected: on-chain update requires precomputedUpdateAttestation. ' +
         'Sign UpdateAuthorAttestation(kaId, newMerkleRoot, authorAddress) off-band ' +
@@ -53,10 +56,12 @@ describe('ProfileManager republish routing', () => {
     await manager.publishProfile(config);
     await manager.publishProfile(config);
 
-    // 0n is "no knowledge asset yet", not an id to update. Routing it to
-    // update() trips the attestation guard, and the publisher never validates
-    // the id at all, so the failure names the attestation and nothing ever
-    // mentions the zero id that caused it.
+    // 0n is "no knowledge asset yet", not an id to update. When this bug
+    // shipped, routing it to update() tripped the attestation guard and the
+    // publisher never validated the id at all, so the failure named the seal
+    // and nothing mentioned the zero id that caused it. The publisher now
+    // rejects the id first, so a routing regression names the real cause --
+    // but the routing itself is what this asserts.
     expect(update).not.toHaveBeenCalled();
     expect(publish).toHaveBeenCalledTimes(2);
     // Gate the routing decision, not the stored id: profileKcId still mirrors
