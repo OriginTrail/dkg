@@ -6,21 +6,26 @@ import {
 } from '@origintrail-official/dkg-storage';
 
 /**
- * The catalog-persist steps, as a closed set. Failure-injection tests target a
- * step by name, so a renamed step must be a compile error at every call site
- * rather than a string that silently stops matching.
+ * The canonical `QueryOptions.source` tag for each catalog-persist step.
+ *
+ * These strings are an observable contract: storage-side diagnostics and the
+ * ACK dead-air guards select store calls by this exact tag. They are literals
+ * here, in one place, rather than a template built from the step name — so
+ * renaming a step cannot silently change the externally visible tag.
  */
-export type CatalogPersistStep = 'deleteSubjects' | 'deleteByPattern' | 'insert' | 'flush';
+export const CATALOG_PERSIST_SOURCES = {
+  deleteSubjects: 'storage-ack.persistCatalog.deleteSubjects',
+  deleteByPattern: 'storage-ack.persistCatalog.deleteByPattern',
+  insert: 'storage-ack.persistCatalog.insert',
+  flush: 'storage-ack.persistCatalog.flush',
+} as const;
 
-/** The canonical `QueryOptions.source` tag for one catalog-persist step. */
-export function catalogPersistSource(step: CatalogPersistStep): string {
-  return `storage-ack.persistCatalog.${step}`;
-}
+export type CatalogPersistStep = keyof typeof CATALOG_PERSIST_SOURCES;
 
 function catalogStoreOptions(step: CatalogPersistStep, signal?: AbortSignal): QueryOptions {
   return {
     priority: 'ack',
-    source: catalogPersistSource(step),
+    source: CATALOG_PERSIST_SOURCES[step],
     ...(signal ? { signal } : {}),
   };
 }
