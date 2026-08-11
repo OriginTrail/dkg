@@ -151,7 +151,7 @@ describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
         snapshotsResolved: 1,
         snapshotsTotal: 2,
       });
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       releaseFirst();
       await harness.close();

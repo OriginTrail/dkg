@@ -93,6 +93,7 @@ export default defineConfig({
       "test/catchup-pass-policy.test.ts",
       "test/selected-swm-continuation.test.ts",
       "test/selected-swm-freshness.test.ts",
+      "test/selected-swm-bootstrap-admission.test.ts",
       "test/selected-swm-lifecycle-core.test.ts",
       "test/selected-swm-lifecycle-session.test.ts",
       "test/selected-swm-lifecycle-queue.test.ts",

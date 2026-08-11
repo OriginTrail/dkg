@@ -926,6 +926,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
       rfc64PublicCatalogBootstrap: {
@@ -971,6 +972,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
       rfc64PublicCatalogBootstrap: {
@@ -989,22 +991,25 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(queue).toHaveBeenCalledTimes(1);
-    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(true);
+    expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
+      .toBe(true);
 
-    // No configured selected Context Graph is eligible for this provider. The
-    // production selected retry path must classify that as clean no-work and
-    // clear its marker before the next bootstrap pass.
-    (receiver as any).networkAdmissionCoordinator.isAcceptedPeer = () => true;
-    await expect((receiver as any).trySelectedSwmRetryFromPeer(providerPeerId))
-      .resolves.toBe('not-started');
-    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(false);
+    // Exact plane proof terminates only this peer + selected-graph scope.
+    const completeOwner = (receiver as any).selectedSwmBootstrapAdmission.beginTransfer(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID],
+    );
+    (receiver as any).selectedSwmBootstrapAdmission.markTransferTerminal(completeOwner);
+    expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
+      .toBe(false);
     await vi.waitFor(() => {
       expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThanOrEqual(2);
     }, { timeout: 2_500, interval: 25 });
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(queue).toHaveBeenCalledTimes(1);
-    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(false);
+    expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
+      .toBe(false);
   });
 
   it('re-admits an incomplete selected SWM provider on periodic bootstrap refresh', async () => {
@@ -1025,6 +1030,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       store: new OxigraphStore(),
       syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
       rfc64PublicCatalogBootstrap: {
@@ -1043,7 +1049,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
     expect(queue).toHaveBeenCalledTimes(1);
-    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(true);
+    expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
+      .toBe(true);
 
     await vi.waitFor(() => {
       expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThanOrEqual(2);
@@ -1051,7 +1058,72 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
 
     expect(queue).toHaveBeenCalledTimes(2);
-    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(true);
+    expect((receiver as any).selectedSwmBootstrapAdmission.isRetryRequired(providerPeerId))
+      .toBe(true);
+  });
+
+  it('re-admits the same provider when a selected Context Graph is added later', async () => {
+    const secondContextGraphId = (
+      '0x2222222222222222222222222222222222222222/selected-later'
+    ) as ContextGraphIdV1;
+    const firstPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const secondPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: secondContextGraphId,
+      ownerAddress: AUTHOR,
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-provider-scope-growth-'));
+    tempDirs.push(dataDir);
+    const providerPeerId = '12D3KooWScopeAwareCompleteSwmProvider';
+    const receiver = await DKGAgent.create({
+      name: 'complete-provider-scope-growth-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      syncContextGraphs: [CONTEXT_GRAPH_ID],
+      agentProfileHeartbeatMs: 0,
+      rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
+      rfc64PublicCatalogBootstrap: {
+        retryIntervalMs: 1_000,
+        acceptedPublicPolicies: [firstPolicy, secondPolicy].map((policy) => ({
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+          completeSwmProviders: [providerPeerId],
+        })),
+      },
+    });
+    agents.push(receiver);
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+
+    await receiver.start();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(queue).toHaveBeenCalledTimes(1);
+    const firstScopeOwner = (receiver as any).selectedSwmBootstrapAdmission.beginTransfer(
+      providerPeerId,
+      [CONTEXT_GRAPH_ID],
+    );
+    (receiver as any).selectedSwmBootstrapAdmission.markTransferTerminal(firstScopeOwner);
+
+    expect(receiver.trackSyncContextGraph(secondContextGraphId)).toBe(true);
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThanOrEqual(2);
+    }, { timeout: 2_500, interval: 25 });
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(queue).toHaveBeenCalledTimes(2);
+    expect((receiver as any).selectedSwmBootstrapAdmission.snapshot(providerPeerId)).toEqual({
+      contextGraphIds: [CONTEXT_GRAPH_ID, secondContextGraphId].sort(),
+      phase: 'retry-required',
+    });
   });
 
   it('rejects bootstrap without persistence before node startup', async () => {

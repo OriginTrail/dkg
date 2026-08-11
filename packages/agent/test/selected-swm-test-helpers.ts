@@ -20,6 +20,7 @@ import {
   type SelectedSwmMetaContinuation,
 } from '../src/sync/selected-swm-meta-fetcher.js';
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
+import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
   SyncPageAccumulationLimitError,
   type SyncPageFetchOptions,
@@ -270,7 +271,7 @@ export interface SelectedProviderSelectionAgent {
   lastSuccessfulSyncAt: Map<string, number>;
   lastSyncProgressAt: Map<string, number>;
   syncReconcilerBackoff: Map<string, unknown>;
-  selectedSwmRetryRequiredPeers: Set<string>;
+  selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   getPeerProtocols: () => Promise<string[]>;
   planSharedMemorySyncContextGraphs: () => Promise<{
     publicContextGraphIds: string[];
@@ -373,7 +374,7 @@ export interface SelectedSwmLifecycleAgentFixture {
       local?: { rows?: number; bytesEstimate?: number };
     };
   };
-  selectedSwmRetryRequiredPeers: Set<string>;
+  selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
   store: OxigraphStore;
   writeLocks: Map<string, Promise<void>>;
   publicSnapshotStore: {
@@ -542,7 +543,7 @@ export function createSelectedSwmLifecycleHarness(
         }
         : {}),
     },
-    selectedSwmRetryRequiredPeers: new Set(),
+    selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
     store,
     writeLocks: new Map(),
     publicSnapshotStore: {

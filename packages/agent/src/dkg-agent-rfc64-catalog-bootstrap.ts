@@ -95,6 +95,17 @@ export function resolveRfc64SelectedRecoveryContextGraphIdsV1(
     .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
 }
 
+/** Selected recovery scopes for which one peer is explicitly graph-complete. */
+export function resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
+  config: Readonly<Rfc64PublicCatalogBootstrapConfigV1> | undefined,
+  providerPeerId: string,
+): readonly string[] {
+  if (config === undefined) return Object.freeze([]);
+  return Object.freeze(config.acceptedPublicPolicies
+    .filter(({ completeSwmProviders = [] }) => completeSwmProviders.includes(providerPeerId))
+    .map(({ policyEnvelope }) => policyEnvelope.payload.contextGraphId));
+}
+
 export class Rfc64CatalogBootstrapMethods extends DKGAgentBase {
   /**
    * Exact operator-pinned graph-complete SWM providers for one accepted policy.

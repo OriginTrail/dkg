@@ -31,6 +31,7 @@ import { getRfc64PersistenceRootOwnershipForInventoryV1 } from '../src/rfc64/per
 import {
   RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1,
 } from '../src/rfc64/persistence-layout-v1.js';
+import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 
 const temporaryDirectories: string[] = [];
 const childProcesses = new Set<ChildProcessWithoutNullStreams>();
@@ -53,7 +54,7 @@ function syntheticAgent(dataDirectory?: string): any {
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     finalizationRuntime: new FinalizationRuntime(),
     rfc64PersistenceV1: undefined,
-    selectedSwmRetryRequiredPeers: new Set<string>(),
+    selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
   });
   return agent;
 }

@@ -4,6 +4,7 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshness.js';
 import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
+import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import {
   DKG,
   PEER,
@@ -135,7 +136,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.selectedScopeComplete).toBe(true);
       expect(summary.continuationPasses).toBe(0);
       expect(harness.probes.publicAdmissions()).toBe(1);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
     } finally {
       await harness.close();
     }
@@ -169,7 +170,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.shared.swmCoverage).toBeUndefined();
       expect(selected.selectedScopeComplete).toBe(false);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
     }
@@ -212,7 +213,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.insertedMetaTriples).toBe(0);
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.selectedScopeComplete).toBe(false);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
     }
@@ -250,7 +251,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.swmCoverage).toBeUndefined();
       expect(selected.shared.timedOutPhases).toBeGreaterThan(0);
       expect(selected.selectedScopeComplete).toBe(false);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
     }
@@ -286,7 +287,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSuccessfulSyncAt: new Map<string, number>(),
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
-      selectedSwmRetryRequiredPeers: new Set<string>(),
+      selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async () => mixedPlan,
       resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => (
@@ -351,7 +352,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       lastSuccessfulSyncAt: new Map<string, number>(),
       lastSyncProgressAt: new Map<string, number>(),
       syncReconcilerBackoff: new Map<string, unknown>(),
-      selectedSwmRetryRequiredPeers: new Set<string>(),
+      selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
       planSharedMemorySyncContextGraphs: async () => ({
         publicContextGraphIds: [publicCg],
@@ -378,7 +379,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
     await callTrySyncFromPeer.call(agent, PEER, (outcome) => accounting.push(outcome));
 
-    expect(agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
+    expect(agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
     expect(agent.lastSuccessfulSyncAt.has(PEER)).toBe(false);
     // No freshness/progress callback means the reconciler wrapper classifies
     // this explicit incomplete result as a failed attempt and grows backoff.
@@ -432,7 +433,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(summary.resolvedSnapshotPlaneIncomplete).toBe(1);
       expect(summary.timedOutPhases).toBe(0);
       expect(summary.backoffWorthyFailures).toBe(0);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
       expect(initialSnapshotReads).toBe(672);
       expect(harness.probes.snapshotFetches).toEqual([]);
       expect(harness.probes.maxActiveAdmissions()).toBe(1);
@@ -500,7 +501,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         },
       );
       expect(selected.selectedScopeComplete).toBe(false);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
       await harness.close();
     }
@@ -620,7 +621,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(first.metadataContinuationYields).toBe(1);
       expect(firstSelected.selectedScopeComplete).toBe(false);
       expect(harness.probes.processedMetaBatches).toEqual([]);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
 
       const queuedPeers: string[] = [];
       const queueAgent = harness.agent as SelectedSwmLifecycleAgentFixture & Record<string, any>;
@@ -661,7 +662,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         harness.probes.metaReturnAcceptedPrefixOnRetryableTransportFailure,
       ).toEqual([true, true]);
       expect(harness.probes.processedMetaBatches).toEqual([manifest.meta]);
-      expect(harness.agent.selectedSwmRetryRequiredPeers.has(PEER)).toBe(false);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
     } finally {
       if (previousBudget === undefined) {
         delete process.env.DKG_SWM_CATCHUP_PASS_BUDGET_MS;
