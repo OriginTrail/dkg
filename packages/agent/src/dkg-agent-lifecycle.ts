@@ -5253,6 +5253,30 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const legacyCgs: string[] = [];
     const work = [];
     for (const contextGraphId of contextGraphIds) {
+      // #2052 D-13 — the `agents` system CG never rides the changelog lane.
+      //
+      // `isPrivateContextGraph` returns FALSE for system CGs, so without this
+      // `agents` is carried down applyPage by any peer advertising the
+      // changelog protocol. That matters because the merkle bypass is on BOTH
+      // doors — `acceptUnverified` is computed from system-CG membership here
+      // (:5324) and identically in the legacy runner (durable-sync.ts:338) —
+      // and it does more than skip a precondition: it ADMITS mismatched
+      // content as verified. So the fix is routing, not a second gate; a gate
+      // would sit downstream of a selector that already accepted the quads.
+      //
+      // Withholding at applyPage is unsafe here rather than merely harder:
+      // planPageApply advances a contiguous-prefix cursor with two record
+      // dispositions, so a withhold-but-advance third shape makes the withhold
+      // PERMANENT past a passed sequence. Excluding the CG means no changelog
+      // cursor is ever established for it, which is the only shape that stays
+      // reversible.
+      //
+      // Fails closed: anything uncertain stays on legacy, the lane that has
+      // always carried this graph.
+      if (contextGraphId === SYSTEM_CONTEXT_GRAPHS.AGENTS) {
+        legacyCgs.push(contextGraphId);
+        continue;
+      }
       if (await this.isPrivateContextGraph(contextGraphId)) {
         legacyCgs.push(contextGraphId);
         continue;

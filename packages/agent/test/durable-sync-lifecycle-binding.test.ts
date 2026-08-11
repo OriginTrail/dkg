@@ -22,7 +22,7 @@ vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOr
   };
 });
 
-import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC_CHANGELOG, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
@@ -467,6 +467,49 @@ describe('durable sync lifecycle chain binding', () => {
       priorityOverride: 2_000,
       source: 'catchup-foreground',
     });
+  });
+
+  it('routes the agents system CG to legacy even on a changelog-capable peer (#2052 D-13)', async () => {
+    // `isPrivateContextGraph` returns FALSE for system Context Graphs, so before
+    // D-13 the `agents` graph was carried down the changelog lane by any peer
+    // advertising the protocol. The fixture below pins that exact condition —
+    // changelog-capable peer, nothing private — which is the only state where
+    // the routing decision is observable at all.
+    //
+    // Both assertions are load-bearing and neither implies the other: the
+    // returned list proves `agents` is HANDED to legacy, and the admission list
+    // proves it never ENTERED the changelog lane. A routing bug that admitted
+    // the graph and also reported it as remaining would satisfy the first alone.
+    const admissions: unknown[][] = [];
+    const agentLike = {
+      config: {},
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+      getPeerProtocols: async () => [PROTOCOL_SYNC_CHANGELOG],
+      isPrivateContextGraph: async () => false,
+      runContextGraphSyncWithBackpressure: async (...args: unknown[]) => {
+        admissions.push(args);
+        return createDurableSyncAccumulator();
+      },
+    };
+
+    const { remainingLegacyCgs } = await LifecycleSyncMethods.prototype.runChangelogLane.call(
+      agentLike as never,
+      ctx,
+      '12D3KooWChangelogPeer',
+      [SYSTEM_CONTEXT_GRAPHS.AGENTS, 'public-cg'],
+    );
+
+    // `agents` goes back to the legacy lane...
+    expect(remainingLegacyCgs).toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
+    // ...and the ordinary public CG is NOT diverted with it, so this pins the
+    // exclusion rather than a lane that stopped working.
+    expect(remainingLegacyCgs).not.toContain('public-cg');
+
+    // The changelog lane admitted exactly one graph, and not the agents one.
+    expect(admissions).toHaveLength(1);
+    expect((admissions[0] as unknown[])[1]).toBe('public-cg');
+    const admittedGraphs = admissions.map((args) => args[1]);
+    expect(admittedGraphs).not.toContain(SYSTEM_CONTEXT_GRAPHS.AGENTS);
   });
 
   it('labels standalone SWM recovery admissions at the call site', async () => {
