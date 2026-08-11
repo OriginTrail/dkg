@@ -104,6 +104,7 @@ export default defineConfig({
       "test/sync-on-connect-retry.test.ts",
       "test/sync-on-connect-churn.test.ts",
       "test/system-context-graph-policy.test.ts",
+      "test/system-record-config-controls-v1.test.ts",
       "test/system-record-requester-v1.test.ts",
       "test/system-record-requester-wire-v1.test.ts",
       "test/system-record-reconcile-transport-v1.test.ts",
