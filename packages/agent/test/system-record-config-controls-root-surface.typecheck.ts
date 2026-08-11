@@ -67,3 +67,34 @@ export type _RootPickerReturnsExactlyWhatTheRootTypePublishes = Expect<
 /** The published type must still describe the picker's value, not merely share keys. */
 export type _RootTypeIsAssignableFromThePickerReturn =
   Expect<RootPickerReturn extends RootSystemRecordConfigControlsV1 ? true : false>;
+
+/**
+ * NEGATIVE declaration checks: the per-control resolvers must not be reachable
+ * from the root's TYPES either. A type-only re-export
+ * (`export type { systemRecordProducerTrackingEnabledV1 } from './…'`) publishes
+ * the resolver's name and shape while adding no runtime export — invisible to
+ * `test-package-root.mjs`, which sees only values, and invisible to every
+ * positive assertion above, which only asks what IS published.
+ *
+ * Each `@ts-expect-error` below asserts the import FAILS. If a resolver ever
+ * becomes reachable from the root declarations, the error disappears, the
+ * directive becomes unused, and TypeScript reports THAT — so these fail in the
+ * right direction rather than silently passing.
+ */
+// @ts-expect-error — must not be reachable from the package root declarations.
+import type { systemRecordProducerTrackingEnabledV1 as _p } from '@origintrail-official/dkg-agent';
+// @ts-expect-error — must not be reachable from the package root declarations.
+import type { systemRecordProviderAdvertisementEnabledV1 as _a } from '@origintrail-official/dkg-agent';
+// @ts-expect-error — must not be reachable from the package root declarations.
+import type { systemRecordRequesterLaneEnabledV1 as _r } from '@origintrail-official/dkg-agent';
+// @ts-expect-error — must not be reachable from the package root declarations.
+import type { systemRecordLegacyCapablePeerSelectionEnabledV1 as _l } from '@origintrail-official/dkg-agent';
+
+export type _ResolverDeclarationsStayPrivate = [
+  typeof _p,
+  typeof _a,
+  typeof _r,
+  typeof _l,
+] extends never[]
+  ? true
+  : true;

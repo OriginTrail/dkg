@@ -94,19 +94,23 @@ if (packageManifest.exports['./dist/system-records/*'] !== null) {
 const configControlsModule = await import(
   new URL('../dist/system-records/config-controls-v1.js', import.meta.url).href
 );
-const publicOnRoot = new Set(['pickSystemRecordConfigControlsV1']);
-const configControlsExports = Object.keys(configControlsModule);
-// An empty or picker-less module would make the loop below assert nothing while
-// passing — the check-that-cannot-fail shape, guarded explicitly.
-if (!configControlsExports.some((name) => publicOnRoot.has(name))) {
+// One value is public; everything else the module exports is internal. Splitting
+// it off by destructuring states that invariant directly instead of encoding it
+// as a name list consulted by two separate guards.
+const { pickSystemRecordConfigControlsV1: expectedPicker, ...internalControls } =
+  configControlsModule;
+// Guards the module side: a picker-less module would make every check below
+// vacuous — the identity comparison would compare undefined to undefined.
+if (typeof expectedPicker !== 'function') {
   throw new Error(
-    `config-controls-v1.js exports none of the names allowed on the root (${[...publicOnRoot].join(', ')}); the root-exposure check below would assert nothing`,
+    'config-controls-v1.js no longer exports pickSystemRecordConfigControlsV1; the root checks below would assert nothing',
   );
 }
-
-if (typeof root.pickSystemRecordConfigControlsV1 !== 'function') {
+// Identity, not `typeof`: this must be THE picker, not merely some function
+// published under its name.
+if (root.pickSystemRecordConfigControlsV1 !== expectedPicker) {
   throw new Error(
-    'package root no longer exports pickSystemRecordConfigControlsV1; the CLI forwarding hop consumes it',
+    'package root does not publish the config-controls picker — missing, or a different value under its name; the CLI forwarding hop consumes it',
   );
 }
 // Compared by VALUE, not by name. A name comparison passes an alias — re-export
@@ -114,11 +118,9 @@ if (typeof root.pickSystemRecordConfigControlsV1 !== 'function') {
 // from the barrel and the internal function is published under a name the check
 // never looks for. The contract is that these functions stay off the root, not
 // that these spellings do.
-const internalByValue = new Map();
-for (const [name, value] of Object.entries(configControlsModule)) {
-  if (publicOnRoot.has(name)) continue;
-  internalByValue.set(value, name);
-}
+const internalByValue = new Map(
+  Object.entries(internalControls).map(([name, value]) => [value, name]),
+);
 for (const [rootName, rootValue] of Object.entries(root)) {
   const internalName = internalByValue.get(rootValue);
   if (internalName !== undefined) {
