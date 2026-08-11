@@ -270,6 +270,34 @@ describe('sync-on-connect churn gates', () => {
     expect(calls).toEqual([PEER_A]);
   });
 
+  it('resumes RFC-64 selected SWM when broad sync-on-connect is disabled', async () => {
+    const agent = await createUnstartedAgent('SelectedSwmRetryIndependentSwitch');
+    allowAllNetworkAdmission(agent);
+    (agent as any).config.syncOnConnectEnabled = false;
+    const calls: string[] = [];
+    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+      calls.push(peerId);
+    };
+    const handleSyncError = () => undefined;
+    (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now());
+    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+    )).toBe(false);
+    expect((agent as any).queueSyncFromPeerOnConnect(
+      PEER_A,
+      handleSyncError,
+      0,
+      { selectedSwmRetry: true },
+    )).toBe(true);
+
+    await flushTimers();
+    expect(calls).toEqual([PEER_A]);
+  });
+
   it('clears selected SWM retry state when network admission rejects a peer', async () => {
     const agent = await createUnstartedAgent('SelectedSwmRetryRejectedPeerCleanup');
     (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
