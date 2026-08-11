@@ -4,6 +4,11 @@
  * Both the module and this file are greenfield, so every assertion here is a contract
  * from day one rather than a characterization of observed behaviour. Each block cites the
  * plan sentence it pins.
+ *
+ * Fixture discipline that matters for the key contract: the applied projection is modelled
+ * GRAPHLESS while the inbound legacy page carries the aggregate `agents` graph, because
+ * that is how they really differ. Using one graph for both would let a regression that
+ * started comparing `graph` pass every duplicate test while withholding real duplicates.
  */
 import { describe, expect, it, vi } from 'vitest';
 
@@ -32,8 +37,14 @@ const ROOT = rootAt(1);
 const OTHER_ROOT = rootAt(2);
 const X25519_SUFFIX = 'a'.repeat(32);
 
+/** An inbound legacy quad: carries the aggregate agents graph. */
 function quad(subject: string, predicate: string, object: string): Quad {
   return { subject, predicate, object, graph: AGENTS_GRAPH };
+}
+
+/** An applied-projection row as the store really holds it: graphless. */
+function projectionRow(subject: string, predicate: string, object: string): Quad {
+  return { subject, predicate, object, graph: '' };
 }
 
 /**
@@ -57,9 +68,15 @@ describe('deriveLegacyAgentProfileRootV1 (:926 root derivation)', () => {
     expect(deriveLegacyAgentProfileRootV1(ROOT)).toBe(ROOT);
   });
 
-  it('strips a /.well-known/ descendant back to its root', () => {
+  it('round-trips every owned-subject shape core can derive', () => {
+    // If core changes an existing shape, this fails. It cannot detect a NEW shape with a
+    // new separator — core's policy table is module-private — which is why reverse
+    // derivation belongs in core; recorded on the PR rather than silently accepted.
     expect(deriveLegacyAgentProfileRootV1(deriveAgentProfileOwnedSubjectV1(ROOT, 'hosting'))).toBe(ROOT);
+    expect(deriveLegacyAgentProfileRootV1(deriveAgentProfileOwnedSubjectV1(ROOT, 'registration'))).toBe(ROOT);
     expect(deriveLegacyAgentProfileRootV1(deriveAgentProfileOwnedSubjectV1(ROOT, 'capability', 7))).toBe(ROOT);
+    expect(deriveLegacyAgentProfileRootV1(deriveAgentProfileOwnedSubjectV1(ROOT, 'offering', 3))).toBe(ROOT);
+    expect(deriveLegacyAgentProfileRootV1(`${ROOT}#x25519-${X25519_SUFFIX}`)).toBe(ROOT);
   });
 
   it('strips only a validated x25519 fragment', () => {
@@ -76,6 +93,8 @@ describe('deriveLegacyAgentProfileRootV1 (:926 root derivation)', () => {
     expect(deriveLegacyAgentProfileRootV1('https://example.com/agent')).toBeNull();
     expect(deriveLegacyAgentProfileRootV1(`${ROOT}/other`)).toBeNull();
     expect(deriveLegacyAgentProfileRootV1(`${ROOT}/.well-known/genid/unknown`)).toBeNull();
+    // Strips at `/.well-known/` but core's genid prefix is narrower, so this falls out.
+    expect(deriveLegacyAgentProfileRootV1(`${ROOT}/.well-known/other/thing`)).toBeNull();
     expect(deriveLegacyAgentProfileRootV1(`did:dkg:agent:0x${'A'.repeat(40)}`)).toBeNull();
     expect(deriveLegacyAgentProfileRootV1('')).toBeNull();
   });
@@ -116,13 +135,29 @@ describe('LegacyAgentProfileGateV1 — uncovered roots keep legacy behaviour (:9
     expect(lookupProjectionMembership).not.toHaveBeenCalled();
     expect(result.storeRequests).toBe(1);
   });
+
+  // A passthrough page must come out in the order it went in: "unchanged" includes order,
+  // and root selection is sorted for batching, which must not leak into emission.
+  it('preserves arrival order across interleaved unknown-shape and derived-root quads', async () => {
+    const { lookup } = fakeLookup([], []);
+    const quads = [
+      quad(OTHER_ROOT, 'p', 'o'),
+      quad('urn:x', 'p', 'o'),
+      quad(ROOT, 'p', 'o'),
+      quad('https://example.com/a', 'p', 'o'),
+    ];
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(quads);
+
+    expect(result.insert).toEqual(quads);
+  });
 });
 
 // :924 — exact duplicates discarded before store insertion; conflicting quads held aside.
 // :925 — streaming per quad, never page equality.
 describe('LegacyAgentProfileGateV1 — covered roots (:924, :925)', () => {
   const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: [ROOT] };
-  const projection = [quad(ROOT, 'p', 'o1'), quad(ROOT, 'p', 'o2')];
+  const projection = [projectionRow(ROOT, 'p', 'o1'), projectionRow(ROOT, 'p', 'o2')];
 
   it('discards exact duplicates before insertion', async () => {
     const { lookup } = fakeLookup([applied], projection);
@@ -137,6 +172,19 @@ describe('LegacyAgentProfileGateV1 — covered roots (:924, :925)', () => {
     expect(result.withheld).toEqual([]);
     expect(result.conflictedRoots).toBe(0);
     expect(result.storeRequests).toBe(2);
+  });
+
+  // The applied projection is graphless and the legacy page carries the agents graph, so
+  // this fails the moment membership identity starts including `graph`.
+  it('matches duplicates across differing graphs', async () => {
+    const { lookup } = fakeLookup([applied], projection);
+
+    const result = await createLegacyAgentProfileGateV1(lookup)
+      .filterPage([{ subject: ROOT, predicate: 'p', object: 'o1', graph: AGENTS_GRAPH }]);
+
+    expect(result.discardedDuplicates).toBe(1);
+    expect(result.withheld).toEqual([]);
+    expect(result.conflictedRoots).toBe(0);
   });
 
   it('withholds a conflicting quad and counts the root as conflicted', async () => {
@@ -199,14 +247,14 @@ describe('LegacyAgentProfileGateV1 — covered roots (:924, :925)', () => {
 // :1505 — "signed state cannot be overwritten".
 describe('LegacyAgentProfileGateV1 — signed state cannot be overwritten (:1505)', () => {
   it('never offers a quad of a covered root for insertion, under any page shape', async () => {
-    const owned = [ROOT, deriveAgentProfileOwnedSubjectV1(ROOT, 'hosting')];
-    const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: owned };
-    const projection = [quad(ROOT, 'p', 'o1'), quad(owned[1] as string, 'p', 'o2')];
+    const hosting = deriveAgentProfileOwnedSubjectV1(ROOT, 'hosting');
+    const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: [ROOT, hosting] };
+    const projection = [projectionRow(ROOT, 'p', 'o1'), projectionRow(hosting, 'p', 'o2')];
 
     const pages: Quad[][] = [
       [quad(ROOT, 'p', 'o1')],
       [quad(ROOT, 'p', 'rewritten')],
-      [quad(owned[1] as string, 'p', 'o2'), quad(owned[1] as string, 'p', 'extra')],
+      [quad(hosting, 'p', 'o2'), quad(hosting, 'p', 'extra')],
       [quad(`${ROOT}#x25519-${X25519_SUFFIX}`, 'p', 'o')],
       [quad(ROOT, 'p', 'o1'), quad(ROOT, 'p', 'rewritten'), quad(OTHER_ROOT, 'p', 'o')],
     ];
@@ -228,7 +276,7 @@ describe('LegacyAgentProfileGateV1 — a profile split across conflicting legacy
   it('classifies each page independently and only the conflicting page reports a conflict', async () => {
     const hosting = deriveAgentProfileOwnedSubjectV1(ROOT, 'hosting');
     const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: [ROOT, hosting] };
-    const projection = [quad(ROOT, 'p', 'o1'), quad(hosting, 'p', 'o2')];
+    const projection = [projectionRow(ROOT, 'p', 'o1'), projectionRow(hosting, 'p', 'o2')];
 
     const first = fakeLookup([applied], projection);
     const clean = await createLegacyAgentProfileGateV1(first.lookup).filterPage([quad(ROOT, 'p', 'o1')]);
@@ -254,10 +302,11 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
   it('classifies a cold page spanning 256 signed roots with exactly two store requests', async () => {
     const roots = Array.from({ length: LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1 }, (_, i) => rootAt(i + 1));
     const applied = roots.map((root) => ({ root, ownedSubjects: [root] }));
-    const projection = roots.map((root) => quad(root, 'p', 'o'));
+    const projection = roots.map((root) => projectionRow(root, 'p', 'o'));
+    const page = roots.map((root) => quad(root, 'p', 'o'));
     const { lookup, lookupAppliedRoots, lookupProjectionMembership } = fakeLookup(applied, projection);
 
-    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(projection.map((row) => ({ ...row })));
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(page);
 
     expect(result.discardedDuplicates).toBe(LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1);
     expect(result.insert).toEqual([]);
@@ -272,10 +321,11 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
     const total = LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1 + 2;
     const roots = Array.from({ length: total }, (_, i) => rootAt(i + 1));
     const applied = roots.map((root) => ({ root, ownedSubjects: [root] }));
-    const projection = roots.map((root) => quad(root, 'p', 'o'));
+    const projection = roots.map((root) => projectionRow(root, 'p', 'o'));
+    const page = roots.map((root) => quad(root, 'p', 'o'));
     const { lookup, lookupAppliedRoots, lookupProjectionMembership } = fakeLookup(applied, projection);
 
-    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(projection.map((row) => ({ ...row })));
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(page);
 
     expect(result.withheld).toHaveLength(2);
     expect(result.unclassifiedRoots).toBe(2);
@@ -290,10 +340,9 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
   // classification of the quads that DID fit in the batch.
   it('still classifies in-batch quads exactly while withholding the out-of-batch remainder', async () => {
     const total = LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1 + 1;
-    // Sorted selection takes the numerically-lowest roots; index 1 and 2 are in-batch.
     const roots = Array.from({ length: total }, (_, i) => rootAt(i + 1));
     const applied = roots.map((root) => ({ root, ownedSubjects: [root] }));
-    const projection = roots.map((root) => quad(root, 'p', 'o'));
+    const projection = roots.map((root) => projectionRow(root, 'p', 'o'));
     const { lookup } = fakeLookup(applied, projection);
 
     // The page itself must derive more than one batch of roots — the cap is on roots the
@@ -336,7 +385,7 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
     const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: [ROOT] };
     const oversized = Array.from(
       { length: SYSTEM_RECORD_MAX_PROJECTION_QUADS + 1 },
-      (_, i) => quad(ROOT, 'p', `o${i}`),
+      (_, i) => projectionRow(ROOT, 'p', `o${i}`),
     );
     const { lookup } = fakeLookup([applied], oversized);
 

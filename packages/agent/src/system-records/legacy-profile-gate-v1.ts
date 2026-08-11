@@ -20,6 +20,13 @@
  * split across root, nested and key subjects are expected and are classified
  * independently.
  *
+ * Structure: the lookup phases only assign a DISPOSITION to each derived root; a single
+ * final pass then walks the original page and materializes the result from those
+ * dispositions. That keeps `insert` and `withheld` in arrival order — "uncovered roots use
+ * legacy insertion" means unchanged, and reordering a passthrough page is a change — and
+ * keeps the classification invariant readable in one place rather than spread across
+ * mutations in each lookup branch.
+ *
  * Plan lines 924-930. At :924 "quarantined" takes quads as its object, in parallel with
  * "discarded" — the quads are held aside. The record-level marker is :925's "dirties ...
  * it", and the plan's record vocabulary is consistently dirty (:923, :927, AC-4).
@@ -33,6 +40,7 @@
  * and :926's two-request budget does not transfer to it. Activation is gated on both.
  */
 
+import { tripleContentV10 } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   classifyAgentProfileOwnedSubjectV1,
@@ -74,13 +82,10 @@ export interface LegacyAgentProfileGateLookupV1 {
   ): Promise<readonly Quad[]>;
 }
 
-/** Why a root's quads were withheld rather than classified. Deliberately not exported. */
-type LegacyAgentProfileWithholdReasonV1 = 'conflict' | 'unclassified';
-
 export interface LegacyAgentProfileGateResultV1 {
-  /** Quads cleared for ordinary legacy insertion, in arrival order. */
+  /** Quads cleared for ordinary legacy insertion, in the page's arrival order. */
   readonly insert: readonly Quad[];
-  /** Quads never offered to the store: a conflict, or a root left unclassified by a cap. */
+  /** Quads never offered to the store, in arrival order. */
   readonly withheld: readonly Quad[];
   /** Exact duplicates dropped before insertion. */
   readonly discardedDuplicates: number;
@@ -93,6 +98,18 @@ export interface LegacyAgentProfileGateResultV1 {
 }
 
 /**
+ * What one derived root's quads are to do. Assigned by the lookup phases, consumed once
+ * by the final pass. Deliberately not exported: it is this module's internal plan.
+ */
+type RootDispositionV1 =
+  /** No applied signed record: ordinary legacy behaviour, untouched. */
+  | { readonly kind: 'uncovered' }
+  /** A batch cap stopped us classifying it, so nothing may be inserted unverified. */
+  | { readonly kind: 'unclassified' }
+  /** Covered by an applied record; each quad is compared against its exact projection. */
+  | { readonly kind: 'covered' };
+
+/**
  * Derive the canonical record root for an arbitrary inbound subject.
  *
  * Exact `did:dkg:agent:<address>` subjects are their own root; a `/.well-known/`
@@ -100,6 +117,11 @@ export interface LegacyAgentProfileGateResultV1 {
  * Every candidate is confirmed by core's owned-subject classifier rather than by
  * restating its string rules here, so this can never admit a shape core rejects.
  * Unknown shapes stay uncovered and take the legacy path.
+ *
+ * Known gap, filed rather than papered over: the separators tried here are fixed, while
+ * the authoritative shape set is core's module-private policy table. A future owned-subject
+ * shape using a new separator would derive to null and be treated as uncovered. Core is
+ * the only place that can see the full set, which is why reverse derivation belongs there.
  */
 export function deriveLegacyAgentProfileRootV1(subject: string): string | null {
   if (typeof subject !== 'string' || subject.length === 0) return null;
@@ -117,9 +139,14 @@ export function deriveLegacyAgentProfileRootV1(subject: string): string | null {
   return null;
 }
 
-/** Graphless identity. Projection membership is a triple property; the page's graph is not. */
-function tripleKeyV1(quad: Quad): string {
-  return JSON.stringify([quad.subject, quad.predicate, quad.object]);
+/**
+ * Projection membership identity: the canonical graphless N-Triples line, the same
+ * encoding storage's projection inspection uses. Graph is deliberately excluded — the
+ * applied projection lives in its own graph while the legacy page carries the aggregate
+ * `agents` graph, so a graph-sensitive key would call every real duplicate a conflict.
+ */
+function projectionKeyV1(quad: Quad): string {
+  return new TextDecoder().decode(tripleContentV10(quad.subject, quad.predicate, quad.object));
 }
 
 export interface LegacyAgentProfileGateV1 {
@@ -138,148 +165,112 @@ export function createLegacyAgentProfileGateV1(
       quads: readonly Quad[],
       signal?: AbortSignal,
     ): Promise<LegacyAgentProfileGateResultV1> {
-      // Partition first: one pass, one derivation per quad, no query.
-      const byRoot = new Map<string, Quad[]>();
-      const uncovered: Quad[] = [];
-      for (const quad of quads) {
+      // Phase 1 — derive once per quad, keeping the result positionally so the final pass
+      // never re-derives. No query.
+      const rootByIndex: (string | null)[] = new Array(quads.length);
+      const roots = new Set<string>();
+      for (const [index, quad] of quads.entries()) {
         const root = deriveLegacyAgentProfileRootV1(quad.subject);
-        if (root === null) {
-          uncovered.push(quad);
-          continue;
-        }
-        const existing = byRoot.get(root);
-        if (existing === undefined) byRoot.set(root, [quad]);
-        else existing.push(quad);
+        rootByIndex[index] = root;
+        if (root !== null) roots.add(root);
       }
 
-      if (byRoot.size === 0) {
-        return frozenResult({
-          insert: uncovered,
-          withheld: [],
-          discardedDuplicates: 0,
-          conflictedRoots: 0,
-          unclassifiedRoots: 0,
-          storeRequests: 0,
-        });
-      }
-
-      // A page may derive more roots than one batch may carry. Selection is sorted so the
-      // same page always selects the same roots, and the remainder is withheld rather than
-      // inserted on an unverified assumption that it is uncovered — absence of a lookup is
-      // not absence of a record.
-      const derivedRoots = [...byRoot.keys()].sort();
-      const selected = derivedRoots.slice(0, LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1);
-      const deferred = derivedRoots.slice(LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1);
-
-      const withheld: Quad[] = [];
-      const recovery = new Map<string, LegacyAgentProfileWithholdReasonV1>();
-      for (const root of deferred) {
-        withheld.push(...(byRoot.get(root) ?? []));
-        recovery.set(root, 'unclassified');
-      }
-
-      const applied = await lookup.lookupAppliedRoots(selected, signal);
-      let storeRequests = 1;
-
-      const appliedByRoot = new Map<string, LegacyAgentProfileAppliedRootV1>();
-      for (const record of applied) {
-        if (byRoot.has(record.root)) appliedByRoot.set(record.root, record);
-      }
-
-      // Only covered roots need a membership read, and only for subjects the page touched.
-      const subjects = new Set<string>();
-      for (const [root, record] of appliedByRoot) {
-        const owned = new Set(record.ownedSubjects);
-        for (const quad of byRoot.get(root) ?? []) {
-          if (owned.has(quad.subject)) subjects.add(quad.subject);
-        }
-      }
-
-      // A covered root whose page subjects overflow the membership batch cannot be
-      // classified exactly, so it is withheld whole rather than partly compared.
-      const membershipSubjects: string[] = [];
-      const overflowed = new Set<string>();
-      if (subjects.size > SYSTEM_RECORD_MAX_OWNED_SUBJECTS) {
-        for (const [root] of appliedByRoot) {
-          withheld.push(...(byRoot.get(root) ?? []));
-          recovery.set(root, 'unclassified');
-          overflowed.add(root);
-        }
-      } else {
-        membershipSubjects.push(...[...subjects].sort());
-      }
-
+      const disposition = new Map<string, RootDispositionV1>();
+      let storeRequests = 0;
       const projection = new Set<string>();
-      if (membershipSubjects.length > 0) {
-        const rows = await lookup.lookupProjectionMembership(membershipSubjects, signal);
+
+      if (roots.size > 0) {
+        // Phase 2 — a page may derive more roots than one batch may carry. Selection is
+        // sorted so the same page always selects the same roots; the remainder is withheld
+        // rather than inserted on an unverified assumption that it is uncovered, because
+        // absence of a lookup is not absence of a record.
+        const derivedRoots = [...roots].sort();
+        const selected = derivedRoots.slice(0, LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1);
+        for (const root of derivedRoots.slice(LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1)) {
+          disposition.set(root, { kind: 'unclassified' });
+        }
+
+        // Phase 3 — one batched read maps the selected roots to applied records.
+        const applied = await lookup.lookupAppliedRoots(selected, signal);
         storeRequests += 1;
-        if (rows.length > SYSTEM_RECORD_MAX_PROJECTION_QUADS) {
-          // An over-cap response cannot be trusted as the exact applied set, so every
-          // covered root falls back to withhold-and-recover rather than being compared
-          // against a truncated projection.
-          for (const [root] of appliedByRoot) {
-            if (overflowed.has(root)) continue;
-            withheld.push(...(byRoot.get(root) ?? []));
-            recovery.set(root, 'unclassified');
-            overflowed.add(root);
+        const appliedByRoot = new Map<string, LegacyAgentProfileAppliedRootV1>();
+        for (const record of applied) {
+          if (roots.has(record.root)) appliedByRoot.set(record.root, record);
+        }
+        for (const root of selected) {
+          disposition.set(root, appliedByRoot.has(root) ? { kind: 'covered' } : { kind: 'uncovered' });
+        }
+
+        // Phase 4 — one batched membership read, for covered roots only and only for the
+        // subjects this page actually touched.
+        const subjects = new Set<string>();
+        for (const [root, record] of appliedByRoot) {
+          const owned = new Set(record.ownedSubjects);
+          for (const [index, quad] of quads.entries()) {
+            if (rootByIndex[index] === root && owned.has(quad.subject)) subjects.add(quad.subject);
           }
-        } else {
-          for (const row of rows) projection.add(tripleKeyV1(row));
+        }
+
+        // A covered root whose page subjects overflow the membership batch cannot be
+        // classified exactly, so it is withheld whole rather than partly compared.
+        if (subjects.size > SYSTEM_RECORD_MAX_OWNED_SUBJECTS) {
+          for (const root of appliedByRoot.keys()) disposition.set(root, { kind: 'unclassified' });
+        } else if (subjects.size > 0) {
+          const rows = await lookup.lookupProjectionMembership([...subjects].sort(), signal);
+          storeRequests += 1;
+          if (rows.length > SYSTEM_RECORD_MAX_PROJECTION_QUADS) {
+            // An over-cap response cannot be trusted as the exact applied set, so every
+            // covered root falls back to withhold rather than being compared against a
+            // truncated projection.
+            for (const root of appliedByRoot.keys()) disposition.set(root, { kind: 'unclassified' });
+          } else {
+            for (const row of rows) projection.add(projectionKeyV1(row));
+          }
         }
       }
 
-      const insert: Quad[] = [...uncovered];
-      let discardedDuplicates = 0;
+      // Phase 5 — one materialization pass over the page, in arrival order.
+      const insert: Quad[] = [];
+      const withheld: Quad[] = [];
       const conflicted = new Set<string>();
-      for (const root of selected) {
-        const pageQuads = byRoot.get(root) ?? [];
-        const record = appliedByRoot.get(root);
-        if (record === undefined) {
-          // No applied signed record: ordinary legacy behaviour, untouched.
-          insert.push(...pageQuads);
+      let discardedDuplicates = 0;
+      let unclassifiedRoots = 0;
+      for (const [index, quad] of quads.entries()) {
+        const root = rootByIndex[index];
+        const plan = root === null ? undefined : disposition.get(root);
+        if (root === null || plan === undefined || plan.kind === 'uncovered') {
+          insert.push(quad);
           continue;
         }
-        if (overflowed.has(root)) continue;
-        for (const quad of pageQuads) {
-          if (projection.has(tripleKeyV1(quad))) {
-            discardedDuplicates += 1;
-            continue;
-          }
-          // Additional or different for a covered root: never inserted.
+        if (plan.kind === 'unclassified') {
           withheld.push(quad);
-          conflicted.add(root);
+          continue;
         }
+        if (projection.has(projectionKeyV1(quad))) {
+          discardedDuplicates += 1;
+          continue;
+        }
+        // Additional or different for a covered root: never inserted.
+        withheld.push(quad);
+        conflicted.add(root);
       }
-      for (const root of conflicted) recovery.set(root, 'conflict');
+      for (const plan of disposition.values()) {
+        if (plan.kind === 'unclassified') unclassifiedRoots += 1;
+      }
 
       // The roots owing exact signed recovery stay inside this module and surface only as
       // counts. The record-dirty mechanism that would consume them does not exist yet, and
       // it is shared with plan :927 ("generic deletes/updates ... must use the record
       // capability or atomically dirty that record"), so it belongs where both consumers
       // reach it rather than as an interface here with nothing on the other end.
-      // Withholding alone already holds :1505 for this seam.
-      let unclassifiedRoots = 0;
-      for (const reason of recovery.values()) if (reason === 'unclassified') unclassifiedRoots += 1;
-
-      return frozenResult({
-        insert,
-        withheld,
+      return Object.freeze({
+        insert: Object.freeze(insert),
+        withheld: Object.freeze(withheld),
         discardedDuplicates,
         conflictedRoots: conflicted.size,
         unclassifiedRoots,
         storeRequests,
-      });
+      }) as LegacyAgentProfileGateResultV1;
     },
   });
-}
-
-function frozenResult(result: LegacyAgentProfileGateResultV1): LegacyAgentProfileGateResultV1 {
-  return Object.freeze({
-    insert: Object.freeze([...result.insert]),
-    withheld: Object.freeze([...result.withheld]),
-    discardedDuplicates: result.discardedDuplicates,
-    conflictedRoots: result.conflictedRoots,
-    unclassifiedRoots: result.unclassifiedRoots,
-    storeRequests: result.storeRequests,
-  }) as LegacyAgentProfileGateResultV1;
 }
