@@ -51,6 +51,9 @@ import {
   snapshotRfc64PublicCatalogBootstrapConfigV1,
 } from '../src/dkg-agent-rfc64-catalog.js';
 import {
+  resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1,
+} from '../src/dkg-agent-rfc64-catalog-bootstrap.js';
+import {
   buildOpenOwnerContextGraphPolicyV1,
   unsignedOpenContextGraphPolicyEnvelopeV1,
 } from '../src/rfc64/open-catalog-policy-v1.js';
@@ -907,6 +910,49 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         policyDigest: `0x${'11'.repeat(32)}`,
       }],
     } as unknown as Rfc64PublicCatalogBootstrapConfigV1)).toThrow(/unknown or missing fields/u);
+  });
+
+  it('keeps mixed graph-complete provider scopes isolated', () => {
+    const peerA = '12D3KooWMixedCompleteProviderA';
+    const peerB = '12D3KooWMixedCompleteProviderB';
+    const contextGraphA = CONTEXT_GRAPH_ID;
+    const contextGraphB =
+      '0x2222222222222222222222222222222222222222/mixed-provider' as ContextGraphIdV1;
+    const config = snapshotRfc64PublicCatalogBootstrapConfigV1({
+      acceptedPublicPolicies: [
+        {
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(
+            buildOpenOwnerContextGraphPolicyV1({
+              networkId: NETWORK_ID,
+              contextGraphId: contextGraphA,
+              ownerAddress: AUTHOR,
+            }),
+          ),
+          targets: [],
+          completeSwmProviders: [peerA],
+        },
+        {
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(
+            buildOpenOwnerContextGraphPolicyV1({
+              networkId: NETWORK_ID,
+              contextGraphId: contextGraphB,
+              ownerAddress: AUTHOR,
+            }),
+          ),
+          targets: [],
+          completeSwmProviders: [peerB],
+        },
+      ],
+    });
+
+    expect(resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(config, peerA))
+      .toEqual([contextGraphA]);
+    expect(resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(config, peerB))
+      .toEqual([contextGraphB]);
+    expect(resolveRfc64SelectedRecoveryContextGraphIdsForProviderV1(
+      config,
+      '12D3KooWUnconfiguredProvider',
+    )).toEqual([]);
   });
 
   it('dials and schedules every graph-complete SWM provider during bootstrap', async () => {
