@@ -26,6 +26,7 @@ import { Rfc64PublicCatalogReconciliationFailureRegistryV1 } from './rfc64/publi
 import { resolveVmReconcileStartupMaxDelayMs } from './startup-jitter.js';
 import { ContextGraphMembershipPersistScheduler } from './context-graph-membership-persist-scheduler.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
+import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -1607,21 +1608,8 @@ export class DKGAgentBase {
    * so denied peers must remain eligible on the next reconciler cadence.
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
-  /**
-   * Complete RFC-64 SWM providers whose most recent selected transfer did not
-   * prove every selected Context Graph complete. The catalog bootstrap may
-   * bypass the generic clean-success freshness gate only while this marker is
-   * present; the ordinary per-peer queue cooldown and reconciler backoff still
-   * bound retries.
-   */
-  protected readonly selectedSwmRetryRequiredPeers = new Set<string>();
-  /**
-   * Complete RFC-64 SWM providers whose one cold-start seed has already been
-   * admitted during this node lifecycle. The lifecycle scheduler owns this
-   * alongside the retry-required marker so bootstrap never has to coordinate
-   * two halves of the same state transition.
-   */
-  protected readonly selectedSwmBootstrapSeededPeers = new Set<string>();
+  /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
+  protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   /**
    * Per-peer sync-reconciler backoff. `failures` is the count of
    * consecutive reconciler attempts that did NOT produce a successful

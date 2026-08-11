@@ -16,11 +16,11 @@ import {
 } from '../src/sync/selected-swm-meta-fetcher.js';
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
+import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 
 function syntheticShutdownAgent(): any {
   const agent = Object.create(DKGAgent.prototype) as any;
-  agent.selectedSwmRetryRequiredPeers = new Set<string>();
-  agent.selectedSwmBootstrapSeededPeers = new Set<string>();
+  agent.selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   return agent;
 }
 

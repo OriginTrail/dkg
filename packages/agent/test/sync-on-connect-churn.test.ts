@@ -221,7 +221,7 @@ describe('sync-on-connect churn gates', () => {
       { selectedSwmRetry: true },
     )).toBe(false);
 
-    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     // A normal connection-open event never inherits the catalog bootstrap's
     // selected retry authority, even while the scheduling marker is present.
     expect((agent as any).queueSyncFromPeerOnConnect(
@@ -258,7 +258,11 @@ describe('sync-on-connect churn gates', () => {
 
     // A later exact completion clears the marker. Even after the short queue
     // cooldown expires, the still-fresh generic success prevents another run.
-    (agent as any).selectedSwmRetryRequiredPeers.delete(PEER_A);
+    const completedOwner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+      PEER_A,
+      ['selected-cg'],
+    );
+    (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(completedOwner);
     (agent as any).catchupOnConnectAt.set(
       PEER_A,
       Date.now() - CATCHUP_ON_CONNECT_COOLDOWN_MS - 1,
@@ -283,6 +287,7 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).config.rfc64PublicCatalogBootstrap = {
       acceptedPublicPolicies: [{ completeSwmProviders: [PEER_A] }],
     };
+    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({
       publicContextGraphIds: ['selected-cg'],
@@ -310,7 +315,7 @@ describe('sync-on-connect churn gates', () => {
       errors.push(error);
     };
     (agent as any).lastSuccessfulSyncAt.set(PEER_A, Date.now());
-    expect((agent as any).selectedSwmRetryRequiredPeers.has(PEER_A)).toBe(false);
+    expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(false);
 
     expect((agent as any).queueSyncFromPeerOnConnect(
       PEER_A,
@@ -322,7 +327,7 @@ describe('sync-on-connect churn gates', () => {
       handleSyncError,
       0,
     )).toBe(true);
-    expect((agent as any).selectedSwmRetryRequiredPeers.has(PEER_A)).toBe(true);
+    expect((agent as any).selectedSwmBootstrapAdmission.isRetryRequired(PEER_A)).toBe(true);
 
     await flushTimers();
     expect(errors).toEqual([]);
@@ -337,13 +342,11 @@ describe('sync-on-connect churn gates', () => {
 
   it('clears selected SWM retry state when network admission rejects a peer', async () => {
     const agent = await createUnstartedAgent('SelectedSwmRetryRejectedPeerCleanup');
-    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
-    (agent as any).selectedSwmBootstrapSeededPeers.add(PEER_A);
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
 
     (agent as any).clearNetworkRejectedPeerState(PEER_A);
 
-    expect((agent as any).selectedSwmRetryRequiredPeers.has(PEER_A)).toBe(false);
-    expect((agent as any).selectedSwmBootstrapSeededPeers.has(PEER_A)).toBe(false);
+    expect((agent as any).selectedSwmBootstrapAdmission.snapshot(PEER_A)).toBeNull();
   });
 
   it('clears selected SWM retry state after stop drains transfer owners', async () => {
@@ -356,13 +359,11 @@ describe('sync-on-connect churn gates', () => {
     });
     try {
       await agent.start();
-      (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
-      (agent as any).selectedSwmBootstrapSeededPeers.add(PEER_A);
+      (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
 
       await agent.stop();
 
-      expect((agent as any).selectedSwmRetryRequiredPeers.size).toBe(0);
-      expect((agent as any).selectedSwmBootstrapSeededPeers.size).toBe(0);
+      expect((agent as any).selectedSwmBootstrapAdmission.size).toBe(0);
     } finally {
       if ((agent as any).started) await agent.stop().catch(() => undefined);
     }
@@ -466,7 +467,7 @@ describe('sync-on-connect churn gates', () => {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
-    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
     (agent as any).trySelectedSwmRetryFromPeer = async (
       _peerId: string,
       onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
@@ -528,7 +529,8 @@ describe('sync-on-connect churn gates', () => {
       }),
       selectedScopeComplete: false,
     });
-    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).selectedSwmBootstrapAdmission.request(PEER_A, ['selected-cg']);
+    (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = () => ['selected-cg'];
     (agent as any).syncReconcilerBackoff.set(PEER_A, {
       failures: 1,
       nextRetryAt: Date.now() + 60_000,
