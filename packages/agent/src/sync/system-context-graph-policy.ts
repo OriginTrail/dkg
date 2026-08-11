@@ -54,22 +54,20 @@ export type ChangelogLaneDisposition =
 /**
  * Lane disposition for EVERY system Context Graph.
  *
- * The `satisfies Record<SystemContextGraphId, ...>` is the enforcement, and it
- * is the point of this table rather than a decoration: adding a member to
- * `SYSTEM_CONTEXT_GRAPHS` makes this object stop satisfying the constraint and
- * FAILS THE BUILD until that graph is given a lane disposition. Verified by
- * construction — a third member was added experimentally and `tsc` rejected this
- * table until it was given a value.
+ * The `satisfies Record<SystemContextGraphId, ...>` is the enforcement rather
+ * than a decoration: adding a member to `SYSTEM_CONTEXT_GRAPHS` makes this object
+ * stop satisfying the constraint, and `tsc` rejects it until that graph is given
+ * a disposition (verified by adding a third member experimentally).
  *
- * THE HONEST BOUND ON THAT GUARD: it forces a STATEMENT, not a DECISION. Someone
- * adding a system graph under deadline can discharge the error by writing
- * `'undecided-rides-changelog-lane'` and shipping. What it buys is that the
- * choice becomes visible in a diff and greppable — strictly more than a comment
- * achieved, and strictly less than a decision. Do not cite it as more.
+ * Its bound, so it is not trusted past its range: it forces a STATEMENT, not a
+ * decision — a graph can be added as `'undecided-rides-changelog-lane'` and
+ * shipped. What it buys is that the choice becomes visible in a diff and
+ * greppable.
  *
- * IT ALSO HAS EXACTLY ONE BYPASS, named here so that taking it reads as a
- * downgrade rather than a tidy-up: replacing `satisfies` with `as` silences the
- * constraint entirely, and the enforcement is gone with nothing failing.
+ * The enforcement lives entirely in that type boundary, and weakening the
+ * boundary removes it silently, with nothing failing: swapping `satisfies` for
+ * `as`, making the Record `Partial`, or widening the key type would each do it.
+ * Treat such an edit as a downgrade rather than a tidy-up.
  *
  * That matters because the sibling policy cannot ask the same question: the
  * verification-posture check (`acceptUnverified`) keys on membership of the
