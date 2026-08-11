@@ -236,7 +236,10 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
       // reads the LABEL rather than the prose. The first version of this guard
       // asserted that a paragraph contained the substring 'RUN:' and went red on
       // a rewording that lost no claim at all -- a wording-keyed guard, in the
-      // commit whose subject is wording-keyed guards.
+      // commit whose subject is wording-keyed guards. It was also PROVEN VACUOUS
+      // BY MUTATION: it passed on exactly the failure it existed to catch. A
+      // guard that is false-positive AND vacuous at the same time is the
+      // complete argument for keying on a label.
       expect({
         id: limitation.ruleId,
         executed: limitation.provenance.some((entry) => entry.kind === 'run'),

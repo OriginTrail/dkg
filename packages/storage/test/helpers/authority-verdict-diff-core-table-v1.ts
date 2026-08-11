@@ -272,7 +272,10 @@ export interface HarnessLimitationV1 {
    * The first version of this field was a paragraph and the guard beside it
    * asserted that the paragraph contained the substring 'RUN:' -- a guard keyed
    * on WORDING, which went red the moment the paragraph was reworded without
-   * losing a single claim. A guard for "an executed provenance exists" has to
+   * losing a single claim. WORSE, AND MEASURED RATHER THAN SUSPECTED: the same
+   * guard PASSED on precisely the failure it was written to catch, so it was
+   * false-positive and vacuous at once. That pair is the whole argument for
+   * keying on structure -- a guard for "an executed provenance exists" has to
    * key on a labelled entry, not on how the entry is phrased.
    *
    * ONE ENTRY PER CLAIM, never merged. "the referent is constructible", "the
@@ -604,7 +607,9 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   + 'SIDE READS STATE THE OTHER DOES NOT HAVE. The summary is one instance. The other '
   + "instance running the same way is core's `disposition`, which decides at :139-141 "
   + 'and for which storage has no producer at all -- MEASURED, with controls: the token '
-  + 'occurs 15 times in packages/core/src and 0 times in packages/storage/src, against a '
+  + 'occurs 15 times across 14 LINES in packages/core/src -- the gap is :643, which '
+  + 'carries the token twice, so a line count and an occurrence count disagree here '
+  + 'without either being wrong -- and 0 times in packages/storage/src, against a '
   + 'positive control (`authoritySequence`, 63 and 13) and a negative one (a nonexistent '
   + 'token, 0 and 0), so the zero is the tree\'s and not the instrument\'s. The mirror '
   + 'population -- cells storage answers from the applied row before the candidate is '
