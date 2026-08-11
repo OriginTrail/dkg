@@ -27,11 +27,10 @@ interface TestChainReader {
 
 function chainBridge(reader: TestChainReader): VmRecoveryFootprintBridge {
   return {
-    authority: {
-      kind: 'chain-reader',
-      isContextGraphActive: reader.isContextGraphActiveOnChain,
-      readAccessPolicy: reader.getContextGraphAccessPolicy,
-    },
+    resolvePublicAccess: async (contextGraphId) => (
+      await reader.isContextGraphActiveOnChain(contextGraphId)
+      && await reader.getContextGraphAccessPolicy(contextGraphId) === 0
+    ),
     sizing: { readUpdateContext: reader.getKnowledgeAssetUpdateContext },
   };
 }

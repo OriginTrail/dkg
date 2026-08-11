@@ -1,357 +1,9 @@
-/**
- * Adversarial acceptance lane for byte-aware exact-VM microbatch recovery.
- *
- * This file intentionally lives outside the large core-fills-gap suite so the
- * planner and host integration can be reviewed and executed independently.
- * The production contract expected by these tests is:
- *
- *   planVmRecoveryMicrobatch(candidates, limits)
- *     -> one deterministic, stable-prefix, byte/leaf bounded plan
- *
- * The host must use that plan only after a single exact request proves a
- * holder. Every requested UAL is then revalidated independently; aggregate
- * transport success must never turn an unresolved member into clean absence
- * or a successful VM reconciliation.
- */
+/** Focused integration lane for byte-aware exact-VM host recovery. */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DKG_GOSSIP_MAX_MESSAGE_BYTES } from '@origintrail-official/dkg-core';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/index.js';
-import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { OrdinalRecoveryTarget } from '../src/chain-reconciler.js';
-import {
-  MAX_EXACT_SYNC_ASSETS,
-  MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET,
-  exactSyncPhaseAccumulationLimits,
-} from '../src/sync/exact-assets.js';
-import {
-  planVmRecoveryMicrobatch,
-  type VmRecoveryTargetFootprint,
-  type VmRecoveryMicrobatchLimits,
-} from '../src/vm-recovery-microbatch.js';
-import {
-  VmRecoveryProviderPolicy,
-  type VmRecoveryUalDisposition,
-} from '../src/vm-recovery-provider-policy.js';
-import type { VmRecoveryChainFootprint } from '../src/vm-recovery-types.js';
 import { createVmRecoveryHostHarness } from './_helpers/vm-recovery-host.js';
-
-interface SizedTarget extends VmRecoveryTargetFootprint {
-  readonly id: number;
-}
-
-function sizedTarget(
-  id: number,
-  byteSize?: bigint,
-  merkleLeafCount?: bigint,
-): SizedTarget {
-  return {
-    id,
-    recoveryFootprint: byteSize === undefined || merkleLeafCount === undefined
-      ? { kind: 'unknown' }
-      : {
-          kind: 'public-v10',
-          byteSize,
-          merkleLeafCount,
-          assertionVersion: '1',
-          anchor: { kind: 'pinned-finalized', blockHash: '0x01' },
-        },
-  };
-}
-
-const selectorBytesFor = (targets: readonly SizedTarget[]): number =>
-  targets.length * 48;
-
-function dispositions(
-  ...entries: Array<readonly [string, VmRecoveryUalDisposition]>
-): ReadonlyMap<string, VmRecoveryUalDisposition> {
-  return new Map(entries);
-}
-
-const MICRO_LIMITS: VmRecoveryMicrobatchLimits = {
-  maxAssets: MAX_EXACT_SYNC_ASSETS,
-  targetBytes: 32n * 1024n * 1024n,
-  targetLeaves: 100_000n,
-  fixedBytesPerAsset: 0n,
-  bytesPerLeafOverhead: 0n,
-  byteSizeMultiplierBps: 10_000n,
-  maxSelectorBytes: 64 * 1024,
-};
-
-// Production exact data pages contain at most 64 rows. This soft planner
-// budget therefore keeps a microbatch near 64 non-empty data pages.
-const EXACT_PAGE_FAIRNESS_LEAVES = 4_096n;
-
-function planAll(
-  targets: readonly SizedTarget[],
-  limits: VmRecoveryMicrobatchLimits,
-): SizedTarget[][] {
-  const batches: SizedTarget[][] = [];
-  let remaining = [...targets];
-  while (remaining.length > 0) {
-    const plan = planVmRecoveryMicrobatch(remaining, limits, selectorBytesFor);
-    expect(plan.targets.length).toBeGreaterThan(0);
-    batches.push([...plan.targets]);
-    remaining = remaining.slice(plan.targets.length);
-  }
-  return batches;
-}
-
-describe('VM recovery microbatch planner — adversarial boundaries', () => {
-  it('collapses many small assets into the largest wire-bounded multi-UAL call', () => {
-    const targets = Array.from({ length: 40 }, (_, id) => sizedTarget(id, 1_024n, 8n));
-    const plan = planVmRecoveryMicrobatch(targets, {
-      ...MICRO_LIMITS,
-      // The current request executor advertises ten here. A future streaming
-      // executor can advertise a larger capability without changing packing.
-      maxAssets: MAX_EXACT_SYNC_ASSETS,
-    }, selectorBytesFor);
-
-    // 10 is the current additive exact-sync compatibility ceiling, not the
-    // scheduling policy. The planner must fill that advertised capability for
-    // small assets instead of falling back to one request per KA.
-    expect(plan.targets.map(({ id }) => id)).toEqual(
-      Array.from({ length: MAX_EXACT_SYNC_ASSETS }, (_, id) => id),
-    );
-    expect(plan.estimatedBytes).toBe(BigInt(MAX_EXACT_SYNC_ASSETS) * 1_024n);
-    expect(plan.estimatedLeaves).toBe(BigInt(MAX_EXACT_SYNC_ASSETS) * 8n);
-    expect(plan.completeFootprints).toBe(true);
-  });
-
-  it('packs ten 100-triple KAs up to the executor asset-count cap', () => {
-    const targets = Array.from({ length: 20 }, (_, id) => sizedTarget(id, 8_192n, 100n));
-    const plan = planVmRecoveryMicrobatch(targets, {
-      ...MICRO_LIMITS,
-      targetLeaves: EXACT_PAGE_FAIRNESS_LEAVES,
-    }, selectorBytesFor);
-
-    expect(plan.targets.map(({ id }) => id)).toEqual(
-      Array.from({ length: MAX_EXACT_SYNC_ASSETS }, (_, id) => id),
-    );
-    expect(plan.estimatedLeaves).toBe(1_000n);
-  });
-
-  it('caps 500-triple KAs at eight before exceeding the 4,096-leaf window', () => {
-    const targets = Array.from({ length: 10 }, (_, id) => sizedTarget(id, 32_768n, 500n));
-    const plan = planVmRecoveryMicrobatch(targets, {
-      ...MICRO_LIMITS,
-      targetLeaves: EXACT_PAGE_FAIRNESS_LEAVES,
-    }, selectorBytesFor);
-
-    expect(plan.targets.map(({ id }) => id)).toEqual(
-      Array.from({ length: 8 }, (_, id) => id),
-    );
-    expect(plan.estimatedLeaves).toBe(4_000n);
-  });
-
-  it('admits a KA over the 4,096-leaf fairness window only as a singleton', () => {
-    const targets = [
-      sizedTarget(0, 512_000n, 5_000n),
-      sizedTarget(1, 8_192n, 100n),
-      sizedTarget(2, 8_192n, 100n),
-    ];
-    const limits = {
-      ...MICRO_LIMITS,
-      targetLeaves: EXACT_PAGE_FAIRNESS_LEAVES,
-    };
-
-    expect(planAll(targets, limits).map((batch) => batch.map(({ id }) => id)))
-      .toEqual([[0], [1, 2]]);
-    expect(planVmRecoveryMicrobatch(targets, limits, selectorBytesFor)).toMatchObject({
-      targets: [targets[0]],
-      estimatedLeaves: 5_000n,
-      completeFootprints: true,
-    });
-  });
-
-  it('splits mixed sizes deterministically by stable prefix, bytes, and leaves', () => {
-    const targets = [
-      sizedTarget(0, 3n, 2n),
-      sizedTarget(1, 5n, 3n),
-      sizedTarget(2, 1n, 1n),
-      sizedTarget(3, 7n, 4n),
-      sizedTarget(4, 4n, 8n),
-    ];
-    const limits = { ...MICRO_LIMITS, targetBytes: 8n, targetLeaves: 9n };
-
-    const first = planAll(targets, limits).map((batch) => batch.map(({ id }) => id));
-    const replay = planAll(targets, limits).map((batch) => batch.map(({ id }) => id));
-
-    expect(first).toEqual([[0, 1], [2, 3], [4]]);
-    expect(replay).toEqual(first);
-  });
-
-  it('admits one oversized asset alone without starving the following assets', () => {
-    const targets = [
-      sizedTarget(0, 64n * 1024n * 1024n, 500_000n),
-      sizedTarget(1, 1_024n, 8n),
-      sizedTarget(2, 2_048n, 16n),
-    ];
-    const limits = {
-      ...MICRO_LIMITS,
-      targetBytes: 32n * 1024n * 1024n,
-      targetLeaves: 100_000n,
-    };
-
-    const batches = planAll(targets, limits);
-
-    expect(batches.map((batch) => batch.map(({ id }) => id))).toEqual([[0], [1, 2]]);
-    expect(planVmRecoveryMicrobatch(targets, limits, selectorBytesFor)).toMatchObject({
-      estimatedBytes: 64n * 1024n * 1024n,
-      estimatedLeaves: 500_000n,
-      completeFootprints: true,
-    });
-  });
-
-  it('fails safe to a singleton when a footprint is unknown', () => {
-    const unknownFirst = [sizedTarget(0), sizedTarget(1, 1_024n, 8n)];
-    const unknownAfterKnown = [sizedTarget(2, 1_024n, 8n), sizedTarget(3)];
-    const limits = {
-      ...MICRO_LIMITS,
-      targetBytes: 32n * 1024n,
-      targetLeaves: 1_000n,
-    };
-
-    expect(planVmRecoveryMicrobatch(unknownFirst, limits, selectorBytesFor)).toMatchObject({
-      targets: [unknownFirst[0]],
-      completeFootprints: false,
-    });
-    expect(planVmRecoveryMicrobatch(unknownAfterKnown, limits, selectorBytesFor)).toMatchObject({
-      targets: [unknownAfterKnown[0]],
-      completeFootprints: true,
-    });
-  });
-
-  it('rejects even a singleton when its encoded selector exceeds the executor cap', () => {
-    const target = sizedTarget(0, 1_024n, 8n);
-    const plan = planVmRecoveryMicrobatch(
-      [target],
-      { ...MICRO_LIMITS, maxSelectorBytes: 47 },
-      selectorBytesFor,
-    );
-
-    expect(plan.targets).toEqual([]);
-    expect(plan.selectorBytes).toBe(0);
-  });
-
-  it('is stateless and deterministic when restart resumes after a durable checkpoint', () => {
-    const targets = Array.from({ length: 7 }, (_, id) => sizedTarget(id, 4n, 2n));
-    const limits = { ...MICRO_LIMITS, maxAssets: 3, targetBytes: 12n, targetLeaves: 6n };
-    const beforeRestart = planVmRecoveryMicrobatch(targets, limits, selectorBytesFor);
-    const checkpointedIds = new Set(beforeRestart.targets.map(({ id }) => id));
-    const remaining = targets.filter(({ id }) => !checkpointedIds.has(id));
-
-    const afterRestart = planAll(remaining, limits).map((batch) =>
-      batch.map(({ id }) => id));
-
-    expect(beforeRestart.targets.map(({ id }) => id)).toEqual([0, 1, 2]);
-    expect(afterRestart).toEqual([[3, 4, 5], [6]]);
-    expect(planAll(remaining, limits).map((batch) => batch.map(({ id }) => id)))
-      .toEqual(afterRestart);
-  });
-
-  it('does not widen the existing exact-sync, frame, peer, or scheduler bounds', () => {
-    const before = {
-      peerMax: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
-      concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
-      queueMaxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
-    };
-    const targets = Array.from({ length: 500 }, (_, id) => sizedTarget(id, 1n, 1n));
-    const plan = planVmRecoveryMicrobatch(targets, {
-      ...MICRO_LIMITS,
-      maxAssets: MAX_EXACT_SYNC_ASSETS,
-      targetBytes: BigInt(Number.MAX_SAFE_INTEGER),
-      targetLeaves: BigInt(Number.MAX_SAFE_INTEGER),
-    }, selectorBytesFor);
-    const uals = Array.from(
-      { length: plan.targets.length },
-      (_, id) => `did:dkg:base:84532/0x0000000000000000000000000000000000000001/${id}`,
-    );
-
-    expect(plan.targets).toHaveLength(MAX_EXACT_SYNC_ASSETS);
-    expect(MAX_EXACT_SYNC_ASSETS).toBe(10);
-    expect(MAX_EXACT_SYNC_PHASE_BYTES_PER_ASSET).toBe(DKG_GOSSIP_MAX_MESSAGE_BYTES);
-    expect(exactSyncPhaseAccumulationLimits(uals).maxBytes)
-      .toBe(uals.length * DKG_GOSSIP_MAX_MESSAGE_BYTES);
-    expect({
-      peerMax: DKGAgentBase.VM_RECONCILE_EXACT_PEER_MAX,
-      concurrency: DKGAgentBase.VM_RECONCILE_CONCURRENCY,
-      queueMaxPending: DKGAgentBase.VM_RECONCILE_QUEUE_MAX_PENDING,
-    }).toEqual(before);
-  });
-
-  it('revokes provider affinity on partial or incomplete per-UAL outcomes', () => {
-    const peerId = '12D3KooWPolicyHolder';
-    const policy = new VmRecoveryProviderPolicy();
-    expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
-    const probe = policy.beginAttempt(peerId)!;
-    expect(probe.kind).toBe('probe');
-    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
-    expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
-    const reuse = policy.beginAttempt(peerId)!;
-    expect(reuse.kind).toBe('proven-holder-reuse');
-
-    policy.finishAttempt(reuse, 'found', dispositions(
-      ['ual-1', 'found'],
-      ['ual-2', 'incomplete'],
-    ));
-
-    expect(policy.ualDisposition(peerId, 'ual-1')).toBe('found');
-    expect(policy.ualDisposition(peerId, 'ual-2')).toBe('incomplete');
-    expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
-
-    const nextSweep = new VmRecoveryProviderPolicy();
-    expect(nextSweep.selectNextCandidate([peerId], 3)).toBe(peerId);
-    expect(nextSweep.beginAttempt(peerId)?.kind).toBe('probe');
-  });
-
-  it('revokes provider affinity when the aggregate response is incomplete', () => {
-    const peerId = '12D3KooWAggregateIncomplete';
-    const policy = new VmRecoveryProviderPolicy();
-    const probe = policy.beginAttempt(peerId)!;
-    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
-    const reuse = policy.beginAttempt(peerId)!;
-    expect(reuse.kind).toBe('proven-holder-reuse');
-
-    policy.finishAttempt(reuse, 'incomplete', dispositions(
-      ['ual-1', 'found'],
-      ['ual-2', 'found'],
-    ));
-
-    expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
-  });
-
-  it('spends proven-holder affinity once and cannot re-arm it in the same slice', () => {
-    const peerId = '12D3KooWOneReusePerSlice';
-    const policy = new VmRecoveryProviderPolicy();
-    const probe = policy.beginAttempt(peerId)!;
-    policy.finishAttempt(probe, 'found', dispositions(['ual-0', 'found']));
-
-    const reuse = policy.beginAttempt(peerId)!;
-    expect(reuse.kind).toBe('proven-holder-reuse');
-    expect(policy.beginAttempt(peerId)).toBeUndefined();
-
-    policy.finishAttempt(reuse, 'found', dispositions(
-      ['ual-1', 'found'],
-      ['ual-2', 'found'],
-    ));
-    expect(policy.selectNextCandidate([peerId], 3)).toBeUndefined();
-  });
-
-  it('settles only the exact attempt token returned by beginAttempt', () => {
-    const peerId = '12D3KooWAttemptToken';
-    const policy = new VmRecoveryProviderPolicy();
-    const attempt = policy.beginAttempt(peerId)!;
-
-    expect(() => policy.finishAttempt(
-      { ...attempt },
-      'found',
-      dispositions(['ual-0', 'found']),
-    )).toThrow(/not active/);
-
-    policy.finishAttempt(attempt, 'found', dispositions(['ual-0', 'found']));
-    expect(policy.selectNextCandidate([peerId], 3)).toBe(peerId);
-  });
-});
 
 interface RecoveryTarget extends OrdinalRecoveryTarget {
   readonly localCgId: string;
@@ -361,13 +13,11 @@ interface RecoveryTarget extends OrdinalRecoveryTarget {
   readonly merkleRoot: string;
   readonly kaId: string;
   readonly reason: 'no-swm';
-  readonly recoveryFootprint: VmRecoveryChainFootprint;
 }
 
 function recoveryTarget(
   localCgId: string,
   ordinal: number,
-  footprint?: Readonly<{ byteSize: bigint; merkleLeafCount: bigint }> | 'unknown',
 ): RecoveryTarget {
   return {
     localCgId,
@@ -377,13 +27,6 @@ function recoveryTarget(
     merkleRoot: `root-${ordinal}`,
     kaId: String(ordinal),
     reason: 'no-swm',
-    recoveryFootprint: footprint === 'unknown' ? { kind: 'unknown' } : {
-      kind: 'public-v10',
-      byteSize: footprint?.byteSize ?? 1_024n,
-      merkleLeafCount: footprint?.merkleLeafCount ?? 8n,
-      assertionVersion: '1',
-      anchor: { kind: 'pinned-finalized', blockHash: '0x01' },
-    },
   };
 }
 
@@ -405,11 +48,9 @@ async function createRecoveryHarness(options: {
 }) {
   return createVmRecoveryHostHarness({
     ...options,
-    targetForOrdinal: (ordinal) => recoveryTarget(
-      options.localCgId,
-      ordinal,
-      options.unknownFootprints ? 'unknown' : options.footprintForOrdinal?.(ordinal),
-    ),
+    sizingUnavailable: options.unknownFootprints,
+    footprintForOrdinal: options.footprintForOrdinal,
+    targetForOrdinal: (ordinal) => recoveryTarget(options.localCgId, ordinal),
   });
 }
 
@@ -620,10 +261,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
     const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
     const updateContext = vi.spyOn(harness.chainAdapter, 'getKnowledgeAssetUpdateContext');
-    const unknownTargets: RecoveryTarget[] = harness.targets.map((target) => ({
-      ...target,
-      recoveryFootprint: { kind: 'unknown' },
-    }));
+    const unknownTargets = harness.targets;
 
     await harness.internals.recoverVmReconcileBatch(
       localCgId,
@@ -637,7 +275,12 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(liveness).toHaveBeenCalledWith(1n);
     expect(policy).toHaveBeenCalledTimes(1);
     expect(policy).toHaveBeenCalledWith(1n);
-    expect(updateContext).toHaveBeenCalledTimes(8);
+    // The single-KA probe is already admitted before sizing. Only the
+    // compatible non-prefix population (ordinals 1..7) spends bounded reads.
+    expect(updateContext).toHaveBeenCalledTimes(7);
+    expect(updateContext.mock.calls.map(([kaId]) => kaId)).toEqual(
+      unknownTargets.slice(1).map(({ kaId }) => BigInt(kaId)),
+    );
     expect(harness.fetched).toEqual([
       { peerId: holder, uals: [unknownTargets[0]!.ual] },
       { peerId: holder, uals: unknownTargets.slice(1).map(({ ual }) => ual) },
@@ -656,10 +299,7 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       onFetch: () => 'incomplete',
     });
     agents.push(harness.agent);
-    const unknownTargets: RecoveryTarget[] = harness.targets.map((target) => ({
-      ...target,
-      recoveryFootprint: { kind: 'unknown' },
-    }));
+    const unknownTargets = harness.targets;
     harness.internals.vmReconcileFetchCooldownAt.set(localCgId, Date.now());
     const liveness = vi.spyOn(harness.chainAdapter, 'isContextGraphActiveOnChain');
     const policy = vi.spyOn(harness.chainAdapter, 'getContextGraphAccessPolicy');
@@ -782,10 +422,6 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       if (outcome?.status !== 'pending' || !outcome.recovery) {
         throw new Error(`expected pending recovery target for ordinal ${ordinal}`);
       }
-      expect(outcome.recovery.recoveryFootprint).toMatchObject({
-        kind: 'public-v10',
-        assertionVersion: '1',
-      });
       return outcome.recovery as RecoveryTarget;
     });
     const second = await harness.internals.recoverVmReconcileBatch(
@@ -841,10 +477,6 @@ describe('VM recovery microbatch host — adversarial integration', () => {
       if (outcome?.status !== 'pending' || !outcome.recovery) {
         throw new Error(`expected pending recovery target for ordinal ${ordinal}`);
       }
-      expect(outcome.recovery.recoveryFootprint).toMatchObject({
-        kind: 'public-v10',
-        assertionVersion: '1',
-      });
       return outcome.recovery as RecoveryTarget;
     });
     const second = await harness.internals.recoverVmReconcileBatch(
@@ -901,5 +533,50 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.outcomes.size).toBe(0);
     expect(result.attemptedOrdinals).toEqual([]);
     expect(result.hasImmediateRecoveryWork).toBe(false);
+  });
+
+  it('retains no attempt evidence when stale at executor entry', async () => {
+    const peerId = '12D3KooWStaleExecutorHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/stale-entry';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchStaleEntry',
+      localCgId,
+      peers: [peerId],
+      targetCount: 1,
+      onFetch: () => {
+        throw new Error('stale executor must not fetch');
+      },
+    });
+    agents.push(harness.agent);
+    const target = harness.targets[0]!;
+    const slotKey = harness.internals.vmReconcileRotationSlotKey(target);
+    const replication = vi.spyOn(
+      harness.agent as unknown as { emitReplication(event: unknown): void },
+      'emitReplication',
+    );
+
+    const result = await harness.internals.executeVmRecoveryBatch({
+      localCgId,
+      onChainCgId: 1n,
+      peerId,
+      attempts: [{
+        entry: {
+          index: 0,
+          target,
+          prepared: { slotKey, suppressed: false },
+        },
+        installedRecord: undefined,
+        candidatePeerIds: [peerId],
+      }],
+      unavailablePeerIds: [],
+      headBlock: 100,
+      isRecoveryCurrent: () => false,
+      ctx: createOperationContext('system'),
+    });
+
+    expect(result).toEqual({ kind: 'not-started-stale' });
+    expect(harness.fetched).toEqual([]);
+    expect(harness.internals.vmReconcileRotationState.size).toBe(0);
+    expect(replication).not.toHaveBeenCalled();
   });
 });

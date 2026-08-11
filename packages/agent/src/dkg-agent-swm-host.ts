@@ -261,7 +261,6 @@ import {
   type VmRecoveryProviderAttempt,
   type VmRecoveryUalDisposition,
 } from './vm-recovery-provider-policy.js';
-import type { VmRecoveryChainFootprint } from './vm-recovery-types.js';
 import {
   encodeExactAssetUals,
   MAX_EXACT_SYNC_ASSETS,
@@ -561,8 +560,6 @@ type VmReconcileOrdinalOptions = {
   revalidateTarget?: () => Promise<boolean>;
   /** Collect the missing KA for one batch fetch instead of fetching inline. */
   deferActiveFetch?: boolean;
-  /** Reuse the version-bound footprint captured by the initial inventory scan. */
-  recoveryFootprint?: VmRecoveryChainFootprint;
 };
 
 /**
@@ -612,6 +609,20 @@ interface VmRecoveryBatchAttempt {
   readonly installedRecord: VmReconcileRotationRecord | undefined;
   readonly candidatePeerIds: readonly string[];
 }
+
+type VmRecoveryBatchExecutionResult =
+  | { readonly kind: 'not-started-stale' }
+  | { readonly kind: 'stale-after-attempt' }
+  | {
+    readonly kind: 'completed';
+    readonly outcomes: readonly (readonly [number, OrdinalOutcome])[];
+    readonly handledOrdinals: readonly number[];
+    readonly attemptedOrdinals: readonly number[];
+    readonly providerDisposition: VmRecoveryUalDisposition;
+    readonly perUalDispositions: readonly (
+      readonly [string, VmRecoveryUalDisposition]
+    )[];
+  };
 
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
@@ -5146,48 +5157,51 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   /**
    * Execute one already-admitted exact provider attempt. The caller owns
-   * roster/admission and packing; this executor owns the physical request,
-   * per-UAL chain revalidation, provider transition, and rotation settlement.
-   * `false` means the captured lifecycle became stale and no local evidence
-   * from the attempt may be retained.
+   * roster/admission, packing, and provider affinity; this executor owns the
+   * physical request, per-UAL chain revalidation, and rotation settlement.
+   * Returns immutable evidence for the caller to merge. A stale lifecycle is
+   * discriminated by whether the physical attempt had already been admitted;
+   * only the pre-admission variant guarantees zero attempt side effects.
    */
   async executeVmRecoveryBatch(this: DKGAgent, input: {
     localCgId: string;
     onChainCgId: bigint;
     peerId: string;
     attempts: readonly VmRecoveryBatchAttempt[];
-    providerAttempt: VmRecoveryProviderAttempt;
-    providerPolicy: VmRecoveryProviderPolicy;
+    unavailablePeerIds: readonly string[];
     headBlock: number | undefined;
     signal?: AbortSignal;
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
     ctx: OperationContext;
-    outcomes: Map<number, OrdinalOutcome>;
-    handledBatchOrdinals: Set<number>;
-    attemptedOrdinals: Set<number>;
-  }): Promise<boolean> {
+  }): Promise<VmRecoveryBatchExecutionResult> {
     const {
       localCgId,
       onChainCgId,
       peerId,
       attempts,
-      providerAttempt,
-      providerPolicy,
+      unavailablePeerIds,
       headBlock,
       signal,
       isRecoveryCurrent,
       revalidateTarget,
       ctx,
-      outcomes,
-      handledBatchOrdinals,
-      attemptedOrdinals,
     } = input;
+    const unavailablePeerIdSet = new Set(unavailablePeerIds);
+
+    // The caller's last guard can race an unsubscribe/rebind before this
+    // executor begins. Do not retain attempt evidence or emit a fetch event
+    // until this exact lifecycle has been re-proved at the ownership boundary.
+    if (!isRecoveryCurrent()) return { kind: 'not-started-stale' };
+
+    const handledOrdinals: number[] = [];
+    const attemptedOrdinals: number[] = [];
+    const outcomes: Array<readonly [number, OrdinalOutcome]> = [];
 
     for (const attempt of attempts) {
       const batchTarget = attempt.entry.target;
-      handledBatchOrdinals.add(batchTarget.ordinal);
-      attemptedOrdinals.add(batchTarget.ordinal);
+      handledOrdinals.push(batchTarget.ordinal);
+      attemptedOrdinals.push(batchTarget.ordinal);
       if (attempt.installedRecord) {
         attempt.installedRecord.lastAttemptedPeerId = peerId;
         attempt.installedRecord.attemptedPeerIds.add(peerId);
@@ -5208,8 +5222,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
         detail: attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
       });
     }
-    if (!isRecoveryCurrent()) return false;
-
     let disposition: VmRecoveryUalDisposition = 'incomplete';
     try {
       const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
@@ -5230,7 +5242,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
-    if (!isRecoveryCurrent()) return false;
+    if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
 
     const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
     for (const attempt of attempts) {
@@ -5244,11 +5256,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
           isTargetCurrent: isRecoveryCurrent,
           revalidateTarget,
           deferActiveFetch: true,
-          recoveryFootprint: batchTarget.recoveryFootprint ?? { kind: 'unknown' },
         },
       );
-      if (!isRecoveryCurrent()) return false;
-      outcomes.set(batchTarget.ordinal, outcome);
+      if (!isRecoveryCurrent()) return { kind: 'stale-after-attempt' };
+      outcomes.push([batchTarget.ordinal, outcome]);
       const perTargetDisposition: VmRecoveryUalDisposition = (
         outcome.status === 'reconciled' || outcome.status === 'already'
       )
@@ -5281,15 +5292,21 @@ export class SwmHostModeMethods extends DKGAgentBase {
             perTargetDisposition,
             attempt.candidatePeerIds,
             batchRecord,
-            providerPolicy.unavailablePeerIds(),
+            unavailablePeerIdSet,
           );
         }
       } else {
         this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(batchTarget));
       }
     }
-    providerPolicy.finishAttempt(providerAttempt, disposition, perUalDispositions);
-    return true;
+    return {
+      kind: 'completed',
+      outcomes,
+      handledOrdinals,
+      attemptedOrdinals,
+      providerDisposition: disposition,
+      perUalDispositions: [...perUalDispositions],
+    };
   }
 
   /**
@@ -5326,7 +5343,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
 
     const expectedOnChainCgId = onChainCgId.toString();
-    let currentTargets = targets.filter((target) =>
+    const currentTargets = targets.filter((target) =>
       target.localCgId === localCgId && target.onChainCgId === expectedOnChainCgId);
     if (currentTargets.length === 0) return noRecovery();
     const admissionCursor = (
@@ -5436,38 +5453,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!this.shouldRunVmReconcileActiveFetch(localCgId)) {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
       return noRecovery(initiallyEligible[0]?.ordinal, true);
-    }
-
-    // Sizing is optional recovery work, so it belongs behind the same
-    // per-CG admission decision as exact network fetches. Live-event nudges
-    // received during cooldown must not turn into repeated liveness, policy,
-    // or per-KA update-context RPCs when no transfer may run.
-    const readVmRecoveryUpdateContext = this.chain.getKnowledgeAssetUpdateContext;
-    currentTargets = await enrichVmRecoveryFootprints(
-      currentTargets,
-      onChainCgId,
-      {
-        authority: {
-          kind: 'host-policy',
-          resolveAccessPolicy: (contextGraphId) =>
-            this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx),
-        },
-        sizing: typeof readVmRecoveryUpdateContext === 'function'
-          ? {
-              readUpdateContext: (kaId, readOptions) =>
-                readVmRecoveryUpdateContext.call(this.chain, kaId, readOptions),
-            }
-          : null,
-      },
-      {
-        maxContextReads: MAX_EXACT_SYNC_ASSETS,
-        signal,
-        isCurrent: isRecoveryCurrent,
-      },
-    );
-    if (!isRecoveryCurrent()) {
-      this.vmReconcileFetchCooldownAt.delete(localCgId);
-      return noRecovery();
     }
 
     // Capture the authenticated join-approval hint before consulting metadata:
@@ -5796,10 +5781,38 @@ export class SwmHostModeMethods extends DKGAgentBase {
               : orderedPeerIds,
           });
         }
-        const plannableTargets = compatible.map((attempt) => ({
+        // Only candidates that survived rotation/admission are sized. Keeping
+        // this hint local to the planner avoids broadening the canonical chain
+        // ordinal target and does not waste bounded RPC reads on ineligible
+        // prefixes. Missing/failed hints remain conservative singletons.
+        const readVmRecoveryUpdateContext = this.chain.getKnowledgeAssetUpdateContext;
+        const sizedCandidates = await enrichVmRecoveryFootprints(
+          compatible.map((attempt) => ({
+            attempt,
+            kaId: attempt.entry.target.kaId,
+          })),
+          onChainCgId,
+          {
+            resolvePublicAccess: async (contextGraphId) => (
+              await this.readLiveOnChainAccessPolicy(contextGraphId.toString(), ctx)
+            ) === 0,
+            sizing: typeof readVmRecoveryUpdateContext === 'function'
+              ? {
+                  readUpdateContext: (kaId, readOptions) =>
+                    readVmRecoveryUpdateContext.call(this.chain, kaId, readOptions),
+                }
+              : null,
+          },
+          {
+            maxContextReads: MAX_EXACT_SYNC_ASSETS,
+            signal,
+            isCurrent: isRecoveryCurrent,
+          },
+        );
+        if (!isRecoveryCurrent()) return noRecovery();
+        const plannableTargets = sizedCandidates.map(({ attempt, recoveryFootprint }) => ({
           attempt,
-          recoveryFootprint: attempt.entry.target.recoveryFootprint
-            ?? { kind: 'unknown' as const },
+          recoveryFootprint: recoveryFootprint ?? { kind: 'unknown' as const },
         } satisfies VmRecoveryTargetFootprint & { attempt: VmRecoveryBatchAttempt }));
         const plan = planVmRecoveryMicrobatch(
           plannableTargets,
@@ -5844,23 +5857,27 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
 
-      const completed = await this.executeVmRecoveryBatch({
+      const execution = await this.executeVmRecoveryBatch({
         localCgId,
         onChainCgId,
         peerId,
         attempts: batchAttempts,
-        providerAttempt,
-        providerPolicy,
+        unavailablePeerIds: [...providerPolicy.unavailablePeerIds()],
         headBlock,
         signal,
         isRecoveryCurrent,
         revalidateTarget,
         ctx,
-        outcomes,
-        handledBatchOrdinals,
-        attemptedOrdinals,
       });
-      if (!completed) return noRecovery();
+      if (execution.kind !== 'completed') return noRecovery();
+      for (const [ordinal, outcome] of execution.outcomes) outcomes.set(ordinal, outcome);
+      for (const ordinal of execution.handledOrdinals) handledBatchOrdinals.add(ordinal);
+      for (const ordinal of execution.attemptedOrdinals) attemptedOrdinals.add(ordinal);
+      providerPolicy.finishAttempt(
+        providerAttempt,
+        execution.providerDisposition,
+        new Map(execution.perUalDispositions),
+      );
     }
 
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));
@@ -6021,7 +6038,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let outcome = await fh.handleChainReconciledKC(reconcileInput, ctx);
     if (outcome === 'no-swm' || outcome === 'verified-vm-metadata-pending') {
       if (options.deferActiveFetch) {
-        const recoveryFootprint = options.recoveryFootprint ?? { kind: 'unknown' as const };
         this.emitReplication({
           contextGraphId: localCgId,
           onChainCgId: onChainCgId.toString(),
@@ -6044,7 +6060,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
             ).join(''),
             kaId: kaId.toString(),
             reason: outcome,
-            recoveryFootprint,
           },
         };
       }

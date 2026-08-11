@@ -20,20 +20,12 @@ export interface VmRecoveryFootprintSizingReader {
   ): Promise<VmRecoveryUpdateContext>;
 }
 
-export type VmRecoveryFootprintAuthority =
-  | {
-      readonly kind: 'host-policy';
-      resolveAccessPolicy(contextGraphId: bigint): Promise<0 | 1 | null>;
-    }
-  | {
-      readonly kind: 'chain-reader';
-      isContextGraphActive(contextGraphId: bigint): Promise<boolean>;
-      readAccessPolicy(contextGraphId: bigint): Promise<number>;
-    };
-
-/** Authority is explicit; unavailable sizing is represented deliberately by null. */
+/** Public authority is resolved by the host; this module owns sizing only. */
 export interface VmRecoveryFootprintBridge {
-  readonly authority: VmRecoveryFootprintAuthority;
+  readonly resolvePublicAccess: (
+    contextGraphId: bigint,
+    options?: { signal?: AbortSignal },
+  ) => Promise<boolean>;
   readonly sizing: VmRecoveryFootprintSizingReader | null;
 }
 
@@ -129,27 +121,17 @@ function downgradeUnverifiedPublicFootprints<T extends VmRecoveryFootprintBridge
 
 async function resolveVmRecoveryPublicAuthority(
   onChainCgId: bigint,
-  authority: VmRecoveryFootprintAuthority,
+  resolvePublicAccess: VmRecoveryFootprintBridge['resolvePublicAccess'],
   signal: AbortSignal | undefined,
   isCurrent: () => boolean,
 ): Promise<boolean> {
   try {
-    if (authority.kind === 'host-policy') {
-      const policy = await raceVmRecoveryBridgeAbort(
-        authority.resolveAccessPolicy(onChainCgId), signal,
-      );
-      return policy !== VM_RECOVERY_BRIDGE_ABORTED
-        && policy === 0
-        && !vmRecoveryBridgeSignalAborted(signal)
-        && isCurrent();
-    }
-    const active = await raceVmRecoveryBridgeAbort(
-      authority.isContextGraphActive(onChainCgId), signal,
+    const allowed = await raceVmRecoveryBridgeAbort(
+      resolvePublicAccess(onChainCgId, { signal }),
+      signal,
     );
-    if (active !== true || vmRecoveryBridgeSignalAborted(signal) || !isCurrent()) return false;
-    const policy = await raceVmRecoveryBridgeAbort(authority.readAccessPolicy(onChainCgId), signal);
-    return policy !== VM_RECOVERY_BRIDGE_ABORTED
-      && policy === 0
+    return allowed !== VM_RECOVERY_BRIDGE_ABORTED
+      && allowed === true
       && !vmRecoveryBridgeSignalAborted(signal)
       && isCurrent();
   } catch {
@@ -174,7 +156,7 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   if (onChainCgId <= 0n || options.signal?.aborted || !options.isCurrent()) return unverified;
 
   const publicAuthority = await resolveVmRecoveryPublicAuthority(
-    onChainCgId, bridge.authority, options.signal, options.isCurrent,
+    onChainCgId, bridge.resolvePublicAccess, options.signal, options.isCurrent,
   );
   if (!publicAuthority || options.signal?.aborted || !options.isCurrent()) return unverified;
 

@@ -36,11 +36,10 @@ function chainBridge(reader: {
   ) => Promise<VmRecoveryUpdateContext>;
 }): VmRecoveryFootprintBridge {
   return {
-    authority: {
-      kind: 'chain-reader',
-      isContextGraphActive: reader.isContextGraphActiveOnChain,
-      readAccessPolicy: reader.getContextGraphAccessPolicy,
-    },
+    resolvePublicAccess: async (contextGraphId) => (
+      await reader.isContextGraphActiveOnChain(contextGraphId)
+      && await reader.getContextGraphAccessPolicy(contextGraphId) === 0
+    ),
     sizing: reader.getKnowledgeAssetUpdateContext
       ? { readUpdateContext: reader.getKnowledgeAssetUpdateContext }
       : null,
@@ -55,7 +54,9 @@ function hostBridge(
   ) => Promise<VmRecoveryUpdateContext>,
 ): VmRecoveryFootprintBridge {
   return {
-    authority: { kind: 'host-policy', resolveAccessPolicy },
+    resolvePublicAccess: async (contextGraphId) => (
+      await resolveAccessPolicy(contextGraphId)
+    ) === 0,
     sizing: readUpdateContext ? { readUpdateContext } : null,
   };
 }

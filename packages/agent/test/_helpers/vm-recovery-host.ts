@@ -1,4 +1,5 @@
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 
 import type {
   OrdinalOutcome,
@@ -10,7 +11,6 @@ import { DKGAgent } from '../../src/index.js';
 import type {
   VmRecoveryUalDisposition,
 } from '../../src/vm-recovery-provider-policy.js';
-import type { VmRecoveryChainFootprint } from '../../src/vm-recovery-types.js';
 
 interface TestPeerId {
   toString(): string;
@@ -73,11 +73,6 @@ export interface VmRecoveryHostInternals {
     operation?: string,
     signal?: AbortSignal,
   ): Promise<boolean>;
-  readVmReconcileRecoveryFootprint(
-    onChainCgId: bigint,
-    target: OrdinalRecoveryTarget,
-    signal?: AbortSignal,
-  ): Promise<Readonly<{ byteSize: bigint; merkleLeafCount: bigint }> | undefined>;
   syncExactKnowledgeAssetsFromPeerDetailed(
     peerId: string,
     contextGraphId: string,
@@ -92,9 +87,28 @@ export interface VmRecoveryHostInternals {
     options?: {
       isTargetCurrent?: () => boolean;
       deferActiveFetch?: boolean;
-      recoveryFootprint?: VmRecoveryChainFootprint;
     },
   ): Promise<OrdinalOutcome>;
+  executeVmRecoveryBatch(input: {
+    localCgId: string;
+    onChainCgId: bigint;
+    peerId: string;
+    attempts: readonly {
+      entry: {
+        index: number;
+        target: OrdinalRecoveryTarget;
+        prepared: { slotKey: string; suppressed: boolean };
+      };
+      installedRecord: VmReconcileRotationRecord | undefined;
+      candidatePeerIds: readonly string[];
+    }[];
+    unavailablePeerIds: readonly string[];
+    headBlock: number | undefined;
+    signal?: AbortSignal;
+    isRecoveryCurrent: () => boolean;
+    revalidateTarget?: () => Promise<boolean>;
+    ctx: OperationContext;
+  }): Promise<{ kind: 'not-started-stale' | 'stale-after-attempt' | 'completed' }>;
   recoverVmReconcileBatch(
     localCgId: string,
     onChainCgId: bigint,
@@ -128,6 +142,10 @@ export interface VmRecoveryHostHarnessOptions<TTarget extends OrdinalRecoveryTar
   readonly peers: readonly string[];
   readonly targetCount: number;
   readonly targetForOrdinal: (ordinal: number) => TTarget;
+  readonly sizingUnavailable?: boolean;
+  readonly footprintForOrdinal?: (
+    ordinal: number,
+  ) => Readonly<{ byteSize: bigint; merkleLeafCount: number | bigint; merkleRootsCount?: bigint }>;
   readonly onFetch: (
     peerId: string,
     targets: readonly TTarget[],
@@ -183,10 +201,18 @@ export async function createVmRecoveryHostHarness<
   let activeFetches = 0;
   let maxActiveFetches = 0;
 
-  internals.readVmReconcileRecoveryFootprint = async () => ({
-    byteSize: 1_024n,
-    merkleLeafCount: 8n,
-  });
+  chainAdapter.getKnowledgeAssetUpdateContext = async (kaId) => {
+    const ordinal = Number(kaId);
+    if (options.sizingUnavailable) {
+      return { merkleRootsCount: 0n, byteSize: 0n, merkleLeafCount: 0 };
+    }
+    const footprint = options.footprintForOrdinal?.(ordinal);
+    return {
+      merkleRootsCount: footprint?.merkleRootsCount ?? 1n,
+      byteSize: footprint?.byteSize ?? 1_024n,
+      merkleLeafCount: Number(footprint?.merkleLeafCount ?? 8),
+    };
+  };
   internals.syncExactKnowledgeAssetsFromPeerDetailed = async (
     peerId,
     _contextGraphId,
@@ -228,14 +254,13 @@ export async function createVmRecoveryHostHarness<
     _onChainCgId,
     ordinal,
     _headBlock,
-    reconcileOptions,
+    _reconcileOptions,
   ) => recovered.has(ordinal)
     ? { status: 'reconciled', blockNumber: 100 }
     : {
         status: 'pending',
         recovery: {
           ...targets[ordinal]!,
-          recoveryFootprint: reconcileOptions?.recoveryFootprint,
         },
       };
 
