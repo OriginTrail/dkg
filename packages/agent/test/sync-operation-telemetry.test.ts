@@ -11,7 +11,11 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 
-import { DKGAgent, runCatchupPlaneWithPolicy } from '../src/index.js';
+import {
+  DKGAgent,
+  runCatchupPlaneWithPolicy,
+  type SyncAdmissionConfig,
+} from '../src/index.js';
 import { getSyncBackpressureSnapshot } from '../src/sync/backpressure.js';
 import { ethers } from 'ethers';
 
@@ -92,6 +96,7 @@ async function createAgent(options: {
   sendToPeer?: (...args: unknown[]) => Promise<Uint8Array>;
   syncGlobalMaxInflight?: number;
   syncGlobalQueueLimit?: number;
+  syncAdmission?: SyncAdmissionConfig;
 } = {}): Promise<DKGAgent> {
   const agent = await DKGAgent.create({
     name: 'W1OperationTelemetry',
@@ -99,6 +104,7 @@ async function createAgent(options: {
     chainAdapter: new MockChainAdapter(),
     syncGlobalMaxInflight: options.syncGlobalMaxInflight ?? 2,
     syncGlobalQueueLimit: options.syncGlobalQueueLimit ?? 2,
+    syncAdmission: options.syncAdmission,
   });
   liveAgents.push(agent);
   (agent as any).messenger = { sendToPeer: options.sendToPeer ?? (async () => new Uint8Array(0)) };
@@ -198,6 +204,47 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
     // M10 emits a 0 ms duration sample here; the denominator must not grow.
     const samples = await harness.histogram(I4);
     expect(samples.filter((point) => point.attributes.source === 'reconcile')).toEqual([]);
+
+    blocker.resolve();
+    await blocking;
+  });
+
+  it('records a fast queue timeout in I5 without starting or emitting I4', async () => {
+    harness.install();
+    const agent = await createAgent({
+      syncAdmission: {
+        globalMaxInflight: 2,
+        fast: { maxInflight: 1, queueLimit: 1, queueTimeoutMs: 10 },
+        slow: {
+          maxInflight: 1,
+          foregroundReserved: 1,
+          foregroundQueueLimit: 0,
+          backgroundMaxInflight: 0,
+          backgroundQueueLimit: 0,
+        },
+      },
+    });
+    const blocker = blockingDeferred();
+    const blocking = admit(
+      agent,
+      { lane: 'changelog', source: 'on-connect', label: 'fast-blocker' },
+      () => blocker.promise,
+    );
+    await waitFor(() => getSyncBackpressureSnapshot().inflight === 1);
+
+    let started = false;
+    await expect(admit(
+      agent,
+      { lane: 'changelog', source: 'reconcile', label: 'fast-timeout' },
+      async () => { started = true; },
+    )).rejects.toMatchObject({ reason: 'queue_timeout' });
+    expect(started).toBe(false);
+    expect(await harness.matching(I5, {
+      lane: 'changelog', source: 'reconcile', reason: 'queue_timeout',
+    })).toHaveLength(1);
+    expect(await harness.matching(I4, {
+      lane: 'changelog', source: 'reconcile',
+    })).toEqual([]);
 
     blocker.resolve();
     await blocking;
@@ -908,6 +955,7 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
   async function createRefreshAgent(
     /** Omitted ⇒ an empty successful page. Supply one to inject a wire failure. */
     onSend?: () => Promise<Uint8Array>,
+    syncAdmission?: SyncAdmissionConfig,
   ): Promise<{ agent: DKGAgent; sends: () => number }> {
     let sends = 0;
     const agent = await createAgent({
@@ -915,6 +963,7 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
         sends += 1;
         return onSend ? onSend() : new Uint8Array(0);
       },
+      syncAdmission,
     });
     (agent as any).node = {
       ...(agent as any).node,
@@ -943,6 +992,39 @@ describe('W1 §5.5 — `control-plane` is the trigger base case, not a catch-all
     expect((await harness.matching(I1, { source: 'control-plane', phase: 'meta' })).length)
       .toBeGreaterThanOrEqual(1);
     expect(await harness.matching(I1, { source: 'unspecified' })).toEqual([]);
+  });
+
+  it('1b: a standalone control-plane refresh uses fast capacity while slow background is full', async () => {
+    harness.install();
+    const { agent, sends } = await createRefreshAgent(undefined, {
+      globalMaxInflight: 2,
+      fast: { maxInflight: 1, queueLimit: 0, queueTimeoutMs: 100 },
+      slow: {
+        maxInflight: 1,
+        foregroundReserved: 0,
+        foregroundQueueLimit: 0,
+        backgroundMaxInflight: 1,
+        backgroundQueueLimit: 0,
+      },
+    });
+    const blocker = blockingDeferred();
+    const background = admit(
+      agent,
+      { source: 'on-connect', lane: 'durable', label: 'slow-background-blocker' },
+      () => blocker.promise,
+    );
+    await waitFor(() => getSyncBackpressureSnapshot().inflight === 1);
+
+    try {
+      expect(await refresh(agent)).toBe(false);
+      expect(sends()).toBeGreaterThanOrEqual(1);
+      expect(await harness.matching(I4, {
+        lane: 'durable', source: 'control-plane', outcome: 'resolved',
+      })).toHaveLength(1);
+    } finally {
+      blocker.resolve();
+      await background;
+    }
   });
 
   it('2: a refresh NESTED in an admitted operation keeps the ENCLOSING source', async () => {

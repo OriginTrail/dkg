@@ -23,6 +23,16 @@ function operationContext(): OperationContext {
   return { kind: 'sync', id: 'cg-refresh-test', startedAt: Date.now() } as never;
 }
 
+async function runDirectlyWithBackpressure<T>(
+  _ctx: OperationContext,
+  _contextGraphId: string,
+  _lane: 'durable',
+  _label: string,
+  work: () => Promise<T>,
+): Promise<T> {
+  return work();
+}
+
 function authoritativePrivateMetaQuads(contextGraphId: string): Quad[] {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
@@ -303,6 +313,7 @@ describe('refreshMetaFromCurator', () => {
 
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       resolveCuratorPeerId: async () => CURATOR_PEER_ID,
       node: {
@@ -359,6 +370,7 @@ describe('refreshMetaFromCurator', () => {
     let staged: Quad[] = [];
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -412,6 +424,7 @@ describe('refreshMetaFromCurator', () => {
     let targetMutated = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -495,6 +508,7 @@ describe('refreshMetaFromCurator', () => {
     const agent = {
       // A recent auth-driven refresh would suppress a normal call.
       metaRefreshTimestamps: new Map([[contextGraphId, Date.now()]]),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       resolveCuratorPeerId: async () => {
         resolved = true;
@@ -570,6 +584,7 @@ describe('refreshMetaFromCurator', () => {
     let stored = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -651,6 +666,7 @@ describe('refreshMetaFromCurator', () => {
     const storedSnapshots: unknown[] = [];
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -727,6 +743,7 @@ describe('refreshMetaFromCurator', () => {
     let targetMutated = false;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -780,6 +797,7 @@ describe('refreshMetaFromCurator', () => {
     let recordedDrops = 0;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -861,6 +879,7 @@ describe('refreshMetaFromCurator', () => {
       };
       const agent = {
         metaRefreshTimestamps: new Map<string, number>(),
+        runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
         peerId: 'local-peer',
         node: {
           libp2p: {
@@ -958,6 +977,7 @@ describe('refreshMetaFromCurator', () => {
     const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -1025,6 +1045,7 @@ describe('refreshMetaFromCurator', () => {
     let replacements = 0;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {
@@ -1089,6 +1110,7 @@ describe('refreshMetaFromCurator', () => {
     let replacements = 0;
     const agent = {
       metaRefreshTimestamps: new Map<string, number>(),
+      runContextGraphSyncWithBackpressure: runDirectlyWithBackpressure,
       peerId: 'local-peer',
       node: {
         libp2p: {

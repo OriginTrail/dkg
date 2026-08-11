@@ -269,6 +269,7 @@ import {
 import {
   createContextGraphSyncDeadline,
   createDurableSyncBudget,
+  createDurableSyncFetchTimeoutMs,
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   normalizeDurableSyncTimeoutMs,
 } from './sync/requester/durable-sync-budget.js';
@@ -2963,14 +2964,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       (message) => this.log.warn(ctx, message),
     );
     const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config);
+    const syncPartitions = syncGlobalPolicy.mode === 'partitioned'
+      && syncGlobalPolicy.limit !== undefined
+      ? syncGlobalPolicy.partitions
+      : undefined;
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
+      syncAdmissionMode: syncGlobalPolicy.mode,
       snapshotGlobalRows: snapshotPolicy.budget.maxRows,
       snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,
       snapshotLocalRows: snapshotPolicy.budget.maxSnapshotRows,
       snapshotLocalBytesEstimate: snapshotPolicy.budget.maxSnapshotBytesEstimate,
       syncGlobalInflightLimit: syncGlobalPolicy.limit ?? 0,
       syncGlobalQueueLimit: syncGlobalPolicy.queueLimit ?? 0,
+      syncFastInflightLimit: syncPartitions?.fast.maxInflight,
+      syncFastQueueLimit: syncPartitions?.fast.queueLimit,
+      syncSlowInflightLimit: syncPartitions?.slow.maxInflight,
+      syncSlowForegroundReserved: syncPartitions?.slow.foregroundReserved,
+      syncSlowForegroundQueueLimit: syncPartitions?.slow.foregroundQueueLimit,
+      syncSlowBackgroundInflightLimit: syncPartitions?.slow.backgroundMaxInflight,
+      syncSlowBackgroundQueueLimit: syncPartitions?.slow.backgroundQueueLimit,
       configuredPriorities: configuredPriorityCounts,
       snapshotLocalClamped: snapshotPolicy.localRowsClamped || snapshotPolicy.localBytesEstimateClamped,
     })}`);
@@ -5183,9 +5196,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal: options?.signal,
     });
     const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
-    const fetchTimeoutMs = exactAssetUals && options?.totalTimeoutMs === undefined
-      ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
-      : authenticationTimeoutMs;
+    const fetchTimeoutMs = createDurableSyncFetchTimeoutMs({
+      totalTimeoutMs: options?.totalTimeoutMs,
+      exactRecovery: exactAssetUals !== undefined,
+    });
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
       this.config.syncContextGraphPriorities,
