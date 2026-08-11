@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import { describe, expect, it } from 'vitest';
 
@@ -176,6 +177,31 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
       expect(entry.before).not.toBe(entry.after);
       expect(entry.appliedProof.length).toBeGreaterThan(0);
       expect(entry.actualVerdict.length).toBeGreaterThan(0);
+
+      // THE ANCHOR IS RESOLVED AGAINST THE SOURCE, NOT SHAPE-CHECKED.
+      // A well-formed `file:line` naming a file that does not exist, or a line
+      // that no longer holds the text the mutation moved, satisfies every
+      // assertion above. The recorded experiment could therefore rot to
+      // nothing while this test stayed green -- which is the species this
+      // harness exists to refuse, sitting in the harness itself.
+      const separator = entry.site.lastIndexOf(':');
+      const source = readFileSync(
+        new URL(`../../../${entry.site.slice(0, separator)}`, import.meta.url),
+        'utf8',
+      ).split('\n');
+      const lineNumber = Number(entry.site.slice(separator + 1));
+      expect({ site: entry.site, resolves: lineNumber >= 1 && lineNumber <= source.length })
+        .toStrictEqual({ site: entry.site, resolves: true });
+      expect(source[lineNumber - 1]?.trim()).toContain(entry.before.trim());
+
+      // AND THE APPLIED PROOF'S PREMISE IS EXECUTED RATHER THAN READ.
+      // "occurrence count of the original predicate 1 -> 0" only means the
+      // mutation was site-anchored if the original predicate occurs exactly
+      // ONCE in that file. At two occurrences the same proof text is
+      // compatible with having moved a line other than the one cited.
+      const occurrences = source.filter((line) => line.includes(entry.before)).length;
+      expect({ site: entry.site, occurrences })
+        .toStrictEqual({ site: entry.site, occurrences: 1 });
     }
     // No counterfactual result may appear as a table verdict.
     const verdicts = new Set(Object.keys(CORE_VERDICT_TABLE_V1));

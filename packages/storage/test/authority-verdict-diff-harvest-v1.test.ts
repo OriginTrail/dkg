@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   CORE_AMBIGUOUS_REJECT_LITERALS_V1,
+  CORE_DELEGATED_REJECT_REASON_SITES_V1,
   CORE_QUARANTINE_REASONS_V1,
   CORE_REJECT_REASON_SITES_V1,
   VERDICT_DIFF_AXES_V1,
@@ -29,8 +30,24 @@ const CORE_SRC = new URL(
   import.meta.url,
 );
 
-function harvest(): { reject: Map<string, number[]>; quarantine: Map<string, number[]> } {
-  const lines = readFileSync(CORE_SRC, 'utf8').split('\n');
+/**
+ * THE FILE THE EVALUATOR DELEGATES TO.
+ *
+ * `evaluateAgentProfileHeadAdvanceV1` delegates at :353 and returns that
+ * decision VERBATIM at :358, so rejects minted here escape through the same
+ * `{ decision, reason }` object carrying no marker of origin. The observable
+ * codomain is therefore larger than any one file.
+ */
+const CORE_DELEGATE_SRC = new URL(
+  '../../core/src/system-record-authority-verification-v1-internal.ts',
+  import.meta.url,
+);
+
+function harvest(source: URL): {
+  reject: Map<string, number[]>;
+  quarantine: Map<string, number[]>;
+} {
+  const lines = readFileSync(source, 'utf8').split('\n');
   const reject = new Map<string, number[]>();
   const quarantine = new Map<string, number[]>();
   let pending: 'reject' | 'quarantine' | undefined;
@@ -50,7 +67,7 @@ function harvest(): { reject: Map<string, number[]>; quarantine: Map<string, num
 }
 
 describe('core authority decision reason harvest', () => {
-  const { reject, quarantine } = harvest();
+  const { reject, quarantine } = harvest(CORE_SRC);
 
   it('pins every reject literal and the sites that produce it', () => {
     expect(Object.fromEntries([...reject].sort())).toEqual(
@@ -130,6 +147,46 @@ function harvestEvidenceOptionals(): { declared: string[]; snapshotted: string[]
   const snapshotted = [...optionals.matchAll(/'([^']+)'/g)].map((match) => match[1]);
   return { declared, snapshotted };
 }
+
+/**
+ * THE DELEGATED REJECT MAP IS PINNED TO ITS SOURCE, exactly as the primary one
+ * is.
+ *
+ * The fixture recorded these six literals while only the FIRST source file was
+ * harvested. So a delegated reject that was added, removed or reworded stayed
+ * invisible unless the current sweep happened to reach that branch -- and the
+ * sweep reaching a branch is a property of the axis set, not of the map. A map
+ * the verdict table trusts but nothing pins is the same check-that-cannot-fail
+ * this file exists to close for the primary map; it was closed on one file and
+ * left open on the other.
+ */
+describe('core delegated authority-verification reason harvest', () => {
+  const { reject, quarantine } = harvest(CORE_DELEGATE_SRC);
+
+  it('pins every delegated reject literal and the sites that produce it', () => {
+    expect(Object.fromEntries([...reject].sort())).toEqual(
+      Object.fromEntries(Object.entries(CORE_DELEGATED_REJECT_REASON_SITES_V1).map(
+        ([literal, sites]) => [literal, [...sites]],
+      )),
+    );
+  });
+
+  // Non-vacuity, for the same reason the primary harvest carries it: an empty
+  // map compares equal to an empty map, so a broken path or a regex that
+  // stopped matching would pass the row above without finding anything.
+  it('harvests the six delegated reject sites, so an empty map cannot pass', () => {
+    expect([...reject.values()].flat()).toHaveLength(6);
+    expect(reject.has('transition does not bind the accepted predecessor')).toBe(true);
+  });
+
+  // PINNED AS ZERO RATHER THAN OMITTED. The delegate mints no quarantines
+  // today; if it starts, that value escapes verbatim into a codomain the table
+  // checks against a union harvested from the other file, and the table would
+  // meet a quarantine reason it has no row for.
+  it('pins the delegate as minting no quarantine reasons', () => {
+    expect([...quarantine.keys()]).toStrictEqual([]);
+  });
+});
 
 describe('core head-advance evidence optional harvest', () => {
   const { declared, snapshotted } = harvestEvidenceOptionals();
