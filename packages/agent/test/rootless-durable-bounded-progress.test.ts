@@ -154,6 +154,81 @@ describe('bounded rootless durable progress', () => {
     ]);
   });
 
+  it('drops rows after the first incomplete graph and preserves the safe leading prefix', () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const rawData = [
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload.slice(0, 2),
+      ...fixtures[2]!.payload,
+    ];
+
+    const plan = planBoundedGraphScopedDurableBatch(
+      rawData,
+      meta,
+      0,
+      rawData.length,
+      false,
+    );
+
+    expect(plan).not.toBeNull();
+    expect(plan?.safeNextOffset).toBe(4);
+    expect(plan?.manifestRowCount).toBe(12);
+    expect(plan?.completedGraphCount).toBe(1);
+    expect(plan?.changedDataGraphs).toEqual([fixtures[0]!.graph]);
+    expect(plan?.dataQuads).toEqual(fixtures[0]!.payload);
+  });
+
+  it('does not checkpoint a corrupt leading graph while dropping a non-contiguous tail', async () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const corruptLeading = fixtures[0]!.payload.map((quad, index) => index === 0
+      ? { ...quad, object: '"tampered"' }
+      : quad);
+    const rawData = [
+      ...corruptLeading,
+      ...fixtures[1]!.payload.slice(0, 2),
+      ...fixtures[2]!.payload,
+    ];
+    const materialized: string[] = [];
+    const checkpoints: Array<[string, number]> = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-non-contiguous',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
+        phase,
+      }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', {
+          quads: rawData,
+          nextOffset: rawData.length,
+          completed: false,
+          timedOut: true,
+        }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.rejectedKcs).toBe(1);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(materialized).toEqual([]);
+    expect(checkpoints).toEqual([]);
+  });
+
   it('ignores a non-IRI dkg:partOf poison row and still projects the valid boundary (#1921)', () => {
     // A peer can attach `_:bad dkg:partOf "<valid-ual>"` to a valid graph-scoped
     // manifest. Without the bounded planner's #1921 verification-input sanitize,

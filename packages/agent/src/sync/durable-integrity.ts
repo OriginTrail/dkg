@@ -162,10 +162,12 @@ function compareUnicodeCodePoints(leftValue: string, rightValue: string): number
  * Project an incomplete/resumed full snapshot onto a safe V2 graph prefix.
  *
  * This mirrors the responder's `buildExactGraphPagePlan` ordering. The raw
- * offset must start on a manifest boundary and the received rows must be a
- * contiguous prefix of the remaining exact graphs. Any ambiguity fails closed
- * by returning `null`, so callers cannot advance a cursor on attacker-shaped
- * metadata or a mixed legacy/V2 snapshot.
+ * offset must start on a manifest boundary. The checkpointed projection must
+ * be a contiguous prefix of the remaining exact graphs, but an interrupted
+ * partitioned fetch may also contain rows beyond its first incomplete graph;
+ * those non-contiguous tail rows are discarded for replay. Ownership or resume
+ * ambiguity still fails closed by returning `null`, so callers cannot advance
+ * a cursor on attacker-shaped metadata or a mixed legacy/V2 snapshot.
  */
 export function planBoundedGraphScopedDurableBatch(
   dataQuads: readonly Quad[],
@@ -246,7 +248,14 @@ export function planBoundedGraphScopedDurableBatch(
 
     const observed = observedCounts.get(descriptor.assertionGraph) ?? 0;
     if (stoppedAtIncompleteGraph) {
-      if (observed !== 0) return null;
+      // The responder can fetch exact graphs through independent partitions.
+      // An interrupted round may therefore contain rows for later graphs even
+      // though an earlier graph is short. Those rows are not part of the
+      // contiguous checkpointable prefix, but their presence does not make the
+      // already-complete leading graphs ambiguous: graph-scoped metadata still
+      // gives every row an exact owner and the verifier authenticates each
+      // selected graph before storage. Drop the non-contiguous tail and replay
+      // it from the first incomplete boundary on the next round.
       continue;
     }
     if (observed === expected) {
