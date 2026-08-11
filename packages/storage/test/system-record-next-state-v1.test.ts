@@ -738,12 +738,11 @@ describe('system-record terminal and quarantine next-state derivation', () => {
     activeRegistry.consumer.release(activeFacts);
   });
 
-  // The tombstone classifier is a parallel path to the active one and had no
-  // quarantine gate, so a peer that equivocated could delete the quarantined row
-  // -- and the evidence of its own equivocation -- by publishing a tombstone for
-  // the head it had quarantined. Every conjunct of the advance matches here,
-  // which is the point: without the gate this fixture advances and plans a
-  // deletion.
+  // Pins the precondition that makes the absent-resolution refusal unreachable
+  // today: a summary minted through the closure for a head advertising a
+  // resolution always carries the facts. The refusal guards a summary minted on
+  // some other traversal, which cannot be built here -- so the precondition is
+  // pinned instead of faking a removal test for it.
   it('carries verified fork-resolution facts on the fork-resolving successor', async () => {
     const { binding } = makeAuthenticActiveReplacementFixtureV1('authoritative');
     const fork = await makeForkResolvingSuccessorFixtureV1(binding);
@@ -755,6 +754,130 @@ describe('system-record terminal and quarantine next-state derivation', () => {
     });
     expect(fork.head.version).toBe('3');
   });
+
+  // Two real authority rotations before the fork, so the persisted row's lineage
+  // length (2) differs from the forked version (1). Without that the two
+  // comparisons read the same number and a predicate matching the resolution's
+  // sequence against the wrong operand still passes.
+  it('clears a fork quarantine on a row whose lineage outruns its version', async () => {
+    const fork = await quarantinedForkFixtureV1('rotated');
+    if (fork.quarantinedSnapshot.state !== 'present') throw new Error('expected a present row');
+    expect(fork.quarantinedSnapshot.headVersion).toBe('1');
+    expect(fork.quarantinedSnapshot.appliedState.transitionLineage).toHaveLength(2);
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const cleared = expectReady(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(fork.successorIssue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    }));
+    expect(cleared.plan.next.appliedState.status).toBe('active');
+  });
+
+  it('clears a fork quarantine for the successor resolving that exact fork', async () => {
+    const fork = await quarantinedForkFixtureV1();
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const cleared = expectReady(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(fork.successorIssue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    }));
+    expect(cleared.plan.next.appliedState.status).toBe('active');
+  });
+
+  // The precondition every unreachable conjunct in this file rests on: an active
+  // row carries no conflict saga, so a later reader can treat empty slots and an
+  // absent fork base as facts rather than hopes. It holds because the active
+  // state is built as a fresh literal (:324-332) rather than by spreading the
+  // persisted row -- turn that into a spread and this goes red.
+  //
+  // The pin has two arms because a single one cannot exist: a row carrying slots
+  // is terminal and never unquarantines, so "unquarantine a slots-carrying row
+  // and find it clean" is unbuildable. Arm one is what makes an active row's
+  // slots always empty -- a genuinely slots-carrying row, derived through
+  // terminal transition evidence rather than assigned, is refused even though
+  // every other clause of the advance passes.
+  //
+  // That isolation is measured, not assumed: the slots disjunct is the only true
+  // one here, and disabling it turns this test and only this test red. Anyone
+  // re-proving that must mutate the clause inside classifyAuthorityAdvance
+  // specifically -- the tombstone gate carries a textually identical slots
+  // clause, and disabling that one instead leaves the whole suite green, which
+  // reads as though this pin were inert.
+  it('refuses to unquarantine a row whose conflict slots are occupied', async () => {
+    const fork = await quarantinedForkFixtureV1('based', true);
+    if (fork.quarantinedSnapshot.state !== 'present') throw new Error('expected a present row');
+    expect(fork.quarantinedSnapshot.appliedState.conflictDigestSlots.length)
+      .toBeGreaterThan(0);
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    expect(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(fork.successorIssue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
+  });
+
+  // Arm two: what a row that DOES clear looks like afterwards.
+  it('unquarantines to an active row carrying no conflict saga at all', async () => {
+    const fork = await quarantinedForkFixtureV1();
+    if (fork.quarantinedSnapshot.state !== 'present') throw new Error('expected a present row');
+    const quarantined = fork.quarantinedSnapshot.appliedState;
+    expect(fork.forkBaseHeadDigest).toBeDefined();
+    expect(quarantined.conflictForkBaseHeadDigest).toBe(fork.forkBaseHeadDigest);
+    expect(quarantined.conflictEvidenceDigest).toBeDefined();
+
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const cleared = expectReady(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(fork.successorIssue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    }));
+    expect(cleared.plan.next.appliedState.status).toBe('active');
+    expect(cleared.plan.next.appliedState.conflictForkBaseHeadDigest).toBeUndefined();
+    expect(cleared.plan.next.appliedState.conflictEvidenceDigest).toBeUndefined();
+    expect(cleared.plan.next.appliedState.conflictDigestSlots).toEqual([]);
+    expect(cleared.plan.next.appliedState.conflictOverflow).toBe(false);
+  });
+
+  // Three resolutions that all verify on their own terms, each disagreeing with
+  // our quarantine on exactly one coordinate of the fork event. One conjunct
+  // decides each case, so removing that conjunct turns that case -- and only
+  // that case -- green.
+  it.each([
+    ['a different fork of the same history', 'genesis'],
+    ['a fork at a different version off our base', 'other-version'],
+    ['a fork at our version off a different base', 'other-base'],
+  ] as const)('refuses a resolution of %s', async (_label, shape) => {
+    const fork = await quarantinedForkFixtureV1();
+    const other = await makeForkResolvingSuccessorFixtureV1(fork.binding, shape);
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    expect(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(
+        registry.issuer.issueActive(other.issue),
+        fork.binding,
+      ),
+      snapshot: fork.quarantinedSnapshot,
+      observedRootClaimQuads: fork.observedRootClaimQuads,
+    })).toEqual({ outcome: 'deferred', reason: 'non-active-state' });
+  });
+
+  // The tombstone classifier is a parallel path to the active one and had no
+  // quarantine gate, so a peer that equivocated could delete the quarantined row
+  // -- and the evidence of its own equivocation -- by publishing a tombstone for
+  // the head it had quarantined. Every conjunct of the advance matches here,
+  // which is the point: without the gate this fixture advances and plans a
+  // deletion.
 
   it('never lets a tombstone advance over a fork-quarantined row', async () => {
     const fixture = await makeAuthenticTerminalReplacementFixtureV1('authoritative');
@@ -1426,4 +1549,92 @@ function quadKey(quad: Readonly<{ subject: string; predicate: string; object: st
 
 function compareUtf8(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left, 'utf8'), Buffer.from(right, 'utf8'));
+}
+
+/** Apply our branch of a fork, then quarantine it, and hand back that row. */
+async function quarantinedForkFixtureV1(
+  shape: 'based' | 'rotated' = 'based',
+  terminalTransitionConflict = false,
+  expectedHeadVersion = '1',
+  expectedLineageLength = shape === 'rotated' ? 2 : 0,
+) {
+  const { binding, epochQuad } = makeAuthenticActiveReplacementFixtureV1('authoritative');
+  const fork = await makeForkResolvingSuccessorFixtureV1(
+    binding,
+    shape,
+    terminalTransitionConflict,
+  );
+  const activeRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+  const activeFacts = activeRegistry.consumer.consume(
+    activeRegistry.issuer.issueActive(fork.forkedIssue),
+    binding,
+  );
+  const active = expectReady(deriveSystemRecordReplacementV1({
+    facts: activeFacts,
+    snapshot: decodeSystemRecordAppliedSnapshotV1({
+      networkId: activeFacts.networkId,
+      stableKeyHash: computeStableKey(activeFacts.head as AgentProfileActiveHeadObjectV1),
+      materializationEpoch: activeFacts.materializationEpoch,
+      quads: [epochQuad],
+    }),
+    observedRootClaimQuads: [],
+  }));
+  activeRegistry.consumer.release(activeFacts);
+
+  const quarantineRegistry = createSystemRecordVerifiedReplacementRegistryV1();
+  const quarantineFacts = quarantineRegistry.consumer.consume(
+    quarantineRegistry.issuer.issueCandidate({
+      operation: 'quarantine',
+      ...fork.quarantineIssue,
+    }),
+    binding,
+  );
+  const quarantined = expectReady(deriveSystemRecordReplacementV1({
+    facts: quarantineFacts,
+    snapshot: replayedSnapshot(activeFacts.networkId, active),
+    observedRootClaimQuads: active.plan.next.rootClaimQuads,
+  }));
+  quarantineRegistry.consumer.release(quarantineFacts);
+  const quarantinedSnapshot = replayedSnapshot(quarantineFacts.networkId, quarantined);
+  // The numbers the predicate tests turn on live on the summary side. They only
+  // constrain the comparison if the persisted row genuinely took those values by
+  // derivation, so assert the row before any test reads it. Without this a
+  // fixture change could quietly align the two sides again and every predicate
+  // test would keep passing for the wrong reason.
+  if (quarantinedSnapshot.state !== 'present'
+    || quarantinedSnapshot.appliedState.status !== 'quarantined'
+    || quarantinedSnapshot.headVersion !== expectedHeadVersion
+    || quarantinedSnapshot.appliedState.transitionLineage.length !== expectedLineageLength) {
+    throw new Error(
+      `fork fixture derived version ${quarantinedSnapshot.state === 'present'
+        ? quarantinedSnapshot.headVersion : 'absent'} rather than the intended row`,
+    );
+  }
+  return {
+    binding,
+    forkBaseHeadDigest: fork.forkBaseHeadDigest,
+    successorIssue: fork.issue,
+    observedRootClaimQuads: quarantined.plan.next.rootClaimQuads,
+    quarantinedSnapshot,
+  };
+}
+
+function replayedSnapshot(
+  networkId: NetworkIdV1,
+  ready: SystemRecordActiveReplacementReadyV1,
+) {
+  const tuple = buildSystemRecordReservedStateQuadsV1({
+    appliedState: ready.plan.next.appliedState,
+    headVersion: ready.plan.next.headVersion,
+    ownedSubjectTable: ready.plan.next.ownedSubjectTable,
+    rootClaimSet: ready.plan.next.rootClaimSet,
+    capacityState: ready.plan.next.capacityState,
+    receipt: ready.plan.next.receipt,
+  });
+  return decodeSystemRecordAppliedSnapshotV1({
+    networkId,
+    stableKeyHash: ready.plan.stableKeyHash,
+    materializationEpoch: ready.plan.next.appliedState.materializationEpoch,
+    quads: [...tuple.record, ...tuple.capacity, ...tuple.epoch, ...tuple.receipt],
+  });
 }

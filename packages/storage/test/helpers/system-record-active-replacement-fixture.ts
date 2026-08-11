@@ -8,13 +8,19 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   buildAgentProfileVerificationClosureV1,
+  canonicalizeAgentProfileConflictEvidenceV1,
   canonicalizeSignedSystemRecordEnvelopeV1,
+  computeAgentProfileAuthorityTransitionDigestV1,
+  computeAgentProfileConflictEvidenceDigestV1,
   computeAgentProfileForkResolutionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
+  computeOwnedSubjectTableDigestV1,
   computeSystemRecordStableKeyHashV1,
   digestSystemRecordBytesV1,
   SYSTEM_RECORD_DIGEST_DOMAINS_V1,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileAuthorityTransitionV1,
+  type AgentProfileConflictEvidenceV1,
   type AgentProfileForkResolutionV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type Digest32V1,
@@ -35,6 +41,7 @@ import { decodeSystemRecordAppliedSnapshotV1 } from '../../src/system-record-sta
 import {
   createSystemRecordVerifiedReplacementRegistryV1,
   type SystemRecordActiveReplacementIssueV1,
+  type SystemRecordQuarantineReplacementIssueV1,
 } from '../../src/system-record-verified-replacement-v1-internal.js';
 import type { SystemRecordLaneExecutionBindingV1 } from '../../src/system-record-materializer-v1.js';
 import type { Quad } from '../../src/triple-store.js';
@@ -148,95 +155,306 @@ export function makeSystemRecordActiveReplacementIssueV1(
 }
 
 const SIBLING_BUNDLE_DIGEST = `0x${'c7'.repeat(32)}` as Digest32V1;
+const ALTERNATE_BASE_ISSUED_AT = '2026-08-05T11:59:00Z';
+const ROTATION_ISSUERS = [
+  '0x5555555555555555555555555555555555555555',
+  '0x6666666666666666666666666666666666666666',
+] as const;
 
-export interface ForkResolvingSuccessorFixtureV1 {
-  readonly resolution: AgentProfileForkResolutionV1;
-  readonly head: AgentProfileActiveHeadObjectV1;
-  readonly issue: SystemRecordActiveReplacementIssueV1;
+/**
+ * Rotate authority to a new issuer, rebuilding the projection the rotation
+ * invalidates: a rotation moves the root subject, and a head commits to a
+ * digest of the projection over that root.
+ */
+function rotatedActiveHead(
+  source: AgentProfileActiveHeadObjectV1,
+  issuer: string,
+  authoritySequence: string,
+  version: string,
+  history: Readonly<{ previousHeadDigest?: Digest32V1; acceptedTransitionDigest?: Digest32V1 }>,
+): AgentProfileActiveHeadObjectV1 {
+  const rootSubject = `did:dkg:agent:${issuer}`;
+  const draft = {
+    ...source,
+    authoritySequence,
+    version,
+    ...history,
+    evmIssuer: issuer,
+    rootSubject,
+    ownedSubjectTableDigest: computeOwnedSubjectTableDigestV1(rootSubject, [rootSubject]),
+  } as AgentProfileActiveHeadObjectV1;
+  const quads = projectionFor(draft);
+  const contentDigest = contentDigestFor(quads);
+  return {
+    ...draft,
+    projectionBytes: String(canonicalBytesFor(quads).byteLength),
+    projectionQuads: String(quads.length),
+    contentDigest,
+    graphScopedAuthorSeal: {
+      ...source.graphScopedAuthorSeal,
+      authorAddress: issuer,
+      kaUal: `did:dkg:otp:20430/${issuer}/7`,
+      reservedKaId: ((BigInt(issuer) << 96n) | 7n).toString(),
+      assertionMerkleRoot: contentDigest,
+      publicTripleCount: String(quads.length),
+    },
+  } as AgentProfileActiveHeadObjectV1;
 }
 
 /**
- * A version-zero fork resolved by a successor descending from neither sibling,
- * so the resolution names no common base. The closure is the real one, so the
- * minted summary carries verified fork-resolution facts rather than a stub.
+ * Two real authority rotations, so a head derived from the result carries a
+ * transition lineage of length two. That is what lets the persisted row's
+ * lineage length differ from the forked version, which is the only way a
+ * predicate comparing the wrong one of the two can be caught.
+ */
+function twiceRotatedChain() {
+  const initial = structuredClone(verified.head);
+  const first = rotationTransition(initial, '1', ROTATION_ISSUERS[0]);
+  const middle = rotatedActiveHead(initial, ROTATION_ISSUERS[0], '1', '0', {
+    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(first),
+  });
+  const second = rotationTransition(middle, '2', ROTATION_ISSUERS[1]);
+  const base = rotatedActiveHead(middle, ROTATION_ISSUERS[1], '2', '0', {
+    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(second),
+  });
+  return { initial, middle, base, transitions: [first, second] as const };
+}
+
+function rotationTransition(
+  prior: AgentProfileActiveHeadObjectV1,
+  nextAuthoritySequence: string,
+  nextEvmIssuer: string,
+): AgentProfileAuthorityTransitionV1 {
+  return {
+    objectType: 'authority-transition',
+    kind: 'agents',
+    mode: 'co-signed',
+    networkId: prior.networkId,
+    peerId: prior.peerId,
+    peerPublicKey: prior.peerPublicKey,
+    priorAuthoritySequence: prior.authoritySequence,
+    nextAuthoritySequence,
+    priorHeadDigest: computeAgentProfileHeadObjectDigestV1(prior),
+    priorEvmIssuer: prior.evmIssuer,
+    nextEvmIssuer,
+    nextRoot: `did:dkg:agent:${nextEvmIssuer}`,
+    issuedAt: '2026-08-05T12:02:00Z',
+  } as AgentProfileAuthorityTransitionV1;
+}
+
+export interface ForkResolvingSuccessorFixtureV1 {
+  readonly resolution: AgentProfileForkResolutionV1;
+  /** The resolving successor. */
+  readonly head: AgentProfileActiveHeadObjectV1;
+  readonly issue: SystemRecordActiveReplacementIssueV1;
+  /** Our branch of the fork -- the head a receiver applies and then quarantines. */
+  readonly forkedIssue: SystemRecordActiveReplacementIssueV1;
+  /** Quarantines our branch on evidence naming both branches of the same fork. */
+  readonly quarantineIssue: SystemRecordQuarantineReplacementIssueV1;
+  readonly forkBaseHeadDigest?: Digest32V1;
+}
+
+/**
+ * A fork and the successor that resolves it, built through the real closure so
+ * the minted summary carries facts core actually produces.
+ *
+ * `genesis` forks at version zero, so the resolution names no common base and
+ * the successor descends from nothing. `based` forks at version one off a
+ * version-zero base, which is the shape that discriminates: its authority
+ * sequence, forked version, resolution version and successor version are four
+ * distinct numbers, so a predicate comparing the wrong pair cannot pass by
+ * coincidence. Use `based` for anything asserting on individual conjuncts.
  */
 export async function makeForkResolvingSuccessorFixtureV1(
   binding: SystemRecordLaneExecutionBindingV1,
+  shape: 'genesis' | 'based' | 'other-version' | 'other-base' | 'rotated' = 'genesis',
+  terminalTransitionConflict = false,
 ): Promise<ForkResolvingSuccessorFixtureV1> {
-  const forked = structuredClone(verified.head);
+  const genesis = shape === 'genesis';
+  const chain = shape === 'rotated' ? twiceRotatedChain() : undefined;
+  const origin = chain?.base ?? structuredClone(verified.head);
+  // A second version-zero head of the same authority: a different common base,
+  // which is what distinguishes two fork events that agree on every other
+  // coordinate. It differs by issue time rather than by bundle, so it keeps the
+  // one bundle this fixture can resolve while still hashing differently.
+  const base = shape === 'other-base'
+    ? { ...origin, issuedAt: ALTERNATE_BASE_ISSUED_AT } as AgentProfileActiveHeadObjectV1
+    : origin;
+  const baseDigest = computeAgentProfileHeadObjectDigestV1(base);
+  const forkedVersion = genesis ? '0' : shape === 'other-version' ? '2' : '1';
+  const forked = genesis
+    ? base
+    : { ...base, version: forkedVersion, previousHeadDigest: baseDigest } as AgentProfileActiveHeadObjectV1;
   const sibling = { ...forked, bundleDigest: SIBLING_BUNDLE_DIGEST };
   const resolution = Object.freeze({
     objectType: 'fork-resolution',
     kind: 'agents',
-    networkId: forked.networkId,
-    peerId: forked.peerId,
-    peerPublicKey: forked.peerPublicKey,
-    evmIssuer: forked.evmIssuer,
-    authoritySequence: forked.authoritySequence,
-    forkedVersion: forked.version,
-    resolutionVersion: '2',
+    networkId: origin.networkId,
+    peerId: origin.peerId,
+    peerPublicKey: origin.peerPublicKey,
+    evmIssuer: origin.evmIssuer,
+    authoritySequence: origin.authoritySequence,
+    forkedVersion,
+    resolutionVersion: genesis ? '2' : '3',
+    ...(genesis ? {} : { forkBaseHeadDigest: baseDigest }),
     evidenceHeadDigests: Object.freeze(
       [forked, sibling].map(computeAgentProfileHeadObjectDigestV1).sort(),
     ),
     issuedAt: '2026-08-05T12:05:00Z',
   }) as AgentProfileForkResolutionV1;
   const head = {
-    ...forked,
-    version: '3',
+    ...origin,
+    version: genesis ? '3' : shape === 'other-version' ? '5' : '4',
+    ...(genesis ? {} : { previousHeadDigest: baseDigest }),
     forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
   } as AgentProfileActiveHeadObjectV1;
-  const headDigest = computeAgentProfileHeadObjectDigestV1(head);
-  const artifacts = new Map<string, {
-    objectKind: 'agent-profile-head' | 'fork-resolution' | 'profile-bundle';
-    digest: Digest32V1;
-    canonicalBytes: Uint8Array;
-  }>([
-    envelopeArtifact('agent-profile-head', head),
-    envelopeArtifact('agent-profile-head', forked),
-    envelopeArtifact('agent-profile-head', sibling),
-    envelopeArtifact('fork-resolution', resolution),
-    [`profile-bundle:${head.bundleDigest}`, {
-      objectKind: 'profile-bundle',
-      digest: head.bundleDigest,
-      canonicalBytes: verified.bundle,
-    }],
-  ]);
-  const closure = await buildAgentProfileVerificationClosureV1(headDigest, {
-    nowMs: Date.parse('2026-08-05T12:10:00Z'),
-    resolve: async (reference) => artifacts.get(`${reference.objectKind}:${reference.digest}`),
-    verifyAuthorityEnvelope: () => true,
-    verifyCurrentBundle: (_head, bytes) =>
-      Buffer.from(bytes).equals(Buffer.from(verified.bundle)),
-  });
+  const artifacts = closureArtifactsFor(
+    [head, forked, sibling, base, ...(chain === undefined ? [] : [chain.middle, chain.initial])],
+    resolution,
+    chain?.transitions ?? [],
+  );
+  const closure = await buildAgentProfileVerificationClosureV1(
+    computeAgentProfileHeadObjectDigestV1(head),
+    closureOptions(),
+  );
+  const forkedClosure = genesis
+    ? undefined
+    : await buildAgentProfileVerificationClosureV1(
+      computeAgentProfileHeadObjectDigestV1(forked),
+      closureOptions(),
+    );
+  // A rotation moves the root subject, so the issue must carry the projection
+  // over the NEW root -- the derivation recomputes the head's committed digests
+  // from exactly these quads and refuses a mismatch.
+  const projected = chain === undefined ? {} : (() => {
+    const quads = projectionFor(forked);
+    return {
+      canonicalProjectionBytes: canonicalBytesFor(quads),
+      projectionQuads: quads,
+      ownedSubjectTable: [forked.rootSubject],
+    };
+  })();
+  const issue = { ...makeSystemRecordActiveReplacementIssueV1(binding), ...projected };
+  const forkedIssue = forkedClosure === undefined
+    ? issue
+    : { ...issue, head: forked, verifiedAuthoritySummary: forkedClosure.authoritySummary };
+  const branchDigests = Object.freeze(
+    [forked, sibling].map(computeAgentProfileHeadObjectDigestV1).sort(),
+  ) as readonly Digest32V1[];
+  // A transition-typed entry is what makes a quarantine terminal, and it is the
+  // only thing that fills the conflict digest slots: fork-only evidence leaves
+  // them empty. A pin needing a slots-carrying row therefore has to come through
+  // here rather than assigning the array.
+  const evidence = Object.freeze({
+    objectType: 'conflict-evidence',
+    kind: 'agents',
+    networkId: base.networkId,
+    peerId: base.peerId,
+    entries: Object.freeze([Object.freeze(terminalTransitionConflict
+      ? {
+        type: 'transition',
+        priorAuthoritySequence: forked.authoritySequence,
+        nextAuthoritySequence: String(BigInt(forked.authoritySequence) + 1n),
+        objectDigests: branchDigests,
+      }
+      : {
+        type: 'fork',
+        authoritySequence: forked.authoritySequence,
+        version: forked.version,
+        objectDigests: branchDigests,
+      })]),
+  }) as AgentProfileConflictEvidenceV1;
   return Object.freeze({
     resolution,
     head,
-    issue: {
-      ...makeSystemRecordActiveReplacementIssueV1(binding),
-      head,
-      verifiedAuthoritySummary: closure.authoritySummary,
+    issue: { ...issue, head, verifiedAuthoritySummary: closure.authoritySummary },
+    forkedIssue,
+    quarantineIssue: {
+      ...forkedIssue,
+      conflictEvidenceDigest: computeAgentProfileConflictEvidenceDigestV1(evidence),
+      canonicalConflictEvidenceBytes: canonicalizeAgentProfileConflictEvidenceV1(evidence),
+      terminalTransitionConflict,
     },
+    ...(genesis ? {} : { forkBaseHeadDigest: baseDigest }),
   });
+
+  function closureOptions() {
+    return {
+      nowMs: Date.parse('2026-08-05T12:10:00Z'),
+      resolve: async (reference: { objectKind: string; digest: string }) =>
+        artifacts.get(`${reference.objectKind}:${reference.digest}`),
+      verifyAuthorityEnvelope: () => true,
+      verifyCurrentBundle: (_head: unknown, bytes: Uint8Array) =>
+        Buffer.from(bytes).equals(Buffer.from(verified.bundle)),
+    };
+  }
+}
+
+function closureArtifactsFor(
+  heads: readonly AgentProfileActiveHeadObjectV1[],
+  resolution: AgentProfileForkResolutionV1,
+  transitions: readonly AgentProfileAuthorityTransitionV1[] = [],
+) {
+  const artifacts = new Map<string, {
+    objectKind: 'agent-profile-head' | 'fork-resolution' | 'profile-bundle'
+      | 'authority-transition';
+    digest: Digest32V1;
+    canonicalBytes: Uint8Array;
+  }>([
+    ...heads.map((head) => envelopeArtifact('agent-profile-head', head)),
+    ...transitions.map((transition) => envelopeArtifact('authority-transition', transition)),
+    envelopeArtifact('fork-resolution', resolution),
+  ]);
+  artifacts.set(`profile-bundle:${verified.head.bundleDigest}`, {
+    objectKind: 'profile-bundle',
+    digest: verified.head.bundleDigest,
+    canonicalBytes: verified.bundle,
+  });
+  return artifacts;
 }
 
 function envelopeArtifact(
-  objectKind: 'agent-profile-head' | 'fork-resolution',
-  object: AgentProfileActiveHeadObjectV1 | AgentProfileForkResolutionV1,
+  objectKind: 'agent-profile-head' | 'fork-resolution' | 'authority-transition',
+  object: AgentProfileActiveHeadObjectV1 | AgentProfileForkResolutionV1
+    | AgentProfileAuthorityTransitionV1,
 ): [string, {
-  objectKind: 'agent-profile-head' | 'fork-resolution';
+  objectKind: 'agent-profile-head' | 'fork-resolution' | 'authority-transition';
   digest: Digest32V1;
   canonicalBytes: Uint8Array;
 }] {
   const digest = object.objectType === 'agent-profile-head'
     ? computeAgentProfileHeadObjectDigestV1(object)
-    : computeAgentProfileForkResolutionDigestV1(object);
+    : object.objectType === 'authority-transition'
+      ? computeAgentProfileAuthorityTransitionDigestV1(object)
+      : computeAgentProfileForkResolutionDigestV1(object);
+  // Signers are rebuilt per role rather than reused from the vector envelope: a
+  // rotation changes the object's issuer, and the envelope check rejects a
+  // current-evm signature that still names the previous one.
+  const template = structuredClone(vectors.signed.activeEip191.envelope);
+  const peerEntry = template.signatures.find((entry) => entry.role === 'peer');
+  const evmEntry = template.signatures.find((entry) => entry.role !== 'peer');
+  const roles = object.objectType === 'authority-transition'
+    ? [
+      { role: 'peer', signer: object.peerId },
+      { role: 'prior-evm', signer: object.priorEvmIssuer },
+      { role: 'next-evm', signer: object.nextEvmIssuer },
+    ]
+    : [
+      { role: 'peer', signer: object.peerId },
+      { role: 'current-evm', signer: object.evmIssuer },
+    ];
   return [`${objectKind}:${digest}`, {
     objectKind,
     digest,
     canonicalBytes: canonicalizeSignedSystemRecordEnvelopeV1({
-      ...structuredClone(vectors.signed.activeEip191.envelope),
+      ...template,
       object,
       objectDigest: digest,
+      signatures: roles.map(({ role, signer }) => ({
+        ...(role === 'peer' ? peerEntry : evmEntry),
+        role,
+        signer,
+      })),
     } as SignedAgentProfileHeadEnvelopeV1),
   }];
 }

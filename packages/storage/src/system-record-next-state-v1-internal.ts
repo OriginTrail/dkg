@@ -10,6 +10,7 @@ import {
 import {
   assertAgentProfileHeadObjectV1,
   assertAgentProfileVerifiedAuthoritySummaryV1,
+  type AgentProfileVerifiedAuthoritySummaryV1,
   canonicalizeOwnedSubjectTableObjectV1,
   canonicalizeSystemRecordAppliedStateV1,
   canonicalizeSystemRecordCapacityStateV1,
@@ -465,6 +466,12 @@ function quarantineSystemRecordDerivationV1(
     ...withoutConflictSaga(derived.plan.next.appliedState),
     status: 'quarantined',
     conflictEvidenceDigest: facts.conflictEvidenceDigest,
+    // Captured here because this is the only moment the receiver still knows
+    // which head it is quarantining; a later resolution names a fork base, and
+    // without our own base the two cannot be compared.
+    ...(facts.head.previousHeadDigest === undefined
+      ? {}
+      : { conflictForkBaseHeadDigest: facts.head.previousHeadDigest }),
     conflictDigestSlots,
     conflictOverflow,
   });
@@ -1019,6 +1026,60 @@ function persistedStateMatchesVerifiedTombstone(
         && sameStrings(snapshot.pendingDeletionTable, pendingDeletionTable));
 }
 
+/**
+ * Decide whether a fork resolution adjudicates *this* quarantine.
+ *
+ * A head advertising some resolution is not enough. A peer that equivocated at
+ * one point can hold a perfectly valid resolution of a different fork of its
+ * own history, and presenting that would otherwise walk the quarantine off
+ * without the original equivocation ever being adjudicated. Each conjunct pins
+ * one coordinate of the fork event against state the candidate does not own.
+ *
+ * P-forkedVersion / P-authoritySeq / P-forkBase name the fork event: the
+ * version it happened at, the authority sequence it happened under, and the
+ * base its branches descend from. P-resolutionDigest binds the summary to the
+ * head in hand. P-absentRefusal refuses a head that advertises a resolution the
+ * summary does not carry -- load-bearing because summary validation is identity
+ * only, so a summary minted on a traversal that never ran the directness check
+ * is indistinguishable here from one that did.
+ *
+ * P-authoritySeq deliberately compares against OUR persisted lineage rather
+ * than the summary's. Core forces a resolution's authority sequence to equal
+ * its successor's, so the summary form could never fail. The consequence is
+ * intended: a resolution issued after the peer rotated authority is refused,
+ * because resolving at the next sequence moves past the equivocation instead of
+ * adjudicating it. The supported order is resolve, clear, then rotate.
+ *
+ * Do not drop the sequence conjunct for looking untested. Deleting it alone
+ * changes no test, and that is structural rather than a coverage hole: a
+ * resolution cannot disagree with us on sequence ALONE, because the evidence
+ * check welds a resolution's sequence to its fork base's, so any sequence
+ * mismatch drags a base mismatch along and the base conjunct decides first.
+ * What the tests do catch is either comparison being wired to the other's
+ * operand, which is the mistake this shape actually invites.
+ */
+function resolutionAdjudicatesThisQuarantineV1(
+  current: SystemRecordAppliedStatePresentV1,
+  headVersion: string,
+  advertisedResolutionDigest: Digest32V1,
+  summary: AgentProfileVerifiedAuthoritySummaryV1,
+): boolean {
+  const resolution = summary.forkResolution;
+  // P-absentRefusal. Not removable: every conjunct below reads `resolution`, so
+  // deleting this line fails to compile rather than admitting anything -- the
+  // type carries the refusal. It never fires today, and the precondition that
+  // keeps it silent is pinned by 'carries verified fork-resolution facts on the
+  // fork-resolving successor': a summary minted through the closure for a head
+  // advertising a resolution always carries the facts. It exists for a summary
+  // minted on a traversal that never ran the directness check, which the
+  // identity-only validator cannot tell apart from one that did.
+  if (resolution === undefined) return false;
+  return resolution.forkedVersion === headVersion
+    && resolution.authoritySequence === String(current.transitionLineage.length)
+    && resolution.resolutionDigest === advertisedResolutionDigest
+    && resolution.forkBaseHeadDigest === current.conflictForkBaseHeadDigest;
+}
+
 type AuthorityAdvance =
   | Readonly<{
       readonly outcome: 'advance';
@@ -1040,7 +1101,13 @@ function classifyAuthorityAdvance(
       if (current.conflictDigestSlots.length > 0 || current.conflictOverflow
           || facts.head.forkResolutionDigest === undefined
           || parseCanonicalDecimalU64(facts.head.version)
-            <= parseCanonicalDecimalU64(snapshot.headVersion)) {
+            <= parseCanonicalDecimalU64(snapshot.headVersion)
+          || !resolutionAdjudicatesThisQuarantineV1(
+            current,
+            snapshot.headVersion,
+            facts.head.forkResolutionDigest,
+            facts.verifiedAuthoritySummary,
+          )) {
         return Object.freeze({ outcome: 'deferred', reason: 'non-active-state' });
       }
     } else if (facts.operation !== 'quarantine') {

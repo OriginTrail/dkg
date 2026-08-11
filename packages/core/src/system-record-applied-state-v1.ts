@@ -65,6 +65,16 @@ export interface SystemRecordAppliedStatePresentV1 {
   readonly headDigest: Digest32V1;
   readonly transitionLineage: readonly AgentProfileAppliedTransitionV1[];
   readonly conflictEvidenceDigest?: Digest32V1;
+  /**
+   * The quarantined head's own predecessor, captured at quarantine-install.
+   *
+   * A fork resolution names the common base its conflicting heads descend
+   * from. Only the holder of the quarantine knows which base *its* head
+   * descends from, so without this the receiver cannot tell a resolution of
+   * its own fork from a resolution of a different fork at the same sequence
+   * and version. Absent for a version-zero head, which has no predecessor.
+   */
+  readonly conflictForkBaseHeadDigest?: Digest32V1;
   readonly projectionDigest: Digest32V1;
   readonly projectionBytes: DecimalU64V1;
   readonly projectionQuads: DecimalU64V1;
@@ -178,7 +188,7 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
     return ABSENT;
   }
   const optional = [
-    'conflictEvidenceDigest',
+    'conflictEvidenceDigest', 'conflictForkBaseHeadDigest',
     'conflictSidecarIntentOperation', 'conflictSidecarIntentEvidenceDigest',
     'conflictSidecarIntentStateRevision',
     'pendingDeletionTableDigest', 'pendingDeletionSubjectCount', 'pendingDeletionTableBytes',
@@ -217,6 +227,9 @@ function validateAppliedState(value: unknown): SystemRecordAppliedStateV1 {
   const transitionLineage = validateTransitionLineage(state.transitionLineage);
   if (hasOwnDataProperty(state, 'conflictEvidenceDigest')) {
     assertCanonicalDigest(state.conflictEvidenceDigest);
+  }
+  if (hasOwnDataProperty(state, 'conflictForkBaseHeadDigest')) {
+    assertCanonicalDigest(state.conflictForkBaseHeadDigest);
   }
   assertCanonicalDigest(state.projectionDigest);
   const projectionBytes = boundedU64(state.projectionBytes, SYSTEM_RECORD_MAX_PROJECTION_BYTES, 'projectionBytes');
