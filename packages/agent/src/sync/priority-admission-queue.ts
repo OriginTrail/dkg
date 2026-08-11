@@ -62,11 +62,8 @@ export interface PriorityAdmissionQueueHooks<Payload> {
     scheduler: string;
     operation: (entry: PriorityAdmissionEntry<Payload>) => string;
     inflightLimit?: (entry: PriorityAdmissionEntry<Payload>) => number | null;
-    /** Override the default shared-pool description for a true partitioned scheduler. */
-    capacity?: (
-      entry: PriorityAdmissionEntry<Payload>,
-      options: Pick<PriorityAdmissionAcquireOptions<Payload>, 'queueLimit'>,
-    ) => SchedulerPressureCapacity;
+    /** Static scheduler capacity. Omit only when acquire options define a shared pool. */
+    capacity?: SchedulerPressureCapacity;
     thresholds?: SchedulerPressureThresholds;
     register?: boolean;
   };
@@ -116,6 +113,7 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
   private readonly pressureTickets = new WeakMap<PriorityAdmissionEntry<Payload>, SchedulerPressureTicket>();
   private readonly hooks: PriorityAdmissionQueueHooks<Payload>;
   private readonly now: () => number;
+  private hasStaticObservabilityCapacity: boolean;
   private nextSequence = 0;
   private agedTurnOwed = false;
 
@@ -125,17 +123,19 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       scheduler: hooks.observability?.scheduler ?? 'priority-admission',
       thresholds: hooks.observability?.thresholds,
       now,
-      // Registration happens here, but capacity is only published on the first
-      // acquire — so without this a freshly booted daemon advertises
-      // `partitioned` on the field documented as authoritative, permanently so
-      // when sync admission is disabled and no acquire ever runs. The limits
-      // themselves still arrive with the first acquire; this declares only the
-      // model, which is a property of this queue rather than of a call.
-      capacity: { capacityModel: 'shared' },
+      capacity: hooks.observability?.capacity ?? { capacityModel: 'shared' },
     });
     this.hooks = hooks;
     this.now = now;
+    this.hasStaticObservabilityCapacity = hooks.observability?.capacity !== undefined;
     if (hooks.observability?.register) backpressureRegistry.register(this);
+  }
+
+  /** Configure one scheduler-wide capacity model before any admission. */
+  configureObservabilityCapacity(capacity: SchedulerPressureCapacity): void {
+    if (!this.hooks.observability) return;
+    this.hasStaticObservabilityCapacity = true;
+    this.updatePressureCapacity(capacity);
   }
 
   get length(): number {
@@ -186,13 +186,13 @@ export class PriorityAdmissionQueue<Payload> extends ObservableScheduler {
       enqueuedAt: this.now(),
       agingThresholdMs: options.agingThresholdMs,
     };
-    if (this.hooks.observability) {
-      this.updatePressureCapacity(this.hooks.observability.capacity?.(base, options) ?? {
+    if (this.hooks.observability && !this.hasStaticObservabilityCapacity) {
+      this.updatePressureCapacity({
         queueLimit: options.queueLimit,
         inflightLimit: this.hooks.observability.inflightLimit?.(base) ?? null,
         // Lanes here normally order one pool by priority, they do not
         // partition it. A caller with private allocations must opt in through
-        // `capacity` above so diagnostics never infer partitions from labels.
+        // static `capacity` so diagnostics never infer partitions from labels.
         capacityModel: 'shared',
       });
     }

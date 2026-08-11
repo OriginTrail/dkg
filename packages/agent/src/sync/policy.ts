@@ -40,6 +40,7 @@ export type SyncSchedulerLane =
  */
 export interface SyncAdmissionConfig {
   mode?: 'shared' | 'partitioned';
+  /** Partitioned fallback; explicit legacy global config/env caps remain authoritative. */
   globalMaxInflight?: number;
   fast?: {
     maxInflight?: number;
@@ -49,8 +50,10 @@ export interface SyncAdmissionConfig {
   slow?: {
     maxInflight?: number;
     foregroundReserved?: number;
+    /** Retained foreground work requires maxInflight > 0. */
     foregroundQueueLimit?: number;
     backgroundMaxInflight?: number;
+    /** Retained background work requires backgroundMaxInflight > 0. */
     backgroundQueueLimit?: number;
   };
 }

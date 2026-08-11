@@ -1,5 +1,9 @@
 import { performance } from 'node:perf_hooks';
-import { getMetrics, type OperationContext } from '@origintrail-official/dkg-core';
+import {
+  getMetrics,
+  type OperationContext,
+  type SchedulerPressureCapacity,
+} from '@origintrail-official/dkg-core';
 import {
   normalizeSyncAdmissionSource,
   type SyncAdmissionConfig,
@@ -32,22 +36,31 @@ export interface SyncGlobalBackpressureConfig {
 
 declare const syncGlobalBackpressurePolicyBrand: unique symbol;
 
+type SyncAdmissionPartitions = Readonly<{
+  fast: Readonly<{ maxInflight: number; queueLimit: number; queueTimeoutMs: number }>;
+  slow: Readonly<{
+    maxInflight: number;
+    foregroundReserved: number;
+    foregroundQueueLimit: number;
+    backgroundMaxInflight: number;
+    backgroundQueueLimit: number;
+  }>;
+}>;
+
 export type SyncGlobalBackpressurePolicy = Readonly<(
   | {
+    mode: 'shared';
     limit: number;
     queueLimit: number;
-    partitions?: Readonly<{
-      fast: Readonly<{ maxInflight: number; queueLimit: number; queueTimeoutMs: number }>;
-      slow: Readonly<{
-        maxInflight: number;
-        foregroundReserved: number;
-        foregroundQueueLimit: number;
-        backgroundMaxInflight: number;
-        backgroundQueueLimit: number;
-      }>;
-    }>;
+    partitions?: never;
   }
-  | { limit: undefined; queueLimit: undefined }
+  | {
+    mode: 'partitioned';
+    limit: number;
+    queueLimit: number;
+    partitions: SyncAdmissionPartitions;
+  }
+  | { mode: 'shared' | 'partitioned'; limit: undefined; queueLimit: undefined; partitions?: never }
 ) & { [syncGlobalBackpressurePolicyBrand]: true }>;
 
 export type SyncAdmissionClass = 'fast' | 'slow_foreground' | 'slow_background';
@@ -76,7 +89,7 @@ type SyncCapacityClaim =
     readonly contextGraphId: string;
   };
 
-export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
+export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 10;
 export const DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER = 2;
 export const DEFAULT_SYNC_PRIORITY_AGING_MS = 30_000;
 export const DEFAULT_SYNC_PARTITIONED_GLOBAL_MAX_INFLIGHT = 10;
@@ -325,32 +338,6 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     // source, before node-wide diagnostics/logging.
     operation: (entry) => syncAdmissionOperation(entry.payload),
     inflightLimit: (entry) => entry.payload.limit,
-    capacity: (entry, options) => {
-      const { policy } = entry.payload;
-      if (!isPartitionedPolicy(policy)) {
-        return {
-          queueLimit: options.queueLimit,
-          inflightLimit: policy.limit,
-          capacityModel: 'shared',
-        };
-      }
-      return {
-        queueLimit: policy.queueLimit,
-        inflightLimit: policy.limit,
-        capacityModel: 'partitioned',
-        lanes: {
-          fast: {
-            queueLimit: policy.partitions.fast.queueLimit,
-            inflightLimit: policy.partitions.fast.maxInflight,
-          },
-          slow: {
-            queueLimit: policy.partitions.slow.foregroundQueueLimit
-              + policy.partitions.slow.backgroundQueueLimit,
-            inflightLimit: policy.partitions.slow.maxInflight,
-          },
-        },
-      };
-    },
     thresholds: {
       degradedQueueAgeMs: DEFAULT_SYNC_PRIORITY_AGING_MS / 2,
       stalledActiveAgeMs: 120_000,
@@ -358,6 +345,55 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     register: true,
   },
 });
+
+function syncGlobalPressureCapacity(
+  policy: SyncGlobalBackpressurePolicy,
+): SchedulerPressureCapacity {
+  if (policy.limit === undefined) {
+    if (policy.mode === 'shared') {
+      return { capacityModel: 'shared', queueLimit: 0, inflightLimit: 0 };
+    }
+    return {
+      capacityModel: 'partitioned',
+      queueLimit: 0,
+      inflightLimit: 0,
+      lanes: {
+        fast: { queueLimit: 0, inflightLimit: 0 },
+        slow: { queueLimit: 0, inflightLimit: 0 },
+      },
+    };
+  }
+  if (!isPartitionedPolicy(policy)) {
+    return {
+      capacityModel: 'shared',
+      queueLimit: policy.queueLimit,
+      inflightLimit: policy.limit,
+    };
+  }
+  return {
+    capacityModel: 'partitioned',
+    queueLimit: policy.queueLimit,
+    inflightLimit: policy.limit,
+    lanes: {
+      fast: {
+        queueLimit: policy.partitions.fast.queueLimit,
+        inflightLimit: policy.partitions.fast.maxInflight,
+      },
+      slow: {
+        queueLimit: policy.partitions.slow.foregroundQueueLimit
+          + policy.partitions.slow.backgroundQueueLimit,
+        inflightLimit: policy.partitions.slow.maxInflight,
+      },
+    },
+  };
+}
+
+function configureResolvedSyncGlobalPolicy(
+  policy: SyncGlobalBackpressurePolicy,
+): SyncGlobalBackpressurePolicy {
+  queue.configureObservabilityCapacity(syncGlobalPressureCapacity(policy));
+  return policy;
+}
 const automaticBackgroundLimits = new WeakMap<object, number>();
 const selectedRecoveryScopeIds = new WeakMap<object, ReadonlySet<string>>();
 
@@ -544,7 +580,9 @@ export function resolveSyncGlobalBackpressure(
     ) ?? [],
   );
   if (config.syncAdmission !== undefined && config.syncAdmission.mode !== 'shared') {
-    return resolvePartitionedSyncGlobalBackpressure(config.syncAdmission, selectedRecoveryIds);
+    return configureResolvedSyncGlobalPolicy(
+      resolvePartitionedSyncGlobalBackpressure(config, selectedRecoveryIds),
+    );
   }
   const limit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
     ?? nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_LIMIT'))
@@ -552,16 +590,18 @@ export function resolveSyncGlobalBackpressure(
     ?? nonNegativeInteger(config.syncGlobalLimit)
     ?? DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT;
   if (limit === 0) {
-    return Object.freeze({
+    return configureResolvedSyncGlobalPolicy(Object.freeze({
+      mode: 'shared',
       limit: undefined,
       queueLimit: undefined,
-    }) as SyncGlobalBackpressurePolicy;
+    }) as SyncGlobalBackpressurePolicy);
   }
 
   const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
     ?? nonNegativeInteger(config.syncGlobalQueueLimit)
     ?? limit * DEFAULT_SYNC_GLOBAL_QUEUE_LIMIT_MULTIPLIER;
   const policy = Object.freeze({
+    mode: 'shared',
     limit,
     queueLimit,
   }) as SyncGlobalBackpressurePolicy;
@@ -573,7 +613,7 @@ export function resolveSyncGlobalBackpressure(
   // consuming that slot before exact VM or selected-SWM recovery arrives.
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
-  return policy;
+  return configureResolvedSyncGlobalPolicy(policy);
 }
 
 function validateSyncAdmissionConfig(config: SyncAdmissionConfig | undefined): void {
@@ -609,12 +649,18 @@ function resolvedPartitionValue(
 }
 
 function resolvePartitionedSyncGlobalBackpressure(
-  config: SyncAdmissionConfig,
+  globalConfig: SyncGlobalBackpressureConfig,
   selectedRecoveryIds: ReadonlySet<string>,
 ): SyncGlobalBackpressurePolicy {
+  const config = globalConfig.syncAdmission;
+  if (config === undefined) {
+    throw new TypeError('Invalid syncAdmission: partitioned mode requires a config object');
+  }
   const envLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_MAX_INFLIGHT'))
     ?? nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_LIMIT'));
   const limit = envLimit
+    ?? nonNegativeInteger(globalConfig.syncGlobalMaxInflight)
+    ?? nonNegativeInteger(globalConfig.syncGlobalLimit)
     ?? resolvedPartitionValue(
       config.globalMaxInflight,
       DEFAULT_SYNC_PARTITIONED_GLOBAL_MAX_INFLIGHT,
@@ -622,6 +668,7 @@ function resolvePartitionedSyncGlobalBackpressure(
     );
   if (limit === 0) {
     return Object.freeze({
+      mode: 'partitioned',
       limit: undefined,
       queueLimit: undefined,
     }) as SyncGlobalBackpressurePolicy;
@@ -689,11 +736,25 @@ function resolvePartitionedSyncGlobalBackpressure(
       'Invalid syncAdmission.slow.backgroundMaxInflight: must leave foregroundReserved slow slots',
     );
   }
+  if (slow.foregroundQueueLimit > 0 && slow.maxInflight === 0) {
+    throw new TypeError(
+      'Invalid syncAdmission.slow.foregroundQueueLimit: retained foreground work requires slow.maxInflight > 0',
+    );
+  }
+  if (slow.backgroundQueueLimit > 0 && slow.backgroundMaxInflight === 0) {
+    throw new TypeError(
+      'Invalid syncAdmission.slow.backgroundQueueLimit: retained background work requires backgroundMaxInflight > 0',
+    );
+  }
 
-  const queueLimit = fast.queueLimit
+  const partitionQueueLimit = fast.queueLimit
     + slow.foregroundQueueLimit
     + slow.backgroundQueueLimit;
+  const queueLimit = nonNegativeInteger(parseIntegerEnv('DKG_SYNC_GLOBAL_QUEUE_LIMIT'))
+    ?? nonNegativeInteger(globalConfig.syncGlobalQueueLimit)
+    ?? partitionQueueLimit;
   const policy = Object.freeze({
+    mode: 'partitioned',
     limit,
     queueLimit,
     partitions: Object.freeze({ fast, slow }),

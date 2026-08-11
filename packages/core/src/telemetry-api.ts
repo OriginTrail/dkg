@@ -329,7 +329,8 @@ export interface DkgMetrics {
    *  source, outcome={resolved|error|cancelled}. */
   syncOperationDurationMs: Histogram;
   /** I5 — operations rejected *before starting*, so they are never a 0 ms I4
-   *  sample. lane, source, reason={queue_full|displaced|aborted_before_start}. */
+   *  sample. lane, source,
+   *  reason={queue_full|queue_timeout|displaced|aborted_before_start}. */
   syncOperationRejectedTotal: Counter;
   /** I6 — single-flight/coalescing joins, recorded at map-hit time (before any
    *  bytes move). scope={context-graph|durable|shared-memory|page},

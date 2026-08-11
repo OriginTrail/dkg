@@ -2963,12 +2963,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       (message) => this.log.warn(ctx, message),
     );
     const syncGlobalPolicy = resolveAgentSyncGlobalBackpressure(this.config);
-    const syncPartitions = 'partitions' in syncGlobalPolicy
+    const syncPartitions = syncGlobalPolicy.mode === 'partitioned'
+      && syncGlobalPolicy.limit !== undefined
       ? syncGlobalPolicy.partitions
       : undefined;
     const configuredPriorityCounts = countSyncPriorityClasses(this.config.syncContextGraphPriorities);
     this.log.info(ctx, `Resolved sync policy ${JSON.stringify({
-      syncAdmissionMode: syncPartitions ? 'partitioned' : 'shared',
+      syncAdmissionMode: syncGlobalPolicy.mode,
       snapshotGlobalRows: snapshotPolicy.budget.maxRows,
       snapshotGlobalBytesEstimate: snapshotPolicy.budget.maxBytesEstimate,
       snapshotLocalRows: snapshotPolicy.budget.maxSnapshotRows,
