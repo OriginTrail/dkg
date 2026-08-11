@@ -647,6 +647,20 @@ export interface DkgConfig {
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
+   * #2052 Stack D system-record lane controls (plan :1436). Independent and
+   * DEFAULT-OFF — the opposite polarity to the emergency switches above, which
+   * default ON. They reach the agent through
+   * `pickSystemRecordConfigControlsV1`, the single forwarding chokepoint.
+   * Env DKG_SYSTEM_RECORD_PRODUCER_TRACKING_ENABLED wins.
+   */
+  systemRecordProducerTrackingEnabled?: boolean;
+  /** Advertise the system-record provider protocol. Default OFF. Env DKG_SYSTEM_RECORD_PROVIDER_ADVERTISEMENT_ENABLED wins. */
+  systemRecordProviderAdvertisementEnabled?: boolean;
+  /** Run the system-record requester lane. Default OFF. Env DKG_SYSTEM_RECORD_REQUESTER_LANE_ENABLED wins. */
+  systemRecordRequesterLaneEnabled?: boolean;
+  /** Let legacy sync prefer system-record-capable peers. Default OFF. Env DKG_SYSTEM_RECORD_LEGACY_CAPABLE_PEER_SELECTION_ENABLED wins. */
+  systemRecordLegacyCapablePeerSelectionEnabled?: boolean;
+  /**
    * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */
