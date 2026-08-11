@@ -105,7 +105,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     expect(enriched.slice(0, 10).every(({ recoveryFootprint }) =>
       recoveryFootprint?.kind === 'public-v10')).toBe(true);
     expect(enriched.slice(10).every(({ recoveryFootprint }) =>
-      recoveryFootprint === undefined)).toBe(true);
+      recoveryFootprint.kind === 'unknown')).toBe(true);
   });
 
   it('does zero sizing reads for private CGs', async () => {
@@ -131,7 +131,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
 
     expect(policyReads).toBe(1);
     expect(contextReads).toBe(0);
-    expect(enriched).toEqual(targets);
+    expect(enriched).toEqual(asPlannable(targets));
   });
 
   it('does not reread a prepopulated pinned footprint', async () => {
@@ -187,7 +187,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     });
 
     for (const index of [0, 1, 2]) {
-      expect(enriched[index]!.recoveryFootprint).toBeUndefined();
+      expect(enriched[index]!.recoveryFootprint).toEqual({ kind: 'unknown' });
       const plan = planVmRecoveryMicrobatch(
         asPlannable([enriched[index]!, enriched[3]!]),
         LIMITS,
@@ -224,9 +224,9 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     expect(contextReads[0]!.kaId).toBe(0n);
     expect(contextReads[0]!.signal).not.toBe(controller.signal);
     expect(contextReads[0]!.signal?.aborted).toBe(true);
-    expect(enriched).toEqual(targets);
+    expect(enriched).toEqual(asPlannable(targets));
     expect(enriched.every(({ recoveryFootprint }) =>
-      recoveryFootprint === undefined)).toBe(true);
+      recoveryFootprint.kind === 'unknown')).toBe(true);
   });
 
   it('bounds a hung sizing read, aborts its child signal, and admits no late hint', async () => {
@@ -263,10 +263,10 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
       expect(settled).toBe(true);
       expect(vi.getTimerCount()).toBe(0);
       expect(sizingSignal?.aborted).toBe(true);
-      expect(enriched).toEqual(targets);
+      expect(enriched).toEqual(asPlannable(targets));
       resolveLate?.(publicContext(7n));
       await vi.runAllTicks();
-      expect(enriched).toEqual(targets);
+      expect(enriched).toEqual(asPlannable(targets));
       expect(targets[0]!.recoveryFootprint).toBeUndefined();
     } finally {
       vi.useRealTimers();
@@ -304,8 +304,8 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
 
       expect(deadlineAborts).toBe(1);
       expect(vi.getTimerCount()).toBe(0);
-      expect(enriched).toEqual(targets);
-      expect(enriched[0]!.recoveryFootprint).toBeUndefined();
+      expect(enriched).toEqual(asPlannable(targets));
+      expect(enriched[0]!.recoveryFootprint).toEqual({ kind: 'unknown' });
     } finally {
       vi.useRealTimers();
     }
@@ -404,7 +404,7 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
     expect(livenessReads).toBe(contextGraphId > 0n ? 1 : 0);
     expect(policyReads).toBe(0);
     expect(contextReads).toBe(0);
-    expect(enriched).toEqual(targets);
+    expect(enriched).toEqual(asPlannable(targets));
   });
 
   it('fails closed when the explicit chain authority rejects', async () => {
@@ -432,6 +432,6 @@ describe('classic VM recovery footprint bridge — adversarial boundaries', () =
 
     expect(policyReads).toBe(0);
     expect(contextReads).toBe(0);
-    expect(enriched).toEqual(targets);
+    expect(enriched).toEqual(asPlannable(targets));
   });
 });
