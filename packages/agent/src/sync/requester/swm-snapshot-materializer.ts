@@ -108,6 +108,16 @@ export interface SharedMemorySnapshotMaterializer {
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<void>;
+  /**
+   * Best-effort post-materialization tier reconciliation. It runs after the
+   * materialization lock is released, then reacquires that same per-KA lock
+   * while re-reading the current VM, SWM and head evidence. Optional so pure
+   * requester tests and embedders without VM semantics remain valid.
+   */
+  reconcileFinalizedTwin?(
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean>;
 }
 
 /**
@@ -122,6 +132,10 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    */
   writeLocks: Map<string, Promise<void>>;
   invalidateListContextGraphsCache: () => void;
+  reconcileFinalizedTwin?: (
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ) => Promise<boolean>;
 }): SharedMemorySnapshotMaterializer {
   // #2079 operator override, default ON. Blank is UNSET, not false:
   // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for
@@ -336,6 +350,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         );
       }
     },
+    ...(deps.reconcileFinalizedTwin === undefined
+      ? {}
+      : { reconcileFinalizedTwin: deps.reconcileFinalizedTwin }),
   };
 }
 

@@ -123,6 +123,8 @@ interface HarnessOverrides {
   subGraphName?: string;
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
+  reconcileImpl?: () => Promise<void>;
+  reconcileRetired?: boolean;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -210,6 +212,11 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('head-swapped');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
         },
+        reconcileFinalizedTwin: async () => {
+          events.push('finalized-twin-reconciled');
+          await overrides.reconcileImpl?.();
+          return overrides.reconcileRetired ?? false;
+        },
       },
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
@@ -251,6 +258,40 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
     expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
     expect(h.headSwaps).toEqual([{ contextGraphId: CG, headSubject: `${UAL}#dkg-swm-head` }]);
+  });
+
+  it('reconciles a possible finalized twin only after releasing the SWM write lock', async () => {
+    const h = harness();
+    await h.run();
+    expect(h.events.indexOf('finalized-twin-reconciled'))
+      .toBeGreaterThan(h.events.indexOf('lock-released'));
+  });
+
+  it('keeps a completed SWM materialization successful when twin cleanup defers', async () => {
+    const h = harness({
+      reconcileImpl: async () => { throw new Error('cleanup unavailable'); },
+    });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(h.replaced).toHaveLength(1);
+    expect(h.events).toContain('finalized-twin-reconciled');
+  });
+
+  it('does not recreate SWM head metadata after retiring an already-materialized twin', async () => {
+    const h = harness({
+      contentPresent: () => true,
+      storedHead: () => ({ version: '1', needsRepair: false }),
+      reconcileRetired: true,
+    });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(h.events).toContain('finalized-twin-reconciled');
+    const retiredSubjects = new Set([
+      `${UAL}#dkg-swm-head`,
+      `urn:dkg:share:${CG}:snapshot-materialization-op`,
+    ]);
+    expect(h.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
+      .toHaveLength(0);
   });
 
   it('closes the gossip race: in-lock version re-check skips a superseded snapshot', async () => {
