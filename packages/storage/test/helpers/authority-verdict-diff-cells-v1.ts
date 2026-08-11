@@ -36,6 +36,66 @@ export interface VerdictDiffCellV1 {
   readonly clock: 'valid' | 'beyondFutureSkew' | 'priorExpirySkewUnmet';
 }
 
+/**
+ * THE TWO EVALUATORS READ DISJOINT SUBSETS OF THE AXES, and that is a finding
+ * before it is an optimisation.
+ *
+ * Core's inputs are `AgentProfileAcceptedAuthorityStateV1` (:63) and
+ * `AgentProfileHeadAdvanceEvidenceV1` (:76). Neither carries an applied STATUS
+ * or a storage OPERATION -- there is no field to put them in. Storage's
+ * classifier takes (snapshot, facts, headDigest): `facts` carries `operation`,
+ * and nothing on either object carries core's `disposition` or core's evidence
+ * object. So each side sees a PROJECTION of the cell, and a cell is the pair.
+ *
+ * The consequence is measured, not rhetorical: every storage input corresponds
+ * to exactly 48 distinct core inputs. Core will therefore discriminate 48 ways
+ * where storage cannot discriminate at all -- which is what "no total mapping"
+ * means concretely, and what Phase 3 inherits if it routes the live path
+ * through core.
+ *
+ * The lists below are load-bearing rather than decorative: the projection keys
+ * are BUILT from them, so moving an axis between the visible and invisible sets
+ * moves the pinned input counts.
+ */
+export const CORE_INVISIBLE_AXES_V1 = ['B_appliedStatus', 'H_storageOperation'] as const;
+export const STORAGE_INVISIBLE_AXES_V1 = ['I_coreDisposition', 'J_evidencePresence'] as const;
+
+/** Axis name -> the cell field carrying it. Pinned complete against the axes. */
+export const AXIS_TO_CELL_FIELD_V1 = {
+  A_snapshot: 'snapshot',
+  B_appliedStatus: 'appliedStatus',
+  C_candidateHeadState: 'candidateHeadState',
+  D_sequenceRelation: 'sequenceRelation',
+  E_versionRelation: 'versionRelation',
+  F_headDigest: 'headDigest',
+  G_acceptedTransitionDigest: 'acceptedTransitionDigest',
+  H_storageOperation: 'storageOperation',
+  I_coreDisposition: 'coreDisposition',
+  J_evidencePresence: 'evidence',
+  K_candidateForkResolutionDigest: 'candidateForkResolutionDigest',
+  L_clock: 'clock',
+} as const;
+
+function projectionKeyV1(cell: VerdictDiffCellV1, invisible: readonly string[]): string {
+  return Object.entries(AXIS_TO_CELL_FIELD_V1)
+    .filter(([axis]) => !invisible.includes(axis))
+    .map(([, field]) => {
+      const value = (cell as unknown as Record<string, unknown>)[field];
+      return Array.isArray(value) ? [...value].sort().join('+') : String(value);
+    })
+    .join('|');
+}
+
+/** Two cells sharing this key present IDENTICAL inputs to core. */
+export function coreInputProjectionKeyV1(cell: VerdictDiffCellV1): string {
+  return projectionKeyV1(cell, CORE_INVISIBLE_AXES_V1);
+}
+
+/** Two cells sharing this key present IDENTICAL inputs to the storage entry. */
+export function storageInputProjectionKeyV1(cell: VerdictDiffCellV1): string {
+  return projectionKeyV1(cell, STORAGE_INVISIBLE_AXES_V1);
+}
+
 /** Every subset of the four optional evidence members (axis J). */
 function evidenceSubsets(): readonly (readonly string[])[] {
   const members = VERDICT_DIFF_AXES_V1.J_evidencePresence;
