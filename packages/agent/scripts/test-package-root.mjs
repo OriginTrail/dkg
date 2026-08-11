@@ -65,6 +65,73 @@ if (packageManifest.exports['./dist/system-records/*'] !== null) {
   throw new Error('unclassified System Record deep imports are not blocked by default');
 }
 
+// #2052 D-10 — pin the package-root contract for the system-record config
+// controls, in BOTH directions. It sits with the System Record surface checks
+// above rather than further down, so one audit of this domain sees the whole
+// policy: the deep-import block, then what the root itself offers.
+//
+// The CLI forwarding hop needs the picker on the root; the four per-control
+// resolvers are deliberately NOT on it, because they have no production caller
+// and `./dist/system-records/*` is blocked just above, so publishing them would
+// commit us to names and shapes before their consuming lanes exist. Without
+// this pin both drifts are silent: a re-export would widen the public surface,
+// an accidental removal of the picker would break the CLI hop, and every other
+// check stays green either way — the resolver tests import the source module
+// directly, and the CLI wiring test proves the value survives the hop, never
+// what the package root offers.
+// ALLOW-LIST, not deny-list. Earlier revisions of this check named the four
+// resolvers, then derived them by a naming regex; both are models of what
+// counts as internal, and both fail open — a hardcoded list misses the fifth
+// resolver, and a regex misses one renamed out of the pattern (only a TOTAL
+// rename trips an empty-list guard, a partial one just goes quiet). So the rule
+// is inverted: everything this module exports is internal EXCEPT what is named
+// public here. A new export of any name is covered the day it is written, with
+// no convention to remember and no second inventory to keep in step.
+//
+// The module is imported by file path because `./dist/system-records/*` is
+// blocked above, and that block is the point: a package specifier cannot reach
+// it.
+const configControlsModule = await import(
+  new URL('../dist/system-records/config-controls-v1.js', import.meta.url).href
+);
+// One value is public; everything else the module exports is internal. Splitting
+// it off by destructuring states that invariant directly instead of encoding it
+// as a name list consulted by two separate guards.
+const { pickSystemRecordConfigControlsV1: expectedPicker, ...internalControls } =
+  configControlsModule;
+// Guards the module side: a picker-less module would make every check below
+// vacuous — the identity comparison would compare undefined to undefined.
+if (typeof expectedPicker !== 'function') {
+  throw new Error(
+    'config-controls-v1.js no longer exports pickSystemRecordConfigControlsV1; the root checks below would assert nothing',
+  );
+}
+// Identity, not `typeof`: this must be THE picker, not merely some function
+// published under its name.
+if (root.pickSystemRecordConfigControlsV1 !== expectedPicker) {
+  throw new Error(
+    'package root does not publish the config-controls picker — missing, or a different value under its name; the CLI forwarding hop consumes it',
+  );
+}
+// Compared by VALUE, not by name. A name comparison passes an alias — re-export
+// `systemRecordRequesterLaneEnabledV1 as resolveSystemRecordRequesterLaneV1`
+// from the barrel and the internal function is published under a name the check
+// never looks for. The contract is that these functions stay off the root, not
+// that these spellings do.
+const internalByValue = new Map(
+  Object.entries(internalControls).map(([name, value]) => [value, name]),
+);
+for (const [rootName, rootValue] of Object.entries(root)) {
+  const internalName = internalByValue.get(rootValue);
+  if (internalName !== undefined) {
+    throw new Error(
+      `package root exports internal system-record control export ${internalName}${
+        rootName === internalName ? '' : ` (aliased as ${rootName})`
+      }; keep it internal until its lane has a caller`,
+    );
+  }
+}
+
 const profileArtifact = (objectKind, byte) => Object.freeze({
   objectKind,
   objectDigest: `0x${byte.toString(16).padStart(64, '0')}`,
