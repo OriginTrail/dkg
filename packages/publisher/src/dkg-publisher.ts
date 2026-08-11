@@ -4505,14 +4505,6 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
-    // Argument validity precedes capability. Without this the only guard an
-    // invalid id ever meets is the attestation requirement below, so a zero or
-    // garbage kaId is reported as a missing seal and the id that actually
-    // caused it is never named -- which is exactly how the ProfileManager
-    // zero-id routing bug presented, and what made it expensive to diagnose.
-    if (kaId <= 0n || kaId >= (1n << 256n)) {
-      throw new Error(`Invalid update kaId ${kaId.toString()}: expected a positive uint256`);
-    }
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
