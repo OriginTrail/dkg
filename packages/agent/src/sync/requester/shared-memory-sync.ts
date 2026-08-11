@@ -280,6 +280,11 @@ interface SharedMemorySyncContext {
   };
   /** Optional metadata retrieval strategy; ordinary callers use page fetch. */
   metadataFetcher?: SharedMemoryMetadataFetcher;
+  /**
+   * Selected cold-join recovery may interleave recent snapshots with the
+   * oldest outstanding history. Ordinary sync preserves manifest order.
+   */
+  snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -320,6 +325,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     stopOnBackoffWorthyFailure = false,
     snapshotEvidencePolicy,
     metadataFetcher,
+    snapshotRecoveryOrder = 'manifest',
     deleteCheckpoint,
     setCheckpoint,
     ensureOwnedMap,
@@ -910,6 +916,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         contextGraphId: pid,
         deadline,
         metaQuads: processed.verifiedMeta,
+        recoveryOrder: snapshotRecoveryOrder,
         publicSnapshotStore,
         fetchSyncPages,
         deleteCheckpoint,
@@ -1194,6 +1201,10 @@ export interface PublicSnapshotMetadata {
   ref: string;
   digest: string;
   count: number;
+  /** Optional, non-authoritative scheduling hint parsed with the manifest. */
+  publishedAtMs?: number;
+  /** Optional UAL suffix used only as a deterministic recency fallback. */
+  ualOrdinal?: bigint;
 }
 
 export async function syncPublicSnapshotsForMeta(params: {
@@ -1202,6 +1213,7 @@ export async function syncPublicSnapshotsForMeta(params: {
   contextGraphId: string;
   deadline: number;
   metaQuads: readonly Quad[];
+  recoveryOrder?: 'manifest' | 'recent-balanced';
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1241,7 +1253,10 @@ export async function syncPublicSnapshotsForMeta(params: {
    */
   yieldedAtDeadline: boolean;
 }> {
-  const snapshots = collectPublicSnapshotMetadata(params.metaQuads);
+  const manifestSnapshots = collectPublicSnapshotMetadata(params.metaQuads);
+  const snapshots = params.recoveryOrder === 'recent-balanced'
+    ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
+    : manifestSnapshots;
   if (snapshots.length === 0) {
     return {
       bytesReceived: 0,
@@ -1418,21 +1433,41 @@ export async function syncPublicSnapshotsForMeta(params: {
 }
 
 export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): PublicSnapshotMetadata[] {
-  const bySubject = new Map<string, { ref?: string; digest?: string; count?: number; hasSnapshotGraph?: boolean }>();
+  const bySubject = new Map<string, {
+    ref?: string;
+    digest?: string;
+    count?: number;
+    hasSnapshotGraph?: boolean;
+    publishedAtMs?: number;
+    ualOrdinal?: bigint;
+  }>();
   for (const quad of metaQuads) {
     if (
       quad.predicate !== `${DKG}publicSnapshotRef` &&
       quad.predicate !== `${DKG}publicSnapshotGraph` &&
       quad.predicate !== `${DKG}publicQuadsDigest` &&
-      quad.predicate !== `${DKG}publicQuadsCount`
+      quad.predicate !== `${DKG}publicQuadsCount` &&
+      quad.predicate !== `${DKG}publishedAt` &&
+      quad.predicate !== `${DKG}kaUal`
     ) {
       continue;
     }
     const entry = bySubject.get(quad.subject) ?? {};
-    if (quad.predicate === `${DKG}publicSnapshotRef`) entry.ref = stripLiteral(quad.object)?.trim();
+    const value = stripLiteral(quad.object)?.trim();
+    if (quad.predicate === `${DKG}publicSnapshotRef`) entry.ref = value;
     if (quad.predicate === `${DKG}publicSnapshotGraph`) entry.hasSnapshotGraph = true;
-    if (quad.predicate === `${DKG}publicQuadsDigest`) entry.digest = stripLiteral(quad.object)?.trim();
+    if (quad.predicate === `${DKG}publicQuadsDigest`) entry.digest = value;
     if (quad.predicate === `${DKG}publicQuadsCount`) entry.count = parseIntegerLiteral(quad.object);
+    if (quad.predicate === `${DKG}publishedAt` && value) {
+      const parsed = Date.parse(value);
+      if (Number.isFinite(parsed)) entry.publishedAtMs = parsed;
+    }
+    if (quad.predicate === `${DKG}kaUal` && value) {
+      const match = value.match(/\/(\d+)$/);
+      if (match) {
+        try { entry.ualOrdinal = BigInt(match[1]!); } catch { /* scheduling hint only */ }
+      }
+    }
     bySubject.set(quad.subject, entry);
   }
 
@@ -1458,13 +1493,90 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
       throw new Error(`Shared-memory public snapshot metadata for ${subject} is missing digest/count`);
     }
     const existing = byRef.get(ref);
-    const metadata = { ref, digest: entry.digest, count: entry.count! };
+    const metadata: PublicSnapshotMetadata = {
+      ref,
+      digest: entry.digest,
+      count: entry.count!,
+      ...(entry.publishedAtMs !== undefined ? { publishedAtMs: entry.publishedAtMs } : {}),
+      ...(entry.ualOrdinal !== undefined ? { ualOrdinal: entry.ualOrdinal } : {}),
+    };
     if (existing && (existing.digest !== metadata.digest || existing.count !== metadata.count)) {
       throw new Error(`Conflicting shared-memory public snapshot metadata for ${ref}`);
     }
-    byRef.set(ref, metadata);
+    if (!existing) {
+      byRef.set(ref, metadata);
+      continue;
+    }
+    const newerHints = newerPublicSnapshotRecency(existing, metadata);
+    byRef.set(ref, {
+      ...existing,
+      ...(newerHints.publishedAtMs !== undefined ? { publishedAtMs: newerHints.publishedAtMs } : {}),
+      ...(newerHints.ualOrdinal !== undefined ? { ualOrdinal: newerHints.ualOrdinal } : {}),
+    });
   }
   return [...byRef.values()];
+}
+
+function newerPublicSnapshotRecency(
+  left: Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'>,
+  right: Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'>,
+): Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'> {
+  if ((right.publishedAtMs ?? -1) !== (left.publishedAtMs ?? -1)) {
+    return (right.publishedAtMs ?? -1) > (left.publishedAtMs ?? -1) ? right : left;
+  }
+  return (right.ualOrdinal ?? -1n) > (left.ualOrdinal ?? -1n) ? right : left;
+}
+
+/**
+ * Build a deterministic 3:1 recent/history walk from verified metadata.
+ *
+ * `publishedAt` and the UAL suffix affect scheduling only; digest/count remain
+ * the integrity boundary. Missing or malformed recency hints fall back to the
+ * manifest index, and a manifest with no usable hints keeps its original order.
+ */
+export function orderPublicSnapshotsForBalancedRecency(
+  snapshots: readonly PublicSnapshotMetadata[],
+): PublicSnapshotMetadata[] {
+  if (
+    snapshots.length < 2
+    || !snapshots.some((snapshot) => (
+      snapshot.publishedAtMs !== undefined || snapshot.ualOrdinal !== undefined
+    ))
+  ) return [...snapshots];
+
+  const manifestIndex = new Map(snapshots.map((snapshot, index) => [snapshot.ref, index]));
+  const ranked = [...snapshots].sort((a, b) => {
+    const aTime = a.publishedAtMs;
+    const bTime = b.publishedAtMs;
+    if (aTime !== undefined || bTime !== undefined) {
+      if (aTime === undefined) return -1;
+      if (bTime === undefined) return 1;
+      if (aTime !== bTime) return aTime - bTime;
+    }
+    const aOrdinal = a.ualOrdinal;
+    const bOrdinal = b.ualOrdinal;
+    if (aOrdinal !== undefined || bOrdinal !== undefined) {
+      if (aOrdinal === undefined) return -1;
+      if (bOrdinal === undefined) return 1;
+      if (aOrdinal !== bOrdinal) return aOrdinal < bOrdinal ? -1 : 1;
+    }
+    return (manifestIndex.get(a.ref) ?? 0) - (manifestIndex.get(b.ref) ?? 0);
+  });
+
+  const ordered: PublicSnapshotMetadata[] = [];
+  let oldest = 0;
+  let newest = ranked.length - 1;
+  while (oldest <= newest) {
+    for (let recent = 0; recent < 3 && oldest <= newest; recent += 1) {
+      ordered.push(ranked[newest]!);
+      newest -= 1;
+    }
+    if (oldest <= newest) {
+      ordered.push(ranked[oldest]!);
+      oldest += 1;
+    }
+  }
+  return ordered;
 }
 
 /**

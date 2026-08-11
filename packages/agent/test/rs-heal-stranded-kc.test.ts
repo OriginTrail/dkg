@@ -109,6 +109,9 @@ async function seedOntology(store: OxigraphStore, localCgId: string, onChainId: 
 function makeAgentLike(store: OxigraphStore): unknown {
   return Object.assign(Object.create(DKGAgent.prototype), {
     store,
+    // createVmReconcileDeps now distinguishes explicit Edge subscriptions
+    // from Core-owned historical reconciliation when planning recent slots.
+    config: { nodeRole: 'edge' },
     contextGraphBindingState: new ContextGraphBindingState(),
     rsHealCursorByCg: new Map<string, string>(),
     log: { info: () => undefined, warn: () => undefined, error: () => undefined },

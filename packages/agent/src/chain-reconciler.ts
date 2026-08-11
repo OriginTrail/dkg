@@ -115,6 +115,15 @@ export interface ChainReconcilerDeps {
   /** Maximum ordinal reconciliations allowed to run concurrently in one pass. */
   maxOrdinalConcurrency?: number;
   /**
+   * Number of slots in a bounded pass reserved for the newest outstanding
+   * ordinals. The remaining slots keep advancing the historical scan cursor.
+   *
+   * This is intentionally opt-in. Ordinary member/Core reconciliation keeps
+   * strict oldest-first behaviour, while an explicitly selected cold Edge can
+   * make the current head useful quickly without starving durable history.
+   */
+  recentOrdinalsPerPass?: number;
+  /**
    * Fetch one exact batch containing only locally-missing KAs, then re-run
    * local verification for those ordinals. Undefined preserves scan-only
    * behavior for callers/tests that do not provide network recovery.
@@ -147,6 +156,104 @@ export interface ReconcileResult {
   hasMore: boolean;
   /** True when this pass stopped because its captured chain binding changed. */
   staleTarget: boolean;
+}
+
+interface OrdinalPassPlan {
+  /** Oldest outstanding ordinals that advance the durable scan cursor. */
+  historicalOrdinals: readonly number[];
+  /** Newest outstanding ordinals sampled only to reduce head latency. */
+  recentOrdinals: readonly number[];
+  /** Deterministic ordinal-ordered union used by the reconciliation workers. */
+  ordinals: readonly number[];
+  /** True when this pass deliberately sampled both ends of the inventory. */
+  usesRecentLane: boolean;
+  hasUnvisitedCandidates: boolean;
+  /** Next cursor derived exclusively from the oldest-side slice. */
+  historicalContinuationOrdinal: number;
+  /** Priority comparator for the bounded exact-recovery queue. */
+  compareRecoveryTargets: (left: OrdinalRecoveryTarget, right: OrdinalRecoveryTarget) => number;
+  /** Derive the next durable scan cursor without conflating recovery order. */
+  nextScanOrdinal: (input: {
+    watermark: number;
+    recoveryContinuationOrdinal: number | undefined;
+    recoveryAttempted: boolean;
+    recoveryCooldownOnly: boolean;
+  }) => number | undefined;
+}
+
+/**
+ * Build one bounded ordinal pass without mutating cursor state.
+ *
+ * The recent lane is a latency sample, not a second cursor. Keeping that
+ * distinction explicit prevents a continuation from the recent-first exact
+ * recovery queue from jumping the durable historical scan over older gaps.
+ */
+function planOrdinalPass(
+  candidates: readonly number[],
+  passLimit: number,
+  requestedRecent: number,
+  watermark: number,
+): OrdinalPassPlan {
+  const recentCount = Number.isFinite(passLimit) && passLimit >= 2
+    ? Math.min(requestedRecent, passLimit - 1)
+    : 0;
+  let historicalOrdinals: readonly number[];
+  let recentOrdinals: readonly number[] = [];
+  if (recentCount > 0 && candidates.length > passLimit) {
+    const historicalCount = passLimit - recentCount;
+    historicalOrdinals = candidates.slice(0, historicalCount);
+    const historicalSet = new Set(historicalOrdinals);
+    recentOrdinals = candidates
+      .slice(-recentCount)
+      .filter((ordinal) => !historicalSet.has(ordinal));
+  } else {
+    historicalOrdinals = candidates.slice(0, passLimit);
+  }
+  const ordinals = [...historicalOrdinals, ...recentOrdinals]
+    .sort((a, b) => a - b);
+  const recentOrdinalSet = new Set(recentOrdinals);
+  const usesRecentLane = recentOrdinals.length > 0;
+  const hasUnvisitedCandidates = candidates.length > ordinals.length;
+  const historicalContinuationOrdinal = historicalOrdinals.length > 0
+    ? historicalOrdinals[historicalOrdinals.length - 1]! + 1
+    : watermark;
+  return {
+    historicalOrdinals,
+    recentOrdinals,
+    ordinals,
+    usesRecentLane,
+    hasUnvisitedCandidates,
+    historicalContinuationOrdinal,
+    compareRecoveryTargets: (left, right) => {
+      const leftRecent = recentOrdinalSet.has(left.ordinal);
+      const rightRecent = recentOrdinalSet.has(right.ordinal);
+      if (leftRecent !== rightRecent) return leftRecent ? -1 : 1;
+      return leftRecent ? right.ordinal - left.ordinal : left.ordinal - right.ordinal;
+    },
+    nextScanOrdinal: ({
+      watermark: currentWatermark,
+      recoveryContinuationOrdinal,
+      recoveryAttempted,
+      recoveryCooldownOnly,
+    }) => {
+      if (usesRecentLane) {
+        return hasUnvisitedCandidates
+          ? Math.max(currentWatermark, historicalContinuationOrdinal)
+          : currentWatermark;
+      }
+      if (
+        recoveryContinuationOrdinal !== undefined
+        && (recoveryAttempted || recoveryCooldownOnly || !hasUnvisitedCandidates)
+      ) {
+        return Math.max(currentWatermark, recoveryContinuationOrdinal);
+      }
+      if (!hasUnvisitedCandidates) return currentWatermark;
+      if (ordinals.length > 0) {
+        return Math.max(currentWatermark, historicalContinuationOrdinal);
+      }
+      return undefined;
+    },
+  };
 }
 
 /**
@@ -220,8 +327,19 @@ export async function reconcileContextGraph(
     state.scanOrdinal = state.watermark;
     candidates = outstandingBefore;
   }
-  const ordinals = candidates.slice(0, passLimit);
-  const hasUnvisitedCandidates = candidates.length > ordinals.length;
+  const requestedRecent = Number.isFinite(deps.recentOrdinalsPerPass)
+    ? Math.max(0, Math.floor(deps.recentOrdinalsPerPass ?? 0))
+    : 0;
+  const passPlan = planOrdinalPass(
+    candidates,
+    passLimit,
+    requestedRecent,
+    state.watermark,
+  );
+  const {
+    ordinals,
+    hasUnvisitedCandidates,
+  } = passPlan;
   if (headUnavailable) {
     state.scanOrdinal = state.watermark;
   } else {
@@ -276,7 +394,13 @@ export async function reconcileContextGraph(
       .filter((outcome): outcome is Extract<OrdinalOutcome, { status: 'pending' }> =>
         outcome?.status === 'pending' && outcome.recovery !== undefined,
       )
-      .map((outcome) => outcome.recovery!);
+      .map((outcome) => outcome.recovery!)
+      // The exact-recovery executor has a tighter physical peer/request budget
+      // than the ordinal scanner. Spend that scarce budget on the recent slots
+      // this selected pass deliberately reserved, then use any remainder for
+      // the historical side. Cursor completion is still merged below in
+      // ordinal order, so this changes latency rather than correctness.
+      .sort(passPlan.compareRecoveryTargets);
     if (!staleTarget && recoveryTargets.length > 0 && deps.recoverPendingOrdinals) {
       const recovery = await deps.recoverPendingOrdinals(
         localCgId,
@@ -323,15 +447,21 @@ export async function reconcileContextGraph(
 
   if (staleTarget || headUnavailable) {
     state.scanOrdinal = state.watermark;
-  } else if (
-    recoveryContinuationOrdinal !== undefined
-    && (recoveryAttempted || recoveryCooldownOnly || !hasUnvisitedCandidates)
-  ) {
-    state.scanOrdinal = Math.max(state.watermark, recoveryContinuationOrdinal);
-  } else if (!hasUnvisitedCandidates) {
-    state.scanOrdinal = state.watermark;
-  } else if (ordinals.length > 0) {
-    state.scanOrdinal = ordinals[ordinals.length - 1]! + 1;
+  } else {
+    // The recovery executor consumes recent targets first and therefore its
+    // continuation is ordered by recovery priority, not by chain ordinal. It
+    // must never become the durable scan cursor: on a growing graph that would
+    // move the cursor near the head and starve the untouched historical gap.
+    // Advance only from the oldest-side slice. The recovery continuation still
+    // contributes to `hasMore` below, while pending outcomes remain in the
+    // inventory and are revisited on a later historical cycle.
+    const nextScanOrdinal = passPlan.nextScanOrdinal({
+      watermark: state.watermark,
+      recoveryContinuationOrdinal,
+      recoveryAttempted,
+      recoveryCooldownOnly,
+    });
+    if (nextScanOrdinal !== undefined) state.scanOrdinal = nextScanOrdinal;
   }
 
   const pending = ordinalsToReconcile(state, head).length;
