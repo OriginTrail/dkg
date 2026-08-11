@@ -6,7 +6,9 @@ import {
   createContextGraphSyncDeadline,
   createDurableMetaPhaseFetchDeadline,
   createDurableSyncBudget,
+  createDurableSyncFetchTimeoutMs,
   createGraphScopedAuthenticationDeadline,
+  DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
   DURABLE_DATA_PHASE_MIN_BUDGET_MS,
   DURABLE_META_PHASE_BUDGET_FRACTION,
   type DurableSyncBudget,
@@ -196,6 +198,21 @@ describe('durable sync deadline budget', () => {
     expect(
       createContextGraphSyncDeadline({ remainingContextGraphs: 1 }),
     ).toBe(1_120_000);
+  });
+
+  it('reserves settlement headroom inside an explicit operation timeout', () => {
+    expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 299_000 }))
+      .toBe(299_000 - DURABLE_SYNC_SETTLEMENT_HEADROOM_MS);
+  });
+
+  it('keeps historical fetch-only budgets without an outer operation timeout', () => {
+    expect(createDurableSyncFetchTimeoutMs()).toBe(120_000);
+    expect(createDurableSyncFetchTimeoutMs({ exactRecovery: true })).toBe(600_000);
+  });
+
+  it('never removes the minimum usable fetch window from short operations', () => {
+    expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 30_000 }))
+      .toBe(10_000);
   });
 
   it('uses a caller-supplied bounded graph-scoped authentication budget', () => {

@@ -269,6 +269,7 @@ import {
 import {
   createContextGraphSyncDeadline,
   createDurableSyncBudget,
+  createDurableSyncFetchTimeoutMs,
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   normalizeDurableSyncTimeoutMs,
 } from './sync/requester/durable-sync-budget.js';
@@ -5195,9 +5196,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       signal: options?.signal,
     });
     const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
-    const fetchTimeoutMs = exactAssetUals && options?.totalTimeoutMs === undefined
-      ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
-      : authenticationTimeoutMs;
+    const fetchTimeoutMs = createDurableSyncFetchTimeoutMs({
+      totalTimeoutMs: options?.totalTimeoutMs,
+      exactRecovery: exactAssetUals !== undefined,
+    });
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
       this.config.syncContextGraphPriorities,
