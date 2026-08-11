@@ -4019,7 +4019,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     delayMs = 3000,
     options: { selectedSwmRetry?: boolean } = {},
   ): boolean {
-    if (!syncOnConnectEnabled(this.config)) {
+    // RFC-64 bootstrap is an independently enabled, graph-scoped recovery
+    // authority. Its selected provider must be able to resume an incomplete
+    // bounded walk even when the operator disabled broad peer-on-connect sync.
+    // Ordinary connection events still obey the generic kill switch.
+    if (!syncOnConnectEnabled(this.config) && options.selectedSwmRetry !== true) {
       return false;
     }
     if (!this.networkAdmissionCoordinator.isAcceptedPeer(remotePeer)) {
