@@ -180,6 +180,30 @@ describe('bounded rootless durable progress', () => {
     expect(plan?.dataQuads).toEqual(fixtures[0]!.payload);
   });
 
+  it('preserves the safe prefix when an older responder cursor advances past missing rows', () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const rawData = [
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload.slice(0, 2),
+      ...fixtures[2]!.payload,
+    ];
+
+    const plan = planBoundedGraphScopedDurableBatch(
+      rawData,
+      meta,
+      0,
+      rawData.length + 63,
+      false,
+    );
+
+    expect(plan).not.toBeNull();
+    expect(plan?.safeNextOffset).toBe(4);
+    expect(plan?.completedGraphCount).toBe(1);
+    expect(plan?.changedDataGraphs).toEqual([fixtures[0]!.graph]);
+    expect(plan?.dataQuads).toEqual(fixtures[0]!.payload);
+  });
+
   it('does not checkpoint a corrupt leading graph while dropping a non-contiguous tail', async () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);

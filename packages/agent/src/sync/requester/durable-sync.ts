@@ -484,6 +484,15 @@ async function runDurableSyncWithBudget(
             { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
           );
         }
+        const responderCursorDelta = dataResult.nextOffset - dataResult.resumedFromOffset;
+        if (responderCursorDelta !== dataResult.quads.length) {
+          logWarn(
+            ctx,
+            `Rootless durable cursor drift for "${pid}": responder advanced `
+              + `${responderCursorDelta} row(s) but delivered ${dataResult.quads.length}; `
+              + 'projecting only the verified complete-graph prefix',
+          );
+        }
         const bounded = planBoundedGraphScopedDurableBatch(
           dataResult.quads,
           effectiveMetaResult.quads,

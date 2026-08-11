@@ -231,9 +231,17 @@ export function planBoundedGraphScopedDurableBatch(
     || resumedFromOffset < 0
     || !Number.isSafeInteger(rawNextOffset)
     || rawNextOffset < resumedFromOffset
-    || rawNextOffset - resumedFromOffset !== dataQuads.length
     || metaQuads.length === 0
   ) return null;
+
+  // Do not require the responder cursor delta to equal the number of received
+  // rows. Older responders can advance their session cursor past a short
+  // exact-graph read before the requester observes the transport deadline.
+  // Graph ownership, exact descriptor counts, and Merkle verification below
+  // still make only the complete leading graphs checkpointable: a skipped row
+  // makes its graph incomplete and drops that graph plus every later graph.
+  // Requiring cursor/row equality here discarded that independently verifiable
+  // prefix and recreated the all-or-nothing retry loop this planner prevents.
 
   const descriptors = readOrderedGraphScopedDescriptors(dataQuads, metaQuads);
   if (!descriptors) return null;
