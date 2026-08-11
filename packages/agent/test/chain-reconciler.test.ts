@@ -279,6 +279,66 @@ describe('reconcileContextGraph — sweep', () => {
     ]]);
   });
 
+  it('never lets recent recovery continuation starve history while the head grows', async () => {
+    let head = 30;
+    let pass = 0;
+    const attempts: number[][] = [[], [], []];
+    const recoveryCalls: number[][] = [];
+    const { deps } = makeDeps({
+      getKCCount: async () => head,
+      maxOrdinalsPerPass: 10,
+      recentOrdinalsPerPass: 7,
+      reconcileOrdinal: async (_cg, _onchain, ordinal) => {
+        attempts[pass]!.push(ordinal);
+        if (ordinal < head - 7) {
+          return { status: 'reconciled', blockNumber: 0 };
+        }
+        return {
+          status: 'pending',
+          recovery: recoveryTarget(ordinal),
+        };
+      },
+      recoverPendingOrdinals: async (_cg, _onchain, targets) => {
+        const ordinals = targets.map(({ ordinal }) => ordinal);
+        recoveryCalls.push(ordinals);
+        const attempted = targets[0]!;
+        return {
+          outcomes: new Map([[
+            attempted.ordinal,
+            { status: 'pending', recovery: attempted } as OrdinalOutcome,
+          ]]),
+          attemptedOrdinals: [attempted.ordinal],
+          continuationOrdinal: targets[1]?.ordinal,
+          hasImmediateRecoveryWork: false,
+        };
+      },
+    });
+    const state = createCursorState(0);
+
+    const first = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(first.watermark).toBe(3);
+    expect(state.scanOrdinal).toBe(3);
+
+    head = 35;
+    pass += 1;
+    const second = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(second.watermark).toBe(6);
+    expect(state.scanOrdinal).toBe(6);
+
+    head = 40;
+    pass += 1;
+    const third = await reconcileContextGraph(deps, state, 'cg', 1n);
+    expect(third.watermark).toBe(9);
+    expect(state.scanOrdinal).toBe(9);
+
+    expect(attempts).toEqual([
+      [0, 1, 2, 23, 24, 25, 26, 27, 28, 29],
+      [3, 4, 5, 28, 29, 30, 31, 32, 33, 34],
+      [6, 7, 8, 33, 34, 35, 36, 37, 38, 39],
+    ]);
+    expect(recoveryCalls.map((ordinals) => ordinals[0])).toEqual([29, 34, 39]);
+  });
+
   it('runs each bounded slice with capped ordinal concurrency', async () => {
     let active = 0;
     let maxActive = 0;

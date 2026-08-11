@@ -21,6 +21,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
+  collectPublicSnapshotMetadata,
   orderPublicSnapshotsForBalancedRecency,
   syncPublicSnapshotsForMeta,
   type PublicSnapshotMetadata,
@@ -174,12 +175,14 @@ describe('syncPublicSnapshotsForMeta', () => {
       const subject = `urn:dkg:share:balanced-${index}`;
       return [
         { subject, predicate: `${DKG}publicQuadsDigest`, object: `"${snapshot.digest}"`, graph: WS_META },
+        { subject, predicate: `${DKG}publicQuadsCount`, object: '"1"', graph: WS_META },
         { subject, predicate: `${DKG}publishedAt`, object: `"2026-08-10T22:00:${index.toString().padStart(2, '0')}.000Z"`, graph: WS_META },
         { subject, predicate: `${DKG}kaUal`, object: `"did:dkg:base:84532/0x0000000000000000000000000000000000000001/${100 + index}"`, graph: WS_META },
       ];
     });
 
-    expect(orderPublicSnapshotsForBalancedRecency(snapshots, metaQuads).map(({ ref }) => ref))
+    const parsed = collectPublicSnapshotMetadata(metaQuads);
+    expect(orderPublicSnapshotsForBalancedRecency(parsed).map(({ ref }) => ref))
       .toEqual([
         snapshots[7]!.ref,
         snapshots[6]!.ref,
@@ -197,7 +200,7 @@ describe('syncPublicSnapshotsForMeta', () => {
       { ref: 'ref-b', digest: 'digest-b', count: 1 },
       { ref: 'ref-a', digest: 'digest-a', count: 1 },
     ];
-    expect(orderPublicSnapshotsForBalancedRecency(snapshots, [])).toEqual(snapshots);
+    expect(orderPublicSnapshotsForBalancedRecency(snapshots)).toEqual(snapshots);
   });
 
   it('retries a cleanly-closed short snapshot response without caching its prefix', async () => {

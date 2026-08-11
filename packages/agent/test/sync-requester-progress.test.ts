@@ -1872,7 +1872,12 @@ describe('public SWM snapshot coverage (#2050)', () => {
     // 1` below would be measuring something else), and NOTHING may be
     // described (or this row would silently become a second copy of the mixed
     // row above, travelling the described path it is meant to avoid).
-    expect(collectPublicSnapshotMetadata(meta)).toEqual([{ ref: digest, digest, count: payload.length }]);
+    expect(collectPublicSnapshotMetadata(meta)).toEqual([{
+      ref: digest,
+      digest,
+      count: payload.length,
+      publishedAtMs: 0,
+    }]);
     expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
 
     // The blob is already cached: the state of a node whose earlier pass

@@ -5,7 +5,9 @@ import { classifySharedMemoryFreshness } from '../src/sync/shared-memory-freshne
 import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import {
+  DKG,
   PEER,
+  callSyncSharedMemoryFromPeerDetailed,
   callSelectedSharedMemoryFromPeerDetailed,
   callSelectedSharedMemorySummary,
   callTrySyncFromPeer,
@@ -18,6 +20,82 @@ import {
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
+  it('uses balanced recency only through the selected production lifecycle', async () => {
+    const publicCg = 'selected-balanced-recency';
+    const createManifest = () => {
+      const manifest = snapshotManifest(publicCg, 8);
+      const metaGraph = manifest.meta[0]!.graph;
+      for (let index = 0; index < 8; index += 1) {
+        const subject = `urn:selected-swm-manifest:${index}`;
+        manifest.meta.push(
+          {
+            subject,
+            predicate: `${DKG}publishedAt`,
+            object: `"2026-08-10T22:00:${index.toString().padStart(2, '0')}.000Z"`,
+            graph: metaGraph,
+          },
+          {
+            subject,
+            predicate: `${DKG}kaUal`,
+            object: `"did:dkg:base:84532/0x0000000000000000000000000000000000000001/${100 + index}"`,
+            graph: metaGraph,
+          },
+        );
+      }
+      return manifest;
+    };
+    const selectedManifest = createManifest();
+    const selectedRefs = [...selectedManifest.payloadByRef.keys()];
+    const selectedReads: string[] = [];
+    const selectedHarness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: selectedManifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      onSnapshotRead: ({ ref }) => selectedReads.push(ref),
+    });
+
+    const ordinaryManifest = createManifest();
+    const ordinaryRefs = [...ordinaryManifest.payloadByRef.keys()];
+    const ordinaryReads: string[] = [];
+    const ordinaryHarness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: ordinaryManifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      onSnapshotRead: ({ ref }) => ordinaryReads.push(ref),
+    });
+
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+    try {
+      await callSelectedSharedMemoryFromPeerDetailed(
+        selectedHarness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: plan,
+        },
+      );
+      await callSyncSharedMemoryFromPeerDetailed(
+        ordinaryHarness.agent,
+        [publicCg],
+        { sharedMemorySyncPlan: plan },
+      );
+
+      expect(selectedReads).toEqual([
+        selectedRefs[7], selectedRefs[6], selectedRefs[5], selectedRefs[0],
+        selectedRefs[4], selectedRefs[3], selectedRefs[2], selectedRefs[1],
+      ]);
+      expect(ordinaryReads).toEqual(ordinaryRefs);
+    } finally {
+      await selectedHarness.close();
+      await ordinaryHarness.close();
+    }
+  });
+
   it('treats a clean selected graph with zero snapshot refs as explicit complete 0/0 coverage', async () => {
     const publicCg = 'selected-empty-snapshot-plane';
     const harness = createSelectedSwmLifecycleHarness({
