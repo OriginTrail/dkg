@@ -1199,6 +1199,18 @@ function matchesProjectionSnapshot(
   // atomic transaction must replace. Shadow storage is protocol-owned from
   // inception and therefore remains strict-empty when its state is absent.
   if (snapshot.state === 'absent' && mode === 'authoritative') return true;
+  // A shadow tombstone writes status 'dirty' and its deletion scope to the
+  // single shared reserved row while emptying only the shadow projection, so the
+  // legacy authoritative projection is still in place. The authoritative cutover
+  // reads that same row, sees the empty projection the shadow pass recorded, and
+  // must DELETE the legacy content rather than match against it -- the skip is the
+  // cutover mechanism, not an exemption from it. Bounded on both sides: the
+  // observed projection is read over the exact next-subject union and the delete
+  // is bound by that same union, and the reserved-state precondition is untouched.
+  // Pinned by 'cuts a dirty shadow tombstone over to authoritative against a
+  // legacy projection'; remove this and the transition defers on
+  // validation-mismatch forever, because the row's recorded projection can never
+  // match the legacy rows still in the store.
   if (snapshot.state === 'present'
       && snapshot.appliedState.status === 'dirty'
       && mode === 'authoritative'
