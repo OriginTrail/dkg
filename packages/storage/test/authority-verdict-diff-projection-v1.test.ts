@@ -23,8 +23,16 @@ import { resolveConstructibilityV1 } from './helpers/authority-verdict-diff-cons
  * cells sharing a projection present byte-identical inputs, so the evaluator
  * runs once per projection rather than once per cell.
  *
- * The same measurement is the finding. A storage input maps to 48 core inputs,
- * so core discriminates 48 ways where storage cannot discriminate at all.
+ * The same measurement is the finding, and the number is the one this suite
+ * asserts: every storage input covers exactly 192 cells -- min AND max, so the
+ * blindness is uniform, not an average hiding a spread -- while core's groups
+ * run from 1 to 8. Core discriminates inside a set storage cannot split at all.
+ *
+ * REFINED SINCE, by the projection-equivalence suite: axis L never reaches a
+ * storage input, so the built inputs collapse 855 -> 285 under byte comparison
+ * and the honest figure is 576 cells per input, not 192. Both numbers are real
+ * and they answer different questions -- 192 is what the committed projection
+ * key groups, 576 is what storage can actually see.
  */
 // Stated rather than inherited, for the reason recorded in the generator's own
 // suite: vitest's 5s default already cost this lane a run once, and the space
