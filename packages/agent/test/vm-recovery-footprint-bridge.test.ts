@@ -3,7 +3,7 @@ import {
   enrichVmRecoveryFootprints,
   type VmRecoveryFootprintBridge,
   type VmRecoveryUpdateContext,
-} from '../src/vm-recovery-microbatch.js';
+} from '../src/vm-recovery-footprint.js';
 import type { VmRecoveryChainFootprint } from '../src/vm-recovery-types.js';
 
 interface Target {

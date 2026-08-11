@@ -252,12 +252,15 @@ import {
 } from './vm-reconcile-service.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import {
-  enrichVmRecoveryFootprints,
   planVmRecoveryMicrobatch,
-  VmRecoveryProviderPolicy,
   type VmRecoveryTargetFootprint,
-  type VmRecoveryUalDisposition,
 } from './vm-recovery-microbatch.js';
+import { enrichVmRecoveryFootprints } from './vm-recovery-footprint.js';
+import {
+  VmRecoveryProviderPolicy,
+  type VmRecoveryProviderAttempt,
+  type VmRecoveryUalDisposition,
+} from './vm-recovery-provider-policy.js';
 import type { VmRecoveryChainFootprint } from './vm-recovery-types.js';
 import {
   encodeExactAssetUals,
@@ -593,6 +596,22 @@ const VM_EXACT_MICROBATCH_LIMITS = Object.freeze({
   // Hard exact-selector cap, evaluated with the executor's real encoder.
   maxSelectorBytes: 16 * 1024,
 });
+
+interface VmRecoveryPreparedEntry {
+  readonly index: number;
+  readonly target: OrdinalRecoveryTarget;
+  readonly prepared: {
+    readonly slotKey: string;
+    readonly record?: VmReconcileRotationRecord;
+    readonly suppressed: boolean;
+  };
+}
+
+interface VmRecoveryBatchAttempt {
+  readonly entry: VmRecoveryPreparedEntry;
+  readonly installedRecord: VmReconcileRotationRecord | undefined;
+  readonly candidatePeerIds: readonly string[];
+}
 
 function normalizeHostModeReconcileBatchSize(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_HOST_MODE_RECONCILE_BATCH_SIZE;
@@ -5126,6 +5145,154 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   /**
+   * Execute one already-admitted exact provider attempt. The caller owns
+   * roster/admission and packing; this executor owns the physical request,
+   * per-UAL chain revalidation, provider transition, and rotation settlement.
+   * `false` means the captured lifecycle became stale and no local evidence
+   * from the attempt may be retained.
+   */
+  async executeVmRecoveryBatch(this: DKGAgent, input: {
+    localCgId: string;
+    onChainCgId: bigint;
+    peerId: string;
+    attempts: readonly VmRecoveryBatchAttempt[];
+    providerAttempt: VmRecoveryProviderAttempt;
+    providerPolicy: VmRecoveryProviderPolicy;
+    headBlock: number | undefined;
+    signal?: AbortSignal;
+    isRecoveryCurrent: () => boolean;
+    revalidateTarget?: () => Promise<boolean>;
+    ctx: OperationContext;
+    outcomes: Map<number, OrdinalOutcome>;
+    handledBatchOrdinals: Set<number>;
+    attemptedOrdinals: Set<number>;
+  }): Promise<boolean> {
+    const {
+      localCgId,
+      onChainCgId,
+      peerId,
+      attempts,
+      providerAttempt,
+      providerPolicy,
+      headBlock,
+      signal,
+      isRecoveryCurrent,
+      revalidateTarget,
+      ctx,
+      outcomes,
+      handledBatchOrdinals,
+      attemptedOrdinals,
+    } = input;
+
+    for (const attempt of attempts) {
+      const batchTarget = attempt.entry.target;
+      handledBatchOrdinals.add(batchTarget.ordinal);
+      attemptedOrdinals.add(batchTarget.ordinal);
+      if (attempt.installedRecord) {
+        attempt.installedRecord.lastAttemptedPeerId = peerId;
+        attempt.installedRecord.attemptedPeerIds.add(peerId);
+        attempt.installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
+          + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
+        this.touchVmReconcileRotationRecord(
+          this.vmReconcileRotationSlotKey(batchTarget),
+          attempt.installedRecord,
+        );
+      }
+      this.emitReplication({
+        contextGraphId: localCgId,
+        onChainCgId: onChainCgId.toString(),
+        action: 'fetch',
+        ordinal: batchTarget.ordinal,
+        kaId: batchTarget.kaId,
+        ual: batchTarget.ual,
+        detail: attempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
+      });
+    }
+    if (!isRecoveryCurrent()) return false;
+
+    let disposition: VmRecoveryUalDisposition = 'incomplete';
+    try {
+      const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
+        peerId,
+        localCgId,
+        attempts.map(({ entry }) => entry.target.ual),
+        { signal, isCurrent: isRecoveryCurrent },
+      );
+      const { result } = detailed;
+      disposition = detailed.disposition;
+      this.log.info(
+        ctx,
+        `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${attempts.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
+      );
+    } catch (error) {
+      this.log.info(
+        ctx,
+        `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    if (!isRecoveryCurrent()) return false;
+
+    const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
+    for (const attempt of attempts) {
+      const batchTarget = attempt.entry.target;
+      const outcome = await this.reconcileChainOrdinal(
+        localCgId,
+        onChainCgId,
+        batchTarget.ordinal,
+        headBlock,
+        {
+          isTargetCurrent: isRecoveryCurrent,
+          revalidateTarget,
+          deferActiveFetch: true,
+          recoveryFootprint: batchTarget.recoveryFootprint ?? { kind: 'unknown' },
+        },
+      );
+      if (!isRecoveryCurrent()) return false;
+      outcomes.set(batchTarget.ordinal, outcome);
+      const perTargetDisposition: VmRecoveryUalDisposition = (
+        outcome.status === 'reconciled' || outcome.status === 'already'
+      )
+        ? 'found'
+        : disposition === 'clean-absent'
+          ? 'clean-absent'
+          : 'incomplete';
+      perUalDispositions.set(batchTarget.ual, perTargetDisposition);
+      if (outcome.status === 'pending' && outcome.recovery) {
+        const batchRecord = attempt.installedRecord;
+        if (!batchRecord || this.vmReconcileRotationClosed) continue;
+        if (
+          this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(batchTarget))
+          !== batchRecord
+        ) continue;
+        const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(localCgId);
+        if (!this.vmReconcilePeerMembershipMatches(
+          batchRecord.candidatePeerIds,
+          candidateMembershipAfter,
+        )) {
+          this.prepareVmReconcileRotationTarget(
+            outcome.recovery,
+            candidateMembershipAfter,
+            this.vmReconcileRotationNow(),
+          );
+        } else if (this.vmReconcileRecoveryTargetMatches(batchTarget, outcome.recovery)) {
+          this.settleVmReconcileRotationAttempt(
+            batchTarget,
+            peerId,
+            perTargetDisposition,
+            attempt.candidatePeerIds,
+            batchRecord,
+            providerPolicy.unavailablePeerIds(),
+          );
+        }
+      } else {
+        this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(batchTarget));
+      }
+    }
+    providerPolicy.finishAttempt(providerAttempt, disposition, perUalDispositions);
+    return true;
+  }
+
+  /**
    * Drain one exact missing-KA batch. The initial ordinal scan has already
    * proven these UALs are not locally materialized, so no already-confirmed KA
    * enters the wire request. After every peer response we re-run local chain
@@ -5590,13 +5757,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       const providerAttempt = providerPolicy.beginAttempt(peerId);
       if (!providerAttempt) continue;
 
-      type EligibleEntry = (typeof eligible)[number];
-      type BatchAttempt = {
-        entry: EligibleEntry;
-        installedRecord: VmReconcileRotationRecord | undefined;
-        candidatePeerIds: string[];
-      };
-      let batchAttempts: BatchAttempt[] = [{
+      let batchAttempts: VmRecoveryBatchAttempt[] = [{
         entry,
         installedRecord,
         candidatePeerIds,
@@ -5607,7 +5768,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // by authoritative size hints. Unknown footprints stay singleton; the
       // exact-sync protocol's ten-UAL cap remains the hard upper bound.
       if (providerAttempt.kind === 'proven-holder-reuse') {
-        const compatible: BatchAttempt[] = [];
+        const compatible: VmRecoveryBatchAttempt[] = [];
         for (let candidateIndex = eligibleIndex; candidateIndex < eligible.length; candidateIndex += 1) {
           const candidateEntry = eligible[candidateIndex]!;
           const candidateTarget = candidateEntry.target;
@@ -5639,7 +5800,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
           attempt,
           recoveryFootprint: attempt.entry.target.recoveryFootprint
             ?? { kind: 'unknown' as const },
-        } satisfies VmRecoveryTargetFootprint & { attempt: BatchAttempt }));
+        } satisfies VmRecoveryTargetFootprint & { attempt: VmRecoveryBatchAttempt }));
         const plan = planVmRecoveryMicrobatch(
           plannableTargets,
           VM_EXACT_MICROBATCH_LIMITS,
@@ -5683,122 +5844,23 @@ export class SwmHostModeMethods extends DKGAgentBase {
         );
       }
 
-      for (const attempt of batchAttempts) {
-        const batchTarget = attempt.entry.target;
-        handledBatchOrdinals.add(batchTarget.ordinal);
-        attemptedOrdinals.add(batchTarget.ordinal);
-        if (attempt.installedRecord) {
-          attempt.installedRecord.lastAttemptedPeerId = peerId;
-          attempt.installedRecord.attemptedPeerIds.add(peerId);
-          attempt.installedRecord.collectionDeadlineAt = this.vmReconcileRotationNow()
-            + DKGAgentBase.VM_RECONCILE_NEGATIVE_BACKOFF_MAX_MS;
-          this.touchVmReconcileRotationRecord(
-            this.vmReconcileRotationSlotKey(batchTarget),
-            attempt.installedRecord,
-          );
-        }
-        this.emitReplication({
-          contextGraphId: localCgId,
-          onChainCgId: onChainCgId.toString(),
-          action: 'fetch',
-          ordinal: batchTarget.ordinal,
-          kaId: batchTarget.kaId,
-          ual: batchTarget.ual,
-          detail: batchAttempts.length > 1 ? 'exact-asset-batch' : 'exact-asset',
-        });
-      }
-
-      // Every queue item still consumes at most one peer attempt per eligible
-      // pass. A partial microbatch is revalidated per KA; unresolved members
-      // retain rotation state and fail open to another provider on a later pass.
-      if (!isRecoveryCurrent()) return noRecovery();
-
-      let disposition: 'found' | 'clean-absent' | 'incomplete' = 'incomplete';
-      try {
-        const detailed = await this.syncExactKnowledgeAssetsFromPeerDetailed(
-          peerId,
-          localCgId,
-          batchAttempts.map(({ entry: item }) => item.target.ual),
-          { signal, isCurrent: isRecoveryCurrent },
-        );
-        const { result } = detailed;
-        disposition = detailed.disposition;
-        this.log.info(
-          ctx,
-          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)}: requested=${batchAttempts.length} fetched=${result.fetchedDataTriples + result.fetchedMetaTriples} inserted=${result.insertedTriples} failed=${result.failedPeers + result.failedPhases} deferred=${result.deferredBackpressure} disposition=${disposition}`,
-        );
-      } catch (error) {
-        this.log.info(
-          ctx,
-          `VM exact fetch for "${localCgId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      // The exact request may have completed after unsubscribe, rebind, or
-      // shutdown. Its authenticated materialization is already fail-closed,
-      // but no process-local evidence or cooldown may outlive that lifecycle.
-      if (!isRecoveryCurrent()) return noRecovery();
-      const perUalDispositions = new Map<string, VmRecoveryUalDisposition>();
-      for (const attempt of batchAttempts) {
-        const batchTarget = attempt.entry.target;
-        const outcome = await this.reconcileChainOrdinal(
-          localCgId,
-          onChainCgId,
-          batchTarget.ordinal,
-          headBlock,
-          {
-            isTargetCurrent: isRecoveryCurrent,
-            revalidateTarget,
-            deferActiveFetch: true,
-            recoveryFootprint: batchTarget.recoveryFootprint ?? { kind: 'unknown' },
-          },
-        );
-        if (!isRecoveryCurrent()) return noRecovery();
-        outcomes.set(batchTarget.ordinal, outcome);
-        const perTargetDisposition: VmRecoveryUalDisposition = (
-          outcome.status === 'reconciled' || outcome.status === 'already'
-        )
-          ? 'found'
-          : disposition === 'clean-absent'
-            ? 'clean-absent'
-            : 'incomplete';
-        perUalDispositions.set(batchTarget.ual, perTargetDisposition);
-        if (outcome.status === 'pending' && outcome.recovery) {
-          const batchRecord = attempt.installedRecord;
-          if (!batchRecord) continue;
-          if (this.vmReconcileRotationClosed) continue;
-          if (
-            this.vmReconcileRotationState.get(this.vmReconcileRotationSlotKey(batchTarget))
-            !== batchRecord
-          ) continue;
-          const candidateMembershipAfter = this.vmReconcileObservedCandidatePeerIds(
-            localCgId,
-          );
-          if (!this.vmReconcilePeerMembershipMatches(
-            batchRecord.candidatePeerIds,
-            candidateMembershipAfter,
-          )) {
-            // Membership changed while the request was in flight. Invalidate the
-            // cycle before considering its response, then fail open.
-            this.prepareVmReconcileRotationTarget(
-              outcome.recovery,
-              candidateMembershipAfter,
-              this.vmReconcileRotationNow(),
-            );
-          } else if (this.vmReconcileRecoveryTargetMatches(batchTarget, outcome.recovery)) {
-            this.settleVmReconcileRotationAttempt(
-              batchTarget,
-              peerId,
-              perTargetDisposition,
-              attempt.candidatePeerIds,
-              batchRecord,
-              providerPolicy.unavailablePeerIds(),
-            );
-          }
-        } else {
-          this.vmReconcileRotationState.delete(this.vmReconcileRotationSlotKey(batchTarget));
-        }
-      }
-      providerPolicy.finishAttempt(providerAttempt, disposition, perUalDispositions);
+      const completed = await this.executeVmRecoveryBatch({
+        localCgId,
+        onChainCgId,
+        peerId,
+        attempts: batchAttempts,
+        providerAttempt,
+        providerPolicy,
+        headBlock,
+        signal,
+        isRecoveryCurrent,
+        revalidateTarget,
+        ctx,
+        outcomes,
+        handledBatchOrdinals,
+        attemptedOrdinals,
+      });
+      if (!completed) return noRecovery();
     }
 
     const eligibleOrdinals = new Set(eligible.map(({ target }) => target.ordinal));

@@ -7,10 +7,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   enrichVmRecoveryFootprints,
-  planVmRecoveryMicrobatch,
   type VmRecoveryFootprintBridge,
-  type VmRecoveryMicrobatchLimits,
   type VmRecoveryUpdateContext,
+} from '../src/vm-recovery-footprint.js';
+import {
+  planVmRecoveryMicrobatch,
+  type VmRecoveryMicrobatchLimits,
 } from '../src/vm-recovery-microbatch.js';
 import type { VmRecoveryChainFootprint } from '../src/vm-recovery-types.js';
 
