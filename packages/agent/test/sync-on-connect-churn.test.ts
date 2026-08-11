@@ -3,7 +3,10 @@ import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/index.js';
 import { CATCHUP_ON_CONNECT_COOLDOWN_MS, SYNC_RECONNECT_FLAP_GRACE_MS } from '../src/dkg-agent-constants.js';
-import { runSyncOnConnect } from '../src/sync/on-connect/sync-on-connect.js';
+import {
+  runSelectedSharedMemoryRetry,
+  runSyncOnConnect,
+} from '../src/sync/on-connect/sync-on-connect.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 const PEER_A = '12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M';
@@ -203,7 +206,7 @@ describe('sync-on-connect churn gates', () => {
   it('retries incomplete selected SWM past generic freshness without creating a loop', async () => {
     const agent = await createUnstartedAgent('SelectedSwmRetryFreshnessBypass');
     const calls: string[] = [];
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+    (agent as any).runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
       calls.push(peerId);
     };
     const handleSyncError = () => undefined;
@@ -392,9 +395,9 @@ describe('sync-on-connect churn gates', () => {
     (agent as any).trySyncFromPeer = async (
       _peer: string,
       _onAccounting: unknown,
-      invocation: unknown,
+      source: unknown,
     ) => {
-      sources.push(invocation);
+      sources.push(source);
       return undefined;
     };
 
@@ -403,11 +406,7 @@ describe('sync-on-connect churn gates', () => {
       hasSyncProtocol: true,
     });
 
-    expect(sources).toEqual([{
-      source: 'on-connect',
-      trigger: 'ordinary',
-      executionPlan: { kind: 'full' },
-    }]);
+    expect(sources).toEqual(['on-connect']);
   });
 
   it('reconciler still retries stale connected peers', async () => {
@@ -430,11 +429,7 @@ describe('sync-on-connect churn gates', () => {
     expect(trySyncFromPeer.calls).toEqual([[
       PEER_A,
       expect.any(Function),
-      {
-        source: 'reconcile',
-        trigger: 'ordinary',
-        executionPlan: { kind: 'full' },
-      },
+      'reconcile',
     ]]);
   });
 
@@ -467,17 +462,14 @@ describe('sync-on-connect churn gates', () => {
       getPeers: () => [{ toString: () => PEER_A }],
       getConnections: () => [],
     };
-    (agent as any).trySyncFromPeer = async (
+    (agent as any).selectedSwmRetryRequiredPeers.add(PEER_A);
+    (agent as any).trySelectedSwmRetryFromPeer = async (
       _peerId: string,
       onSyncAccounting?: (outcome: { fresh: boolean; progress?: boolean }) => void,
-    ) => runSyncOnConnect({
+    ) => runSelectedSharedMemoryRetry({
       remotePeer: PEER_A,
       syncingPeers: new Set(),
       getPeerProtocols: async () => [PROTOCOL_SYNC],
-      knownCorePeerIds: new Set(),
-      getSyncContextGraphs: () => [],
-      getDurableSyncContextGraphs: () => [],
-      getSharedMemorySyncContextGraphs: () => ['selected-cg'],
       selectedSharedMemoryLane: {
         getContextGraphIds: () => ['selected-cg'],
         syncFromPeer: async () => ({
@@ -486,17 +478,13 @@ describe('sync-on-connect churn gates', () => {
           selectedScopeComplete: false,
         }),
       },
-      syncFromPeer: async () => emptyDetailedSync({ complete: true }),
-      refreshMetaSyncedFlags: async () => undefined,
-      discoverContextGraphsFromStore: async () => 0,
-      syncSharedMemoryFromPeer: async () => emptyDetailedSync(),
       onPeerSynced: (_peerId, outcome) => {
         if (outcome) onSyncAccounting?.(outcome);
       },
       logInfo: noopLog,
     });
 
-    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+    await (agent as any).attemptSelectedSwmRetryWithReconcilerAccounting(PEER_A, {
       connected: true,
       hasSyncProtocol: true,
     });
@@ -542,7 +530,7 @@ describe('sync-on-connect churn gates', () => {
       nextRetryAt: Date.now() + 60_000,
     });
 
-    await (agent as any).attemptSyncFromPeerWithReconcilerAccounting(PEER_A, {
+    await (agent as any).attemptSelectedSwmRetryWithReconcilerAccounting(PEER_A, {
       connected: true,
       hasSyncProtocol: true,
     });
@@ -552,7 +540,7 @@ describe('sync-on-connect churn gates', () => {
     expect((agent as any).syncReconcilerBackoff.has(PEER_A)).toBe(false);
 
     const calls: string[] = [];
-    (agent as any).runSyncFromPeerOnConnect = async (peerId: string) => {
+    (agent as any).runSelectedSwmRetryFromPeerOnConnect = async (peerId: string) => {
       calls.push(peerId);
     };
     const handleSyncError = () => undefined;

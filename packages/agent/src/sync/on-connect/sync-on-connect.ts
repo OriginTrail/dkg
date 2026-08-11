@@ -35,10 +35,6 @@ export interface SyncOnConnectPeerOutcome {
   progress?: boolean;
 }
 
-export type SyncOnConnectExecutionPlan =
-  | { readonly kind: 'full' }
-  | { readonly kind: 'selected-swm-retry-only' };
-
 interface SyncOnConnectContext {
   remotePeer: string;
   syncingPeers: Set<string>;
@@ -59,8 +55,6 @@ interface SyncOnConnectContext {
     contextGraphIds: string[],
   ) => Promise<SyncFromPeerResult>;
   syncSharedMemoryOnConnect?: boolean;
-  /** One explicit lane plan; retry-only never falls through to broad catch-up. */
-  executionPlan?: SyncOnConnectExecutionPlan;
   logInfo: (ctx: OperationContext, message: string) => void;
   /**
    * Optional. Called when the peer is reachable but does not currently
@@ -82,6 +76,22 @@ interface SyncOnConnectContext {
    * marking the peer as cleanly fresh for reconnect suppression; `progress`
    * controls whether the periodic reconciler may write its long cooldown.
    */
+  onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
+}
+
+/**
+ * Narrow RFC-64 retry boundary. Unlike {@link SyncOnConnectContext}, this
+ * shape cannot express durable, discovery, or ordinary shared-memory work, so
+ * a selected retry cannot fall through when the broad on-connect workflow is
+ * changed later.
+ */
+interface SelectedSharedMemoryRetryContext {
+  remotePeer: string;
+  syncingPeers: Set<string>;
+  getPeerProtocols: (peerId: string) => Promise<string[]>;
+  selectedSharedMemoryLane: SelectedSharedMemorySyncLane;
+  logInfo: (ctx: OperationContext, message: string) => void;
+  onPeerSkippedNoSync?: (peerId: string, protocols: string[]) => void;
   onPeerSynced?: (peerId: string, outcome?: SyncOnConnectPeerOutcome) => void;
 }
 
@@ -165,6 +175,94 @@ function classifySyncResult(
   };
 }
 
+/**
+ * Retry exactly the selected RFC-64 SWM lane and nothing else. The generic
+ * on-connect orchestrator still prioritizes selected SWM during a broad run,
+ * but resumptions created by the catalog bootstrap use this dedicated entry
+ * point so disabling broad sync does not disable selected recovery.
+ */
+export async function runSelectedSharedMemoryRetry(
+  context: SelectedSharedMemoryRetryContext,
+): Promise<SyncOnConnectOutcome> {
+  const {
+    remotePeer,
+    syncingPeers,
+    getPeerProtocols,
+    selectedSharedMemoryLane,
+    logInfo,
+  } = context;
+  const ctx = createOperationContext('sync');
+  const shortPeer = remotePeer.slice(-8);
+
+  if (syncingPeers.has(remotePeer)) return 'already-syncing';
+  syncingPeers.add(remotePeer);
+
+  const runNonTransportStep = async <T>(step: () => Promise<T>): Promise<T> => {
+    try {
+      return await step();
+    } catch (err) {
+      throw new SyncOnConnectPostSyncError(remotePeer, err, { backoffEligible: false });
+    }
+  };
+
+  try {
+    const protocols = await getPeerProtocols(remotePeer);
+    if (!protocols.includes(PROTOCOL_SYNC)) {
+      logInfo(
+        ctx,
+        `Peer ${shortPeer} does not support sync protocol (protocols: ${protocols.join(', ')})`,
+      );
+      context.onPeerSkippedNoSync?.(remotePeer, protocols);
+      return 'skipped-no-sync';
+    }
+
+    const contextGraphIds = [...new Set(await runNonTransportStep(() => Promise.resolve(
+      selectedSharedMemoryLane.getContextGraphIds(remotePeer),
+    )))];
+    if (contextGraphIds.length === 0) return 'synced';
+
+    logInfo(
+      ctx,
+      `Retrying ${contextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+    );
+    const selected = await selectedSharedMemoryLane.syncFromPeer(remotePeer, contextGraphIds);
+    const accounting = classifySyncResult(
+      selected.shared,
+      'shared',
+      selected.selectedScopeComplete,
+    );
+    logInfo(
+      ctx,
+      `Synced ${accounting.insertedTriples} selected shared memory triples from peer ${shortPeer}`,
+    );
+
+    if (accounting.deferredByBackpressure) {
+      if (accounting.madeProgress) {
+        context.onPeerSynced?.(remotePeer, { fresh: false, progress: true });
+      }
+      return 'deferred-backpressure';
+    }
+
+    // Selected completion clears this attempt's backoff, but never stamps the
+    // whole peer fresh: durable and unrelated CG work were intentionally not
+    // run. Explicit incomplete/no-progress remains silent so reconciler
+    // accounting grows its bounded retry backoff.
+    const selectedRetryResolved = selected.selectedScopeComplete
+      && !accounting.backoffWorthyFailure
+      && !accounting.failed
+      && !accounting.denied;
+    if (accounting.madeProgress || accounting.denied || selectedRetryResolved) {
+      context.onPeerSynced?.(remotePeer, {
+        fresh: false,
+        progress: accounting.madeProgress,
+      });
+    }
+    return 'synced';
+  } finally {
+    syncingPeers.delete(remotePeer);
+  }
+}
+
 export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<SyncOnConnectOutcome> {
   const {
     remotePeer,
@@ -181,7 +279,6 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
     discoverContextGraphsFromStore,
     syncSharedMemoryFromPeer,
     syncSharedMemoryOnConnect = true,
-    executionPlan = { kind: 'full' },
     logInfo,
   } = context;
 
@@ -304,9 +401,7 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
       return 'skipped-no-sync';
     }
 
-    const prioritySharedMemoryContextGraphIds = (
-      syncSharedMemoryOnConnect || executionPlan.kind === 'selected-swm-retry-only'
-    )
+    const prioritySharedMemoryContextGraphIds = syncSharedMemoryOnConnect
       && selectedSharedMemoryLane
         ? [...new Set(await runNonTransportStep(() => Promise.resolve(
           selectedSharedMemoryLane.getContextGraphIds(remotePeer),
@@ -333,13 +428,6 @@ export async function runSyncOnConnect(context: SyncOnConnectContext): Promise<S
         );
         return finishSyncAccounting();
       }
-    }
-
-    // This narrow plan is the complete execution boundary for an RFC-64 retry.
-    // It deliberately cannot fall through to durable, discovery, or ordinary
-    // shared-memory callbacks, even if a future caller supplies all of them.
-    if (executionPlan.kind === 'selected-swm-retry-only') {
-      return finishSyncAccounting();
     }
 
     const durableContextGraphIds = getDurableSyncContextGraphs?.() ?? [
