@@ -5850,7 +5850,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         if (!isRecoveryCurrent()) return noRecovery();
         const plannableTargets = sizedCandidates.map(({ attempt, recoveryFootprint }) => ({
           attempt,
-          recoveryFootprint: recoveryFootprint ?? { kind: 'unknown' as const },
+          recoveryFootprint,
         } satisfies VmRecoveryTargetFootprint & { attempt: VmRecoveryBatchAttempt }));
         const plan = planVmRecoveryMicrobatch(
           plannableTargets,

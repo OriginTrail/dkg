@@ -108,7 +108,19 @@ async function readVmRecoveryFootprintWithDeadline<T>(
 }
 
 export type VmRecoveryFootprintEnrichedTarget<T extends VmRecoveryFootprintBridgeTarget> =
-  T & { readonly recoveryFootprint?: VmRecoveryChainFootprint };
+  Omit<T, 'recoveryFootprint'> & { readonly recoveryFootprint: VmRecoveryChainFootprint };
+
+function normalizeVmRecoveryFootprint<T extends VmRecoveryFootprintBridgeTarget>(
+  target: T,
+): VmRecoveryFootprintEnrichedTarget<T> {
+  if (target.recoveryFootprint) {
+    return target as VmRecoveryFootprintEnrichedTarget<T>;
+  }
+  return {
+    ...target,
+    recoveryFootprint: { kind: 'unknown' },
+  };
+}
 
 function downgradeUnverifiedPublicFootprints<T extends VmRecoveryFootprintBridgeTarget>(
   targets: readonly T[],
@@ -116,7 +128,7 @@ function downgradeUnverifiedPublicFootprints<T extends VmRecoveryFootprintBridge
   return targets.map((target): VmRecoveryFootprintEnrichedTarget<T> =>
     target.recoveryFootprint?.kind === 'public-v10'
       ? { ...target, recoveryFootprint: { kind: 'unknown' } }
-      : target);
+      : normalizeVmRecoveryFootprint(target));
 }
 
 async function resolveVmRecoveryPublicAuthority(
@@ -150,7 +162,7 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   bridge: VmRecoveryFootprintBridge,
   options: Readonly<VmRecoveryFootprintBridgeOptions>,
 ): Promise<VmRecoveryFootprintEnrichedTarget<T>[]> {
-  const original: VmRecoveryFootprintEnrichedTarget<T>[] = [...targets];
+  const original = targets.map(normalizeVmRecoveryFootprint);
   const unverified = downgradeUnverifiedPublicFootprints(targets);
   if (targets.length === 0) return original;
   if (onChainCgId <= 0n || options.signal?.aborted || !options.isCurrent()) return unverified;
@@ -212,7 +224,7 @@ export async function enrichVmRecoveryFootprints<T extends VmRecoveryFootprintBr
   }));
 
   if (options.signal?.aborted || !options.isCurrent()) return unverified;
-  const enriched: VmRecoveryFootprintEnrichedTarget<T>[] = [...targets];
+  const enriched: VmRecoveryFootprintEnrichedTarget<T>[] = [...original];
   for (const { index, footprint } of observed) {
     if (footprint) enriched[index] = { ...targets[index]!, recoveryFootprint: footprint };
   }
