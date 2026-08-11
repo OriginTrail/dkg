@@ -4539,13 +4539,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
       );
       await boundaryStarted;
       current = false;
-      (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
       releaseBoundary();
 
       await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
       expect(fetch).not.toHaveBeenCalled();
       expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
-      expect((internals as any).vmReconcileRotationState.size).toBe(0);
     },
   );
 
@@ -4591,13 +4589,11 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     );
     await fetchStarted;
     current = false;
-    (internals as any).forceClearVmReconcileStateForContextGraph(localCgId);
     releaseFetch();
 
     await expect(recovery).resolves.toMatchObject({ attemptedOrdinals: [] });
     expect(reconcile).not.toHaveBeenCalled();
     expect((internals as any).vmReconcileFetchCooldownAt.has(localCgId)).toBe(false);
-    expect((internals as any).vmReconcileRotationState.size).toBe(0);
   });
 
   it('does not resurrect a rotation record evicted while the exact request is pending', async () => {

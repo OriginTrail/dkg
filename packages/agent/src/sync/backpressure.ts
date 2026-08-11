@@ -27,6 +27,11 @@ export interface SyncGlobalBackpressureConfig {
   rfc64PublicCatalogBootstrap?: {
     acceptedPublicPolicies?: readonly {
       completeSwmProviders?: readonly string[];
+      policyEnvelope?: {
+        payload?: {
+          contextGraphId?: string;
+        };
+      };
     }[];
   };
 }
@@ -45,6 +50,7 @@ interface GlobalQueuePayload {
   contextGraphId?: string;
   source: SyncAdmissionSource;
   selectedSwmPriority: boolean;
+  selectedRecoveryScope: boolean;
 }
 
 export const DEFAULT_SYNC_GLOBAL_MAX_INFLIGHT = 2;
@@ -79,6 +85,7 @@ function syncAdmissionOperation(payload: GlobalQueuePayload): string {
 
 let inflight = 0;
 let automaticBackgroundInflight = 0;
+const ordinarySelectedScopeInflight = new Map<string, number>();
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
@@ -89,17 +96,34 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
       !isAutomaticBackgroundSync(entry)
       || automaticBackgroundInflight < entry.payload.automaticBackgroundLimit
     )
+    && (
+      entry.payload.limit <= 1
+      || !isOrdinarySelectedScopeSync(entry)
+      || (ordinarySelectedScopeInflight.get(entry.payload.contextGraphId!) ?? 0)
+        < entry.payload.limit - 1
+    )
   ),
   onStart: (entry) => {
     inflight += 1;
     const automaticBackground = isAutomaticBackgroundSync(entry);
     if (automaticBackground) automaticBackgroundInflight += 1;
+    const ordinarySelectedScope = isOrdinarySelectedScopeSync(entry);
+    if (ordinarySelectedScope) {
+      const contextGraphId = entry.payload.contextGraphId!;
+      ordinarySelectedScopeInflight.set(
+        contextGraphId,
+        (ordinarySelectedScopeInflight.get(contextGraphId) ?? 0) + 1,
+      );
+    }
     lastLimit = entry.payload.limit;
     getMetrics().syncGlobalInflight.record(inflight);
     return () => {
       inflight = Math.max(0, inflight - 1);
       if (automaticBackground) {
         automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
+      }
+      if (ordinarySelectedScope) {
+        decrementOrdinarySelectedScopeInflight(entry.payload.contextGraphId!);
       }
       getMetrics().syncGlobalInflight.record(inflight);
     };
@@ -108,6 +132,9 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     inflight = Math.max(0, inflight - 1);
     if (isAutomaticBackgroundSync(entry)) {
       automaticBackgroundInflight = Math.max(0, automaticBackgroundInflight - 1);
+    }
+    if (isOrdinarySelectedScopeSync(entry)) {
+      decrementOrdinarySelectedScopeInflight(entry.payload.contextGraphId!);
     }
     getMetrics().syncGlobalInflight.record(inflight);
   },
@@ -127,6 +154,25 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   },
 });
 const automaticBackgroundLimits = new WeakMap<object, number>();
+const selectedRecoveryScopeIds = new WeakMap<object, ReadonlySet<string>>();
+
+function decrementOrdinarySelectedScopeInflight(contextGraphId: string): void {
+  const next = Math.max(0, (ordinarySelectedScopeInflight.get(contextGraphId) ?? 0) - 1);
+  if (next === 0) ordinarySelectedScopeInflight.delete(contextGraphId);
+  else ordinarySelectedScopeInflight.set(contextGraphId, next);
+}
+
+function isSelectedRecoverySync(entry: { payload: GlobalQueuePayload }): boolean {
+  return entry.payload.selectedSwmPriority
+    || entry.payload.source === 'vm-recovery'
+    || entry.payload.source === 'swm-recovery';
+}
+
+function isOrdinarySelectedScopeSync(entry: { payload: GlobalQueuePayload }): boolean {
+  return entry.payload.selectedRecoveryScope
+    && entry.payload.contextGraphId !== undefined
+    && !isSelectedRecoverySync(entry);
+}
 
 function isAutomaticBackgroundSync(entry: { payload: GlobalQueuePayload }): boolean {
   if (entry.payload.selectedSwmPriority) return false;
@@ -191,6 +237,8 @@ function acquire(
       contextGraphId: options.contextGraphId,
       source: options.source,
       selectedSwmPriority: options.selectedSwmPriority,
+      selectedRecoveryScope: options.contextGraphId !== undefined
+        && (selectedRecoveryScopeIds.get(policy)?.has(options.contextGraphId) ?? false),
     },
     ownerKey: 'global',
     lane: options.lane,
@@ -295,11 +343,20 @@ export function resolveSyncGlobalBackpressure(
     queueLimit,
   }) as SyncGlobalBackpressurePolicy;
   // A selected complete SWM provider is useful only if its transfer can enter
-  // the scheduler. Keep one slot out of every automatic background source,
-  // including VM/SWM recovery, because those sources can start during daemon
-  // bootstrap before the selected Edge provider becomes dialable. Explicit
-  // foreground catch-up retains the full cap.
+  // the scheduler. Keep one slot out of every automatic background source
+  // because those sources can start during daemon bootstrap before the
+  // selected Edge provider becomes dialable. For the selected CG itself, the
+  // scope-aware guard above also prevents explicit fallback fanout from
+  // consuming that slot before exact VM or selected-SWM recovery arrives.
   automaticBackgroundLimits.set(policy, hasCompleteSwmProvider && limit > 1 ? limit - 1 : limit);
+  selectedRecoveryScopeIds.set(policy, new Set(
+    config.rfc64PublicCatalogBootstrap?.acceptedPublicPolicies
+      ?.filter((acceptedPolicy) => (acceptedPolicy.completeSwmProviders?.length ?? 0) > 0)
+      .map((acceptedPolicy) => acceptedPolicy.policyEnvelope?.payload?.contextGraphId)
+      .filter((contextGraphId): contextGraphId is string => (
+        typeof contextGraphId === 'string' && contextGraphId.length > 0
+      )) ?? [],
+  ));
   return policy;
 }
 

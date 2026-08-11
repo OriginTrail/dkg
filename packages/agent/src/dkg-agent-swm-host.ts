@@ -5340,7 +5340,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
       hasImmediateRecoveryWork: false,
       cooldownOnly,
     });
-    if (!isRecoveryCurrent() || targets.length === 0) return noRecovery();
+    const staleRecovery = (): PendingOrdinalRecoveryResult => {
+      // Active-fetch admission installs this cooldown before any async
+      // provider or transport boundary. If the target lifecycle changes while
+      // one of those boundaries is pending, the discarded attempt must not
+      // delay the replacement lifecycle by a full reconcile sweep.
+      this.vmReconcileFetchCooldownAt.delete(localCgId);
+      return noRecovery();
+    };
+    if (!isRecoveryCurrent()) return staleRecovery();
+    if (targets.length === 0) return noRecovery();
 
     const expectedOnChainCgId = onChainCgId.toString();
     const currentTargets = targets.filter((target) =>
@@ -5483,7 +5492,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         overflowed: false,
         nextPageAfterPeerId: undefined,
       }));
-    if (!isRecoveryCurrent()) return noRecovery();
+    if (!isRecoveryCurrent()) return staleRecovery();
     const allResolvedCuratorPeerIds = [...new Set(curatorResolution.peerIds
       .filter((peerId) => peerId && peerId !== this.peerId))]
       .sort((left, right) => left.localeCompare(right));
@@ -5534,7 +5543,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       && resolvedCuratorPeerIds.length === 0) {
       legacyPreferredPeerId = await this.resolvePreferredSyncPeerId(localCgId);
     }
-    if (!isRecoveryCurrent()) return noRecovery();
+    if (!isRecoveryCurrent()) return staleRecovery();
     const authoritativeCuratorPeerIds = resolutionSucceeded
       ? resolvedCuratorPeerIds
       : curatorRosterOverflow
@@ -5698,7 +5707,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               `VM exact fetch could not connect candidate peer ${candidatePeerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`,
             );
           });
-          if (!isRecoveryCurrent()) return noRecovery();
+          if (!isRecoveryCurrent()) return staleRecovery();
           const connection = this.node.libp2p.getConnections()
             .find((candidate) => candidate.remotePeer.toString() === candidatePeerId);
           connectedPeer = connection?.remotePeer;
@@ -5708,7 +5717,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         const protocolReady = connectedPeer
           ? await this.waitForSyncProtocol(connectedPeer, signal)
           : false;
-        if (!isRecoveryCurrent()) return noRecovery();
+        if (!isRecoveryCurrent()) return staleRecovery();
         if (!connectedPeer || !protocolReady) {
           providerPolicy.markUnavailable(candidatePeerId);
         } else {
@@ -5721,7 +5730,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
             'VM exact fetch',
             signal,
           );
-          if (!isRecoveryCurrent()) return noRecovery();
+          if (!isRecoveryCurrent()) return staleRecovery();
           if (!peerAdmitted) providerPolicy.markUnavailable(candidatePeerId);
           else peerId = candidatePeerId;
         }
@@ -5869,7 +5878,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         revalidateTarget,
         ctx,
       });
-      if (execution.kind !== 'completed') return noRecovery();
+      if (execution.kind !== 'completed') return staleRecovery();
       for (const [ordinal, outcome] of execution.outcomes) outcomes.set(ordinal, outcome);
       for (const ordinal of execution.handledOrdinals) handledBatchOrdinals.add(ordinal);
       for (const ordinal of execution.attemptedOrdinals) attemptedOrdinals.add(ordinal);
@@ -5912,7 +5921,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // or untried provider without waiting for the periodic safety-net sweep.
     // Once every retained provider cycle is exhausted, the ordinary cooldown /
     // negative backoff applies exactly as before.
-    if (!isRecoveryCurrent()) return noRecovery();
+    if (!isRecoveryCurrent()) return staleRecovery();
     const recoveredAny = [...outcomes.values()]
       .some((outcome) => outcome.status === 'reconciled' || outcome.status === 'already');
     if (

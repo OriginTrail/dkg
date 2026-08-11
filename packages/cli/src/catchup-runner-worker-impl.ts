@@ -512,6 +512,31 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         shared,
       };
     }
+    if (needSharedMemory && authoritativeSharedMemoryPeerIds.has(peerId)) {
+      // An explicitly selected graph-complete SWM provider may also happen to
+      // be the metadata/curator peer. The generic two-plane helper runs durable
+      // first, but a cold public CG can spend minutes authenticating a large VM
+      // prefix before the selected SWM transfer gets a turn. The selected lane
+      // is independently chain/policy verified and the on-connect path already
+      // runs it before durable work, so preserve that ordering here as well.
+      // A backpressure deferral stops this peer round just as a deferred durable
+      // plane does in the generic helper: do not fill the reserved slot with the
+      // lower-priority fallback that just prevented selected recovery.
+      const shared = await runCatchupPlaneWithPolicy(
+        'foreground',
+        syncSharedMemory,
+      );
+      const durable = (shared.payload.deferredBackpressure ?? 0) > 0
+        ? null
+        : await runCatchupPlaneWithPolicy('foreground', syncDurable);
+      return {
+        peerId,
+        fromDurableAuthority,
+        fromSharedMemoryAuthority,
+        durable,
+        shared,
+      };
+    }
     const round = await runCatchupPlanesWithPolicy({
       mode: 'foreground',
       includeSharedMemory: needSharedMemory,
