@@ -616,7 +616,7 @@ function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
   // Keep this Edge-only. Core nodes intentionally host the public corpus and
   // grow `syncContextGraphs` through discovery; treating that all-CG inventory
   // as one selected scope would permanently reduce Core background throughput.
-  const edgeSelectedContextGraphIds = config.nodeRole === 'edge'
+  const edgeSelectedContextGraphIds = (config.nodeRole ?? 'edge') === 'edge'
     ? config.syncContextGraphs ?? []
     : [];
   return resolveSyncGlobalBackpressure({

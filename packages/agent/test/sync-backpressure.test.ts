@@ -1717,11 +1717,14 @@ describe('sync global backpressure', () => {
     ]);
   });
 
-  it('reserves Edge capacity for a runtime-selected Context Graph', async () => {
+  it.each([
+    { label: 'explicit Edge', nodeRole: 'edge' as const },
+    { label: 'default Edge', nodeRole: undefined },
+  ])('reserves $label capacity for a runtime-selected Context Graph', async ({ nodeRole }) => {
     const selectedCg = 'urn:cg:edge-selected';
     const agentLike = {
       config: {
-        nodeRole: 'edge',
+        ...(nodeRole === undefined ? {} : { nodeRole }),
         syncContextGraphs: [selectedCg],
         syncGlobalMaxInflight: 2,
         syncGlobalQueueLimit: 6,
