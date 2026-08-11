@@ -1939,6 +1939,13 @@ export class PublishMethods extends DKGAgentBase {
       allowedPeers?: PublishOptions['allowedPeers'];
     },
   ): Promise<PublishResult> {
+    // Argument validity precedes both capability and effect: the lock below is
+    // keyed on kaId, so validating after taking it would contend a lock on an
+    // id we are about to reject, and validating after the attestation check
+    // would report an invalid id as a missing seal.
+    if (kaId <= 0n || kaId >= (1n << 256n)) {
+      throw new Error(`Invalid graph-scoped kaId ${kaId.toString()}: expected a positive uint256`);
+    }
     return withRootlessUpdateLock(contextGraphId, kaId, async () => {
     const ctx = opts?.operationCtx ?? createOperationContext('update');
     const onPhase = opts?.onPhase;
@@ -1952,10 +1959,6 @@ export class PublishMethods extends DKGAgentBase {
           'Sign UpdateAuthorAttestation(kaId, newMerkleRoot, authorAddress) off-band and pass the seal in this call.',
       );
     }
-    if (kaId <= 0n || kaId >= (1n << 256n)) {
-      throw new Error(`Invalid graph-scoped kaId ${kaId.toString()}: expected a positive uint256`);
-    }
-
     const submittedPrivateQuads = privateQuads ?? [];
     assertNoKnowledgeAssetPayloadNamedGraphs(quads, submittedPrivateQuads);
     const canonicalParts = await skolemizeKnowledgeAssetParts(
