@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   automaticDurableSyncContextGraphs,
+  isSystemContextGraphExcludedFromChangelogLane,
   resolveAutomaticSystemContextGraphSync,
 } from '../src/sync/system-context-graph-policy.js';
 
@@ -59,4 +60,22 @@ describe('automatic system Context Graph sync policy', () => {
       'selected-cg',
     ]);
   });
+});
+
+describe('changelog lane exclusion policy (#2052 D-13)', () => {
+  it('keeps the agent registry off the changelog lane', () => {
+    expect(isSystemContextGraphExcludedFromChangelogLane(SYSTEM_CONTEXT_GRAPHS.AGENTS)).toBe(true);
+  });
+
+  it('leaves ordinary Context Graphs on the changelog lane', () => {
+    expect(isSystemContextGraphExcludedFromChangelogLane('public-cg')).toBe(false);
+    expect(isSystemContextGraphExcludedFromChangelogLane('')).toBe(false);
+  });
+
+  // `ontology` is deliberately NOT asserted here, and the omission is the point.
+  // Its changelog disposition is an OPEN question owned by the ontology plane.
+  // Pinning either value would convert that question into a contract: asserting
+  // `false` today would read as clearance it never received, and a later
+  // decision to exclude it would then surface as a regression rather than as
+  // the decision it is. The policy's docblock is where that status is recorded.
 });

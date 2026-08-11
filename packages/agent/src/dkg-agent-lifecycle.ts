@@ -34,7 +34,7 @@ import {
   decodeGossipEnvelope, type GossipEnvelopeMsg,
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
-  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, isAgentRegistryContextGraph, DKG_ONTOLOGY,
+  getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   validateSubGraphName,
   Logger, createOperationContext, isKaPublishLifecycleDebugLoggingEnabled, isStorageACKDecline, sparqlString, escapeSparqlLiteral, isSafeIri, assertSafeIri,
@@ -339,7 +339,10 @@ import {
   type SyncAdmissionSource,
   type SyncSchedulerLane,
 } from './sync/policy.js';
-import { automaticDurableSyncContextGraphs } from './sync/system-context-graph-policy.js';
+import {
+  automaticDurableSyncContextGraphs,
+  isSystemContextGraphExcludedFromChangelogLane,
+} from './sync/system-context-graph-policy.js';
 import {
   activeSyncAdmissionSource,
   monotonicNowMs,
@@ -5253,33 +5256,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const legacyCgs: string[] = [];
     const work = [];
     for (const contextGraphId of contextGraphIds) {
-      // #2052 D-13 — the `agents` system CG never rides the changelog lane.
-      //
-      // `isPrivateContextGraph` returns FALSE for system CGs, so without this
-      // `agents` is carried down applyPage by any peer advertising the
-      // changelog protocol. That matters because the merkle bypass is on BOTH
-      // doors — `acceptUnverified` is computed from system-CG membership in
-      // `runChangelogSyncForCg` below, and the legacy runner computes the
-      // identical predicate under a DIFFERENT NAME (`isSystemContextGraph` in
-      // `sync/requester/durable-sync.ts`), so grepping either name alone finds
-      // only one of the two doors — and it does more than skip a precondition:
-      // it ADMITS mismatched content as verified. So the fix is routing, not a
-      // second gate; a gate would sit downstream of a selector that had already
-      // accepted the quads.
-      //
-      // Withholding at applyPage is unsafe here rather than merely harder:
-      // planPageApply advances a contiguous-prefix cursor with two record
-      // dispositions, so a withhold-but-advance third shape makes the withhold
-      // PERMANENT past a passed sequence. Excluding the CG means no changelog
-      // cursor is ever established for it, which is the only shape that stays
-      // reversible.
-      //
+      // #2052 D-13 — `agents` never rides the changelog lane. Needed because
+      // `isPrivateContextGraph` returns FALSE for system CGs, so without it the
+      // graph is carried down applyPage by any peer advertising the protocol.
       // Fails closed: anything uncertain stays on legacy, the lane that has
-      // always carried this graph. The predicate is core's canonical one rather
-      // than an inline comparison, so this site cannot drift from the other
-      // agent-registry call sites; the test pins the CONSTANT, so a predicate
-      // that stopped matching it would fail rather than silently agree.
-      if (isAgentRegistryContextGraph(contextGraphId)) {
+      // always carried it. Which graphs are excluded, why this is routing
+      // rather than a gate, and what drifts if a system CG is added later all
+      // live with the predicate in sync/system-context-graph-policy.ts.
+      if (isSystemContextGraphExcludedFromChangelogLane(contextGraphId)) {
         legacyCgs.push(contextGraphId);
         continue;
       }
