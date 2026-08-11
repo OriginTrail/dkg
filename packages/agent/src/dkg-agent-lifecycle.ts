@@ -607,11 +607,26 @@ const DEFAULT_HOST_MODE_RECONCILE_JITTER_RATIO = 0.15;
 const RFC64_SELECTED_SWM_ADMISSION_PRIORITY = 2_000;
 
 function resolveAgentSyncGlobalBackpressure(config: DKGAgentConfig) {
+  // `trackSyncContextGraph()` mutates this list when an Edge explicitly
+  // subscribes or starts a foreground catch-up. Those operator-selected graphs
+  // need the same admission guarantee as an RFC-64 pinned scope: otherwise a
+  // mature Edge can fill every global slot with unrelated background VM
+  // recovery and repeatedly reject the graph the user just selected.
+  //
+  // Keep this Edge-only. Core nodes intentionally host the public corpus and
+  // grow `syncContextGraphs` through discovery; treating that all-CG inventory
+  // as one selected scope would permanently reduce Core background throughput.
+  const edgeSelectedContextGraphIds = config.nodeRole === 'edge'
+    ? config.syncContextGraphs ?? []
+    : [];
   return resolveSyncGlobalBackpressure({
     ...config,
-    selectedRecoveryContextGraphIds: resolveRfc64SelectedRecoveryContextGraphIdsV1(
-      config.rfc64PublicCatalogBootstrap,
-    ),
+    selectedRecoveryContextGraphIds: [...new Set([
+      ...resolveRfc64SelectedRecoveryContextGraphIdsV1(
+        config.rfc64PublicCatalogBootstrap,
+      ),
+      ...edgeSelectedContextGraphIds,
+    ])],
   });
 }
 
