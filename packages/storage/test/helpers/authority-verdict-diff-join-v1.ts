@@ -232,6 +232,27 @@ export interface JoinLevel1EntryV1 {
  * THE LEVEL-1 MAP. Declared from the sites, then measured -- in that order, and
  * every place the measurement widened a declaration is written into the note
  * rather than smoothed away.
+ *
+ * WHAT MAKES A DECLARED IMAGE ADMISSIBLE IS A COUNTERFACTUAL: toggle the feature
+ * the deciding side decides on, and the other side's outcome must be ABLE to
+ * move. Otherwise the image is a coincidence of whatever the other side's own
+ * axes happened to be doing, and it can never be violated by the observation
+ * that produced it.
+ *
+ * THE COUNTERFACTUAL REQUIREMENT APPLIES TO POSITIVE IMAGES ONLY, and the
+ * qualifier is load-bearing rather than pedantic. A POSITIVE image -- "core says
+ * this, so storage says X" -- NAMES an outcome, and nothing can name X unless the
+ * other side is RESPONSIVE to the feature; the counterfactual is how that
+ * responsiveness gets measured. A NEGATIVE image -- `reject`'s "withholding
+ * outcomes only" -- is grounded in what the core decision MEANS, and asks the
+ * other side only NOT to do the forbidden thing. There, structural invariance on
+ * the deciding axis is not disqualifying; it is the EXPLANATION.
+ *
+ * WITHOUT THE QUALIFIER THE TEST REACHES THE WRONG ANSWER BY BEING APPLIED
+ * CORRECTLY. Storage is clock-invariant, so `reject` fails a counterfactual it
+ * was never subject to, gets reclassified NO-MAPPING for consistency with
+ * `quarantine|transition-equivocation`, and this artifact's 3,136 divergences
+ * vanish into an exclusion bucket.
  */
 export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
   {
@@ -337,7 +358,24 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
       + 'recorded differently on purpose -- core\'s is CONSTANT across this whole '
       + 'mapping class and so belongs to the map as a no-image entry, while storage\'s '
       + 'varies cell by cell with axis B and so belongs to the cell as a named '
-      + 'non-comparability.',
+      + 'non-comparability. '
+      + 'READ THIS BESIDE THE `reject` ENTRY, which meets the same shape of fact and correctly '
+      + 'answers it the other way. Both are one side deciding on an axis the other cannot see: '
+      + 'core on axis I here, core on axis L -- the clock -- there, where storage is just as '
+      + 'blind. WHAT SEPARATES THEM IS THE KIND OF CLAIM THE IMAGE WOULD BE. This entry would '
+      + 'need a POSITIVE image -- "core says transition-equivocation, so storage says X" -- and '
+      + 'a positive image REQUIRES THE OTHER SIDE TO BE RESPONSIVE TO THE FEATURE, because X is '
+      + 'grounded in the other side\'s answer to it. Storage is not responding to the '
+      + 'equivocation at all, so nothing grounds an X and this entry stands at NO-MAPPING. The '
+      + 'reject entry\'s image is NEGATIVE -- reject implies withholding outcomes only -- '
+      + 'grounded in what a reject MEANS rather than in storage\'s responsiveness, and a '
+      + 'NEGATIVE CONSTRAINT ONLY REQUIRES THE OTHER SIDE NOT TO DO THE FORBIDDEN THING. '
+      + 'Storage materialises, so it is outside that image and those cells are DIVERGENCES. So '
+      + 'TWO POPULATIONS OF THE SAME SURFACE SHAPE LAND IN OPPOSITE BUCKETS -- 1,920 cells '
+      + 'NO-MAPPING here, 2,112 of the 3,136 divergences there -- and that is correct rather '
+      + 'than an inconsistency to be tidied away. It is recorded at BOTH entries so that a '
+      + 'later consistency argument cannot quietly reclassify the divergences into this bucket '
+      + 'and delete the artifact\'s headline.',
   },
   {
     coreDecisionKey: 'reject',
@@ -356,7 +394,27 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
       + '-- against a storage classifier with no clock input at all. Axis L reaches '
       + 'no storage input, which the projection-equivalence suite measured '
       + 'independently when 855 projection keys collapsed to 285 distinct built '
-      + 'inputs. Routing the live path through core would START REFUSING these heads.',
+      + 'inputs. Routing the live path through core would START REFUSING these heads. '
+      + 'WHY THESE ARE DIVERGENCES AND NOT NO-MAPPING, answered at the entry because the '
+      + 'question arrives from the other side of the map. '
+      + '`quarantine|transition-equivocation` grounds no image on exactly this shape of fact '
+      + '-- one side deciding on an axis the other cannot see -- and 2,112 of the 3,136 '
+      + 'divergences here are core deciding on axis L, which storage cannot see either. THE '
+      + 'TWO IMAGES ARE DIFFERENT KINDS OF CLAIM. That entry would need a POSITIVE image, '
+      + '"core says this, so storage says X", and X has to be grounded in something: A '
+      + 'POSITIVE IMAGE REQUIRES THE OTHER SIDE TO BE RESPONSIVE TO THE FEATURE. Nothing '
+      + 'grounds an X there, because storage is not responding to the equivocation at all. '
+      + 'THIS entry\'s image is NEGATIVE -- a reject implies withholding outcomes only -- and '
+      + 'it is grounded in what a reject MEANS, not in storage\'s responsiveness to the clock. '
+      + 'A NEGATIVE CONSTRAINT DOES NOT REQUIRE THE OTHER SIDE TO BE RESPONSIVE TO THE SAME '
+      + 'FEATURE; IT ONLY REQUIRES IT NOT TO DO THE FORBIDDEN THING. Storage materialises, so '
+      + 'it is outside the image, and the cell is a real divergence about whether this head '
+      + 'may enter the store. TWO POPULATIONS WITH THE SAME SURFACE SHAPE THEREFORE LAND IN '
+      + 'OPPOSITE BUCKETS ON THIS DISTINCTION, correctly -- 1,920 NO-MAPPING there, 2,112 '
+      + 'DIVERGENCE here. STORAGE\'S CLOCK-BLINDNESS EXPLAINS THE DIVERGENCE; IT DOES NOT '
+      + 'DISQUALIFY IT. The reason is written down rather than left to be re-derived because '
+      + 'the tidy-looking move -- reclassifying these cells NO-MAPPING for consistency with '
+      + 'the equivocation entry -- would erase the headline of the whole artifact.',
   },
 ];
 

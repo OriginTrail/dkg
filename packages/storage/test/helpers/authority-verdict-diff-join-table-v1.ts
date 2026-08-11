@@ -614,4 +614,56 @@ export const JOIN_FINDINGS_V1: readonly string[] = [
   + 'file\'s provenance against that constant would have compared one stale value to another and '
   + 'sat green through precisely the window it exists for. Hashing the sweep output makes the '
   + 'gate independent of whether anyone has re-pinned yet.',
+
+  // THE JOIN-SIDE HALF OF A FINDING THE CORE TABLE STATES IN GENERAL TERMS. The
+  // populations live here because this is where they were measured; the core
+  // half deliberately claimed no numbers it had not measured itself.
+  'THE TWO EVALUATORS HAVE DISJOINT PRIVATE INPUTS, AND THESE ARE THE CELLS. The core table '
+  + 'states the general result -- ROUTING CANNOT BE A DROP-IN, BECAUSE EACH SIDE READS STATE '
+  + 'THE OTHER DOES NOT HAVE -- and these are its two join-side populations. 12,096 cells are '
+  + 'storage answering from the APPLIED ROW at :1108/:1111/:1114, before the candidate is read '
+  + 'at :1116, on an axis CORE has no field for. 1,920 cells are core deciding '
+  + '`quarantine|transition-equivocation` from `disposition` at :139-141, on an axis STORAGE '
+  + 'has no producer for. TOTAL 14,016 -- THE SAME PHENOMENON IN OPPOSITE DIRECTIONS. Both are '
+  + 'CORRECT cell-level exclusions and neither is reclassified: the 12,096 stay a named '
+  + 'non-comparability on the CELL, the 1,920 stay the MAP\'s one no-image entry, and nothing '
+  + 'in the conservation moves. TOGETHER THEY ARE ONE ARCHITECTURAL FINDING, and it was '
+  + 'invisible precisely BECAUSE it was found twice, from opposite ends, and filed as an '
+  + 'ABSENCE both times -- two correct exclusions in two registers do not add up to a finding '
+  + 'until someone writes the finding down. THE `disposition` PROBE, WITH ITS INSTRUMENT '
+  + 'NAMED: 15 occurrences across 14 lines, all in '
+  + 'packages/core/src/system-record-authority-v1-internal.ts, against 0 anywhere in '
+  + 'packages/storage/src. The two figures are ONE measurement read by TWO instruments -- '
+  + 'matching LINES against matching OCCURRENCES -- and the entire difference is :643, where '
+  + 'the word appears twice on one line. THE CORE COUNT IS THE POSITIVE CONTROL PROVING THE '
+  + 'PROBE WORKS; THE LOAD-BEARING NUMBER IS THE ZERO, and both instruments agree on the zero. '
+  + 'A count that disagrees between two instruments is not a discrepancy when neither '
+  + 'instrument is the one the claim rests on -- but only if someone says which is which.',
+
+  // A PROPOSED ANNOTATION, AND WHAT IT COST TO EARN IT. An unverified shadowing
+  // claim reads exactly as principled as a demonstrated one, so it is written
+  // only in the scope where it was actually shown, and that scope is named.
+  'R2\'S CITED REFUSAL IS SHADOWED INSIDE THE STORAGE DRIVER -- MEASURED, NOT ARGUED, OVER ALL '
+  + '30 OF ITS CANDIDATE-HEAD SHAPES. R2 (authority-verdict-diff-constructibility-v1.ts) '
+  + 'retires operation `active` against a tombstone candidate and cites '
+  + 'system-record-verified-replacement-v1-internal.ts:641. That territory is 65,664 cells over '
+  + '30 distinct head shapes, of which R1 owns the K=present half, leaving R2 the 15 K=absent '
+  + 'ones. Driven with constructibility BYPASSED, all 30 resolve: 17 never reach the driver '
+  + 'because the head itself is refused (13 H1, 4 F1), 12 more are summary-unmintable, and '
+  + 'EXACTLY ONE reaches the issue path. R2\'s own 15 split 2 / 12 / 1 the same way, and the '
+  + 'one that gets there is present|tombstone|equal|above|-|equal|absent. There the driver\'s '
+  + 'OWN `rebuildProjectionForHeadV1` throws first -- "driver projection rebuild is unfaithful: '
+  + 'projectionBytes 790 != committed 0; projectionQuads 6 != committed 0; contentDigest ... != '
+  + 'committed undefined" -- and it throws while building the ARGUMENT to `issueCandidate`, so '
+  + 'the driver\'s catch reports it as {kind:refused, stage:issue}: THE SAME STAGE '
+  + 'DISCRIMINATOR THE REGISTRY\'S OWN REFUSAL CARRIES, separable only by reading the message. '
+  + 'THE DISCRIMINATOR: re-driving that same shape through the `projectionOverride` control '
+  + 'hook skips the rebuild, and :641 then fires verbatim -- {kind:refused, stage:issue, '
+  + 'message:"verified replacement head must be active"}. So the site is genuinely REACHABLE, '
+  + 'which is what a read of the PRODUCTION issuer already found, and what shadows it is the '
+  + 'INSTRUMENT rather than the system. CONTROL: the same call on an ACTIVE head does not '
+  + 'throw, so the probe is not simply always-throwing. NOTHING MOVES ON THIS -- R2\'s cells '
+  + 'stay retired and its counts stay pinned; the annotation says only which SITE owns the '
+  + 'refusal when it is read through the driver. It is deliberately NOT written as a claim '
+  + 'about the production issuer, where it could not be verified and is in fact false.',
 ];
