@@ -6,6 +6,7 @@ import {
   CORE_AMBIGUOUS_REJECT_LITERALS_V1,
   CORE_QUARANTINE_REASONS_V1,
   CORE_REJECT_REASON_SITES_V1,
+  VERDICT_DIFF_AXES_V1,
 } from './helpers/authority-verdict-diff-fixture-v1.js';
 
 /**
@@ -92,5 +93,64 @@ describe('core authority decision reason harvest', () => {
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
     expect([...reject.values()].flat().length).toBe(32);
     expect([...quarantine.values()].flat().length).toBe(10);
+  });
+});
+
+/**
+ * AXIS J IS PINNED AGAINST THE CONTRACT IT CLAIMS TO ENUMERATE.
+ *
+ * This is the check that was missing, and its absence cost a real defect: the
+ * fixture's prose said axis J was "grounded in core's declared input shapes"
+ * while the axis listed four of the six optional members that shape declares.
+ * Prose was the only thing asserting the grounding, so nothing went red, and a
+ * table that pins every constructible cell was measuring a QUARTER of the
+ * evidence space it claimed. A grounding claim that is not executable is not a
+ * grounding claim.
+ *
+ * TWO SOURCES, ASSERTED AGAINST EACH OTHER as well as against the axis, because
+ * they can disagree and the disagreement is itself a defect: the INTERFACE
+ * declares the contract, while the runtime `optionals` list in
+ * `snapshotHeadAdvanceEvidenceV1` decides which keys survive the exact-record
+ * snapshot. A member added to the interface but not to that list would be
+ * silently dropped from every evaluation -- present to the type checker, absent
+ * to the evaluator.
+ */
+const EVIDENCE_INTERFACE_START = /export interface AgentProfileHeadAdvanceEvidenceV1 \{/;
+
+function harvestEvidenceOptionals(): { declared: string[]; snapshotted: string[] } {
+  const source = readFileSync(CORE_SRC, 'utf8');
+  const lines = source.split('\n');
+  const start = lines.findIndex((line) => EVIDENCE_INTERFACE_START.test(line));
+  const end = lines.findIndex((line, index) => index > start && line.trimEnd() === '}');
+  const declared = lines.slice(start + 1, end)
+    .map((line) => /^\s*readonly\s+(\w+)\?:/.exec(line)?.[1])
+    .filter((name): name is string => name !== undefined);
+
+  const optionals = /const optionals = \[([^\]]*)\]/.exec(source)?.[1] ?? '';
+  const snapshotted = [...optionals.matchAll(/'([^']+)'/g)].map((match) => match[1]);
+  return { declared, snapshotted };
+}
+
+describe('core head-advance evidence optional harvest', () => {
+  const { declared, snapshotted } = harvestEvidenceOptionals();
+
+  it('pins axis J as exactly the declared optional evidence members', () => {
+    expect([...declared].sort())
+      .toEqual([...VERDICT_DIFF_AXES_V1.J_evidencePresence].sort());
+  });
+
+  // The interface and the runtime filter must name the same set, or a declared
+  // member is unreachable at evaluation time regardless of what any axis says.
+  it('pins the runtime optional filter as the same set the interface declares', () => {
+    expect([...snapshotted].sort()).toEqual([...declared].sort());
+  });
+
+  // Non-vacuity, for the same reason the reject harvest has it: two empty lists
+  // compare equal, so a broken regex would otherwise pass both rows above.
+  it('harvests the six optional members, so an empty list cannot pass', () => {
+    expect(declared).toHaveLength(6);
+    expect(snapshotted).toHaveLength(6);
+    expect(declared).toContain('verifiedAuthoritySummary');
+    expect(declared).toContain('forkEvidenceHeads');
   });
 });

@@ -12,7 +12,7 @@ import {
  * shortcuts honest.
  *
  * Static resolution is the lever that makes this sweep runnable at all -- the
- * reachable space is 98,496 and most of it describes states no fixture can
+ * reachable space is 393,984 and most of it describes states no fixture can
  * build. The danger is that the same lever can quietly delete cells: a rule
  * that matches too broadly shrinks the run set while every other assertion
  * still passes.
@@ -21,7 +21,12 @@ import {
  * dropped without the arithmetic failing; and every rule must name the site
  * that refuses the state, so a retirement is a citation rather than an opinion.
  */
-describe('verdict-diff constructibility split', () => {
+// Stated rather than inherited, for the reason recorded in the generator's own
+// suite: vitest's 5s default already cost this lane a run once, and the space
+// has quadrupled since.
+const VERDICT_DIFF_SUITE_TIMEOUT_MS = 120_000;
+
+describe('verdict-diff constructibility split', { timeout: VERDICT_DIFF_SUITE_TIMEOUT_MS }, () => {
   const cells = enumerateVerdictDiffCellsV1();
   const split = resolveConstructibilityV1(cells);
 
@@ -29,8 +34,8 @@ describe('verdict-diff constructibility split', () => {
   // holds -- which is why the per-rule counts below matter too. Together they
   // localise a change rather than merely detecting one.
   it('conserves the pinned cell total across the split', () => {
-    expect(split.total).toBe(98_496);
-    expect(split.constructible.length + split.unconstructible.length).toBe(98_496);
+    expect(split.total).toBe(393_984);
+    expect(split.constructible.length + split.unconstructible.length).toBe(393_984);
   });
 
   // Collected rather than asserted per retired cell, for the same reason as the
@@ -51,34 +56,38 @@ describe('verdict-diff constructibility split', () => {
   //
   // Axes C (head state), H (storage operation) and K (fork resolution) are
   // independent of every other axis, so each (C,H,K) triple owns exactly
-  // 98,496 / 12 = 8,208 cells. That is the unit every number below is built
+  // 393,984 / 12 = 32,832 cells. That is the unit every number below is built
   // from, and it is what makes them predictable rather than merely observed:
-  //   R1  C=tombstone & K=present, all three operations   3 x 8,208 = 24,624
-  //   R2  C=tombstone & H=active, K=absent remainder      1 x 8,208 =  8,208
-  //   R3  C=tombstone & H=quarantine, K=absent remainder  1 x 8,208 =  8,208
-  //   R4  C=active    & H=tombstone, both K values        2 x 8,208 = 16,416
+  //   R1  C=tombstone & K=present, all three operations   3 x 32,832 = 98,496
+  //   R2  C=tombstone & H=active, K=absent remainder      1 x 32,832 = 32,832
+  //   R3  C=tombstone & H=quarantine, K=absent remainder  1 x 32,832 = 32,832
+  //   R4  C=active    & H=tombstone, both K values        2 x 32,832 = 65,664
   // R2 and R3 see only the K='absent' remainder because R1 fires first, which
   // mirrors the real refusal order: issueActive validates the head at :637
   // before testing its state at :641.
   //
-  // EVERY NUMBER HERE MOVED WHEN AXIS G WAS GATED ON SNAPSHOT PRESENCE, and they
-  // were RE-DERIVED FROM THE UNIT rather than adjusted -- the unit itself is what
-  // changed (8,352 -> 8,208), so patching the totals would have left the rule
-  // counts internally inconsistent while the conservation sum still balanced.
+  // EVERY NUMBER HERE HAS MOVED TWICE -- once when axis G was gated on snapshot
+  // presence, once when axis J was corrected to span its declared contract --
+  // and both times they were RE-DERIVED FROM THE UNIT rather than adjusted. The
+  // unit itself moves (8,352 -> 8,208 -> 32,832), so patching totals would leave
+  // the rule counts internally inconsistent while conservation still balanced,
+  // which is the one failure this whole structure exists to make impossible.
   //
-  // Cross-check from the other direction, which is the check that makes these
-  // predicted rather than observed: the registry refuses three of the six
-  // (operation, head state) pairs outright, which is half the space (49,248),
+  // These were PREDICTED BEFORE THE RUN and agreed on the first run. A number
+  // read off a run and then pinned is not a measurement.
+  //
+  // Cross-check from the other direction: the registry refuses three of the six
+  // (operation, head state) pairs outright, which is half the space (196,992),
   // plus R1's tombstone-with-resolution cells in the one surviving pair
-  // (C=tombstone & H=tombstone & K=present, 8,208) = 57,456. And forward instead
-  // of by subtraction: the 5 surviving triples x 8,208 = 41,040 constructible.
+  // (C=tombstone & H=tombstone & K=present, 32,832) = 229,824. And forward
+  // instead of by subtraction: 5 surviving triples x 32,832 = 164,160.
   it('retires each rule\'s exact territory', () => {
-    expect(split.byRule['R1-tombstone-carries-fork-resolution']).toBe(24_624);
-    expect(split.byRule['R2-active-operation-needs-active-head']).toBe(8_208);
-    expect(split.byRule['R3-quarantine-operation-needs-active-head']).toBe(8_208);
-    expect(split.byRule['R4-tombstone-operation-needs-tombstone-head']).toBe(16_416);
-    expect(split.unconstructible.length).toBe(57_456);
-    expect(split.constructible.length).toBe(41_040);
+    expect(split.byRule['R1-tombstone-carries-fork-resolution']).toBe(98_496);
+    expect(split.byRule['R2-active-operation-needs-active-head']).toBe(32_832);
+    expect(split.byRule['R3-quarantine-operation-needs-active-head']).toBe(32_832);
+    expect(split.byRule['R4-tombstone-operation-needs-tombstone-head']).toBe(65_664);
+    expect(split.unconstructible.length).toBe(229_824);
+    expect(split.constructible.length).toBe(164_160);
   });
 
   // A retirement is a citation, not an opinion: the failure string each rule

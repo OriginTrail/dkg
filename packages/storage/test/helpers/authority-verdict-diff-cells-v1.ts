@@ -50,10 +50,11 @@ export interface VerdictDiffCellV1 {
  * object. So each side sees a PROJECTION of the cell, and a cell is the pair.
  *
  * The consequence is measured, not rhetorical: every storage input corresponds
- * to exactly 48 distinct core inputs. Core will therefore discriminate 48 ways
- * where storage cannot discriminate at all -- which is what "no total mapping"
- * means concretely, and what Phase 3 inherits if it routes the live path
- * through core.
+ * to exactly 192 distinct core inputs -- axis I's 3 dispositions times axis J's
+ * 64 evidence subsets, neither visible to storage. Core will therefore
+ * discriminate 192 ways where storage cannot discriminate at all, which is what
+ * "no total mapping" means concretely, and what Phase 3 inherits if it routes
+ * the live path through core.
  *
  * The lists below are load-bearing rather than decorative: the projection keys
  * are BUILT from them, so moving an axis between the visible and invisible sets
@@ -98,7 +99,7 @@ export function storageInputProjectionKeyV1(cell: VerdictDiffCellV1): string {
   return projectionKeyV1(cell, STORAGE_INVISIBLE_AXES_V1);
 }
 
-/** Every subset of the four optional evidence members (axis J). */
+/** Every subset of the optional evidence members (axis J): 2^6 = 64. */
 function evidenceSubsets(): readonly (readonly string[])[] {
   const members = VERDICT_DIFF_AXES_V1.J_evidencePresence;
   const out: string[][] = [];

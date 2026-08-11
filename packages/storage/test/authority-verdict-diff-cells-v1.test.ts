@@ -12,20 +12,28 @@ import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-ce
  * constructible cell" unverifiable: the table would still be full, just of
  * fewer things than it claims.
  */
-describe('verdict-diff case generator', () => {
+// EXPLICIT AND GENEROUS, not decoration. These suites walk a 393,984-cell space,
+// and this lane has already lost a run to vitest's 5s default: three pins looped
+// an assertion over the whole space, ran 2.2s idle, and timed out the moment the
+// lane was loaded -- a red that said nothing about the generator. The predicates
+// were fixed to collect-then-assert-once, but the space has since quadrupled, so
+// the timeout is now stated rather than inherited from a default nobody chose.
+const VERDICT_DIFF_SUITE_TIMEOUT_MS = 120_000;
+
+describe('verdict-diff case generator', { timeout: VERDICT_DIFF_SUITE_TIMEOUT_MS }, () => {
   const cells = enumerateVerdictDiffCellsV1();
 
   // The raw twelve-axis cross-product is ~1.3M. The axes are not independent,
   // and the dependency rules come from the spec's own axis definitions, so the
   // reachable space is far smaller. Pinning the number is what makes a later
   // "the sweep covered every cell" claim checkable rather than rhetorical.
-  // 98,496 = 1,728 (absent) + 96,768 (present).
-  //   absent : C(2) x H(3) x I(3) x J(16) x K(2) x L(3)         =  1,728
-  //   present: B(4) x [that same 1,728] x G(2) x [D,E,F = 7]    = 96,768
+  // 393,984 = 6,912 (absent) + 387,072 (present).
+  //   absent : C(2) x H(3) x I(3) x J(64) x K(2) x L(3)          =   6,912
+  //   present: B(4) x [that same 6,912] x G(2) x [D,E,F = 7]     = 387,072
   // The D/E/F factor is 7 rather than 4x3x2=24 because E and F apply only where
-  // the spec defines them. Raw cross-product without dependencies is ~1.3M.
+  // the spec defines them.
   //
-  // THIS PIN HAS MOVED TWICE, AND BOTH REASONS ARE THE SAME REASON -- a relation
+  // THE PIN HAS MOVED THREE TIMES. The first two share one reason -- a relation
   // has no referent when the snapshot is absent, so it is not an axis there:
   //   120,960 -> 100,224  axis D (sequence relation). Measured: both evaluators
   //     branch on an absent current before any sequence logic runs (core
@@ -38,6 +46,15 @@ describe('verdict-diff case generator', () => {
   // have attributed a refusal to code never reached. They were a generator
   // modelling error, and the pin moves with the reason attached, never silently.
   //
+  //    98,496 -> 393,984  axis J, and this one moved the pin UP because the axis
+  //      was too SMALL. It enumerated four of the six optional members that
+  //      `AgentProfileHeadAdvanceEvidenceV1` declares, omitting
+  //      `verifiedAuthoritySummary` and `forkEvidenceHeads`, both of which change
+  //      decisions. Every count here was internally consistent and describing a
+  //      quarter of the input space. The file SAID the axis was grounded in the
+  //      declared shape; prose was all that said so, so nothing was red. Axis J
+  //      is now harvested from core's source and pinned against it.
+  //
   // The absent region is now exactly the (C,H,K) unit x I x J x L, which is why
   // the constructibility numbers downstream divide so cleanly.
   //
@@ -47,7 +64,7 @@ describe('verdict-diff case generator', () => {
   // number first is what makes the later constructible/unconstructible split
   // add up to something checkable.
   it("pins the reachable cell count under the spec's axis dependencies", () => {
-    expect(cells.length).toBe(98_496);
+    expect(cells.length).toBe(393_984);
   });
 
   it('gives every cell a unique id', () => {
@@ -104,12 +121,15 @@ describe('verdict-diff case generator', () => {
     ]).toEqual([0, 0, 0, 0]);
   });
 
-  // Axis J is a presence subset, so all sixteen combinations of the four
+  // Axis J is a presence subset, so all sixty-four combinations of the six
   // optional evidence members must appear -- including the empty one, which is
-  // the no-evidence case both evaluators have to handle.
+  // the no-evidence case both evaluators have to handle. The count is asserted
+  // rather than derived from the axis length on purpose: computing it from
+  // `J_evidencePresence.length` would move with the axis and pass through
+  // exactly the under-modelling that made this pin wrong before.
   it('covers every evidence subset including the empty one', () => {
     const seen = new Set(cells.map((c) => [...c.evidence].sort().join('|')));
-    expect(seen.size).toBe(16);
+    expect(seen.size).toBe(64);
     expect(seen.has('')).toBe(true);
   });
 

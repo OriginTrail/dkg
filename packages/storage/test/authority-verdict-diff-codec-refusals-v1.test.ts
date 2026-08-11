@@ -164,22 +164,81 @@ describe('verified-replacement registry operation/head-state refusals', () => {
   });
 
   // THE RULE ORDER IS A MEASUREMENT, NOT A PREFERENCE, and the per-rule counts
-  // rest on it: R2 and R3 retire 8,208 cells each rather than 16,416 precisely
+  // rest on it: R2 and R3 retire 32,832 cells each rather than 65,664 precisely
   // because R1 owns the fork-resolution half first. That is only true if the
   // codec really refuses before the state check does -- issueActive validates
   // the head at :637 and tests its state at :641 -- so the pairing that trips
   // both must report the CODEC's message.
+  //
+  // PARAMETERIZED OVER AXIS K, because the counts are. Firing only the K='absent'
+  // half leaves the other half of each rule's territory retired against a
+  // citation never fired with a head matching it: `byRule` would still sum to the
+  // unconstructible total and every count would stay green under a wrong OWNER.
+  // A rule's territory and a rule's count are different claims, and only the
+  // count was being checked.
   it('lets the head codec refuse ahead of the operation/head-state check', async () => {
     const fixture = await makeAuthenticTerminalReplacementFixtureV1();
     const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const tombstoneWithResolution = {
+      ...(fixture.tombstone.head as unknown as Record<string, unknown>),
+      forkResolutionDigest: `0x${'cd'.repeat(32)}`,
+    };
+
+    // R1 ahead of R2, on the direct route.
     expect(() => registry.issuer.issueCandidate({
       operation: 'active',
       ...fixture.active,
-      head: {
-        ...(fixture.tombstone.head as unknown as Record<string, unknown>),
-        forkResolutionDigest: `0x${'cd'.repeat(32)}`,
-      },
+      head: tombstoneWithResolution,
     } as never)).toThrow('V1 has no direct terminal fork-resolution tombstone');
+
+    // R1 ahead of R3, on the DELEGATED route. R3 reaches the state check only via
+    // issueActive, so its K='present' remainder depends on the same ordering by a
+    // different path -- and a path that is not fired is a path not measured.
+    expect(() => registry.issuer.issueCandidate({
+      operation: 'quarantine',
+      ...fixture.quarantine,
+      head: tombstoneWithResolution,
+    } as never)).toThrow('V1 has no direct terminal fork-resolution tombstone');
+  });
+
+  // R4's OWNERSHIP OF ITS K='PRESENT' HALF, fired rather than asserted.
+  //
+  // R4 alone retires BOTH fork-resolution values -- 65,664 cells -- on the claim
+  // that nothing refuses an ACTIVE head carrying forkResolutionDigest ahead of
+  // the tombstone branch's state check. That claim points the opposite way from
+  // R2/R3's, which is exactly why it was easy to leave unfired: a rule saying
+  // "something fires first" invites a test, and one saying "nothing does" does
+  // not. If the head codec ever started refusing an active head with a fork
+  // resolution, half of R4's territory would belong to R1 instead, the counts
+  // would still sum, and nothing else here would notice.
+  it('lets the tombstone branch refuse an active head carrying a fork resolution', async () => {
+    const fixture = await makeAuthenticTerminalReplacementFixtureV1();
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    // A fork-resolving head must be NON-INITIAL, and finding that out is half of
+    // what this test is worth. Adding forkResolutionDigest to the fixture's
+    // genesis head is refused by :200 'ordinary initial head must omit all
+    // history digests' -- so R4's rationale ("the head codec permits an ACTIVE
+    // head to carry forkResolutionDigest") is true only above version zero, and
+    // nothing had established that. Axis E is a RELATIVE axis, so the fixture is
+    // free to move the version and the cells stay constructible; had E been
+    // absolute, R4's K='present' half would have been unconstructible instead of
+    // merely unfired.
+    const activeWithResolution = {
+      ...(fixture.active.head as unknown as Record<string, unknown>),
+      version: '2',
+      previousHeadDigest: computeAgentProfileHeadObjectDigestV1(fixture.active.head),
+      forkResolutionDigest: `0x${'cd'.repeat(32)}`,
+    };
+
+    // The premise first: the codec must MINT this head, or the refusal below
+    // would be the codec's and R4 would be the wrong owner.
+    expect(refusalOf(activeWithResolution)).toBe('MINTS');
+
+    expect(() => registry.issuer.issueCandidate({
+      operation: 'tombstone',
+      ...fixture.tombstone,
+      head: activeWithResolution,
+    } as never)).toThrow('verified tombstone replacement head must be tombstone');
   });
 
   // The positive control. Without it the three refusals above are equally

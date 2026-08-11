@@ -274,7 +274,12 @@ export const CONSTRUCTIBILITY_RULES_V1: readonly ConstructibilityRuleV1[] = [
       + 'refuses any head whose state is not tombstone. Unlike R2/R3 this rule '
       + 'retires BOTH fork-resolution values, because the head codec permits an '
       + 'ACTIVE head to carry forkResolutionDigest -- R1 is a tombstone-only '
-      + 'refusal, so nothing retires these cells ahead of it.',
+      + 'refusal, so nothing retires these cells ahead of it. QUALIFIED BY THE '
+      + 'FIRING: that permission holds only ABOVE version zero, since :200 '
+      + 'refuses history digests on an ordinary initial head. Axis E is relative, '
+      + 'so the fixture moves the version and the cells stay constructible; had E '
+      + 'been absolute this half would have been unconstructible, owned by the '
+      + 'codec rather than by this rule.',
     refuses: (cell) =>
       cell.storageOperation === 'tombstone' && cell.candidateHeadState === 'active',
   },

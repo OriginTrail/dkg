@@ -113,10 +113,29 @@ export const VERDICT_DIFF_AXES_V1 = {
     'head-fork-quarantined',
     'transition-equivocation-quarantined',
   ],
+  /**
+   * EVERY optional member of `AgentProfileHeadAdvanceEvidenceV1`, not a chosen
+   * subset -- and pinned against core's source by the harvest test, because this
+   * axis was wrong and the prose above did not catch it.
+   *
+   * It originally listed four of the six, omitting `verifiedAuthoritySummary`
+   * and `forkEvidenceHeads`, which made the generated space a QUARTER of the
+   * declared input space while the file claimed to be grounded in the contract.
+   * Both omitted members change decisions: absent `verifiedAuthoritySummary`
+   * rejects at :237 where a bound one can reach accept at :271, and an absent
+   * `forkEvidenceHeads` is a disjunct of the OR at :452 rejecting at :462 where
+   * valid conflicts continue to quarantine at :483 or accept at :485.
+   *
+   * A table pinning every constructible cell over an axis that under-spans its
+   * own contract is the failure this harness exists to refuse: the coverage
+   * claim stays green while covering less than it says.
+   */
   J_evidencePresence: [
     'acceptedTransition',
     'tombstonePredecessor',
+    'verifiedAuthoritySummary',
     'forkResolution',
+    'forkEvidenceHeads',
     'forkBaseHead',
   ],
   K_candidateForkResolutionDigest: ['present', 'absent'],
