@@ -4989,11 +4989,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
   installVmReconcileActiveFetchCooldown(this: DKGAgent, localCgId: string, now: number): symbol {
     const owner = Symbol(localCgId);
-    this.vmReconcileFetchCooldownAt.delete(localCgId);
-    this.vmReconcileFetchCooldownOwner.delete(localCgId);
-    this.vmReconcileFetchCooldownAt.set(localCgId, now);
-    this.vmReconcileFetchCooldownOwner.set(localCgId, owner);
+    this.vmReconcileFetchCooldowns.delete(localCgId);
+    this.vmReconcileFetchCooldowns.set(localCgId, { startedAt: now, owner });
     return owner;
+  }
+
+  readVmReconcileActiveFetchCooldown(
+    this: DKGAgent,
+    localCgId: string,
+  ): Readonly<{ startedAt: number; owner: symbol }> | undefined {
+    return this.vmReconcileFetchCooldowns.get(localCgId);
   }
 
   clearVmReconcileActiveFetchCooldown(
@@ -5001,19 +5006,15 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     expectedOwner?: symbol,
   ): boolean {
-    if (
-      expectedOwner !== undefined
-      && this.vmReconcileFetchCooldownOwner.get(localCgId) !== expectedOwner
-    ) return false;
-    const deleted = this.vmReconcileFetchCooldownAt.delete(localCgId);
-    this.vmReconcileFetchCooldownOwner.delete(localCgId);
-    return deleted;
+    const current = this.vmReconcileFetchCooldowns.get(localCgId);
+    if (expectedOwner !== undefined && current?.owner !== expectedOwner) return false;
+    return this.vmReconcileFetchCooldowns.delete(localCgId);
   }
 
   shouldRunVmReconcileActiveFetch(this: DKGAgent, localCgId: string): boolean {
     const now = Date.now();
     this.pruneVmReconcileState(now);
-    const lastFetchAt = this.vmReconcileFetchCooldownAt.get(localCgId);
+    const lastFetchAt = this.vmReconcileFetchCooldowns.get(localCgId)?.startedAt;
     if (lastFetchAt !== undefined && now - lastFetchAt < DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
       return false;
     }
@@ -5044,13 +5045,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.deleteVmReconcileNegativeCacheEntry(oldestKey);
     }
 
-    for (const [localCgId, lastFetchAt] of this.vmReconcileFetchCooldownAt) {
-      if (now - lastFetchAt >= DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
+    for (const [localCgId, cooldown] of this.vmReconcileFetchCooldowns) {
+      if (now - cooldown.startedAt >= DKGAgentBase.VM_RECONCILE_SWEEP_INTERVAL_MS) {
         this.clearVmReconcileActiveFetchCooldown(localCgId);
       }
     }
-    while (this.vmReconcileFetchCooldownAt.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
-      const oldestKey = this.vmReconcileFetchCooldownAt.keys().next().value;
+    while (this.vmReconcileFetchCooldowns.size > DKGAgentBase.VM_RECONCILE_CG_STATE_MAX_ENTRIES) {
+      const oldestKey = this.vmReconcileFetchCooldowns.keys().next().value;
       if (oldestKey === undefined) break;
       this.clearVmReconcileActiveFetchCooldown(oldestKey);
     }
@@ -5490,7 +5491,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       this.log.info(ctx, `VM exact fetch for "${localCgId}" skipped by per-CG cooldown`);
       return noRecovery(initiallyEligible[0]?.ordinal, true);
     }
-    activeFetchCooldownOwner = this.vmReconcileFetchCooldownOwner.get(localCgId);
+    activeFetchCooldownOwner = this.readVmReconcileActiveFetchCooldown(localCgId)?.owner;
 
     // Capture the authenticated join-approval hint before consulting metadata:
     // older member snapshots can contain a legacy creator self-stamp that is
@@ -5964,7 +5965,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     } else {
       if (
         activeFetchCooldownOwner !== undefined
-        && this.vmReconcileFetchCooldownOwner.get(localCgId) === activeFetchCooldownOwner
+        && this.readVmReconcileActiveFetchCooldown(localCgId)?.owner === activeFetchCooldownOwner
       ) {
         this.installVmReconcileActiveFetchCooldown(localCgId, Date.now());
       }

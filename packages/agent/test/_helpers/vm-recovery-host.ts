@@ -43,12 +43,14 @@ export interface VmRecoveryHostInternals {
     };
   };
   preferredSyncPeers: Map<string, string>;
-  vmReconcileFetchCooldownAt: Map<string, number>;
-  vmReconcileFetchCooldownOwner: Map<string, symbol>;
   vmReconcileRotationState: Map<string, VmReconcileRotationRecord>;
   vmReconcileRotationNow(): number;
   vmReconcileRotationSlotKey(target: OrdinalRecoveryTarget): string;
   shouldRunVmReconcileActiveFetch(localCgId: string): boolean;
+  installVmReconcileActiveFetchCooldown(localCgId: string, now: number): symbol;
+  readVmReconcileActiveFetchCooldown(
+    localCgId: string,
+  ): Readonly<{ startedAt: number; owner: symbol }> | undefined;
   clearVmReconcileActiveFetchCooldown(localCgId: string, expectedOwner?: symbol): boolean;
   resolveCuratorPeerIdsForCg(
     contextGraphId: string,
