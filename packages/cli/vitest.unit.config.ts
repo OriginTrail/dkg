@@ -179,6 +179,9 @@ export default defineConfig({
           'test/daemon-context-graph-bootstrap.test.ts',
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
+          // #2052 D-10 — the same guard for the four system-record config
+          // controls: set at the CLI, asserted on the DKGAgent.create options.
+          'test/daemon-system-record-config-controls-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

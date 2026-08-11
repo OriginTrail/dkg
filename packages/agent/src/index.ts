@@ -402,3 +402,14 @@ export { selectSwmSnapshotCoverage } from './sync/requester/shared-memory-sync.j
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+// #2052 Stack D config controls (plan :1436). The pick helper is exported
+// because the CLI forwarding hop consumes it; the four resolvers are exported
+// for the later slices that will read each control.
+export {
+  pickSystemRecordConfigControlsV1,
+  systemRecordLegacyCapablePeerSelectionEnabledV1,
+  systemRecordProducerTrackingEnabledV1,
+  systemRecordProviderAdvertisementEnabledV1,
+  systemRecordRequesterLaneEnabledV1,
+  type SystemRecordConfigControlsV1,
+} from './system-records/config-controls-v1.js';
