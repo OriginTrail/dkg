@@ -4023,6 +4023,27 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.warmCoreFailedUnpins.delete(remotePeer);
   }
 
+  queueSelectedSwmFromPeerOnConnect(
+    this: DKGAgent,
+    remotePeer: string,
+    handleSyncError: (remotePeer: string, err: unknown) => void,
+    delayMs = 3000,
+  ): boolean {
+    // The same marker represents both an RFC-64-selected provider's first
+    // bounded pull and any continuation required after incomplete coverage.
+    // Establish it before entering the generic scheduler: selected recovery
+    // is independently enabled and must be able to start when broad
+    // sync-on-connect is disabled. Completion clears the marker; cooldown and
+    // reconciler backoff retain it so a later bootstrap pass can resume.
+    this.selectedSwmRetryRequiredPeers.add(remotePeer);
+    return this.queueSyncFromPeerOnConnect(
+      remotePeer,
+      handleSyncError,
+      delayMs,
+      { selectedSwmRetry: true },
+    );
+  }
+
   queueSyncFromPeerOnConnect(
     this: DKGAgent,
     remotePeer: string,

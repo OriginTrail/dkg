@@ -924,7 +924,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       listenPort: 0,
       bootstrapPeers: [],
       store: new OxigraphStore(),
-      syncOnConnectEnabled: true,
+      syncOnConnectEnabled: false,
       syncReconcilerEnabled: false,
       agentProfileHeartbeatMs: 0,
       rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
@@ -938,7 +938,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     });
     agents.push(receiver);
     const connect = vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
-    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+    const queue = vi.spyOn(receiver, 'queueSelectedSwmFromPeerOnConnect').mockReturnValue(true);
 
     await receiver.start();
     await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
@@ -950,8 +950,56 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       '12D3KooWCompleteSwmProvider',
       expect.any(Function),
       0,
-      { selectedSwmRetry: true },
     );
+  });
+
+  it('does not reseed a plane-proven SWM provider on periodic bootstrap refresh', async () => {
+    const policy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-rfc64-complete-provider-refresh-'));
+    tempDirs.push(dataDir);
+    const providerPeerId = '12D3KooWCompleteSwmProvider';
+    const receiver = await DKGAgent.create({
+      name: 'complete-provider-refresh-receiver',
+      dataDir,
+      listenHost: '127.0.0.1',
+      listenPort: 0,
+      bootstrapPeers: [],
+      store: new OxigraphStore(),
+      syncOnConnectEnabled: false,
+      syncReconcilerEnabled: false,
+      agentProfileHeartbeatMs: 0,
+      rfc64CatalogDeploymentProfile: NATIVE_DEPLOYMENT,
+      rfc64PublicCatalogBootstrap: {
+        retryIntervalMs: 1_000,
+        acceptedPublicPolicies: [{
+          policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+          targets: [],
+          completeSwmProviders: [providerPeerId],
+        }],
+      },
+    });
+    agents.push(receiver);
+    vi.spyOn(receiver, 'connectToPeerId').mockResolvedValue();
+    const queue = vi.spyOn(receiver, 'queueSyncFromPeerOnConnect').mockReturnValue(true);
+
+    await receiver.start();
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+    expect(queue).toHaveBeenCalledTimes(1);
+    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(true);
+
+    // The selected producer clears this marker only after exact plane proof.
+    (receiver as any).selectedSwmRetryRequiredPeers.delete(providerPeerId);
+    await vi.waitFor(() => {
+      expect(receiver.readRfc64PublicCatalogBootstrapStatusV1()?.pass).toBeGreaterThanOrEqual(2);
+    }, { timeout: 2_500, interval: 25 });
+    await receiver.whenRfc64PublicCatalogBootstrapIdleV1();
+
+    expect(queue).toHaveBeenCalledTimes(1);
+    expect((receiver as any).selectedSwmRetryRequiredPeers.has(providerPeerId)).toBe(false);
   });
 
   it('rejects bootstrap without persistence before node startup', async () => {
