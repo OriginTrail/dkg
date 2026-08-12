@@ -45,13 +45,25 @@ const GATE = Object.freeze({
   ownershipMint: 'createManagedOxigraphOwnershipControllerV1',
   publicError: 'ManagedOxigraphBackendUnownedError',
   /** The packed exports map must carry EXACTLY these keys. */
-  exportsAllowlist: ['.', './internal/managed-oxigraph-ownership-v1', './package.json'],
+  exportsAllowlist: [
+    '.',
+    './internal/managed-oxigraph-ownership-v1',
+    // #2052 D-8 (#53) — the legacy `agents` gate's two bounded reads. A DELIBERATE
+    // surface addition: the gate lives in the agent package and the reads must not,
+    // because only storage knows where reserved state and projections live. Narrow
+    // subpath rather than the barrel, so the reads stay reachable by exactly one
+    // consumer without widening what the root export promises.
+    './internal/system-record-legacy-gate-read-v1',
+    './package.json',
+  ],
   resolutionExpectations: [
     ['@origintrail-official/dkg-storage', true],
     ['@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1', true],
+    ['@origintrail-official/dkg-storage/internal/system-record-legacy-gate-read-v1', true],
     // The manifest is a STABLE metadata subpath, per ecosystem convention.
     ['@origintrail-official/dkg-storage/package.json', true],
     ['@origintrail-official/dkg-storage/dist/internal/managed-oxigraph-ownership-v1.js', false],
+    ['@origintrail-official/dkg-storage/dist/internal/system-record-legacy-gate-read-v1.js', false],
     ['@origintrail-official/dkg-storage/dist/store-priority-scheduler.js', false],
     ['@origintrail-official/dkg-storage/structured-mutation-materialization-internal', false],
     ['@origintrail-official/dkg-storage/dist/structured-mutation-materialization-internal.js', false],
