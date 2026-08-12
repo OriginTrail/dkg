@@ -241,6 +241,7 @@ const expectedRuntimeExports = Object.freeze([
   'decodeSystemRecordResponseFrameV1',
   'decodeSystemRecordResponseHeaderV1',
   'decodeUnpaddedBase64UrlV1',
+  'deriveAgentProfileAuthorityDispositionV1',
   'deriveAgentProfileOwnedSubjectV1',
   'digestSystemRecordBytesV1',
   'digestSystemRecordJsonV1',

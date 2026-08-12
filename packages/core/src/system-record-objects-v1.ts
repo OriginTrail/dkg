@@ -116,6 +116,12 @@ export {
   type SystemRecordAuthorityDecisionV1,
 } from './system-record-authority-v1-internal.js';
 
+export {
+  deriveAgentProfileAuthorityDispositionV1,
+  type AgentProfileAuthorityDispositionV1,
+  type AgentProfileDerivedAuthorityDispositionV1,
+} from './system-record-applied-disposition-v1-internal.js';
+
 export type { AgentProfileAppliedTransitionV1 } from './system-record-authority-types-v1-internal.js';
 
 export {

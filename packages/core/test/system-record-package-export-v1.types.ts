@@ -1,5 +1,7 @@
 import type {
   AgentProfileAcceptedAuthorityStateV1,
+  AgentProfileAuthorityDispositionV1,
+  AgentProfileDerivedAuthorityDispositionV1,
   AgentProfileActiveHeadObjectV1,
   AgentProfileAppliedTransitionV1,
   AgentProfileAuthorityTransitionV1,
@@ -146,5 +148,21 @@ type ForkResolutionScalarsAreStrings =
     : never;
 const forkResolutionScalarsAreStrings: ForkResolutionScalarsAreStrings = true;
 void forkResolutionScalarsAreStrings;
+
+// The derived disposition is WIDER than the domain the evaluator accepts, and
+// that width IS the safety property: an `undecided-` row must not be consumable
+// as a decision. Folding either member into the accepted union would make both
+// expectations below stale, and an unused @ts-expect-error is itself an error,
+// so this file stops compiling rather than quietly widening what counts as
+// decided.
+const derivedTombstone: AgentProfileDerivedAuthorityDispositionV1 = 'undecided-tombstone-disposition';
+const derivedShadow: AgentProfileDerivedAuthorityDispositionV1 = 'undecided-shadow-tombstone-disposition';
+// @ts-expect-error An undecided row is not an authority disposition.
+const forgedDisposition: AgentProfileAuthorityDispositionV1 = derivedTombstone;
+// @ts-expect-error An undecided row cannot populate the accepted authority state.
+const forgedAcceptedState: AgentProfileAcceptedAuthorityStateV1['disposition'] = derivedShadow;
+
+void forgedDisposition;
+void forgedAcceptedState;
 
 export {};
