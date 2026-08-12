@@ -1654,6 +1654,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     expect(columns).toContain('responder_session_expires_at');
     expect(columns).toContain('manifest_digest');
     expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
   });
 
   it('round-trips, overwrites, deletes, and expires checkpoints', () => {
@@ -1816,6 +1817,25 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     });
   });
 
+  it('persists terminal manifest completion across restart and clears it on rebind', () => {
+    const key = 'peer|cg|durable|data';
+    const store = checkpointStore();
+    store.setManifestBoundOffset(key, 6_357_721, manifestA, now, prefixA, true);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
+    expect(reopened.get(key)).toMatchObject({
+      offset: 6_357_721,
+      manifestDigest: manifestA,
+      manifestPrefixDigest: prefixA,
+      terminal: true,
+    });
+
+    reopened.setManifestBoundOffset(key, 512, manifestB, now + 1, prefixA);
+    expect(reopened.get(key)?.terminal).toBeUndefined();
+  });
+
   it('resets an offset when a responder session is bound to a different manifest', () => {
     const key = 'peer|cg|durable|data';
     const store = checkpointStore();
@@ -1912,6 +1932,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     expect(columns).toContain('responder_session_expires_at');
     expect(columns).toContain('manifest_digest');
     expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
   });
 
   it('adds manifest bindings to a V32 checkpoint table without losing progress', () => {
@@ -1948,6 +1969,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     );
     expect(columns).toContain('manifest_digest');
     expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
   });
 });
 

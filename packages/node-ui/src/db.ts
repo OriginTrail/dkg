@@ -321,6 +321,9 @@ export class DashboardDB {
       if (!columns.has('manifest_prefix_digest')) {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN manifest_prefix_digest TEXT;`);
       }
+      if (!columns.has('terminal')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1));`);
+      }
     };
     if (version > SCHEMA_VERSION) return;
     if (version === SCHEMA_VERSION) {
@@ -956,7 +959,8 @@ export class DashboardDB {
           responder_session_id TEXT,
           responder_session_expires_at INTEGER,
           manifest_digest TEXT,
-          manifest_prefix_digest TEXT
+          manifest_prefix_digest TEXT,
+          terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1))
         );
         CREATE INDEX IF NOT EXISTS idx_sync_checkpoints_expires_at
           ON sync_checkpoints(expires_at);
@@ -3377,13 +3381,14 @@ export class SqliteSyncCheckpointStore {
     expiresAtMs: number;
     manifestDigest?: SyncManifestDigest;
     manifestPrefixDigest?: SyncManifestPrefixDigest;
+    terminal?: boolean;
     responderSessionId?: string;
     responderSessionExpiresAtMs?: number;
   } | undefined {
     const row = this.db.prepare(
       `SELECT offset, updated_at, expires_at,
               responder_session_id, responder_session_expires_at,
-              manifest_digest, manifest_prefix_digest
+              manifest_digest, manifest_prefix_digest, terminal
          FROM sync_checkpoints WHERE key = ?`,
     ).get(key) as {
       offset: number;
@@ -3393,6 +3398,7 @@ export class SqliteSyncCheckpointStore {
       responder_session_expires_at: number | null;
       manifest_digest: SyncManifestDigest | null;
       manifest_prefix_digest: SyncManifestPrefixDigest | null;
+      terminal: number;
     } | undefined;
     if (!row) return undefined;
     if (row.expires_at < now) {
@@ -3409,6 +3415,7 @@ export class SqliteSyncCheckpointStore {
       offset: row.offset,
       updatedAtMs: row.updated_at,
       expiresAtMs: row.expires_at,
+      ...(row.terminal === 1 ? { terminal: true } : {}),
       ...(row.manifest_digest ? { manifestDigest: row.manifest_digest } : {}),
       ...(row.manifest_prefix_digest
         ? { manifestPrefixDigest: row.manifest_prefix_digest }
@@ -3435,6 +3442,7 @@ export class SqliteSyncCheckpointStore {
         expires_at = excluded.expires_at,
         manifest_digest = NULL,
         manifest_prefix_digest = NULL,
+        terminal = 0,
         responder_session_id = CASE
           WHEN sync_checkpoints.manifest_digest IS NULL
            AND sync_checkpoints.responder_session_expires_at > ?
@@ -3456,6 +3464,7 @@ export class SqliteSyncCheckpointStore {
     manifestDigest: SyncManifestDigest,
     nowMs = this.clock(),
     manifestPrefixDigest?: SyncManifestPrefixDigest,
+    terminal = false,
   ): void {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
@@ -3472,14 +3481,15 @@ export class SqliteSyncCheckpointStore {
     this.db.prepare(`
       INSERT INTO sync_checkpoints (
         key, offset, updated_at, expires_at,
-        manifest_digest, manifest_prefix_digest
-      ) VALUES (?, ?, ?, ?, ?, ?)
+        manifest_digest, manifest_prefix_digest, terminal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET
         offset = excluded.offset,
         updated_at = excluded.updated_at,
         expires_at = excluded.expires_at,
         manifest_digest = excluded.manifest_digest,
         manifest_prefix_digest = excluded.manifest_prefix_digest,
+        terminal = excluded.terminal,
         responder_session_id = CASE
           WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
            AND sync_checkpoints.responder_session_expires_at > ?
@@ -3499,6 +3509,7 @@ export class SqliteSyncCheckpointStore {
       nowMs + this.ttlMs,
       manifestDigest,
       manifestPrefixDigest ?? null,
+      terminal ? 1 : 0,
       nowMs,
       nowMs,
     );
@@ -3551,6 +3562,11 @@ export class SqliteSyncCheckpointStore {
           ELSE excluded.expires_at
         END,
         manifest_digest = excluded.manifest_digest,
+        terminal = CASE
+          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
+            THEN sync_checkpoints.terminal
+          ELSE 0
+        END,
         manifest_prefix_digest = CASE
           WHEN excluded.manifest_prefix_digest IS NOT NULL
             THEN excluded.manifest_prefix_digest

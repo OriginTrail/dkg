@@ -76,6 +76,39 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
  * through the REAL resolver/projection path instead of injecting it here.
  */
 describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)', () => {
+  it('dispatches one durable bridge call when the host owns graph-level recovery', async () => {
+    const peerIds = ['peer-a', 'peer-b', 'peer-c'];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup({
+      contextGraphId: 'cg-graph-owner',
+      includeSharedMemory: false,
+      graphOwnedDurableRecovery: true,
+    }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurable':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-a']);
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(2);
+  });
+
   it('stops the walk at the first peer that proves every requested plane', async () => {
     const peerIds = Array.from({ length: 20 }, (_, i) => `peer-${i}`);
     const durableOrder: string[] = [];

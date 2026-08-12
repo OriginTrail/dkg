@@ -164,4 +164,19 @@ describe('manifest-bound sync continuation', () => {
     });
     expect(store.get('data', 1_003)?.responderSessionId).toBeUndefined();
   });
+
+  it('persists terminal verification with the manifest-bound full prefix', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setManifestBoundOffset('data', 6_357_721, digestA, 1_001, prefixDigest, true);
+
+    expect(store.get('data', 1_002)).toMatchObject({
+      offset: 6_357_721,
+      manifestDigest: digestA,
+      manifestPrefixDigest: prefixDigest,
+      terminal: true,
+    });
+
+    store.setManifestBoundOffset('data', 512, digestB, 1_003, prefixDigest, false);
+    expect(store.get('data', 1_004)?.terminal).toBeUndefined();
+  });
 });

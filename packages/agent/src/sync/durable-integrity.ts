@@ -159,6 +159,34 @@ function compareUnicodeCodePoints(leftValue: string, rightValue: string): number
   return left.length - right.length;
 }
 
+function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
+  const hash = createHash('sha256');
+  const encoder = new TextEncoder();
+  const append = (value: string): void => {
+    const bytes = encoder.encode(value);
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.byteLength);
+    hash.update(length);
+    hash.update(bytes);
+  };
+  const canonical = [...rows].sort((left, right) => (
+    compareUnicodeCodePoints(left.subject, right.subject)
+    || compareUnicodeCodePoints(left.predicate, right.predicate)
+    || compareUnicodeCodePoints(left.object, right.object)
+    || compareUnicodeCodePoints(left.graph, right.graph)
+  ));
+  append('origintrail.dkg.durable-graph-metadata');
+  append('1');
+  append(String(canonical.length));
+  for (const row of canonical) {
+    append(row.subject);
+    append(row.predicate);
+    append(row.object);
+    append(row.graph);
+  }
+  return hash.digest('hex');
+}
+
 function readOrderedGraphScopedDescriptors(
   dataQuads: readonly Quad[],
   metaQuads: readonly Quad[],
@@ -186,7 +214,7 @@ function readOrderedGraphScopedDescriptors(
 }
 
 export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
-export const DURABLE_MANIFEST_DIGEST_VERSION = 1;
+export const DURABLE_MANIFEST_DIGEST_VERSION = 2;
 export const DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest-prefix';
 
 export interface GraphScopedDurableManifestPlan {
@@ -241,6 +269,7 @@ export function encodeGraphScopedDurableManifest(
     append(descriptor.claimedRootHex);
     append(String(descriptor.privateTripleCount));
     append(descriptor.privateRootHex ?? '');
+    append(descriptor.metadataDigestHex);
   }
 
   const encoded = new Uint8Array(byteLength);
@@ -518,6 +547,8 @@ export interface GraphScopedDescriptor {
   privateRoot?: Uint8Array;
   privateRootHex?: string;
   claimedRootHex: string;
+  /** Canonical digest of every metadata row that will drive materialization. */
+  metadataDigestHex: string;
 }
 
 interface IntegrityMetadataIndex {
@@ -1684,6 +1715,7 @@ function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphSc
         }
       : {}),
     claimedRootHex: normalizeHex32(requireSingle(MERKLE_ROOT, 'merkleRoot'), 'merkleRoot'),
+    metadataDigestHex: digestGraphScopedMetadataRows(rows),
   };
 }
 

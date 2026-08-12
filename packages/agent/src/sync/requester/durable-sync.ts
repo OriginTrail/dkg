@@ -239,6 +239,7 @@ export interface DurableSyncContext {
     offset: number,
     manifestDigest?: DurableManifestDigest,
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal?: boolean,
   ) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
@@ -315,6 +316,7 @@ async function runDurableSyncWithBudget(
       countProgress?: boolean;
       emptyPhase?: boolean;
       manifestPlan?: GraphScopedDurableManifestPlan;
+      terminal?: boolean;
     },
   ) => {
     const countProgress = options.countProgress ?? true;
@@ -343,7 +345,33 @@ async function runDurableSyncWithBudget(
       checkpointAdvances,
     });
     if (!options.updateCheckpoint) return;
-    if (result.completed) deleteCheckpoint(result.checkpointKey);
+    if (result.completed && options.manifestPlan && options.terminal === true) {
+      if (result.nextOffset !== options.manifestPlan.manifestRowCount) {
+        deleteCheckpoint(result.checkpointKey);
+        throw new Error(
+          `Refusing to persist terminal durable DATA offset ${result.nextOffset}: `
+          + `manifest requires ${options.manifestPlan.manifestRowCount}`,
+        );
+      }
+      const prefix = graphScopedDurableManifestPrefixAtOffset(
+        options.manifestPlan,
+        result.nextOffset,
+      );
+      if (!prefix) {
+        deleteCheckpoint(result.checkpointKey);
+        throw new Error(
+          `Refusing to persist terminal durable DATA offset ${result.nextOffset}: `
+          + 'the completed META manifest has no matching graph boundary',
+        );
+      }
+      setCheckpoint(
+        result.checkpointKey,
+        result.nextOffset,
+        options.manifestPlan.manifestDigest,
+        prefix.prefixDigest,
+        true,
+      );
+    } else if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
       if (options.manifestPlan) {
         const prefix = graphScopedDurableManifestPrefixAtOffset(
@@ -362,6 +390,7 @@ async function runDurableSyncWithBudget(
           result.nextOffset,
           options.manifestPlan.manifestDigest,
           prefix.prefixDigest,
+          false,
         );
       } else {
         setCheckpoint(result.checkpointKey, result.nextOffset);
@@ -785,6 +814,7 @@ async function runDurableSyncWithBudget(
           updateCheckpoint: updateDataCheckpoint,
           emptyPhase,
           manifestPlan: graphScopedManifest ?? undefined,
+          terminal: reachedContextGraphTerminalBoundary,
         });
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
@@ -869,6 +899,7 @@ async function runDurableSyncWithBudget(
       recordPhaseOutcome(effectiveDataResult, {
         updateCheckpoint: updateDataCheckpoint,
         manifestPlan: graphScopedManifest ?? undefined,
+        terminal: reachedContextGraphTerminalBoundary,
       });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
       if (exactFetchDispositionIndex !== undefined) {

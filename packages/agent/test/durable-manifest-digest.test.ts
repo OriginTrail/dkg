@@ -78,6 +78,7 @@ function descriptor(overrides: Partial<GraphScopedDescriptor> = {}): GraphScoped
     publicTripleCount: 2,
     privateTripleCount: 0,
     claimedRootHex: '11'.repeat(32),
+    metadataDigestHex: '44'.repeat(32),
     ...overrides,
   };
 }
@@ -139,12 +140,34 @@ describe('canonical durable manifest digest', () => {
       descriptor({ publicTripleCount: 3 }),
       descriptor({ claimedRootHex: '22'.repeat(32) }),
       descriptor({ privateTripleCount: 1, privateRootHex: '33'.repeat(32) }),
+      descriptor({ metadataDigestHex: '55'.repeat(32) }),
     ];
 
     for (const mutation of mutations) {
       expect(sha256(encodeGraphScopedDurableManifest(CONTEXT_GRAPH_ID, [mutation])))
         .not.toBe(baseDigest);
     }
+  });
+
+  it('changes when receipt or materialization metadata changes without changing DATA', () => {
+    const original = asset(1);
+    const transactionHash = `0x${'ab'.repeat(32)}`;
+    const withReceipt: Quad[] = [
+      ...original.meta,
+      {
+        subject: original.meta[0]!.subject,
+        predicate: 'http://dkg.io/ontology/transactionHash',
+        object: `"${transactionHash}"`,
+        graph: original.meta[0]!.graph,
+      },
+    ];
+
+    const before = createGraphScopedDurableManifestPlan(original.meta, CONTEXT_GRAPH_ID);
+    const after = createGraphScopedDurableManifestPlan(withReceipt, CONTEXT_GRAPH_ID);
+
+    expect(after?.manifestRowCount).toBe(before?.manifestRowCount);
+    expect(after?.descriptors[0]?.claimedRootHex).toBe(before?.descriptors[0]?.claimedRootHex);
+    expect(after?.manifestDigest).not.toBe(before?.manifestDigest);
   });
 
   it('is order-sensitive using the same ordered descriptors as the DATA plan', () => {

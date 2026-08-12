@@ -22,6 +22,8 @@ export interface SyncCheckpointEntry {
   offset: number;
   updatedAtMs: number;
   expiresAtMs: number;
+  /** Full manifest verification and atomic materialization completed at this offset. */
+  terminal?: boolean;
   /** Canonical META generation that gives this DATA offset/session meaning. */
   manifestDigest?: DurableManifestDigest;
   /** Canonical descriptor prefix already verified through `offset`. */
@@ -50,6 +52,7 @@ export interface SyncCheckpointStore {
     manifestDigest: DurableManifestDigest,
     nowMs?: number,
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal?: boolean,
   ): void;
   /** Persist the responder snapshot token without advancing the verified offset. */
   setResponderSession?(
@@ -91,6 +94,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
         offset: entry.offset,
         updatedAtMs: entry.updatedAtMs,
         expiresAtMs: entry.expiresAtMs,
+        ...(entry.terminal ? { terminal: true } : {}),
         ...(entry.manifestDigest ? { manifestDigest: entry.manifestDigest } : {}),
         ...(entry.manifestPrefixDigest
           ? { manifestPrefixDigest: entry.manifestPrefixDigest }
@@ -128,6 +132,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
     manifestDigest: DurableManifestDigest,
     nowMs = this.clock(),
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal = false,
   ): void {
     if (!Number.isSafeInteger(value) || value < 0) {
       throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
@@ -148,6 +153,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       updatedAtMs: nowMs,
       expiresAtMs: nowMs + this.ttlMs,
       manifestDigest,
+      ...(terminal ? { terminal: true } : {}),
       ...(manifestPrefixDigest ? { manifestPrefixDigest } : {}),
       ...(bindingMatches
         && existing?.responderSessionId
@@ -187,6 +193,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
         : bindingMatches && existing?.manifestPrefixDigest
           ? { manifestPrefixDigest: existing.manifestPrefixDigest }
           : {}),
+      ...(bindingMatches && existing?.terminal ? { terminal: true } : {}),
       responderSessionId: sessionId,
       responderSessionExpiresAtMs: expiresAtMs,
     });
@@ -199,6 +206,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       offset: existing.offset,
       updatedAtMs: existing.updatedAtMs,
       expiresAtMs: existing.expiresAtMs,
+      ...(existing.terminal ? { terminal: true } : {}),
       ...(existing.manifestDigest ? { manifestDigest: existing.manifestDigest } : {}),
       ...(existing.manifestPrefixDigest
         ? { manifestPrefixDigest: existing.manifestPrefixDigest }

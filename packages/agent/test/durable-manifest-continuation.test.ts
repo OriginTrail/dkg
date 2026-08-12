@@ -219,7 +219,7 @@ function createTwoRoundHarness(
         return 'applied';
       },
       deleteCheckpoint: (key) => deleteSyncPageCheckpoint(checkpointStore, key),
-      setCheckpoint: (key, offset, manifestDigest, manifestPrefixDigest) => {
+      setCheckpoint: (key, offset, manifestDigest, manifestPrefixDigest, terminal) => {
         if (manifestDigest) {
           checkpointStore.setManifestBoundOffset(
             key,
@@ -227,6 +227,7 @@ function createTwoRoundHarness(
             manifestDigest,
             Date.now(),
             manifestPrefixDigest,
+            terminal,
           );
         }
         else checkpointStore.set(key, offset);
@@ -288,7 +289,11 @@ describe('manifest-bound durable DATA continuation', () => {
       manifestDigest: established?.manifestDigest,
     });
     expect(second.complete).toBe(true);
-    expect(harness.checkpointStore.get(checkpointKey)).toBeUndefined();
+    expect(harness.checkpointStore.get(checkpointKey)).toMatchObject({
+      offset: x.flatMap((entry) => entry.payload).length,
+      manifestDigest: established?.manifestDigest,
+      terminal: true,
+    });
   });
 
   it.each([
@@ -343,7 +348,11 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(harness.dataRequests[1]?.manifestDigest)
       .toBe(createGraphScopedDurableManifestPlan(yMeta, contextGraphId)?.manifestDigest);
     expect(second.complete).toBe(true);
-    expect(harness.checkpointStore.get(checkpointKey)).toBeUndefined();
+    expect(harness.checkpointStore.get(checkpointKey)).toMatchObject({
+      offset: y.flatMap((entry) => entry.payload).length,
+      manifestDigest: createGraphScopedDurableManifestPlan(yMeta, contextGraphId)?.manifestDigest,
+      terminal: true,
+    });
   });
 
   it.each([

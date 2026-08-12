@@ -399,6 +399,17 @@ export {
   type DurableProgressClassificationOptions,
   type DurableProgressSummary,
 } from './sync/durable-progress.js';
+export {
+  DurableRecoveryCoordinator,
+  classifyDurableRecoverySlice,
+  rankDurableRecoveryPeers,
+  selectCanonicalDurableRecoveryManifest,
+  type DurableRecoveryContinuationOutcome,
+  type DurableRecoveryOwnerControl,
+  type DurableRecoveryPeerCandidate,
+  type DurableRecoveryPeerHealth,
+  type DurableRecoverySliceEvidence,
+} from './sync/durable-recovery-coordinator.js';
 // The ONE reduction for `SwmSnapshotCoverage`. Exported so the CLI catch-up
 // walk reduces across peers with the same rule the agent uses across Context
 // Graphs — two implementations is how a numerator and a denominator end up

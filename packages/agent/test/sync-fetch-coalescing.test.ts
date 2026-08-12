@@ -1175,7 +1175,7 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
-  it('does not join catch-up rounds with different shareable identity fields', async () => {
+  it('joins durable recovery for one graph across caller-specific catch-up options', async () => {
     const cases: Array<{
       name: string;
       firstOptions?: {
@@ -1222,7 +1222,7 @@ describe('DKGAgent sync fetch coalescing', () => {
           agent.syncContextGraphFromConnectedPeers('coalesced-cg', testCase.firstOptions),
           agent.syncContextGraphFromConnectedPeers('coalesced-cg', testCase.secondOptions),
         ]);
-        expect(durableSyncs, testCase.name).toBe(2);
+        expect(durableSyncs, testCase.name).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }

@@ -337,6 +337,14 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     syncCapable.push(peerId);
   }
   syncCapablePeers = syncCapable.length;
+  const graphOwnedDurablePeerId = request.graphOwnedDurableRecovery
+    ? (prepared.authoritativePeerId && syncCapable.includes(prepared.authoritativePeerId)
+        ? prepared.authoritativePeerId
+        : syncCapable[0])
+    : undefined;
+  const initialWalkPeers = graphOwnedDurablePeerId !== undefined && !request.includeSharedMemory
+    ? [graphOwnedDurablePeerId]
+    : syncCapable;
 
   // Only a plane-specific authority may let one snapshot stand for the WHOLE
   // graph: metadata resolves the durable/VM authority, while an explicit
@@ -414,11 +422,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
   const syncPeer = async (peerId: string, pass: CatchupPassContext): Promise<PeerRound> => {
-    const fromDurableAuthority = prepared.authoritativePeerId !== undefined
-      && peerId === prepared.authoritativePeerId;
+    const fromDurableAuthority = graphOwnedDurablePeerId !== undefined
+      ? peerId === graphOwnedDurablePeerId
+      : prepared.authoritativePeerId !== undefined && peerId === prepared.authoritativePeerId;
     const fromSharedMemoryAuthority = authoritativeSharedMemoryPeerIds.size > 0
       ? authoritativeSharedMemoryPeerIds.has(peerId)
-      : fromDurableAuthority;
+      : prepared.authoritativePeerId !== undefined && peerId === prepared.authoritativePeerId;
     // A deferred plane can burn up to CATCHUP_BACKPRESSURE_MAX_WAIT_MS (180 s)
     // inside a single admission, so a continuation pass can go past its budget
     // between one peer and the next. Decline to START another peer rather than
@@ -480,7 +489,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     // cannot take it away.
     const hasDedicatedDurableAuthority = prepared.authoritativePeerId !== undefined;
     const hasDedicatedSharedMemoryAuthority = authoritativeSharedMemoryPeerIds.size > 0;
-    const needDurable = !pass.sharedMemoryOnly
+    const needDurable = (graphOwnedDurablePeerId === undefined || peerId === graphOwnedDurablePeerId)
+      && !pass.sharedMemoryOnly
       && (!optimize || !authorityProven.durable)
       && (
         !optimize
@@ -784,7 +794,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // Pass 1 IS today's walk: same peers, both planes, no deadline. Everything the
   // repeat loop adds happens after it returns, so a node with extra passes
   // disabled behaves exactly as it did before #2050.
-  await runWalk(syncCapable, { sharedMemoryOnly: false });
+  await runWalk(initialWalkPeers, { sharedMemoryOnly: false });
 
   // The bounded, progress-aware repeat (#2050). A receiver that ran out of clock
   // mid-manifest used to terminate `unreachable` with a partial graph and no
