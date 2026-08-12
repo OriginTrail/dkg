@@ -68,6 +68,9 @@ function harvest(source: URL): {
 
 describe('core authority decision reason harvest', () => {
   const { reject, quarantine } = harvest(CORE_SRC);
+  // The delegate's rejects escape verbatim through the same decision object, so
+  // the observable codomain is the pair, never this file alone.
+  const delegatedReject = harvest(CORE_DELEGATE_SRC).reject;
 
   it('pins every reject literal and the sites that produce it', () => {
     expect(Object.fromEntries([...reject].sort())).toEqual(
@@ -83,9 +86,33 @@ describe('core authority decision reason harvest', () => {
   // shrinks, someone made core more observable and the table can say more; if it
   // grows, a new branch became unobservable and Phase 3 inherits the problem.
   it('records exactly the reject literals that are observationally ambiguous', () => {
-    const ambiguous = [...reject].filter(([, sites]) => sites.length > 1).map(([l]) => l);
+    // Quantified over BOTH producers, because that is what the register claims.
+    // Counting sites per file would call a literal unambiguous whenever each
+    // file produces it once -- which is precisely how this shipped saying five.
+    const sites = new Map<string, number[]>();
+    for (const map of [reject, delegatedReject]) {
+      for (const [literal, found] of map) {
+        sites.set(literal, [...(sites.get(literal) ?? []), ...found]);
+      }
+    }
+    const ambiguous = [...sites].filter(([, s]) => s.length > 1).map(([l]) => l);
     expect(ambiguous.sort()).toEqual([...CORE_AMBIGUOUS_REJECT_LITERALS_V1].sort());
-    expect(ambiguous).toHaveLength(5);
+    expect(ambiguous).toHaveLength(6);
+  });
+
+  // THE GUARD IS KEYED ON THE MECHANISM, NOT ON THE LITERAL THAT ESCAPED.
+  // A pin naming 'verification clock is invalid' would go green the moment that
+  // particular literal was reworded, while the next cross-file duplicate walked
+  // through the same gap. The mechanism is: a literal both files can produce is
+  // observationally ambiguous no matter how few sites either file has, so the
+  // key INTERSECTION of the two maps must be a subset of the register.
+  it('registers every literal both files can produce, so a cross-file duplicate cannot escape', () => {
+    const crossFile = [...reject.keys()].filter((literal) => delegatedReject.has(literal));
+    // Non-vacuity: an empty intersection would satisfy the subset check trivially.
+    expect(crossFile.length).toBeGreaterThan(0);
+    for (const literal of crossFile) {
+      expect(CORE_AMBIGUOUS_REJECT_LITERALS_V1).toContain(literal);
+    }
   });
 
   // Quarantine is a different kind of thing wearing the same field name: a

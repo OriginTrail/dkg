@@ -105,24 +105,41 @@ export const CORE_ALL_REJECT_LITERALS_V1: readonly string[] = Object.freeze([
 ]);
 
 /**
- * THE FIVE OBSERVATIONALLY AMBIGUOUS LITERALS -- a Phase 1 FINDING, not a
+ * THE SIX OBSERVATIONALLY AMBIGUOUS LITERALS -- a Phase 1 FINDING, not a
  * harness limitation.
  *
  * `{ decision: 'reject', reason: string }` carries no origin, so the producing
- * site is not recoverable from the decision object. For these five the
+ * site is not recoverable from the decision object. For these six the
  * literal->site map is one-to-many, which means core has branches that are
  * indistinguishable to ANY caller, this diff included.
  *
  * BEARS ON PHASE 3: if routing the live path through core must preserve
  * behaviour, it cannot preserve a distinction no observer can make.
  *
+ * THE COUNT IS SCOPED TO THE OBSERVABLE CODOMAIN, NOT TO ONE FILE, AND THE
+ * FIRST VERSION OF IT WAS NOT. It filtered the PRIMARY map alone and reported
+ * FIVE. Delegated rejects escape verbatim through the same decision object, so
+ * a literal produced ONCE IN EACH FILE is one-to-many to a caller while being
+ * one-to-one in either map on its own. Exactly one literal has that shape --
+ * 'verification clock is invalid', at authority :97 and authority-verification
+ * :30 -- and it was missed, so the finding said five when a caller sees six.
+ *
+ * THE CLASS, NOT THE INSTANCE: CORE_ALL_REJECT_LITERALS_V1 twenty lines above
+ * ALREADY unions both maps. The delegation sweep was applied to that consumer
+ * and not to this one, though both derive from the same two maps -- so the
+ * defect was the sweep's discriminator being scoped to a file, not a missing
+ * measurement. Any future constant derived from these maps is quantified over
+ * the merged pair, and the harvest suite pins that as a mechanism rather than
+ * as this literal's name.
+ *
  * Closing the reject union would dissolve this. It is a recorded candidate for
  * Phase 3 or later and deliberately NOT done here -- it would change the thing
  * being measured in the middle of measuring it.
  */
 export const CORE_AMBIGUOUS_REJECT_LITERALS_V1 = Object.freeze(
-  Object.keys(CORE_REJECT_REASON_SITES_V1).filter(
-    (literal) => (CORE_REJECT_REASON_SITES_V1[literal] ?? []).length > 1,
+  CORE_ALL_REJECT_LITERALS_V1.filter(
+    (literal) => (CORE_REJECT_REASON_SITES_V1[literal] ?? []).length
+      + (CORE_DELEGATED_REJECT_REASON_SITES_V1[literal] ?? []).length > 1,
   ),
 );
 
