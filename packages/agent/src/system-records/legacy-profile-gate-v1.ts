@@ -64,30 +64,60 @@ export interface LegacyAgentProfileAppliedRootV1 {
 }
 
 /**
+ * Request one's answer: the applied records found, and the roots it could NOT decide.
+ *
+ * `unclassifiedRoots` exists because absence and ignorance are different answers and the
+ * gate cannot tell them apart on its own. A root that was asked about and is simply
+ * missing from `records` means "no applied record", and its quads take the ordinary
+ * legacy path. A root the implementation could not classify — because a bounded response
+ * ran out before reaching it — must NOT take that path, or honouring a byte cap silently
+ * becomes an insertion of unsigned quads over signed state. :926 requires the opposite
+ * ("signed-root quads not classified within the selected bounded batch are withheld"), so
+ * the implementation names what it could not decide and the gate withholds it.
+ */
+export interface LegacyAgentProfileAppliedRootsV1 {
+  readonly records: readonly LegacyAgentProfileAppliedRootV1[];
+  /** Requested roots this bounded response did not decide. Their quads are withheld. */
+  readonly unclassifiedRoots: readonly string[];
+}
+
+/** Request two's answer: the projection rows, and whether they are the exact set. */
+export interface LegacyAgentProfileProjectionV1 {
+  readonly rows: readonly Quad[];
+  /**
+   * True when a bound stopped this response short of the exact projection. Row-count
+   * overflow is visible to the gate; the 2-MiB byte bound is not, so the implementation
+   * reports it. Either way every covered root is withheld rather than compared against a
+   * partial projection, which would misread a real duplicate as a conflict.
+   */
+  readonly truncated: boolean;
+}
+
+/**
  * The two bounded store reads this gate is allowed for one legacy page.
  *
  * Implementations own the batching; the gate guarantees it calls each at most once per
  * page and never per root or per quad.
+ *
+ * BOTH BYTE CAPS BELONG TO THE IMPLEMENTATION, AND NEITHER MAY BE HONOURED SILENTLY.
+ * :926 caps request one at 1 MiB and request two at 2 MiB, and by the time the gate holds
+ * a result the bytes have already transferred — so the gate can only refuse to trust an
+ * answer, never prevent it. An implementation that cannot honour a cap reports the
+ * shortfall (`unclassifiedRoots` / `truncated`); it must not simply return less, because
+ * a short response is indistinguishable from "no record here" and so fails toward
+ * insertion — the one direction :1505 forbids.
  */
 export interface LegacyAgentProfileGateLookupV1 {
-  /**
-   * Request one: which of these derived roots carry an applied signed record.
-   *
-   * :926 puts the owned-subject lists in this response and caps it at 1 MiB. That byte
-   * cap belongs to the implementation, because by the time the gate holds the result the
-   * bytes have already been transferred — the gate can only refuse to trust an oversized
-   * answer, which it does per record below. An implementation that cannot honour the cap
-   * must return fewer roots rather than a larger response.
-   */
+  /** Request one: which of these derived roots carry an applied signed record. */
   lookupAppliedRoots(
     roots: readonly string[],
     signal?: AbortSignal,
-  ): Promise<readonly LegacyAgentProfileAppliedRootV1[]>;
+  ): Promise<LegacyAgentProfileAppliedRootsV1>;
   /** Request two: the exact projection triples owned by these subjects. */
   lookupProjectionMembership(
     subjects: readonly string[],
     signal?: AbortSignal,
-  ): Promise<readonly Quad[]>;
+  ): Promise<LegacyAgentProfileProjectionV1>;
 }
 
 export interface LegacyAgentProfileGateResultV1 {
@@ -209,8 +239,13 @@ export function createLegacyAgentProfileGateV1(
         const applied = await lookup.lookupAppliedRoots(selected, signal);
         storeRequests += 1;
         const appliedByRoot = new Map<string, LegacyAgentProfileAppliedRootV1>();
+        // Roots the response itself declined to decide. Kept separate from `untrusted`
+        // only for readability; both end in the same disposition, because "the batch ran
+        // out before this root" and "this record's table cannot be believed" are the same
+        // thing to a gate that must not insert on an unverified assumption.
+        const undecided = new Set(applied.unclassifiedRoots);
         const untrusted = new Set<string>();
-        for (const record of applied) {
+        for (const record of applied.records) {
           if (!roots.has(record.root)) continue;
           // Fail closed on data crossing the injected lookup boundary. A well-formed
           // record cannot exceed the owned-subject cap, so an over-cap table means this
@@ -223,7 +258,7 @@ export function createLegacyAgentProfileGateV1(
           appliedByRoot.set(record.root, record);
         }
         for (const root of selected) {
-          if (untrusted.has(root)) {
+          if (untrusted.has(root) || undecided.has(root)) {
             disposition.set(root, { kind: 'unclassified' });
             continue;
           }
@@ -245,15 +280,16 @@ export function createLegacyAgentProfileGateV1(
         if (subjects.size > SYSTEM_RECORD_MAX_OWNED_SUBJECTS) {
           for (const root of appliedByRoot.keys()) disposition.set(root, { kind: 'unclassified' });
         } else if (subjects.size > 0) {
-          const rows = await lookup.lookupProjectionMembership([...subjects].sort(), signal);
+          const membership = await lookup.lookupProjectionMembership([...subjects].sort(), signal);
           storeRequests += 1;
-          if (rows.length > SYSTEM_RECORD_MAX_PROJECTION_QUADS) {
-            // An over-cap response cannot be trusted as the exact applied set, so every
-            // covered root falls back to withhold rather than being compared against a
-            // truncated projection.
+          // Two independent ways this response can fail to be the exact projection: a row
+          // count the gate can see, and a byte bound only the implementation can. Both
+          // land here, because a partial projection makes a real duplicate look like a
+          // conflict, and comparing against it would withhold on manufactured evidence.
+          if (membership.truncated || membership.rows.length > SYSTEM_RECORD_MAX_PROJECTION_QUADS) {
             for (const root of appliedByRoot.keys()) disposition.set(root, { kind: 'unclassified' });
           } else {
-            for (const row of rows) projection.add(projectionKeyV1(row));
+            for (const row of membership.rows) projection.add(projectionKeyV1(row));
           }
         }
       }

@@ -50,12 +50,26 @@ function projectionRow(subject: string, predicate: string, object: string): Quad
 /**
  * A lookup that answers from an explicit applied set and records its call shape, so every
  * assertion about the store budget is made against calls that actually happened.
+ *
+ * `bounds` models an implementation that hit one of :926's byte caps. It is deliberately
+ * expressed as a response the gate RECEIVES rather than as a shorter list, because the
+ * whole point of the reported channel is that a short list is indistinguishable from
+ * "no record here" — a fixture that simulated a byte cap by returning fewer records
+ * would be testing the very confusion the contract exists to remove.
  */
-function fakeLookup(records: readonly LegacyAgentProfileAppliedRootV1[], projection: readonly Quad[]) {
-  const lookupAppliedRoots = vi.fn(async (roots: readonly string[]) =>
-    records.filter((record) => roots.includes(record.root)));
-  const lookupProjectionMembership = vi.fn(async (subjects: readonly string[]) =>
-    projection.filter((row) => subjects.includes(row.subject)));
+function fakeLookup(
+  records: readonly LegacyAgentProfileAppliedRootV1[],
+  projection: readonly Quad[],
+  bounds: { unclassifiedRoots?: readonly string[]; truncated?: boolean } = {},
+) {
+  const lookupAppliedRoots = vi.fn(async (roots: readonly string[]) => ({
+    records: records.filter((record) => roots.includes(record.root)),
+    unclassifiedRoots: (bounds.unclassifiedRoots ?? []).filter((root) => roots.includes(root)),
+  }));
+  const lookupProjectionMembership = vi.fn(async (subjects: readonly string[]) => ({
+    rows: projection.filter((row) => subjects.includes(row.subject)),
+    truncated: bounds.truncated ?? false,
+  }));
   const lookup: LegacyAgentProfileGateLookupV1 = { lookupAppliedRoots, lookupProjectionMembership };
   return { lookup, lookupAppliedRoots, lookupProjectionMembership };
 }
@@ -427,6 +441,46 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
     expect(result.withheld).toHaveLength(1);
     expect(result.unclassifiedRoots).toBe(1);
     expect(result.discardedDuplicates).toBe(0);
+    expect(result.storeRequests).toBe(2);
+  });
+
+  // :926 request one — "one batched VALUES query ... with a 1-MiB response cap".
+  //
+  // The cap can only be honoured by answering about fewer roots, and an unmentioned root
+  // is otherwise indistinguishable from one that simply has no applied record. The two
+  // roots below are BOTH absent from `records`; the reported channel is the only thing
+  // that differs between them, so this fails if the gate ever reads omission as absence.
+  it('withholds a root the applied-roots response reports it could not classify', async () => {
+    const { lookup, lookupProjectionMembership } = fakeLookup([], [], {
+      unclassifiedRoots: [OTHER_ROOT],
+    });
+    const page = [quad(ROOT, 'p', 'o'), quad(OTHER_ROOT, 'p', 'o')];
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(page);
+
+    expect(result.insert).toEqual([page[0]]);
+    expect(result.withheld).toEqual([page[1]]);
+    expect(result.unclassifiedRoots).toBe(1);
+    expect(result.conflictedRoots).toBe(0);
+    // No root was classified as covered, so the membership read is never issued.
+    expect(lookupProjectionMembership).not.toHaveBeenCalled();
+    expect(result.storeRequests).toBe(1);
+  });
+
+  // :926 request two — "10,000 quads, and 2 MiB". The row count is visible to the gate;
+  // the byte bound is not. The single row below IS the page's quad, so without the
+  // reported flag this quad is an exact duplicate and is DISCARDED. The flag is therefore
+  // the only difference between discarding and withholding.
+  it('withholds covered roots when the membership response reports it was truncated', async () => {
+    const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: [ROOT] };
+    const { lookup } = fakeLookup([applied], [projectionRow(ROOT, 'p', 'o')], { truncated: true });
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage([quad(ROOT, 'p', 'o')]);
+
+    expect(result.discardedDuplicates).toBe(0);
+    expect(result.withheld).toHaveLength(1);
+    expect(result.insert).toEqual([]);
+    expect(result.unclassifiedRoots).toBe(1);
     expect(result.storeRequests).toBe(2);
   });
 });
