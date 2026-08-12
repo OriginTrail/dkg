@@ -9,6 +9,9 @@ import {
   coreHeadShapeKeyV1,
   CORE_CURRENT_DIGEST_V1,
   CORE_CURRENT_HEAD_V1,
+  CORE_CURRENT_SEQUENCE_V1,
+  CORE_CURRENT_VERSION_V1,
+  CORE_OTHER_TRANSITION_DIGEST_V1,
 } from './helpers/authority-verdict-diff-core-heads-v1.js';
 
 /**
@@ -41,6 +44,14 @@ describe('core candidate head construction', { timeout: SUITE_TIMEOUT_MS }, () =
   const refused = [...byShape].filter(([, r]) => !r.built);
   const built = [...byShape].filter(([, r]) => r.built);
 
+  // One cell per shape, kept so a built head can be checked against the axes
+  // the cell CLAIMS rather than against the key derived from it.
+  const representative = new Map<string, (typeof constructible)[number]>();
+  for (const cell of constructible) {
+    const key = coreHeadShapeKeyV1(cell);
+    if (!representative.has(key)) representative.set(key, cell);
+  }
+
   // THE PREMISE OF THE WHOLE LAYER. If the current head does not mint, every
   // relation below is measured against nothing and the refusals would all be
   // artefacts of a broken fixture.
@@ -60,6 +71,70 @@ describe('core candidate head construction', { timeout: SUITE_TIMEOUT_MS }, () =
     expect(constructible).toHaveLength(164_160);
     expect(byShape.size).toBeLessThan(200);
     expect([...cellsPerShape.values()].reduce((a, b) => a + b, 0)).toBe(164_160);
+  });
+
+  // COUNTS ARE NOT CONTENT. Every check above measures how MANY shapes build;
+  // none of them opens a built head and asks whether it is the head its cell
+  // describes. A builder that mapped two axis values onto one head -- 'plusOne'
+  // and 'abovePlusOne' onto the same sequence, say -- would keep every count
+  // here green while the sweep evaluated duplicate inputs for distinct cells.
+  //
+  // The expected values are restated from what each axis MEANS, never read back
+  // from the builder's own switch: an expectation computed from the code under
+  // test agrees with it by construction. Axes that do not apply to a cell are
+  // skipped rather than defaulted -- a defaulted axis would pin a free choice
+  // the cell never made.
+  it('builds candidate heads that honour the axes their cells claim', () => {
+    const SEQUENCE_DELTA = { below: -1n, equal: 0n, plusOne: 1n, abovePlusOne: 2n };
+    const VERSION_DELTA = { below: -1n, equal: 0n, above: 1n };
+    const violations: string[] = [];
+
+    for (const [key, result] of byShape) {
+      if (!result.built) continue;
+      const cell = representative.get(key);
+      if (cell === undefined) {
+        violations.push(`${key}: built shape has no representative cell`);
+        continue;
+      }
+      const head = result.candidate as unknown as Record<string, unknown>;
+      const note = (m: string) => violations.push(`${key}: ${m}`);
+
+      if (String(head.state) !== cell.candidateHeadState) {
+        note(`state ${String(head.state)} does not match axis C ${cell.candidateHeadState}`);
+      }
+      if (cell.headDigest === 'equal' && result.digest !== CORE_CURRENT_DIGEST_V1) {
+        note('axis F equal did not reproduce the current head digest');
+      }
+      if (cell.headDigest === 'differ' && result.digest === CORE_CURRENT_DIGEST_V1) {
+        note('axis F differ reproduced the current head digest');
+      }
+      if (cell.sequenceRelation !== undefined) {
+        const delta = BigInt(String(head.authoritySequence)) - CORE_CURRENT_SEQUENCE_V1;
+        if (delta !== SEQUENCE_DELTA[cell.sequenceRelation]) {
+          note(`axis D ${cell.sequenceRelation} wanted delta ${SEQUENCE_DELTA[cell.sequenceRelation]}, head has ${delta}`);
+        }
+      }
+      if (cell.versionRelation !== undefined) {
+        const delta = BigInt(String(head.version)) - CORE_CURRENT_VERSION_V1;
+        if (delta !== VERSION_DELTA[cell.versionRelation]) {
+          note(`axis E ${cell.versionRelation} wanted delta ${VERSION_DELTA[cell.versionRelation]}, head has ${delta}`);
+        }
+      }
+      if (cell.acceptedTransitionDigest === 'differ'
+        && head.acceptedTransitionDigest !== CORE_OTHER_TRANSITION_DIGEST_V1) {
+        note('axis G differ is not the competing transition digest');
+      }
+      if (cell.acceptedTransitionDigest === 'equal'
+        && head.acceptedTransitionDigest !== CORE_CURRENT_HEAD_V1.acceptedTransitionDigest) {
+        note("axis G equal is not the current head's transition digest");
+      }
+      const carriesFork = head.forkResolutionDigest !== undefined;
+      if (carriesFork !== (cell.candidateForkResolutionDigest === 'present')) {
+        note(`axis K ${cell.candidateForkResolutionDigest} but head ${carriesFork ? 'carries' : 'omits'} a fork resolution`);
+      }
+    }
+
+    expect(violations).toEqual([]);
   });
 
   // NON-VACUITY IN BOTH DIRECTIONS. A layer that built everything would be

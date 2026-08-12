@@ -71,6 +71,31 @@ describe('verdict-diff case generator', { timeout: VERDICT_DIFF_SUITE_TIMEOUT_MS
     expect(new Set(cells.map((c) => c.id)).size).toBe(cells.length);
   });
 
+  // A UNIQUE ID IS NOT A UNIQUE CELL, and the difference is the whole coverage
+  // claim. A regression that emitted one axis tuple twice under two ids while
+  // omitting another tuple would keep the reachable count, keep id uniqueness,
+  // and keep every per-axis presence check above -- the omitted values still
+  // appear on other cells. Nothing in this suite could see it. The tuple is
+  // built from the axis fields rather than from the id so that the assertion
+  // cannot agree with the generator by construction.
+  it('gives every cell a distinct axis tuple, not merely a distinct id', () => {
+    const axisTuple = (c: (typeof cells)[number]) => JSON.stringify([
+      c.snapshot,
+      c.appliedStatus ?? null,
+      c.candidateHeadState,
+      c.sequenceRelation ?? null,
+      c.versionRelation ?? null,
+      c.headDigest ?? null,
+      c.acceptedTransitionDigest ?? null,
+      c.storageOperation,
+      c.coreDisposition,
+      [...c.evidence].sort(),
+      c.candidateForkResolutionDigest,
+      c.clock,
+    ]);
+    expect(new Set(cells.map(axisTuple)).size).toBe(cells.length);
+  });
+
   // Axis B applies only to a present snapshot. An absent snapshot has no applied
   // status at all, and recording `undefined` rather than a default is what stops
   // the table asserting coverage of a state the case never had.
