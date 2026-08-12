@@ -5095,15 +5095,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // #2052 D-8 (#53) — the inbound legacy `agents` gate. Supplied here because this is
       // the only production construction site for the legacy durable-sync seam.
       //
-      // THE MODE IS `shadow`, AND THAT IS NOT A DEFAULT I PICKED. It is the plan's
-      // documented pre-activation state — `SystemRecordLaneActivationV1` says in its own
-      // docblock that "Pre-activation shadow mode keeps the legacy lane authoritative" —
-      // and there is nothing to read it from, because the mode is an input to
-      // `SystemRecordLaneControllerV1.open()` and no production path opens a lane. So the
-      // gate is inert BY MODE rather than by being absent: it is constructed, it runs on
-      // every legacy page, and it withholds nothing because no projection is authoritative
-      // yet. D-12 owns replacing this expression with the activation's own mode, and owns
-      // the proof that flipping it makes the gate fire.
+      // THE LITERAL `shadow` IS CORRECT HERE, AND IS NOT A DEFAULT STANDING IN FOR A
+      // LOOKUP. There is nothing to read the mode from: it is an INPUT to
+      // `SystemRecordLaneControllerV1.open()`, not state the controller exposes, and no
+      // production path opens a lane — so pre-activation this is the only place a mode can
+      // be expressed at all. The value is the plan's documented pre-activation state:
+      // `SystemRecordLaneActivationV1`'s own docblock says "Pre-activation shadow mode
+      // keeps the legacy lane authoritative".
+      //
+      // DO NOT "FIX" THIS into reading a config key or an agent-side default. No such
+      // source exists, inventing one would give the mode a second home, and the mode
+      // having exactly one home is what stops the gate and the projection disagreeing
+      // about which graph is authoritative.
+      //
+      // So the gate is inert BY MODE rather than by being absent: it is constructed, it
+      // runs on every legacy page, and it withholds nothing because no projection is
+      // authoritative yet. D-12 owns replacing this one expression with the activation's
+      // own mode, and owns the proof that flipping it makes the gate fire.
       //
       // Without a network identity the root-claim subjects cannot be derived at all, so
       // the gate is not constructed rather than constructed against an invented id. A
