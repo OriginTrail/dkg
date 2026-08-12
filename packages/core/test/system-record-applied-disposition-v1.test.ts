@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  canonicalizeSystemRecordAppliedStateV1,
   computeSystemRecordAccountedBytesV1,
   computeSystemRecordRootClaimSetDigestV1,
   systemRecordAppliedStateAbsentV1,
+  SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1,
   type SystemRecordAppliedStatePresentV1,
   type SystemRecordAppliedStatusV1,
   type SystemRecordAppliedStateV1,
@@ -14,6 +16,7 @@ import {
   type AgentProfileDerivedAuthorityDispositionV1,
 } from '../src/system-record-applied-disposition-v1-internal.js';
 import { computeSystemRecordStableKeyHashV1 } from '../src/system-record-inventory-v1.js';
+import { EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1 } from '../src/system-record-objects-v1.js';
 
 const HASH_A = `0x${'aa'.repeat(32)}` as const;
 const HASH_B = `0x${'bb'.repeat(32)}` as const;
@@ -126,6 +129,20 @@ function stateForCell(cell: AppliedDispositionCellV1): SystemRecordAppliedStateV
     currentRoot: ROOT_A,
     historicalRoots: [],
   });
+  /*
+   * THE PROJECTION SHAPE IS DECIDED BY THE STATUS, BECAUSE THE CODEC DECIDES IT.
+   *
+   * A terminal row must commit the canonical empty projection and table
+   * (applied-state :335-339) and an active row a non-empty one (:341-345), so a
+   * single shape across all four statuses would build cells the system can
+   * never hold -- and the table would then measure the fixture rather than the
+   * mapping. `dirty` takes the terminal shape because its only producer is the
+   * shadow-mode tombstone derivation (next-state :679, projection literal
+   * :682-687).
+   */
+  const terminal = status === 'tombstone' || status === 'dirty';
+  const projectionBytes = terminal ? 0 : 4_096;
+  const tableBytes = terminal ? 0 : 80;
   const present: SystemRecordAppliedStatePresentV1 = {
     objectType: 'system-record-applied-state',
     state: 'present',
@@ -137,19 +154,23 @@ function stateForCell(cell: AppliedDispositionCellV1): SystemRecordAppliedStateV
     status,
     headDigest: HASH_A,
     transitionLineage: [],
-    projectionDigest: HASH_B,
-    projectionBytes: '4096',
-    projectionQuads: '3',
-    ownedSubjectTableDigest: HASH_A,
-    ownedSubjectCount: '1',
-    ownedSubjectTableBytes: '80',
+    // A quarantined row must carry installed evidence or a resumable sidecar
+    // intent (applied-state :272-275); the mapping never reads it, so it changes
+    // no verdict -- it is here because without it the row is not constructible.
+    ...(status === 'quarantined' ? { conflictEvidenceDigest: HASH_A } : {}),
+    projectionDigest: terminal ? SYSTEM_RECORD_EMPTY_PROJECTION_DIGEST_V1 : HASH_B,
+    projectionBytes: String(projectionBytes),
+    projectionQuads: terminal ? '0' : '3',
+    ownedSubjectTableDigest: terminal ? EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1 : HASH_A,
+    ownedSubjectCount: terminal ? '0' : '1',
+    ownedSubjectTableBytes: String(tableBytes),
     currentRoot: ROOT_A,
     historicalRoots: [],
     conflictDigestSlots: cell.slots === 'occupied' ? [SLOT_A, SLOT_B] : [],
     conflictOverflow: cell.overflow === true,
     materializationEpoch: '2',
     rootClaimSetDigest,
-    accountedBytes: computeSystemRecordAccountedBytesV1(80, 4096).toString(),
+    accountedBytes: computeSystemRecordAccountedBytesV1(tableBytes, projectionBytes).toString(),
   };
   return present;
 }
@@ -202,6 +223,24 @@ describe('applied state -> authority disposition', () => {
     const actual = APPLIED_DISPOSITION_TABLE_V1.map(coordinateKey);
     expect(new Set(actual).size).toBe(actual.length);
     expect([...new Set(actual)].sort()).toEqual([...expected].sort());
+  });
+
+  /*
+   * EVERY CELL IS A STATE THE SYSTEM CAN ACTUALLY HOLD.
+   *
+   * The table claims all 17 coordinates are constructible as persisted state
+   * and retires none, so none carries a refusing site. That claim is worth
+   * exactly as much as its evidence: without this, the cells would be literals
+   * typed as applied state, and the three the write path cannot reach would be
+   * indistinguishable from shapes the codec forbids. Running each through the
+   * real canonicaliser is what makes "constructible" a measurement.
+   */
+  it('builds all 17 cells as states the applied-state codec accepts', () => {
+    for (const cell of APPLIED_DISPOSITION_TABLE_V1) {
+      const state = stateForCell(cell);
+      if (state.state !== 'present') continue;
+      expect(() => canonicalizeSystemRecordAppliedStateV1(state)).not.toThrow();
+    }
   });
 
   it('derives the pinned disposition for every cell', () => {
