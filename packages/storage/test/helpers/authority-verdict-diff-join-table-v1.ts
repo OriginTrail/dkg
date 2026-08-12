@@ -33,7 +33,7 @@
  * itself the signal.
  */
 export const JOIN_PINNED_AGAINST_CORE_DIGEST_V1 =
-  'd396cb862bc3b091652db60568683f970d6ba6cbbbb1fb4a98107cf7159d32d8';
+  '7127b2f93a51e07a0473547dcfd7eabf1d8480ad826d8741d829fde2bc9da4f0';
 
 /**
  * THE FOUR-BUCKET PARTITION.
@@ -41,10 +41,29 @@ export const JOIN_PINNED_AGAINST_CORE_DIGEST_V1 =
  * `storageProjections` is pinned beside `cells` because they move
  * independently and the second is a cross-check on the first: every storage
  * projection covers EXACTLY 192 cells (min AND max, asserted upstream), so
- * 114/645/96 times 192 must reproduce these cell counts to the unit. A change
+ * 222/537/96 times 192 must reproduce these cell counts to the unit. A change
  * that moved cells without moving projections would be a projection key that
  * stopped discriminating; a change that moved projections without moving cells
  * would be the fixture growing. Neither can hide behind the other.
+ *
+ * THIS PARTITION WAS DERIVED BY HAND BEFORE THE RUN THAT CONFIRMED IT, and the
+ * derivation is the reason these numbers are trustworthy rather than merely
+ * observed. Per mintable head shape the covering projections are B x L x H,
+ * with H constrained by the surviving (C,H,K) triples: 4x3x2 = 24 projections
+ * for a present active candidate, 4x3x1 = 12 for a present tombstone, 1x3x2 = 6
+ * in the absent region where axis B does not apply. Twelve mintable shapes give
+ * 222 projections and 42,624 cells; the same derivation reproduces the PREVIOUS
+ * pin exactly from the previous six shapes (114 and 21,888), which is what
+ * earns it the right to predict the new one.
+ *
+ * IT ALSO CAUGHT A DEFECT THE RUN COULD NOT. An earlier run returned COMPARABLE
+ * 35,712 / 186 -- internally consistent, conserving perfectly against 164,160,
+ * every bucket summing. It disagreed with this derivation by exactly 6,912 cells
+ * and 36 projections, which factors as three tombstone shapes x 12 x 192, and
+ * that gap was a real defect: the storage minter was still building tombstone
+ * closures against the current head. Conservation is a CONSISTENCY check, not a
+ * correctness check, and only an independently derived count can tell the two
+ * apart.
  */
 export interface JoinBucketRowV1 {
   readonly cells: number;
@@ -52,8 +71,8 @@ export interface JoinBucketRowV1 {
 }
 
 export const JOIN_PARTITION_V1: Readonly<Record<string, JoinBucketRowV1>> = {
-  COMPARABLE: { cells: 21_888, storageProjections: 114 },
-  'CORE-ONLY': { cells: 123_840, storageProjections: 645 },
+  COMPARABLE: { cells: 42_624, storageProjections: 222 },
+  'CORE-ONLY': { cells: 103_104, storageProjections: 537 },
   'NO-HEAD': { cells: 18_432, storageProjections: 96 },
 };
 
@@ -84,8 +103,8 @@ export interface JoinCoreOnlySplitRowV1 {
 }
 
 export const JOIN_CORE_ONLY_SPLIT_V1: Readonly<Record<string, JoinCoreOnlySplitRowV1>> = {
-  'namesSummary=false': { cells: 61_920, coreSide: 'decided' },
-  'namesSummary=true': { cells: 61_920, coreSide: 'decided' },
+  'namesSummary=false': { cells: 51_552, coreSide: 'decided' },
+  'namesSummary=true': { cells: 51_552, coreSide: 'decided' },
 };
 
 /** The join's own unit: one row per distinct (core projection, storage projection). */
@@ -104,7 +123,7 @@ export const JOIN_ROWS_V1 = 164_160;
  * ships green.
  */
 export const JOIN_TABLE_DIGEST_V1 =
-  'edc66a0acc2d10bbc30e0bea2df54620441dcc9b27426829239f8200d96cbb8b';
+  '7763d665d54bac3623d3bb4b3fe300f5871368ae3bd2622a75d0b5931c7f4037';
 
 /**
  * THE HEADLINE, and the two numbers it carries are deliberately of different
@@ -115,14 +134,20 @@ export const JOIN_TABLE_DIGEST_V1 =
  * this headline describe the fixture's cardinality instead of the behaviour.
  */
 export const JOIN_VERDICT_TOTALS_V1: Readonly<Record<string, number>> = {
-  AGREEMENT: 4736,
-  DIVERGENCE: 3136,
-  'NO-MAPPING': 1920,
-  'NOT-COMPARABLE': 154_368,
+  AGREEMENT: 11_264,
+  DIVERGENCE: 4672,
+  'NO-MAPPING': 4224,
+  'NOT-COMPARABLE': 144_000,
 };
 
 export const JOIN_SEMANTICS_CHANGING_ENTRIES_V1 = 4;
-export const JOIN_ADJUDICATED_CELLS_V1 = 9792;
+/**
+ * COMPARABLE minus the cells storage answers from the applied row before it
+ * reads the candidate: 42,624 - 22,464 = 20,160, which is also the
+ * `shortCircuit=false` half of JOIN_PRECONDITION_DISCRIMINATION_V1. The two are
+ * computed by different code paths and must agree.
+ */
+export const JOIN_ADJUDICATED_CELLS_V1 = 20_160;
 
 /**
  * NON-COMPARABILITY IS ALWAYS NAMED. An unnamed one is indistinguishable from a
@@ -130,10 +155,10 @@ export const JOIN_ADJUDICATED_CELLS_V1 = 9792;
  * this whole join turns on rather than an exclusion.
  */
 export const JOIN_NOT_COMPARABLE_CAUSE_TOTALS_V1: Readonly<Record<string, number>> = {
-  'storage-requires-a-verified-authority-summary-this-head-cannot-mint': 123_840,
+  'storage-requires-a-verified-authority-summary-this-head-cannot-mint': 103_104,
   'no-candidate-head-exists-because-the-system-forbids-the-input': 9216,
   'no-candidate-head-because-this-fixture-cannot-build-the-referent': 9216,
-  'storage-answered-from-the-applied-row-without-reading-the-candidate': 12_096,
+  'storage-answered-from-the-applied-row-without-reading-the-candidate': 22_464,
 };
 
 /**
@@ -158,8 +183,8 @@ export const JOIN_NO_HEAD_SPLIT_V1: Readonly<Record<string, number>> = {
  * third key here.
  */
 export const JOIN_PRECONDITION_DISCRIMINATION_V1: Readonly<Record<string, number>> = {
-  'shortCircuit=false isNonActiveState=false': 9792,
-  'shortCircuit=true isNonActiveState=true': 12_096,
+  'shortCircuit=false isNonActiveState=false': 20_160,
+  'shortCircuit=true isNonActiveState=true': 22_464,
 };
 
 /** Every adjudicated row, keyed `verdict coreDecisionKey -> storageLabel`. */
@@ -167,16 +192,24 @@ export const JOIN_LEVEL1_TABLE_V1: Readonly<Record<string, number>> = {
   'AGREEMENT accept -> ready': 1280,
   'AGREEMENT quarantine|head-fork -> deferred|authority-fork': 768,
   'AGREEMENT reject -> deferred|authority-fork': 576,
-  'AGREEMENT reject -> stale': 576,
+  // The sequence-depth closure's own row: core rejects a two-ahead candidate,
+  // storage defers it, both from the sequence arithmetic alone.
+  'AGREEMENT reject -> deferred|authority-history-mismatch': 4032,
+  'AGREEMENT reject -> stale': 2304,
   'AGREEMENT stale -> already-applied': 256,
   'AGREEMENT stale -> ready': 512,
-  'AGREEMENT stale -> stale': 768,
+  'AGREEMENT stale -> stale': 1536,
+  // THE DIVERGENCE RUNNING THE OTHER WAY. Every other divergence in this table
+  // is storage materialising a head core refuses; this one is core ACCEPTING an
+  // advance storage declines to materialise.
+  'DIVERGENCE accept -> stale': 192,
   'DIVERGENCE reject -> already-applied': 192,
-  'DIVERGENCE reject -> ready': 2944,
+  'DIVERGENCE reject -> ready': 4288,
   'NO-MAPPING quarantine|transition-equivocation -> already-applied': 128,
   'NO-MAPPING quarantine|transition-equivocation -> deferred|authority-fork': 384,
-  'NO-MAPPING quarantine|transition-equivocation -> ready': 1024,
-  'NO-MAPPING quarantine|transition-equivocation -> stale': 384,
+  'NO-MAPPING quarantine|transition-equivocation -> deferred|authority-history-mismatch': 1152,
+  'NO-MAPPING quarantine|transition-equivocation -> ready': 1408,
+  'NO-MAPPING quarantine|transition-equivocation -> stale': 1152,
 };
 
 /**
@@ -197,13 +230,13 @@ export interface JoinLevel1EntryCountsV1 {
 
 export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCountsV1>> = {
   accept: {
-    cells: 1280,
+    cells: 1472,
     members: { ready: 1280, 'already-applied': 0 },
   },
   stale: {
-    cells: 1536,
+    cells: 2304,
     members: {
-      stale: 768,
+      stale: 1536,
       'already-applied': 256,
       ready: 512,
       'deferred|verified-state-mismatch': 0,
@@ -214,17 +247,17 @@ export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCo
     members: { 'deferred|authority-fork': 768 },
   },
   'quarantine|transition-equivocation': {
-    cells: 1920,
+    cells: 4224,
     members: {},
   },
   reject: {
-    cells: 4288,
+    cells: 11_392,
     members: {
-      stale: 576,
+      stale: 2304,
       'root-collision': 0,
       'deferred|non-active-state': 0,
       'deferred|authority-fork': 576,
-      'deferred|authority-history-mismatch': 0,
+      'deferred|authority-history-mismatch': 4032,
       'deferred|verified-state-mismatch': 0,
       'deferred|root-state-changed': 0,
       'capacity-exhausted|state-revision-overflow': 0,
@@ -240,16 +273,38 @@ export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCo
  * EVERY DIVERGENCE, WITH BOTH SIDES VERBATIM. This is the actionable table: it
  * is what changes if Phase 3 routes the live path through core.
  *
- * Read it as one sentence: STORAGE MATERIALISES HEADS CORE REFUSES. Two thirds
- * of it is one cause -- core's future clock-skew gate against a storage
- * classifier that takes no clock at all.
+ * IT NO LONGER READS AS ONE SENTENCE, and the correction matters more than the
+ * growth. It used to be entirely "STORAGE MATERIALISES HEADS CORE REFUSES" --
+ * every row a `reject -> ready`-shaped violation of the withholding-only image,
+ * two thirds of it core's future clock-skew gate against a clock-blind storage
+ * classifier. That direction is still the bulk, and it grew from 3,136 cells to
+ * 4,672 as the sequence-relative region became comparable.
+ *
+ * BUT THE SEQUENCE-DEPTH CLOSURE EXPOSED A DIVERGENCE RUNNING THE OTHER WAY:
+ * `accept -> stale`, 192 cells, where CORE ACCEPTS an advance and STORAGE
+ * DECLINES TO MATERIALISE it. Every previously known divergence had core
+ * refusing and storage proceeding, which is why the headline could be stated as
+ * one sentence; this one inverts the roles. It was unreachable while the
+ * sequence-relative candidates could not mint, so it is not a regression -- it
+ * is a cell that had no observation before.
+ *
+ * WHY THAT ASYMMETRY MATTERS TO PHASE 3 SPECIFICALLY: the two directions carry
+ * OPPOSITE routing risks. Storage-materialises-what-core-refuses is a SAFETY
+ * gap that routing through core would CLOSE. Core-accepts-what-storage-refuses
+ * is the reverse -- routing through core would newly ADMIT these cells, so the
+ * route does not merely tighten. A reader who took the old one-sentence headline
+ * into the routing decision would have carried exactly the wrong prior about
+ * which way the change cuts.
  */
 export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
-  'reject|head issuedAt exceeds the future clock-skew bound -> ready': 1920,
+  'accept -> stale': 192,
+  'reject|head issuedAt exceeds the future clock-skew bound -> ready': 2496,
   'reject|head issuedAt exceeds the future clock-skew bound -> already-applied': 192,
   'reject|absent state cannot retain authority history or quarantine -> ready': 512,
   'reject|current frontier fork requires its exact direct resolving successor -> ready': 384,
   'reject|cold noninitial head requires its verified authority closure -> ready': 128,
+  'reject|exact accepted authority transition is missing -> ready': 384,
+  'reject|unresolved head fork cannot advance authority sequence -> ready': 384,
 };
 
 /**
@@ -263,15 +318,27 @@ export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
  * three variants that carry no reason field at all.
  */
 export const JOIN_LEVEL2_REASON_PAIRS_V1: Readonly<Record<string, number>> = {
-  '<none> :: <none>': 2816,
+  '<none> :: <none>': 3776,
   'absent state cannot retain authority history or quarantine :: <none>': 512,
+  // THE PAIR THE SEQUENCE-DEPTH CLOSURE EXISTS TO PRODUCE: a candidate two
+  // authority sequences ahead, refused by core and deferred by storage, both
+  // from the sequence arithmetic alone and both on input the other side accepts.
+  'authority history is incomplete :: authority-history-mismatch': 1536,
   'cold noninitial head requires its verified authority closure :: <none>': 128,
   'current frontier fork requires its exact direct resolving successor :: <none>': 384,
-  'head issuedAt exceeds the future clock-skew bound :: <none>': 2688,
+  'exact accepted authority transition is missing :: <none>': 384,
+  'exact accepted authority transition is missing :: authority-history-mismatch': 384,
+  'head issuedAt exceeds the future clock-skew bound :: <none>': 4416,
   'head issuedAt exceeds the future clock-skew bound :: authority-fork': 576,
+  'head issuedAt exceeds the future clock-skew bound :: authority-history-mismatch': 1728,
   'head-fork :: authority-fork': 768,
-  'transition-equivocation :: <none>': 1536,
+  'late tombstone lacks its exact verified active predecessor :: <none>': 384,
+  'late tombstone requires the exact retained resurrection transition :: <none>': 192,
+  'transition-equivocation :: <none>': 2688,
   'transition-equivocation :: authority-fork': 384,
+  'transition-equivocation :: authority-history-mismatch': 1152,
+  'unresolved head fork cannot advance authority sequence :: <none>': 384,
+  'unresolved head fork cannot advance authority sequence :: authority-history-mismatch': 384,
 };
 
 /**
@@ -290,25 +357,40 @@ export const JOIN_STALE_ROUTES_V1: Readonly<Record<string, number>> = {
   'identical-head:core:199 -> NOT-COMPARABLE(applied-row-short-circuit)': 1280,
   'lower-version:core:196 -> stale': 768,
   'lower-version:core:196 -> NOT-COMPARABLE(applied-row-short-circuit)': 1280,
+  // A THIRD SUB-CAUSE, reachable only since the sequence-depth closure. Core
+  // reaches `stale` from the LOWER-SEQUENCE branch (:274) as well as from the
+  // lower-version one, and storage answers it with the same flat `stale`. Its
+  // counts mirror lower-version exactly -- 768 routed, 1,280 short-circuited --
+  // which is the axis arithmetic, not a coincidence: both relations occupy one
+  // axis-D value and differ only in which relation the cell names.
+  'lower-sequence -> stale': 768,
+  'lower-sequence -> NOT-COMPARABLE(applied-row-short-circuit)': 1280,
 };
 
 /**
  * STORAGE'S FULL LEVEL-1 CODOMAIN AND WHAT THE DIFF ACTUALLY REACHED.
  *
- * NINE OF FOURTEEN LABELS ARE ZERO, and they are pinned AS zero rather than
+ * EIGHT OF FOURTEEN LABELS ARE ZERO, and they are pinned AS zero rather than
  * omitted. An omitted row and an unreachable row look identical in a pin, and
  * only one of them is a claim: a dispatch or codec change that starts producing
  * `root-collision` must turn this suite red rather than silently enlarging the
  * codomain the table claims to cover.
+ *
+ * ONE LABEL LEFT THE ZERO SET, WHICH IS THE POINT OF PINNING ZEROES AT ALL.
+ * `deferred|authority-history-mismatch` was 0 and is now 5,184. It is reachable
+ * only by a candidate whose sequence relation is not `equal`, so it was
+ * unreachable for exactly as long as the sequence-depth boundary stood -- and it
+ * appeared the moment that closed. A zero that becomes non-zero when the gap
+ * that explained it is closed is a zero that was telling the truth.
  */
 export const JOIN_STORAGE_LABEL_REACH_V1: Readonly<Record<string, number>> = {
-  ready: 5760,
+  ready: 7488,
   'already-applied': 576,
-  stale: 1728,
+  stale: 5184,
   'root-collision': 0,
-  'deferred|non-active-state': 12_096,
+  'deferred|non-active-state': 22_464,
   'deferred|authority-fork': 1728,
-  'deferred|authority-history-mismatch': 0,
+  'deferred|authority-history-mismatch': 5184,
   'deferred|verified-state-mismatch': 0,
   'deferred|root-state-changed': 0,
   'capacity-exhausted|state-revision-overflow': 0,

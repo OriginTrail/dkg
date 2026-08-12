@@ -1,12 +1,16 @@
 import { describe, expect, it } from 'vitest';
 
-import { computeAgentProfileHeadObjectDigestV1 } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  computeAgentProfileAuthorityTransitionDigestV1,
+  computeAgentProfileHeadObjectDigestV1,
+} from '@origintrail-official/dkg-core/system-record-v1';
 
 import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-cells-v1.js';
 import { resolveConstructibilityV1 } from './helpers/authority-verdict-diff-constructibility-v1.js';
 import {
   buildCoreCandidateHeadV1,
   coreHeadShapeKeyV1,
+  CORE_ALL_TRANSITIONS_V1,
   CORE_CURRENT_DIGEST_V1,
   CORE_CURRENT_HEAD_V1,
   CORE_CURRENT_SEQUENCE_V1,
@@ -120,13 +124,50 @@ describe('core candidate head construction', { timeout: SUITE_TIMEOUT_MS }, () =
           note(`axis E ${cell.versionRelation} wanted delta ${VERSION_DELTA[cell.versionRelation]}, head has ${delta}`);
         }
       }
-      if (cell.acceptedTransitionDigest === 'differ'
-        && head.acceptedTransitionDigest !== CORE_OTHER_TRANSITION_DIGEST_V1) {
-        note('axis G differ is not the competing transition digest');
+      // AXIS G IS SEQUENCE-RELATIVE. 'equal' means the candidate names the
+      // ACCEPTED rotation into its OWN authority sequence; 'differ' means it
+      // names a COMPETING rotation into that same sequence. Ruled 2026-08-12;
+      // the denotation and its provenance are declared at the axis itself.
+      //
+      // Resolved against the transition OBJECTS rather than against the
+      // builder's own per-sequence table. Comparing a head to the table that
+      // built it agrees BY CONSTRUCTION and could never detect a builder that
+      // ignored the axis -- the same self-reference that makes a count computed
+      // from the generator worthless as a pin.
+      if (cell.acceptedTransitionDigest !== undefined) {
+        const named = CORE_ALL_TRANSITIONS_V1.find((transition) =>
+          computeAgentProfileAuthorityTransitionDigestV1(transition)
+            === head.acceptedTransitionDigest);
+        if (named === undefined) {
+          note('axis G names a transition this fixture does not carry');
+        } else if (named.nextAuthoritySequence !== String(head.authoritySequence)) {
+          note(`axis G names a rotation into sequence ${named.nextAuthoritySequence}`
+            + ` while the head sits at ${String(head.authoritySequence)}`);
+        } else {
+          // The accepted rotation is the one this head's own wallet root came
+          // from; a competing rotation moves to some other root.
+          const accepted = named.nextEvmIssuer === head.evmIssuer;
+          if (cell.acceptedTransitionDigest === 'equal' && !accepted) {
+            note("axis G equal is not the accepted rotation into the head's own sequence");
+          }
+          if (cell.acceptedTransitionDigest === 'differ' && accepted) {
+            note('axis G differ is not a competing rotation');
+          }
+        }
       }
-      if (cell.acceptedTransitionDigest === 'equal'
-        && head.acceptedTransitionDigest !== CORE_CURRENT_HEAD_V1.acceptedTransitionDigest) {
-        note("axis G equal is not the current head's transition digest");
+      // THE SPECIAL CASE IS PINNED, NOT INHERITED. At the current authority
+      // sequence the general rule must still land on exactly the two constants
+      // the pre-generalisation assertion named, byte for byte -- so "the
+      // D='equal' column did not move" is asserted rather than argued.
+      if (String(head.authoritySequence) === CORE_CURRENT_HEAD_V1.authoritySequence) {
+        if (cell.acceptedTransitionDigest === 'equal'
+          && head.acceptedTransitionDigest !== CORE_CURRENT_HEAD_V1.acceptedTransitionDigest) {
+          note("axis G equal at the current sequence left the current head's transition digest");
+        }
+        if (cell.acceptedTransitionDigest === 'differ'
+          && head.acceptedTransitionDigest !== CORE_OTHER_TRANSITION_DIGEST_V1) {
+          note('axis G differ at the current sequence left CORE_OTHER_TRANSITION_DIGEST_V1');
+        }
       }
       const carriesFork = head.forkResolutionDigest !== undefined;
       if (carriesFork !== (cell.candidateForkResolutionDigest === 'present')) {

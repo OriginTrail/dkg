@@ -80,20 +80,30 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
   'REFUSED|F1-digest-equality-forces-the-current-state': { cells: 4608, projections: 1152 },
   'REFUSED|F2-digest-equality-forces-the-current-transition-digest': { cells: 9216, projections: 1152 },
   'REFUSED|F3-digest-equality-forces-the-current-fork-resolution-absence': { cells: 4608, projections: 576 },
-  accept: { cells: 2176, projections: 448 },
+  accept: { cells: 2432, projections: 512 },
   'quarantine|head-fork': { cells: 4096, projections: 512 },
   'quarantine|transition-equivocation': { cells: 47104, projections: 7040 },
   'reject|absent state cannot retain authority history or quarantine': { cells: 1280, projections: 768 },
   'reject|authority history is incomplete': { cells: 10240, projections: 1536 },
   'reject|cold noninitial head requires its verified authority closure': { cells: 512, projections: 320 },
   'reject|current frontier fork requires its exact direct resolving successor': { cells: 2048, projections: 256 },
-  'reject|exact accepted authority transition is missing': { cells: 3840, projections: 576 },
+  'reject|exact accepted authority transition is missing': { cells: 5120, projections: 768 },
   'reject|head issuedAt exceeds the future clock-skew bound': { cells: 48576, projections: 7680 },
   'reject|historical or unsolicited fork resolution is audit-only': { cells: 1024, projections: 128 },
-  'reject|late tombstone lacks its exact verified active predecessor': { cells: 2048, projections: 512 },
-  'reject|next-sequence tombstone requires its exact same-sequence active predecessor': { cells: 256, projections: 64 },
+  'reject|late tombstone lacks its exact verified active predecessor': { cells: 1536, projections: 384 },
+  // REPLACES 'next-sequence tombstone requires its exact same-sequence active
+  // predecessor' at the same 256/64. A tombstone candidate one sequence ahead
+  // now carries the real rotation into its own sequence, so core reaches it
+  // through the RESURRECTION branch rather than refusing it for a predecessor at
+  // the wrong sequence. Same cells, different reason -- which is the shape a
+  // reason-level pin exists to catch.
+  'reject|late tombstone requires the exact retained resurrection transition': { cells: 256, projections: 64 },
   'reject|tombstone lacks its exact verified active predecessor': { cells: 2048, projections: 512 },
-  'reject|transition does not bind the accepted predecessor': { cells: 1024, projections: 128 },
+  // 'reject|transition does not bind the accepted predecessor' (1,024 / 128) is
+  // GONE. It fired when a candidate named a transition whose prior head was not
+  // its own; every candidate now names the rotation into its own sequence, so
+  // nothing reaches it. Removed rather than pinned at zero because it is not a
+  // declared codomain member -- this table records the rejects core RETURNED.
   'reject|unresolved head fork cannot advance authority sequence': { cells: 5120, projections: 768 },
   stale: { cells: 14336, projections: 1792 },
 };
@@ -108,7 +118,7 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
  * `projectionKey=>verdict` list.
  */
 export const CORE_VERDICT_TABLE_DIGEST_V1 =
-  'd396cb862bc3b091652db60568683f970d6ba6cbbbb1fb4a98107cf7159d32d8';
+  '7127b2f93a51e07a0473547dcfd7eabf1d8480ad826d8741d829fde2bc9da4f0';
 
 /**
  * WHAT THE TABLE DECIDES, AND THE TWO THINGS THESE NUMBERS DO NOT SAY.
@@ -186,28 +196,39 @@ export const CORE_PROJECTIONS_V1 = 25920;
  *
  * Re-run by authority-verdict-diff-summary-independence-v1.test.ts, which asserts
  * this whole object in ONE comparison -- so a control cannot be quietly dropped.
+ *
+ * THE AFFECTED SET SHRANK AND THAT IS THE GOOD DIRECTION, which is worth saying
+ * because a falling number in a coverage-adjacent pin reads like a loss.
+ * `affected` counts projections naming a summary their head shape CANNOT mint;
+ * closing the sequence-depth boundary made six more shapes mintable, so cells
+ * moved OUT of the affected set and INTO the summary-carrying one --
+ * affectedProjections 9,792 -> 8,064 while summaryCarryingProjections 1,728 ->
+ * 3,456. Fewer cells now rest on the omission argument and more carry a real
+ * minted summary. Both controls still discriminate at their previous strength
+ * (128 of 576 absent-path cells still move), so the equality is no more vacuous
+ * than before.
  */
 export const CORE_SUMMARY_INDEPENDENCE_V1 = {
   /** What rule S1 used to retire. */
-  affectedProjections: 9792,
-  affectedCells: 61920,
+  affectedProjections: 8064,
+  affectedCells: 51552,
   affectedCellsAbsentPath: 864,
-  affectedCellsPresentPath: 61056,
+  affectedCellsPresentPath: 50688,
   /** Foreign summary vs member omitted, over EVERY affected projection. */
-  equalityHeld: 9792,
+  equalityHeld: 8064,
   equalityDiffered: 0,
   equalityThrew: 0,
   /** Control: core DOES read the field here, so the instrument is not blind. */
   absentControlCells: 576,
   absentControlDiffered: 128,
   /** Control: a cell's OWN valid summary is inert across the present region. */
-  presentControlCells: 10368,
+  presentControlCells: 20736,
   presentControlDiffered: 0,
   /** Of the returning cells, how many short-circuit at the clock before anything else. */
-  clockShortCircuitCells: 20640,
+  clockShortCircuitCells: 17184,
   /** Cells and projections whose evidence really does carry a minted summary. */
-  summaryCarryingProjections: 1728,
-  summaryCarryingCells: 10944,
+  summaryCarryingProjections: 3456,
+  summaryCarryingCells: 21312,
 } as const;
 
 /**
@@ -484,8 +505,17 @@ export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
  *
  * A summary is a WeakSet-branded, factory-only capability, so a cell naming
  * `verifiedAuthoritySummary` receives one only if the closure builder will mint
- * one for that candidate head. Of the 40 buildable shapes, 6 mint and 34 are
+ * one for that candidate head. Of the 40 buildable shapes, 12 mint and 28 are
  * refused.
+ *
+ * THE 'incomplete authority/root lineage' ROW IS GONE, and its absence is the
+ * sequence-depth closure's headline. It carried 12 shapes -- every candidate at
+ * an authority sequence other than the current one -- because each named the
+ * same 1->2 transition and the same predecessor whatever sequence it claimed.
+ * Six of those twelve now MINT and six moved to refusals that ARE the system's:
+ * three to the accepted-transition binding and three to the resolving-successor
+ * lineage check. A row leaving this census is the strongest available evidence
+ * that a boundary closed rather than moved.
  *
  * WHAT THIS ROW NO LONGER MEANS: it used to be quoted as the cause of a
  * 61,920-cell retirement. It is not a retirement of anything now. The 34
@@ -507,13 +537,12 @@ export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
  * THAT is the property the suite asserts -- not the wording of any one message.
  */
 export const CORE_SUMMARY_MINT_OUTCOMES_V1: Readonly<Record<string, number>> = {
-  MINTED: 6,
-  '[system-record-closure] resolving successor changed accepted-transition lineage': 6,
+  MINTED: 12,
+  '[system-record-closure] resolving successor changed accepted-transition lineage': 9,
   '[system-record-closure] verification closure contains authority-transition equivocation': 6,
   '[system-record-closure] tombstone predecessor is not the exact prior active authority state': 3,
   '[system-record-closure] head <digest> does not directly bind its fork resolution': 4,
-  '[system-record-closure] head <digest> does not bind its accepted authority transition': 3,
-  '[system-record-history] head <digest> has incomplete authority/root lineage': 12,
+  '[system-record-closure] head <digest> does not bind its accepted authority transition': 6,
 };
 
 /** Buildable candidate head shapes; the mint memoises on this, not on the cell. */
@@ -620,7 +649,61 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   + 'candidate version falls to its default and cannot clear the version threshold at '
   + 'any chain depth. Filed as its own follow-up with these measurements rather than '
   + 'folded into the sequence-depth work, because it is a distinct mechanism at a '
-  + 'distinct site and the Phase-3 routing coupling does not rest on it.',
+  + 'distinct site and the Phase-3 routing coupling does not rest on it.'
+  + ' '
+  + 'EQUAL OUTCOMES FROM UNEQUAL MACHINERY, and this is the Phase-3-relevant '
+  + 'half of what the closure buys. The three sequence relations are NOT alike '
+  + 'in comparison value, and the ranking is the reverse of their cell counts. '
+  + 'At D=below and D=abovePlusOne storage answers by a FLAT RULE on the '
+  + 'sequence number alone -- `candidateSequence < currentSequence` returns '
+  + 'stale, `> currentSequence + 1n` defers -- while core runs a RICH BRANCH on '
+  + 'both, indexing lineage[candidateSequence] and comparing transition fields '
+  + 'one by one at :274. The outcomes AGREE; the work does not. That matters '
+  + 'because routing the live path through core replaces the flat rule with the '
+  + 'rich one, so agreement measured today is agreement between a cheap check '
+  + 'and an expensive one, and only the expensive one survives the route. '
+  + 'D=plusOne is the discriminating comparison -- the only relation where BOTH '
+  + 'sides do real work, core at its next-sequence branch (:318) and storage at '
+  + "its tail checks on the summary's lineage, its "
+  + 'lastAuthorityTransitionPriorHeadDigest and its root-history arithmetic -- '
+  + 'which is consistent with the Phase-3 coupling having been placed on '
+  + 'plusOne alone.',
+
+  // AXIS DENOTATION, not a count. Filed because a committed axis's MEANING was
+  // generalised, and a meaning that changes without a record is the kind of
+  // thing a later reader reconstructs wrongly from the builder.
+  'AXIS G IS SEQUENCE-RELATIVE, RULED RATHER THAN ASSUMED. Closing the '
+  + "sequence-depth boundary forced a choice about what axis G means away from "
+  + "D='equal', because a well-formed candidate at another authority sequence "
+  + 'MUST name the rotation into its own sequence -- naming the current head\'s '
+  + '1->2 transition at sequence 3 is precisely the malformation that boundary '
+  + 'work removed. Two readings were available: LITERAL (compared to the current '
+  + "head's digest, full stop, which makes G='equal' unconstructible off "
+  + "D='equal' and returns half the newly-comparable cells to retirement) and "
+  + 'SEQUENCE-RELATIVE (\'equal\' names the accepted rotation into the '
+  + "candidate's own sequence, 'differ' a competing one). THE SEQUENCE-RELATIVE "
+  + 'READING WAS ADOPTED, adjudicated 2026-08-12 rather than settled by the '
+  + 'implementer, because generalising a reviewed axis is not a call the builder '
+  + 'gets to make for itself. '
+  + 'THE GROUND IS SYSTEM RESPONSIVENESS, WHICH IS EVIDENCE RATHER THAN '
+  + "PREFERENCE: at the sequence-relative shapes G='differ' fires "
+  + "'[system-record-closure] verification closure contains "
+  + "authority-transition equivocation' -- 6 of the 40 buildable head shapes in "
+  + 'CORE_SUMMARY_MINT_OUTCOMES_V1 -- so the outcome MOVES on the axis, which is '
+  + 'what makes an axis live rather than enumerated. Supporting: equivocation is '
+  + 'defined at its source as two transitions out of the same prior head into '
+  + 'the same sequence, a sequence-relative notion where it is SPECIFIED and not '
+  + 'merely where this fixture reads it. Against the literal reading and '
+  + 'decisive: it would require a G=\'equal\' candidate off D=\'equal\' to name a '
+  + 'rotation into somewhere other than its own sequence -- a head this fixture '
+  + "authored to be malformed, refusing in the system's own wording, which is "
+  + 'the manufactured-retirement class this slice exists to remove. '
+  + 'SCOPE, because this claim is exactly the kind that gets widened: the '
+  + 'generalisation is about AXIS G ONLY. It says nothing about axes D, E or F, '
+  + 'whose relations remain against the current head. The older reading is not '
+  + "wrong, it is the SPECIAL CASE at D='equal', and the core-heads suite pins "
+  + 'that column on the two original constants byte for byte rather than '
+  + 'inheriting it from the general rule.',
 
   // CONDITION-3 FINDING. Filed on its own rather than folded into the counts,
   // because it is a routing hazard and a statistic absorbed into a total is not

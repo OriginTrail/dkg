@@ -361,7 +361,10 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
   });
 
   it('carries its findings as data rather than as a commit message', () => {
-    expect(CORE_SWEEP_FINDINGS_V1.length).toBe(6);
+    // Seven since the sequence-depth closure added the axis-G denotation
+    // finding. The count is pinned rather than bounded so a finding cannot be
+    // dropped silently -- a `toBeGreaterThan` here would let one disappear.
+    expect(CORE_SWEEP_FINDINGS_V1.length).toBe(7);
     for (const finding of CORE_SWEEP_FINDINGS_V1) expect(finding.length).toBeGreaterThan(80);
 
     // REGISTER SEPARATION, ASSERTED. A harness limitation filed among the system

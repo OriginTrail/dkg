@@ -158,6 +158,34 @@ export const VERDICT_DIFF_AXES_V1 = {
   D_sequenceRelation: ['below', 'equal', 'plusOne', 'abovePlusOne'],
   E_versionRelation: ['below', 'equal', 'above'],
   F_headDigest: ['equal', 'differ'],
+  /**
+   * AXIS G IS SEQUENCE-RELATIVE, and this is the axis's denotation rather than a
+   * note about one builder. 'equal' means the candidate names the ACCEPTED
+   * rotation into ITS OWN authority sequence; 'differ' means it names a
+   * COMPETING rotation into that same sequence.
+   *
+   * THE OLDER READING IS THE SPECIAL CASE, NOT A RIVAL. Until axis D gained
+   * per-sequence lineage every candidate sat at the current sequence, where the
+   * accepted rotation IS the current head's -- so "compared to the current
+   * head's acceptedTransitionDigest" and the rule above are the same statement
+   * in that column, and the core-heads suite asserts the D='equal' column still
+   * lands on exactly the two constants it always did.
+   *
+   * WHY THE GENERAL FORM IS THE RIGHT ONE, ruled 2026-08-12 on three grounds.
+   * The decisive one is that the SYSTEM responds to it: at the sequence-relative
+   * shapes G='differ' fires '[system-record-closure] verification closure
+   * contains authority-transition equivocation', so the outcome moves on the
+   * axis, which is what makes an axis live -- 6 of the 40 buildable head shapes
+   * refuse that way in CORE_SUMMARY_MINT_OUTCOMES_V1. Second, equivocation is
+   * DEFINED at the source as two transitions out of the same prior head into the
+   * same sequence, so the notion is sequence-relative where it is specified, not
+   * where this fixture reads it. Third, and decisive against the literal
+   * reading: taken literally, a G='equal' candidate off D='equal' would have to
+   * name a rotation into somewhere other than its own sequence -- a head this
+   * fixture authored to be malformed, refusing in the system's wording. That is
+   * exactly the manufactured-retirement class this slice exists to remove, so
+   * the literal reading would re-create it by definition.
+   */
   G_acceptedTransitionDigest: ['equal', 'differ'],
   H_storageOperation: ['active', 'tombstone', 'quarantine'],
   I_coreDisposition: [
