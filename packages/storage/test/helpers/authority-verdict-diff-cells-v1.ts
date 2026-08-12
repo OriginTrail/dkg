@@ -159,9 +159,17 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
               ? [...A.F_headDigest] as (VerdictDiffCellV1['headDigest'])[]
               : [undefined];
             for (const headDigest of digests) {
-              // Axis G relates the candidate's acceptedTransitionDigest to the
-              // CURRENT head's, so like axis D it has no referent when the
-              // snapshot is absent. Ruled 2026-08-11 after measurement: the
+              // AXIS G'S DENOTATION IS DEFINED ONCE, at G_acceptedTransitionDigest
+              // in VERDICT_DIFF_AXES_V1, and this comment deliberately does NOT
+              // restate it. It is SEQUENCE-RELATIVE -- 'equal' names the accepted
+              // rotation into the candidate's OWN sequence -- and an earlier
+              // revision of this block said it relates to the CURRENT head, which
+              // is the D='equal' SPECIAL CASE rather than the definition. Two
+              // plausible definitions in two files is worse than one stale one,
+              // because the next change can follow either and nothing fails.
+              //
+              // What is gated HERE is only reachability: like axis D the axis has
+              // no referent when the snapshot is absent. Ruled 2026-08-11 after measurement: the
               // transition-equivocation decision the spec names this axis for is
               // core system-record-authority-v1-internal.ts:171, whose referent is
               // `current`, and :111 diverts to the absent branch before it ever

@@ -5,7 +5,10 @@ import { describe, expect, it } from 'vitest';
 
 import { evaluateAgentProfileHeadAdvanceV1 } from '@origintrail-official/dkg-core/system-record-v1';
 
-import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-cells-v1.js';
+import {
+  enumerateVerdictDiffCellsV1,
+  type VerdictDiffCellV1,
+} from './helpers/authority-verdict-diff-cells-v1.js';
 import {
   resolveConstructibilityV1,
   type SourceCitationV1,
@@ -67,9 +70,42 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
       : `THREW|${outcome.message}`;
   }
 
-  async function sweep() {
-    const split = resolveConstructibilityV1(enumerateVerdictDiffCellsV1());
-    return { split, rows: await runCoreSweepV1(split.constructible) };
+  /**
+   * ONE SWEEP AND ONE MINT INDEX FOR THE WHOLE FILE, memoised the way the join
+   * suite already memoises its own.
+   *
+   * These were recomputed per test -- three full sweeps and two mint-index
+   * builds -- which is the same work five times over identical inputs. Measured
+   * in CI at 226 seconds for this file, which is most of a lane budget spent
+   * re-deriving what it already had.
+   *
+   * NO OBSERVATION LEAVES THE RUN. Every assertion still runs against the same
+   * data it did before; only the number of times that data is computed changes.
+   * A cut that dropped a driven cell would be a different thing entirely and
+   * would have to name what it stopped observing.
+   */
+  let sweptCache: Promise<{
+    split: ReturnType<typeof resolveConstructibilityV1>;
+    rows: Awaited<ReturnType<typeof runCoreSweepV1>>;
+  }> | undefined;
+  function sweep() {
+    sweptCache ??= (async () => {
+      const split = resolveConstructibilityV1(enumerateVerdictDiffCellsV1());
+      return { split, rows: await runCoreSweepV1(split.constructible) };
+    })();
+    return sweptCache;
+  }
+
+  // NO PARAMETER, because a memo that ignores its argument is a lie about what
+  // it depends on. The earlier form took `constructible` and returned the first
+  // cached promise regardless -- harmless while every caller passes the same
+  // set, and exactly the shape that makes a later assertion silently
+  // order-dependent if one ever passes a filtered one. It reads the sweep's own
+  // split so there is only one set it CAN be about.
+  let mintCache: Promise<Awaited<ReturnType<typeof buildCoreSummaryIndexV1>>> | undefined;
+  function mintIndex() {
+    mintCache ??= sweep().then(({ split }) => buildCoreSummaryIndexV1(split.constructible));
+    return mintCache;
   }
 
   it('pins every projection verdict exactly, and the distribution that localises a move', async () => {
@@ -161,7 +197,7 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
 
   it('mints a summary for only the head shapes core will close over, each for a stated reason', async () => {
     const split = resolveConstructibilityV1(enumerateVerdictDiffCellsV1());
-    const { summaries, unresolvedArtifacts } = await buildCoreSummaryIndexV1(split.constructible);
+    const { summaries, unresolvedArtifacts } = await mintIndex();
     const buildable = new Set(
       split.constructible
         .filter((cell) => buildCoreCandidateHeadV1(cell).built)
@@ -216,7 +252,7 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
    */
   it('re-checks that the escape objects its limitation register names are really built', async () => {
     const split = resolveConstructibilityV1(enumerateVerdictDiffCellsV1());
-    const { summaries } = await buildCoreSummaryIndexV1(split.constructible);
+    const { summaries } = await mintIndex();
     const byShape = new Map<string, ReturnType<typeof buildCoreCandidateHeadV1>>();
     for (const cell of split.constructible) {
       const key = coreHeadShapeKeyV1(cell);
@@ -361,7 +397,10 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
   });
 
   it('carries its findings as data rather than as a commit message', () => {
-    expect(CORE_SWEEP_FINDINGS_V1.length).toBe(6);
+    // Seven since the sequence-depth closure added the axis-G denotation
+    // finding. The count is pinned rather than bounded so a finding cannot be
+    // dropped silently -- a `toBeGreaterThan` here would let one disappear.
+    expect(CORE_SWEEP_FINDINGS_V1.length).toBe(7);
     for (const finding of CORE_SWEEP_FINDINGS_V1) expect(finding.length).toBeGreaterThan(80);
 
     // REGISTER SEPARATION, ASSERTED. A harness limitation filed among the system

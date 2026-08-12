@@ -47,8 +47,20 @@ export interface StorageProjectionRowV1 {
   readonly outcome: StorageProjectionOutcomeV1;
 }
 
+/**
+ * `onUnresolved` receives every `objectKind:digest` the mint walk asked for and
+ * the fixture could not answer.
+ *
+ * Threaded through the REAL sweep rather than audited by a parallel walk on
+ * purpose. A second walk built to check the first can drift from it, and then
+ * the audit reports on a graph nobody drives -- the same "two halves asking
+ * different questions" failure this harness exists to catch, wearing an
+ * auditor's clothes. Optional so no existing caller changes; the audit passes a
+ * collector and asserts the result is empty.
+ */
 export async function runStorageSweepV1(
   cells: readonly VerdictDiffCellV1[],
+  onUnresolved?: (reference: string) => void,
 ): Promise<readonly StorageProjectionRowV1[]> {
   const groups = new Map<string, { representative: VerdictDiffCellV1; count: number }>();
   for (const cell of cells) {
@@ -83,7 +95,7 @@ export async function runStorageSweepV1(
       continue;
     }
     if (!mints.has(headShapeKey)) {
-      mints.set(headShapeKey, await mintStorageSummaryForHeadV1(head.candidate));
+      mints.set(headShapeKey, await mintStorageSummaryForHeadV1(head.candidate, onUnresolved));
     }
     const mint = mints.get(headShapeKey)!;
     if (!mint.minted) {

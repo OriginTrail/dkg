@@ -157,9 +157,21 @@ export function makeSystemRecordActiveReplacementIssueV1(
 
 const SIBLING_BUNDLE_DIGEST = `0x${'c7'.repeat(32)}` as Digest32V1;
 const ALTERNATE_BASE_ISSUED_AT = '2026-08-05T11:59:00Z';
+/**
+ * One wallet root per rotation. The length is the chain's maximum depth, and
+ * that is the only thing bounding it: a rotation needs a fresh root because the
+ * lineage walk refuses a reused one (verification closure :635), so extending
+ * the chain is extending this array.
+ *
+ * `0x77` is deliberately absent: the verdict-diff head layer rotates its
+ * EQUIVOCATING transition to that root, and a competing rotation is only
+ * competing while its root is off the real chain.
+ */
 const ROTATION_ISSUERS = [
   '0x5555555555555555555555555555555555555555',
   '0x6666666666666666666666666666666666666666',
+  '0x8888888888888888888888888888888888888888',
+  '0x9999999999999999999999999999999999999999',
 ] as const;
 
 /**
@@ -183,7 +195,16 @@ function rotatedActiveHead(
     evmIssuer: issuer,
     rootSubject,
     ownedSubjectTableDigest: computeOwnedSubjectTableDigestV1(rootSubject, [rootSubject]),
-  } as AgentProfileActiveHeadObjectV1;
+  } as AgentProfileActiveHeadObjectV1 & { previousHeadDigest?: Digest32V1 };
+  // A rotation restarts version numbering, and a version-zero head must omit its
+  // predecessor link (head codec :204). The link would otherwise be INHERITED
+  // FROM THE SOURCE by the spread above -- invisible while every source was
+  // genesis, and a throw the moment a caller rotates off a versioned head.
+  // Applied here rather than left to fail: a builder that lets its own
+  // obligations throw manufactures refusals out of its omissions.
+  if (draft.version === '0' && history.previousHeadDigest === undefined) {
+    delete draft.previousHeadDigest;
+  }
   const quads = projectionFor(draft);
   const contentDigest = contentDigestFor(quads);
   return {
@@ -202,45 +223,113 @@ function rotatedActiveHead(
   } as AgentProfileActiveHeadObjectV1;
 }
 
+export interface RotatedAuthorityChainV1 {
+  /** The head at the top of the chain -- `heads[steps]`. */
+  readonly base: AgentProfileActiveHeadObjectV1;
+  /**
+   * `heads[i]` is the head at authority sequence `i`, `heads[0]` being genesis.
+   *
+   * Indexed by sequence rather than handed out as a bare list because that is
+   * the question every caller actually has. A candidate at sequence 3 must
+   * carry the issuer, root subject, owned-subject table digest and accepted
+   * transition that sequence 3 requires; re-stamping the sequence number onto a
+   * head built for another sequence leaves it naming a transition into
+   * somewhere else, which the closure's lineage walk refuses with a message
+   * about incomplete lineage that reads like a domain refusal.
+   */
+  readonly heads: readonly AgentProfileActiveHeadObjectV1[];
+  /** `heads[steps - 1] .. heads[0]`, newest first. */
+  readonly ancestors: readonly AgentProfileActiveHeadObjectV1[];
+  /** `transitions[i]` is the rotation INTO sequence `i + 1`. */
+  readonly transitions: readonly AgentProfileAuthorityTransitionV1[];
+}
+
 /**
- * Two real authority rotations, so a head derived from the result carries a
- * transition lineage of length two. That is what lets the persisted row's
- * lineage length differ from the forked version, which is the only way a
- * predicate comparing the wrong one of the two can be caught.
+ * `steps` real authority rotations, so a head derived from `base` carries a
+ * transition lineage of that length. A lineage longer than one is what lets a
+ * persisted row's lineage length differ from the forked version, which is the
+ * only way a predicate comparing the wrong one of the two can be caught.
+ *
+ * Built as a fold rather than as one body per depth. The two bespoke bodies
+ * this replaces were identical except for their last iteration, and the shape
+ * mattered: it made the depth look like a property of the fixture when it is a
+ * property of ROTATION_ISSUERS, and a reader who wanted a third rotation found
+ * a closed switch rather than a parameter.
  */
-function twiceRotatedChain() {
-  const initial = structuredClone(verified.head);
-  const first = rotationTransition(initial, '1', ROTATION_ISSUERS[0]);
-  const middle = rotatedActiveHead(initial, ROTATION_ISSUERS[0], '1', '0', {
-    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(first),
-  });
-  const second = rotationTransition(middle, '2', ROTATION_ISSUERS[1]);
-  const base = rotatedActiveHead(middle, ROTATION_ISSUERS[1], '2', '0', {
-    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(second),
-  });
+function nRotatedChain(steps: number): RotatedAuthorityChainV1 {
+  const { heads, transitions } = rotateFrom(structuredClone(verified.head), steps, 0);
   return {
-    base,
-    ancestors: [middle, initial] as readonly AgentProfileActiveHeadObjectV1[],
-    transitions: [first, second] as readonly AgentProfileAuthorityTransitionV1[],
+    base: heads[steps] as AgentProfileActiveHeadObjectV1,
+    heads,
+    ancestors: heads.slice(0, steps).reverse(),
+    transitions,
   };
 }
 
 /**
- * One real authority rotation. A resolution built on the result is internally
- * valid at the NEXT authority sequence, which is what a peer offers when it
- * rotates instead of adjudicating the fork it created.
+ * Continue an authority chain `steps` further, rotating off `from`.
+ *
+ * SEPARATE FROM `makeRotatedAuthorityChainV1` BECAUSE THE TWO ANSWER DIFFERENT
+ * QUESTIONS, and collapsing them silently produces a head that verifies while
+ * meaning the wrong thing. That one builds a record's PAST: the ancestry some
+ * current head descends from, rooted at genesis. This one builds a proposed
+ * FUTURE off a head that already exists.
+ *
+ * The distinction is load-bearing for anything comparing a candidate against an
+ * APPLIED row. A receiver at sequence N checks that the candidate's lineage tail
+ * names ITS OWN head as the rotation's prior (storage
+ * system-record-next-state-v1-internal.ts, the next-sequence arm's
+ * `summary.lastAuthorityTransitionPriorHeadDigest !== current.headDigest`
+ * conjunct). A candidate built by extending the ancestry chain instead rotates
+ * off the ancestry's version-zero head at that sequence, which is a DIFFERENT
+ * object from the applied head -- so the candidate verifies internally, mints a
+ * well-formed summary, and is still refused as a history mismatch. That refusal
+ * is the fixture's, not the system's, and it is indistinguishable from a real
+ * one at the message.
+ *
+ * `heads[0]` IS `from`, so `heads[i]` is the head `i` rotations above it.
+ * `firstIssuerIndex` says where in ROTATION_ISSUERS this extension starts, so a
+ * caller continuing a chain does not reuse a root the ancestry already spent --
+ * the lineage walk refuses a repeated wallet root.
  */
-function onceRotatedChain() {
-  const initial = structuredClone(verified.head);
-  const first = rotationTransition(initial, '1', ROTATION_ISSUERS[0]);
-  const base = rotatedActiveHead(initial, ROTATION_ISSUERS[0], '1', '0', {
-    acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(first),
-  });
-  return {
-    base,
-    ancestors: [initial] as readonly AgentProfileActiveHeadObjectV1[],
-    transitions: [first] as readonly AgentProfileAuthorityTransitionV1[],
-  };
+export function extendRotatedAuthorityChainV1(
+  from: AgentProfileActiveHeadObjectV1,
+  steps: number,
+  firstIssuerIndex: number,
+): Readonly<{
+  heads: readonly AgentProfileActiveHeadObjectV1[];
+  transitions: readonly AgentProfileAuthorityTransitionV1[];
+}> {
+  assertRotationCountV1(steps, firstIssuerIndex, 'extension length');
+  return Object.freeze(rotateFrom(from, steps, firstIssuerIndex));
+}
+
+/**
+ * The one rotation loop. The next authority sequence is read off the PRIOR HEAD
+ * rather than off the loop index, so an extension continues its input's
+ * numbering instead of restarting at one.
+ */
+function rotateFrom(
+  origin: AgentProfileActiveHeadObjectV1,
+  steps: number,
+  firstIssuerIndex: number,
+): {
+  heads: AgentProfileActiveHeadObjectV1[];
+  transitions: AgentProfileAuthorityTransitionV1[];
+} {
+  const heads: AgentProfileActiveHeadObjectV1[] = [origin];
+  const transitions: AgentProfileAuthorityTransitionV1[] = [];
+  for (let step = 0; step < steps; step += 1) {
+    const prior = heads[step] as AgentProfileActiveHeadObjectV1;
+    const issuer = ROTATION_ISSUERS[firstIssuerIndex + step] as string;
+    const nextSequence = String(BigInt(prior.authoritySequence) + 1n);
+    const transition = rotationTransition(prior, nextSequence, issuer);
+    transitions.push(transition);
+    heads.push(rotatedActiveHead(prior, issuer, nextSequence, '0', {
+      acceptedTransitionDigest: computeAgentProfileAuthorityTransitionDigestV1(transition),
+    }));
+  }
+  return { heads, transitions };
 }
 
 function rotationTransition(
@@ -300,9 +389,12 @@ export async function makeForkResolvingSuccessorFixtureV1(
   terminalTransitionConflict = false,
 ): Promise<ForkResolvingSuccessorFixtureV1> {
   const genesis = shape === 'genesis';
+  // `rotated` wants a lineage of two; `after-rotate` wants a resolution that is
+  // internally valid at the NEXT authority sequence, which is what a peer offers
+  // when it rotates instead of adjudicating the fork it created.
   const chain = shape === 'rotated'
-    ? twiceRotatedChain()
-    : shape === 'after-rotate' ? onceRotatedChain() : undefined;
+    ? nRotatedChain(2)
+    : shape === 'after-rotate' ? nRotatedChain(1) : undefined;
   const origin = chain?.base ?? structuredClone(verified.head);
   // A second version-zero head of the same authority: a different common base,
   // which is what distinguishes two fork events that agree on every other
@@ -481,17 +573,56 @@ export function systemRecordClosureResolveOptionsV1(
  * A real authority chain of `steps` rotations, exported because a NON-GENESIS
  * head cannot be fabricated by editing a genesis one.
  *
- * The constraint is structural and was measured at its site: authority sequence
- * > 0 requires an `acceptedTransitionDigest` (head codec :197), that digest must
- * name a valid authority transition, and a transition MUST "rotate to a new
- * wallet root" (system-record-agent-profile-control-codecs-v1-internal.ts:190).
- * So every non-genesis head is a ROTATED head -- which moves `evmIssuer` and
+ * THE CONSTRAINT THIS DOCUMENTS IS ABOUT EVERY ROTATION, NOT ABOUT DEPTH, and
+ * the distinction has already cost one wrong finding. It is structural and was
+ * measured at its site: authority sequence > 0 requires an
+ * `acceptedTransitionDigest` (head codec :197), that digest must name a valid
+ * authority transition, and a transition MUST "rotate to a new wallet root"
+ * (system-record-agent-profile-control-codecs-v1-internal.ts:190). So every
+ * non-genesis head is a ROTATED head -- which moves `evmIssuer` and
  * `rootSubject`, and therefore obliges a rebuilt graph-scoped author seal and a
  * re-derived owned-subject table. `rotatedActiveHead` already does all of that;
  * this exposes it rather than inviting the next caller to rebuild it wrongly.
+ *
+ * DEPTH IS A PARAMETER AND HAS NO BOUND HERE beyond the supply of wallet roots,
+ * which is why the type is `number` rather than a union of the depths anyone has
+ * needed so far. The previous signature was `steps: 1 | 2`, and it was read as a
+ * structural cap by two separate readers -- a finding shipped blaming it for a
+ * 47% coverage boundary before being corrected at the real cause. A literal union
+ * on a parameter says "these are the legal values"; nothing here refuses a third
+ * rotation, so nothing here should look like it does.
  */
-export function makeRotatedAuthorityChainV1(steps: 1 | 2) {
-  return steps === 1 ? onceRotatedChain() : twiceRotatedChain();
+export function makeRotatedAuthorityChainV1(steps: number): RotatedAuthorityChainV1 {
+  assertRotationCountV1(steps, 0, 'chain depth');
+  return nRotatedChain(steps);
+}
+
+/**
+ * `number` is a WIDER type than the values this fixture can serve, so the
+ * boundary has to narrow it -- otherwise widening from `1 | 2` just moves the
+ * refusal from the compiler to an index that silently yields `undefined` and a
+ * cast that hides it.
+ *
+ * Checked rather than assumed: a non-integer, a negative, or a count past the
+ * wallet-root supply are all reachable from a caller and none of them produces a
+ * sensible chain. The root-supply bound is the only REAL one -- there is nothing
+ * in the system that refuses a deeper chain, which is exactly the misreading the
+ * old literal union invited.
+ */
+function assertRotationCountV1(steps: number, firstIssuerIndex: number, what: string): void {
+  if (!Number.isSafeInteger(steps) || steps < 0) {
+    throw new Error(`${what} must be a non-negative safe integer, got ${String(steps)}`);
+  }
+  if (!Number.isSafeInteger(firstIssuerIndex) || firstIssuerIndex < 0) {
+    throw new Error(`issuer index must be a non-negative safe integer, got ${String(firstIssuerIndex)}`);
+  }
+  if (firstIssuerIndex + steps > ROTATION_ISSUERS.length) {
+    throw new Error(
+      `${what} ${steps} from issuer index ${firstIssuerIndex} needs `
+      + `${firstIssuerIndex + steps} rotation issuers, and this fixture supplies `
+      + `${ROTATION_ISSUERS.length}`,
+    );
+  }
 }
 
 function envelopeArtifact(

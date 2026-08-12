@@ -42,9 +42,8 @@ import { buildAgentProfileVerificationClosureV1 } from '@origintrail-official/dk
 
 import { agentProfileIdentityProjectionV1 } from './agent-profile-identity-projection-v1.js';
 import {
-  CORE_CHAIN_V1,
+  CORE_MINT_GRAPH_V1,
   CORE_CURRENT_HEAD_V1,
-  CORE_EQUIVOCATING_TRANSITION_V1,
   CORE_FORK_CONFLICT_HEADS_V1,
   CORE_FORK_RESOLUTION_V1,
 } from './authority-verdict-diff-core-heads-v1.js';
@@ -300,17 +299,20 @@ export interface StorageDriverV1 {
  * that walked a DIFFERENT graph would produce a diff between two different
  * questions while every row still looked well formed. The core half's minter is
  * module-private, so the walk is reproduced -- but it is reproduced over
- * `CORE_CHAIN_V1`, `CORE_CURRENT_HEAD_V1`, `CORE_FORK_CONFLICT_HEADS_V1`,
- * `CORE_EQUIVOCATING_TRANSITION_V1` and `CORE_FORK_RESOLUTION_V1`, which are the
- * very objects the core half walks. Nothing here is a second copy of the data.
+ * `CORE_ALL_LINEAGE_HEADS_V1`, `CORE_CURRENT_HEAD_V1`,
+ * `CORE_FORK_CONFLICT_HEADS_V1`, `CORE_ALL_TRANSITIONS_V1` and
+ * `CORE_FORK_RESOLUTION_V1`, which are the very objects the core half walks.
+ * Nothing here is a second copy of the data.
+ *
+ * THE SHARED-CONSTANT DISCIPLINE EARNED ITS KEEP WHEN AXIS D GAINED PER-SEQUENCE
+ * LINEAGE: the two halves picked up sequences 3 and 4 together because both name
+ * the same two exports. Had this list been the literal four objects it used to
+ * spell out, the storage half would have kept minting against a two-deep graph
+ * while the core half walked a four-deep one, and the diff would have compared
+ * two different questions with every row still well formed.
  */
 function mintAncestryV1(): readonly AgentProfileHeadObjectV1[] {
-  return [
-    CORE_CURRENT_HEAD_V1,
-    CORE_CHAIN_V1.base,
-    ...CORE_CHAIN_V1.ancestors,
-    ...CORE_FORK_CONFLICT_HEADS_V1,
-  ];
+  return CORE_MINT_GRAPH_V1.ancestry;
 }
 
 /**
@@ -320,23 +322,50 @@ function mintAncestryV1(): readonly AgentProfileHeadObjectV1[] {
  * The refusal is a construction result, never a swallowed skip: where the
  * builder will not close over a head there is no storage verdict to compare, and
  * the join records that as a NAMED non-comparability rather than as a gap.
+ *
+ * `onUnresolved` FIRES ON EVERY LOOKUP THE ARTIFACT MAP CANNOT ANSWER, and it is
+ * here because its ABSENCE was demonstrated rather than theorised. The core
+ * minter has carried this hook since the S1 incident, and the sweep pins its
+ * result at zero; this one did not, and that asymmetry is exactly where a defect
+ * hid. Minting every sequence-relative tombstone against the CURRENT head's
+ * owned-subject table asked for a deletion-table digest this fixture never
+ * supplies, which surfaces as 'verification closure is missing 0x...' -- a
+ * refusal owned by the harness, wearing a domain refusal's exact wording. It
+ * survived a full 13-minute lane with every count conserving, and was found only
+ * because an independently derived cell count disagreed with the run by exactly
+ * the three affected head shapes.
+ *
+ * A guard installed on one of two minters is not installed. The distinction the
+ * hook reports is not in the message -- it is in whether a lookup went
+ * unanswered, which no amount of reading the message recovers.
  */
 export async function mintStorageSummaryForHeadV1(
   candidate: AgentProfileHeadObjectV1,
+  onUnresolved?: (reference: string) => void,
 ): Promise<
   | { readonly minted: true; readonly summary: AgentProfileVerifiedAuthoritySummaryV1 }
   | { readonly minted: false; readonly message: string }
 > {
   const ancestry = mintAncestryV1();
-  const transitions = [...CORE_CHAIN_V1.transitions, CORE_EQUIVOCATING_TRANSITION_V1];
+  const transitions = [...CORE_MINT_GRAPH_V1.transitions];
   try {
     if ((candidate as { state: string }).state === 'tombstone') {
+      // The predecessor and its deletion table are the ACTIVE head at the
+      // tombstone's OWN authority sequence -- the same rule the core minter
+      // follows, and it has to be the same rule or the two halves of the diff
+      // mint over different graphs. Pinning both to the current head refuses
+      // every sequence-relative tombstone for an owned-subject table this
+      // fixture never supplies, and the refusal is phrased exactly like a
+      // domain one.
+      const { predecessor, ownedSubjectTable } = CORE_MINT_GRAPH_V1
+        .tombstonePredecessorFor((candidate as { authoritySequence: string }).authoritySequence);
       const closure = await mintAgentProfileTombstoneClosureV1({
         tombstone: candidate,
-        predecessor: CORE_CURRENT_HEAD_V1,
-        ownedSubjectTable: [CORE_CURRENT_HEAD_V1.rootSubject],
+        predecessor,
+        ownedSubjectTable: [...ownedSubjectTable],
         ancestors: ancestry,
         transitions,
+        onUnresolvedArtifact: onUnresolved,
       } as never);
       return {
         minted: true,
@@ -350,7 +379,11 @@ export async function mintStorageSummaryForHeadV1(
     );
     const closure = await buildAgentProfileVerificationClosureV1(
       computeAgentProfileHeadObjectDigestV1(candidate as never),
-      systemRecordClosureResolveOptionsV1(artifacts, TERMINAL_FIXTURE_NOW_MS_V1) as never,
+      systemRecordClosureResolveOptionsV1(
+        artifacts,
+        TERMINAL_FIXTURE_NOW_MS_V1,
+        onUnresolved,
+      ) as never,
     );
     return {
       minted: true,
