@@ -100,6 +100,7 @@ describe('getSyncCheckpointKey', () => {
 describe('manifest-bound sync continuation', () => {
   const digestA = `sha256:${'aa'.repeat(32)}` as const;
   const digestB = `sha256:${'bb'.repeat(32)}` as const;
+  const prefixDigest = `sha256:${'cc'.repeat(32)}` as const;
 
   it('stores offset, responder session and digest as one logical tuple', () => {
     const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
@@ -148,5 +149,19 @@ describe('manifest-bound sync continuation', () => {
       manifestDigest: digestA,
     });
     expect(store.get('data', 2_001)?.responderSessionId).toBeUndefined();
+  });
+
+  it('atomically rebinds a proven prefix while dropping the old generation token', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setResponderSession('data', 'session-a', 10_000, 1_000, digestA);
+    store.setManifestBoundOffset('data', 512, digestA, 1_001, prefixDigest);
+    store.setManifestBoundOffset('data', 512, digestB, 1_002, prefixDigest);
+
+    expect(store.get('data', 1_003)).toMatchObject({
+      offset: 512,
+      manifestDigest: digestB,
+      manifestPrefixDigest: prefixDigest,
+    });
+    expect(store.get('data', 1_003)?.responderSessionId).toBeUndefined();
   });
 });

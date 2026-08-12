@@ -5508,6 +5508,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         snapshotRef,
         sinceBatchId,
         manifestDigest,
+        manifestPrefixDigestAtOffset,
         forceFreshSession,
         fetchContext,
       }) => {
@@ -5526,6 +5527,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             forceFreshSession: forceFreshSession
               || onVerifiedFullSnapshot !== undefined,
             manifestDigest,
+            manifestPrefixDigestAtOffset,
             assetUals: exactAssetUals,
           },
         );
@@ -5668,10 +5670,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       },
       onVerifiedFullSnapshot,
       deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
-      setCheckpoint: (key, offset, manifestDigest) => {
+      setCheckpoint: (key, offset, manifestDigest, manifestPrefixDigest) => {
         if (manifestDigest) {
           if (this.syncCheckpoints.setManifestBoundOffset) {
-            this.syncCheckpoints.setManifestBoundOffset(key, offset, manifestDigest);
+            this.syncCheckpoints.setManifestBoundOffset(
+              key,
+              offset,
+              manifestDigest,
+              Date.now(),
+              manifestPrefixDigest,
+            );
           } else {
             // Rolling/custom stores that cannot persist the binding must not
             // retain an offset whose generation identity would be lost.
@@ -6115,6 +6123,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // an unfinished offset-zero requester session remains cached.
       forceFreshSession,
       manifestDigest,
+      manifestPrefixDigestAtOffset,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -6231,6 +6240,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       checkpointStore: this.syncCheckpoints,
       forceFreshSession,
       manifestDigest,
+      manifestPrefixDigestAtOffset,
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {

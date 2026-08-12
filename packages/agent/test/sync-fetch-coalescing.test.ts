@@ -40,6 +40,7 @@ type FetchArgs = {
   sinceBatchId?: string;
   signal?: AbortSignal;
   recovery?: boolean;
+  manifestDigest?: `sha256:${string}`;
   assetUals?: string[];
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
@@ -254,6 +255,7 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
       sinceBatchId: args.sinceBatchId,
       signal: args.signal,
       recovery: args.recovery,
+      manifestDigest: args.manifestDigest,
       assetUals: args.assetUals,
       returnAcceptedPrefixOnRetryableTransportFailure:
         args.returnAcceptedPrefixOnRetryableTransportFailure,
@@ -343,6 +345,11 @@ describe('DKGAgent sync fetch coalescing', () => {
       },
       { name: 'sinceBatchId', base: { sinceBatchId: '10' }, variant: { sinceBatchId: '11' } },
       { name: 'recovery', base: { includeSharedMemory: true, recovery: false }, variant: { includeSharedMemory: true, recovery: true } },
+      {
+        name: 'manifestDigest',
+        base: { manifestDigest: `sha256:${'aa'.repeat(32)}` },
+        variant: { manifestDigest: `sha256:${'bb'.repeat(32)}` },
+      },
       // Exact VM batches: different asset filters must never share a page
       // sequence, and an exact batch must never join a full sync.
       { name: 'assetUals', base: { assetUals: [EXACT_UAL_7] }, variant: { assetUals: [EXACT_UAL_8] } },

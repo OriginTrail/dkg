@@ -14,6 +14,7 @@ import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import {
   createGraphScopedDurableManifestPlan,
+  graphScopedDurableManifestPrefixAtOffset,
   isGraphScopedDurableManifestBoundary,
   planBoundedGraphScopedDurableBatch,
   type GraphScopedDurableManifestPlan,
@@ -29,6 +30,7 @@ import {
 import {
   getSyncCheckpointKey,
   type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
 } from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type {
@@ -149,6 +151,10 @@ export interface DurableSyncFetchRequest {
   readonly exactAssetUals?: string[];
   /** Canonical META generation that authorizes this DATA continuation. */
   readonly manifestDigest?: DurableManifestDigest;
+  /** Canonical descriptor-prefix proof for safe cross-generation reuse. */
+  readonly manifestPrefixDigestAtOffset?: (
+    offset: number,
+  ) => DurableManifestPrefixDigest | undefined;
   /** Identity is unprovable; rotate any saved DATA continuation before fetch. */
   readonly forceFreshSession?: boolean;
   readonly fetchContext: DurableSyncFetchContext;
@@ -228,7 +234,12 @@ export interface DurableSyncContext {
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
-  setCheckpoint: (key: string, offset: number, manifestDigest?: DurableManifestDigest) => void;
+  setCheckpoint: (
+    key: string,
+    offset: number,
+    manifestDigest?: DurableManifestDigest,
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+  ) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -303,7 +314,7 @@ async function runDurableSyncWithBudget(
       updateCheckpoint: boolean;
       countProgress?: boolean;
       emptyPhase?: boolean;
-      manifestDigest?: DurableManifestDigest;
+      manifestPlan?: GraphScopedDurableManifestPlan;
     },
   ) => {
     const countProgress = options.countProgress ?? true;
@@ -334,7 +345,27 @@ async function runDurableSyncWithBudget(
     if (!options.updateCheckpoint) return;
     if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      setCheckpoint(result.checkpointKey, result.nextOffset, options.manifestDigest);
+      if (options.manifestPlan) {
+        const prefix = graphScopedDurableManifestPrefixAtOffset(
+          options.manifestPlan,
+          result.nextOffset,
+        );
+        if (!prefix) {
+          deleteCheckpoint(result.checkpointKey);
+          throw new Error(
+            `Refusing to checkpoint durable DATA offset ${result.nextOffset}: `
+            + 'the completed META manifest has no matching graph boundary',
+          );
+        }
+        setCheckpoint(
+          result.checkpointKey,
+          result.nextOffset,
+          options.manifestPlan.manifestDigest,
+          prefix.prefixDigest,
+        );
+      } else {
+        setCheckpoint(result.checkpointKey, result.nextOffset);
+      }
     }
   };
 
@@ -398,6 +429,9 @@ async function runDurableSyncWithBudget(
         graphUri: string,
         sinceBatchId?: string,
         manifestDigest?: DurableManifestDigest,
+        manifestPrefixDigestAtOffset?: (
+          offset: number,
+        ) => DurableManifestPrefixDigest | undefined,
         forceFreshSession?: boolean,
       ): Promise<SyncPageResult> => fetchSyncPages({
         ctx,
@@ -408,6 +442,7 @@ async function runDurableSyncWithBudget(
         sinceBatchId,
         exactAssetUals,
         manifestDigest,
+        manifestPrefixDigestAtOffset,
         forceFreshSession,
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
@@ -429,6 +464,21 @@ async function runDurableSyncWithBudget(
       // next context graph when stopOnBackoffWorthyFailure is enabled.
       throwIfOperationAborted();
       const sinceBatchId = sinceBatchIdFor?.(pid);
+      let effectiveMetaResult = metaResult;
+      let exactAssetDescriptorCoverageComplete = true;
+      if (exactAssetUals !== undefined) {
+        // Scope META before it defines the DATA generation. Older responders
+        // can ignore the exact-asset wire filter and over-return descriptors;
+        // those unrelated assets must not enter the continuation digest or
+        // bounded DATA plan for the requested subset.
+        const exactMeta = filterExactAssetDurablePayload(
+          [],
+          metaResult.quads,
+          exactAssetUals,
+        );
+        effectiveMetaResult = { ...metaResult, quads: exactMeta.metaQuads };
+        exactAssetDescriptorCoverageComplete = exactMeta.descriptorCoverageComplete;
+      }
       let graphScopedManifest: GraphScopedDurableManifestPlan | null = null;
       let forceFreshUnboundDataSession = false;
       if (sinceBatchId === undefined && !isSystemContextGraph) {
@@ -452,7 +502,10 @@ async function runDurableSyncWithBudget(
             { code: 'SYNC_DATA_MANIFEST_INCOMPLETE' },
           );
         }
-        graphScopedManifest = createGraphScopedDurableManifestPlan(metaResult.quads, pid);
+        graphScopedManifest = createGraphScopedDurableManifestPlan(
+          effectiveMetaResult.quads,
+          pid,
+        );
         // Legacy/mixed/malformed metadata has no canonical generation identity.
         // It may still complete safely in one round, but never by trusting a
         // saved nonzero offset or responder token.
@@ -463,15 +516,19 @@ async function runDurableSyncWithBudget(
         dataGraph,
         sinceBatchId,
         graphScopedManifest?.manifestDigest,
+        graphScopedManifest
+          ? (offset) => graphScopedDurableManifestPrefixAtOffset(
+            graphScopedManifest!,
+            offset,
+          )?.prefixDigest
+          : undefined,
         forceFreshUnboundDataSession,
       );
       throwIfOperationAborted();
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
-      let effectiveMetaResult = metaResult;
       let dataResult = rawDataResult;
-      let exactAssetDescriptorCoverageComplete = true;
       if (exactAssetUals !== undefined) {
         const exact = filterExactAssetDurablePayload(
           rawDataResult.quads,
@@ -727,7 +784,7 @@ async function runDurableSyncWithBudget(
         recordPhaseOutcome(effectiveDataResult, {
           updateCheckpoint: updateDataCheckpoint,
           emptyPhase,
-          manifestDigest: graphScopedManifest?.manifestDigest,
+          manifestPlan: graphScopedManifest ?? undefined,
         });
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
@@ -811,7 +868,7 @@ async function runDurableSyncWithBudget(
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, {
         updateCheckpoint: updateDataCheckpoint,
-        manifestDigest: graphScopedManifest?.manifestDigest,
+        manifestPlan: graphScopedManifest ?? undefined,
       });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
       if (exactFetchDispositionIndex !== undefined) {

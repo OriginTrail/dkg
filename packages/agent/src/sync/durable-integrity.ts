@@ -187,12 +187,19 @@ function readOrderedGraphScopedDescriptors(
 
 export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
 export const DURABLE_MANIFEST_DIGEST_VERSION = 1;
+export const DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest-prefix';
 
 export interface GraphScopedDurableManifestPlan {
   readonly contextGraphId: string;
   readonly manifestDigest: `sha256:${string}`;
   readonly descriptors: readonly GraphScopedDescriptor[];
   readonly manifestRowCount: number;
+}
+
+export interface GraphScopedDurableManifestPrefix {
+  readonly offset: number;
+  readonly descriptorCount: number;
+  readonly prefixDigest: `sha256:${string}`;
 }
 
 /**
@@ -273,6 +280,64 @@ export function createGraphScopedDurableManifestPlan(
     manifestDigest,
     descriptors,
     manifestRowCount,
+  };
+}
+
+/**
+ * Bind one verified DATA checkpoint boundary to the canonical descriptor
+ * prefix that gives that offset meaning.
+ *
+ * Zero-width descriptors immediately following a positive-width graph are
+ * included at that boundary. This makes inserting/removing a private-only or
+ * empty asset before the next DATA row observable even though the numeric
+ * offset does not move.
+ */
+export function graphScopedDurableManifestPrefixAtOffset(
+  manifest: GraphScopedDurableManifestPlan,
+  offset: number,
+): GraphScopedDurableManifestPrefix | null {
+  if (!Number.isSafeInteger(offset) || offset < 0) return null;
+
+  let rowCount = 0;
+  let descriptorCount = 0;
+  if (offset === 0) {
+    while (
+      descriptorCount < manifest.descriptors.length
+      && manifest.descriptors[descriptorCount]!.publicTripleCount === 0
+    ) {
+      descriptorCount += 1;
+    }
+  }
+  for (const descriptor of manifest.descriptors) {
+    if (offset === 0) break;
+    const nextRowCount = rowCount + descriptor.publicTripleCount;
+    if (!Number.isSafeInteger(nextRowCount)) return null;
+    if (nextRowCount > offset) return null;
+    rowCount = nextRowCount;
+    descriptorCount += 1;
+
+    if (rowCount === offset) {
+      while (
+        descriptorCount < manifest.descriptors.length
+        && manifest.descriptors[descriptorCount]!.publicTripleCount === 0
+      ) {
+        descriptorCount += 1;
+      }
+      break;
+    }
+  }
+
+  if (rowCount !== offset) return null;
+  const canonical = encodeGraphScopedDurableManifest(
+    manifest.contextGraphId,
+    manifest.descriptors.slice(0, descriptorCount),
+    DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN,
+    DURABLE_MANIFEST_DIGEST_VERSION,
+  );
+  return {
+    offset,
+    descriptorCount,
+    prefixDigest: `sha256:${createHash('sha256').update(canonical).digest('hex')}`,
   };
 }
 

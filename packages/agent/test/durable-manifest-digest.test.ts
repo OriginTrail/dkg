@@ -16,6 +16,7 @@ import {
   DURABLE_MANIFEST_DIGEST_DOMAIN,
   DURABLE_MANIFEST_DIGEST_VERSION,
   encodeGraphScopedDurableManifest,
+  graphScopedDurableManifestPrefixAtOffset,
   type GraphScopedDescriptor,
 } from '../src/sync/durable-integrity.js';
 
@@ -178,5 +179,31 @@ describe('canonical durable manifest digest', () => {
 
     expect(otherDomain).not.toBe(current);
     expect(otherVersion).not.toBe(current);
+  });
+
+  it('reuses only an unchanged canonical graph prefix across generations', () => {
+    const original = createGraphScopedDurableManifestPlan(
+      [asset(1), asset(3)].flatMap((entry) => entry.meta),
+      CONTEXT_GRAPH_ID,
+    )!;
+    const appended = createGraphScopedDurableManifestPlan(
+      [asset(1), asset(3), asset(5)].flatMap((entry) => entry.meta),
+      CONTEXT_GRAPH_ID,
+    )!;
+    const changedPrefix = createGraphScopedDurableManifestPlan(
+      [asset(1, { valuePrefix: 'changed' }), asset(3), asset(5)]
+        .flatMap((entry) => entry.meta),
+      CONTEXT_GRAPH_ID,
+    )!;
+
+    const boundary = original.descriptors[0]!.publicTripleCount;
+    const originalPrefix = graphScopedDurableManifestPrefixAtOffset(original, boundary);
+    const appendedPrefix = graphScopedDurableManifestPrefixAtOffset(appended, boundary);
+    const changed = graphScopedDurableManifestPrefixAtOffset(changedPrefix, boundary);
+
+    expect(appended.manifestDigest).not.toBe(original.manifestDigest);
+    expect(appendedPrefix?.prefixDigest).toBe(originalPrefix?.prefixDigest);
+    expect(changed?.prefixDigest).not.toBe(originalPrefix?.prefixDigest);
+    expect(graphScopedDurableManifestPrefixAtOffset(appended, boundary - 1)).toBeNull();
   });
 });
