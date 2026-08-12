@@ -90,14 +90,13 @@ describe('the conflict-slot substrate the authority disposition is derived from'
     expect(merge).not.toContain("entry.type === 'fork'");
   });
 
-  it('keeps the overflow flag paired with the slots at every site', () => {
-    const source = sourceOf(NEXT_STATE);
-    // The reader treats overflow as equivalent evidence, because it records
-    // slots dropped at the cap. That is only sound while the two are written
-    // together -- a site that carried one without the other could present a
-    // record that equivocated past the cap as clean.
-    const overflowLines = source.split('\n').filter((text) => text.includes('conflictOverflow'));
-    expect(overflowLines.length).toBeGreaterThan(0);
-    expect(source).toContain('SYSTEM_RECORD_MAX_CONFLICT_DIGESTS');
-  });
+  /*
+   * The overflow flag is NOT pinned here. An earlier version of this file
+   * asserted that the token and the cap constant appear in the source, which
+   * would have stayed green if the writer stopped setting overflow for over-cap
+   * evidence -- a check that cannot fail, raised in review. Overflow turned out
+   * to be constructible through the real write path (two quarantines
+   * accumulating past the cap), so it is pinned BEHAVIOURALLY instead, in
+   * `system-record-applied-disposition-restart-v1.test.ts`.
+   */
 });

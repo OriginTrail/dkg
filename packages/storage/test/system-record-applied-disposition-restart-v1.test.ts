@@ -1,8 +1,13 @@
 import {
+  canonicalizeAgentProfileConflictEvidenceV1,
+  computeAgentProfileConflictEvidenceDigestV1,
   computeSystemRecordAppliedStateDigestV1,
   computeSystemRecordStableKeyHashV1,
   deriveAgentProfileAuthorityDispositionV1,
+  SYSTEM_RECORD_MAX_CONFLICT_DIGESTS,
   type AgentProfileActiveHeadObjectV1,
+  type AgentProfileConflictEvidenceV1,
+  type Digest32V1,
   type NetworkIdV1,
   type SystemRecordAppliedStatePresentV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -71,7 +76,7 @@ function restartFromPersistedQuads(
  * (`system-record-verified-replacement-v1-internal.ts:776-778`). So the two
  * arms below differ by the thing the substrate actually keys on.
  */
-async function quarantinedForkV1(terminalTransitionConflict: boolean) {
+async function quarantinedForkV1(terminalTransitionConflict: boolean, _withHandles = false) {
   const { binding, epochQuad } = makeAuthenticActiveReplacementFixtureV1('authoritative');
   const fork = await makeForkResolvingSuccessorFixtureV1(
     binding,
@@ -109,7 +114,13 @@ async function quarantinedForkV1(terminalTransitionConflict: boolean) {
     observedRootClaimQuads: active.plan.next.rootClaimQuads,
   }));
   quarantineRegistry.consumer.release(quarantineFacts);
-  return { networkId: quarantineFacts.networkId, active, quarantined };
+  return {
+    networkId: quarantineFacts.networkId,
+    active,
+    quarantined,
+    binding,
+    forkedIssue: fork.forkedIssue,
+  };
 }
 
 describe('authority disposition survives a restart on persisted quads alone', () => {
@@ -227,4 +238,87 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     expect(deriveAgentProfileAuthorityDispositionV1(snapshot.appliedState))
       .toBe('transition-equivocation-quarantined');
   }, 120_000);
+
+  /*
+   * THE OVERFLOW FLAG, ON A ROW THAT REALLY OVERFLOWED.
+   *
+   * The reader treats `conflictOverflow` as equivalent evidence to a non-empty
+   * slot array, because it records digests DROPPED at the cap -- without it, a
+   * record that equivocated more times than the cap allows would read as clean,
+   * on exactly the worst-behaved peers. An earlier version of this slice pinned
+   * that only by forging the flag and by asserting the token appeared in
+   * storage's source; review pointed out that both stay green if the writer
+   * stops setting it. This builds the flag instead.
+   *
+   * A single conflict-evidence object cannot do it: the codec refuses more than
+   * SYSTEM_RECORD_MAX_CONFLICT_DIGESTS total object digests
+   * (agent-profile-evidence-codecs :236-238). Overflow is therefore reachable
+   * only by ACCUMULATION -- the merge unions the persisted slots with the new
+   * terminal digests (next-state :456-464) -- so the construction quarantines
+   * twice with distinct transition evidence.
+   */
+  it('re-derives the equivocation from a row whose slots overflowed the cap', async () => {
+    const { networkId, quarantined, binding, forkedIssue } = await quarantinedForkV1(true, true);
+    const first = quarantined.plan.next.appliedState;
+    expect(first.conflictDigestSlots.length).toBe(2);
+    expect(first.conflictOverflow).toBe(false);
+
+    const overflowed = expectReady(overflowQuarantineV1(binding, forkedIssue, quarantined));
+    const row = overflowed.plan.next.appliedState;
+    // Capped, not truncated to nothing: the flag is what records the remainder.
+    expect(row.conflictDigestSlots.length).toBe(SYSTEM_RECORD_MAX_CONFLICT_DIGESTS);
+    expect(row.conflictOverflow).toBe(true);
+
+    const restarted = restartFromPersistedQuads(networkId, overflowed);
+    if (restarted.state !== 'present') throw new Error('expected a present row after restart');
+    // Asserted on the DECODED row: the flag survived serialisation to reserved
+    // quads and back, which is the boundary the property is about.
+    expect(restarted.appliedState.conflictOverflow).toBe(true);
+    expect(deriveAgentProfileAuthorityDispositionV1(restarted.appliedState))
+      .toBe('transition-equivocation-quarantined');
+  }, 120_000);
 });
+
+/**
+ * A second quarantine over the already-quarantined row, carrying the most
+ * digests one evidence object may hold, so the union crosses the cap.
+ */
+function overflowQuarantineV1(
+  binding: Parameters<typeof makeForkResolvingSuccessorFixtureV1>[0],
+  forkedIssue: { readonly head: unknown },
+  quarantined: SystemRecordActiveReplacementReadyV1,
+) {
+  const forked = forkedIssue.head as AgentProfileActiveHeadObjectV1;
+  const digests = Object.freeze(
+    Array.from({ length: SYSTEM_RECORD_MAX_CONFLICT_DIGESTS }, (_, index) =>
+      `0x${(index + 0x40).toString(16).padStart(2, '0').repeat(32)}`).sort(),
+  ) as readonly Digest32V1[];
+  const evidence = Object.freeze({
+    objectType: 'conflict-evidence',
+    kind: 'agents',
+    networkId: forked.networkId,
+    peerId: forked.peerId,
+    entries: Object.freeze([Object.freeze({
+      type: 'transition',
+      priorAuthoritySequence: forked.authoritySequence,
+      nextAuthoritySequence: String(BigInt(forked.authoritySequence) + 1n),
+      objectDigests: digests,
+    })]),
+  }) as AgentProfileConflictEvidenceV1;
+
+  const registry = createSystemRecordVerifiedReplacementRegistryV1();
+  const facts = registry.consumer.consume(registry.issuer.issueCandidate({
+    operation: 'quarantine',
+    ...forkedIssue,
+    conflictEvidenceDigest: computeAgentProfileConflictEvidenceDigestV1(evidence),
+    canonicalConflictEvidenceBytes: canonicalizeAgentProfileConflictEvidenceV1(evidence),
+    terminalTransitionConflict: true,
+  } as never), binding);
+  const derived = deriveSystemRecordReplacementV1({
+    facts,
+    snapshot: restartFromPersistedQuads(facts.networkId, quarantined),
+    observedRootClaimQuads: quarantined.plan.next.rootClaimQuads,
+  });
+  registry.consumer.release(facts);
+  return derived;
+}
