@@ -2,7 +2,10 @@ import { describe, expect, it } from 'vitest';
 
 import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-cells-v1.js';
 import { resolveConstructibilityV1 } from './helpers/authority-verdict-diff-constructibility-v1.js';
-import { CORE_CURRENT_HEAD_V1 } from './helpers/authority-verdict-diff-core-heads-v1.js';
+import {
+  buildCoreCandidateHeadV1,
+  CORE_CURRENT_HEAD_V1,
+} from './helpers/authority-verdict-diff-core-heads-v1.js';
 import { mintStorageSummaryForHeadV1 } from './helpers/authority-verdict-diff-storage-driver-v1.js';
 import { runStorageSweepV1 } from './helpers/authority-verdict-diff-storage-sweep-v1.js';
 
@@ -79,6 +82,58 @@ describe('verdict-diff: storage mint artifact audit', () => {
     expect(seen).toContain(`authority-transition:${absent}`);
     // And the mint refused, so the control exercises the same path a real
     // fixture omission takes rather than a branch reached only by this test.
+    expect(result.minted).toBe(false);
+  }, 120_000);
+
+  /**
+   * THE SAME CONTROL ON THE TOMBSTONE BRANCH, because the one above proves the
+   * hook only on the path the defect was NOT on.
+   *
+   * `mintStorageSummaryForHeadV1` forks on the candidate's state: a tombstone
+   * goes through `mintAgentProfileTombstoneClosureV1`, everything else through
+   * the verification-closure builder. Each arm passes `onUnresolvedArtifact`
+   * SEPARATELY. The control above drives the ACTIVE arm — so deleting the hook
+   * from the tombstone arm leaves it green, while the audit loses exactly the
+   * omission it was written to catch: the tombstone owned-subject-table defect
+   * that survived a full lane with perfect conservation.
+   *
+   * A guard whose positive control exercises a different branch than the defect
+   * is a check that cannot fail for the thing it names. That this one shipped
+   * INSIDE the fix for a previous check-that-cannot-fail is the reason it is
+   * spelled out here rather than quietly corrected.
+   */
+  it('reports an unanswered lookup on the TOMBSTONE path too', async () => {
+    const seen: string[] = [];
+    const absent = `0x${'cd'.repeat(32)}`;
+
+    // A real built tombstone candidate, not a hand-shaped object: the arm is
+    // selected by `state`, and a fabricated head would let the control pass
+    // while the real tombstone path stayed unexercised.
+    const tombstoneCell = {
+      id: 'audit-tombstone',
+      snapshot: 'present',
+      appliedStatus: 'active',
+      candidateHeadState: 'tombstone',
+      sequenceRelation: 'equal',
+      versionRelation: 'above',
+      storageOperation: 'tombstone',
+      coreDisposition: 'discoverable',
+      evidence: [],
+      candidateForkResolutionDigest: 'absent',
+      clock: 'valid',
+    } as unknown as Parameters<typeof buildCoreCandidateHeadV1>[0];
+
+    const build = buildCoreCandidateHeadV1(tombstoneCell);
+    expect(build.built).toBe(true);
+    if (!build.built) return;
+    expect((build.candidate as { state: string }).state).toBe('tombstone');
+
+    const result = await mintStorageSummaryForHeadV1(
+      { ...build.candidate, acceptedTransitionDigest: absent } as never,
+      (reference) => seen.push(reference),
+    );
+
+    expect(seen).toContain(`authority-transition:${absent}`);
     expect(result.minted).toBe(false);
   }, 120_000);
 });

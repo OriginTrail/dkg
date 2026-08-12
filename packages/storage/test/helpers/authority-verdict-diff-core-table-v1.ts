@@ -487,7 +487,7 @@ export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = 
 export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'candidate-selects-the-lineage-of-its-own-sequence',
-    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:511',
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:576',
     contains: 'const lineageHead = coreSequenceActiveHeadV1(String(sequence));',
     why: 'Axis D now selects the head its candidate descends from, which carries the '
       + 'issuer, root subject, owned-subject table digest and accepted transition that '
@@ -495,8 +495,8 @@ export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
   },
   {
     id: 'candidate-descends-from-the-head-at-its-own-sequence',
-    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:524',
-    contains: 'previousHeadDigest: SEQUENCE_PREDECESSOR_DIGESTS_V1.get(String(sequence))',
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:589',
+    contains: 'previousHeadDigest: requireSequenceLineageV1(String(sequence)).predecessorDigest,',
     why: 'The predecessor is the digest of that same head rather than the pinned '
       + 'sequence-2 current head, so a sequence-1 candidate no longer claims a '
       + 'predecessor ABOVE itself and a sequence-3 one no longer skips its own. '

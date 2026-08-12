@@ -135,7 +135,32 @@ const SEQUENCE_TRANSITIONS_V1: ReadonlyMap<string, AgentProfileAuthorityTransiti
 export function coreSequenceActiveHeadV1(
   authoritySequence: string,
 ): AgentProfileActiveHeadObjectV1 {
-  return SEQUENCE_ACTIVE_HEADS_V1.get(authoritySequence) as AgentProfileActiveHeadObjectV1;
+  return requireSequenceLineageV1(authoritySequence).activeHead;
+}
+
+/**
+ * THE ONE CHECKED LOOKUP, and the reason it is checked rather than cast.
+ *
+ * The per-sequence facts were reached through `Map.get(...) as T`, which types
+ * every string as supported while only four exist. A future axis relation
+ * asking for sequence `5` would compile, receive `undefined` DISGUISED AS A
+ * VALID HEAD, and fail somewhere downstream in a spread or a digest with a
+ * message about the wrong thing entirely. This turns that into a refusal at the
+ * boundary, naming the sequence and what the fixture actually serves.
+ *
+ * Adding a sequence is now one data change in SEQUENCE_LINEAGE_V1 rather than
+ * four maps kept in step by hand -- which is the drift pressure this PR exists
+ * to remove, applied to the model this PR introduced.
+ */
+function requireSequenceLineageV1(authoritySequence: string): CoreSequenceLineageV1 {
+  const lineage = SEQUENCE_LINEAGE_V1.get(authoritySequence);
+  if (lineage === undefined) {
+    throw new Error(
+      `no fixture lineage for authority sequence ${authoritySequence}; `
+      + `this fixture serves ${[...SEQUENCE_LINEAGE_V1.keys()].join(', ')}`,
+    );
+  }
+  return lineage;
 }
 
 /**
@@ -169,7 +194,7 @@ export function coreCandidateSequenceV1(cell: VerdictDiffCellV1): string {
 export function coreSequenceTransitionV1(
   authoritySequence: string,
 ): AgentProfileAuthorityTransitionV1 {
-  return SEQUENCE_TRANSITIONS_V1.get(authoritySequence) as AgentProfileAuthorityTransitionV1;
+  return requireSequenceLineageV1(authoritySequence).transition;
 }
 
 /**
@@ -185,7 +210,7 @@ export function coreSequenceTransitionV1(
 export function coreSequenceEquivocatingTransitionV1(
   authoritySequence: string,
 ): AgentProfileAuthorityTransitionV1 {
-  return EQUIVOCATING_TRANSITIONS_V1.get(authoritySequence) as AgentProfileAuthorityTransitionV1;
+  return requireSequenceLineageV1(authoritySequence).equivocatingTransition;
 }
 
 /**
@@ -261,6 +286,46 @@ const EQUIVOCATING_TRANSITION_DIGESTS_V1: ReadonlyMap<string, string> = new Map(
     sequence,
     computeAgentProfileAuthorityTransitionDigestV1(transition),
   ]),
+);
+
+/**
+ * ONE RECORD PER AUTHORITY SEQUENCE -- the canonical model the separate maps
+ * above are folded into.
+ *
+ * The maps are kept as the construction steps (each needs the one before it),
+ * but nothing outside this file reads them: every consumer goes through
+ * `requireSequenceLineageV1`, so a sequence's active head, its real rotation,
+ * its competing rotation and its predecessor digest cannot drift apart. They
+ * are five facts about ONE rotation and are now typed that way.
+ */
+export interface CoreSequenceLineageV1 {
+  readonly sequence: string;
+  readonly activeHead: AgentProfileActiveHeadObjectV1;
+  readonly transition: AgentProfileAuthorityTransitionV1;
+  readonly equivocatingTransition: AgentProfileAuthorityTransitionV1;
+  /**
+   * PRECOMPUTED, both of these. They are digests, i.e. a canonicalisation plus a
+   * keccak hash, and the head builder runs per cell -- computing them here
+   * rather than at the call site is what keeps this lane inside its CI budget
+   * (measured: moving two such digests into the builder took the
+   * projection-equivalence suite from 310s to 716s).
+   */
+  readonly equivocatingTransitionDigest: string;
+  readonly predecessorDigest: string;
+}
+
+const SEQUENCE_LINEAGE_V1: ReadonlyMap<string, CoreSequenceLineageV1> = new Map(
+  [...SEQUENCE_ACTIVE_HEADS_V1].map(([sequence, activeHead]) => [sequence, Object.freeze({
+    sequence,
+    activeHead,
+    transition: SEQUENCE_TRANSITIONS_V1.get(sequence) as AgentProfileAuthorityTransitionV1,
+    equivocatingTransition:
+      EQUIVOCATING_TRANSITIONS_V1.get(sequence) as AgentProfileAuthorityTransitionV1,
+    equivocatingTransitionDigest:
+      EQUIVOCATING_TRANSITION_DIGESTS_V1.get(sequence) as string,
+    predecessorDigest:
+      SEQUENCE_PREDECESSOR_DIGESTS_V1.get(sequence) as string,
+  })]),
 );
 
 /** Every rotation this fixture can present, real and equivocating. */
@@ -510,7 +575,7 @@ export function buildCoreCandidateHeadV1(
   // rotating INTO it, and the predecessor is the head it really descends from.
   const lineageHead = coreSequenceActiveHeadV1(String(sequence));
   const transitionDigest = cell.acceptedTransitionDigest === 'differ'
-    ? EQUIVOCATING_TRANSITION_DIGESTS_V1.get(String(sequence)) as string
+    ? requireSequenceLineageV1(String(sequence)).equivocatingTransitionDigest
     : lineageHead.acceptedTransitionDigest;
 
   const base: Record<string, unknown> = {
@@ -521,7 +586,7 @@ export function buildCoreCandidateHeadV1(
     // A noninitial head requires its predecessor link (:206), and the head named
     // here is a real one that mints, which keeps this a history reference rather
     // than a placeholder the codec would reject.
-    previousHeadDigest: SEQUENCE_PREDECESSOR_DIGESTS_V1.get(String(sequence)) as string,
+    previousHeadDigest: requireSequenceLineageV1(String(sequence)).predecessorDigest,
     // Differ from the current by issue time, which moves the digest without
     // touching any field an axis pins. Perturbing an axis-owned field instead
     // would make axis F's 'differ' silently duplicate another axis.
