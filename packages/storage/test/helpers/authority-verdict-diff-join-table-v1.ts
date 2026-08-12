@@ -199,9 +199,6 @@ export const JOIN_LEVEL1_TABLE_V1: Readonly<Record<string, number>> = {
   'AGREEMENT stale -> already-applied': 256,
   'AGREEMENT stale -> ready': 512,
   'AGREEMENT stale -> stale': 1536,
-  // THE DIVERGENCE RUNNING THE OTHER WAY. Every other divergence in this table
-  // is storage materialising a head core refuses; this one is core ACCEPTING an
-  // advance storage declines to materialise.
   'DIVERGENCE reject -> already-applied': 192,
   'DIVERGENCE reject -> ready': 4096,
   'NO-MAPPING quarantine|transition-equivocation -> already-applied': 128,
@@ -272,28 +269,36 @@ export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCo
  * EVERY DIVERGENCE, WITH BOTH SIDES VERBATIM. This is the actionable table: it
  * is what changes if Phase 3 routes the live path through core.
  *
- * IT NO LONGER READS AS ONE SENTENCE, and the correction matters more than the
- * growth. It used to be entirely "STORAGE MATERIALISES HEADS CORE REFUSES" --
- * every row a `reject -> ready`-shaped violation of the withholding-only image,
- * two thirds of it core's future clock-skew gate against a clock-blind storage
- * classifier. That direction is still the bulk, and it grew from 3,136 cells to
- * 4,672 as the sequence-relative region became comparable.
+ * IT READS AS ONE SENTENCE: STORAGE MATERIALISES HEADS CORE REFUSES. Every row
+ * is a `reject -> ready`-shaped violation of the withholding-only image, and the
+ * bulk of it is core's future clock-skew gate against a clock-blind storage
+ * classifier. The population grew from 3,136 cells to 4,288 as the
+ * sequence-relative region became comparable.
  *
- * BUT THE SEQUENCE-DEPTH CLOSURE EXPOSED A DIVERGENCE RUNNING THE OTHER WAY:
- * `accept -> stale`, 192 cells, where CORE ACCEPTS an advance and STORAGE
- * DECLINES TO MATERIALISE it. Every previously known divergence had core
- * refusing and storage proceeding, which is why the headline could be stated as
- * one sentence; this one inverts the roles. It was unreachable while the
- * sequence-relative candidates could not mint, so it is not a regression -- it
- * is a cell that had no observation before.
+ * AN EARLIER REVISION CLAIMED OTHERWISE AND WAS WRONG, recorded here because
+ * this doc is where a reader looks for the shape of the population. It reported
+ * `accept -> stale` at 192 cells -- core accepting an advance storage declined
+ * -- said the headline "no longer reads as one sentence", and concluded the two
+ * directions carry OPPOSITE routing risks so routing does not merely tighten.
  *
- * WHY THAT ASYMMETRY MATTERS TO PHASE 3 SPECIFICALLY: the two directions carry
- * OPPOSITE routing risks. Storage-materialises-what-core-refuses is a SAFETY
- * gap that routing through core would CLOSE. Core-accepts-what-storage-refuses
- * is the reverse -- routing through core would newly ADMIT these cells, so the
- * route does not merely tighten. A reader who took the old one-sentence headline
- * into the routing decision would have carried exactly the wrong prior about
- * which way the change cuts.
+ * That was not a system divergence. It was this fixture handing core a
+ * mismatched `acceptedTransition`: a candidate at sequence 3 received the 1->2
+ * transition, core refused it, and storage -- which never sees axis-J evidence
+ * -- went its own way. ONE SIDE GOT A CORRUPTED INPUT AND THE DISAGREEMENT WAS
+ * RECORDED AS THE TWO IMPLEMENTATIONS DISAGREEING. With the transition the
+ * candidate actually names, all 192 cells are `accept -> ready`, an AGREEMENT.
+ *
+ * THE POSITIVE TRACE OF THAT FIX IS ALSO IN THIS TABLE, and it is the better
+ * evidence: `reject|exact accepted authority transition is missing -> ready`
+ * HALVED, 384 -> 192. Manufactured rejects leaving the table is as much proof
+ * the mismatch is gone as the divergence vanishing is -- and the two are
+ * independent observations of one fix.
+ *
+ * The failure shape, since it is the one this whole slice keeps meeting: a first
+ * observation inside a region you have just built is the LEAST trustworthy kind.
+ * The novelty of the observation and the novelty of the instrument are the same
+ * fact, so the hypothesis to run first is "I built it wrong", not "the system
+ * was hiding something".
  */
 export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
   'reject|head issuedAt exceeds the future clock-skew bound -> ready': 2496,
