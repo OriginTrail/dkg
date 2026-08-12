@@ -222,12 +222,22 @@ describe('verdict-diff projection equivalence', { timeout: VERDICT_DIFF_SUITE_TI
    * That is not a defect in the key. Its contract is only that cells SHARING a
    * key present identical inputs, which over-discrimination cannot violate, and
    * running 855 projections where 285 would do costs nothing worth having. It is
-   * recorded as a MEASUREMENT instead, because the number is the finding: a
-   * storage input stands for 576 cells, not 192, and the three clock values are
-   * served by one byte-identical input. That is the sharpest available statement
+   * recorded as a MEASUREMENT instead, because the number is the finding: each
+   * CLOCK-INDEPENDENT KEY-GROUP covers 576 cells, not 192, and the three clock
+   * values are served by one byte-identical input. That is the sharpest available statement
    * of the clock divergence -- not merely that storage has no clock, but that
    * the same storage input answers for a candidate core refuses on skew and for
    * one it accepts.
+   *
+   * 576 IS CELLS PER KEY-GROUP, NEVER CELLS PER INPUT, AND THE DISTINCTION IS
+   * MEASURABLE RATHER THAN PEDANTIC. The built inputs number 273, and 273 does
+   * NOT divide 164,160 -- it leaves remainder 87, giving ~601.3 cells per input.
+   * A non-integer is the proof that inputs are NOT uniformly sized: they collapse
+   * further than the key-groups, across applied statuses and operations wherever
+   * those agree. Any sentence of the form "N cells per storage input" derived
+   * from a KEY count is describing the key, which is the same conflation that
+   * once had this suite credited with measuring 285 built inputs it never
+   * measured.
    */
   it('measures that the clock cannot reach a storage input', () => {
     const distinctKeys = new Set(cells.map(storageInputProjectionKeyV1));
@@ -239,8 +249,13 @@ describe('verdict-diff projection equivalence', { timeout: VERDICT_DIFF_SUITE_TI
     expect(distinctKeys.size).toBe(855);
     expect(withoutClock.size).toBe(285);
     expect(distinctKeys.size).toBe(withoutClock.size * 3);
-    // The built inputs themselves collapse further than either key: the head is
+    // THE EMPIRICAL INPUT-COLLAPSE FIGURE, PINNED RATHER THAN BOUNDED. The old
+    // one-sided bound is satisfied by any degenerate fingerprint -- 1 < 855 --
+    // so it could not distinguish a real collapse from a broken instrument, and
+    // it is the number the artifact spent four sentences claiming to have.
+    // The built inputs collapse further than either key because the head is
     // shared across applied statuses and operations wherever those agree.
-    expect(distinctInputs.size).toBeLessThan(distinctKeys.size);
+    expect(distinctInputs.size).toBe(273);
+    expect(distinctInputs.size).toBeLessThan(withoutClock.size);
   });
 });
