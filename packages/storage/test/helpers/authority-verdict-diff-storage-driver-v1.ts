@@ -328,9 +328,26 @@ function mintAncestryV1(): readonly AgentProfileHeadObjectV1[] {
  * The refusal is a construction result, never a swallowed skip: where the
  * builder will not close over a head there is no storage verdict to compare, and
  * the join records that as a NAMED non-comparability rather than as a gap.
+ *
+ * `onUnresolved` FIRES ON EVERY LOOKUP THE ARTIFACT MAP CANNOT ANSWER, and it is
+ * here because its ABSENCE was demonstrated rather than theorised. The core
+ * minter has carried this hook since the S1 incident, and the sweep pins its
+ * result at zero; this one did not, and that asymmetry is exactly where a defect
+ * hid. Minting every sequence-relative tombstone against the CURRENT head's
+ * owned-subject table asked for a deletion-table digest this fixture never
+ * supplies, which surfaces as 'verification closure is missing 0x...' -- a
+ * refusal owned by the harness, wearing a domain refusal's exact wording. It
+ * survived a full 13-minute lane with every count conserving, and was found only
+ * because an independently derived cell count disagreed with the run by exactly
+ * the three affected head shapes.
+ *
+ * A guard installed on one of two minters is not installed. The distinction the
+ * hook reports is not in the message -- it is in whether a lookup went
+ * unanswered, which no amount of reading the message recovers.
  */
 export async function mintStorageSummaryForHeadV1(
   candidate: AgentProfileHeadObjectV1,
+  onUnresolved?: (reference: string) => void,
 ): Promise<
   | { readonly minted: true; readonly summary: AgentProfileVerifiedAuthoritySummaryV1 }
   | { readonly minted: false; readonly message: string }
@@ -355,6 +372,7 @@ export async function mintStorageSummaryForHeadV1(
         ownedSubjectTable: [predecessor.rootSubject],
         ancestors: ancestry,
         transitions,
+        onUnresolvedArtifact: onUnresolved,
       } as never);
       return {
         minted: true,
@@ -368,7 +386,11 @@ export async function mintStorageSummaryForHeadV1(
     );
     const closure = await buildAgentProfileVerificationClosureV1(
       computeAgentProfileHeadObjectDigestV1(candidate as never),
-      systemRecordClosureResolveOptionsV1(artifacts, TERMINAL_FIXTURE_NOW_MS_V1) as never,
+      systemRecordClosureResolveOptionsV1(
+        artifacts,
+        TERMINAL_FIXTURE_NOW_MS_V1,
+        onUnresolved,
+      ) as never,
     );
     return {
       minted: true,
