@@ -22,6 +22,7 @@ import {
   type AgentProfileAuthorityTransitionV1,
   type AgentProfileConflictEvidenceV1,
   type AgentProfileForkResolutionV1,
+  type AgentProfileHeadObjectV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
   type Digest32V1,
   type NetworkIdV1,
@@ -338,7 +339,7 @@ export async function makeForkResolvingSuccessorFixtureV1(
     ...(genesis ? {} : { previousHeadDigest: baseDigest }),
     forkResolutionDigest: computeAgentProfileForkResolutionDigestV1(resolution),
   } as AgentProfileActiveHeadObjectV1;
-  const artifacts = closureArtifactsFor(
+  const artifacts = buildSystemRecordClosureArtifactsV1(
     [head, forked, sibling, base, ...(chain?.ancestors ?? [])],
     resolution,
     chain?.transitions ?? [],
@@ -409,20 +410,22 @@ export async function makeForkResolvingSuccessorFixtureV1(
   });
 
   function closureOptions() {
-    return {
-      nowMs: Date.parse('2026-08-05T12:10:00Z'),
-      resolve: async (reference: { objectKind: string; digest: string }) =>
-        artifacts.get(`${reference.objectKind}:${reference.digest}`),
-      verifyAuthorityEnvelope: () => true,
-      verifyCurrentBundle: (_head: unknown, bytes: Uint8Array) =>
-        Buffer.from(bytes).equals(Buffer.from(verified.bundle)),
-    };
+    return systemRecordClosureResolveOptionsV1(artifacts);
   }
 }
 
-function closureArtifactsFor(
-  heads: readonly AgentProfileActiveHeadObjectV1[],
-  resolution: AgentProfileForkResolutionV1,
+/**
+ * Assembles the artifact map a verification closure walks.
+ *
+ * Exported because a closure is minted from more than one place -- the fork
+ * fixtures here and the tombstone minter in the terminal fixture -- and two
+ * hand-rolled copies of envelope construction is exactly the drift that lets a
+ * fixture change land in one and be forgotten in the other. `resolution` is
+ * optional: a tombstone closure names no fork.
+ */
+export function buildSystemRecordClosureArtifactsV1(
+  heads: readonly AgentProfileHeadObjectV1[],
+  resolution?: AgentProfileForkResolutionV1,
   transitions: readonly AgentProfileAuthorityTransitionV1[] = [],
 ) {
   const artifacts = new Map<string, {
@@ -433,7 +436,7 @@ function closureArtifactsFor(
   }>([
     ...heads.map((head) => envelopeArtifact('agent-profile-head', head)),
     ...transitions.map((transition) => envelopeArtifact('authority-transition', transition)),
-    envelopeArtifact('fork-resolution', resolution),
+    ...(resolution === undefined ? [] : [envelopeArtifact('fork-resolution', resolution)]),
   ]);
   artifacts.set(`profile-bundle:${verified.head.bundleDigest}`, {
     objectKind: 'profile-bundle',
@@ -443,9 +446,57 @@ function closureArtifactsFor(
   return artifacts;
 }
 
+/**
+ * The resolve/verify options every closure in these fixtures is built with, so
+ * the callers differ only in the artifacts they supply and the clock they read.
+ *
+ * `onUnresolved` FIRES ON EVERY LOOKUP THIS MAP CANNOT ANSWER, and it exists so
+ * a caller can tell the two refusal MECHANISMS apart. A closure resolves every
+ * digest a head names, so a fixture that omits one gets a refusal phrased exactly
+ * like a domain refusal -- and pinning that retires cells on the harness's own
+ * omission. The distinction is not in the message, which is why a guard reading
+ * the message keys on wording; it is in whether a lookup went unanswered, which
+ * is what this reports.
+ */
+export function systemRecordClosureResolveOptionsV1(
+  artifacts: ReadonlyMap<string, { canonicalBytes: Uint8Array }>,
+  nowMs: number = Date.parse('2026-08-05T12:10:00Z'),
+  onUnresolved?: (reference: string) => void,
+) {
+  return {
+    nowMs,
+    resolve: async (reference: { objectKind: string; digest: string }) => {
+      const key = `${reference.objectKind}:${reference.digest}`;
+      const found = artifacts.get(key);
+      if (found === undefined) onUnresolved?.(key);
+      return found;
+    },
+    verifyAuthorityEnvelope: () => true,
+    verifyCurrentBundle: (_head: unknown, bytes: Uint8Array) =>
+      Buffer.from(bytes).equals(Buffer.from(verified.bundle)),
+  };
+}
+
+/**
+ * A real authority chain of `steps` rotations, exported because a NON-GENESIS
+ * head cannot be fabricated by editing a genesis one.
+ *
+ * The constraint is structural and was measured at its site: authority sequence
+ * > 0 requires an `acceptedTransitionDigest` (head codec :197), that digest must
+ * name a valid authority transition, and a transition MUST "rotate to a new
+ * wallet root" (system-record-agent-profile-control-codecs-v1-internal.ts:190).
+ * So every non-genesis head is a ROTATED head -- which moves `evmIssuer` and
+ * `rootSubject`, and therefore obliges a rebuilt graph-scoped author seal and a
+ * re-derived owned-subject table. `rotatedActiveHead` already does all of that;
+ * this exposes it rather than inviting the next caller to rebuild it wrongly.
+ */
+export function makeRotatedAuthorityChainV1(steps: 1 | 2) {
+  return steps === 1 ? onceRotatedChain() : twiceRotatedChain();
+}
+
 function envelopeArtifact(
   objectKind: 'agent-profile-head' | 'fork-resolution' | 'authority-transition',
-  object: AgentProfileActiveHeadObjectV1 | AgentProfileForkResolutionV1
+  object: AgentProfileHeadObjectV1 | AgentProfileForkResolutionV1
     | AgentProfileAuthorityTransitionV1,
 ): [string, {
   objectKind: 'agent-profile-head' | 'fork-resolution' | 'authority-transition';

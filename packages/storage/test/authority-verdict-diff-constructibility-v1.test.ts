@@ -1,0 +1,115 @@
+import { describe, expect, it } from 'vitest';
+
+import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-cells-v1.js';
+import {
+  CONSTRUCTIBILITY_RULES_V1,
+  readCitedSourceLineV1,
+  resolveConstructibilityV1,
+} from './helpers/authority-verdict-diff-constructibility-v1.js';
+
+/**
+ * The constructibility split, and the conservation law that keeps the static
+ * shortcuts honest.
+ *
+ * Static resolution is the lever that makes this sweep runnable at all -- the
+ * reachable space is 393,984 and most of it describes states no fixture can
+ * build. The danger is that the same lever can quietly delete cells: a rule
+ * that matches too broadly shrinks the run set while every other assertion
+ * still passes.
+ *
+ * Two things stop that. The sum must equal the pinned total, so nothing can be
+ * dropped without the arithmetic failing; and every rule must name the site
+ * that refuses the state, so a retirement is a citation rather than an opinion.
+ */
+// Stated rather than inherited, for the reason recorded in the generator's own
+// suite: vitest's 5s default already cost this lane a run once, and the space
+// has quadrupled since.
+const VERDICT_DIFF_SUITE_TIMEOUT_MS = 120_000;
+
+describe('verdict-diff constructibility split', { timeout: VERDICT_DIFF_SUITE_TIMEOUT_MS }, () => {
+  const cells = enumerateVerdictDiffCellsV1();
+  const split = resolveConstructibilityV1(cells);
+
+  // THE CONSERVATION LAW. If a rule starts matching more cells, this still
+  // holds -- which is why the per-rule counts below matter too. Together they
+  // localise a change rather than merely detecting one.
+  it('conserves the pinned cell total across the split', () => {
+    expect(split.total).toBe(393_984);
+    expect(split.constructible.length + split.unconstructible.length).toBe(393_984);
+  });
+
+  // Collected rather than asserted per retired cell, for the same reason as the
+  // generator's dependency pins: 25k assertions for one property is a timeout
+  // risk that reports nothing about the rules.
+  it('attributes every retired cell to exactly one rule that exists', () => {
+    const ids = new Set(CONSTRUCTIBILITY_RULES_V1.map((r) => r.id));
+    const unattributed = split.unconstructible.filter(({ ruleId }) => !ids.has(ruleId));
+    expect(unattributed.slice(0, 3)).toEqual([]);
+    expect(unattributed).toHaveLength(0);
+    const summed = Object.values(split.byRule).reduce((a, b) => a + b, 0);
+    expect(summed).toBe(split.unconstructible.length);
+  });
+
+  // Per-rule counts, because the conservation sum above DETECTS a change while
+  // these LOCALISE it. A predicate typo that dropped one conjunct would double
+  // a rule's territory with every other row here still passing.
+  //
+  // Axes C (head state), H (storage operation) and K (fork resolution) are
+  // independent of every other axis, so each (C,H,K) triple owns exactly
+  // 393,984 / 12 = 32,832 cells. That is the unit every number below is built
+  // from, and it is what makes them predictable rather than merely observed:
+  //   R1  C=tombstone & K=present, all three operations   3 x 32,832 = 98,496
+  //   R2  C=tombstone & H=active, K=absent remainder      1 x 32,832 = 32,832
+  //   R3  C=tombstone & H=quarantine, K=absent remainder  1 x 32,832 = 32,832
+  //   R4  C=active    & H=tombstone, both K values        2 x 32,832 = 65,664
+  // R2 and R3 see only the K='absent' remainder because R1 fires first, which
+  // mirrors the real refusal order: issueActive validates the head at :637
+  // before testing its state at :641.
+  //
+  // EVERY NUMBER HERE HAS MOVED TWICE -- once when axis G was gated on snapshot
+  // presence, once when axis J was corrected to span its declared contract --
+  // and both times they were RE-DERIVED FROM THE UNIT rather than adjusted. The
+  // unit itself moves (8,352 -> 8,208 -> 32,832), so patching totals would leave
+  // the rule counts internally inconsistent while conservation still balanced,
+  // which is the one failure this whole structure exists to make impossible.
+  //
+  // These were PREDICTED BEFORE THE RUN and agreed on the first run. A number
+  // read off a run and then pinned is not a measurement.
+  //
+  // Cross-check from the other direction: the registry refuses three of the six
+  // (operation, head state) pairs outright, which is half the space (196,992),
+  // plus R1's tombstone-with-resolution cells in the one surviving pair
+  // (C=tombstone & H=tombstone & K=present, 32,832) = 229,824. And forward
+  // instead of by subtraction: 5 surviving triples x 32,832 = 164,160.
+  it('retires each rule\'s exact territory', () => {
+    expect(split.byRule['R1-tombstone-carries-fork-resolution']).toBe(98_496);
+    expect(split.byRule['R2-active-operation-needs-active-head']).toBe(32_832);
+    expect(split.byRule['R3-quarantine-operation-needs-active-head']).toBe(32_832);
+    expect(split.byRule['R4-tombstone-operation-needs-tombstone-head']).toBe(65_664);
+    expect(split.unconstructible.length).toBe(229_824);
+    expect(split.constructible.length).toBe(164_160);
+  });
+
+  // A retirement is a citation, not an opinion: the failure string each rule
+  // claims must actually be present at the LINE it names. The weaker
+  // file-contains form is what let R1's site sit one line past its own
+  // `fail(...)` call -- a citation nobody could follow, passing a test whose
+  // whole job was to make citations followable.
+  it('verifies every rule quotes a failure string that exists at its cited line', () => {
+    for (const rule of CONSTRUCTIBILITY_RULES_V1) {
+      expect(readCitedSourceLineV1(rule.site, new URL('../../../', import.meta.url)))
+        .toContain(rule.failure);
+    }
+  });
+
+  // Non-vacuity: a rule that matches nothing is dead weight that makes the
+  // table look more resolved than it is, and a rule matching everything would
+  // empty the run set. Both are caught here rather than at review time.
+  it('keeps every rule live and non-total', () => {
+    for (const rule of CONSTRUCTIBILITY_RULES_V1) {
+      const n = split.byRule[rule.id] ?? 0;
+      expect(n).toBeGreaterThan(0);
+      expect(n).toBeLessThan(split.total);
+    }
+  });
+});
