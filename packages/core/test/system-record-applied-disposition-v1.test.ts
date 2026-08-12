@@ -36,11 +36,6 @@ const STABLE_KEY = computeSystemRecordStableKeyHashV1('otp:20430', PEER);
  * full while covering fewer things than it says.
  */
 const APPLIED_STATUSES = ['active', 'quarantined', 'tombstone', 'dirty'] as const;
-type StatusesAreExactlyTheUnion =
-  SystemRecordAppliedStatusV1 extends (typeof APPLIED_STATUSES)[number]
-    ? (typeof APPLIED_STATUSES)[number] extends SystemRecordAppliedStatusV1 ? true : never
-    : never;
-const statusesAreExactlyTheUnion: StatusesAreExactlyTheUnion = true;
 
 /** The domain core's evaluator accepts -- the `undecided-` members are NOT in it. */
 const ACCEPTED_DISPOSITIONS = [
@@ -48,11 +43,6 @@ const ACCEPTED_DISPOSITIONS = [
   'head-fork-quarantined',
   'transition-equivocation-quarantined',
 ] as const;
-type AcceptedAreExactlyTheUnion =
-  AgentProfileAuthorityDispositionV1 extends (typeof ACCEPTED_DISPOSITIONS)[number]
-    ? (typeof ACCEPTED_DISPOSITIONS)[number] extends AgentProfileAuthorityDispositionV1 ? true : never
-    : never;
-const acceptedAreExactlyTheUnion: AcceptedAreExactlyTheUnion = true;
 
 /**
  * ONE CELL OF THE MAPPING, AS DATA.
@@ -180,9 +170,35 @@ function coordinateKey(cell: AppliedDispositionCellV1): string {
 }
 
 describe('applied state -> authority disposition', () => {
-  it('binds its axis lists to the unions they enumerate', () => {
-    expect(statusesAreExactlyTheUnion).toBe(true);
-    expect(acceptedAreExactlyTheUnion).toBe(true);
+  /*
+   * THE AXIS LIST IS CHECKED AGAINST THE CODEC, NOT AGAINST A TYPE ALIAS.
+   *
+   * The compile-time half of this guard lives in
+   * `system-record-package-export-v1.types.ts`, because THIS file is not in any
+   * tsc program -- `packages/core/tsconfig.json` includes only `src`, and vitest
+   * transpiles without semantic typechecking, so a conditional-type guard written
+   * here would assert a literal `true` forever. Found in review.
+   *
+   * What is executable HERE is the runtime half, read off the applied-state codec
+   * rather than off a restated list: all four axis members are accepted, and a
+   * non-member is refused by the codec's own message (applied-state :223-224).
+   */
+  it('uses axis statuses the applied-state codec accepts, and no others', () => {
+    for (const status of APPLIED_STATUSES) {
+      const state = stateForCell({
+        row: 2, state: 'present', status, slots: 'empty', overflow: false,
+        disposition: 'discoverable',
+      });
+      if (state.state !== 'present') throw new Error('expected present');
+      expect(() => canonicalizeSystemRecordAppliedStateV1(state)).not.toThrow();
+    }
+    const nonMember = stateForCell({
+      row: 2, state: 'present', status: 'active', slots: 'empty', overflow: false,
+      disposition: 'discoverable',
+    });
+    expect(() => canonicalizeSystemRecordAppliedStateV1(
+      { ...nonMember, status: 'expired' } as never,
+    )).toThrow(/applied-state status is invalid/u);
   });
 
   // The pinned total comes first: without it, per-cell coverage is

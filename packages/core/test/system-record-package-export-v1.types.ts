@@ -165,4 +165,44 @@ const forgedAcceptedState: AgentProfileAcceptedAuthorityStateV1['disposition'] =
 void forgedDisposition;
 void forgedAcceptedState;
 
+/*
+ * AXIS-EXACTNESS LIVES HERE BECAUSE THIS IS A LANE THAT COMPILES.
+ *
+ * These guards were originally written in the disposition vitest file, where they
+ * could not work: `packages/core/tsconfig.json` includes only `src`, and vitest
+ * transpiles without semantic typechecking, so a conditional type collapsing to
+ * `never` was never evaluated and the runtime assertion only ever read a literal
+ * `true`. Found in review. `test:system-record-export` runs
+ * `tsc --noEmit --strict` over THIS file, so here the collapse is a build error.
+ *
+ * Both checks are bidirectional: a member ADDED to either union and a member
+ * REMOVED from it both fail. A one-directional check stays green while the list
+ * covers less than the union it claims to enumerate.
+ *
+ * The lists are duplicated from the disposition table on purpose -- these read the
+ * PUBLISHED package surface, so they also catch a union that stops being exported.
+ * Their runtime twin is proven separately against the applied-state codec.
+ */
+const APPLIED_STATUSES_V1 = ['active', 'quarantined', 'tombstone', 'dirty'] as const;
+type APPLIED_STATUSES_ARE_EXACTLY_THE_UNION =
+  SystemRecordAppliedStatusV1 extends (typeof APPLIED_STATUSES_V1)[number]
+    ? (typeof APPLIED_STATUSES_V1)[number] extends SystemRecordAppliedStatusV1 ? true : never
+    : never;
+const appliedStatusesAreExactlyTheUnion: APPLIED_STATUSES_ARE_EXACTLY_THE_UNION = true;
+
+const ACCEPTED_DISPOSITIONS_V1 = [
+  'discoverable',
+  'head-fork-quarantined',
+  'transition-equivocation-quarantined',
+] as const;
+type ACCEPTED_DISPOSITIONS_ARE_EXACTLY_THE_UNION =
+  AgentProfileAuthorityDispositionV1 extends (typeof ACCEPTED_DISPOSITIONS_V1)[number]
+    ? (typeof ACCEPTED_DISPOSITIONS_V1)[number] extends AgentProfileAuthorityDispositionV1
+      ? true : never
+    : never;
+const acceptedDispositionsAreExactlyTheUnion: ACCEPTED_DISPOSITIONS_ARE_EXACTLY_THE_UNION = true;
+
+void appliedStatusesAreExactlyTheUnion;
+void acceptedDispositionsAreExactlyTheUnion;
+
 export {};
