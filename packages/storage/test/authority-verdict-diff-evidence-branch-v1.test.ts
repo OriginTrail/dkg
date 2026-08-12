@@ -32,7 +32,11 @@ import { buildCoreCandidateHeadV1 } from './helpers/authority-verdict-diff-core-
 describe('verdict-diff: acceptedTransition evidence is branch-selected', () => {
   function verdict(cell: VerdictDiffCellV1): string {
     const head = buildCoreCandidateHeadV1(cell);
-    if (!head.built) return `REFUSED|${head.ruleId}`;
+    // A refused head must FAIL rather than return a string: a construction
+    // failure that merely produced a different label would satisfy any negative
+    // assertion below and the branch would never be reached.
+    expect(head.built).toBe(true);
+    if (!head.built) throw new Error(`head refused: ${head.ruleId}`);
     const decision = evaluateAgentProfileHeadAdvanceV1(
       buildCoreAcceptedStateV1(cell) as never,
       head.candidate,
@@ -62,12 +66,12 @@ describe('verdict-diff: acceptedTransition evidence is branch-selected', () => {
       evidence: ['tombstonePredecessor', 'acceptedTransition'],
     } as unknown as VerdictDiffCellV1;
 
-    // The branch must get PAST the retained-transition comparison. Asserting the
-    // absence of that specific reject rather than a particular success verdict:
-    // what this pins is that the fixture stopped manufacturing the refusal, not
-    // what core then decides, which is the table's business and not this test's.
-    expect(verdict(cell))
-      .not.toBe('reject|late tombstone requires the exact retained resurrection transition');
+    // POSITIVE, not negative. A `not.toBe(<one reject>)` passes on ANY other
+    // string -- including the predecessor-gate reject that fires BEFORE the
+    // retained-transition comparison, so the branch this test names would never
+    // be reached and the test would still be green. `accept` is only reachable
+    // through both gates in order, so it proves the whole path.
+    expect(verdict(cell)).toBe('accept');
   });
 
   it('satisfies the named-transition check on a NEXT-sequence candidate', () => {
@@ -79,9 +83,9 @@ describe('verdict-diff: acceptedTransition evidence is branch-selected', () => {
       evidence: ['acceptedTransition', 'verifiedAuthoritySummary'],
     } as unknown as VerdictDiffCellV1;
 
-    // The mirror-image refusal: the next-sequence arm compares the supplied
-    // transition against the candidate's OWN named digest, so a lower-sequence
-    // style selection lands here instead.
-    expect(verdict(cell)).not.toBe('reject|exact accepted authority transition is missing');
+    // Positive for the same reason: the next-sequence arm compares the supplied
+    // transition against the candidate's OWN named digest, and `accept` is
+    // reachable only once that comparison succeeds.
+    expect(verdict(cell)).toBe('accept');
   });
 });
