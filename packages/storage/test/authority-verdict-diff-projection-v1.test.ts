@@ -29,8 +29,11 @@ import { resolveConstructibilityV1 } from './helpers/authority-verdict-diff-cons
  * run from 1 to 8. Core discriminates inside a set storage cannot split at all.
  *
  * REFINED SINCE, by the projection-equivalence suite: axis L never reaches a
- * storage input, so the built inputs collapse 855 -> 285 under byte comparison
- * and the honest figure is 576 cells per input, not 192. Both numbers are real
+ * storage input -- measured at SOURCE, where issuedAt, nowMs, clockSkew and
+ * futureSkew do not occur anywhere in packages/storage/src -- so the storage
+ * projection keys collapse 855 -> 285 once the clock segment is removed, which
+ * is KEY ARITHMETIC (855 = 285 x 3) rather than a byte comparison of built
+ * inputs, and the honest figure is 576 cells per input, not 192. Both numbers are real
  * and they answer different questions -- 192 is what the committed projection
  * key groups, 576 is what storage can actually see.
  */
