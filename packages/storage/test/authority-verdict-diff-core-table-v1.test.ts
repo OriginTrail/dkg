@@ -96,9 +96,15 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
     return sweptCache;
   }
 
+  // NO PARAMETER, because a memo that ignores its argument is a lie about what
+  // it depends on. The earlier form took `constructible` and returned the first
+  // cached promise regardless -- harmless while every caller passes the same
+  // set, and exactly the shape that makes a later assertion silently
+  // order-dependent if one ever passes a filtered one. It reads the sweep's own
+  // split so there is only one set it CAN be about.
   let mintCache: Promise<Awaited<ReturnType<typeof buildCoreSummaryIndexV1>>> | undefined;
-  function mintIndex(constructible: readonly VerdictDiffCellV1[]) {
-    mintCache ??= buildCoreSummaryIndexV1(constructible);
+  function mintIndex() {
+    mintCache ??= sweep().then(({ split }) => buildCoreSummaryIndexV1(split.constructible));
     return mintCache;
   }
 
@@ -191,7 +197,7 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
 
   it('mints a summary for only the head shapes core will close over, each for a stated reason', async () => {
     const split = resolveConstructibilityV1(enumerateVerdictDiffCellsV1());
-    const { summaries, unresolvedArtifacts } = await mintIndex(split.constructible);
+    const { summaries, unresolvedArtifacts } = await mintIndex();
     const buildable = new Set(
       split.constructible
         .filter((cell) => buildCoreCandidateHeadV1(cell).built)
@@ -246,7 +252,7 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
    */
   it('re-checks that the escape objects its limitation register names are really built', async () => {
     const split = resolveConstructibilityV1(enumerateVerdictDiffCellsV1());
-    const { summaries } = await mintIndex(split.constructible);
+    const { summaries } = await mintIndex();
     const byShape = new Map<string, ReturnType<typeof buildCoreCandidateHeadV1>>();
     for (const cell of split.constructible) {
       const key = coreHeadShapeKeyV1(cell);

@@ -33,7 +33,7 @@
  * itself the signal.
  */
 export const JOIN_PINNED_AGAINST_CORE_DIGEST_V1 =
-  '1d977f97a5b00f060a12ac894699040bdf147a8ab87249f47b0178c3f16d166f';
+  'fbad4f37a8b7f062a28affece30672eddd75ad33ef845adaefc3c84afec5e2e3';
 
 /**
  * THE FOUR-BUCKET PARTITION.
@@ -123,7 +123,7 @@ export const JOIN_ROWS_V1 = 164_160;
  * ships green.
  */
 export const JOIN_TABLE_DIGEST_V1 =
-  '4ef1c1ea7dc6cef7c6c8c1ebbd84d5bf1858ada20f9cd63637bb33a44932a0f7';
+  '90fc566f5fb40dddc7a32d3e3aa04579514689df15002517b43b8660f8a1ea16';
 
 /**
  * THE HEADLINE, and the two numbers it carries are deliberately of different

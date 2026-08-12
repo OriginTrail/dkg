@@ -12,6 +12,7 @@ import {
   coreHeadShapeKeyV1,
   coreCandidateSequenceV1,
   coreSequenceActiveHeadV1,
+  coreSequenceEquivocatingTransitionV1,
   coreSequenceTransitionV1,
   CORE_MINT_GRAPH_V1,
   CORE_CHAIN_V1,
@@ -130,11 +131,27 @@ export const CORE_CLOCK_MS_V1: Readonly<Record<VerdictDiffCellV1['clock'], numbe
  * refusal and measures this fixture's wrongness instead of core's
  * discrimination. Found by review, not by the derivation -- a derivation checks
  * counts and cannot check evidence fidelity.
+ *
+ * IT DEPENDS ON AXIS G AS WELL AS AXIS D, and the first fix here got only half
+ * of that. Axis G decides WHICH transition into the sequence a candidate names:
+ * 'equal' the accepted rotation, 'differ' a competing one, and the head builder
+ * writes exactly that digest onto the head. A version of this function keyed on
+ * sequence alone handed every G='differ' candidate the REAL rotation -- again an
+ * input no caller could hold, and again a refusal owned by this fixture.
+ *
+ * That second miss is why the class sweep behind it was re-run with an
+ * AXIS-GENERAL discriminator: the class is "a constant supplied where an axis
+ * varies", never "a constant that depends on the axis the last incident was
+ * about". An enumeration that is exhaustive over the population but narrow in
+ * its predicate produces a completeness claim that is false on its own terms.
  */
 export function coreAcceptedTransitionV1(
   cell: VerdictDiffCellV1,
 ): AgentProfileAuthorityTransitionV1 {
-  return coreSequenceTransitionV1(coreCandidateSequenceV1(cell));
+  const sequence = coreCandidateSequenceV1(cell);
+  return cell.acceptedTransitionDigest === 'differ'
+    ? coreSequenceEquivocatingTransitionV1(sequence)
+    : coreSequenceTransitionV1(sequence);
 }
 
 /**

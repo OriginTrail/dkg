@@ -173,6 +173,22 @@ export function coreSequenceTransitionV1(
 }
 
 /**
+ * The COMPETING rotation into `authoritySequence` -- the transition a G='differ'
+ * candidate names.
+ *
+ * Exported for the same reason as its real counterpart, and the pair has to be
+ * chosen together: axis G decides WHICH of the two a candidate names, so any
+ * evidence member describing "the transition this candidate accepted" depends on
+ * axis G as well as axis D. Supplying the real rotation to a candidate that
+ * names the competing one hands core an input no caller could hold.
+ */
+export function coreSequenceEquivocatingTransitionV1(
+  authoritySequence: string,
+): AgentProfileAuthorityTransitionV1 {
+  return EQUIVOCATING_TRANSITIONS_V1.get(authoritySequence) as AgentProfileAuthorityTransitionV1;
+}
+
+/**
  * Axis G's 'differ' value: a REAL competing transition into the current's own
  * authority sequence, rotating to a different wallet root.
  *
