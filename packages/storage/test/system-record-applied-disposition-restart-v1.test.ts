@@ -4,6 +4,7 @@ import {
   deriveAgentProfileAuthorityDispositionV1,
   type AgentProfileActiveHeadObjectV1,
   type NetworkIdV1,
+  type SystemRecordAppliedStatePresentV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import { describe, expect, it } from 'vitest';
 
@@ -185,25 +186,38 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     const { quarantined } = await quarantinedForkV1(true);
     const derived = quarantined.plan.next.appliedState;
 
-    const forged = { ...derived, status: 'active' as const } as Record<string, unknown>;
-    delete forged.conflictEvidenceDigest;
-    delete forged.conflictForkBaseHeadDigest;
+    // The two quarantined-only fields come off by NAME, not by deleting keys from
+    // a widened bag: `conflictEvidenceDigest` is refused on any non-quarantined
+    // row (applied-state :268-270), so an active row must not carry it, and the
+    // fork base is meaningless without it. Written as a typed rest so the shape
+    // being constructed stays legible and no cast is needed anywhere below --
+    // dropping a required scalar or leaving a quarantined-only field on would be
+    // a type error here rather than something the codec discovers at runtime.
+    const {
+      conflictEvidenceDigest: _installedEvidence,
+      conflictForkBaseHeadDigest: _forkBase,
+      ...carriedFields
+    } = derived;
+    const forged: SystemRecordAppliedStatePresentV1 = { ...carriedFields, status: 'active' };
 
     const tuple = buildSystemRecordReservedStateQuadsV1({
-      appliedState: forged as never,
+      appliedState: forged,
       headVersion: quarantined.plan.next.headVersion,
       ownedSubjectTable: quarantined.plan.next.ownedSubjectTable,
       rootClaimSet: quarantined.plan.next.rootClaimSet,
       capacityState: quarantined.plan.next.capacityState,
+      // Re-bound because the receipt commits the applied-state digest
+      // (rdf-schema :179-181). This is the one place the construction departs
+      // from what a write path does, and it is why the decode admits the row.
       receipt: {
         ...quarantined.plan.next.receipt,
-        appliedStateDigest: computeSystemRecordAppliedStateDigestV1(forged as never),
+        appliedStateDigest: computeSystemRecordAppliedStateDigestV1(forged),
       },
     });
     const snapshot = decodeSystemRecordAppliedSnapshotV1({
-      networkId: forged.networkId as NetworkIdV1,
+      networkId: forged.networkId,
       stableKeyHash: quarantined.plan.stableKeyHash,
-      materializationEpoch: forged.materializationEpoch as string,
+      materializationEpoch: forged.materializationEpoch,
       quads: [...tuple.record, ...tuple.capacity, ...tuple.epoch, ...tuple.receipt],
     });
 
