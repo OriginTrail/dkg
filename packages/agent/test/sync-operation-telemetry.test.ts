@@ -278,6 +278,44 @@ describe('W1 I4/I5 — the operation denominator and its rejections', () => {
     await blocking;
   });
 
+  it('releases an active lane after signal-aware work observes cancellation', async () => {
+    const agent = await createAgent({ syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 2 });
+    const controller = new AbortController();
+    let firstStarted = false;
+    let secondStarted = false;
+
+    const first = admit(
+      agent,
+      {
+        source: 'vm-recovery',
+        label: 'cancel-active',
+        operationSignal: controller.signal,
+      },
+      () => new Promise<void>((_resolve, reject) => {
+        firstStarted = true;
+        const rejectAbort = () => reject(controller.signal.reason);
+        if (controller.signal.aborted) rejectAbort();
+        else controller.signal.addEventListener('abort', rejectAbort, { once: true });
+      }),
+    );
+    await waitFor(() => firstStarted && getSyncBackpressureSnapshot().inflight === 1);
+
+    const second = admit(
+      agent,
+      { source: 'catchup-foreground', label: 'after-cancel' },
+      async () => { secondStarted = true; },
+    );
+    await waitFor(() => getSyncBackpressureSnapshot().queued === 1);
+    expect(secondStarted).toBe(false);
+
+    const reason = new Error('caller cancelled active recovery');
+    controller.abort(reason);
+    await expect(first).rejects.toBe(reason);
+    await expect(second).resolves.toBeUndefined();
+    expect(secondStarted).toBe(true);
+    expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 0, queued: 0 });
+  });
+
   it('separates a failed operation from a cancelled one CAUSALLY, and clamps a non-requester lane', async () => {
     // `cancelled` means something cancelled the operation — not that the error
     // happened to be shaped like an abort.
@@ -571,7 +609,7 @@ describe('adaptive page-size production wiring', () => {
       );
 
     await expect(fetch(PEER_A, 'meta')).rejects.toThrow('relay stream reset');
-    expect(requested.map(({ limit }) => limit)).toEqual([8_192, 64, 64]);
+    expect(requested.map(({ limit }) => limit)).toEqual([512, 64, 64]);
 
     failTransport = false;
     await expect(fetch(PEER_A, 'meta')).resolves.toMatchObject({ completed: true });
@@ -589,7 +627,7 @@ describe('adaptive page-size production wiring', () => {
       contextGraphId: CG,
       includeSharedMemory: true,
       phase: 'data',
-      limit: 8_192,
+      limit: 512,
     });
 
     const peerB = '12D3KooWPageSizeProfileIsolationPeerBBBBBBBBBBBBBBBB';
@@ -599,7 +637,7 @@ describe('adaptive page-size production wiring', () => {
       contextGraphId: CG,
       includeSharedMemory: true,
       phase: 'meta',
-      limit: 8_192,
+      limit: 512,
     });
 
     const otherContextGraphId = `${CG}-other`;
@@ -611,7 +649,7 @@ describe('adaptive page-size production wiring', () => {
       contextGraphId: otherContextGraphId,
       includeSharedMemory: true,
       phase: 'meta',
-      limit: 8_192,
+      limit: 512,
     });
 
     await expect(fetch(PEER_A, 'meta', CG, false)).resolves.toMatchObject({
@@ -622,7 +660,7 @@ describe('adaptive page-size production wiring', () => {
       contextGraphId: CG,
       includeSharedMemory: false,
       phase: 'meta',
-      limit: 8_192,
+      limit: 512,
     });
   });
 });

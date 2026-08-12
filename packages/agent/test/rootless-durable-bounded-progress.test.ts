@@ -12,6 +12,8 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
+  createGraphScopedDurableManifestPlan,
+  isGraphScopedDurableManifestBoundary,
   planBoundedGraphScopedDurableBatch,
 } from '../src/sync/durable-integrity.js';
 import {
@@ -152,6 +154,105 @@ describe('bounded rootless durable progress', () => {
       ...fixtures[0]!.payload,
       ...fixtures[1]!.payload,
     ]);
+  });
+
+  it('drops rows after the first incomplete graph and preserves the safe leading prefix', () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const rawData = [
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload.slice(0, 2),
+      ...fixtures[2]!.payload,
+    ];
+
+    const plan = planBoundedGraphScopedDurableBatch(
+      rawData,
+      meta,
+      0,
+      rawData.length,
+      false,
+    );
+
+    expect(plan).not.toBeNull();
+    expect(plan?.safeNextOffset).toBe(4);
+    expect(plan?.manifestRowCount).toBe(12);
+    expect(plan?.completedGraphCount).toBe(1);
+    expect(plan?.changedDataGraphs).toEqual([fixtures[0]!.graph]);
+    expect(plan?.dataQuads).toEqual(fixtures[0]!.payload);
+  });
+
+  it('preserves the safe prefix when an older responder cursor advances past missing rows', () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const rawData = [
+      ...fixtures[0]!.payload,
+      ...fixtures[1]!.payload.slice(0, 2),
+      ...fixtures[2]!.payload,
+    ];
+
+    const plan = planBoundedGraphScopedDurableBatch(
+      rawData,
+      meta,
+      0,
+      rawData.length + 63,
+      false,
+    );
+
+    expect(plan).not.toBeNull();
+    expect(plan?.safeNextOffset).toBe(4);
+    expect(plan?.completedGraphCount).toBe(1);
+    expect(plan?.changedDataGraphs).toEqual([fixtures[0]!.graph]);
+    expect(plan?.dataQuads).toEqual(fixtures[0]!.payload);
+  });
+
+  it('does not checkpoint a corrupt leading graph while dropping a non-contiguous tail', async () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const corruptLeading = fixtures[0]!.payload.map((quad, index) => index === 0
+      ? { ...quad, object: '"tampered"' }
+      : quad);
+    const rawData = [
+      ...corruptLeading,
+      ...fixtures[1]!.payload.slice(0, 2),
+      ...fixtures[2]!.payload,
+    ];
+    const materialized: string[] = [];
+    const checkpoints: Array<[string, number]> = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-non-contiguous',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
+        phase,
+      }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', {
+          quads: rawData,
+          nextOffset: rawData.length,
+          completed: false,
+          timedOut: true,
+        }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.rejectedKcs).toBe(1);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(materialized).toEqual([]);
+    expect(checkpoints).toEqual([]);
   });
 
   it('ignores a non-IRI dkg:partOf poison row and still projects the valid boundary (#1921)', () => {
@@ -458,6 +559,7 @@ describe('bounded rootless durable progress', () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);
     const suffix = fixtures[2]!.payload;
+    const manifestDigest = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID)!.manifestDigest;
     const inserted: Quad[][] = [];
     const materialized: Array<{ dataQuads: Quad[] }> = [];
     const deleted: string[] = [];
@@ -478,6 +580,7 @@ describe('bounded rootless durable progress', () => {
           quads: suffix,
           resumedFromOffset: 8,
           nextOffset: 12,
+          manifestDigest,
           completed: true,
           timedOut: false,
         }),
@@ -506,6 +609,70 @@ describe('bounded rootless durable progress', () => {
     expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
     expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual(suffix);
     expect(inserted.flat().some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
+  });
+
+  it('resets a checkpoint that resumes inside an exact assertion graph', async () => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const manifestDigest = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID)!.manifestDigest;
+    const misalignedOffset = 1;
+    const suffix = [
+      ...fixtures[0]!.payload.slice(misalignedOffset),
+      ...fixtures[1]!.payload,
+    ];
+    const deleted: string[] = [];
+    const materialized: string[] = [];
+    const warnings: string[] = [];
+    let verificationCalls = 0;
+
+    expect(isGraphScopedDurableManifestBoundary(meta, 0)).toBe(true);
+    expect(isGraphScopedDurableManifestBoundary(meta, 4)).toBe(true);
+    expect(isGraphScopedDurableManifestBoundary(meta, misalignedOffset)).toBe(false);
+    expect(isGraphScopedDurableManifestBoundary(meta, 13)).toBe(false);
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-misaligned-resume',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({
+        phase,
+      }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', {
+          quads: suffix,
+          resumedFromOffset: misalignedOffset,
+          nextOffset: misalignedOffset + suffix.length,
+          manifestDigest,
+          completed: false,
+          timedOut: true,
+        }),
+      processDurableBatchInWorker: (...args) => {
+        verificationCalls += 1;
+        return processBatch(...args);
+      },
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({
+        asset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(asset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: (_ctx, message) => { warnings.push(message); },
+      logDebug: () => {},
+    });
+
+    expect(summary.insertedTriples).toBe(0);
+    expect(summary.failedPhases).toBe(1);
+    expect(verificationCalls).toBe(0);
+    expect(materialized).toEqual([]);
+    expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(warnings.some((message) => message.includes(
+      'resumed offset 1 is inside an assertion graph',
+    ))).toBe(true);
   });
 
   it('fails closed for mixed legacy and graph-scoped metadata', () => {

@@ -367,6 +367,10 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['resumed-cg'],
+      // Full rootless snapshots now require a fresh, complete META manifest
+      // before DATA. Exercise phase-level progress accounting on the delta
+      // path, where independent resumed META/DATA cursors remain valid.
+      sinceBatchIdFor: () => 'progress-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ contextGraphId, phase }) => (
         pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 })
@@ -514,6 +518,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['meta-only-cg'],
+      sinceBatchIdFor: () => 'meta-only-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -558,6 +563,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-controls'],
+      sinceBatchIdFor: () => 'discarded-controls-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -638,6 +644,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-non-iri'],
+      sinceBatchIdFor: () => 'discarded-non-iri-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -680,6 +687,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-mixed'],
+      sinceBatchIdFor: () => 'discarded-mixed-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({

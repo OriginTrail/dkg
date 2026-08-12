@@ -50,10 +50,23 @@ export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
 export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
 /** Maximum rows a responder may materialize for one byte-budgeted durable page. */
 export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+/**
+ * Conservative first request for a previously unseen peer/path.
+ *
+ * The 8,192-row byte-budget ceiling remains available after the requester has
+ * observed sustained success, but opening at that ceiling amplifies cold
+ * relay and responder-queue churn: one reset throws away a much larger page
+ * and occupies a scarce durable lane while the transport retries. 512 stays
+ * above the legacy 500-row cap (so byte-budget EOF semantics remain active)
+ * while bounding the first response.
+ */
+export const SYNC_REQUEST_INITIAL_PAGE_SIZE = 512;
 /** Target serialized body. Six MiB of the 10 MiB router cap remains as headroom. */
 export const SYNC_BYTE_BUDGET_RESPONSE_BYTES = DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES;
-/** Throughput-oriented requested row hint; the signed legacy limit remains 500. */
+/** Maximum throughput-oriented row hint; the signed legacy limit remains 500. */
 export const SYNC_REQUEST_PAGE_SIZE = SYNC_BYTE_BUDGET_MAX_ROWS;
+/** Successful pages required before the requester doubles its learned size. */
+export const SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD = 8;
 export const SYNC_PAGE_RETRY_ATTEMPTS = 3;
 export const SYNC_TOTAL_TIMEOUT_MS = 120_000;
 /** Per-page timeout for sync when we have budget (relay links can be slow). */

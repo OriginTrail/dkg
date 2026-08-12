@@ -2020,6 +2020,8 @@ async function readRowsPageFromExactGraphPlan(
       skip -= entry.rowCount;
       continue;
     }
+    const entryOffset = skip;
+    const expectedRows = Math.min(entry.rowCount - entryOffset, remaining);
     let added = 0;
     const graphRows = await loadExactGraphRowsSnapshot(
       store,
@@ -2029,17 +2031,18 @@ async function readRowsPageFromExactGraphPlan(
       signal,
     );
     if (graphRows) {
-      const page = graphRows.slice(skip, skip + remaining);
+      const page = graphRows.slice(entryOffset, entryOffset + expectedRows);
       rows.push(...page);
       added = page.length;
     } else {
+      const isFinalGraphPage = entryOffset + expectedRows === entry.rowCount;
       const result = await store.query(`
         SELECT ?s ?p ?o WHERE {
           GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
         }
         ORDER BY ?s ?p ?o
-        OFFSET ${skip}
-        LIMIT ${remaining}
+        OFFSET ${entryOffset}
+        LIMIT ${expectedRows + (isFinalGraphPage ? 1 : 0)}
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
         maxResponseBytes: snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
@@ -2055,6 +2058,22 @@ async function readRowsPageFromExactGraphPlan(
           }
         }
       }
+      if (isFinalGraphPage && added > expectedRows) {
+        throw new Error(
+          `Sync exact-graph plan changed while paging ${entry.graph}: `
+          + `expected ${entry.rowCount} total rows but found a surplus row`,
+        );
+      }
+    }
+    // Exact-asset metadata is a commitment to the number of rows in each
+    // assertion graph. Do not let a short graph borrow rows from the next
+    // graph in the plan: that produces a full-looking response whose graph
+    // boundaries no longer match the manifest and hides the damaged source.
+    if (added !== expectedRows) {
+      throw new Error(
+        `Sync exact-graph plan changed while paging ${entry.graph}: ` +
+        `expected ${expectedRows} rows at offset ${entryOffset}, found ${added}`,
+      );
     }
     remaining -= added;
     if (remaining <= 0) break;

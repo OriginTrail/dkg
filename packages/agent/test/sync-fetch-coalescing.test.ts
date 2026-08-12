@@ -9,7 +9,12 @@ import {
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
 } from '../src/index.js';
 import type { ContextGraphMembershipStore, SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
-import { resolveSyncGlobalBackpressure, SyncBackpressureBusyError, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
+import {
+  getSyncBackpressureSnapshot,
+  resolveSyncGlobalBackpressure,
+  SyncBackpressureBusyError,
+  withGlobalSyncBackpressure,
+} from '../src/sync/backpressure.js';
 import type { SyncPhase } from '../src/sync/auth/request-build.js';
 import type { SyncCheckpointScope } from '../src/sync/checkpoint/state.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -35,6 +40,7 @@ type FetchArgs = {
   sinceBatchId?: string;
   signal?: AbortSignal;
   recovery?: boolean;
+  manifestDigest?: `sha256:${string}`;
   assetUals?: string[];
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
@@ -249,6 +255,7 @@ function fetchPages(agent: DKGAgent, args: FetchArgs = {}): Promise<SyncPageResu
       sinceBatchId: args.sinceBatchId,
       signal: args.signal,
       recovery: args.recovery,
+      manifestDigest: args.manifestDigest,
       assetUals: args.assetUals,
       returnAcceptedPrefixOnRetryableTransportFailure:
         args.returnAcceptedPrefixOnRetryableTransportFailure,
@@ -338,6 +345,11 @@ describe('DKGAgent sync fetch coalescing', () => {
       },
       { name: 'sinceBatchId', base: { sinceBatchId: '10' }, variant: { sinceBatchId: '11' } },
       { name: 'recovery', base: { includeSharedMemory: true, recovery: false }, variant: { includeSharedMemory: true, recovery: true } },
+      {
+        name: 'manifestDigest',
+        base: { manifestDigest: `sha256:${'aa'.repeat(32)}` },
+        variant: { manifestDigest: `sha256:${'bb'.repeat(32)}` },
+      },
       // Exact VM batches: different asset filters must never share a page
       // sequence, and an exact batch must never join a full sync.
       { name: 'assetUals', base: { assetUals: [EXACT_UAL_7] }, variant: { assetUals: [EXACT_UAL_8] } },
@@ -744,8 +756,10 @@ describe('DKGAgent sync fetch coalescing', () => {
       );
       await waitFor(() => fetchCalls === 1);
       // Different budgets remain separate operations, but the second physical
-      // stream must wait instead of racing/superseding the first session.
+      // stream must wait outside admission instead of racing/superseding the
+      // first session or occupying a second scarce slow-lane slot.
       expect(fetchCalls).toBe(1);
+      expect(getSyncBackpressureSnapshot()).toMatchObject({ inflight: 1, queued: 0 });
 
       firstMetaFetch.resolve(emptySyncPage('meta'));
       const [automaticResult, recoveryResult] = await Promise.all([automatic, recovery]);

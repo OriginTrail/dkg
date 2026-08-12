@@ -96,3 +96,72 @@ describe('getSyncCheckpointKey', () => {
     expect(store.get(recoveryKey)).toBeUndefined();
   });
 });
+
+describe('manifest-bound sync continuation', () => {
+  const digestA = `sha256:${'aa'.repeat(32)}` as const;
+  const digestB = `sha256:${'bb'.repeat(32)}` as const;
+  const prefixDigest = `sha256:${'cc'.repeat(32)}` as const;
+
+  it('stores offset, responder session and digest as one logical tuple', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setResponderSession('data', 'session-a', 10_000, 1_000, digestA);
+    store.setManifestBoundOffset('data', 512, digestA, 1_001);
+
+    expect(store.get('data', 1_002)).toMatchObject({
+      offset: 512,
+      manifestDigest: digestA,
+      responderSessionId: 'session-a',
+      responderSessionExpiresAtMs: 10_000,
+    });
+  });
+
+  it('never carries a responder token across a manifest change', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setResponderSession('data', 'session-a', 10_000, 1_000, digestA);
+    store.setManifestBoundOffset('data', 512, digestA, 1_001);
+    store.setManifestBoundOffset('data', 0, digestB, 1_002);
+
+    expect(store.get('data', 1_003)).toMatchObject({
+      offset: 0,
+      manifestDigest: digestB,
+    });
+    expect(store.get('data', 1_003)?.responderSessionId).toBeUndefined();
+  });
+
+  it('does not let an unbound offset update inherit a bound token or digest', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setResponderSession('data', 'session-a', 10_000, 1_000, digestA);
+    store.setManifestBoundOffset('data', 512, digestA, 1_001);
+    store.set('data', 768, 1_002);
+
+    expect(store.get('data', 1_003)).toMatchObject({ offset: 768 });
+    expect(store.get('data', 1_003)?.manifestDigest).toBeUndefined();
+    expect(store.get('data', 1_003)?.responderSessionId).toBeUndefined();
+  });
+
+  it('preserves the digest when the responder session expires or is cleared', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setResponderSession('data', 'session-a', 2_000, 1_000, digestA);
+    store.setManifestBoundOffset('data', 512, digestA, 1_001);
+
+    expect(store.get('data', 2_001)).toMatchObject({
+      offset: 512,
+      manifestDigest: digestA,
+    });
+    expect(store.get('data', 2_001)?.responderSessionId).toBeUndefined();
+  });
+
+  it('atomically rebinds a proven prefix while dropping the old generation token', () => {
+    const store = new MemorySyncCheckpointStore({ clock: () => 1_000 });
+    store.setResponderSession('data', 'session-a', 10_000, 1_000, digestA);
+    store.setManifestBoundOffset('data', 512, digestA, 1_001, prefixDigest);
+    store.setManifestBoundOffset('data', 512, digestB, 1_002, prefixDigest);
+
+    expect(store.get('data', 1_003)).toMatchObject({
+      offset: 512,
+      manifestDigest: digestB,
+      manifestPrefixDigest: prefixDigest,
+    });
+    expect(store.get('data', 1_003)?.responderSessionId).toBeUndefined();
+  });
+});
