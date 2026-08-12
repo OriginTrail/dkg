@@ -801,6 +801,7 @@ function syncPageFetchCoalescingKey(params: {
   sinceBatchId?: string;
   recovery?: boolean;
   forceFreshSession?: boolean;
+  manifestDigest?: SyncPageFetchOptions['manifestDigest'];
   assetUals?: readonly string[];
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
@@ -817,6 +818,7 @@ function syncPageFetchCoalescingKey(params: {
     params.sinceBatchId ?? null,
     params.recovery === true,
     params.forceFreshSession === true,
+    params.manifestDigest ?? null,
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
     params.returnAcceptedPrefixOnRetryableTransportFailure === true,
     params.requesterScope ?? null,
@@ -5505,6 +5507,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         graphUri,
         snapshotRef,
         sinceBatchId,
+        manifestDigest,
+        forceFreshSession,
         fetchContext,
       }) => {
         return this.fetchSyncPages(
@@ -5519,7 +5523,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             snapshotRef,
             sinceBatchId,
             signal: fetchContext.signal,
-            forceFreshSession: onVerifiedFullSnapshot !== undefined,
+            forceFreshSession: forceFreshSession
+              || onVerifiedFullSnapshot !== undefined,
+            manifestDigest,
             assetUals: exactAssetUals,
           },
         );
@@ -5661,8 +5667,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       },
       onVerifiedFullSnapshot,
-      deleteCheckpoint: (key) => this.syncCheckpoints.delete(key),
-      setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+      deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
+      setCheckpoint: (key, offset, manifestDigest) => {
+        if (manifestDigest) {
+          if (this.syncCheckpoints.setManifestBoundOffset) {
+            this.syncCheckpoints.setManifestBoundOffset(key, offset, manifestDigest);
+          } else {
+            // Rolling/custom stores that cannot persist the binding must not
+            // retain an offset whose generation identity would be lost.
+            deleteSyncPageCheckpoint(this.syncCheckpoints, key);
+          }
+        } else {
+          this.syncCheckpoints.set(key, offset);
+        }
+      },
       logInfo: (opCtx, message) => this.log.info(opCtx, message),
       logWarn: (opCtx, message) => this.log.warn(opCtx, message),
       logDebug: (opCtx, message) => this.log.debug(opCtx, message),
@@ -6096,6 +6114,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Authoritative snapshot callers rotate the responder session even when
       // an unfinished offset-zero requester session remains cached.
       forceFreshSession,
+      manifestDigest,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -6124,6 +6143,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         sinceBatchId,
         recovery,
         forceFreshSession,
+        manifestDigest,
         assetUals,
         returnAcceptedPrefixOnRetryableTransportFailure,
         requesterScope,
@@ -6210,6 +6230,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       protocolSync: PROTOCOL_SYNC,
       checkpointStore: this.syncCheckpoints,
       forceFreshSession,
+      manifestDigest,
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {

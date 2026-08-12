@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -184,17 +185,116 @@ function readOrderedGraphScopedDescriptors(
   return descriptorByGraph.size === descriptors.length ? descriptors : null;
 }
 
+export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
+export const DURABLE_MANIFEST_DIGEST_VERSION = 1;
+
+export interface GraphScopedDurableManifestPlan {
+  readonly contextGraphId: string;
+  readonly manifestDigest: `sha256:${string}`;
+  readonly descriptors: readonly GraphScopedDescriptor[];
+  readonly manifestRowCount: number;
+}
+
+/**
+ * Encode the exact graph-scoped DATA plan without depending on RDF row order.
+ *
+ * Every scalar is length-prefixed independently. This makes embedded
+ * separators and empty optional values unambiguous while the explicit domain
+ * and version prevent the bytes from being reused as another protocol hash.
+ */
+export function encodeGraphScopedDurableManifest(
+  contextGraphId: string,
+  descriptors: readonly GraphScopedDescriptor[],
+  domain = DURABLE_MANIFEST_DIGEST_DOMAIN,
+  version = DURABLE_MANIFEST_DIGEST_VERSION,
+): Uint8Array {
+  const encoder = new TextEncoder();
+  const chunks: Uint8Array[] = [];
+  let byteLength = 0;
+  const append = (value: string): void => {
+    const bytes = encoder.encode(value);
+    const length = new Uint8Array(4);
+    new DataView(length.buffer).setUint32(0, bytes.byteLength, false);
+    chunks.push(length, bytes);
+    byteLength += length.byteLength + bytes.byteLength;
+  };
+
+  append(domain);
+  append(String(version));
+  append(contextGraphId);
+  append(String(descriptors.length));
+  for (const descriptor of descriptors) {
+    append(descriptor.ual);
+    append(descriptor.contentScopeVersion);
+    append(descriptor.assertionVersion);
+    append(descriptor.contextGraphId);
+    append(descriptor.subGraphName ?? '');
+    append(descriptor.assertionGraph);
+    append(String(descriptor.publicTripleCount));
+    append(descriptor.claimedRootHex);
+    append(String(descriptor.privateTripleCount));
+    append(descriptor.privateRootHex ?? '');
+  }
+
+  const encoded = new Uint8Array(byteLength);
+  let offset = 0;
+  for (const chunk of chunks) {
+    encoded.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return encoded;
+}
+
+/**
+ * Parse, validate, order and bind the complete V2 manifest that defines a
+ * rootless durable DATA plan. `null` means the metadata is incomplete,
+ * malformed, mixed legacy/V2, or belongs to another Context Graph and cannot
+ * authorize a nonzero continuation.
+ */
+export function createGraphScopedDurableManifestPlan(
+  metaQuads: readonly Quad[],
+  contextGraphId: string,
+): GraphScopedDurableManifestPlan | null {
+  const descriptors = readOrderedGraphScopedDescriptors([], metaQuads);
+  if (
+    !descriptors
+    || descriptors.some((descriptor) => descriptor.contextGraphId !== contextGraphId)
+  ) return null;
+
+  let manifestRowCount = 0;
+  for (const descriptor of descriptors) {
+    manifestRowCount += descriptor.publicTripleCount;
+    if (!Number.isSafeInteger(manifestRowCount)) return null;
+  }
+  const canonical = encodeGraphScopedDurableManifest(contextGraphId, descriptors);
+  const manifestDigest = `sha256:${createHash('sha256').update(canonical).digest('hex')}` as const;
+  return {
+    contextGraphId,
+    manifestDigest,
+    descriptors,
+    manifestRowCount,
+  };
+}
+
+function isGraphScopedDurableManifestPlan(
+  value: readonly Quad[] | GraphScopedDurableManifestPlan,
+): value is GraphScopedDurableManifestPlan {
+  return !Array.isArray(value);
+}
+
 /**
  * Check whether a persisted OFFSET is an exact graph boundary in the current
  * rootless manifest. `null` means the metadata is not a pure, structurally
  * valid graph-scoped manifest and therefore cannot justify boundary repair.
  */
 export function isGraphScopedDurableManifestBoundary(
-  metaQuads: readonly Quad[],
+  manifestOrMeta: readonly Quad[] | GraphScopedDurableManifestPlan,
   offset: number,
 ): boolean | null {
   if (!Number.isSafeInteger(offset) || offset < 0) return false;
-  const descriptors = readOrderedGraphScopedDescriptors([], metaQuads);
+  const descriptors = isGraphScopedDurableManifestPlan(manifestOrMeta)
+    ? manifestOrMeta.descriptors
+    : readOrderedGraphScopedDescriptors([], manifestOrMeta);
   if (!descriptors) return null;
   if (offset === 0) return true;
 
@@ -221,7 +321,7 @@ export function isGraphScopedDurableManifestBoundary(
  */
 export function planBoundedGraphScopedDurableBatch(
   dataQuads: readonly Quad[],
-  metaQuads: readonly Quad[],
+  manifestOrMeta: readonly Quad[] | GraphScopedDurableManifestPlan,
   resumedFromOffset: number,
   rawNextOffset: number,
   phaseCompleted: boolean,
@@ -231,7 +331,7 @@ export function planBoundedGraphScopedDurableBatch(
     || resumedFromOffset < 0
     || !Number.isSafeInteger(rawNextOffset)
     || rawNextOffset < resumedFromOffset
-    || metaQuads.length === 0
+    || (!isGraphScopedDurableManifestPlan(manifestOrMeta) && manifestOrMeta.length === 0)
   ) return null;
 
   // Do not require the responder cursor delta to equal the number of received
@@ -243,7 +343,9 @@ export function planBoundedGraphScopedDurableBatch(
   // Requiring cursor/row equality here discarded that independently verifiable
   // prefix and recreated the all-or-nothing retry loop this planner prevents.
 
-  const descriptors = readOrderedGraphScopedDescriptors(dataQuads, metaQuads);
+  const descriptors = isGraphScopedDurableManifestPlan(manifestOrMeta)
+    ? manifestOrMeta.descriptors
+    : readOrderedGraphScopedDescriptors(dataQuads, manifestOrMeta);
   if (!descriptors) return null;
   const descriptorByGraph = new Map(
     descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
@@ -339,11 +441,17 @@ export function planBoundedGraphScopedDurableBatch(
   };
 }
 
-interface GraphScopedDescriptor {
+export interface GraphScopedDescriptor {
   ual: string;
+  contentScopeVersion: string;
+  assertionVersion: string;
+  contextGraphId: string;
+  subGraphName?: string;
   assertionGraph: string;
   publicTripleCount: number;
+  privateTripleCount: number;
   privateRoot?: Uint8Array;
+  privateRootHex?: string;
   claimedRootHex: string;
 }
 
@@ -1427,6 +1535,10 @@ function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphSc
 
   const metadataUal = requireSingle(KA_UAL, 'kaUal');
   if (metadataUal !== ual) throw new Error(`kaUal mismatch: found ${metadataUal}`);
+  const contentScopeVersion = parseInteger(
+    requireSingle(CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
+    'contentScopeVersion',
+  );
   const assertionVersion = parseInteger(
     requireSingle(ASSERTION_VERSION, 'assertionVersion'),
     'assertionVersion',
@@ -1487,14 +1599,25 @@ function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphSc
   if (privateTripleCount === 0 && privateRootValues.length > 0) {
     throw new Error('privateMerkleRoot present without private content');
   }
+  const privateRootHex = privateRootValues[0]
+    ? normalizeHex32(privateRootValues[0], 'privateMerkleRoot')
+    : undefined;
 
   return {
     ual,
+    contentScopeVersion: contentScopeVersion.toString(),
+    assertionVersion: assertionVersion.toString(),
+    contextGraphId,
+    ...(subGraphName === undefined ? {} : { subGraphName }),
     assertionGraph,
     publicTripleCount,
-    privateRoot: privateRootValues[0]
-      ? hexToBytes(normalizeHex32(privateRootValues[0], 'privateMerkleRoot'))
-      : undefined,
+    privateTripleCount,
+    ...(privateRootHex
+      ? {
+          privateRoot: hexToBytes(privateRootHex),
+          privateRootHex,
+        }
+      : {}),
     claimedRootHex: normalizeHex32(requireSingle(MERKLE_ROOT, 'merkleRoot'), 'merkleRoot'),
   };
 }

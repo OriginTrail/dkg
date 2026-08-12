@@ -15,10 +15,14 @@ export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string
 
 export const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
 
+export type DurableManifestDigest = `sha256:${string}`;
+
 export interface SyncCheckpointEntry {
   offset: number;
   updatedAtMs: number;
   expiresAtMs: number;
+  /** Canonical META generation that gives this DATA offset/session meaning. */
+  manifestDigest?: DurableManifestDigest;
   /**
    * Opaque responder snapshot token paired with this offset. OFFSET is only
    * meaningful while the responder still owns the same immutable row list;
@@ -36,8 +40,21 @@ export interface SyncCheckpointStore {
    */
   get(key: string, nowMs?: number): SyncCheckpointEntry | undefined;
   set(key: string, value: number, nowMs?: number): void;
+  /** Advance a verified DATA offset without detaching it from its META generation. */
+  setManifestBoundOffset?(
+    key: string,
+    value: number,
+    manifestDigest: DurableManifestDigest,
+    nowMs?: number,
+  ): void;
   /** Persist the responder snapshot token without advancing the verified offset. */
-  setResponderSession?(key: string, sessionId: string, expiresAtMs: number, nowMs?: number): void;
+  setResponderSession?(
+    key: string,
+    sessionId: string,
+    expiresAtMs: number,
+    nowMs?: number,
+    manifestDigest?: DurableManifestDigest,
+  ): void;
   /** Forget only the snapshot token while retaining the verified offset. */
   clearResponderSession?(key: string): void;
   delete(key: string): void;
@@ -69,6 +86,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
         offset: entry.offset,
         updatedAtMs: entry.updatedAtMs,
         expiresAtMs: entry.expiresAtMs,
+        ...(entry.manifestDigest ? { manifestDigest: entry.manifestDigest } : {}),
       };
       this.entries.set(key, withoutExpiredSession);
       return withoutExpiredSession;
@@ -85,7 +103,38 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       offset: value,
       updatedAtMs: nowMs,
       expiresAtMs: nowMs + this.ttlMs,
-      ...(existing?.responderSessionId
+      ...(existing?.manifestDigest === undefined
+        && existing?.responderSessionId
+        && (existing.responderSessionExpiresAtMs ?? 0) > nowMs
+        ? {
+            responderSessionId: existing.responderSessionId,
+            responderSessionExpiresAtMs: existing.responderSessionExpiresAtMs,
+          }
+        : {}),
+    });
+  }
+
+  setManifestBoundOffset(
+    key: string,
+    value: number,
+    manifestDigest: DurableManifestDigest,
+    nowMs = this.clock(),
+  ): void {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
+    }
+    if (!/^sha256:[0-9a-f]{64}$/.test(manifestDigest)) {
+      throw new Error(`Invalid sync manifest digest for ${key}`);
+    }
+    const existing = this.entries.get(key);
+    const bindingMatches = existing?.manifestDigest === manifestDigest;
+    this.entries.set(key, {
+      offset: value,
+      updatedAtMs: nowMs,
+      expiresAtMs: nowMs + this.ttlMs,
+      manifestDigest,
+      ...(bindingMatches
+        && existing?.responderSessionId
         && (existing.responderSessionExpiresAtMs ?? 0) > nowMs
         ? {
             responderSessionId: existing.responderSessionId,
@@ -100,6 +149,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
     sessionId: string,
     expiresAtMs: number,
     nowMs = this.clock(),
+    manifestDigest?: DurableManifestDigest,
   ): void {
     if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
       throw new Error(`Invalid sync responder session for ${key}`);
@@ -109,10 +159,12 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       return;
     }
     const existing = this.entries.get(key);
+    const bindingMatches = existing?.manifestDigest === manifestDigest;
     this.entries.set(key, {
-      offset: existing?.offset ?? 0,
-      updatedAtMs: existing?.updatedAtMs ?? nowMs,
-      expiresAtMs: existing?.expiresAtMs ?? nowMs + this.ttlMs,
+      offset: bindingMatches ? existing?.offset ?? 0 : 0,
+      updatedAtMs: bindingMatches ? existing?.updatedAtMs ?? nowMs : nowMs,
+      expiresAtMs: bindingMatches ? existing?.expiresAtMs ?? nowMs + this.ttlMs : nowMs + this.ttlMs,
+      ...(manifestDigest ? { manifestDigest } : {}),
       responderSessionId: sessionId,
       responderSessionExpiresAtMs: expiresAtMs,
     });
@@ -125,6 +177,7 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       offset: existing.offset,
       updatedAtMs: existing.updatedAtMs,
       expiresAtMs: existing.expiresAtMs,
+      ...(existing.manifestDigest ? { manifestDigest: existing.manifestDigest } : {}),
     });
   }
 

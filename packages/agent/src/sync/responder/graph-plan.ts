@@ -2035,13 +2035,14 @@ async function readRowsPageFromExactGraphPlan(
       rows.push(...page);
       added = page.length;
     } else {
+      const isFinalGraphPage = entryOffset + expectedRows === entry.rowCount;
       const result = await store.query(`
         SELECT ?s ?p ?o WHERE {
           GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
         }
         ORDER BY ?s ?p ?o
         OFFSET ${entryOffset}
-        LIMIT ${expectedRows}
+        LIMIT ${expectedRows + (isFinalGraphPage ? 1 : 0)}
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
         maxResponseBytes: snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
@@ -2056,6 +2057,12 @@ async function readRowsPageFromExactGraphPlan(
             added += 1;
           }
         }
+      }
+      if (isFinalGraphPage && added > expectedRows) {
+        throw new Error(
+          `Sync exact-graph plan changed while paging ${entry.graph}: `
+          + `expected ${entry.rowCount} total rows but found a surplus row`,
+        );
       }
     }
     // Exact-asset metadata is a commitment to the number of rows in each

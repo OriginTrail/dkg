@@ -13,8 +13,10 @@ import {
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import {
+  createGraphScopedDurableManifestPlan,
   isGraphScopedDurableManifestBoundary,
   planBoundedGraphScopedDurableBatch,
+  type GraphScopedDurableManifestPlan,
 } from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
@@ -24,7 +26,10 @@ import {
   recordDurableSyncDiagnostics,
   type InitializedDurableSyncResult,
 } from '../durable-progress.js';
-import { getSyncCheckpointKey } from '../checkpoint/state.js';
+import {
+  getSyncCheckpointKey,
+  type DurableManifestDigest,
+} from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type {
   GraphScopedMaterializationOutcome,
@@ -142,6 +147,10 @@ export interface DurableSyncFetchRequest {
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly exactAssetUals?: string[];
+  /** Canonical META generation that authorizes this DATA continuation. */
+  readonly manifestDigest?: DurableManifestDigest;
+  /** Identity is unprovable; rotate any saved DATA continuation before fetch. */
+  readonly forceFreshSession?: boolean;
   readonly fetchContext: DurableSyncFetchContext;
 }
 
@@ -219,7 +228,7 @@ export interface DurableSyncContext {
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
-  setCheckpoint: (key: string, offset: number) => void;
+  setCheckpoint: (key: string, offset: number, manifestDigest?: DurableManifestDigest) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -294,6 +303,7 @@ async function runDurableSyncWithBudget(
       updateCheckpoint: boolean;
       countProgress?: boolean;
       emptyPhase?: boolean;
+      manifestDigest?: DurableManifestDigest;
     },
   ) => {
     const countProgress = options.countProgress ?? true;
@@ -324,7 +334,7 @@ async function runDurableSyncWithBudget(
     if (!options.updateCheckpoint) return;
     if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      setCheckpoint(result.checkpointKey, result.nextOffset);
+      setCheckpoint(result.checkpointKey, result.nextOffset, options.manifestDigest);
     }
   };
 
@@ -387,6 +397,8 @@ async function runDurableSyncWithBudget(
         phase: 'data' | 'meta',
         graphUri: string,
         sinceBatchId?: string,
+        manifestDigest?: DurableManifestDigest,
+        forceFreshSession?: boolean,
       ): Promise<SyncPageResult> => fetchSyncPages({
         ctx,
         remotePeerId,
@@ -395,6 +407,8 @@ async function runDurableSyncWithBudget(
         graphUri,
         sinceBatchId,
         exactAssetUals,
+        manifestDigest,
+        forceFreshSession,
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const metaResult: SyncPageResult = skipAgentsMeta
@@ -415,7 +429,42 @@ async function runDurableSyncWithBudget(
       // next context graph when stopOnBackoffWorthyFailure is enabled.
       throwIfOperationAborted();
       const sinceBatchId = sinceBatchIdFor?.(pid);
-      const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
+      let graphScopedManifest: GraphScopedDurableManifestPlan | null = null;
+      let forceFreshUnboundDataSession = false;
+      if (sinceBatchId === undefined && !isSystemContextGraph) {
+        if (
+          !metaResult.completed
+          || metaResult.timedOut
+          || metaResult.resumedFromOffset !== 0
+        ) {
+          // A suffix or incomplete META phase is not a manifest. It cannot
+          // identify the generation of a saved DATA OFFSET/session, so do not
+          // fetch or advance DATA under it. A legacy resumed META checkpoint
+          // is discarded so the next round can obtain the complete manifest.
+          if (metaResult.resumedFromOffset !== 0) {
+            deleteCheckpoint(metaResult.checkpointKey);
+          }
+          throw Object.assign(
+            new Error(
+              `Cannot authorize durable DATA continuation for "${pid}": `
+              + 'META did not complete from offset zero',
+            ),
+            { code: 'SYNC_DATA_MANIFEST_INCOMPLETE' },
+          );
+        }
+        graphScopedManifest = createGraphScopedDurableManifestPlan(metaResult.quads, pid);
+        // Legacy/mixed/malformed metadata has no canonical generation identity.
+        // It may still complete safely in one round, but never by trusting a
+        // saved nonzero offset or responder token.
+        forceFreshUnboundDataSession = graphScopedManifest === null;
+      }
+      const rawDataResult = await fetchPhase(
+        'data',
+        dataGraph,
+        sinceBatchId,
+        graphScopedManifest?.manifestDigest,
+        forceFreshUnboundDataSession,
+      );
       throwIfOperationAborted();
       peerRespondedForContextGraph = true;
       endPhase();
@@ -462,9 +511,23 @@ async function runDurableSyncWithBudget(
         sinceBatchId === undefined
         && !isSystemContextGraph
       ) {
+        if (
+          graphScopedManifest
+          && dataResult.resumedFromOffset > 0
+          && dataResult.manifestDigest !== graphScopedManifest.manifestDigest
+        ) {
+          deleteCheckpoint(dataResult.checkpointKey);
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": resumed DATA `
+              + 'continuation is not bound to the completed META generation',
+            ),
+            { code: 'SYNC_DATA_MANIFEST_UNBOUND' },
+          );
+        }
         const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
           ? isGraphScopedDurableManifestBoundary(
-            effectiveMetaResult.quads,
+            graphScopedManifest ?? effectiveMetaResult.quads,
             dataResult.resumedFromOffset,
           )
           : true;
@@ -495,7 +558,7 @@ async function runDurableSyncWithBudget(
         }
         const bounded = planBoundedGraphScopedDurableBatch(
           dataResult.quads,
-          effectiveMetaResult.quads,
+          graphScopedManifest ?? effectiveMetaResult.quads,
           dataResult.resumedFromOffset,
           dataResult.nextOffset,
           dataResult.completed,
@@ -525,13 +588,19 @@ async function runDurableSyncWithBudget(
 
       startPhase('verify');
       const verifyStartedAt = Date.now();
-      const processed = await processDurableBatchInWorker(
-        dataForVerification,
-        effectiveMetaResult.quads,
-        ctx,
-        isSystemContextGraph,
-        verificationMode,
-      );
+      let processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>;
+      try {
+        processed = await processDurableBatchInWorker(
+          dataForVerification,
+          effectiveMetaResult.quads,
+          ctx,
+          isSystemContextGraph,
+          verificationMode,
+        );
+      } catch (error) {
+        if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
+        throw error;
+      }
       throwIfOperationAborted();
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
@@ -554,11 +623,15 @@ async function runDurableSyncWithBudget(
       // instead of silently skipping it.
       const batchVerifiedCleanly = processed.rejectedKcs === 0;
       if (!batchVerifiedCleanly) {
+        if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
         logWarn(
           ctx,
           `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
         );
         recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs });
+      }
+      if (graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
+        deleteCheckpoint(rawDataResult.checkpointKey);
       }
 
       const notifyVerifiedFullSnapshot = async (): Promise<void> => {
@@ -654,6 +727,7 @@ async function runDurableSyncWithBudget(
         recordPhaseOutcome(effectiveDataResult, {
           updateCheckpoint: updateDataCheckpoint,
           emptyPhase,
+          manifestDigest: graphScopedManifest?.manifestDigest,
         });
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
@@ -735,7 +809,10 @@ async function runDurableSyncWithBudget(
       await notifyVerifiedFullSnapshot();
       throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
+      recordPhaseOutcome(effectiveDataResult, {
+        updateCheckpoint: updateDataCheckpoint,
+        manifestDigest: graphScopedManifest?.manifestDigest,
+      });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
       if (exactFetchDispositionIndex !== undefined) {
         exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();

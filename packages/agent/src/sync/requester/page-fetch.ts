@@ -17,6 +17,7 @@ import type { SyncPhase } from '../auth/request-build.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import {
   getSyncCheckpointKey,
+  type DurableManifestDigest,
   type SyncCheckpointScope,
   type SyncCheckpointStore,
 } from '../checkpoint/state.js';
@@ -40,14 +41,19 @@ const MAX_UNFINISHED_SYNC_RESPONDER_SESSIONS = 4096;
 type UnfinishedSyncResponderSession = {
   syncSessionId: string;
   expiresAt: number;
+  manifestDigest?: DurableManifestDigest;
 };
 
 const unfinishedSyncResponderSessions = new Map<string, UnfinishedSyncResponderSession>();
 
-function getUnfinishedSyncResponderSession(checkpointKey: string, now = Date.now()): UnfinishedSyncResponderSession | undefined {
+function getUnfinishedSyncResponderSession(
+  checkpointKey: string,
+  manifestDigest: DurableManifestDigest | undefined,
+  now = Date.now(),
+): UnfinishedSyncResponderSession | undefined {
   const session = unfinishedSyncResponderSessions.get(checkpointKey);
   if (!session) return undefined;
-  if (session.expiresAt > now) return session;
+  if (session.expiresAt > now && session.manifestDigest === manifestDigest) return session;
   unfinishedSyncResponderSessions.delete(checkpointKey);
   return undefined;
 }
@@ -66,16 +72,19 @@ function rememberUnfinishedSyncResponderSession(checkpointKey: string, session: 
 
 function getPersistedSyncResponderSession(
   checkpoint: ReturnType<SyncCheckpointStore['get']>,
+  manifestDigest: DurableManifestDigest | undefined,
   now = Date.now(),
 ): UnfinishedSyncResponderSession | undefined {
   if (
     !checkpoint?.responderSessionId
+    || checkpoint.manifestDigest !== manifestDigest
     || !Number.isSafeInteger(checkpoint.responderSessionExpiresAtMs)
     || (checkpoint.responderSessionExpiresAtMs ?? 0) <= now
   ) return undefined;
   return {
     syncSessionId: checkpoint.responderSessionId,
     expiresAt: checkpoint.responderSessionExpiresAtMs!,
+    ...(checkpoint.manifestDigest ? { manifestDigest: checkpoint.manifestDigest } : {}),
   };
 }
 
@@ -83,14 +92,19 @@ function persistUnfinishedSyncResponderSession(
   checkpointStore: SyncCheckpointStore,
   checkpointKey: string,
   session: UnfinishedSyncResponderSession,
+  manifestDigest: DurableManifestDigest | undefined,
   now = Date.now(),
 ): void {
-  rememberUnfinishedSyncResponderSession(checkpointKey, session, now);
+  rememberUnfinishedSyncResponderSession(checkpointKey, {
+    ...session,
+    ...(manifestDigest ? { manifestDigest } : {}),
+  }, now);
   checkpointStore.setResponderSession?.(
     checkpointKey,
     session.syncSessionId,
     session.expiresAt,
     now,
+    manifestDigest,
   );
 }
 
@@ -147,6 +161,8 @@ export interface SyncPageResult {
    * proof-sensitive callers must treat an omitted value as unknown.
    */
   responderSessionStartedFresh?: boolean;
+  /** META generation actually used to authorize this DATA continuation. */
+  manifestDigest?: DurableManifestDigest;
   nextOffset: number;
   checkpointKey: string;
   completed: boolean;
@@ -341,6 +357,8 @@ export interface SyncPageFetchOptions {
   readonly signal?: AbortSignal;
   readonly recovery?: boolean;
   readonly forceFreshSession?: boolean;
+  /** Completed canonical META generation that defines a durable DATA plan. */
+  readonly manifestDigest?: DurableManifestDigest;
   readonly assetUals?: string[];
   /**
    * Permit the selected-SWM transfer owner to retain a validated metadata
@@ -405,6 +423,8 @@ interface FetchSyncPagesParams {
    * an unfinished session's stale offset-zero view.
    */
   forceFreshSession?: boolean;
+  /** Enforces generation identity for durable DATA continuation state. */
+  manifestDigest?: DurableManifestDigest;
   /**
    * R9/R10 — member SWM recovery marker. Forks BOTH the checkpoint namespace
    * (R10: distinct `|recovery` cursor + responder-session scope so it never
@@ -517,6 +537,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     protocolSync,
     checkpointStore,
     forceFreshSession,
+    manifestDigest,
     recovery,
     buildSyncRequest,
     sinceBatchId,
@@ -556,7 +577,14 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     checkpointStore.delete(checkpointKey);
     unfinishedSyncResponderSessions.delete(checkpointKey);
   }
-  const checkpoint = checkpointStore.get(checkpointKey);
+  let checkpoint = checkpointStore.get(checkpointKey);
+  if (manifestDigest && checkpoint?.manifestDigest !== manifestDigest) {
+    // OFFSET has meaning only inside the exact META generation that produced
+    // the responder DATA plan. A legacy/missing binding is just as unprovable
+    // as a mismatch, so rotate the token and restart from zero as one action.
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+    checkpoint = undefined;
+  }
   let offset = checkpoint?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
@@ -567,9 +595,9 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   const savedResponderSession = usesPageSession
     ? (
         (checkpoint
-          ? getUnfinishedSyncResponderSession(checkpointKey, sessionStartedAt)
+          ? getUnfinishedSyncResponderSession(checkpointKey, manifestDigest, sessionStartedAt)
           : undefined)
-        ?? getPersistedSyncResponderSession(checkpoint, sessionStartedAt)
+        ?? getPersistedSyncResponderSession(checkpoint, manifestDigest, sessionStartedAt)
       )
     : undefined;
   const responderSessionStartedFresh = savedResponderSession === undefined;
@@ -623,6 +651,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     ? {
       syncSessionId,
       expiresAt: savedResponderSession?.expiresAt ?? sessionStartedAt + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+      ...(manifestDigest ? { manifestDigest } : {}),
     }
     : undefined;
 
@@ -854,6 +883,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           checkpointStore,
           checkpointKey,
           refreshedResponderSession,
+          manifestDigest,
         );
       }
     }
@@ -884,6 +914,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         bytesReceived,
         resumedFromOffset,
         responderSessionStartedFresh,
+        ...(manifestDigest ? { manifestDigest } : {}),
         nextOffset: offset,
         checkpointKey,
       });
@@ -919,6 +950,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         bytesReceived,
         resumedFromOffset,
         responderSessionStartedFresh,
+        ...(manifestDigest ? { manifestDigest } : {}),
         nextOffset: offset,
         checkpointKey,
       });
@@ -963,6 +995,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         checkpointStore,
         checkpointKey,
         refreshedResponderSession,
+        manifestDigest,
       );
     } else {
       forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
@@ -984,6 +1017,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     bytesReceived,
     resumedFromOffset,
     responderSessionStartedFresh,
+    ...(manifestDigest ? { manifestDigest } : {}),
     nextOffset: offset,
     checkpointKey,
     completed: !timedOut,

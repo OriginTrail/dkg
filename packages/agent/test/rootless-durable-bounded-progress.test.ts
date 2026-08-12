@@ -12,6 +12,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
+  createGraphScopedDurableManifestPlan,
   isGraphScopedDurableManifestBoundary,
   planBoundedGraphScopedDurableBatch,
 } from '../src/sync/durable-integrity.js';
@@ -558,6 +559,7 @@ describe('bounded rootless durable progress', () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);
     const suffix = fixtures[2]!.payload;
+    const manifestDigest = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID)!.manifestDigest;
     const inserted: Quad[][] = [];
     const materialized: Array<{ dataQuads: Quad[] }> = [];
     const deleted: string[] = [];
@@ -578,6 +580,7 @@ describe('bounded rootless durable progress', () => {
           quads: suffix,
           resumedFromOffset: 8,
           nextOffset: 12,
+          manifestDigest,
           completed: true,
           timedOut: false,
         }),
@@ -611,6 +614,7 @@ describe('bounded rootless durable progress', () => {
   it('resets a checkpoint that resumes inside an exact assertion graph', async () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);
+    const manifestDigest = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID)!.manifestDigest;
     const misalignedOffset = 1;
     const suffix = [
       ...fixtures[0]!.payload.slice(misalignedOffset),
@@ -639,6 +643,7 @@ describe('bounded rootless durable progress', () => {
           quads: suffix,
           resumedFromOffset: misalignedOffset,
           nextOffset: misalignedOffset + suffix.length,
+          manifestDigest,
           completed: false,
           timedOut: true,
         }),
