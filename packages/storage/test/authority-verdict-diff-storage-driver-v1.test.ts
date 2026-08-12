@@ -107,7 +107,15 @@ describe('authority verdict diff: storage driver controls', { timeout: 300_000 }
         projectionQuads: genesis.projectionQuads as never,
         ownedSubjectTable: rotated.ownedSubjectTable,
       },
-    })).not.toStrictEqual(honest);
+      // PIN THE REFUSAL, NOT MERELY THAT ONE HAPPENED. "differs from the honest
+      // result" is satisfied by ANY failure, including an unrelated one in the
+      // issue setup -- which would make this control read as projection coverage
+      // while proving nothing about the projection.
+    })).toStrictEqual({
+      kind: 'refused',
+      stage: 'issue',
+      message: 'verified projection quad 0 has an unowned subject',
+    });
   });
 
   /**
@@ -140,7 +148,15 @@ describe('authority verdict diff: storage driver controls', { timeout: 300_000 }
         projectionQuads: rotated.projectionQuads,
         ownedSubjectTable: rotated.ownedSubjectTable,
       },
-    }).kind).toBe('refused');
+      // The byte-for-byte comparison names itself, which is the whole point of
+      // this variant: a bare 'refused' here would also be satisfied by the
+      // subject-ownership refusal C1 receives, and this control exists to prove
+      // the OTHER discriminator fires once ownership is retired.
+    })).toStrictEqual({
+      kind: 'refused',
+      stage: 'issue',
+      message: 'verified projection quads do not exactly match their canonical bytes',
+    });
   });
 
   /**

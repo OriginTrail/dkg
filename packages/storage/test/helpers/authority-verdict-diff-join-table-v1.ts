@@ -711,4 +711,35 @@ export const JOIN_FINDINGS_V1: readonly string[] = [
   + 'dirty row retaining a non-empty projection and owned-subject table is materializer-'
   + 'reachable. Its worst case is REDUNDANT cells, never wrong ones, and if it closes as '
   + 'unreachable these are the exact 1,152 that reclassify.',
+
+  // THE AXIS-J REFINEMENT. Raised as a suspected fabrication defect -- cells
+  // claiming a summary but evaluated without one -- and measured into its
+  // opposite. Recorded because the artifact's axis-J finding states WHERE the
+  // member is read, and this states where the AXIS discriminates, which is the
+  // narrower and more useful fact.
+  'AXIS J DISCRIMINATES EXACTLY WHERE THE SUMMARY MINTS, AND DUPLICATES WHERE IT CANNOT. '
+  + 'A cell whose evidence subset NAMES verifiedAuthoritySummary receives the member only '
+  + 'when the closure builder mints one for its head shape; where it cannot, buildCoreEvidenceV1 '
+  + 'OMITS the member rather than refusing the cell. MEASURED over the 82,080 cells that name '
+  + 'it: 10,944 MINT and 71,136 are omitted. For every one of the 71,136, the built evidence '
+  + 'object is BYTE-IDENTICAL to that of the otherwise-identical cell that does not name the '
+  + 'member (71,136 identical, 0 differing), and the projection verdicts agree in every case '
+  + '(71,136 same, 0 different, 0 unmatched). Input equality is the stronger half and was '
+  + 'measured first: identical inputs force identical outputs, while equal outputs would not '
+  + 'have proven the inputs equal. '
+  + 'SO NOTHING FALSE IS RECORDED -- each such cell carries core\'s real answer to the input '
+  + 'it was actually given -- but 71,136 of them are BEHAVIOURAL DUPLICATES of their '
+  + 'summary-absent counterparts, and axis J does no work over that sub-region. Where the '
+  + 'summary DOES mint the axis is live, and sharply so on the absent-snapshot path where core '
+  + 'reads it: 576 minting cells there, of which 128 change verdict when the member is removed. '
+  + 'THIS IS THE MIRROR OF THE REMOVED S1 RULE, and the direction matters: S1 RETIRED these '
+  + 'cells for unmintability, and removing it DECIDED them instead. Removing it was correct -- '
+  + 'core genuinely decides them, which is what the 71,136 equal verdicts show. What was left '
+  + 'unstated is that the axis LABEL on the decided cells claims a distinction the evaluator '
+  + 'does not make there. Same disposition as axis B on the tombstone path and axis L against '
+  + 'storage: a stated scope, not a re-pin, because no verdict is false and no count is wrong. '
+  + 'STILL OPEN and filed against the Phase-3 gate with its population named: whether a cell '
+  + 'may claim an evidence member it is not given is a DENOTATION question about the axis, of '
+  + 'the same family as D=abovePlusOne, and it is not closed here. If it closes as "the label '
+  + 'must mean the member is present", these are the exact 71,136 that move.',
 ];

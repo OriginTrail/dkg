@@ -464,7 +464,7 @@ describe('authority verdict diff: the join', { timeout: JOIN_SUITE_TIMEOUT_MS },
   });
 
   it('carries its findings as data rather than as a commit message', () => {
-    expect(JOIN_FINDINGS_V1).toHaveLength(12);
+    expect(JOIN_FINDINGS_V1).toHaveLength(13);
     for (const finding of JOIN_FINDINGS_V1) expect(finding.length).toBeGreaterThan(200);
   });
 });
