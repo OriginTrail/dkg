@@ -28,6 +28,7 @@ import {
   JOIN_ADJUDICATED_CELLS_V1,
   JOIN_CELLS_PER_STORAGE_PROJECTION_V1,
   JOIN_CORE_ONLY_SPLIT_V1,
+  JOIN_DIVERGENCE_DIRECTIONS_V1,
   JOIN_DIVERGENCES_V1,
   JOIN_FINDINGS_V1,
   JOIN_IMPOSSIBILITY_PROOFS_V1,
@@ -218,6 +219,29 @@ describe('authority verdict diff: the join', { timeout: JOIN_SUITE_TIMEOUT_MS },
     expect(tally(rows, (row) => (row.verdict === JOIN_VERDICT_V1.DIVERGENCE
       ? `${row.coreLabel} -> ${row.storageLabel}` : undefined)))
       .toStrictEqual(JOIN_DIVERGENCES_V1);
+
+    // THE DIRECTION SPLIT, DERIVED FROM THE ROWS RATHER THAN RESTATED.
+    // `accept` on the core side means core permitted the advance, so a divergence
+    // there is storage DECLINING what core allows; every other core decision is a
+    // withholding, so a divergence there is storage PROCEEDING where core does
+    // not. Computed from `coreDecisionKey`, which is the cell's own core verdict,
+    // never from the direction labels themselves.
+    const directions = tally(rows, (row) => (row.verdict === JOIN_VERDICT_V1.DIVERGENCE
+      ? (row.coreDecisionKey === 'accept'
+        ? 'core-accepts-what-storage-refuses'
+        : 'storage-materialises-what-core-refuses')
+      : undefined));
+    expect(directions).toStrictEqual(JOIN_DIVERGENCE_DIRECTIONS_V1);
+    // The split must PARTITION the total it describes -- a direction pin that
+    // drifted from the divergence count would state a sign for a population that
+    // no longer exists.
+    expect(Object.values(JOIN_DIVERGENCE_DIRECTIONS_V1).reduce((a, b) => a + b, 0))
+      .toBe(JOIN_VERDICT_TOTALS_V1.DIVERGENCE);
+    // BOTH DIRECTIONS LIVE. A zero on either side would make the "two opposite
+    // routing risks" claim vacuous while the sum still checked out.
+    for (const [key, cells] of Object.entries(JOIN_DIVERGENCE_DIRECTIONS_V1)) {
+      expect({ key, live: cells > 0 }).toStrictEqual({ key, live: true });
+    }
 
     // CONSERVATION, ASSERTED RATHER THAN COMPUTED IN A COMMENT. Every
     // constructible cell carries exactly one verdict, and the adjudicated

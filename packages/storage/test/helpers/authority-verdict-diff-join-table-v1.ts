@@ -308,6 +308,36 @@ export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
 };
 
 /**
+ * THE DIVERGENCE TOTAL SPLIT BY DIRECTION -- the number a routing decision
+ * actually needs, and the one the aggregate hides.
+ *
+ * 4,672 divergent cells is a single figure with a sign problem: it says how MANY
+ * cells disagree and nothing about WHICH WAY, and the two ways carry OPPOSITE
+ * consequences for routing the live path through core.
+ *
+ *   storage-materialises-what-core-refuses (4,480 cells, 7 rows) is a SAFETY
+ *   GAP that routing through core would CLOSE. Storage proceeds where core
+ *   withholds, so handing the decision to core removes those materialisations.
+ *
+ *   core-accepts-what-storage-refuses (192 cells, 1 row) runs the other way.
+ *   Routing through core would NEWLY ADMIT these -- storage declines them
+ *   today. The route does not merely tighten.
+ *
+ * A reader given only the total, or given the pre-closure headline in which
+ * every divergence ran the first way, would carry the wrong SIGN on part of the
+ * change into the routing decision. Pinned as data rather than stated in prose
+ * so the split cannot drift away from the total it partitions; the suite asserts
+ * both directions sum to JOIN_VERDICT_TOTALS_V1.DIVERGENCE.
+ *
+ * The reverse direction was UNREACHABLE before the sequence-depth closure -- it
+ * is a cell that had no observation, never a regression.
+ */
+export const JOIN_DIVERGENCE_DIRECTIONS_V1: Readonly<Record<string, number>> = {
+  'storage-materialises-what-core-refuses': 4480,
+  'core-accepts-what-storage-refuses': 192,
+};
+
+/**
  * LEVEL 2: THE REASON PAIRS, VERBATIM, MAPPED TO NOTHING.
  *
  * There is no correspondence to declare here and the suite says so by asserting
