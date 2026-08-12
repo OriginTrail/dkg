@@ -139,6 +139,40 @@ export function coreSequenceActiveHeadV1(
 }
 
 /**
+ * The authority sequence the candidate for `cell` will carry, WITHOUT building it.
+ *
+ * Exported for the evidence layer, which needs the sequence in order to choose a
+ * sequence-dependent member. Building the whole candidate head to read one field
+ * back off it costs a head build PER CELL, and the projection-equivalence suite
+ * builds evidence for every constructible cell -- so that shortcut is worth
+ * roughly 145,000 avoided head builds, which is most of a CI budget.
+ *
+ * Derived from the CELL, which is also the honest source rather than merely the
+ * cheap one: `buildCoreCandidateHeadV1` derives the sequence from the same axis
+ * value. The two agreeing is asserted over every buildable shape in the
+ * core-heads suite rather than left to inspection -- a shortcut that silently
+ * drifted from the builder would hand the evidence layer a member chosen for the
+ * wrong sequence, which is the exact defect class this fixture keeps meeting.
+ */
+export function coreCandidateSequenceV1(cell: VerdictDiffCellV1): string {
+  return String(candidateSequence(cell.sequenceRelation));
+}
+
+/**
+ * The REAL rotation into `authoritySequence` -- the transition a well-formed
+ * candidate at that sequence names.
+ *
+ * Exported for the evidence layer: axis J's `acceptedTransition` member has to
+ * be the transition the candidate actually names, or the member stops being
+ * decision-changing and starts being a uniform refusal.
+ */
+export function coreSequenceTransitionV1(
+  authoritySequence: string,
+): AgentProfileAuthorityTransitionV1 {
+  return SEQUENCE_TRANSITIONS_V1.get(authoritySequence) as AgentProfileAuthorityTransitionV1;
+}
+
+/**
  * Axis G's 'differ' value: a REAL competing transition into the current's own
  * authority sequence, rotating to a different wallet root.
  *
@@ -185,6 +219,34 @@ export const CORE_OTHER_TRANSITION_DIGEST_V1 = computeAgentProfileAuthorityTrans
   CORE_EQUIVOCATING_TRANSITION_V1,
 );
 
+/**
+ * THE PER-SEQUENCE DIGESTS, COMPUTED ONCE.
+ *
+ * Both were being computed INSIDE `buildCoreCandidateHeadV1`, where the previous
+ * one-size-fits-all version had used module-level constants. A digest is a
+ * canonicalisation plus a keccak hash, and the projection-equivalence suite
+ * builds a head for every constructible cell -- so moving them into the builder
+ * turned four hashes into roughly 145,000, and MEASURED it: that suite went from
+ * 310s on the previous PR's CI run to 716s locally, which is what pushed this
+ * lane past its budget.
+ *
+ * Precomputing loses no observation. These are pure functions of objects fixed
+ * at module load; the builder gets the identical value it computed before.
+ */
+const SEQUENCE_PREDECESSOR_DIGESTS_V1: ReadonlyMap<string, string> = new Map(
+  [...SEQUENCE_ACTIVE_HEADS_V1].map(([sequence, head]) => [
+    sequence,
+    computeAgentProfileHeadObjectDigestV1(head),
+  ]),
+);
+
+const EQUIVOCATING_TRANSITION_DIGESTS_V1: ReadonlyMap<string, string> = new Map(
+  [...EQUIVOCATING_TRANSITIONS_V1].map(([sequence, transition]) => [
+    sequence,
+    computeAgentProfileAuthorityTransitionDigestV1(transition),
+  ]),
+);
+
 /** Every rotation this fixture can present, real and equivocating. */
 export const CORE_ALL_TRANSITIONS_V1: readonly AgentProfileAuthorityTransitionV1[] = Object.freeze([
   ...SEQUENCE_TRANSITIONS_V1.values(),
@@ -196,6 +258,7 @@ export const CORE_ALL_LINEAGE_HEADS_V1: readonly AgentProfileHeadObjectV1[] = Ob
   ...CHAIN.heads,
   ...FORWARD.heads.slice(1),
 ]);
+
 
 /** Two same-sequence conflicting heads -- the evidence a fork resolution names. */
 export const CORE_FORK_CONFLICT_HEADS_V1: readonly AgentProfileActiveHeadObjectV1[] = Object.freeze(
@@ -215,6 +278,17 @@ export const CORE_FORK_CONFLICT_HEADS_V1: readonly AgentProfileActiveHeadObjectV
  * `forkedVersion` is the current's version because core :456 refuses anything
  * else; `resolutionVersion` is one above it because the control codec refuses
  * `resolutionVersion <= forkedVersion` (:262).
+ *
+ * SEQUENCE-DEPENDENT, SUPPLIED AT EVERY SEQUENCE, AND MEASURABLY INERT TODAY.
+ * This object carries the CURRENT head's `evmIssuer` and `authoritySequence`,
+ * so at any other sequence it does not describe the candidate it is handed to.
+ * It is left alone because the branch it feeds is unreachable under this axis
+ * set and the mismatch therefore moves no verdict -- measured at 0 of 5,184
+ * sequence-relative projections, against a positive control of 72 of 600. The
+ * full statement of the measurement, and of the condition under which it stops
+ * holding, is at CORE_FORK_EVIDENCE_HEADS_V1 in the evidence layer. Anyone
+ * making axis K='present' constructible must make this per-sequence in the same
+ * change.
  */
 export const CORE_FORK_RESOLUTION_V1 = Object.freeze({
   objectType: 'fork-resolution',
@@ -239,6 +313,43 @@ export const CORE_FORK_RESOLUTION_V1 = Object.freeze({
 export const CORE_FORK_RESOLUTION_DIGEST_V1 = computeAgentProfileForkResolutionDigestV1(
   CORE_FORK_RESOLUTION_V1,
 );
+
+/**
+ * THE ONE ARTIFACT GRAPH BOTH MINTERS WALK.
+ *
+ * The two halves of the diff mint their own summaries -- core's minter is
+ * module-private to its layer, and the storage driver reproduces the walk. That
+ * reproduction is a DRIFT POINT, and it has already cost one defect: the
+ * per-sequence tombstone predecessor was fixed in the core minter and left
+ * pinned to the current head in the storage one, which refused every
+ * sequence-relative tombstone for an owned-subject table this fixture never
+ * supplies and survived a full lane with perfect conservation.
+ *
+ * Fixing that by editing both minters is a fix by VIGILANCE. This is the
+ * structural form: the ancestry, the transitions and the tombstone predecessor
+ * rule live HERE, once, and both minters read them. Two functions can still
+ * differ in what they do with the graph, but they can no longer disagree about
+ * WHAT THE GRAPH IS -- which is the only thing the drift was ever about.
+ */
+export const CORE_MINT_GRAPH_V1 = Object.freeze({
+  /** Every head a closure walk may resolve, current head first. */
+  ancestry: Object.freeze([
+    CORE_CURRENT_HEAD_V1,
+    ...CORE_ALL_LINEAGE_HEADS_V1,
+    ...CORE_FORK_CONFLICT_HEADS_V1,
+  ]) as readonly AgentProfileHeadObjectV1[],
+  /** Every rotation, real and equivocating. */
+  transitions: CORE_ALL_TRANSITIONS_V1,
+  /**
+   * The predecessor a TOMBSTONE at `authoritySequence` must be minted against,
+   * and the owned-subject table that goes with it. Both minters call this rather
+   * than each deciding what a tombstone descends from.
+   */
+  tombstonePredecessorFor(authoritySequence: string) {
+    const predecessor = coreSequenceActiveHeadV1(authoritySequence);
+    return { predecessor, ownedSubjectTable: [predecessor.rootSubject] as readonly string[] };
+  },
+});
 
 /** The candidate's authority sequence for each axis-D value. */
 function candidateSequence(relation: VerdictDiffCellV1['sequenceRelation']): bigint {
@@ -383,9 +494,7 @@ export function buildCoreCandidateHeadV1(
   // rotating INTO it, and the predecessor is the head it really descends from.
   const lineageHead = coreSequenceActiveHeadV1(String(sequence));
   const transitionDigest = cell.acceptedTransitionDigest === 'differ'
-    ? computeAgentProfileAuthorityTransitionDigestV1(
-      EQUIVOCATING_TRANSITIONS_V1.get(String(sequence)) as AgentProfileAuthorityTransitionV1,
-    )
+    ? EQUIVOCATING_TRANSITION_DIGESTS_V1.get(String(sequence)) as string
     : lineageHead.acceptedTransitionDigest;
 
   const base: Record<string, unknown> = {
@@ -396,7 +505,7 @@ export function buildCoreCandidateHeadV1(
     // A noninitial head requires its predecessor link (:206), and the head named
     // here is a real one that mints, which keeps this a history reference rather
     // than a placeholder the codec would reject.
-    previousHeadDigest: computeAgentProfileHeadObjectDigestV1(lineageHead),
+    previousHeadDigest: SEQUENCE_PREDECESSOR_DIGESTS_V1.get(String(sequence)) as string,
     // Differ from the current by issue time, which moves the digest without
     // touching any field an axis pins. Perturbing an axis-owned field instead
     // would make axis F's 'differ' silently duplicate another axis.

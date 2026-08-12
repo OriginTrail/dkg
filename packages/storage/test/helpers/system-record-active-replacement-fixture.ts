@@ -300,12 +300,7 @@ export function extendRotatedAuthorityChainV1(
   heads: readonly AgentProfileActiveHeadObjectV1[];
   transitions: readonly AgentProfileAuthorityTransitionV1[];
 }> {
-  if (firstIssuerIndex + steps > ROTATION_ISSUERS.length) {
-    throw new Error(
-      `extending ${steps} steps from issuer index ${firstIssuerIndex} needs `
-      + `${firstIssuerIndex + steps} rotation issuers`,
-    );
-  }
+  assertRotationCountV1(steps, firstIssuerIndex, 'extension length');
   return Object.freeze(rotateFrom(from, steps, firstIssuerIndex));
 }
 
@@ -598,10 +593,36 @@ export function systemRecordClosureResolveOptionsV1(
  * rotation, so nothing here should look like it does.
  */
 export function makeRotatedAuthorityChainV1(steps: number): RotatedAuthorityChainV1 {
-  if (steps > ROTATION_ISSUERS.length) {
-    throw new Error(`chain depth ${steps} needs ${steps} rotation issuers`);
-  }
+  assertRotationCountV1(steps, 0, 'chain depth');
   return nRotatedChain(steps);
+}
+
+/**
+ * `number` is a WIDER type than the values this fixture can serve, so the
+ * boundary has to narrow it -- otherwise widening from `1 | 2` just moves the
+ * refusal from the compiler to an index that silently yields `undefined` and a
+ * cast that hides it.
+ *
+ * Checked rather than assumed: a non-integer, a negative, or a count past the
+ * wallet-root supply are all reachable from a caller and none of them produces a
+ * sensible chain. The root-supply bound is the only REAL one -- there is nothing
+ * in the system that refuses a deeper chain, which is exactly the misreading the
+ * old literal union invited.
+ */
+function assertRotationCountV1(steps: number, firstIssuerIndex: number, what: string): void {
+  if (!Number.isSafeInteger(steps) || steps < 0) {
+    throw new Error(`${what} must be a non-negative safe integer, got ${String(steps)}`);
+  }
+  if (!Number.isSafeInteger(firstIssuerIndex) || firstIssuerIndex < 0) {
+    throw new Error(`issuer index must be a non-negative safe integer, got ${String(firstIssuerIndex)}`);
+  }
+  if (firstIssuerIndex + steps > ROTATION_ISSUERS.length) {
+    throw new Error(
+      `${what} ${steps} from issuer index ${firstIssuerIndex} needs `
+      + `${firstIssuerIndex + steps} rotation issuers, and this fixture supplies `
+      + `${ROTATION_ISSUERS.length}`,
+    );
+  }
 }
 
 function envelopeArtifact(

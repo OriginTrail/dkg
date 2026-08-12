@@ -9,6 +9,7 @@ import { enumerateVerdictDiffCellsV1 } from './helpers/authority-verdict-diff-ce
 import { resolveConstructibilityV1 } from './helpers/authority-verdict-diff-constructibility-v1.js';
 import {
   buildCoreCandidateHeadV1,
+  coreCandidateSequenceV1,
   coreHeadShapeKeyV1,
   CORE_ALL_TRANSITIONS_V1,
   CORE_CURRENT_DIGEST_V1,
@@ -176,6 +177,36 @@ describe('core candidate head construction', { timeout: SUITE_TIMEOUT_MS }, () =
     }
 
     expect(violations).toEqual([]);
+  });
+
+  /**
+   * THE CELL-DERIVED SEQUENCE SHORTCUT AGREES WITH THE BUILDER, over every
+   * buildable shape.
+   *
+   * `coreCandidateSequenceV1` exists so the evidence layer can pick a
+   * sequence-dependent member without building a head per cell. That makes it a
+   * SECOND path to a value the builder also computes, and two paths to one value
+   * is precisely how a fixture starts handing out members chosen for the wrong
+   * sequence -- the defect class this whole slice keeps meeting. So the
+   * agreement is asserted rather than inspected, and asserted against the BUILT
+   * head rather than against the shortcut's own inputs.
+   */
+  it('derives the candidate sequence from the cell exactly as the builder does', () => {
+    const disagreements: string[] = [];
+    for (const [key, result] of byShape) {
+      if (!result.built) continue;
+      const cell = representative.get(key)!;
+      const built = String((result.candidate as { authoritySequence: string }).authoritySequence);
+      const derived = coreCandidateSequenceV1(cell);
+      if (built !== derived) disagreements.push(`${key}: built ${built}, derived ${derived}`);
+    }
+    expect(disagreements).toEqual([]);
+    // Non-vacuity: the shortcut must reach more than one sequence, or an
+    // always-return-2 stub would satisfy the equality above.
+    const reached = new Set(
+      [...byShape].filter(([, r]) => r.built).map(([key]) => coreCandidateSequenceV1(representative.get(key)!)),
+    );
+    expect(reached.size).toBeGreaterThan(1);
   });
 
   // NON-VACUITY IN BOTH DIRECTIONS. A layer that built everything would be

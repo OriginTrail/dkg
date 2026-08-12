@@ -42,9 +42,7 @@ import { buildAgentProfileVerificationClosureV1 } from '@origintrail-official/dk
 
 import { agentProfileIdentityProjectionV1 } from './agent-profile-identity-projection-v1.js';
 import {
-  coreSequenceActiveHeadV1,
-  CORE_ALL_LINEAGE_HEADS_V1,
-  CORE_ALL_TRANSITIONS_V1,
+  CORE_MINT_GRAPH_V1,
   CORE_CURRENT_HEAD_V1,
   CORE_FORK_CONFLICT_HEADS_V1,
   CORE_FORK_RESOLUTION_V1,
@@ -314,11 +312,7 @@ export interface StorageDriverV1 {
  * two different questions with every row still well formed.
  */
 function mintAncestryV1(): readonly AgentProfileHeadObjectV1[] {
-  return [
-    CORE_CURRENT_HEAD_V1,
-    ...CORE_ALL_LINEAGE_HEADS_V1,
-    ...CORE_FORK_CONFLICT_HEADS_V1,
-  ];
+  return CORE_MINT_GRAPH_V1.ancestry;
 }
 
 /**
@@ -353,7 +347,7 @@ export async function mintStorageSummaryForHeadV1(
   | { readonly minted: false; readonly message: string }
 > {
   const ancestry = mintAncestryV1();
-  const transitions = [...CORE_ALL_TRANSITIONS_V1];
+  const transitions = [...CORE_MINT_GRAPH_V1.transitions];
   try {
     if ((candidate as { state: string }).state === 'tombstone') {
       // The predecessor and its deletion table are the ACTIVE head at the
@@ -363,13 +357,12 @@ export async function mintStorageSummaryForHeadV1(
       // every sequence-relative tombstone for an owned-subject table this
       // fixture never supplies, and the refusal is phrased exactly like a
       // domain one.
-      const predecessor = coreSequenceActiveHeadV1(
-        (candidate as { authoritySequence: string }).authoritySequence,
-      );
+      const { predecessor, ownedSubjectTable } = CORE_MINT_GRAPH_V1
+        .tombstonePredecessorFor((candidate as { authoritySequence: string }).authoritySequence);
       const closure = await mintAgentProfileTombstoneClosureV1({
         tombstone: candidate,
         predecessor,
-        ownedSubjectTable: [predecessor.rootSubject],
+        ownedSubjectTable: [...ownedSubjectTable],
         ancestors: ancestry,
         transitions,
         onUnresolvedArtifact: onUnresolved,

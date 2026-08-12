@@ -80,24 +80,30 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
   'REFUSED|F1-digest-equality-forces-the-current-state': { cells: 4608, projections: 1152 },
   'REFUSED|F2-digest-equality-forces-the-current-transition-digest': { cells: 9216, projections: 1152 },
   'REFUSED|F3-digest-equality-forces-the-current-fork-resolution-absence': { cells: 4608, projections: 576 },
-  accept: { cells: 2432, projections: 512 },
+  accept: { cells: 3200, projections: 576 },
   'quarantine|head-fork': { cells: 4096, projections: 512 },
   'quarantine|transition-equivocation': { cells: 47104, projections: 7040 },
   'reject|absent state cannot retain authority history or quarantine': { cells: 1280, projections: 768 },
   'reject|authority history is incomplete': { cells: 10240, projections: 1536 },
   'reject|cold noninitial head requires its verified authority closure': { cells: 512, projections: 320 },
   'reject|current frontier fork requires its exact direct resolving successor': { cells: 2048, projections: 256 },
-  'reject|exact accepted authority transition is missing': { cells: 5120, projections: 768 },
+  'reject|exact accepted authority transition is missing': { cells: 3840, projections: 576 },
   'reject|head issuedAt exceeds the future clock-skew bound': { cells: 48576, projections: 7680 },
   'reject|historical or unsolicited fork resolution is audit-only': { cells: 1024, projections: 128 },
   'reject|late tombstone lacks its exact verified active predecessor': { cells: 1536, projections: 384 },
-  // REPLACES 'next-sequence tombstone requires its exact same-sequence active
-  // predecessor' at the same 256/64. A tombstone candidate one sequence ahead
-  // now carries the real rotation into its own sequence, so core reaches it
-  // through the RESURRECTION branch rather than refusing it for a predecessor at
-  // the wrong sequence. Same cells, different reason -- which is the shape a
-  // reason-level pin exists to catch.
-  'reject|late tombstone requires the exact retained resurrection transition': { cells: 256, projections: 64 },
+  // THESE TWO TOMBSTONE ROWS BOTH MOVED, AND THE INTERMEDIATE STATE WAS WRONG
+  // ABOUT BOTH -- worth recording because it is what a reason-level pin buys.
+  // While the fixture handed sequence-ahead candidates the WRONG accepted
+  // transition, the next-sequence row vanished entirely and the resurrection row
+  // sat at 256/64, and that looked like a clean same-count-different-reason
+  // substitution. It was not: the wrong transition was short-circuiting core
+  // before it reached the same-sequence predecessor check. With the transition
+  // the candidate actually names, the next-sequence row is BACK at its original
+  // 256/64 and the resurrection row doubles to 512/128. A cell-count pin would
+  // have read the intermediate state as a tidy swap; only the reasons showed a
+  // branch had gone unreached.
+  'reject|late tombstone requires the exact retained resurrection transition': { cells: 512, projections: 128 },
+  'reject|next-sequence tombstone requires its exact same-sequence active predecessor': { cells: 256, projections: 64 },
   'reject|tombstone lacks its exact verified active predecessor': { cells: 2048, projections: 512 },
   // 'reject|transition does not bind the accepted predecessor' (1,024 / 128) is
   // GONE. It fired when a candidate named a transition whose prior head was not
@@ -118,7 +124,7 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
  * `projectionKey=>verdict` list.
  */
 export const CORE_VERDICT_TABLE_DIGEST_V1 =
-  '7127b2f93a51e07a0473547dcfd7eabf1d8480ad826d8741d829fde2bc9da4f0';
+  '1d977f97a5b00f060a12ac894699040bdf147a8ab87249f47b0178c3f16d166f';
 
 /**
  * WHAT THE TABLE DECIDES, AND THE TWO THINGS THESE NUMBERS DO NOT SAY.
@@ -473,7 +479,7 @@ export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = 
 export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'candidate-selects-the-lineage-of-its-own-sequence',
-    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:384',
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:495',
     contains: 'const lineageHead = coreSequenceActiveHeadV1(String(sequence));',
     why: 'Axis D now selects the head its candidate descends from, which carries the '
       + 'issuer, root subject, owned-subject table digest and accepted transition that '
@@ -481,11 +487,13 @@ export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
   },
   {
     id: 'candidate-descends-from-the-head-at-its-own-sequence',
-    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:399',
-    contains: 'previousHeadDigest: computeAgentProfileHeadObjectDigestV1(lineageHead),',
-    why: 'The predecessor is derived from that same head rather than pinned to the '
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:508',
+    contains: 'previousHeadDigest: SEQUENCE_PREDECESSOR_DIGESTS_V1.get(String(sequence))',
+    why: 'The predecessor is the digest of that same head rather than the pinned '
       + 'sequence-2 current head, so a sequence-1 candidate no longer claims a '
-      + 'predecessor ABOVE itself and a sequence-3 one no longer skips its own.',
+      + 'predecessor ABOVE itself and a sequence-3 one no longer skips its own. '
+      + 'Precomputed per sequence rather than hashed per build: hashing here cost '
+      + 'roughly 145,000 digests and pushed this lane past its CI budget.',
   },
   {
     id: 'the-future-rotates-off-the-current-head-not-off-the-ancestry',

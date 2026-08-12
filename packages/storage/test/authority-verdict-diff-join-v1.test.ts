@@ -226,22 +226,40 @@ describe('authority verdict diff: the join', { timeout: JOIN_SUITE_TIMEOUT_MS },
     // withholding, so a divergence there is storage PROCEEDING where core does
     // not. Computed from `coreDecisionKey`, which is the cell's own core verdict,
     // never from the direction labels themselves.
-    const directions = tally(rows, (row) => (row.verdict === JOIN_VERDICT_V1.DIVERGENCE
+    const observedDirections = tally(rows, (row) => (row.verdict === JOIN_VERDICT_V1.DIVERGENCE
       ? (row.coreDecisionKey === 'accept'
         ? 'core-accepts-what-storage-refuses'
         : 'storage-materialises-what-core-refuses')
       : undefined));
+    // Read over the DECLARED directions so a zero is pinned AS zero -- `tally`
+    // omits empty keys, and an omitted row and an empty one are
+    // indistinguishable while only one of them is a claim. The reverse
+    // direction is currently zero and must stay visible: if a real
+    // core-accepts-what-storage-refuses divergence ever appears, this moves off
+    // zero and the strict equality fails.
+    const directions = Object.fromEntries(
+      Object.keys(JOIN_DIVERGENCE_DIRECTIONS_V1)
+        .map((key) => [key, (observedDirections as Record<string, number>)[key] ?? 0]),
+    );
     expect(directions).toStrictEqual(JOIN_DIVERGENCE_DIRECTIONS_V1);
+    // ...and nothing outside the declared pair was observed, so reading over the
+    // declared keys cannot hide a third direction.
+    expect(Object.keys(observedDirections).sort())
+      .toStrictEqual(Object.keys(observedDirections)
+        .filter((key) => key in JOIN_DIVERGENCE_DIRECTIONS_V1).sort());
     // The split must PARTITION the total it describes -- a direction pin that
     // drifted from the divergence count would state a sign for a population that
     // no longer exists.
     expect(Object.values(JOIN_DIVERGENCE_DIRECTIONS_V1).reduce((a, b) => a + b, 0))
       .toBe(JOIN_VERDICT_TOTALS_V1.DIVERGENCE);
-    // BOTH DIRECTIONS LIVE. A zero on either side would make the "two opposite
-    // routing risks" claim vacuous while the sum still checked out.
-    for (const [key, cells] of Object.entries(JOIN_DIVERGENCE_DIRECTIONS_V1)) {
-      expect({ key, live: cells > 0 }).toStrictEqual({ key, live: true });
-    }
+    // NO BOTH-DIRECTIONS-LIVE ASSERTION. There was one, requiring each side to
+    // be non-zero so the "opposite routing risks" claim could not go vacuous
+    // while the sum still checked out. The claim went vacuous -- the reverse
+    // direction turned out to be a mismatched-evidence artifact of this
+    // fixture, not a system divergence -- so the guard turned red and is
+    // retired rather than weakened. The zero it now guards is pinned AS zero in
+    // JOIN_DIVERGENCE_DIRECTIONS_V1, where a real reverse divergence would move
+    // it off zero and fail the strict equality above.
 
     // CONSERVATION, ASSERTED RATHER THAN COMPUTED IN A COMMENT. Every
     // constructible cell carries exactly one verdict, and the adjudicated

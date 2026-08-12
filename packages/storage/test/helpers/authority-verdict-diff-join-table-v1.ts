@@ -33,7 +33,7 @@
  * itself the signal.
  */
 export const JOIN_PINNED_AGAINST_CORE_DIGEST_V1 =
-  '7127b2f93a51e07a0473547dcfd7eabf1d8480ad826d8741d829fde2bc9da4f0';
+  '1d977f97a5b00f060a12ac894699040bdf147a8ab87249f47b0178c3f16d166f';
 
 /**
  * THE FOUR-BUCKET PARTITION.
@@ -123,7 +123,7 @@ export const JOIN_ROWS_V1 = 164_160;
  * ships green.
  */
 export const JOIN_TABLE_DIGEST_V1 =
-  '7763d665d54bac3623d3bb4b3fe300f5871368ae3bd2622a75d0b5931c7f4037';
+  '4ef1c1ea7dc6cef7c6c8c1ebbd84d5bf1858ada20f9cd63637bb33a44932a0f7';
 
 /**
  * THE HEADLINE, and the two numbers it carries are deliberately of different
@@ -134,8 +134,8 @@ export const JOIN_TABLE_DIGEST_V1 =
  * this headline describe the fixture's cardinality instead of the behaviour.
  */
 export const JOIN_VERDICT_TOTALS_V1: Readonly<Record<string, number>> = {
-  AGREEMENT: 11_264,
-  DIVERGENCE: 4672,
+  AGREEMENT: 11_648,
+  DIVERGENCE: 4288,
   'NO-MAPPING': 4224,
   'NOT-COMPARABLE': 144_000,
 };
@@ -189,22 +189,21 @@ export const JOIN_PRECONDITION_DISCRIMINATION_V1: Readonly<Record<string, number
 
 /** Every adjudicated row, keyed `verdict coreDecisionKey -> storageLabel`. */
 export const JOIN_LEVEL1_TABLE_V1: Readonly<Record<string, number>> = {
-  'AGREEMENT accept -> ready': 1280,
+  'AGREEMENT accept -> ready': 1472,
   'AGREEMENT quarantine|head-fork -> deferred|authority-fork': 768,
   'AGREEMENT reject -> deferred|authority-fork': 576,
   // The sequence-depth closure's own row: core rejects a two-ahead candidate,
   // storage defers it, both from the sequence arithmetic alone.
   'AGREEMENT reject -> deferred|authority-history-mismatch': 4032,
-  'AGREEMENT reject -> stale': 2304,
+  'AGREEMENT reject -> stale': 2496,
   'AGREEMENT stale -> already-applied': 256,
   'AGREEMENT stale -> ready': 512,
   'AGREEMENT stale -> stale': 1536,
   // THE DIVERGENCE RUNNING THE OTHER WAY. Every other divergence in this table
   // is storage materialising a head core refuses; this one is core ACCEPTING an
   // advance storage declines to materialise.
-  'DIVERGENCE accept -> stale': 192,
   'DIVERGENCE reject -> already-applied': 192,
-  'DIVERGENCE reject -> ready': 4288,
+  'DIVERGENCE reject -> ready': 4096,
   'NO-MAPPING quarantine|transition-equivocation -> already-applied': 128,
   'NO-MAPPING quarantine|transition-equivocation -> deferred|authority-fork': 384,
   'NO-MAPPING quarantine|transition-equivocation -> deferred|authority-history-mismatch': 1152,
@@ -231,7 +230,7 @@ export interface JoinLevel1EntryCountsV1 {
 export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCountsV1>> = {
   accept: {
     cells: 1472,
-    members: { ready: 1280, 'already-applied': 0 },
+    members: { ready: 1472, 'already-applied': 0 },
   },
   stale: {
     cells: 2304,
@@ -253,7 +252,7 @@ export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCo
   reject: {
     cells: 11_392,
     members: {
-      stale: 2304,
+      stale: 2496,
       'root-collision': 0,
       'deferred|non-active-state': 0,
       'deferred|authority-fork': 576,
@@ -297,44 +296,50 @@ export const JOIN_LEVEL1_PER_ENTRY_V1: Readonly<Record<string, JoinLevel1EntryCo
  * which way the change cuts.
  */
 export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
-  'accept -> stale': 192,
   'reject|head issuedAt exceeds the future clock-skew bound -> ready': 2496,
   'reject|head issuedAt exceeds the future clock-skew bound -> already-applied': 192,
   'reject|absent state cannot retain authority history or quarantine -> ready': 512,
   'reject|current frontier fork requires its exact direct resolving successor -> ready': 384,
   'reject|cold noninitial head requires its verified authority closure -> ready': 128,
-  'reject|exact accepted authority transition is missing -> ready': 384,
+  'reject|exact accepted authority transition is missing -> ready': 192,
   'reject|unresolved head fork cannot advance authority sequence -> ready': 384,
 };
 
 /**
- * THE DIVERGENCE TOTAL SPLIT BY DIRECTION -- the number a routing decision
- * actually needs, and the one the aggregate hides.
+ * THE DIVERGENCE TOTAL SPLIT BY DIRECTION, and the reverse row is pinned AT ZERO
+ * after a retraction worth recording at the pin rather than only in a register.
  *
- * 4,672 divergent cells is a single figure with a sign problem: it says how MANY
- * cells disagree and nothing about WHICH WAY, and the two ways carry OPPOSITE
- * consequences for routing the live path through core.
+ * EVERY DIVERGENCE IN THIS TABLE RUNS ONE WAY: storage materialises heads core
+ * refuses. That is a SAFETY GAP which routing the live path through core would
+ * CLOSE, and it is the whole of the divergence population.
  *
- *   storage-materialises-what-core-refuses (4,480 cells, 7 rows) is a SAFETY
- *   GAP that routing through core would CLOSE. Storage proceeds where core
- *   withholds, so handing the decision to core removes those materialisations.
+ * THE OTHER DIRECTION WAS CLAIMED AND WAS FALSE. An earlier revision of this
+ * slice reported `accept -> stale` at 192 cells -- core accepting an advance
+ * storage declined -- and drew the conclusion that routing carries OPPOSITE
+ * risks in the two directions and therefore does not merely tighten. It was not
+ * a system divergence. It was this fixture handing core a mismatched
+ * `acceptedTransition`: a candidate at sequence 3 received the 1->2 transition,
+ * core refused it, and storage -- which never sees axis-J evidence -- went its
+ * own way. One side got a corrupted input and the disagreement was recorded as
+ * the two implementations disagreeing. Supplying the transition the candidate
+ * actually names moves all 192 to `accept -> ready`, an AGREEMENT.
  *
- *   core-accepts-what-storage-refuses (192 cells, 1 row) runs the other way.
- *   Routing through core would NEWLY ADMIT these -- storage declines them
- *   today. The route does not merely tighten.
+ * IT IS PINNED AS ZERO RATHER THAN DELETED, for the same reason the storage
+ * codomain pins its eight unreached labels: an omitted row and an empty one are
+ * indistinguishable, and only one of them is a claim. If a real reverse-direction
+ * divergence ever appears, this row moves off zero and says so.
  *
- * A reader given only the total, or given the pre-closure headline in which
- * every divergence ran the first way, would carry the wrong SIGN on part of the
- * change into the routing decision. Pinned as data rather than stated in prose
- * so the split cannot drift away from the total it partitions; the suite asserts
- * both directions sum to JOIN_VERDICT_TOTALS_V1.DIVERGENCE.
- *
- * The reverse direction was UNREACHABLE before the sequence-depth closure -- it
- * is a cell that had no observation, never a regression.
+ * THE NON-VACUITY ASSERTION THAT USED TO GUARD THIS IS GONE ON PURPOSE. It
+ * required BOTH directions to be non-zero so the opposite-risks claim could not
+ * go vacuous while the sum still checked out. The claim HAS gone -- so the guard
+ * did its job by turning red, and keeping it would now assert something false.
+ * What remains is the partition check: the two directions must still sum to
+ * JOIN_VERDICT_TOTALS_V1.DIVERGENCE, so a split that drifts from the total it
+ * describes turns red.
  */
 export const JOIN_DIVERGENCE_DIRECTIONS_V1: Readonly<Record<string, number>> = {
-  'storage-materialises-what-core-refuses': 4480,
-  'core-accepts-what-storage-refuses': 192,
+  'storage-materialises-what-core-refuses': 4288,
+  'core-accepts-what-storage-refuses': 0,
 };
 
 /**
@@ -356,14 +361,15 @@ export const JOIN_LEVEL2_REASON_PAIRS_V1: Readonly<Record<string, number>> = {
   'authority history is incomplete :: authority-history-mismatch': 1536,
   'cold noninitial head requires its verified authority closure :: <none>': 128,
   'current frontier fork requires its exact direct resolving successor :: <none>': 384,
-  'exact accepted authority transition is missing :: <none>': 384,
-  'exact accepted authority transition is missing :: authority-history-mismatch': 384,
+  'exact accepted authority transition is missing :: <none>': 192,
+  'exact accepted authority transition is missing :: authority-history-mismatch': 192,
   'head issuedAt exceeds the future clock-skew bound :: <none>': 4416,
   'head issuedAt exceeds the future clock-skew bound :: authority-fork': 576,
   'head issuedAt exceeds the future clock-skew bound :: authority-history-mismatch': 1728,
   'head-fork :: authority-fork': 768,
   'late tombstone lacks its exact verified active predecessor :: <none>': 384,
-  'late tombstone requires the exact retained resurrection transition :: <none>': 192,
+  'late tombstone requires the exact retained resurrection transition :: <none>': 384,
+  'next-sequence tombstone requires its exact same-sequence active predecessor :: authority-history-mismatch': 192,
   'transition-equivocation :: <none>': 2688,
   'transition-equivocation :: authority-fork': 384,
   'transition-equivocation :: authority-history-mismatch': 1152,
