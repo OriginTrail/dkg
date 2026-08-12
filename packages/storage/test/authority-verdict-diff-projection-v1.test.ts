@@ -33,9 +33,12 @@ import { resolveConstructibilityV1 } from './helpers/authority-verdict-diff-cons
  * futureSkew do not occur anywhere in packages/storage/src -- so the storage
  * projection keys collapse 855 -> 285 once the clock segment is removed, which
  * is KEY ARITHMETIC (855 = 285 x 3) rather than a byte comparison of built
- * inputs, and the honest figure is 576 cells per input, not 192. Both numbers are real
- * and they answer different questions -- 192 is what the committed projection
- * key groups, 576 is what storage can actually see.
+ * inputs, and the honest figure is 576 cells per CLOCK-INDEPENDENT KEY-GROUP,
+ * not 192. Both numbers are real and they answer different questions -- 192 is
+ * what the committed projection key groups, 576 is what a clock-independent
+ * group covers. NEITHER is cells-per-input: the built inputs number 273, which
+ * does not divide 164,160 (remainder 87, ~601.3 cells each), and a non-integer
+ * is the proof that inputs are not uniformly sized.
  */
 // Stated rather than inherited, for the reason recorded in the generator's own
 // suite: vitest's 5s default already cost this lane a run once, and the space
