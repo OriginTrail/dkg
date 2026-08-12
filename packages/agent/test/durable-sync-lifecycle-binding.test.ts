@@ -333,6 +333,68 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
+  // #2052 D-8 (#53). The seam's gate port is OPTIONAL, so "durable sync uses a gate when
+  // it is given one" — proven in durable-sync-legacy-profile-gate.test.ts — says nothing
+  // about production: a construction site that silently omitted the field would satisfy
+  // that test and still ship an open door. This asserts the SUPPLY, at the only
+  // production construction site for the legacy seam.
+  it('supplies the legacy agent-profile gate to durable sync', async () => {
+    const agentLike: any = {
+      config: { networkIdentity: { networkId: 'otp:2043' } },
+      chain: { chainId: 'none' },
+      store: {},
+      subscribedContextGraphs: new Map(),
+      contextGraphBindingGenerations: new Map(),
+      wireIdToLocalCgId: new Map(),
+      bindSubscriptionOnChainId: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      syncCheckpoints: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike, ctx, 'peer-gate-supply', contextGraphId, 1, {},
+    );
+
+    const gate = mockedRunDurableSync.mock.calls[0]![0].legacyAgentProfileGate;
+    expect(gate).toBeDefined();
+    expect(gate!.filterPage).toBeTypeOf('function');
+  });
+
+  // The negative half, which is what keeps the assertion above from being vacuous: the
+  // field is genuinely conditional, so the supply test passing means the condition HELD
+  // rather than that the field is unconditionally present.
+  it('supplies no gate when the node has no network identity', async () => {
+    const agentLike: any = {
+      config: {},
+      chain: { chainId: 'none' },
+      store: {},
+      subscribedContextGraphs: new Map(),
+      contextGraphBindingGenerations: new Map(),
+      wireIdToLocalCgId: new Map(),
+      bindSubscriptionOnChainId: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      syncCheckpoints: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike, ctx, 'peer-gate-no-identity', contextGraphId, 1, {},
+    );
+
+    expect(mockedRunDurableSync.mock.calls[0]![0].legacyAgentProfileGate).toBeUndefined();
+  });
+
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;
     const runLegacyDurableSyncDetailed = vi.fn(async () => ({

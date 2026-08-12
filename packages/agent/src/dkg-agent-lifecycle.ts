@@ -343,6 +343,8 @@ import {
   automaticDurableSyncContextGraphs,
   isSystemContextGraphExcludedFromChangelogLane,
 } from './sync/system-context-graph-policy.js';
+import { createLegacyAgentProfileGateV1 } from './system-records/legacy-profile-gate-v1.js';
+import { createLegacyAgentProfileGateLookupV1 } from './system-records/legacy-profile-gate-lookup-v1.js';
 import {
   activeSyncAdmissionSource,
   monotonicNowMs,
@@ -5041,6 +5043,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       remainingContextGraphs,
     });
+    const networkId = this.config.networkIdentity?.networkId;
     const durableContext: DurableSyncContext = {
       ctx,
       remotePeerId,
@@ -5089,6 +5092,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           signal: operationSignal,
         });
       },
+      // #2052 D-8 (#53) — the inbound legacy `agents` gate. Supplied here because this is
+      // the only production construction site for the legacy durable-sync seam.
+      //
+      // THE MODE IS `shadow`, AND THAT IS NOT A DEFAULT I PICKED. It is the plan's
+      // documented pre-activation state — `SystemRecordLaneActivationV1` says in its own
+      // docblock that "Pre-activation shadow mode keeps the legacy lane authoritative" —
+      // and there is nothing to read it from, because the mode is an input to
+      // `SystemRecordLaneControllerV1.open()` and no production path opens a lane. So the
+      // gate is inert BY MODE rather than by being absent: it is constructed, it runs on
+      // every legacy page, and it withholds nothing because no projection is authoritative
+      // yet. D-12 owns replacing this expression with the activation's own mode, and owns
+      // the proof that flipping it makes the gate fire.
+      //
+      // Without a network identity the root-claim subjects cannot be derived at all, so
+      // the gate is not constructed rather than constructed against an invented id. A
+      // system-record activation carries a networkId, so this cannot be absent once the
+      // lane it protects is live.
+      legacyAgentProfileGate: networkId === undefined ? undefined : createLegacyAgentProfileGateV1(
+        createLegacyAgentProfileGateLookupV1({ store: this.store, networkId, mode: 'shadow' }),
+      ),
       storeGraphScopedAsset: ({
         asset,
         authenticationDeadline,

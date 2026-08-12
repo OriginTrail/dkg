@@ -51,6 +51,12 @@ import {
   type SystemRecordMaterializationModeV1,
 } from '../system-record-rdf-schema-v1-internal.js';
 
+/**
+ * Re-exported so a consumer names the mode with the materializer's own type rather than
+ * restating the union. There is exactly one mode, and it has exactly one definition here.
+ */
+export type { SystemRecordMaterializationModeV1 };
+
 /** One applied signed record, keyed by the agent root the caller asked about. */
 export interface LegacyAgentProfileAppliedRootV1 {
   readonly root: string;
