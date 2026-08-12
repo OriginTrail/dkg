@@ -328,6 +328,18 @@ export const JOIN_STORAGE_LABEL_REACH_V1: Readonly<Record<string, number>> = {
  * The distinction is load-bearing because the two carry opposite obligations: a
  * finding is recorded and left alone, a gap bounds the coverage claim. Neither
  * is a reason to go and manufacture cells.
+ *
+ * ONE ENTRY HAS LEFT THIS REGISTER, AND THAT IS WHAT THE REGISTER IS FOR.
+ * `deferred|authority-history-mismatch` was listed here as 'harness-never-builds'
+ * on the ground that every non-`equal` sequence relation was retired earlier as
+ * summary-unmintable. It is now REACHED, because the sequence-relative candidates
+ * mint. An entry classified 'harness-never-builds' is a standing prediction that
+ * closing the gap will make the outcome appear; this one was closed and it did.
+ * Note the entry's stated CAUSE was already wrong before it was removed -- it
+ * cited the chain helper's `(steps: 1 | 2)` signature, an attribution the core
+ * table had already retired, while claiming "the core table records the same
+ * boundary". A cross-reference asserting agreement with its own correction is
+ * worse than a bare wrong cause, because it borrows authority it does not have.
  */
 export interface JoinUnreachedOutcomeV1 {
   readonly side: 'storage' | 'core';
@@ -352,16 +364,6 @@ export const JOIN_UNREACHED_OUTCOMES_V1: readonly JoinUnreachedOutcomeV1[] = [
     why: 'harness-never-builds',
     reason: 'There is no capacity axis. The fixture\'s single-subject record sits far below '
       + 'every cap and no cell varies revision counters, record counts or byte totals.',
-  },
-  {
-    side: 'storage',
-    outcome: 'deferred|authority-history-mismatch',
-    why: 'harness-never-builds',
-    reason: 'Reached only by a candidate whose sequence relation is not `equal`, and every '
-      + 'such shape is retired earlier as summary-unmintable: the chain is '
-      + 'makeRotatedAuthorityChainV1(2) with the current head at its top, so a sequence-3 '
-      + 'candidate needs a 2->3 transition that does not exist and the helper signature '
-      + '(steps: 1 | 2) caps the depth. The core table records the same boundary.',
   },
   {
     side: 'storage',

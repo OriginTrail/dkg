@@ -11,7 +11,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 
 import type { VerdictDiffCellV1 } from './authority-verdict-diff-cells-v1.js';
-import { makeRotatedAuthorityChainV1 } from './system-record-active-replacement-fixture.js';
+import {
+  extendRotatedAuthorityChainV1,
+  makeRotatedAuthorityChainV1,
+} from './system-record-active-replacement-fixture.js';
 
 /** The wallet root the competing transition rotates to; not on the real chain. */
 const EQUIVOCATING_ISSUER = `0x${'77'.repeat(20)}`;
@@ -64,6 +67,78 @@ export const CORE_CURRENT_VERSION_V1 = BigInt(CORE_CURRENT_HEAD_V1.version);
 export const CORE_CHAIN_V1 = CHAIN;
 
 /**
+ * THE RECORD'S PROPOSED FUTURE: sequences 3 and 4, rotating off the CURRENT head.
+ *
+ * This is the half axis D was missing, and it is deliberately NOT built by
+ * deepening `CHAIN`. The ancestry chain's sequence-2 head is the version-ZERO
+ * one; the current head is that head at version 2. Extending the ancestry would
+ * therefore produce a sequence-3 rotation whose prior is an object the receiver
+ * has never applied, and storage's next-sequence arm compares exactly that --
+ * `summary.lastAuthorityTransitionPriorHeadDigest !== current.headDigest`. The
+ * candidate would verify internally, mint a well-formed summary, and still be
+ * refused as a history mismatch by this fixture's own choice of predecessor.
+ * Rotating off CORE_CURRENT_HEAD_V1 is what makes the next-sequence comparison
+ * the system's answer rather than the harness's.
+ *
+ * Issuer indices 2 and 3: the ancestry already spent 0 and 1, and the lineage
+ * walk refuses a reused wallet root (verification closure :635).
+ */
+const FORWARD = extendRotatedAuthorityChainV1(CORE_CURRENT_HEAD_V1, 2, 2);
+
+/**
+ * THE ACTIVE HEAD AT EACH AUTHORITY SEQUENCE -- one object per sequence, doing
+ * both jobs that sequence has.
+ *
+ * It is the head a candidate at that sequence is DERIVED FROM, because a
+ * candidate must carry the issuer, root subject, owned-subject table digest and
+ * accepted transition its own sequence requires; re-stamping a sequence number
+ * onto a head built for another sequence leaves the head naming a transition
+ * into somewhere else, which is what this layer did for every axis-D value
+ * before and why three of the four relations could never mint.
+ *
+ * It is ALSO that candidate's PREDECESSOR: every candidate here is a later
+ * version of the active head at its own sequence. Deriving both from one entry
+ * is deliberate -- as two maps they could disagree, and a candidate whose
+ * predecessor names a head at some other sequence is refused by the tombstone
+ * binding with wording that reads like the system's.
+ *
+ * At sequence 2 the entry is the CURRENT head rather than the ancestry's
+ * version-zero head at that sequence. Those two differ only in `version` and
+ * `previousHeadDigest`, both of which the builder overrides, so the derived
+ * candidate is unchanged -- but the PREDECESSOR must be the current head, which
+ * is the object a receiver has actually applied.
+ */
+const SEQUENCE_ACTIVE_HEADS_V1: ReadonlyMap<string, AgentProfileActiveHeadObjectV1> = new Map([
+  ['1', CHAIN.ancestors[0] as AgentProfileActiveHeadObjectV1],
+  ['2', CORE_CURRENT_HEAD_V1],
+  ['3', FORWARD.heads[1] as AgentProfileActiveHeadObjectV1],
+  ['4', FORWARD.heads[2] as AgentProfileActiveHeadObjectV1],
+]);
+
+/** The real rotation INTO each authority sequence. */
+const SEQUENCE_TRANSITIONS_V1: ReadonlyMap<string, AgentProfileAuthorityTransitionV1> = new Map([
+  ['1', CHAIN.transitions[0] as AgentProfileAuthorityTransitionV1],
+  ['2', CHAIN.transitions[1] as AgentProfileAuthorityTransitionV1],
+  ['3', FORWARD.transitions[0] as AgentProfileAuthorityTransitionV1],
+  ['4', FORWARD.transitions[1] as AgentProfileAuthorityTransitionV1],
+]);
+
+/**
+ * The active head a candidate at `authoritySequence` descends from.
+ *
+ * Exported because the MINT layer needs it too: a tombstone closure resolves an
+ * owned-subject table over its predecessor's root, and a minter holding the
+ * current head's table for every candidate asks for a digest this fixture never
+ * supplies -- a refusal produced by the harness's own omission, phrased exactly
+ * like a domain refusal.
+ */
+export function coreSequenceActiveHeadV1(
+  authoritySequence: string,
+): AgentProfileActiveHeadObjectV1 {
+  return SEQUENCE_ACTIVE_HEADS_V1.get(authoritySequence) as AgentProfileActiveHeadObjectV1;
+}
+
+/**
  * Axis G's 'differ' value: a REAL competing transition into the current's own
  * authority sequence, rotating to a different wallet root.
  *
@@ -80,15 +155,47 @@ export const CORE_CHAIN_V1 = CHAIN;
  * of the same prior head into the same sequence is transition equivocation,
  * which is the decision the axis exists to reach.
  */
-export const CORE_EQUIVOCATING_TRANSITION_V1 = Object.freeze({
-  ...CHAIN.transitions[CHAIN.transitions.length - 1],
-  nextEvmIssuer: EQUIVOCATING_ISSUER,
-  nextRoot: `did:dkg:agent:${EQUIVOCATING_ISSUER}`,
-}) as AgentProfileAuthorityTransitionV1;
+const EQUIVOCATING_TRANSITIONS_V1: ReadonlyMap<string, AgentProfileAuthorityTransitionV1> = new Map(
+  [...SEQUENCE_TRANSITIONS_V1].map(([sequence, transition]) => [
+    sequence,
+    Object.freeze({
+      ...transition,
+      nextEvmIssuer: EQUIVOCATING_ISSUER,
+      nextRoot: `did:dkg:agent:${EQUIVOCATING_ISSUER}`,
+    }) as AgentProfileAuthorityTransitionV1,
+  ]),
+);
+
+/**
+ * Axis G's 'differ' at the CURRENT sequence, kept as its own export because
+ * consumers name this object rather than a sequence.
+ *
+ * It is the sequence-2 entry of the map above and is byte-identical to what this
+ * constant was before axis D gained per-sequence lineage -- when the chain was
+ * two deep, `transitions[length - 1]` WAS the rotation into sequence 2. That
+ * coincidence is why the index is now explicit: a deeper chain would have
+ * silently re-based this constant on the rotation into its new top, moving every
+ * digest in the D='equal' region while every count still summed.
+ */
+export const CORE_EQUIVOCATING_TRANSITION_V1 = EQUIVOCATING_TRANSITIONS_V1.get(
+  CORE_CURRENT_HEAD_V1.authoritySequence,
+) as AgentProfileAuthorityTransitionV1;
 
 export const CORE_OTHER_TRANSITION_DIGEST_V1 = computeAgentProfileAuthorityTransitionDigestV1(
   CORE_EQUIVOCATING_TRANSITION_V1,
 );
+
+/** Every rotation this fixture can present, real and equivocating. */
+export const CORE_ALL_TRANSITIONS_V1: readonly AgentProfileAuthorityTransitionV1[] = Object.freeze([
+  ...SEQUENCE_TRANSITIONS_V1.values(),
+  ...EQUIVOCATING_TRANSITIONS_V1.values(),
+]);
+
+/** Every head this fixture's lineage walks can reach. */
+export const CORE_ALL_LINEAGE_HEADS_V1: readonly AgentProfileHeadObjectV1[] = Object.freeze([
+  ...CHAIN.heads,
+  ...FORWARD.heads.slice(1),
+]);
 
 /** Two same-sequence conflicting heads -- the evidence a fork resolution names. */
 export const CORE_FORK_CONFLICT_HEADS_V1: readonly AgentProfileActiveHeadObjectV1[] = Object.freeze(
@@ -269,19 +376,27 @@ export function buildCoreCandidateHeadV1(
 
   const sequence = candidateSequence(cell.sequenceRelation);
   const version = candidateVersion(cell);
+  // The lineage the candidate's own authority sequence demands. Selecting these
+  // three per sequence rather than pinning them to the current head is the whole
+  // of the sequence-depth fix: the head supplies the issuer, root subject and
+  // owned-subject table digest that sequence requires, the transition is the one
+  // rotating INTO it, and the predecessor is the head it really descends from.
+  const lineageHead = coreSequenceActiveHeadV1(String(sequence));
   const transitionDigest = cell.acceptedTransitionDigest === 'differ'
-    ? CORE_OTHER_TRANSITION_DIGEST_V1
-    : CORE_CURRENT_HEAD_V1.acceptedTransitionDigest;
+    ? computeAgentProfileAuthorityTransitionDigestV1(
+      EQUIVOCATING_TRANSITIONS_V1.get(String(sequence)) as AgentProfileAuthorityTransitionV1,
+    )
+    : lineageHead.acceptedTransitionDigest;
 
   const base: Record<string, unknown> = {
-    ...structuredClone(CHAIN.base),
+    ...structuredClone(lineageHead),
     authoritySequence: String(sequence),
     version: String(version),
     acceptedTransitionDigest: transitionDigest,
-    // A noninitial head requires its predecessor link (:206); the current head
-    // is a real one that mints, which keeps this a history reference rather
+    // A noninitial head requires its predecessor link (:206), and the head named
+    // here is a real one that mints, which keeps this a history reference rather
     // than a placeholder the codec would reject.
-    previousHeadDigest: CORE_CURRENT_DIGEST_V1,
+    previousHeadDigest: computeAgentProfileHeadObjectDigestV1(lineageHead),
     // Differ from the current by issue time, which moves the digest without
     // touching any field an axis pins. Perturbing an axis-owned field instead
     // would make axis F's 'differ' silently duplicate another axis.

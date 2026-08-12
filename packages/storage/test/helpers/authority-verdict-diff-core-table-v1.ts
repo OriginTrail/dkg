@@ -113,13 +113,18 @@ export const CORE_VERDICT_TABLE_DIGEST_V1 =
 /**
  * WHAT THE TABLE DECIDES, AND THE TWO THINGS THESE NUMBERS DO NOT SAY.
  *
- * ISSUE #57 STILL STANDS. "Core decides all 145,728 cells" reads exactly like
- * the sequence-depth boundary went away. It did NOT -- it moved buckets. The
- * COMPARABLE region still lacks a next-sequence ROTATION: axis D='plusOne' has
- * 23,040 buildable cells and 0 that can mint a verified authority closure, and
- * that is precisely what #57's Phase-3 coupling rests on. Retiring those cells
- * used to make the gap visible in the arithmetic; deciding them makes it
- * invisible there, so it is stated here instead. The gap did not close.
+ * THE SEQUENCE-DEPTH BOUNDARY IS NOW CLOSED, AND THIS NOTE IS KEPT RATHER THAN
+ * DELETED. It used to read "ISSUE #57 STILL STANDS ... axis D='plusOne' has
+ * 23,040 buildable cells and 0 that can mint ... the gap did not close", because
+ * "core decides all 145,728 cells" reads exactly like a boundary that went away
+ * when in fact it had only moved buckets. The gap HAS now closed: all four
+ * axis-D relations mint, and D='plusOne' -- the next-sequence rotation the
+ * Phase-3 coupling rests on -- reaches storage's advance path.
+ *
+ * The note stays because the hazard it names has not gone anywhere. This total
+ * still says nothing about COVERAGE, and the next thing to move buckets will
+ * hide behind it exactly the same way. What is comparable is 42,624 cells, not
+ * 145,728, and the four-bucket partition is where that is visible.
  *
  * 145,728 DECIDED IS NOT 145,728 INDEPENDENT OBSERVATIONS. Of the 61,920 cells
  * the S1 removal returns to the table, 20,640 short-circuit at the future
@@ -429,27 +434,48 @@ export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = 
 ];
 
 /**
- * The anchors for the sequence-depth finding's CAUSE.
+ * The anchors for the sequence-depth boundary's CLOSURE.
  *
- * The finding used to blame the chain helper's `steps: 1 | 2` signature. These
- * two lines are the real cause, and they are cited so the claim can be checked
- * rather than believed: whatever depth the chain is built to, every candidate
- * still names the SAME transition digest and the SAME predecessor.
+ * This register has now cited three different things, and the history is the
+ * reason it exists. It first blamed the chain helper's `steps: 1 | 2` signature
+ * -- a PARAMETER, not a bound. It was corrected to cite the two lines that were
+ * the real cause: every candidate naming the same transition digest and the same
+ * predecessor for all four axis-D values, so a deeper chain alone changed
+ * nothing. Both of those lines are now GONE, and these citations anchor what
+ * replaced them, so "the boundary is closed" is checkable rather than believed.
+ *
+ * A closed boundary keeps its anchors rather than dropping them. The claim a
+ * reader needs to test is no longer "why can't these cells mint" but "is the
+ * lineage really selected per sequence, or did someone quietly re-pin it" --
+ * and that question is answered at exactly these lines.
  */
 export const CORE_SEQUENCE_DEPTH_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
-    id: 'candidate-reuses-the-current-transition-digest',
-    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:272',
-    contains: "const transitionDigest = cell.acceptedTransitionDigest === 'differ'",
-    why: 'Axis D never selects a transition: every candidate carries the current head\'s '
-      + 'digest or the equivocating one, for all four sequence relations.',
+    id: 'candidate-selects-the-lineage-of-its-own-sequence',
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:384',
+    contains: 'const lineageHead = coreSequenceActiveHeadV1(String(sequence));',
+    why: 'Axis D now selects the head its candidate descends from, which carries the '
+      + 'issuer, root subject, owned-subject table digest and accepted transition that '
+      + 'sequence requires. The single reused transition digest is gone.',
   },
   {
-    id: 'candidate-reuses-the-current-head-as-predecessor',
-    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:284',
-    contains: 'previousHeadDigest: CORE_CURRENT_DIGEST_V1,',
-    why: 'Every candidate points at the sequence-2 current head, so a sequence-1 candidate '
-      + 'claims a predecessor ABOVE itself and a sequence-3 one skips its own.',
+    id: 'candidate-descends-from-the-head-at-its-own-sequence',
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:399',
+    contains: 'previousHeadDigest: computeAgentProfileHeadObjectDigestV1(lineageHead),',
+    why: 'The predecessor is derived from that same head rather than pinned to the '
+      + 'sequence-2 current head, so a sequence-1 candidate no longer claims a '
+      + 'predecessor ABOVE itself and a sequence-3 one no longer skips its own.',
+  },
+  {
+    id: 'the-future-rotates-off-the-current-head-not-off-the-ancestry',
+    site: 'packages/storage/test/helpers/authority-verdict-diff-core-heads-v1.ts:86',
+    contains: 'const FORWARD = extendRotatedAuthorityChainV1(CORE_CURRENT_HEAD_V1, 2, 2);',
+    why: 'The sequence-3 and sequence-4 heads rotate off the CURRENT head, not off the '
+      + "ancestry's version-zero head at sequence 2. Extending the ancestry instead "
+      + 'would mint a well-formed summary that storage still refuses as a history '
+      + "mismatch, because its next-sequence arm compares the lineage tail's prior "
+      + "head digest against the applied head's -- a refusal owned by this fixture "
+      + 'wearing the system\'s wording.',
   },
 ];
 
@@ -540,41 +566,61 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   // CORRECTED: the first version named the wrong cause and over-claimed on the
   // sequence relations. A finding that shipped wrong once is exactly the kind
   // that gets believed the second time, so both corrections are cited.
-  'THE SEQUENCE-DEPTH BOUNDARY, AND WHAT IT DOES AND DOES NOT BOUND. Measured over '
-  + 'all 40 buildable shapes: D=below 23,040 buildable cells / 0 able to mint, '
-  + 'D=plusOne 23,040 / 0, D=abovePlusOne 23,040 / 0, against D=equal 73,728 / 20,736 '
-  + 'and the absent-snapshot region 2,880 / 1,152. So 69,120 of 145,728 buildable '
-  + 'cells -- 47% -- sit where no verified authority summary can be obtained. THIS IS '
-  + 'NOT A WRONG VERDICT AND CONSERVATION IS UNAFFECTED; what it bounds is the '
-  + 'COVERAGE CLAIM, and since rule S1 was removed it no longer appears in the '
-  + 'arithmetic at all, which makes stating it here the only place it is visible. '
-  + 'THE CAUSE IS NOT the chain helper\'s (steps: 1 | 2) signature. That is a '
-  + 'PARAMETER, not a bound -- a third rotation is about six lines. The real cause is '
-  + 'authority-verdict-diff-core-heads-v1.ts:272-284, where every candidate reuses the '
-  + 'current head as its predecessor and the same 1->2 transition digest for EVERY '
-  + 'axis-D value, so a deeper chain alone changes nothing: a sequence-3 candidate '
-  + 'would still name a 1->2 transition and still point previousHeadDigest at the '
-  + 'sequence-2 head (anchored by CORE_SEQUENCE_DEPTH_CITATIONS_V1). '
-  + '"THREE OF THE FOUR SEQUENCE RELATIONS ARE DEAD" IS RETIRED as a statement, '
-  + 'because the three are not alike. D=below is a FIX-NOW defect: the sequence-1 '
-  + 'candidate is built with previousHeadDigest naming the sequence-2 current head '
-  + 'while a real sequence-1 ancestor sits unused. D=abovePlusOne AWAITS A DENOTATION '
-  + 'DETERMINATION -- what a candidate two sequences ahead is supposed to MEAN is not '
-  + 'settled, and building one first would pin a fixture\'s guess as a finding. And '
-  + "#57's Phase-3 coupling rests on D=plusOne ALONE, so that is the one whose absence "
-  + 'has a consequence outside this table. '
-  + 'THE CONTRAST ROW SPLITS, AND HALF OF IT WAS FALSE AS WRITTEN. Axis G=\'differ\' '
-  + 'never minting IS core being correct: two transitions out of the same prior head '
+  'THE SEQUENCE-DEPTH BOUNDARY IS CLOSED, AND THIS ENTRY IS ITS HISTORY RATHER THAN '
+  + 'ITS STATEMENT. What it used to say: over all 40 buildable shapes, D=below 23,040 '
+  + 'buildable cells / 0 able to mint, D=plusOne 23,040 / 0, D=abovePlusOne 23,040 / 0 '
+  + '-- 69,120 of 145,728 buildable cells, 47%, where no verified authority summary '
+  + 'could be obtained. All three now mint. Mintable head shapes went 6 -> 12 and the '
+  + "'[system-record-history] head <digest> has incomplete authority/root lineage' "
+  + 'class went 12 shapes -> 0. The COMPARABLE region went 21,888 cells -> 42,624, '
+  + '13.3% -> 25.97% of the constructible space. '
+  + 'THE CAUSE WAS NEVER the chain helper\'s (steps: 1 | 2) signature -- a PARAMETER, '
+  + 'not a bound. It was that every candidate reused the current head as its '
+  + 'predecessor and the same 1->2 transition digest for EVERY axis-D value, so a '
+  + 'deeper chain alone would have changed nothing. Both lines are gone; '
+  + 'CORE_SEQUENCE_DEPTH_CITATIONS_V1 now anchors what replaced them. '
+  + 'WHAT THE CLOSURE COST, recorded because the naive fix does not work: a candidate '
+  + 'at sequence 3 cannot be built by DEEPENING the ancestry chain. The ancestry\'s '
+  + 'sequence-2 head is the version-zero one while the current head is that head at '
+  + 'version 2, so a rotation off the ancestry names a prior the receiver never '
+  + 'applied -- and storage\'s next-sequence arm compares exactly that. Such a '
+  + 'candidate verifies internally, mints a well-formed summary, and is STILL refused '
+  + 'as a history mismatch, by the fixture\'s choice of predecessor in the system\'s '
+  + 'wording. The future is therefore built by extendRotatedAuthorityChainV1 rotating '
+  + 'off the CURRENT head, which is a different primitive from the ancestry builder on '
+  + 'purpose. '
+  + 'THE DENOTATION QUESTION ON D=abovePlusOne IS DISSOLVED, NOT DECIDED. This entry '
+  + 'previously said the axis "AWAITS A DENOTATION DETERMINATION" and that building a '
+  + "candidate first would pin a fixture's guess as a finding. Measured at both sites, "
+  + 'neither implementation has the distinction the question presupposed: core '
+  + 'system-record-authority-v1-internal.ts:151-153 rejects any candidate more than '
+  + 'one sequence ahead with \'authority history is incomplete\', and storage\'s '
+  + 'classifyAuthorityAdvance defers it as \'authority-history-mismatch\', both from '
+  + 'the SEQUENCE NUMBER ALONE and both short-circuiting before reading the summary, '
+  + 'the lineage, or anything else that could tell "intermediates presented" from '
+  + '"intermediates withheld". There is no input the two readings differ on that '
+  + 'reaches a branch. The shape the fixture builds is then forced by '
+  + 'CONSTRUCTIBILITY rather than chosen: storage requires a verified summary as an '
+  + 'input, so the withheld-intermediates shape cannot drive storage at all and its '
+  + 'cells stay unconstructible on both sides. '
+  + 'AXIS K=\'present\' IS A DIFFERENT BOUNDARY AND IS STILL OPEN. Axis G=\'differ\' '
+  + 'never minting IS core being correct -- two transitions out of the same prior head '
   + 'into the same sequence is equivocation, which is what the axis value means. Axis '
-  + 'K=\'present\' never minting is NOT. Measured at the predicate '
-  + '(isDirectResolvingSuccessorV1, system-record-authority-verification-v1-internal.ts'
-  + ':110-117): a direct resolving successor must have a version STRICTLY ABOVE '
-  + 'resolutionVersion, which this fixture pins at 3, so it needs version >= 4 while '
-  + "axis E's largest is 3 -- and it must carry previousHeadDigest equal to the "
-  + 'resolution\'s forkBaseHeadDigest, while the builder pins that field to the current '
-  + 'head. BOTH failing conjuncts are fixture-side, and the second is the very line the '
-  + 'sequence-depth correction above cites, so this half belongs at the fixture '
-  + 'boundary and is noted against #57 rather than recorded as core being right.',
+  + 'K=\'present\' never minting is NOT, and closing axis D did not close it. Measured '
+  + 'at isDirectResolvingSuccessorV1 (system-record-authority-verification-v1-internal'
+  + '.ts:96-118), the predicate has FIVE conjuncts a candidate must satisfy, not the '
+  + 'two previously recorded: version STRICTLY ABOVE resolutionVersion; '
+  + 'previousHeadDigest equal to the resolution\'s forkBaseHeadDigest; and also '
+  + 'matching evmIssuer, matching authoritySequence, and forkResolutionDigest equal to '
+  + 'the resolution\'s digest. The last two are new information and they bite here '
+  + 'specifically: a rotation MOVES evmIssuer, so the single fork resolution this '
+  + 'fixture builds can only ever bind a sequence-2 candidate, and closing K=\'present\' '
+  + 'across axis D requires a PER-SEQUENCE resolution with its own evidence heads. '
+  + 'Separately, axis E applies only at D=\'equal\' (cells-v1), so off that column the '
+  + 'candidate version falls to its default and cannot clear the version threshold at '
+  + 'any chain depth. Filed as its own follow-up with these measurements rather than '
+  + 'folded into the sequence-depth work, because it is a distinct mechanism at a '
+  + 'distinct site and the Phase-3 routing coupling does not rest on it.',
 
   // CONDITION-3 FINDING. Filed on its own rather than folded into the counts,
   // because it is a routing hazard and a statistic absorbed into a total is not

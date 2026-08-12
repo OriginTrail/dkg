@@ -9,9 +9,11 @@ import type { VerdictDiffCellV1 } from './authority-verdict-diff-cells-v1.js';
 import {
   buildCoreCandidateHeadV1,
   coreHeadShapeKeyV1,
+  coreSequenceActiveHeadV1,
+  CORE_ALL_LINEAGE_HEADS_V1,
+  CORE_ALL_TRANSITIONS_V1,
   CORE_CHAIN_V1,
   CORE_CURRENT_HEAD_V1,
-  CORE_EQUIVOCATING_TRANSITION_V1,
   CORE_FORK_CONFLICT_HEADS_V1,
   CORE_FORK_RESOLUTION_V1,
 } from './authority-verdict-diff-core-heads-v1.js';
@@ -117,12 +119,28 @@ export const CORE_ACCEPTED_TRANSITION_V1 = CORE_CHAIN_V1.transitions[
  * The predecessor supplied when axis J names `tombstonePredecessor`.
  *
  * `isTombstoneBoundToPredecessorV1` requires the tombstone's
- * `previousHeadDigest` to be the predecessor's digest. The candidate builder
- * points every non-digest-equal candidate at `CORE_CURRENT_DIGEST_V1`, so the
- * current head is the ONLY object that can satisfy that conjunct -- any other
- * choice would make the member's presence meaningless.
+ * `previousHeadDigest` to be the predecessor's digest, so the member is only
+ * meaningful when it is the head the candidate actually descends from. That
+ * used to be `CORE_CURRENT_HEAD_V1` for every cell, because the builder pointed
+ * every candidate at the current head. Now that a candidate descends from the
+ * active head at its OWN authority sequence, so does this -- otherwise every
+ * sequence-relative J-present cell would collapse onto one refusal and the table
+ * would measure the fixture's wrongness instead of core's discrimination.
+ *
+ * The absent-snapshot region keeps the current head: its candidates sit at the
+ * current sequence, so the two agree there by construction rather than by
+ * coincidence.
  */
-export const CORE_TOMBSTONE_PREDECESSOR_V1 = CORE_CURRENT_HEAD_V1;
+export function coreTombstonePredecessorV1(
+  cell: VerdictDiffCellV1,
+): AgentProfileHeadObjectV1 {
+  const build = buildCoreCandidateHeadV1(cell);
+  return build.built
+    ? coreSequenceActiveHeadV1(
+      (build.candidate as { authoritySequence: string }).authoritySequence,
+    )
+    : CORE_CURRENT_HEAD_V1;
+}
 
 /**
  * The fork evidence. The resolution and the conflicting heads live with the head
@@ -230,8 +248,7 @@ async function mintForHeadV1(
   // defect rather than a missing artifact.
   const ancestry = [
     CORE_CURRENT_HEAD_V1,
-    CORE_CHAIN_V1.base,
-    ...CORE_CHAIN_V1.ancestors,
+    ...CORE_ALL_LINEAGE_HEADS_V1,
     ...CORE_FORK_CONFLICT_HEADS_V1,
   ];
   // Every digest a head NAMES has to be resolvable, or the closure refuses with
@@ -239,13 +256,25 @@ async function mintForHeadV1(
   // being nothing but a gap in this map. Axis G='differ' names the competing
   // transition and axis K='present' names the fork resolution, so both travel
   // with the ancestry rather than being left for the collector to miss.
-  const transitions = [...CORE_CHAIN_V1.transitions, CORE_EQUIVOCATING_TRANSITION_V1];
+  // Every rotation the fixture can present -- the four real ones and the four
+  // competing ones. A candidate at any sequence names one of them, and a digest
+  // a head names that this map cannot answer is refused with wording that reads
+  // exactly like a domain refusal.
+  const transitions = [...CORE_ALL_TRANSITIONS_V1];
   try {
     if ((candidate as { state: string }).state === 'tombstone') {
+      // The predecessor is the active head at the TOMBSTONE'S OWN sequence, and
+      // the deletion table is that head's. Holding the current head's table for
+      // every candidate makes the closure ask for an owned-subject-table digest
+      // this fixture never supplies, which surfaces as
+      // 'verification closure is missing 0x...' -- the harness's own omission in
+      // a domain refusal's clothing, and the exact shape that once retired
+      // ~46,000 cells with every count summing.
+      const predecessor = coreSequenceActiveHeadV1(candidate.authoritySequence);
       const closure = await mintAgentProfileTombstoneClosureV1({
         tombstone: candidate,
-        predecessor: CORE_TOMBSTONE_PREDECESSOR_V1,
-        ownedSubjectTable: [CORE_TOMBSTONE_PREDECESSOR_V1.rootSubject],
+        predecessor,
+        ownedSubjectTable: [predecessor.rootSubject],
         ancestors: ancestry,
         transitions,
         onUnresolvedArtifact: onUnresolved,
@@ -307,7 +336,7 @@ export function buildCoreEvidenceV1(
   const wants = new Set(cell.evidence);
   if (wants.has('acceptedTransition')) evidence.acceptedTransition = CORE_ACCEPTED_TRANSITION_V1;
   if (wants.has('tombstonePredecessor')) {
-    evidence.tombstonePredecessor = CORE_TOMBSTONE_PREDECESSOR_V1;
+    evidence.tombstonePredecessor = coreTombstonePredecessorV1(cell);
   }
   if (wants.has('forkResolution')) evidence.forkResolution = CORE_FORK_RESOLUTION_V1;
   if (wants.has('forkEvidenceHeads')) evidence.forkEvidenceHeads = CORE_FORK_EVIDENCE_HEADS_V1;
