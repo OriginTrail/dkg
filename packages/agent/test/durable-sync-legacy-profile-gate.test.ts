@@ -22,6 +22,7 @@ import {
   createLegacyAgentProfileGateV1,
   type LegacyAgentProfileAppliedRootV1,
 } from '../src/system-records/legacy-profile-gate-v1.js';
+import { createLegacyAgentProfileGateLookupV1 } from '../src/system-records/legacy-profile-gate-lookup-v1.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 
 const ctx = createOperationContext('sync');
@@ -154,6 +155,58 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
 
     expect(lookupAppliedRoots).not.toHaveBeenCalled();
     expect(offered).toEqual(page);
+  });
+
+  // The seam half of the mode counterfactual (the read layer carries the other half in
+  // packages/storage). This composes the REAL adapter, the REAL storage reads and the REAL
+  // gate over one store, and flips ONLY the mode — so it covers the case a controller-
+  // presence inference would have missed: an authoritative projection persisted by an
+  // earlier process, on a node whose lane is not currently open.
+  describe('end to end, only the mode differs', () => {
+    const conflicting = quad(ROOT, 'urn:p', 'rewritten-by-legacy');
+
+    /** Answers the reserved-state join for any claim, and the projection for any subject. */
+    function storeWithAppliedRecord() {
+      const query = vi.fn(async (sparql: string) => (
+        sparql.includes('?claim ?table')
+          ? {
+            type: 'bindings' as const,
+            bindings: [{ claim: /<([^>]*root:[^>]*)>/.exec(sparql)?.[1] ?? '', table: `"[\\"${ROOT}\\"]"^^<urn:json>` }],
+          }
+          : {
+            type: 'bindings' as const,
+            bindings: [{ s: ROOT, p: 'urn:p', o: '"signed"' }],
+          }
+      ));
+      return { query } as never;
+    }
+
+    // The uncovered quad rides along in BOTH runs on purpose. Asserting only that the
+    // conflicting quad disappears would also pass if `filterPage` THREW — the per-CG catch
+    // would drop the whole page and the page would look withheld. Requiring the uncovered
+    // quad to survive means the gate ran to completion and discriminated, so a thrown
+    // lookup can no longer wear a withhold's clothes.
+    const uncovered = quad('urn:ordinary-subject', 'urn:p', 'o');
+
+    it('withholds the conflicting quad when the projection is authoritative', async () => {
+      const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
+        store: storeWithAppliedRecord(), networkId: 'otp:2043', mode: 'authoritative',
+      }));
+
+      const { offered } = await runSeam([conflicting, uncovered], gate);
+
+      expect(offered).toEqual([uncovered]);
+    });
+
+    it('passes the same quad through when the projection is only shadow', async () => {
+      const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
+        store: storeWithAppliedRecord(), networkId: 'otp:2043', mode: 'shadow',
+      }));
+
+      const { offered } = await runSeam([conflicting, uncovered], gate);
+
+      expect(offered).toEqual([conflicting, uncovered]);
+    });
   });
 
   // Withheld quads never reached the store, so counting them as inserted would report
