@@ -117,13 +117,29 @@ export const CORE_CLOCK_MS_V1: Readonly<Record<VerdictDiffCellV1['clock'], numbe
  * fixture's mismatch recorded as a system verdict on the axis-J-present half of
  * the sequence-relative region.
  *
+ * THE CLASS RULE, and it took three attempts to state correctly:
+ * **EVIDENCE IS SELECTED BY THE BRANCH THAT READS IT, never by an attribute of
+ * the candidate alone.** Any single value serving two branches that read
+ * different objects is the same defect wearing a different key.
+ *
  * WHICH OBJECT EACH PATH DEMANDS, read at the sites rather than inferred. On the
  * LOWER-sequence path :295 retains `lineage[candidateSequence]` and :303-305
  * demands a transition agreeing with it on prior sequence, next sequence AND
- * digest. On the NEXT-sequence path :336 compares the supplied transition's
- * digest to the candidate's own `acceptedTransitionDigest`. Both questions are
- * about the candidate's OWN sequence, so both are answered by the rotation INTO
- * that sequence -- which is exactly what the candidate names.
+ * digest -- that entry is the rotation OUT of the candidate's sequence. On the
+ * NEXT-sequence path :336 compares the supplied transition's digest to the
+ * candidate's own `acceptedTransitionDigest` -- the rotation INTO it. THEY ARE
+ * DIFFERENT OBJECTS.
+ *
+ * THE ORIGINAL CONSTANT IS PARTLY REHABILITATED, and the history matters more
+ * than the code. `CORE_ACCEPTED_TRANSITION_V1` was the 1->2 transition for every
+ * cell, and its doc justified that by the LOWER-SEQUENCE path -- where it was
+ * CORRECT, because lineage[1] IS the 1->2 rotation. It was wrong only about the
+ * next-sequence path. Reading "the doc documents its own breakage" and
+ * generalising to "the constant is wrong" replaced a half-true value with a
+ * differently-half-true one: sequence-keyed selection fixed next-sequence and
+ * BROKE lower-sequence, which the constant had been getting right. A half-true
+ * doc invited a whole-cloth replacement, and the second version repeated the
+ * first's mistake in mirror image.
  *
  * Supplying the transition the candidate actually names is what makes the
  * member's PRESENCE decision-changing rather than uniformly refusing: a
@@ -149,9 +165,33 @@ export function coreAcceptedTransitionV1(
   cell: VerdictDiffCellV1,
 ): AgentProfileAuthorityTransitionV1 {
   const sequence = coreCandidateSequenceV1(cell);
+  // THE LOWER-SEQUENCE TOMBSTONE BRANCH READS A DIFFERENT OBJECT, and this is
+  // the one case where "the transition the candidate names" is the wrong answer.
+  // `evaluateLowerSequenceAgentProfileHeadAdvanceV1` takes
+  // `retained = lineage[candidateSequence]` and demands the evidence transition
+  // match it on prior sequence, next sequence AND digest. For a candidate at
+  // sequence S that entry is the rotation OUT of S -- the one INTO S + 1 -- not
+  // the rotation into S. Only the tombstone sub-case reaches it: a lower-sequence
+  // ACTIVE candidate returns `stale` before the member is read.
+  if (isLowerSequenceTombstoneV1(cell)) {
+    return coreSequenceTransitionV1(String(BigInt(sequence) + 1n));
+  }
   return cell.acceptedTransitionDigest === 'differ'
     ? coreSequenceEquivocatingTransitionV1(sequence)
     : coreSequenceTransitionV1(sequence);
+}
+
+/**
+ * Reaches core's lower-sequence tombstone arm: a tombstone candidate below the
+ * accepted head's authority sequence, on a present snapshot.
+ *
+ * Named rather than inlined because it encodes WHICH BRANCH READS THE MEMBER,
+ * and that is the thing the selection depends on.
+ */
+function isLowerSequenceTombstoneV1(cell: VerdictDiffCellV1): boolean {
+  return cell.snapshot === 'present'
+    && cell.candidateHeadState === 'tombstone'
+    && cell.sequenceRelation === 'below';
 }
 
 /**

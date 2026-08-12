@@ -80,7 +80,7 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
   'REFUSED|F1-digest-equality-forces-the-current-state': { cells: 4608, projections: 1152 },
   'REFUSED|F2-digest-equality-forces-the-current-transition-digest': { cells: 9216, projections: 1152 },
   'REFUSED|F3-digest-equality-forces-the-current-fork-resolution-absence': { cells: 4608, projections: 576 },
-  accept: { cells: 3200, projections: 576 },
+  accept: { cells: 3456, projections: 640 },
   'quarantine|head-fork': { cells: 4096, projections: 512 },
   'quarantine|transition-equivocation': { cells: 47104, projections: 7040 },
   'reject|absent state cannot retain authority history or quarantine': { cells: 1280, projections: 768 },
@@ -91,18 +91,15 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
   'reject|head issuedAt exceeds the future clock-skew bound': { cells: 48576, projections: 7680 },
   'reject|historical or unsolicited fork resolution is audit-only': { cells: 1024, projections: 128 },
   'reject|late tombstone lacks its exact verified active predecessor': { cells: 1536, projections: 384 },
-  // THESE TWO TOMBSTONE ROWS BOTH MOVED, AND THE INTERMEDIATE STATE WAS WRONG
-  // ABOUT BOTH -- worth recording because it is what a reason-level pin buys.
-  // While the fixture handed sequence-ahead candidates the WRONG accepted
-  // transition, the next-sequence row vanished entirely and the resurrection row
-  // sat at 256/64, and that looked like a clean same-count-different-reason
-  // substitution. It was not: the wrong transition was short-circuiting core
-  // before it reached the same-sequence predecessor check. With the transition
-  // the candidate actually names, the next-sequence row is BACK at its original
-  // 256/64 and the resurrection row doubles to 512/128. A cell-count pin would
-  // have read the intermediate state as a tidy swap; only the reasons showed a
-  // branch had gone unreached.
-  'reject|late tombstone requires the exact retained resurrection transition': { cells: 512, projections: 128 },
+  // THIS ROW WENT 192 -> 384 -> 192 ACROSS THREE EVIDENCE RULES, and the middle
+  // value was a regression this fixture authored and then explained as a result.
+  // Under sequence-keyed selection a lower-sequence tombstone was handed the
+  // rotation INTO its sequence, while core's lower-sequence arm demands
+  // lineage[candidateSequence] -- the rotation OUT of it -- so the fixture
+  // manufactured this refusal and doubled the row. Branch-keyed selection
+  // restores it. A number returning to where it started is the cleanest possible
+  // evidence that what moved it was never the system.
+  'reject|late tombstone requires the exact retained resurrection transition': { cells: 256, projections: 64 },
   // NEW ROW, and the table has never carried this reason before. A G='differ'
   // candidate names a competing rotation to a wallet root its own head does not
   // carry, so core refuses at the next-sequence issuer/root binding. It only
@@ -132,7 +129,7 @@ export const CORE_VERDICT_TABLE_V1: Readonly<Record<string, CoreVerdictRowV1>> =
  * `projectionKey=>verdict` list.
  */
 export const CORE_VERDICT_TABLE_DIGEST_V1 =
-  'fbad4f37a8b7f062a28affece30672eddd75ad33ef845adaefc3c84afec5e2e3';
+  '93898e323d6a17e63ea36b2d1584b496bf42391f2de4f8007cade88924917a9e';
 
 /**
  * WHAT THE TABLE DECIDES, AND THE TWO THINGS THESE NUMBERS DO NOT SAY.
@@ -188,7 +185,7 @@ export const CORE_PROJECTIONS_V1 = 25920;
  * space. Those cells are now driven with the member OMITTED, which is the only
  * evidence object a real caller holding such a head could assemble. The claim
  * that this does not move a verdict is EXHAUSTIVE over the affected set, not
- * sampled: every one of the 9,792 affected projections was driven twice, once
+ * sampled: every one of the 8,064 affected projections was driven twice, once
  * with a summary minted for a DIFFERENT head and once with the member absent.
  * Exhaustive over the affected set dominates any per-branch sample, and a branch
  * no affected cell reaches cannot be relevant to this change by construction.
