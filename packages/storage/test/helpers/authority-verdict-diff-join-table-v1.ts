@@ -666,4 +666,43 @@ export const JOIN_FINDINGS_V1: readonly string[] = [
   + 'stay retired and its counts stay pinned; the annotation says only which SITE owns the '
   + 'refusal when it is read through the driver. It is deliberately NOT written as a claim '
   + 'about the production issuer, where it could not be verified and is in fact false.',
+
+  // THE SCOPE THE ADJUDICATED COUNT DOES NOT CARRY ON ITS FACE. Recorded after a
+  // finding was escalated as a fabrication defect, measured, and overturned --
+  // the escalation was wrong about the mechanism and right that something here
+  // was unstated.
+  'AXIS B IS NON-DISCRIMINATING ON THE TOMBSTONE DISPATCH PATH, SO 1,152 ADJUDICATED '
+  + 'CELLS ARE BEHAVIOURAL DUPLICATES. classifyTombstoneAdvance reads current.status '
+  + 'EXACTLY ONCE, at :956, and only against \'quarantined\'; a dirty or tombstone row with '
+  + 'no conflict state passes straight through. POSITIVE CONTROL on the ACTIVE classifier '
+  + '(:1087-1164) with the same instrument: THREE reads including a current.status !== '
+  + '\'active\' test, which is why axis B does real work there and produces the 12,096 '
+  + 'applied-row short-circuit. MEASURED CONSEQUENCE: under H=tombstone, B=active, B=dirty '
+  + 'and B=tombstone each split 256 AGREEMENT / 192 DIVERGENCE / 128 NO-MAPPING -- IDENTICAL '
+  + 'in every verdict class, which is the empirical confirmation of the source reading; three '
+  + 'independent classes agreeing exactly is not what coincidence produces. So of the 576 '
+  + 'divergence cells in this region there are only 192 DISTINCT divergent situations, and '
+  + '384 of the 3,136 reported divergences are the same situations recounted under two axis-B '
+  + 'values the classifier cannot see. NEGATIVE CONTROL: B=quarantined adjudicates ZERO cells '
+  + 'under this operation, so the gate discriminates rather than admitting everything. '
+  + 'NO CELL\'S VERDICT IS FALSE AND NO COUNT MOVES -- the table counts CELLS over a declared '
+  + 'input space and never claimed to count distinct phenomena; this states that scope. '
+  + 'WHY THIS IS STATED RATHER THAN RE-PINNED, which is the question a later reader will ask: '
+  + 'the artifact already disposes of an identical situation at larger scale the same way -- '
+  + 'axis L reaches no storage input at all, 855 storage projection keys collapsing to 285 '
+  + 'distinct built inputs, and it ships as a stated finding with both populations rather '
+  + 'than as a count re-pin. Re-pinning axis B while leaving axis L a finding would make this '
+  + 'artifact inconsistent with itself, in the direction of treating one fixture-visibility '
+  + 'fact as an error and an identical one as a result. '
+  + 'THE DOUBT THIS DISPOSITION DOES NOT DISSOLVE, registered rather than dropped because the '
+  + 'ruling went the other way: the standing rule that a CLASS-CONSTANT FACT BELONGS TO THE '
+  + 'MAP rather than the cells cuts against it, since one semantic fact is here multiplied by '
+  + 'axis-B cardinality. It was judged non-decisive because that rule governs the verdict '
+  + 'CODOMAIN while this is the INPUT SPACE -- but the underlying concern, that counts can end '
+  + 'up describing the fixture rather than the system, does bite here, and it is exactly why '
+  + 'the scope sentence above is load-bearing rather than decorative. '
+  + 'STILL OPEN, filed against the Phase-3 gate with its population already named: whether a '
+  + 'dirty row retaining a non-empty projection and owned-subject table is materializer-'
+  + 'reachable. Its worst case is REDUNDANT cells, never wrong ones, and if it closes as '
+  + 'unreachable these are the exact 1,152 that reclassify.',
 ];

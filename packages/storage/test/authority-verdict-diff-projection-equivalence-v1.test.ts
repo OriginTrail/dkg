@@ -59,8 +59,23 @@ const VERDICT_DIFF_SUITE_TIMEOUT_MS = 600_000;
  * The verified authority summary is a WeakSet-branded factory object: it has no
  * meaningful serialisation and must not be compared structurally. It is
  * memoised per HEAD SHAPE, so two cells receive the very same object exactly
- * when their shape keys agree -- which is what the marker records. Comparing the
- * marker is therefore stricter than comparing the object would be, not weaker.
+ * when their shape keys agree -- which is what the marker records.
+ *
+ * THE MARKER IS INERT WITHIN A GROUP, NOT STRICTER, AND CALLING IT STRICTER WAS
+ * WRONG. Every axis feeding `coreHeadShapeKeyV1` is also inside the core
+ * projection key, so within one group the marker is CONSTANT: it contributes the
+ * same string to every cell compared and can never be why two fingerprints
+ * differ. A term that cannot vary inside the comparison is not a strict
+ * comparison, it is no comparison.
+ *
+ * WHAT COVERS THE SUMMARY IS CONSTRUCTION, NOT THIS TEST, and it is recorded as
+ * the argument it is. The sweep's summary index is keyed by
+ * `coreHeadShapeKeyV1(cell)` (authority-verdict-diff-core-evidence-v1.ts:316),
+ * so cells sharing a projection key share a shape key and receive the SAME map
+ * entry -- the identical minted object, or identically none. The OUTPUT-side
+ * half is pinned separately and is the harder one: CORE_SUMMARY_INDEPENDENCE_V1
+ * drives 9,792 projections with the member present and absent and gets identity,
+ * with two live discrimination controls.
  */
 function coreInputFingerprintV1(cell: VerdictDiffCellV1): string {
   const head = buildCoreCandidateHeadV1(cell);
@@ -108,20 +123,60 @@ function groupsWithMixedInputs(
   key: (cell: VerdictDiffCellV1) => string,
   fingerprint: (cell: VerdictDiffCellV1) => string,
 ): readonly string[] {
-  const seen = new Map<string, string>();
+  const seen = new Map<string, { readonly f: string; readonly id: string }>();
   const mixed = new Set<string>();
   for (const cell of cells) {
     const k = key(cell);
     const f = fingerprint(cell);
     const first = seen.get(k);
-    if (first === undefined) seen.set(k, f);
-    else if (first !== f) mixed.add(k);
+    if (first === undefined) seen.set(k, { f, id: cell.id });
+    // Name the CELLS, not only their group: a projection key is not searchable
+    // in the fixture the way a cell id is, and the group alone does not say
+    // which two members disagreed.
+    else if (first.f !== f) mixed.add(`${k} [${first.id} vs ${cell.id}]`);
   }
   return [...mixed].sort();
 }
 
 describe('verdict-diff projection equivalence', { timeout: VERDICT_DIFF_SUITE_TIMEOUT_MS }, () => {
   const cells = resolveConstructibilityV1(enumerateVerdictDiffCellsV1()).constructible;
+
+  // THE FLOOR THIS SUITE WAS MISSING, AND ITS ABSENCE WAS THE SAME DEFECT THE
+  // SUITE EXISTS TO DETECT. `groupsWithMixedInputs` reports only groups whose
+  // members DISAGREE, so a fingerprint returning one fixed string yields no
+  // disagreements anywhere and every row below passes. Every assertion in this
+  // file was green against a check that could not fail.
+  //
+  // THE CORE BOUND IS THE EQUIVALENCE CLAIM IN ITS POSITIVE FORM: one distinct
+  // core input per core projection. It is asserted over cells whose head BUILT,
+  // and the restriction is measured rather than convenient -- a REFUSED build
+  // renders as `head-refused:${ruleId}`, a string carrying none of the cell's
+  // axes, so refused projections collapse onto one another by rule id. Measured:
+  // 23,040 built projections against 23,040 distinct built inputs (exact), and
+  // 2,880 refused projections against 2,304 distinct refused fingerprints. The
+  // 576 difference is entirely the refused collapse, and it is CONSERVATIVE --
+  // distinct projections presenting identical inputs costs redundant evaluation
+  // and never merges cells that differ.
+  //
+  // THE STORAGE BOUND IS A LOWER BOUND WITH A ONE-LINE PROOF: the fingerprint
+  // concatenates snapshot, applied status and operation verbatim, so it must
+  // distinguish at least as many values as there are distinct triples of them.
+  // An exact storage bijection does NOT hold and is not asserted -- the clock
+  // sits in the storage projection key but reaches no storage input, and the
+  // refused collapse applies here too (855 keys, 273 distinct fingerprints).
+  it('discriminates, so the equalities below are not vacuous', () => {
+    const built = cells.filter((cell) => buildCoreCandidateHeadV1(cell).built);
+    expect(built.length).toBeGreaterThan(0);
+    expect(new Set(built.map(coreInputFingerprintV1)).size)
+      .toBe(new Set(built.map(coreInputProjectionKeyV1)).size);
+
+    const triples = new Set(cells.map(
+      (cell) => `${cell.snapshot}|${cell.appliedStatus ?? '-'}|${cell.storageOperation}`,
+    ));
+    expect(triples.size).toBeGreaterThan(1);
+    expect(new Set(cells.map(storageInputFingerprintV1)).size)
+      .toBeGreaterThanOrEqual(triples.size);
+  });
 
   // THE CHECK THE SWEEPS REST ON. Every cell sharing a core projection key must
   // produce the same accepted state, the same candidate head and the same
