@@ -16,6 +16,9 @@ for (const [specifier, shouldResolve] of cfg.resolutionExpectations ?? []) {
 
 const barrel = await import(cfg.pkg);
 const internal = await import(cfg.internalEntry);
+// #2052 D-8 — the gate-read subpath is LOADED, not merely resolved. Resolver metadata can
+// be correct while the packed JS lacks the functions its one consumer calls.
+const gateRead = await import(cfg.gateReadEntry);
 
 // IDENTITY-based leak detection: an authority export on the barrel is a leak
 // under ANY name. Comparing values, not keys, catches aliased re-exports
@@ -49,6 +52,10 @@ const verdicts = [
   [leaks.length === 0, `barrel exports no authority value under any name (leaked: ${leaks.join('; ')})`],
   [typeof internal[cfg.ownershipMint] === 'function', 'internal entry exports the ownership mint'],
   [!(cfg.publicError in internal), 'the public error is not doubled through the authority entry'],
+  [(cfg.gateReadExports ?? []).every((n) => typeof gateRead[n] === 'function'),
+    `gate-read entry exports its consumed surface (missing: ${(cfg.gateReadExports ?? []).filter((n) => typeof gateRead[n] !== 'function').join(',') || '-'})`],
+  [(cfg.gateReadConstants ?? []).every((n) => typeof gateRead[n] === 'string' && gateRead[n].length > 0),
+    `gate-read entry exports its consumed constants (missing: ${(cfg.gateReadConstants ?? []).filter((n) => typeof gateRead[n] !== 'string').join(',') || '-'})`],
 ];
 for (const [ok, label] of verdicts) {
   if (!ok) {

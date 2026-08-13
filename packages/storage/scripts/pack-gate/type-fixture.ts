@@ -10,6 +10,16 @@ import {
   type StructuredMutationSnapshot,
 } from '@origintrail-official/dkg-storage';
 import type { ManagedOxigraphSupervisorHandoffV1 } from '@origintrail-official/dkg-storage/internal/managed-oxigraph-ownership-v1';
+// #2052 D-8 — the gate-read subpath's DECLARATIONS, compiled against the packed d.ts.
+// The agent adapter imports exactly these names; a packed artifact that resolves but
+// ships no declarations for them breaks the only consumer while passing a
+// resolution-only check.
+import {
+  readLegacyAgentProfileAppliedRootsV1,
+  readLegacyAgentProfileProjectionV1,
+  systemRecordProjectionGraphV1,
+  type SystemRecordMaterializationModeV1,
+} from '@origintrail-official/dkg-storage/internal/system-record-legacy-gate-read-v1';
 // @ts-expect-error — final mutation materialization has no supported package subpath
 import { materializeStructuredMutation } from '@origintrail-official/dkg-storage/structured-mutation-materialization-internal';
 // @ts-expect-error — the ownership mint is not on the public barrel
@@ -37,4 +47,12 @@ const snapshotWitness: StructuredMutationSnapshot = captureStructuredMutationSna
 });
 void materializeStructuredMutation;
 void snapshotWitness;
+// The gate-read surface as the adapter actually uses it: the mode type names the union,
+// and the graph function is applied to it. Referencing the values (not just importing
+// them) is what makes a missing declaration a compile error rather than an unused import.
+const gateReadMode: SystemRecordMaterializationModeV1 = 'shadow';
+const gateReadWitness: string = systemRecordProjectionGraphV1(gateReadMode);
+void readLegacyAgentProfileAppliedRootsV1;
+void readLegacyAgentProfileProjectionV1;
+void gateReadWitness;
 export default witness;

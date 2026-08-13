@@ -26,6 +26,7 @@ import {
   type LegacyAgentProfileAppliedRootV1,
   type LegacyAgentProfileGateLookupV1,
 } from '../src/system-records/legacy-profile-gate-v1.js';
+import { systemRecordProjectionGraphV1 } from '@origintrail-official/dkg-storage/internal/system-record-legacy-gate-read-v1';
 
 const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
 
@@ -50,13 +51,31 @@ function projectionRow(subject: string, predicate: string, object: string): Quad
 /**
  * A lookup that answers from an explicit applied set and records its call shape, so every
  * assertion about the store budget is made against calls that actually happened.
+ *
+ * `bounds` models an implementation that hit one of :926's byte caps. It is deliberately
+ * expressed as a response the gate RECEIVES rather than as a shorter list, because the
+ * whole point of the reported channel is that a short list is indistinguishable from
+ * "no record here" — a fixture that simulated a byte cap by returning fewer records
+ * would be testing the very confusion the contract exists to remove.
  */
-function fakeLookup(records: readonly LegacyAgentProfileAppliedRootV1[], projection: readonly Quad[]) {
-  const lookupAppliedRoots = vi.fn(async (roots: readonly string[]) =>
-    records.filter((record) => roots.includes(record.root)));
-  const lookupProjectionMembership = vi.fn(async (subjects: readonly string[]) =>
-    projection.filter((row) => subjects.includes(row.subject)));
-  const lookup: LegacyAgentProfileGateLookupV1 = { lookupAppliedRoots, lookupProjectionMembership };
+function fakeLookup(
+  records: readonly LegacyAgentProfileAppliedRootV1[],
+  projection: readonly Quad[],
+  bounds: { unclassifiedRoots?: readonly string[]; truncated?: boolean } = {},
+) {
+  const lookupAppliedRoots = vi.fn(async (roots: readonly string[]) => ({
+    records: records.filter((record) => roots.includes(record.root)),
+    unclassifiedRoots: (bounds.unclassifiedRoots ?? []).filter((root) => roots.includes(root)),
+  }));
+  const lookupProjectionMembership = vi.fn(async (subjects: readonly string[]) => ({
+    rows: projection.filter((row) => subjects.includes(row.subject)),
+    truncated: bounds.truncated ?? false,
+  }));
+  const lookup: LegacyAgentProfileGateLookupV1 = {
+    projectionGraph: AGENTS_GRAPH,
+    lookupAppliedRoots,
+    lookupProjectionMembership,
+  };
   return { lookup, lookupAppliedRoots, lookupProjectionMembership };
 }
 
@@ -185,6 +204,64 @@ describe('LegacyAgentProfileGateV1 — covered roots (:924, :925)', () => {
     expect(result.discardedDuplicates).toBe(1);
     expect(result.withheld).toEqual([]);
     expect(result.conflictedRoots).toBe(0);
+  });
+
+  // Review found a REAL pre-activation data-loss bug here, and this is its regression.
+  //
+  // The batch-cap overflow disposition is set BEFORE the lookup runs, so under the old
+  // subject-only scoping a shadow-mode page carrying more than the cap's worth of agent
+  // roots had its overflow roots marked unclassified and WITHHELD — even though the
+  // shadow lookup answers empty and nothing authoritative exists to protect. Silent loss
+  // of legacy quads before cutover, with the checkpoint advancing over it.
+  //
+  // Under destination-graph scoping the shadow projection graph is the namespace-hidden
+  // reserved one, which no legacy page targets, so no root is derived at all and the
+  // overflow path is never reached. This pins that: ABOVE the cap, everything passes and
+  // nothing is read.
+  it('passes a page above the batch cap untouched in shadow mode, and reads nothing', async () => {
+    const { lookup, lookupAppliedRoots } = fakeLookup([applied], projection);
+    const shadow: LegacyAgentProfileGateLookupV1 = {
+      ...lookup,
+      // The materializer's own answer for shadow, not a restated constant.
+      projectionGraph: systemRecordProjectionGraphV1('shadow'),
+    };
+    const page = Array.from(
+      { length: LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1 + 1 },
+      (_, i) => quad(`did:dkg:agent:0x${i.toString(16).padStart(40, '0')}`, 'p', 'o'),
+    );
+
+    const result = await createLegacyAgentProfileGateV1(shadow).filterPage(page);
+
+    expect(result.insert).toEqual(page);
+    expect(result.withheld).toEqual([]);
+    expect(result.unclassifiedRoots).toBe(0);
+    expect(result.storeRequests).toBe(0);
+    expect(lookupAppliedRoots).not.toHaveBeenCalled();
+  });
+
+  // T1, half B — the half that scoping by SUBJECT ALONE gets wrong, and the reason the
+  // two conjuncts are independent. This quad names a covered agent root and would
+  // conflict with the projection on content, but it is bound for a different context
+  // graph, where the signed projection does not live. Nothing can be overwritten there,
+  // so withholding it would be pure data loss in an unrelated graph.
+  //
+  // The zero-read assertion is what makes it a scope test rather than a duplicate of the
+  // pass-through case: a gate that consulted the store and then decided to pass would
+  // also satisfy the offer assertion, while spending :926's budget on a page that cannot
+  // collide with anything.
+  it('passes an agent-root quad bound for another context graph, and reads nothing', async () => {
+    const { lookup, lookupAppliedRoots } = fakeLookup([applied], projection);
+    const elsewhere = {
+      subject: ROOT, predicate: 'p', object: 'different', graph: 'did:dkg:context-graph:project-x',
+    };
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage([elsewhere]);
+
+    expect(result.insert).toEqual([elsewhere]);
+    expect(result.withheld).toEqual([]);
+    expect(result.conflictedRoots).toBe(0);
+    expect(result.storeRequests).toBe(0);
+    expect(lookupAppliedRoots).not.toHaveBeenCalled();
   });
 
   it('withholds a conflicting quad and counts the root as conflicted', async () => {
@@ -427,6 +504,46 @@ describe('LegacyAgentProfileGateV1 — bounded store requests (:926)', () => {
     expect(result.withheld).toHaveLength(1);
     expect(result.unclassifiedRoots).toBe(1);
     expect(result.discardedDuplicates).toBe(0);
+    expect(result.storeRequests).toBe(2);
+  });
+
+  // :926 request one — "one batched VALUES query ... with a 1-MiB response cap".
+  //
+  // The cap can only be honoured by answering about fewer roots, and an unmentioned root
+  // is otherwise indistinguishable from one that simply has no applied record. The two
+  // roots below are BOTH absent from `records`; the reported channel is the only thing
+  // that differs between them, so this fails if the gate ever reads omission as absence.
+  it('withholds a root the applied-roots response reports it could not classify', async () => {
+    const { lookup, lookupProjectionMembership } = fakeLookup([], [], {
+      unclassifiedRoots: [OTHER_ROOT],
+    });
+    const page = [quad(ROOT, 'p', 'o'), quad(OTHER_ROOT, 'p', 'o')];
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage(page);
+
+    expect(result.insert).toEqual([page[0]]);
+    expect(result.withheld).toEqual([page[1]]);
+    expect(result.unclassifiedRoots).toBe(1);
+    expect(result.conflictedRoots).toBe(0);
+    // No root was classified as covered, so the membership read is never issued.
+    expect(lookupProjectionMembership).not.toHaveBeenCalled();
+    expect(result.storeRequests).toBe(1);
+  });
+
+  // :926 request two — "10,000 quads, and 2 MiB". The row count is visible to the gate;
+  // the byte bound is not. The single row below IS the page's quad, so without the
+  // reported flag this quad is an exact duplicate and is DISCARDED. The flag is therefore
+  // the only difference between discarding and withholding.
+  it('withholds covered roots when the membership response reports it was truncated', async () => {
+    const applied: LegacyAgentProfileAppliedRootV1 = { root: ROOT, ownedSubjects: [ROOT] };
+    const { lookup } = fakeLookup([applied], [projectionRow(ROOT, 'p', 'o')], { truncated: true });
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage([quad(ROOT, 'p', 'o')]);
+
+    expect(result.discardedDuplicates).toBe(0);
+    expect(result.withheld).toHaveLength(1);
+    expect(result.insert).toEqual([]);
+    expect(result.unclassifiedRoots).toBe(1);
     expect(result.storeRequests).toBe(2);
   });
 });

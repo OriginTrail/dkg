@@ -1,5 +1,6 @@
 import { Agent, request as httpRequest, type IncomingMessage } from 'node:http';
 import { performance } from 'node:perf_hooks';
+import { STORE_RESPONSE_TOO_LARGE_CODE } from '../http-response-limit.js';
 import {
   SYSTEM_RECORD_MAX_MATERIALIZER_WRITE_CONCURRENCY,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -296,8 +297,12 @@ export class OwnedManagedHttpClient {
               if (maxResponseBytes !== undefined
                   && chunkBytes > maxResponseBytes - responseBytes) {
                 failResponse(
-                  new Error(
-                    `managed SPARQL response body exceeded ${maxResponseBytes} bytes`,
+                  // Tagged with the canonical code so callers that degrade on an oversized
+                  // response recognise this refusal too. Previously this client's cap was
+                  // the one shape no shared check could see.
+                  Object.assign(
+                    new Error(`managed SPARQL response body exceeded ${maxResponseBytes} bytes`),
+                    { code: STORE_RESPONSE_TOO_LARGE_CODE },
                   ),
                 );
                 return;
@@ -394,9 +399,17 @@ export class OwnedManagedHttpClient {
               declaredLength = Number(contentLengthHeader);
               if (maxResponseBytes !== undefined && declaredLength > maxResponseBytes) {
                 failResponse(
-                  new Error(
-                    `managed SPARQL response body declares ${declaredLength} bytes; ` +
-                      `maximum is ${maxResponseBytes} bytes`,
+                  // Same code as the chunked refusal below, because this is the same
+                  // refusal: the body exceeds `maxResponseBytes`. A server that sends
+                  // Content-Length lands HERE rather than there, so leaving this site
+                  // untagged left the likelier of the two paths invisible to the shared
+                  // check — the shared bounded reader already types both of its own.
+                  Object.assign(
+                    new Error(
+                      `managed SPARQL response body declares ${declaredLength} bytes; ` +
+                        `maximum is ${maxResponseBytes} bytes`,
+                    ),
+                    { code: STORE_RESPONSE_TOO_LARGE_CODE },
                   ),
                 );
                 return;

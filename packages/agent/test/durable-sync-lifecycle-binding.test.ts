@@ -333,6 +333,117 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
+  // #2052 D-8. The seam's gate port is OPTIONAL, so "durable sync uses a gate when
+  // it is given one" — proven in durable-sync-legacy-profile-gate.test.ts — says nothing
+  // about production: a construction site that silently omitted the field would satisfy
+  // that test and still ship an open door. This asserts the SUPPLY, at the only
+  // production construction site for the legacy seam.
+  it('supplies the legacy agent-profile gate to durable sync', async () => {
+    const agentLike: any = {
+      config: { networkIdentity: { networkId: 'otp:2043' } },
+      chain: { chainId: 'none' },
+      store: {},
+      subscribedContextGraphs: new Map(),
+      contextGraphBindingGenerations: new Map(),
+      wireIdToLocalCgId: new Map(),
+      bindSubscriptionOnChainId: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      syncCheckpoints: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike, ctx, 'peer-gate-supply', contextGraphId, 1, {},
+    );
+
+    const gate = mockedRunDurableSync.mock.calls[0]![0].legacyAgentProfileGate;
+    expect(gate).toBeDefined();
+    expect(gate!.filterPage).toBeTypeOf('function');
+  });
+
+  // Adopted from review, which pointed out that the assertion above proves PRESENCE and
+  // nothing else. The pre-activation `shadow` literal is the load-bearing part of this
+  // construction site, and `expect(gate).toBeDefined()` stays green if it is changed to
+  // `authoritative` — at which point a pre-cutover node starts querying and withholding
+  // agent-root quads. So exercise the gate the production site actually built.
+  //
+  // The store is the discriminator: under shadow the projection graph is the reserved
+  // one, no legacy quad is a candidate, and the gate short-circuits before any read. A
+  // gate built with the wrong mode reaches the store, and the spy fires.
+  it('supplies a gate that is inert BY MODE, not merely present', async () => {
+    const query = vi.fn(async () => ({ type: 'bindings', bindings: [] }));
+    const agentLike: any = {
+      config: { networkIdentity: { networkId: 'otp:2043' } },
+      chain: { chainId: 'none' },
+      store: { query },
+      subscribedContextGraphs: new Map(),
+      contextGraphBindingGenerations: new Map(),
+      wireIdToLocalCgId: new Map(),
+      bindSubscriptionOnChainId: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      syncCheckpoints: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike, ctx, 'peer-gate-mode', contextGraphId, 1, {},
+    );
+
+    const gate = mockedRunDurableSync.mock.calls[0]![0].legacyAgentProfileGate;
+    const page = [{
+      subject: `did:dkg:agent:0x${'1'.repeat(40)}`,
+      predicate: 'urn:p',
+      object: 'legacy',
+      graph: 'did:dkg:context-graph:agents',
+    }];
+
+    const result = await gate!.filterPage(page);
+
+    expect(result.insert).toEqual(page);
+    expect(result.withheld).toEqual([]);
+    expect(result.storeRequests).toBe(0);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  // The negative half, which is what keeps the assertion above from being vacuous: the
+  // field is genuinely conditional, so the supply test passing means the condition HELD
+  // rather than that the field is unconditionally present.
+  it('supplies no gate when the node has no network identity', async () => {
+    const agentLike: any = {
+      config: {},
+      chain: { chainId: 'none' },
+      store: {},
+      subscribedContextGraphs: new Map(),
+      contextGraphBindingGenerations: new Map(),
+      wireIdToLocalCgId: new Map(),
+      bindSubscriptionOnChainId: vi.fn(),
+      persistContextGraphSubscriptionStrict: vi.fn(),
+      processDurableBatchInWorker: async () => ({}),
+      insertSyncedQuadsAndInvalidateListCache: async () => {},
+      syncCheckpoints: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
+      log: { info: () => {}, warn: () => {}, debug: () => {} },
+    };
+
+    await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
+      agentLike, ctx, 'peer-gate-no-identity', contextGraphId, 1, {},
+    );
+
+    expect(mockedRunDurableSync.mock.calls[0]![0].legacyAgentProfileGate).toBeUndefined();
+  });
+
   it('selects the dedicated field-sized exact-recovery transfer policy', async () => {
     const physicalResult = {} as Awaited<ReturnType<typeof runDurableSync>>;
     const runLegacyDurableSyncDetailed = vi.fn(async () => ({

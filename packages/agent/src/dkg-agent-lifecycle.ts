@@ -343,6 +343,8 @@ import {
   automaticDurableSyncContextGraphs,
   isSystemContextGraphExcludedFromChangelogLane,
 } from './sync/system-context-graph-policy.js';
+import { createLegacyAgentProfileGateV1 } from './system-records/legacy-profile-gate-v1.js';
+import { createLegacyAgentProfileGateLookupV1 } from './system-records/legacy-profile-gate-lookup-v1.js';
 import {
   activeSyncAdmissionSource,
   monotonicNowMs,
@@ -5041,6 +5043,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
       remainingContextGraphs,
     });
+    const networkId = this.config.networkIdentity?.networkId;
     const durableContext: DurableSyncContext = {
       ctx,
       remotePeerId,
@@ -5089,6 +5092,34 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           signal: operationSignal,
         });
       },
+      // #2052 D-8 — the inbound legacy `agents` gate. Supplied here because this is
+      // the only production construction site for the legacy durable-sync seam.
+      //
+      // THE LITERAL `shadow` IS CORRECT HERE, AND IS NOT A DEFAULT STANDING IN FOR A
+      // LOOKUP. There is nothing to read the mode from: it is an INPUT to
+      // `SystemRecordLaneControllerV1.open()`, not state the controller exposes, and no
+      // production path opens a lane — so pre-activation this is the only place a mode can
+      // be expressed at all. The value is the plan's documented pre-activation state:
+      // `SystemRecordLaneActivationV1`'s own docblock says "Pre-activation shadow mode
+      // keeps the legacy lane authoritative".
+      //
+      // DO NOT "FIX" THIS into reading a config key or an agent-side default. No such
+      // source exists, inventing one would give the mode a second home, and the mode
+      // having exactly one home is what stops the gate and the projection disagreeing
+      // about which graph is authoritative.
+      //
+      // So the gate is inert BY MODE rather than by being absent: it is constructed, it
+      // runs on every legacy page, and it withholds nothing because no projection is
+      // authoritative yet. D-12 owns replacing this one expression with the activation's
+      // own mode, and owns the proof that flipping it makes the gate fire.
+      //
+      // Without a network identity the root-claim subjects cannot be derived at all, so
+      // the gate is not constructed rather than constructed against an invented id. A
+      // system-record activation carries a networkId, so this cannot be absent once the
+      // lane it protects is live.
+      legacyAgentProfileGate: networkId === undefined ? undefined : createLegacyAgentProfileGateV1(
+        createLegacyAgentProfileGateLookupV1({ store: this.store, networkId, mode: 'shadow' }),
+      ),
       storeGraphScopedAsset: ({
         asset,
         authenticationDeadline,

@@ -27,6 +27,7 @@ import type {
   GraphScopedMaterializationOutcome,
   VerifiedGraphScopedAsset,
 } from './graph-scoped-materialization.js';
+import type { LegacyAgentProfileGateV1 } from '../../system-records/legacy-profile-gate-v1.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import {
   normalizeDurableSyncContext,
@@ -191,6 +192,32 @@ export interface DurableSyncContext {
     dataRejectedMissingMeta: number;
   }>;
   storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
+  /**
+   * #2052 D-8 — the inbound legacy `agents` duplicate/conflict gate (plan :924, :1505).
+   *
+   * Filter-before-insert at this seam, the same shape the oversize guard uses, so that
+   * unsigned legacy quads never reach the store for a root that already carries an
+   * applied signed record.
+   *
+   * SCOPE, STATED AS MEASURED. The gate is scoped by DESTINATION GRAPH conjoined with the
+   * subject derivation — not by the page's context-graph id, and not by the subject alone.
+   * A quad is a candidate only when it derives a `did:dkg:agent:` root AND is bound for
+   * the graph the applied projection occupies, because that is the only place legacy
+   * insertion can physically collide with signed state.
+   *
+   * It is therefore inert, at no store read, on any page carrying no such quad. It is NOT
+   * accurate to say it is inert on "every non-`agents` page": a page under any id can
+   * carry a quad bound for the aggregate graph, and that quad is exactly the one that
+   * scoping by page id would have inserted over signed state.
+   *
+   * OPTIONAL, and deliberately not fail-closed on absence. The trigger for a
+   * fail-closed throw would be "this page derived an agent root", which is true of every
+   * ordinary `agents` page — and `runDurableSync` is reachable outside this package
+   * through the `"./dist/*"` export wildcard, so throwing would break safe and unsafe
+   * external callers alike. Enforcement lives where it can be proven instead: the
+   * production construction site supplies one, and a test asserts that it does.
+   */
+  legacyAgentProfileGate?: LegacyAgentProfileGateV1;
   /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
   storeGraphScopedAsset?: (
     request: DurableSyncGraphScopedStoreRequest,
@@ -246,6 +273,7 @@ async function runDurableSyncWithBudget(
     stopOnBackoffWorthyFailure = false,
     processDurableBatchInWorker,
     storeInsert,
+    legacyAgentProfileGate,
     storeGraphScopedAsset,
     onVerifiedFullSnapshot,
     deleteCheckpoint,
@@ -267,6 +295,39 @@ async function runDurableSyncWithBudget(
     deadline,
     signal,
   });
+
+  /**
+   * #2052 D-8 — run one legacy page through the agent-profile gate before insertion.
+   *
+   * Data and meta are fetched in separate pagination loops and are therefore separate
+   * pages, so each is entitled to :926's two store requests and gating both stays inside
+   * that bound. A page carrying no quad bound for the projection graph short-circuits
+   * inside the gate and issues no read at all, which is what makes gating the meta page
+   * free in the default configuration (`agents/_meta` is opt-in and off).
+   */
+  const gateLegacyAgentProfilePage = async (pid: string, quads: Quad[]): Promise<Quad[]> => {
+    if (legacyAgentProfileGate === undefined || quads.length === 0) return quads;
+    const gated = await legacyAgentProfileGate.filterPage(quads, signal);
+    if (gated.withheld.length > 0) {
+      // Withholding means an applied signed record disagreed with this page, so it is
+      // operationally significant: the phonebook a peer served is contradicting signed
+      // state, or a bounded lookup could not decide. Duplicates are routine replay and
+      // stay at debug so a post-cutover node does not warn on every page.
+      logWarn(
+        ctx,
+        `Legacy agent-profile gate withheld ${gated.withheld.length} quad(s) for "${pid}": `
+        + `${gated.conflictedRoots} conflicting root(s), ${gated.unclassifiedRoots} unclassified `
+        + `(${gated.discardedDuplicates} exact duplicate(s) discarded, ${gated.storeRequests} store read(s))`,
+      );
+    } else if (gated.discardedDuplicates > 0) {
+      logDebug(
+        ctx,
+        `Legacy agent-profile gate discarded ${gated.discardedDuplicates} duplicate quad(s) `
+        + `for "${pid}" (${gated.storeRequests} store read(s))`,
+      );
+    }
+    return [...gated.insert];
+  };
 
   const accumulator = createDurableSyncAccumulator();
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
@@ -660,25 +721,36 @@ async function runDurableSyncWithBudget(
       }
       if (partitioned.remainingData.length > 0) {
         throwIfOperationAborted();
-        await storeInsert({
-          quads: partitioned.remainingData,
-          signal,
-        });
-        recordDurableSyncDiagnostics(accumulator, {
-          insertedTriples: partitioned.remainingData.length,
-          insertedDataTriples: partitioned.remainingData.length,
-        });
+        const insertableData = await gateLegacyAgentProfilePage(pid, partitioned.remainingData);
+        throwIfOperationAborted();
+        if (insertableData.length > 0) {
+          await storeInsert({
+            quads: insertableData,
+            signal,
+          });
+          // Counted from what was offered to the store, never from the page size: a
+          // withheld quad that still reported as inserted would make the diagnostics
+          // claim progress the store never took.
+          recordDurableSyncDiagnostics(accumulator, {
+            insertedTriples: insertableData.length,
+            insertedDataTriples: insertableData.length,
+          });
+        }
       }
       if (partitioned.remainingMeta.length > 0) {
         throwIfOperationAborted();
-        await storeInsert({
-          quads: partitioned.remainingMeta,
-          signal,
-        });
-        recordDurableSyncDiagnostics(accumulator, {
-          insertedTriples: partitioned.remainingMeta.length,
-          insertedMetaTriples: partitioned.remainingMeta.length,
-        });
+        const insertableMeta = await gateLegacyAgentProfilePage(pid, partitioned.remainingMeta);
+        throwIfOperationAborted();
+        if (insertableMeta.length > 0) {
+          await storeInsert({
+            quads: insertableMeta,
+            signal,
+          });
+          recordDurableSyncDiagnostics(accumulator, {
+            insertedTriples: insertableMeta.length,
+            insertedMetaTriples: insertableMeta.length,
+          });
+        }
       }
       // An already-started atomic write is awaited and counted truthfully, but
       // an expired operation may not advance a page checkpoint or enter the
