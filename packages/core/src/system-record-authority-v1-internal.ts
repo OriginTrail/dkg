@@ -42,7 +42,8 @@ import type {
 import {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAuthorityTransitionV1,
-  evaluateAuthorityTransitionInternalV1,
+  rejectInadmissibleExpiredPriorTransitionV1,
+  rejectUnverifiableAuthorityTransitionV1,
   isAgentProfileHeadBoundToAcceptedTransitionV1,
   isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
@@ -532,20 +533,31 @@ function evaluateLateTombstoneRuleV1(
   }
   const clockRefusal = rejectInvalidHeadClockV1(candidateState, retainedTransition.nowMs);
   if (clockRefusal !== undefined) return clockRefusal;
-  // The INTERNAL form: its accept-or-reject type is what lets this rule return a
-  // narrow decision without an arm for a state the verifier cannot produce. The
-  // published entry keeps the full union, because narrowing it would break
-  // consumers outside this repository.
-  const verified = evaluateAuthorityTransitionInternalV1(
+  // VERIFIABILITY IS ESTABLISHED BEFORE ANYTHING IS CLASSIFIED, AND THAT ORDER IS
+  // THE POINT RATHER THAN TIDINESS.
+  //
+  // Below this line, a refusal can only be about what the transition BINDS,
+  // which is what makes the structural arms sound BY CONSTRUCTION instead of by
+  // the coincidence that today's only reachable non-binding refusal happens not
+  // to move a verdict. Previously the verifier ran first and its result was
+  // discarded on two of three arms, so a transition that could not be verified
+  // at all was still read structurally -- and on the `names-another-head` arm
+  // that reading is an ADMISSION that deletes the record. Harmless while the
+  // verifier's only such refusal is temporal; not harmless the day it learns one
+  // that ought to mean refuse, a signature check being the obvious candidate.
+  //
+  // TWO ENTRY-LAYER CELLS MOVE, both toward refusal and both pinned in the seam
+  // suite: a transition naming ANOTHER head that is dated beyond the future skew
+  // stops being an `accept`, and an UNRELATED transition that is also
+  // unverifiable now refuses on the verifiability reason rather than asserting a
+  // structural fact derived from an object nothing could check. No cell any
+  // caller can reach today moves at all, because a receiver has no channel for a
+  // retained transition and never gets this far.
+  const unverifiable = rejectUnverifiableAuthorityTransitionV1(
     transition,
-    candidateState,
     retainedTransition.nowMs,
   );
-  if (verified.decision === 'accept') {
-    // A valid descendant of the tombstoned sequence exists, so the tombstone is
-    // superseded.
-    return { decision: 'stale' };
-  }
+  if (unverifiable !== undefined) return unverifiable;
   // THE AFFIRMATIVE NEEDS EVIDENCE FROM THIS RECORD, NOT MERELY A NON-MATCH.
   //
   // ADR 0002 :131-132 makes the descendant valid only when the retained
@@ -559,9 +571,10 @@ function evaluateLateTombstoneRuleV1(
   //     about this record, and reading it as precedence would let an unrelated
   //     object decide a tombstone's fate. Measured before the split: a retained
   //     transition carrying a foreign issuer returned `accept`.
-  //   names-this-head -- it does name us, yet the verifier still refused, which
-  //     can only be a temporal or expiry refusal. Propagated verbatim, because
-  //     "not verifiable now" must never become "not this tombstone's descendant".
+  //   names-this-head -- it does name us and it is verifiable, so the only
+  //     question left is whether an expired-prior rotation is admissible against
+  //     this head. That refusal is propagated verbatim; anything else is a valid
+  //     descendant, and the tombstone is superseded.
   //
   // A PLAIN `default` WOULD ABSORB A FOURTH BINDING. It would route one into
   // whichever arm it fell through to, silently and at run time, and this is the
@@ -585,8 +598,20 @@ function evaluateLateTombstoneRuleV1(
         decision: 'reject',
         reason: 'late tombstone retained transition belongs to another authority',
       };
-    case 'names-this-head':
-      return verified;
+    case 'names-this-head': {
+      // The binding was asked ONCE, above. Re-running the whole verifier here to
+      // learn the expired-prior answer would recompute exactly that
+      // classification in order to reconstruct a reason it had already thrown
+      // away -- the duplication this shape removes.
+      const inadmissible = rejectInadmissibleExpiredPriorTransitionV1(
+        transition,
+        candidateState,
+        retainedTransition.nowMs,
+      );
+      // A valid descendant of the tombstoned sequence exists, so the tombstone
+      // is superseded.
+      return inadmissible ?? { decision: 'stale' };
+    }
     default: {
       const unmapped: never = binding;
       throw new Error(

@@ -530,6 +530,68 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
    * seam should establish verifiability BEFORE consulting the classifier is a
    * structural question recorded against the rule itself.
    */
+  /**
+   * VERIFIABILITY IS ESTABLISHED BEFORE THE BINDING IS CLASSIFIED, AND THESE ARE
+   * THE TWO CELLS THAT MOVED WHEN IT WAS.
+   *
+   * The row above proves the temporal refusal reaches a caller on the ONE arm
+   * where the verifier's decision was propagated. These two are the arms where
+   * it was not, and where an unverifiable object was therefore read
+   * structurally. The `names-another-head` cell is the one that mattered: a
+   * transition the code could not check AT ALL was mapped to `accept`, which on
+   * this rule deletes the record.
+   *
+   *   cell                              BEFORE                     AFTER
+   *   names-another-head + future-dated `accept`                   the temporal refusal
+   *   unrelated + future-dated          `belongs to another …`     the temporal refusal
+   *
+   * Both move toward refusal, and both were entry-layer only: a receiver has no
+   * channel for a retained transition, so no cell reachable through storage
+   * changed. The second is a reason-only movement and is the honest one -- with
+   * an object nothing can verify, asserting a structural fact about whose
+   * authority it belongs to is a claim derived from unchecked bytes.
+   *
+   * WHY THIS IS NOT THE ONE-LINE FIX. Hoisting a single condition would close
+   * this instance and leave the class: the same shape has now appeared four
+   * times on this rule, one arm over each time. The refusals that are about the
+   * transition rather than about what it binds are named as a group, so the next
+   * one added joins them without anybody having to notice.
+   */
+  it('refuses an unverifiable transition on every arm, not only the naming one', () => {
+    const futureDated = (over: Record<string, unknown>) => Object.freeze({
+      ...structuredClone(binding as unknown as Record<string, unknown>),
+      issuedAt: '2027-08-05T12:00:00Z',
+      ...over,
+    }) as unknown as AgentProfileAuthorityTransitionV1;
+    const answer = (transition: AgentProfileAuthorityTransitionV1) => {
+      const decision = evaluateAgentProfileLateTombstoneAdvanceV1(
+        candidate,
+        {
+          retainedTransition: { transition, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+          tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
+        } satisfies AgentProfileLateTombstoneEvidenceV1,
+        lineageFor(transition),
+      );
+      return 'reason' in decision ? `${decision.decision}|${decision.reason}` : decision.decision;
+    };
+
+    const temporal = 'reject|transition issuedAt exceeds the future clock-skew bound';
+    expect({
+      // Same authority and sequence, naming a DIFFERENT head: the ADR's
+      // "otherwise" arm, which used to return `accept` on an object no clock
+      // could admit.
+      namesAnotherHead: answer(futureDated({
+        priorHeadDigest: computeAgentProfileHeadObjectDigestV1(
+          coreSequenceActiveHeadV1(LATE_SEQUENCE),
+        ),
+      })),
+      // A foreign authority AND unverifiable: the refusal names the reason that
+      // is actually checkable, rather than a structural claim derived from an
+      // object nothing could check.
+      unrelated: answer(futureDated({ networkId: 'another-network' })),
+    }).toStrictEqual({ namesAnotherHead: temporal, unrelated: temporal });
+  });
+
   it('propagates a temporal refusal instead of reading it as precedence', () => {
     const futureDated = Object.freeze({
       ...structuredClone(binding as unknown as Record<string, unknown>),

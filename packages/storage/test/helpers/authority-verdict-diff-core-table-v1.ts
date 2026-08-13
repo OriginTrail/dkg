@@ -433,13 +433,13 @@ export const CORE_HARNESS_LIMITATIONS_V1: readonly HarnessLimitationV1[] = [
 export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'core-single-semantic-read',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:427',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:428',
     contains: 'const summary = evidenceState.verifiedAuthoritySummary;',
     why: "Core's ONLY semantic read of the field, and it sits inside the absent-state branch.",
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:1160',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:1185',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',

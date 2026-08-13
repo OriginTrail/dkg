@@ -103,43 +103,95 @@ export function evaluateAuthorityTransitionInternalV1(
 ): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'accept' | 'reject' }> {
   const validatedTransition = validateAuthorityTransition(transition);
   const validatedPrior = validateAgentProfileHeadObjectV1(priorHead);
-  if (!isSafeNow(nowMs)) return { decision: 'reject', reason: 'verification clock is invalid' };
-  if (isIssuedTooFarInFuture(validatedTransition.issuedAt, nowMs)) {
-    return {
-      decision: 'reject',
-      reason: 'transition issuedAt exceeds the future clock-skew bound',
-    };
-  }
+  const unverifiable = rejectUnverifiableAuthorityTransitionV1(validatedTransition, nowMs);
+  if (unverifiable !== undefined) return unverifiable;
   if (classifyAuthorityTransitionBindingV1(validatedTransition, validatedPrior) !== 'names-this-head') {
     return {
       decision: 'reject',
       reason: 'transition does not bind the accepted predecessor',
     };
   }
-  if (validatedTransition.mode === 'expired-prior') {
-    if (validatedPrior.state !== 'active') {
-      return {
-        decision: 'reject',
-        reason: 'expired-prior transition cannot resurrect a tombstone',
-      };
-    }
-    if (validatedTransition.priorValidUntil !== validatedPrior.validUntil) {
-      return {
-        decision: 'reject',
-        reason: 'expired-prior transition does not bind prior validity',
-      };
-    }
-    if (
-      !Number.isSafeInteger(nowMs) ||
-      nowMs < Date.parse(validatedPrior.validUntil) + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS
-    ) {
-      return {
-        decision: 'reject',
-        reason: 'prior authority has not passed the expiry skew',
-      };
-    }
-  }
+  const inadmissible = rejectInadmissibleExpiredPriorTransitionV1(
+    validatedTransition,
+    validatedPrior,
+    nowMs,
+  );
+  if (inadmissible !== undefined) return inadmissible;
   return { decision: 'accept' };
+}
+
+/**
+ * THE REFUSALS THAT ARE ABOUT THE TRANSITION ITSELF, NOT ABOUT WHAT IT BINDS.
+ *
+ * These answer "can this object be verified at all, right now" -- a question
+ * whose answer does not depend on which head the transition names. They are
+ * extracted so a caller can ask it BEFORE classifying the binding, which is what
+ * stops a structural reading of an unverifiable object from becoming an
+ * affirmative: "not verifiable now" must never be allowed to mean "no valid
+ * descendant exists".
+ *
+ * WHY THIS IS A CLASS AND NOT A HOIST. Fixing one condition inside one caller
+ * closes today's instance and leaves the next binding-independent refusal free
+ * to repeat it -- and this seam has now produced that same shape four times, one
+ * arm over each time. Every future refusal of that kind belongs HERE, and the
+ * callers that must not read a refusal structurally get it without noticing.
+ *
+ * The order inside this function and its position inside
+ * {@link evaluateAuthorityTransitionInternalV1} are unchanged from when both
+ * lived inline, so the verifier's own decisions are identical.
+ */
+export function rejectUnverifiableAuthorityTransitionV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  nowMs: number,
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'reject' }> | undefined {
+  if (!isSafeNow(nowMs)) return { decision: 'reject', reason: 'verification clock is invalid' };
+  if (isIssuedTooFarInFuture(transition.issuedAt, nowMs)) {
+    return {
+      decision: 'reject',
+      reason: 'transition issuedAt exceeds the future clock-skew bound',
+    };
+  }
+  return undefined;
+}
+
+/**
+ * THE EXPIRED-PRIOR REFUSALS, WHICH ARE QUESTIONS ABOUT THIS BINDING.
+ *
+ * Deliberately NOT part of the verifiability gate above: every one compares the
+ * transition against the prior head it names, so asking them of a transition
+ * that names a DIFFERENT head would be answering about the wrong pair. They
+ * belong after the binding is established -- and splitting them out is what lets
+ * a caller classify the binding exactly once instead of recomputing it to
+ * reconstruct a reason the verifier had already discarded.
+ */
+export function rejectInadmissibleExpiredPriorTransitionV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  priorHead: AgentProfileHeadObjectV1,
+  nowMs: number,
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'reject' }> | undefined {
+  if (transition.mode !== 'expired-prior') return undefined;
+  if (priorHead.state !== 'active') {
+    return {
+      decision: 'reject',
+      reason: 'expired-prior transition cannot resurrect a tombstone',
+    };
+  }
+  if (transition.priorValidUntil !== priorHead.validUntil) {
+    return {
+      decision: 'reject',
+      reason: 'expired-prior transition does not bind prior validity',
+    };
+  }
+  if (
+    !Number.isSafeInteger(nowMs) ||
+    nowMs < Date.parse(priorHead.validUntil) + SYSTEM_RECORD_MAX_CLOCK_SKEW_MS
+  ) {
+    return {
+      decision: 'reject',
+      reason: 'prior authority has not passed the expiry skew',
+    };
+  }
+  return undefined;
 }
 
 /** Bind a successor head to the exact accepted transition for the same stable record. */
