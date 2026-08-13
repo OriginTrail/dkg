@@ -313,6 +313,31 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     // lookup can no longer wear a withhold's clothes.
     const uncovered = quad('urn:ordinary-subject', 'urn:p', 'o');
 
+    // Adopted from review: the MIDDLE link of the cancellation chain. Durable-sync -> gate
+    // is proven at the seam, and reader -> store.query is proven in the storage suite, but
+    // the adapter between them is the code this PR actually adds and nothing covered it.
+    // Dropping `signal` from either read call here would pass both of those tests while an
+    // aborted sync stopped cancelling the production reads.
+    it('forwards the abort signal through the adapter into both store reads', async () => {
+      const options: Array<Record<string, unknown>> = [];
+      const store = {
+        query: async (_sparql: string, opts?: Record<string, unknown>) => {
+          options.push(opts ?? {});
+          return { type: 'bindings' as const, bindings: [] };
+        },
+      } as never;
+      const controller = new AbortController();
+      const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
+        store, networkId: NETWORK_ID, mode: 'authoritative',
+      }));
+
+      await gate.filterPage([conflicting], controller.signal);
+
+      // Request one must have run and carried the caller's own signal.
+      expect(options.length).toBeGreaterThan(0);
+      for (const opts of options) expect(opts.signal).toBe(controller.signal);
+    });
+
     it('withholds the conflicting quad when the projection is authoritative', async () => {
       const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
         store: storeWithAppliedRecord(await claimAskedFor(NETWORK_ID)),
