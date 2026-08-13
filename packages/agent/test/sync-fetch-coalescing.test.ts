@@ -851,6 +851,34 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 
+  it('does not let a supplied plan bypass an RFC-64 complete-provider fence', async () => {
+    let fetchCalls = 0;
+    const selectedContextGraphId = 'selected-cg';
+    const completeProvider = '12D3KooWCompleteSwmProvider';
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const sharedMemorySyncPlan = {
+      eligibleContextGraphIds: [selectedContextGraphId],
+      publicContextGraphIds: [selectedContextGraphId],
+      privateRecoverFromCurator: [],
+    };
+    (agent as any).resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [completeProvider];
+    stubLifecycleFetch(agent, async ({ phase }) => {
+      fetchCalls++;
+      return emptySyncPage(phase);
+    });
+
+    try {
+      await expect((agent as any).syncSharedMemoryFromPeerDetailed(
+        PEER_A,
+        [selectedContextGraphId],
+        { sharedMemorySyncPlan },
+      )).resolves.toMatchObject({ failedPeers: 0 });
+      expect(fetchCalls).toBe(0);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('does not join direct shared-memory syncs with different admission priorities', async () => {
     let fetchCalls = 0;
     const agent = await createAgentWithSend(async () => new Uint8Array(0));

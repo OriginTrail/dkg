@@ -85,7 +85,6 @@ describe('private SWM curator recovery planning', () => {
       '12D3KooWUnrelatedEdge',
       [contextGraphId],
       createOperationContext('sync'),
-      { completeProviderOnly: true },
     )).resolves.toMatchObject({
       publicContextGraphIds: [],
       eligibleContextGraphIds: [],
@@ -95,7 +94,6 @@ describe('private SWM curator recovery planning', () => {
       completeProvider,
       [contextGraphId],
       createOperationContext('sync'),
-      { completeProviderOnly: true },
     )).resolves.toMatchObject({
       publicContextGraphIds: [contextGraphId],
       eligibleContextGraphIds: [contextGraphId],
@@ -125,7 +123,7 @@ describe('private SWM curator recovery planning', () => {
     });
   });
 
-  it('retains union fallback for explicit catch-up even when RFC-64 providers are configured', async () => {
+  it('rejects explicit catch-up from a non-authoritative peer when RFC-64 providers are configured', async () => {
     const contextGraphId = `${ethers.Wallet.createRandom().address}/selected-public-fallback`;
     const agent = await createAgent('ExplicitPublicSwmFallbackPlan');
     const internals = agent as any;
@@ -135,6 +133,24 @@ describe('private SWM curator recovery planning', () => {
 
     await expect(agent.planSharedMemorySyncContextGraphs(
       '12D3KooWFallbackPeer',
+      [contextGraphId],
+      createOperationContext('sync'),
+    )).resolves.toMatchObject({
+      publicContextGraphIds: [],
+      eligibleContextGraphIds: [],
+    });
+  });
+
+  it('retains ordinary public union sync when no RFC-64 complete provider is configured', async () => {
+    const contextGraphId = `${ethers.Wallet.createRandom().address}/ordinary-public-fallback`;
+    const agent = await createAgent('OrdinaryPublicSwmFallbackPlan');
+    const internals = agent as any;
+    internals.canUseSharedMemoryForContextGraph = async () => true;
+    internals.isPrivateContextGraph = async () => false;
+    internals.resolveRfc64CompleteSwmProviderPeerIdsV1 = () => [];
+
+    await expect(agent.planSharedMemorySyncContextGraphs(
+      '12D3KooWOrdinaryPeer',
       [contextGraphId],
       createOperationContext('sync'),
     )).resolves.toMatchObject({
