@@ -44,6 +44,7 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { Quad, TripleStore } from '../triple-store.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../internal-graph-policy.js';
+import { isStoreResponseTooLargeErrorV1 } from '../http-response-limit.js';
 // The canonical retained-byte accounting, shared with the inspection path rather than
 // re-derived here. Request one measures a literal rather than quads, so it keeps its own
 // term measurement; request two measures rows, which is exactly what this helper counts.
@@ -122,19 +123,17 @@ function assertQueryableIri(iri: string): void {
 }
 
 /**
- * The transport's own refusal to buffer an oversized body, recognised by its stable
- * `code` rather than by its message.
+ * Delegates to the canonical predicate that lives beside the error class.
  *
- * Only the canonical `StoreResponseTooLargeError` counts. A store whose client reports
- * the overrun as an untyped error still propagates — which fails CLOSED (the page is
- * dropped, nothing is inserted), just more bluntly. That is named as a known residual
- * rather than papered over with message matching, which would silently widen to
- * unrelated failures and start reporting real errors as "could not classify".
+ * This used to restate the code as a local string — review pointed out that the same PR
+ * had just introduced a shared typed predicate for the builder's overflow and left this
+ * sibling case on an ad-hoc check, inconsistent inside one function. The canonical form
+ * also closes what was documented here as a residual: the managed SPARQL client raises a
+ * refusal that is not an instance of the error class, and it now carries the same code, so
+ * one predicate recognises both shapes.
  */
 function isStoreResponseTooLargeV1(error: unknown): boolean {
-  return typeof error === 'object'
-    && error !== null
-    && (error as { code?: unknown }).code === 'STORE_RESPONSE_TOO_LARGE';
+  return isStoreResponseTooLargeErrorV1(error);
 }
 
 /**

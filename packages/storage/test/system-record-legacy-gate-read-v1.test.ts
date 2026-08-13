@@ -32,6 +32,7 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { Quad, QueryResult, TripleStore } from '../src/triple-store.js';
 import { OxigraphStore } from '../src/index.js';
+import { StoreResponseTooLargeError } from '../src/http-response-limit.js';
 
 const NETWORK_ID = 'otp:2043';
 const ROOT = `did:dkg:agent:0x${'1'.repeat(40)}`;
@@ -404,6 +405,23 @@ describe('bounded-read overflow, computed by the real reader', () => {
 
     expect(read.records).toEqual([]);
     expect([...read.unclassifiedRoots].sort()).toEqual([ROOT, OTHER_ROOT].sort());
+  });
+
+  // The canonical predicate must recognise BOTH refusal shapes. `instanceof` alone -- the
+  // form review first suggested -- would catch this one and miss the managed client's,
+  // which is a plain Error carrying the same code; a code-only check catches that one and
+  // is a restatement. This pins the class shape; the case above pins the untyped one.
+  it('turns a real StoreResponseTooLargeError into undecided roots', async () => {
+    const refusing = {
+      async query() { throw new StoreResponseTooLargeError(1024, 4096); },
+    } as unknown as TripleStore;
+
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store: refusing, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT],
+    });
+
+    expect(read.records).toEqual([]);
+    expect(read.unclassifiedRoots).toEqual([ROOT]);
   });
 
   it('turns a transport cap refusal into a truncated projection rather than throwing', async () => {

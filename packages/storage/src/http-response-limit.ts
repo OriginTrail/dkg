@@ -1,5 +1,7 @@
+export const STORE_RESPONSE_TOO_LARGE_CODE = 'STORE_RESPONSE_TOO_LARGE';
+
 export class StoreResponseTooLargeError extends Error {
-  readonly code = 'STORE_RESPONSE_TOO_LARGE';
+  readonly code = STORE_RESPONSE_TOO_LARGE_CODE;
   readonly maxBytes: number;
   readonly actualBytes: number | bigint;
 
@@ -9,6 +11,21 @@ export class StoreResponseTooLargeError extends Error {
     this.maxBytes = maxBytes;
     this.actualBytes = actualBytes;
   }
+}
+
+/**
+ * THE canonical test for "the transport refused an oversized body".
+ *
+ * Lives next to the class that defines the code so a caller never has to restate either.
+ * Deliberately NOT `instanceof` alone: not every client throws this class — the managed
+ * SPARQL client raises its own error when a chunk would exceed the remaining budget — so
+ * the code is the wider net, and both shapes carry it.
+ */
+export function isStoreResponseTooLargeErrorV1(error: unknown): boolean {
+  return error instanceof StoreResponseTooLargeError
+    || (typeof error === 'object'
+      && error !== null
+      && (error as { code?: unknown }).code === STORE_RESPONSE_TOO_LARGE_CODE);
 }
 
 /** Read a fetch response body without ever buffering more than `maxBytes`. */
