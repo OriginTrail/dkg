@@ -47,7 +47,10 @@ import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../internal-graph-policy.js';
 // The canonical retained-byte accounting, shared with the inspection path rather than
 // re-derived here. Request one measures a literal rather than quads, so it keeps its own
 // term measurement; request two measures rows, which is exactly what this helper counts.
-import { retainedSystemRecordInspectionQuadsBytesV1 } from '../system-record-inspection-v1-internal.js';
+import {
+  buildSystemRecordProjectionInspectionQueryV1,
+  retainedSystemRecordInspectionQuadsBytesV1,
+} from '../system-record-inspection-v1-internal.js';
 import {
   SYSTEM_RECORD_V1_JSON_DATATYPE,
   SYSTEM_RECORD_V1_PREDICATES,
@@ -313,14 +316,20 @@ export async function readLegacyAgentProfileProjectionV1(input: {
   }
 
   const graph = systemRecordProjectionGraphV1(mode);
-  assertQueryableIri(graph);
+  // THE CANONICAL BUILDER, not a local one. Adopted from review after measuring the two
+  // against each other rather than arguing layering: it emits the same graph, the same
+  // exact-subject shape, and the same bound (its
+  // `SYSTEM_RECORD_MAX_PROJECTION_INSPECTION_ROWS_V1` resolves to
+  // `SYSTEM_RECORD_MAX_PROJECTION_QUADS + 1`), and it is STRICTLY STRONGER on three
+  // counts the local version lacked — it rejects duplicate subjects, orders them
+  // deterministically, and bounds the ENCODED REQUEST at the atomic SPARQL byte cap.
+  // That last one was a real gap: 2,048 arbitrarily long subjects could previously build
+  // an unbounded request string, and only the RESPONSE was ever capped.
+  //
+  // Its own preconditions are already satisfied above: it throws below one subject and
+  // above the owned-subject bound, and both are returned early.
   const ordered = [...subjects].sort();
-  const query = `SELECT ?s ?p ?o WHERE {\n`
-    + `  GRAPH <${graph}> {\n`
-    + `    ${valuesClause('?s', ordered)}\n`
-    + `    ?s ?p ?o .\n`
-    + `  }\n`
-    + `}\nLIMIT ${SYSTEM_RECORD_MAX_PROJECTION_QUADS + 1}`;
+  const query = buildSystemRecordProjectionInspectionQueryV1(mode, ordered);
 
   let bindings: Array<Record<string, string>>;
   try {
