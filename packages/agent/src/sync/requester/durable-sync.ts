@@ -246,6 +246,92 @@ export interface DurableSyncContext {
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
+interface ManifestSettlementCheckpoint {
+  readonly numericAdvance: boolean;
+}
+
+/**
+ * Advance only across a contiguous prefix of graph descriptors whose exact
+ * assets have finished the chain-authentication + atomic-materialization
+ * boundary. A numeric offset can cover adjacent zero-public descriptors, so
+ * the canonical prefix helper (not DATA row counts alone) decides when the
+ * prefix is persistable.
+ */
+function createManifestSettlementCheckpointer(options: {
+  manifest: GraphScopedDurableManifestPlan;
+  checkpointKey: string;
+  resumedFromOffset: number;
+  maximumOffset: number;
+  setCheckpoint: DurableSyncContext['setCheckpoint'];
+}): (assertionGraph: string) => ManifestSettlementCheckpoint | undefined {
+  const {
+    manifest,
+    checkpointKey,
+    resumedFromOffset,
+    maximumOffset,
+    setCheckpoint,
+  } = options;
+  const descriptorByGraph = new Map(
+    manifest.descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
+  );
+  const resumedPrefix = resumedFromOffset > 0
+    ? graphScopedDurableManifestPrefixAtOffset(manifest, resumedFromOffset)
+    : null;
+  if (resumedFromOffset > 0 && !resumedPrefix) {
+    throw new Error(
+      `Cannot continue manifest settlement from non-boundary offset ${resumedFromOffset}`,
+    );
+  }
+
+  let descriptorIndex = resumedPrefix?.descriptorCount ?? 0;
+  let safeOffset = resumedFromOffset;
+  let persistedDescriptorCount = descriptorIndex;
+  let persistedOffset = resumedFromOffset;
+  const settledGraphs = new Set<string>();
+
+  return (assertionGraph: string): ManifestSettlementCheckpoint | undefined => {
+    if (!descriptorByGraph.has(assertionGraph)) {
+      throw new Error(
+        `Refusing to checkpoint graph ${assertionGraph}: it is absent from the verified manifest`,
+      );
+    }
+    settledGraphs.add(assertionGraph);
+    while (
+      descriptorIndex < manifest.descriptors.length
+      && settledGraphs.has(manifest.descriptors[descriptorIndex]!.assertionGraph)
+    ) {
+      safeOffset += manifest.descriptors[descriptorIndex]!.publicTripleCount;
+      descriptorIndex += 1;
+    }
+    if (!Number.isSafeInteger(safeOffset) || safeOffset > maximumOffset) {
+      throw new Error(
+        `Refusing to checkpoint settled durable prefix ${safeOffset} beyond verified offset ${maximumOffset}`,
+      );
+    }
+
+    const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, safeOffset);
+    // The prefix helper includes every adjacent zero-public descriptor. Wait
+    // until all of those descriptors have settled before binding this offset.
+    if (!prefix || prefix.descriptorCount !== descriptorIndex) return undefined;
+    if (
+      safeOffset === persistedOffset
+      && descriptorIndex === persistedDescriptorCount
+    ) return undefined;
+
+    const numericAdvance = safeOffset > persistedOffset;
+    setCheckpoint(
+      checkpointKey,
+      safeOffset,
+      manifest.manifestDigest,
+      prefix.prefixDigest,
+      false,
+    );
+    persistedOffset = safeOffset;
+    persistedDescriptorCount = descriptorIndex;
+    return { numericAdvance };
+  };
+}
+
 export function runDurableSync(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult>;
@@ -314,6 +400,7 @@ async function runDurableSyncWithBudget(
     options: {
       updateCheckpoint: boolean;
       countProgress?: boolean;
+      checkpointAdvanceAlreadyRecorded?: boolean;
       emptyPhase?: boolean;
       manifestPlan?: GraphScopedDurableManifestPlan;
       terminal?: boolean;
@@ -334,7 +421,10 @@ async function runDurableSyncWithBudget(
       ) {
         completedPhases = 1;
       }
-      if (result.nextOffset > result.resumedFromOffset) {
+      if (
+        result.nextOffset > result.resumedFromOffset
+        && options.checkpointAdvanceAlreadyRecorded !== true
+      ) {
         checkpointAdvances = 1;
       }
     }
@@ -840,6 +930,25 @@ async function runDurableSyncWithBudget(
           { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' },
         );
       }
+      // A rootless manifest contains only exact graph assets in the DATA
+      // ordering. When there are no deferred legacy rows, each authenticated
+      // atomic materialization is therefore a durable continuation boundary.
+      // Persisting it immediately turns a later authentication deadline into
+      // partial progress instead of replaying every earlier chain lookup.
+      const checkpointSettledManifestGraph = graphScopedManifest
+        && updateDataCheckpoint
+        && exactAssetDescriptorCoverageComplete
+        && partitioned.remainingData.length === 0
+        && partitioned.remainingMeta.length === 0
+        ? createManifestSettlementCheckpointer({
+            manifest: graphScopedManifest,
+            checkpointKey: effectiveDataResult.checkpointKey,
+            resumedFromOffset: effectiveDataResult.resumedFromOffset,
+            maximumOffset: effectiveDataResult.nextOffset,
+            setCheckpoint,
+          })
+        : undefined;
+      let incrementalCheckpointAdvanceRecorded = false;
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
         ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
         : deadline;
@@ -853,9 +962,7 @@ async function runDurableSyncWithBudget(
         if (outcome === 'applied') {
           // Materialization is atomic per asset, not per fetched page. Account
           // for each committed asset immediately so a later asset failure does
-          // not erase truthful progress from the returned summary. The phase
-          // checkpoint still advances only after the whole verified page
-          // settles, preserving safe replay semantics.
+          // not erase truthful progress from the returned summary.
           recordDurableSyncDiagnostics(accumulator, {
             insertedDataTriples: asset.dataQuads.length,
             insertedMetaTriples: asset.metadataQuads.length,
@@ -865,6 +972,11 @@ async function runDurableSyncWithBudget(
           logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         } else {
           logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+        }
+        const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
+        if (settledCheckpoint?.numericAdvance && !incrementalCheckpointAdvanceRecorded) {
+          recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
+          incrementalCheckpointAdvanceRecorded = true;
         }
       }
       if (partitioned.remainingData.length > 0) {
@@ -889,15 +1001,16 @@ async function runDurableSyncWithBudget(
           insertedMetaTriples: partitioned.remainingMeta.length,
         });
       }
-      // An already-started atomic write is awaited and counted truthfully, but
-      // an expired operation may not advance a page checkpoint or enter the
-      // next commit boundary.
+      // An already-started atomic write is awaited, counted, and manifest-
+      // checkpointed truthfully. An expired operation may not enter another
+      // commit boundary or claim the whole page terminal.
       throwIfOperationAborted();
       await notifyVerifiedFullSnapshot();
       throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
       recordPhaseOutcome(effectiveDataResult, {
         updateCheckpoint: updateDataCheckpoint,
+        checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,
         manifestPlan: graphScopedManifest ?? undefined,
         terminal: reachedContextGraphTerminalBoundary,
       });
