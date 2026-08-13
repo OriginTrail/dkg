@@ -123,34 +123,6 @@ function assertQueryableIri(iri: string): void {
   if (!isSafeIri(iri)) throw new Error('legacy agent-profile gate read built an unsafe IRI');
 }
 
-/**
- * Delegates to the canonical predicate that lives beside the error class.
- *
- * This used to restate the code as a local string — review pointed out that the same PR
- * had just introduced a shared typed predicate for the builder's overflow and left this
- * sibling case on an ad-hoc check, inconsistent inside one function. The canonical form
- * also closes what was documented here as a residual: the managed SPARQL client raises a
- * refusal that is not an instance of the error class, and it now carries the same code, so
- * one predicate recognises both shapes.
- */
-function isStoreResponseTooLargeV1(error: unknown): boolean {
-  return isStoreResponseTooLargeErrorV1(error);
-}
-
-/**
- * The canonical query builder's own refusal to emit an over-bound REQUEST, recognised by
- * the builder's OWN typed code rather than by its English message.
- *
- * The first version of this matched the message text, which review correctly called
- * brittle — and inconsistent with the argument made a few lines above about the transport
- * cap, where message matching was rejected for exactly this reason. A reworded message
- * would have silently stopped translating a refusal; an unrelated error ending the same
- * way would have been swallowed as truncation.
- */
-function isBoundedBuilderOverflowV1(error: unknown): boolean {
-  return isSystemRecordBoundedBuildOverflowV1(error);
-}
-
 function valuesClause(variable: string, iris: readonly string[]): string {
   for (const iri of iris) assertQueryableIri(iri);
   return `VALUES ${variable} { ${iris.map((iri) => `<${iri}>`).join(' ')} }`;
@@ -246,7 +218,12 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
       signal,
     }) as { type: string; bindings?: Array<Record<string, string>> });
   } catch (error) {
-    if (!isStoreResponseTooLargeV1(error)) throw error;
+    // Recognised by CODE rather than by class or message, which is what makes this catch
+    // total: the shared bounded reader throws the error class, and the managed SPARQL
+    // client throws a plain Error carrying the same code from either of its two cap
+    // checks. One canonical predicate sees all three shapes; an `instanceof` would miss
+    // two of them, and a message match would break on a reworded string.
+    if (!isStoreResponseTooLargeErrorV1(error)) throw error;
     // The transport refused the body before parsing it. Report rather than rethrow: at
     // the seam a throw drops the whole page, which is the retry-storm this port contract
     // was rewritten to avoid, and "could not classify" is already the answer the gate
@@ -390,6 +367,15 @@ export async function readLegacyAgentProfileProjectionV1(input: {
   // That last one was a real gap: 2,048 arbitrarily long subjects could previously build
   // an unbounded request string, and only the RESPONSE was ever capped.
   //
+  // REQUEST ONE NEEDS NO EQUIVALENT, AND THAT IS MEASURED RATHER THAN ASSUMED — recorded
+  // here because the sentence above otherwise reads as an asymmetry someone should close.
+  // Request one's VALUES list carries DERIVED root-claim IRIs rather than caller strings:
+  // base64url of the network id plus base64url of the agent root, a fixed 117 characters
+  // each. At the gate's 256-root batch cap that is roughly 31 KB against the same 4 MiB
+  // request cap — two orders of magnitude clear — and nothing caller-supplied can lengthen
+  // them, because callers supply roots and this module derives the IRIs. The difference is
+  // a property of the two request shapes, not an unclosed gap.
+  //
   // Its own preconditions are already satisfied above: it throws below one subject and
   // above the owned-subject bound, and both are returned early.
   //
@@ -408,7 +394,12 @@ export async function readLegacyAgentProfileProjectionV1(input: {
   try {
     query = buildSystemRecordProjectionInspectionQueryV1(mode, ordered);
   } catch (error) {
-    if (!isBoundedBuilderOverflowV1(error)) throw error;
+    // The builder's OWN typed code, not its English message. Matching the text was the
+    // first form here and review correctly called it brittle: a reworded message would
+    // silently stop translating a real refusal, and an unrelated error ending the same way
+    // would be swallowed as truncation. The builder's suite pins both polarities of that
+    // code, so a bound refusal is translatable and an accounting mismatch is not.
+    if (!isSystemRecordBoundedBuildOverflowV1(error)) throw error;
     return Object.freeze({ rows: [], truncated: true });
   }
 
@@ -421,7 +412,8 @@ export async function readLegacyAgentProfileProjectionV1(input: {
       signal,
     }) as { type: string; bindings?: Array<Record<string, string>> });
   } catch (error) {
-    if (!isStoreResponseTooLargeV1(error)) throw error;
+    // Same canonical predicate as request one's catch, for the same three refusal shapes.
+    if (!isStoreResponseTooLargeErrorV1(error)) throw error;
     return Object.freeze({ rows: [], truncated: true });
   }
 
