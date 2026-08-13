@@ -107,6 +107,7 @@ export {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAgentProfileHeadAdvanceV1,
   evaluateAgentProfileLateTombstoneAdvanceV1,
+  evaluateAgentProfileSameSequenceTombstoneAdvanceV1,
   evaluateAuthorityTransitionAgainstAcceptedStateV1,
   evaluateAuthorityTransitionConflictV1,
   evaluateAuthorityTransitionV1,
@@ -117,6 +118,8 @@ export {
   type AgentProfileLateTombstoneDecisionV1,
   type AgentProfileLateTombstoneEvidenceV1,
   type AgentProfileLateTombstoneRetainedTransitionV1,
+  type AgentProfileSameSequenceAppliedRowV1,
+  type AgentProfileSameSequenceTombstoneEvidenceV1,
   type SystemRecordAuthorityDecisionV1,
 } from './system-record-authority-v1-internal.js';
 

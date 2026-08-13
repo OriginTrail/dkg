@@ -105,14 +105,19 @@ export const SAME_PREDICATE_CITATIONS_V1: readonly SourceCitationV1[] = [
   },
   {
     id: 'evaluator-binding-call',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:345',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:451',
     contains: 'isTombstoneBoundToPredecessorV1(candidateState, predecessor)',
     why: 'The evaluating site: the same predicate, same operands, later window. '
       + 'THE TEXT IS NO LONGER UNIQUE -- the same call now stands at three sites '
       + '(this absent-path check, the late-tombstone rule and the same-sequence '
-      + 'tombstone arm), which is this register\'s own point rather than a defect: '
+      + 'tombstone rule), which is this register\'s own point rather than a defect: '
       + 'one predicate, several windows. The LINE is what disambiguates them, so a '
-      + 're-pin must follow this site rather than resolve the text.',
+      + 're-pin must follow this site rather than resolve the text -- and this '
+      + 'entry was re-resolved by following the site, because two of the three '
+      + 'still carry this text verbatim and matching would have picked whichever '
+      + 'came first. The third now reads `tombstonePredecessor`: the same-sequence '
+      + 'rule takes its predecessor as an explicit operand instead of reading one '
+      + 'out of an evidence object.',
   },
   {
     id: 'closure-builder-refusal',

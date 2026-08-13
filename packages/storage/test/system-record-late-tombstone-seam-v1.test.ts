@@ -222,15 +222,23 @@ describe('the late-tombstone seam (ADR 0002 :129-133)', () => {
   });
 
   /**
-   * THE SAME-SEQUENCE, LOWER-VERSION CASE IS A DIFFERENT RULE AND MUST NOT MOVE.
+   * THE SAME-SEQUENCE CASE IS A DIFFERENT RULE, AND IT IS ALSO CORE'S.
    *
-   * ADR :126-128 resolves an active/tombstone conflict within one sequence to
-   * the tombstone; it is not a tombstone "learned below the current applied
-   * sequence". The routing splits the two disjuncts precisely so this one keeps
-   * its comparison, and a mutant that routed the whole condition would turn this
-   * into a deferral.
+   * THIS ROW USED TO ASSERT `stale`, AND THE REVERSAL IS THE POINT. The original
+   * split was right that a tombstone learned AT the applied sequence is governed
+   * by different ADR text than one learned below it, and wrong that the
+   * difference licensed leaving it on a version comparison: ADR :112-114 makes a
+   * tombstone dominate every active head in its sequence "regardless of delivery
+   * order or version", so discarding a verified revocation as `stale` -- settled,
+   * and therefore permanent -- decided that clause the other way. The exclusion
+   * was correct and did not dispose of the region it excluded.
+   *
+   * The construction is kept exactly as it was, so the movement is legible at the
+   * one place that previously pinned the old answer. Its cell-by-cell form, over
+   * all three applied statuses and all three version relations, is in the
+   * same-sequence seam suite.
    */
-  it('leaves the same-sequence lower-version comparison on the arithmetic', async () => {
+  it('routes the same-sequence case through core instead of the comparison', async () => {
     const driver = await prepareStorageDriverV1();
     const candidate = tombstoneOfV1(CORE_CURRENT_HEAD_V1 as AgentProfileHeadObjectV1);
     const summary = await requireStorageSummaryForHeadV1(candidate);
@@ -303,10 +311,11 @@ describe('the late-tombstone seam (ADR 0002 :129-133)', () => {
       observedRootClaimQuads: base.rootClaimQuads,
     });
 
-    // ADR :126-128 resolves an active/tombstone conflict WITHIN one sequence to
-    // the tombstone; it is not a tombstone "learned below the current applied
-    // sequence", so it keeps the comparison and must stay `stale`.
-    expect(derived).toStrictEqual({ outcome: 'stale' });
+    // ADR :112-114: the tombstone dominates its sequence regardless of version,
+    // so a verified revocation below the applied version now ADVANCES rather than
+    // being discarded. The candidate reaching core at all is what the assertion
+    // above about the disjunct's shape guarantees.
+    expect({ outcome: derived.outcome }).toStrictEqual({ outcome: 'ready' });
   });
 });
 

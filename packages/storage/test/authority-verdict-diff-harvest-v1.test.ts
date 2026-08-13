@@ -149,8 +149,11 @@ describe('core authority decision reason harvest', () => {
   // rows above would all pass against an empty map if the regex or the path
   // broke -- the zero-is-indistinguishable-from-a-broken-probe failure.
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
-    // 32 until the late-tombstone entry added its own precondition reject.
-    expect([...reject.values()].flat().length).toBe(35);
+    // 32 until the late-tombstone entry added its own precondition rejects, then
+    // 35 until the same-sequence entry added three of its own: a non-tombstone
+    // candidate, a candidate at the wrong sequence, and an applied row whose
+    // status the rule does not decide against.
+    expect([...reject.values()].flat().length).toBe(38);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });

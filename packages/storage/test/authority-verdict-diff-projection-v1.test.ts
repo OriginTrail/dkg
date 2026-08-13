@@ -185,22 +185,29 @@ describe('verdict-diff evaluator input projections', { timeout: VERDICT_DIFF_SUI
     expect(importing.map((f) => f.file)).toStrictEqual(
       ['system-record-next-state-v1-internal.ts'],
     );
+    // TWO CALLS, ONE PER ROUTED TOMBSTONE ARM, AND THE SECOND IS THE DESIGN
+    // RATHER THAN A DRIFT. The late-tombstone arm and the same-sequence arm each
+    // consult the reader as their own precondition, because each decides what an
+    // unclassified applied row means for ITS rule and one arm must not answer for
+    // the other. A third call is either a third routed arm -- which owes its own
+    // precondition rows -- or a consumer that slipped in, and both are this
+    // seam's problem.
     const calls = importing.flatMap(
       (f) => f.source.match(/deriveAgentProfileAuthorityDispositionV1\(/g) ?? [],
     );
-    expect(calls).toHaveLength(1);
+    expect(calls).toHaveLength(2);
 
     // EVERY REFERENCE IS ACCOUNTED FOR, NOT JUST EVERY CALL, and this line exists
     // because the call count alone SURVIVED its own mutant: `const alias =
     // deriveAgentProfileAuthorityDispositionV1;` is a reference and not a call,
     // so it passed a check whose whole job is bounding this consumer -- and an
-    // alias can be invoked anywhere afterwards. Three occurrences: the import,
-    // one docblock mention, and the single call. A fourth is either a second
+    // alias can be invoked anywhere afterwards. Four occurrences: the import, one
+    // docblock mention, and the two calls above. A fifth is either a further
     // consumer or an alias, and both are this seam's problem.
     const references = importing.flatMap(
       (f) => f.source.match(/deriveAgentProfileAuthorityDispositionV1/g) ?? [],
     );
-    expect(references).toHaveLength(3);
+    expect(references).toHaveLength(4);
 
     // AND THE DOMAIN ITSELF IS NOT RESTATED HERE. A storage-side copy of core's
     // three classification values is the exact re-implementation this seam

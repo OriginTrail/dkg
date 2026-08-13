@@ -25,6 +25,8 @@ import type {
   AgentProfileLinkedSubjectKindV1,
   AgentProfileOwnedSubjectKindV1,
   AgentProfileProjectionQuadV1,
+  AgentProfileSameSequenceAppliedRowV1,
+  AgentProfileSameSequenceTombstoneEvidenceV1,
   AgentProfileTombstoneHeadObjectV1,
   AgentProfileTransitionConflictEntryV1,
   AgentProfileVerifiedAuthoritySummaryV1,
@@ -99,7 +101,10 @@ import type {
 } from '@origintrail-official/dkg-core/system-record-v1';
 // Value import: the pin below reads this function's declared RETURN TYPE, which
 // a type-only import cannot reach.
-import { evaluateAuthorityTransitionV1 } from '@origintrail-official/dkg-core/system-record-v1';
+import {
+  evaluateAgentProfileSameSequenceTombstoneAdvanceV1,
+  evaluateAuthorityTransitionV1,
+} from '@origintrail-official/dkg-core/system-record-v1';
 import {
   createSystemRecordInventoryRowTraversalV1,
   type SystemRecordInventoryRowTraversalFailureV1,
@@ -332,7 +337,67 @@ type PUBLIC_TRANSITION_EVALUATOR_RETURNS_THE_FULL_UNION =
 const publicTransitionEvaluatorReturnsTheFullUnion:
 PUBLIC_TRANSITION_EVALUATOR_RETURNS_THE_FULL_UNION = true;
 
+/**
+ * THE SAME-SEQUENCE RULE READS NO CLOCK AND NO TRANSITION, AND ITS EVIDENCE
+ * SHAPE HAS TO SAY SO.
+ *
+ * Unlike the late-tombstone rule this one never consults a verifier, so a
+ * caller has nothing to verify a transition WITH. If either key ever appears
+ * here, a caller would start supplying operands the decision cannot read -- and
+ * the late-tombstone arc is on record for what happens when a rule is handed a
+ * clock it has no use for.
+ */
+const SAME_SEQUENCE_EVIDENCE_KEYS_V1 = ['tombstonePredecessor'] as const;
+type SAME_SEQUENCE_EVIDENCE_KEYS_ARE_EXACT =
+  keyof AgentProfileSameSequenceTombstoneEvidenceV1 extends
+    (typeof SAME_SEQUENCE_EVIDENCE_KEYS_V1)[number]
+    ? (typeof SAME_SEQUENCE_EVIDENCE_KEYS_V1)[number] extends
+      keyof AgentProfileSameSequenceTombstoneEvidenceV1 ? true : never
+    : never;
+const sameSequenceEvidenceKeysAreExact: SAME_SEQUENCE_EVIDENCE_KEYS_ARE_EXACT = true;
+
+/**
+ * THE APPLIED-ROW OPERAND IS A ROW, NOT A HEAD OBJECT, AND THAT IS THE WHOLE
+ * REASON THE ENTRY IS CALLABLE.
+ *
+ * A receiver persists a status, a digest, a version and a sequence. The moment
+ * this shape asks for a head object, the only way to call the entry is to
+ * manufacture one -- inventing the issuer, clock and schema fields its digest is
+ * taken over. Pinning the keys exactly is what stops that from being added
+ * later as a convenience.
+ */
+const SAME_SEQUENCE_APPLIED_ROW_KEYS_V1 = [
+  'status', 'authoritySequence', 'version', 'headDigest',
+] as const;
+type SAME_SEQUENCE_APPLIED_ROW_KEYS_ARE_EXACT =
+  keyof AgentProfileSameSequenceAppliedRowV1 extends
+    (typeof SAME_SEQUENCE_APPLIED_ROW_KEYS_V1)[number]
+    ? (typeof SAME_SEQUENCE_APPLIED_ROW_KEYS_V1)[number] extends
+      keyof AgentProfileSameSequenceAppliedRowV1 ? true : never
+    : never;
+const sameSequenceAppliedRowKeysAreExact: SAME_SEQUENCE_APPLIED_ROW_KEYS_ARE_EXACT = true;
+
+/**
+ * THE SAME-SEQUENCE ENTRY PROMISES THE WHOLE UNION, AND HERE THAT IS A MEASURED
+ * FACT RATHER THAN A COMPATIBILITY CONCESSION.
+ *
+ * The rule produces all four decisions: `accept` on a dominating tombstone,
+ * `quarantine | head-fork` on the equal-version fork, `stale` under ADR
+ * :127-128, and `reject` on its refusals. Narrowing this return would therefore
+ * be false about the body, not merely unkind to consumers -- the opposite
+ * direction from the transition evaluator's pin above, which is why both are
+ * written out.
+ */
+type SAME_SEQUENCE_ENTRY_RETURNS_THE_FULL_UNION =
+  SystemRecordAuthorityDecisionV1 extends
+    ReturnType<typeof evaluateAgentProfileSameSequenceTombstoneAdvanceV1>
+    ? true : never;
+const sameSequenceEntryReturnsTheFullUnion: SAME_SEQUENCE_ENTRY_RETURNS_THE_FULL_UNION = true;
+
 void publicTransitionEvaluatorReturnsTheFullUnion;
+void sameSequenceEvidenceKeysAreExact;
+void sameSequenceAppliedRowKeysAreExact;
+void sameSequenceEntryReturnsTheFullUnion;
 void appliedStatusesAreExactlyTheUnion;
 void acceptedDispositionsAreExactlyTheUnion;
 void lateTombstoneEvidenceHasNoTopLevelClock;

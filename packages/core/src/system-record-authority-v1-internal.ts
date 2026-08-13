@@ -30,6 +30,7 @@ import {
   snapshotSystemRecordDataRecord,
   u64,
 } from './system-record-agent-profile-primitives-v1-internal.js';
+import type { SystemRecordAppliedStatusV1 } from './system-record-applied-state-v1.js';
 import {
   isAgentProfileVerifiedAuthoritySummaryV1,
   type AgentProfileVerifiedAuthoritySummaryV1,
@@ -155,6 +156,102 @@ function snapshotLateTombstoneEvidenceV1(
 }
 
 /**
+ * Exactly the operands the ADR 0002 :112-114 / :126-128 same-sequence rule reads
+ * from the evidence side, which is the tombstone's predecessor and nothing else.
+ *
+ * No clock, no transition, no summary: unlike the late-tombstone rule this one
+ * never consults a verifier, so a shape carrying those fields would ask every
+ * caller to supply operands the decision cannot read.
+ */
+export interface AgentProfileSameSequenceTombstoneEvidenceV1 {
+  readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1;
+}
+
+/**
+ * The applied row this rule decides AGAINST, in the vocabulary a receiver holds.
+ *
+ * A receiver persists the applied ROW -- a status, a head digest, a version and
+ * the sequence its lineage reaches -- not the applied head OBJECT. Asking for
+ * the object would repeat the operand gap that made the late-tombstone entry
+ * necessary, and a caller that manufactured one would be inventing the issuer,
+ * clock and schema fields its digest is taken over.
+ *
+ * `status` is core's own {@link SystemRecordAppliedStatusV1}, so the step from a
+ * persisted status to the head state this rule branches on is taken HERE, where
+ * both vocabularies are defined. A receiver that made that step itself would be
+ * modelling core's authority reading in order to call core.
+ */
+export interface AgentProfileSameSequenceAppliedRowV1 {
+  readonly status: SystemRecordAppliedStatusV1;
+  readonly authoritySequence: string;
+  readonly version: string;
+  readonly headDigest: Digest32V1;
+}
+
+function snapshotSameSequenceTombstoneEvidenceV1(
+  value: unknown,
+): AgentProfileSameSequenceTombstoneEvidenceV1 {
+  const probe = snapshotSystemRecordDataRecord(value, 'same-sequence tombstone evidence');
+  const optionals = ['tombstonePredecessor'].filter((key) => hasOwnDataProperty(probe, key));
+  return Object.freeze(
+    snapshotExactDataRecord(probe, optionals, 'same-sequence tombstone evidence'),
+  ) as unknown as AgentProfileSameSequenceTombstoneEvidenceV1;
+}
+
+function snapshotSameSequenceAppliedRowV1(
+  value: unknown,
+): AgentProfileSameSequenceAppliedRowV1 {
+  const probe = snapshotSystemRecordDataRecord(value, 'same-sequence applied row');
+  const row = snapshotExactDataRecord(
+    probe,
+    ['status', 'authoritySequence', 'version', 'headDigest'],
+    'same-sequence applied row',
+  );
+  digest(row.headDigest, 'same-sequence applied row headDigest');
+  u64(row.authoritySequence, 'same-sequence applied row authoritySequence');
+  u64(row.version, 'same-sequence applied row version');
+  if (!['active', 'quarantined', 'tombstone', 'dirty'].includes(row.status as string)) {
+    fail('system-record-schema', 'same-sequence applied row status is invalid');
+  }
+  return Object.freeze({ ...row }) as unknown as AgentProfileSameSequenceAppliedRowV1;
+}
+
+/**
+ * The head state a persisted status stands for, or `undefined` when V1 does not
+ * define one this rule may decide against.
+ *
+ * `quarantined` and `dirty` are refusals rather than readings. A quarantined row
+ * holds an unresolved head fork, and core clears a quarantine only through its
+ * fork-resolution-successor branch -- letting a tombstone answer here would
+ * resolve the equivocation by omission and take the evidence with it. A `dirty`
+ * row is shadow mode's, and what a shadow row's head means is exactly what V1
+ * has not decided; reading it as a tombstone would answer :127-128 for it
+ * anyway, inventing the clearance the undecided state exists to withhold.
+ */
+function sameSequenceAppliedHeadStateV1(
+  status: SystemRecordAppliedStatusV1,
+): AgentProfileHeadObjectV1['state'] | undefined {
+  switch (status) {
+    case 'active':
+      return 'active';
+    case 'tombstone':
+      return 'tombstone';
+    case 'quarantined':
+    case 'dirty':
+      return undefined;
+    default: {
+      // Reached only when the applied-status union grows: the assignment is the
+      // compile error that makes a new status this entry's problem rather than a
+      // row that quietly reads as whichever state the last arm returned.
+      const unmapped: never = status;
+      throw new Error(
+        `unmapped system-record applied status: ${JSON.stringify(unmapped)}`,
+      );
+    }
+  }
+}
+
+/**
  * The clock preflight both public entries owe, in ONE place.
  *
  * It was inline at each, which put two reason literals at two sites apiece and
@@ -265,13 +362,22 @@ export function evaluateAgentProfileHeadAdvanceV1(
   const currentVersion = parseCanonicalDecimalU64(current.version);
   const candidateVersion = parseCanonicalDecimalU64(candidateState.version);
   if (candidateState.state === 'tombstone') {
-    return evaluateSameSequenceTombstoneAdvanceV1(
-      current,
+    // THE ADAPTER RESOLVES THE PREDECESSOR, THE RULE DECIDES WITH IT. Falling
+    // back to the accepted head when no predecessor evidence was supplied needs
+    // the head OBJECT, which only this evaluator holds; the rule takes the
+    // resolved operand so that a caller who has no such object -- every receiver
+    // -- reaches the same decision through the same code.
+    return evaluateSameSequenceTombstoneRuleV1(
       candidateState,
-      evidenceState,
+      evidenceState.tombstonePredecessor === undefined
+        ? current.state === 'active'
+          ? current
+          : undefined
+        : validateAgentProfileHeadObjectV1(evidenceState.tombstonePredecessor),
+      current.state,
       currentVersion,
-      candidateVersion,
       currentDigest,
+      candidateVersion,
       candidateDigest,
     );
   }
@@ -613,6 +719,85 @@ export function evaluateAgentProfileLateTombstoneAdvanceV1(
   );
 }
 
+/**
+ * The ADR 0002 :112-114 / :126-128 decision on a tombstone learned AT the
+ * applied authority sequence, for a caller holding a persisted applied row.
+ *
+ * Its sibling entry answers for a tombstone learned BELOW that sequence. This
+ * one answers the question the sequence comparison alone cannot: ADR :112-114
+ * makes a tombstone dominate every active head in its sequence "regardless of
+ * delivery order or version", so a verified tombstone at a LOWER version than
+ * the applied active head is a revocation to honour, not an old head to discard.
+ * A receiver deciding that from two integers discards it permanently.
+ *
+ * THE OPERANDS ARE WHAT A RECEIVER HAS, and that is the point of the entry
+ * existing at all. `applied` is the persisted row rather than the accepted head
+ * object; see {@link AgentProfileSameSequenceAppliedRowV1} for why manufacturing
+ * the object is the trap this shape avoids.
+ *
+ * `evidence.tombstonePredecessor` is REQUIRED in substance: without it the
+ * decision is `reject | tombstone lacks its exact verified active predecessor`.
+ * The full evaluator can fall back to its own accepted head when the evidence
+ * omits one; this entry has no such object and does not invent one.
+ *
+ * BINDINGNESS IS ASKED ONCE, HERE, AND BEFORE ANY VERSION IS READ. That
+ * ordering is {@link evaluateSameSequenceTombstoneRuleV1}'s pinned contract, so
+ * a caller mapping these answers never has to ask the binding question itself --
+ * which matters because the predicate that answers it is deliberately not part
+ * of this package's surface. An unbound candidate yields the same reject at
+ * every version relation.
+ *
+ * IT ANSWERS ONLY FOR ROWS V1 HAS DECIDED. A quarantined or shadow-dirty applied
+ * row is refused rather than read, and the refusal is a `reject`, not a throw:
+ * those rows are well-formed, they are simply not this rule's to decide. A
+ * malformed operand throws, as everywhere else in this module.
+ *
+ * THE RESULT IS THE FULL AUTHORITY UNION, MEASURED RATHER THAN ASSUMED. All four
+ * decisions are produced: `accept` on a dominating tombstone, `quarantine |
+ * head-fork` on the equal-version fork, `stale` under :127-128 when a lower
+ * tombstone already holds the sequence, and `reject` on the refusals above. A
+ * caller must map every one of them; there is no arm here that cannot happen.
+ */
+export function evaluateAgentProfileSameSequenceTombstoneAdvanceV1(
+  candidate: AgentProfileTombstoneHeadObjectV1,
+  evidence: AgentProfileSameSequenceTombstoneEvidenceV1,
+  applied: AgentProfileSameSequenceAppliedRowV1,
+): SystemRecordAuthorityDecisionV1 {
+  const candidateState = validateAgentProfileHeadObjectV1(candidate);
+  if (candidateState.state !== 'tombstone') {
+    return {
+      decision: 'reject',
+      reason: 'same-sequence tombstone entry requires a tombstone candidate',
+    };
+  }
+  const supplied = snapshotSameSequenceTombstoneEvidenceV1(evidence);
+  const row = snapshotSameSequenceAppliedRowV1(applied);
+  if (candidateState.authoritySequence !== row.authoritySequence) {
+    return {
+      decision: 'reject',
+      reason: 'same-sequence tombstone entry requires a candidate at the applied sequence',
+    };
+  }
+  const appliedState = sameSequenceAppliedHeadStateV1(row.status);
+  if (appliedState === undefined) {
+    return {
+      decision: 'reject',
+      reason: 'same-sequence tombstone entry requires an active or tombstone applied row',
+    };
+  }
+  return evaluateSameSequenceTombstoneRuleV1(
+    candidateState,
+    supplied.tombstonePredecessor === undefined
+      ? undefined
+      : validateAgentProfileHeadObjectV1(supplied.tombstonePredecessor),
+    appliedState,
+    parseCanonicalDecimalU64(row.version),
+    row.headDigest,
+    parseCanonicalDecimalU64(candidateState.version),
+    computeAgentProfileHeadObjectDigestV1(candidateState),
+  );
+}
+
 function evaluateNextSequenceAgentProfileHeadAdvanceV1(
   acceptedState: AgentProfileAcceptedAuthorityStateV1,
   current: AgentProfileHeadObjectV1,
@@ -684,42 +869,65 @@ function evaluateNextSequenceAgentProfileHeadAdvanceV1(
   return { decision: 'accept' };
 }
 
-function evaluateSameSequenceTombstoneAdvanceV1(
-  current: AgentProfileHeadObjectV1,
+/**
+ * THE SAME-SEQUENCE TOMBSTONE RULE ITSELF, over exactly its own operands.
+ *
+ * Both entries call this, so there is ONE implementation: the full evaluator
+ * adapts its accepted head into these arguments, and the same-sequence entry
+ * passes what a receiver already persists. Nothing here reads an evidence
+ * object, a clock or a lineage -- the rule's whole input is the candidate, its
+ * predecessor and three facts about the applied head.
+ *
+ * THE PREDECESSOR IS DECIDED BEFORE THE VERSION IS READ, AND THAT ORDERING IS A
+ * CONTRACT RATHER THAN AN ACCIDENT OF THE BRANCH LAYOUT. A tombstone that does
+ * not bind its exact verified active predecessor is refused on the predecessor,
+ * whatever version it carries and whatever version the applied row is at, so the
+ * three version relations answer identically on an unbound candidate. A caller
+ * mapping this rule's answers may therefore treat bindingness as ALREADY ASKED,
+ * and does not have to re-derive it or model when the version branches run. The
+ * property is asserted in the seam suite, not merely stated here: reordering the
+ * version test above the predecessor test turns those rows red.
+ *
+ * WHAT EACH ARM IS. With the predecessor bound, ADR 0002 :112-114 makes the
+ * tombstone dominate every active head in its sequence "regardless of delivery
+ * order or version" and :126 resolves active/tombstone conflicts to the
+ * tombstone -- so an ACTIVE applied head yields `accept` at any unequal version,
+ * and the equal-version case is the genuine fork (same sequence, same version,
+ * different head). Against a TOMBSTONE applied head the governing rule is
+ * :127-128 instead, where the lowest tombstone wins and the digest breaks a tie,
+ * which is why a higher tombstone over a lower one is `stale` rather than an
+ * advance.
+ */
+function evaluateSameSequenceTombstoneRuleV1(
   candidateState: AgentProfileTombstoneHeadObjectV1,
-  evidenceState: AgentProfileHeadAdvanceEvidenceV1,
-  currentVersion: bigint,
+  tombstonePredecessor: AgentProfileHeadObjectV1 | undefined,
+  appliedState: AgentProfileHeadObjectV1['state'],
+  appliedVersion: bigint,
+  appliedHeadDigest: Digest32V1,
   candidateVersion: bigint,
-  currentDigest: Digest32V1,
   candidateDigest: Digest32V1,
 ): SystemRecordAuthorityDecisionV1 {
-  const predecessor =
-    evidenceState.tombstonePredecessor === undefined
-      ? current.state === 'active'
-        ? current
-        : undefined
-      : validateAgentProfileHeadObjectV1(evidenceState.tombstonePredecessor);
   if (
-    predecessor === undefined ||
-    predecessor.state !== 'active' ||
-    !isTombstoneBoundToPredecessorV1(candidateState, predecessor)
+    tombstonePredecessor === undefined ||
+    tombstonePredecessor.state !== 'active' ||
+    !isTombstoneBoundToPredecessorV1(candidateState, tombstonePredecessor)
   ) {
     return {
       decision: 'reject',
       reason: 'tombstone lacks its exact verified active predecessor',
     };
   }
-  if (current.state === 'active') {
-    if (candidateVersion === currentVersion) {
+  if (appliedState === 'active') {
+    if (candidateVersion === appliedVersion) {
       return { decision: 'quarantine', reason: 'head-fork' };
     }
     return { decision: 'accept' };
   }
-  if (candidateVersion !== currentVersion) {
-    return candidateVersion < currentVersion ? { decision: 'accept' } : { decision: 'stale' };
+  if (candidateVersion !== appliedVersion) {
+    return candidateVersion < appliedVersion ? { decision: 'accept' } : { decision: 'stale' };
   }
-  if (candidateDigest === currentDigest) return { decision: 'stale' };
-  return candidateDigest < currentDigest ? { decision: 'accept' } : { decision: 'stale' };
+  if (candidateDigest === appliedHeadDigest) return { decision: 'stale' };
+  return candidateDigest < appliedHeadDigest ? { decision: 'accept' } : { decision: 'stale' };
 }
 
 function evaluateSameSequenceActiveAdvanceV1(
