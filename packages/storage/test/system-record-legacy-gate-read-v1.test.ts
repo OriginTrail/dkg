@@ -46,12 +46,17 @@ const JSON_DATATYPE = SYSTEM_RECORD_V1_JSON_DATATYPE;
  * wrong predicate or the wrong graph gets nothing back, which is what lets the
  * authoritative half of each counterfactual fail loudly rather than pass vacuously.
  */
-function fakeStore(quads: readonly Quad[]): TripleStore & { queries: string[] } {
+function fakeStore(
+  quads: readonly Quad[],
+): TripleStore & { queries: string[]; options: Array<Record<string, unknown>> } {
   const queries: string[] = [];
+  const options: Array<Record<string, unknown>> = [];
   const store = {
     queries,
-    async query(sparql: string): Promise<QueryResult> {
+    options,
+    async query(sparql: string, opts?: Record<string, unknown>): Promise<QueryResult> {
       queries.push(sparql);
+      options.push(opts ?? {});
       const graph = /GRAPH <([^>]+)>/.exec(sparql)?.[1];
       const values = [...sparql.matchAll(/<([^>]+)>/g)].map((m) => m[1]!);
       const inGraph = quads.filter((quad) => quad.graph === graph);
@@ -316,6 +321,56 @@ describe('bounded-read overflow, computed by the real reader', () => {
     // It really asked — this is the post-decode branch, not the pre-query shortcut the
     // subject-bound case above takes.
     expect(store.queries).toHaveLength(1);
+  });
+
+  /** A store whose transport refuses the body before parsing, the way a real one does. */
+  function refusingStore(): TripleStore {
+    return {
+      async query(): Promise<QueryResult> {
+        throw Object.assign(new Error('Triple-store response exceeds byte limit'), {
+          code: 'STORE_RESPONSE_TOO_LARGE',
+        });
+      },
+    } as unknown as TripleStore;
+  }
+
+  // The transport cap is only a contract if it is actually REQUESTED. Deleting the option
+  // from either call leaves every other case in this file green, because a fake store that
+  // ignores options behaves identically with and without it.
+  it('asks the store to enforce each read\'s response cap', async () => {
+    const store = fakeStore(appliedRecordQuads(ROOT, [ROOT]));
+
+    await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT],
+    });
+    await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects: [ROOT],
+    });
+
+    expect(store.options[0]?.maxResponseBytes)
+      .toBe(SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES);
+    expect(store.options[1]?.maxResponseBytes).toBe(SYSTEM_RECORD_MAX_PROJECTION_BYTES);
+  });
+
+  // ...and only a contract if the refusal is TRANSLATED. Rethrowing instead would drop the
+  // whole page at the seam, which is the retry-storm the port contract exists to avoid —
+  // and no test here would have noticed, because no fake store threw the canonical error.
+  it('turns a transport cap refusal into undecided roots rather than throwing', async () => {
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store: refusingStore(), networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT, OTHER_ROOT],
+    });
+
+    expect(read.records).toEqual([]);
+    expect([...read.unclassifiedRoots].sort()).toEqual([ROOT, OTHER_ROOT].sort());
+  });
+
+  it('turns a transport cap refusal into a truncated projection rather than throwing', async () => {
+    const read = await readLegacyAgentProfileProjectionV1({
+      store: refusingStore(), mode: 'authoritative', subjects: [ROOT],
+    });
+
+    expect(read.rows).toEqual([]);
+    expect(read.truncated).toBe(true);
   });
 
   it('reports truncated when the projection response exceeds the byte cap under the row cap', async () => {
