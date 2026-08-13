@@ -44,6 +44,10 @@ import {
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { Quad, TripleStore } from '../triple-store.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../internal-graph-policy.js';
+// The canonical retained-byte accounting, shared with the inspection path rather than
+// re-derived here. Request one measures a literal rather than quads, so it keeps its own
+// term measurement; request two measures rows, which is exactly what this helper counts.
+import { retainedSystemRecordInspectionQuadsBytesV1 } from '../system-record-inspection-v1-internal.js';
 import {
   SYSTEM_RECORD_V1_PREDICATES,
   systemRecordProjectionGraphV1,
@@ -306,11 +310,18 @@ export async function readLegacyAgentProfileProjectionV1(input: {
   for (const binding of bindings) {
     const { s, p, o } = binding;
     if (s === undefined || p === undefined || o === undefined) continue;
-    retainedBytes += termBytes(s) + termBytes(p) + termBytes(o);
+    const row = { subject: s, predicate: p, object: o, graph };
+    // The system's OWN definition of retained bytes, not a local sum. Adopted from review:
+    // a hand-rolled `s + p + o` in UTF-8 under-counts what is actually retained by more
+    // than half — it ignores the graph term, JS string retention, and per-entry container
+    // overhead — so a cap measured that way lets the process hold materially more than
+    // the bound intends. Reusing the canonical helper also keeps this path from drifting
+    // away from the accounting the sibling inspection path uses.
+    retainedBytes += retainedSystemRecordInspectionQuadsBytesV1([row]);
     if (retainedBytes > SYSTEM_RECORD_MAX_PROJECTION_BYTES) {
       return Object.freeze({ rows: [], truncated: true });
     }
-    rows.push({ subject: s, predicate: p, object: o, graph });
+    rows.push(row);
   }
   return Object.freeze({ rows: Object.freeze(rows), truncated: false }) as LegacyAgentProfileProjectionV1;
 }

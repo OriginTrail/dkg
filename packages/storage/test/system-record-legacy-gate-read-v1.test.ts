@@ -373,6 +373,31 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(read.truncated).toBe(true);
   });
 
+  // The DISCRIMINATOR between the canonical retained-byte accounting and a hand-rolled
+  // `s + p + o` sum. This payload is deliberately UNDER the cap by the naive measure and
+  // OVER it by the real one, so a reader counting bytes locally would hand back these rows
+  // as an exact projection while the process retains well past the bound. It asserts the
+  // observable (`truncated`), not the formula.
+  it('counts retained bytes the way the rest of system-record does, not a local sum', async () => {
+    const rows = Array.from({ length: 3 }, (_, i) => ({
+      subject: ROOT,
+      predicate: `urn:p${i}`,
+      object: `"${'z'.repeat(480_000)}"`,
+      graph: systemRecordProjectionGraphV1('authoritative'),
+    }));
+    const naive = rows.reduce((n, r) => n
+      + Buffer.byteLength(r.subject) + Buffer.byteLength(r.predicate) + Buffer.byteLength(r.object), 0);
+    // The premise, asserted rather than assumed: naive accounting would NOT have tripped.
+    expect(naive).toBeLessThan(SYSTEM_RECORD_MAX_PROJECTION_BYTES);
+
+    const read = await readLegacyAgentProfileProjectionV1({
+      store: fakeStore(rows), mode: 'authoritative', subjects: [ROOT],
+    });
+
+    expect(read.truncated).toBe(true);
+    expect(read.rows).toEqual([]);
+  });
+
   it('reports truncated when the projection response exceeds the byte cap under the row cap', async () => {
     // Deliberately FEW rows, so only the byte accounting can detect this. A reader that
     // implemented the row cap alone passes every other case in this file and fails here.
