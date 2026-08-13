@@ -93,7 +93,7 @@ export const JOIN_NOT_COMPARABLE_CAUSE_V1 = {
   /**
    * Storage cannot be driven at all. `verifiedAuthoritySummary` is a REQUIRED
    * field on all three facts variants and is bind-checked at
-   * system-record-next-state-v1-internal.ts:863 -- the lineage-length invariant,
+   * system-record-next-state-v1-internal.ts:876 -- the lineage-length invariant,
    * which is unique in that file, unlike the brand assert at :850 whose text
    * recurs at :906 in the tombstone path and so cannot name which path it means.
    * A summary is a factory-only capability, so where the closure builder refuses
@@ -288,8 +288,8 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     citations: [
       'packages/core/src/system-record-authority-v1-internal.ts:196',
       'packages/core/src/system-record-authority-v1-internal.ts:199',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1134',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1136-1145',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1147',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1149-1158',
       'packages/storage/src/system-record-next-state-v1-internal.ts:251',
     ],
     note: 'MAPPING core stale TO {stale} ALONE WOULD FABRICATE A DIVERGENCE, and '
@@ -314,7 +314,7 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     citations: [
       'packages/core/src/system-record-authority-v1-internal.ts:200',
       'packages/core/src/system-record-authority-v1-internal.ts:433',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1146',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1159',
     ],
     note: 'No storage outcome is spelled `quarantine`: storage\'s quarantine is an '
       + 'axis-H INPUT operation, not an outcome. The image is still groundable and '

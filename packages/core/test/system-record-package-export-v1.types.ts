@@ -1,7 +1,7 @@
 import type {
   AgentProfileAcceptedAuthorityStateV1,
   AgentProfileAuthorityDispositionV1,
-  AgentProfileDerivedAuthorityDispositionV1,
+  AgentProfileAuthorityDispositionResultV1,
   AgentProfileActiveHeadObjectV1,
   AgentProfileAppliedTransitionV1,
   AgentProfileAuthorityTransitionV1,
@@ -149,19 +149,52 @@ type ForkResolutionScalarsAreStrings =
 const forkResolutionScalarsAreStrings: ForkResolutionScalarsAreStrings = true;
 void forkResolutionScalarsAreStrings;
 
-// The derived disposition is WIDER than the domain the evaluator accepts, and
-// that width IS the safety property: an `undecided-` row must not be consumable
-// as a decision. Folding either member into the accepted union would make both
-// expectations below stale, and an unused @ts-expect-error is itself an error,
-// so this file stops compiling rather than quietly widening what counts as
-// decided.
-const derivedTombstone: AgentProfileDerivedAuthorityDispositionV1 = 'undecided-tombstone-disposition';
-const derivedShadow: AgentProfileDerivedAuthorityDispositionV1 = 'undecided-shadow-tombstone-disposition';
-// @ts-expect-error An undecided row is not an authority disposition.
-const forgedDisposition: AgentProfileAuthorityDispositionV1 = derivedTombstone;
-// @ts-expect-error An undecided row cannot populate the accepted authority state.
-const forgedAcceptedState: AgentProfileAcceptedAuthorityStateV1['disposition'] = derivedShadow;
+/*
+ * THE BOUNDARY THE DISCRIMINATED RESULT BUYS, PINNED AT THE PUBLISHED SURFACE.
+ *
+ * The derivation returns a RESULT, not a widened disposition domain. Three
+ * things must hold and none of them is a naming convention: the result is not
+ * itself a disposition; its disposition cannot be read without narrowing on the
+ * discriminator; and once narrowed, the decided arm is EXACTLY core's union --
+ * never a superset that smuggles a non-disposition back in.
+ *
+ * An unused `@ts-expect-error` is itself an error, so each negative pin below
+ * fails loudly if the property it denies ever becomes true.
+ */
+const undecidedResult: AgentProfileAuthorityDispositionResultV1 = {
+  outcome: 'undecided-terminal',
+  status: 'tombstone',
+};
+// @ts-expect-error A derivation result is not itself an authority disposition.
+const forgedDisposition: AgentProfileAuthorityDispositionV1 = undecidedResult;
+// @ts-expect-error The disposition is unreachable until the result is narrowed.
+const forgedUnnarrowedRead: string = undecidedResult.disposition;
+// @ts-expect-error An undecided result cannot populate the accepted authority state.
+const forgedAcceptedState: AgentProfileAcceptedAuthorityStateV1['disposition'] = undecidedResult;
 
+/** The decided arm carries core's union exactly -- checked in both directions. */
+type DecidedDisposition =
+  Extract<AgentProfileAuthorityDispositionResultV1, { outcome: 'decided' }>['disposition'];
+type DECIDED_ARM_IS_EXACTLY_CORES_UNION =
+  DecidedDisposition extends AgentProfileAuthorityDispositionV1
+    ? AgentProfileAuthorityDispositionV1 extends DecidedDisposition ? true : never
+    : never;
+const decidedArmIsExactlyCoresUnion: DECIDED_ARM_IS_EXACTLY_CORES_UNION = true;
+
+/** The undecided arm keeps the two terminal statuses separately visible. */
+type UndecidedStatus =
+  Extract<AgentProfileAuthorityDispositionResultV1, { outcome: 'undecided-terminal' }>['status'];
+type UNDECIDED_ARM_KEEPS_BOTH_TERMINAL_STATUSES =
+  UndecidedStatus extends SystemRecordAppliedStatusV1
+    ? 'tombstone' extends UndecidedStatus
+      ? 'dirty' extends UndecidedStatus ? true : never
+      : never
+    : never;
+const undecidedArmKeepsBothTerminalStatuses: UNDECIDED_ARM_KEEPS_BOTH_TERMINAL_STATUSES = true;
+
+void decidedArmIsExactlyCoresUnion;
+void undecidedArmKeepsBothTerminalStatuses;
+void forgedUnnarrowedRead;
 void forgedDisposition;
 void forgedAcceptedState;
 

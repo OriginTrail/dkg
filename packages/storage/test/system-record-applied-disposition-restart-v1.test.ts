@@ -130,7 +130,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    *
    * FAIL-BEFORE, and the reason this test is the one that catches it: delete
    * the transition-digest merge at
-   * `system-record-next-state-v1-internal.ts:456-464` and the quarantined row
+   * `system-record-next-state-v1-internal.ts:469-477` and the quarantined row
    * persists with empty slots, so the re-derivation below returns
    * `head-fork-quarantined` and this goes red. No storage-layer assertion would
    * notice, because the consumer of the value lives in core and takes it as an
@@ -142,7 +142,10 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     const beforeRestart = deriveAgentProfileAuthorityDispositionV1(
       quarantined.plan.next.appliedState,
     );
-    expect(beforeRestart).toBe('transition-equivocation-quarantined');
+    expect(beforeRestart).toEqual({
+      outcome: 'decided',
+      disposition: 'transition-equivocation-quarantined',
+    });
 
     const restarted = restartFromPersistedQuads(networkId, quarantined);
     if (restarted.state !== 'present') throw new Error('expected a present row after restart');
@@ -152,7 +155,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     expect(restarted.appliedState.conflictDigestSlots.length).toBeGreaterThan(0);
     expect(restarted.appliedState.status).toBe('quarantined');
 
-    expect(deriveAgentProfileAuthorityDispositionV1(restarted.appliedState)).toBe(beforeRestart);
+    expect(deriveAgentProfileAuthorityDispositionV1(restarted.appliedState)).toEqual(beforeRestart);
   }, 120_000);
 
   /*
@@ -171,13 +174,13 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     expect(restarted.appliedState.conflictOverflow).toBe(false);
 
     expect(deriveAgentProfileAuthorityDispositionV1(restarted.appliedState))
-      .toBe('head-fork-quarantined');
+      .toEqual({ outcome: 'decided', disposition: 'head-fork-quarantined' });
   }, 120_000);
 
   /*
    * ROW 3 OUTRANKS ROW 2, ON A ROW THE READER CAN ACTUALLY RECEIVE.
    *
-   * The unquarantine gate (`next-state:1098`) refuses while slots are occupied,
+   * The unquarantine gate (`next-state:1111`) refuses while slots are occupied,
    * so TODAY no write path produces an `active` row carrying them -- that
    * refusal is already pinned at `system-record-next-state-v1.test.ts:840`,
    * with its clearing control at :807/:857, and is not restated here.
@@ -236,7 +239,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     expect(snapshot.appliedState.status).toBe('active');
     expect(snapshot.appliedState.conflictDigestSlots.length).toBeGreaterThan(0);
     expect(deriveAgentProfileAuthorityDispositionV1(snapshot.appliedState))
-      .toBe('transition-equivocation-quarantined');
+      .toEqual({ outcome: 'decided', disposition: 'transition-equivocation-quarantined' });
   }, 120_000);
 
   /*
@@ -254,7 +257,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    * SYSTEM_RECORD_MAX_CONFLICT_DIGESTS total object digests
    * (agent-profile-evidence-codecs :236-238). Overflow is therefore reachable
    * only by ACCUMULATION -- the merge unions the persisted slots with the new
-   * terminal digests (next-state :456-464) -- so the construction quarantines
+   * terminal digests (next-state :469-477) -- so the construction quarantines
    * twice with distinct transition evidence.
    */
   it('re-derives the equivocation from a row whose slots overflowed the cap', async () => {
@@ -275,7 +278,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     // quads and back, which is the boundary the property is about.
     expect(restarted.appliedState.conflictOverflow).toBe(true);
     expect(deriveAgentProfileAuthorityDispositionV1(restarted.appliedState))
-      .toBe('transition-equivocation-quarantined');
+      .toEqual({ outcome: 'decided', disposition: 'transition-equivocation-quarantined' });
   }, 120_000);
 });
 

@@ -538,8 +538,8 @@ export const JOIN_IMPOSSIBILITY_PROOFS_V1: readonly JoinImpossibilityProofV1[] =
     subject: "the throw at system-record-next-state-v1-internal.ts:241-243, 'equal system-record "
       + "head cannot exist in absent state'",
     citations: [
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1144',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1092',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1157',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1105',
       'packages/storage/src/system-record-state-snapshot-v1-internal.ts:76',
     ],
     proof: "materialization 'reuse' is PRODUCED at exactly one site, :1144 (the literal occurs "

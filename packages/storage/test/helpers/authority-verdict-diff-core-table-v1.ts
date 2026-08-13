@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1113',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1126',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -446,20 +446,20 @@ export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = 
   },
   {
     id: 'storage-binds-candidate-head-digest',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:862',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:875',
     contains: 'summary.candidateHeadDigest !== headDigest',
     why: 'Storage refuses a summary that does not name the head it is presented with.',
   },
   {
     id: 'storage-binds-lineage-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:863',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:876',
     contains: 'BigInt(summary.transitionLineage.length) '
       + '!== parseCanonicalDecimalU64(facts.head.authoritySequence)',
     why: 'The lineage-length invariant: the discriminating conjunct, and unique in the file.',
   },
   {
     id: 'storage-binds-root-history-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:864',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:877',
     contains: 'summary.historicalRoots.length !== summary.transitionLineage.length',
     why: 'The retained-root count must match the lineage it is retained against.',
   },

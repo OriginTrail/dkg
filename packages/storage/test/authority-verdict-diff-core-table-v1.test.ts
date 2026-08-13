@@ -372,7 +372,7 @@ describe('authority verdict diff: core table', { timeout: 600_000 }, () => {
    * occur ONCE in the file, because a line-anchored citation on a string that
    * appears twice cannot say which occurrence it means. That second half is not
    * hypothetical here: the obvious anchor for the asymmetry finding
-   * (next-state-v1-internal.ts:850) is a line whose text appears at :850 and
+   * (next-state-v1-internal.ts:863) is a line whose text appears at :850 and
    * again at :906, in two functions about different subjects, which is precisely
    * why the finding cites :863 instead.
    */

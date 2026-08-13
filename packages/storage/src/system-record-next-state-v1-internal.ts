@@ -453,6 +453,19 @@ function quarantineSystemRecordDerivationV1(
     return Object.freeze({ outcome: 'deferred', reason: 'verified-state-mismatch' });
   }
 
+  // THE PERSISTENT SUBSTRATE FOR THE AUTHORITY DISPOSITION.
+  //
+  // These slots are the only durable record that this quarantine was a
+  // TRANSITION equivocation rather than an ordinary head fork. Core derives
+  // the record's authority disposition from them after a restart
+  // (`deriveAgentProfileAuthorityDispositionV1`), because core takes that
+  // disposition as an INPUT and persists nothing itself.
+  //
+  // Dropping or truncating them below silently breaks the master plan's
+  // line 204 -- that a receiver which verified both branches "remains
+  // quarantined across later heads/restart/provider changes" -- and it breaks
+  // it in a way no storage-layer assertion would show, because the consumer
+  // lives in core. Do not delete this merge as an unexplained leftover.
   const currentSlots = derived.plan.next.appliedState.conflictDigestSlots;
   const terminalDigests = facts.terminalTransitionConflict
     ? facts.conflictEvidence.entries.flatMap((entry) =>
