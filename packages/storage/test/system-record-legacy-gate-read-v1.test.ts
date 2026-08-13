@@ -424,6 +424,29 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(read.unclassifiedRoots).toEqual([ROOT]);
   });
 
+  // The agent-side derivation that feeds this reader is LOOSER than the storage-side
+  // namer. Deriving a root accepts any `did:dkg:agent:0x<40 lowercase hex>`; naming its
+  // claim additionally rejects the zero address, so that one value used to reach the claim
+  // builder and THROW. An uncaught throw here drops the whole durable-sync page — on every
+  // retry, for as long as a peer keeps serving that subject — which is the same
+  // retry-storm the transport-refusal cases above exist to prevent, arriving through the
+  // one input this reader does not control.
+  it('reports a root the claim namer refuses as undecided instead of throwing', async () => {
+    const store = fakeStore([]);
+    const unnameable = `did:dkg:agent:0x${'0'.repeat(40)}`;
+
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [unnameable, ROOT],
+    });
+
+    // Undecided, never "no applied record": the direction that withholds.
+    expect(read.records).toEqual([]);
+    expect(read.unclassifiedRoots).toContain(unnameable);
+    // ...and the batch beside it survives, rather than the page dying with it.
+    expect(store.queries).toHaveLength(1);
+    expect(store.queries[0]).toContain(systemRecordRootClaimSubjectV1(NETWORK_ID, ROOT));
+  });
+
   it('turns a transport cap refusal into a truncated projection rather than throwing', async () => {
     const read = await readLegacyAgentProfileProjectionV1({
       store: refusingStore(), mode: 'authoritative', subjects: [ROOT],

@@ -36,6 +36,7 @@
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import {
+  assertAgentRootV1,
   parseCanonicalOwnedSubjectTableObjectV1,
   SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
   SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
@@ -198,8 +199,31 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
   // outside the byte budget is a function of the request rather than of result ordering.
   const ordered = [...roots].sort();
   const claimByRoot = new Map<string, string>();
+  // Roots this reader cannot even NAME.
+  //
+  // The agent-side derivation that feeds the gate is LOOSER than storage's namer: it
+  // derives a root from any `did:dkg:agent:0x<40 lowercase hex>` subject, while naming
+  // that root's claim additionally rejects the zero address. So exactly one derivable
+  // root reaches the namer and makes it throw — and a throw here does not degrade, it
+  // drops the whole durable-sync page, on every retry, for as long as a peer keeps
+  // serving that subject. That is the retry-storm the transport-refusal translation
+  // below exists to prevent, arriving through the one input this reader does not choose.
+  //
+  // Undecided is the answer this reader already has for "cannot classify", and it
+  // withholds. The guard wraps the validation ALONE, so a malformed network id still
+  // throws from the namer rather than being mislabelled as an unnameable root.
+  const unnameableRoots = new Set<string>();
   for (const root of ordered) {
+    try {
+      assertAgentRootV1(root);
+    } catch {
+      unnameableRoots.add(root);
+      continue;
+    }
     claimByRoot.set(root, systemRecordRootClaimSubjectV1(networkId, root));
+  }
+  if (claimByRoot.size === 0) {
+    return Object.freeze({ records: [], unclassifiedRoots: Object.freeze([...ordered]) });
   }
   const rootByClaim = new Map([...claimByRoot].map(([root, claim]) => [claim, root]));
 
@@ -211,7 +235,7 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
     + `    ?claim <${SYSTEM_RECORD_V1_PREDICATES.claimedBy}> ?record .\n`
     + `    ?record <${SYSTEM_RECORD_V1_PREDICATES.ownedSubjectTable}> ?table .\n`
     + `  }\n`
-    + `}\nLIMIT ${ordered.length + 1}`;
+    + `}\nLIMIT ${claimByRoot.size + 1}`;
 
   let bindings: Array<Record<string, string>>;
   try {
@@ -232,14 +256,15 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
 
   // THE RESPONSE MAY NOT BE THE EXACT SET, AND THAT CHANGES WHAT ABSENCE MEANS.
   //
-  // The query asks for `LIMIT ordered.length + 1`, so at most one row per requested root
-  // plus one. More rows than roots means either duplicates or a bound that cut the answer
-  // short — and a cut answer can have pushed a DIFFERENT root's row out of the result.
+  // The query asks for one row more than it has claims, so at most one row per asked-about
+  // root plus one. More rows than claims means either duplicates or a bound that cut the
+  // answer short — and a cut answer can have pushed a DIFFERENT root's row out of the
+  // result.
   // Reading that root as "no applied record" would classify it uncovered and insert
   // unsigned legacy quads over signed state, which is the exact fail-open this port
   // contract exists to close. So when the answer is not exact, absence stops being an
   // answer and every undecided root is reported undecided.
-  const saturated = bindings.length > ordered.length;
+  const saturated = bindings.length > claimByRoot.size;
 
   const tableByRoot = new Map<string, string>();
   // Roots the reserved graph answered for more than once. A duplicate current claim means
@@ -261,7 +286,7 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
   const unclassifiedRoots: string[] = [];
   let retainedBytes = 0;
   for (const root of ordered) {
-    if (ambiguousRoots.has(root)) {
+    if (unnameableRoots.has(root) || ambiguousRoots.has(root)) {
       unclassifiedRoots.push(root);
       continue;
     }

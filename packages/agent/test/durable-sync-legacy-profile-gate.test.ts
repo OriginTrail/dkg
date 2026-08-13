@@ -231,6 +231,33 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     expect(result.result.insertedTriples).toBe(0);
   });
 
+  // The metadata branch gates through the same helper behind its OWN post-gate abort
+  // check, and the case above cannot reach it: served on the data phase, it leaves the
+  // meta guard deletable with this file green. Found by auditing the guard's siblings
+  // rather than by waiting for the abort window to be re-derived one branch over.
+  it('does not insert metadata when the operation is aborted while the gate is running', async () => {
+    const controller = new AbortController();
+    const page = [quad('urn:ordinary-subject', 'urn:p', 'o')];
+    const aborting = {
+      filterPage: async (quads: Quad[]) => {
+        controller.abort();
+        return {
+          insert: quads,
+          withheld: [],
+          discardedDuplicates: 0,
+          conflictedRoots: 0,
+          unclassifiedRoots: 0,
+          storeRequests: 0,
+        };
+      },
+    } as unknown as ReturnType<typeof createLegacyAgentProfileGateV1>;
+
+    const { offered, result } = await runSeam(page, aborting, 'meta', 'agents', controller.signal);
+
+    expect(offered).toEqual([]);
+    expect(result.result.insertedMetaTriples).toBe(0);
+  });
+
   // T1, half A — the half that scoping by the page's context-graph id would get WRONG.
   // The page is served under `project-x`, but the quad it carries is bound for the
   // aggregate graph where the applied projection lives, so the collision is real and the

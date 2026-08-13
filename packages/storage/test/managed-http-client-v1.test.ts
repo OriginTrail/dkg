@@ -224,6 +224,16 @@ describe('OwnedManagedHttpClient', () => {
         }),
       ).rejects.toThrow(/response body declares 6 bytes; maximum is 5 bytes/);
       expect(reserveResponseCapacity).not.toHaveBeenCalled();
+
+      // The declared-length refusal carries the canonical code for the same reason the
+      // chunked one does, and it matters MORE: an endpoint that sends Content-Length never
+      // reaches the chunked check, so this is the path a real oversized answer takes.
+      // Message-only assertions cannot tell a tagged refusal from an untagged one.
+      const refusal = await client.post(`${base}/declared-overflow`, UPDATE, 'x', 5_000, undefined, {
+        maxRequestBytes: 1,
+        maxResponseBytes: 5,
+      }).then(() => null, (error: unknown) => error);
+      expect(isStoreResponseTooLargeErrorV1(refusal)).toBe(true);
     } finally {
       await client.destroyAndSettle().catch(() => undefined);
     }

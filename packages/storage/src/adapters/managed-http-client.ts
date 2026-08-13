@@ -399,9 +399,17 @@ export class OwnedManagedHttpClient {
               declaredLength = Number(contentLengthHeader);
               if (maxResponseBytes !== undefined && declaredLength > maxResponseBytes) {
                 failResponse(
-                  new Error(
-                    `managed SPARQL response body declares ${declaredLength} bytes; ` +
-                      `maximum is ${maxResponseBytes} bytes`,
+                  // Same code as the chunked refusal below, because this is the same
+                  // refusal: the body exceeds `maxResponseBytes`. A server that sends
+                  // Content-Length lands HERE rather than there, so leaving this site
+                  // untagged left the likelier of the two paths invisible to the shared
+                  // check — the shared bounded reader already types both of its own.
+                  Object.assign(
+                    new Error(
+                      `managed SPARQL response body declares ${declaredLength} bytes; ` +
+                        `maximum is ${maxResponseBytes} bytes`,
+                    ),
+                    { code: STORE_RESPONSE_TOO_LARGE_CODE },
                   ),
                 );
                 return;
