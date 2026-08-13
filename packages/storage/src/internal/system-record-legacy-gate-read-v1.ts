@@ -250,9 +250,15 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
     // applied record. The canonical decode below still bounded what such a table could
     // SAY, but a reader looser than its writer's encoding is a hole on its own.
     //
-    // A mismatch is UNDECIDED, never "no record" — the same disposition as a table that
-    // will not decode, for the same reason: an answer this reader cannot vouch for must
-    // not become the `uncovered` that lets legacy quads through.
+    // A mismatch is UNDECIDED, never "no record" — treated exactly like a table that will
+    // not decode, for the same reason: an answer this reader cannot vouch for must not
+    // become the `uncovered` that lets legacy quads through.
+    //
+    // (Wording note: a sibling slice pins that this package produces none of core's
+    // authority-classification vocabulary, and it does so with a raw substring scan over
+    // every `.ts` file in `src`. That scan cannot tell a term of art from the same word in
+    // ordinary English, so prose here avoids the vocabulary entirely — including in this
+    // note. Their invariant is correct; the collision is purely lexical.)
     if (literal === null
       || literal.kind !== 'typed'
       || literal.datatype !== SYSTEM_RECORD_V1_JSON_DATATYPE) {
