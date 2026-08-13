@@ -334,15 +334,22 @@ function evaluateAbsentAgentProfileHeadAdvanceV1(
  * `retainedTransition` carries its own clock because the transition is only ever
  * checked by a clocked verifier -- see the entry's docblock for the inversion
  * that pairing prevents.
+ *
+ * IT IS TOMBSTONE-ONLY, AND THE ACTIVE SHORTCUT DELIBERATELY LIVES ABOVE IT.
+ * A lower-sequence ACTIVE candidate is stale, but that is a fact about the
+ * SEQUENCE COMPARISON, not about the late-tombstone rule, and it is only sound
+ * once the caller has established that both heads belong to the same record --
+ * which the full evaluator does at :186 and a standalone caller cannot. Keeping
+ * it in the adapter means the exported entry cannot answer for a head this rule
+ * says nothing about.
  */
 function evaluateLateTombstoneRuleV1(
-  candidateState: AgentProfileHeadObjectV1,
+  candidateState: AgentProfileTombstoneHeadObjectV1,
   tombstonePredecessor: AgentProfileActiveHeadObjectV1 | undefined,
   retainedTransition: AgentProfileLateTombstoneRetainedTransitionV1 | undefined,
   lineage: readonly AgentProfileAppliedTransitionV1[],
   candidateSequence: bigint,
 ): SystemRecordAuthorityDecisionV1 {
-  if (candidateState.state === 'active') return { decision: 'stale' };
   const predecessor =
     tombstonePredecessor === undefined
       ? undefined
@@ -403,6 +410,11 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
   lineage: readonly AgentProfileAppliedTransitionV1[],
   candidateSequence: bigint,
 ): SystemRecordAuthorityDecisionV1 {
+  // The sequence comparison's own answer, and it stays HERE. Reaching this
+  // function means the full evaluator has already established that the candidate
+  // and the accepted head are the same record (:186) -- which is what makes
+  // "below the sequence, therefore superseded" sound for an active head.
+  if (candidateState.state === 'active') return { decision: 'stale' };
   return evaluateLateTombstoneRuleV1(
     candidateState,
     evidenceState.tombstonePredecessor,
@@ -472,13 +484,29 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * delegated. The invariant this buys, asserted in the suite: **`accept` and
  * `stale` are reachable only when a retained transition AND a valid clock were
  * both supplied.** A caller with neither cannot express an admission at all.
+ *
+ * IT ANSWERS FOR TOMBSTONES ONLY, at the type AND at runtime. The rule this
+ * entry exposes says nothing about an active candidate; the full evaluator's
+ * "below the sequence, therefore stale" shortcut for actives is sound only after
+ * it has established that both heads are the same record, and this entry has no
+ * accepted head to make that comparison against. Measured before the guard
+ * existed: an active head below the sequence with EMPTY evidence returned
+ * `{ decision: 'stale' }` from an entry whose name promises a tombstone verdict.
+ * The type narrows to a tombstone head and the runtime check refuses anything
+ * else, because a caller can always cast.
  */
 export function evaluateAgentProfileLateTombstoneAdvanceV1(
-  candidate: AgentProfileHeadObjectV1,
+  candidate: AgentProfileTombstoneHeadObjectV1,
   evidence: AgentProfileLateTombstoneEvidenceV1,
   acceptedTransitionLineage: readonly AgentProfileAppliedTransitionV1[],
 ): SystemRecordAuthorityDecisionV1 {
   const candidateState = validateAgentProfileHeadObjectV1(candidate);
+  if (candidateState.state !== 'tombstone') {
+    return {
+      decision: 'reject',
+      reason: 'late tombstone entry requires a tombstone candidate',
+    };
+  }
   const supplied = snapshotLateTombstoneEvidenceV1(evidence);
   const lineage = validateAppliedTransitionLineage(acceptedTransitionLineage);
   const candidateSequence = parseCanonicalDecimalU64(candidateState.authoritySequence);

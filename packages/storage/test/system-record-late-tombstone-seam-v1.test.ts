@@ -5,6 +5,7 @@ import {
   computeAgentProfileHeadObjectDigestV1,
   computeSystemRecordAppliedStateDigestV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+  evaluateAgentProfileHeadAdvanceV1,
   evaluateAgentProfileLateTombstoneAdvanceV1,
   type AgentProfileAuthorityTransitionV1,
   assertAgentProfileHeadObjectV1,
@@ -26,6 +27,10 @@ import {
   coreSequenceTransitionV1,
   CORE_CURRENT_HEAD_V1,
 } from './helpers/authority-verdict-diff-core-heads-v1.js';
+import {
+  CORE_ACCEPTED_LINEAGE_V1,
+  CORE_HISTORICAL_ROOTS_V1,
+} from './helpers/authority-verdict-diff-core-evidence-v1.js';
 import {
   ADMITTED_DEADLINE_MS_V1,
   prepareStorageDriverV1,
@@ -480,5 +485,48 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       lineageFor(binding),
     ) as { decision: string }).decision);
     expect(observed).toStrictEqual(['reject', 'reject']);
+  });
+
+  /**
+   * THE ENTRY ANSWERS FOR TOMBSTONES ONLY, AND THE FULL EVALUATOR IS UNCHANGED.
+   *
+   * BOTH HALVES, because either alone is satisfiable the wrong way. Found by
+   * review: this entry reused a shortcut returning `stale` for a lower-sequence
+   * ACTIVE head, so an entry whose name promises a tombstone verdict answered
+   * for a head its rule says nothing about, on EMPTY evidence.
+   *
+   * The shortcut itself is not wrong -- it is sound inside the full evaluator,
+   * which has already established that the candidate and the accepted head are
+   * the same record before it dispatches. This entry has no accepted head to
+   * make that comparison against, which is exactly why the shortcut cannot
+   * travel with it. So the fix MOVED the shortcut up rather than deleting it,
+   * and the second assertion is what proves the move did not cost the full
+   * evaluator its behaviour: delete the shortcut instead of relocating it and
+   * this row goes red while the first still passes.
+   */
+  it('refuses an active candidate while the full evaluator still calls one stale', () => {
+    const activeBelow = coreSequenceActiveHeadV1(LATE_SEQUENCE);
+    expect(evaluateAgentProfileLateTombstoneAdvanceV1(
+      activeBelow as never,
+      {},
+      lineageFor(binding),
+    )).toStrictEqual({
+      decision: 'reject',
+      reason: 'late tombstone entry requires a tombstone candidate',
+    });
+
+    // Same head, same lineage, through the full evaluator with its accepted
+    // current head present: still `stale`, because there the record identity has
+    // been checked and "below the sequence" really does mean superseded.
+    expect(evaluateAgentProfileHeadAdvanceV1(
+      {
+        current: CORE_CURRENT_HEAD_V1,
+        disposition: 'discoverable',
+        transitionLineage: CORE_ACCEPTED_LINEAGE_V1,
+        historicalRoots: CORE_HISTORICAL_ROOTS_V1,
+      } as never,
+      activeBelow,
+      { nowMs: TERMINAL_FIXTURE_NOW_MS_V1 } as never,
+    )).toStrictEqual({ decision: 'stale' });
   });
 });
