@@ -475,47 +475,82 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
    * it will mint a summary at all, so the producer of the evidence storage
    * demands enforces exactly the conjunction core's rule tests.
    *
-   * Every conjunct is attempted individually below and every one is refused
+   * ALL TEN CONJUNCTS ARE ATTEMPTED INDIVIDUALLY BELOW and every one is refused
    * upstream of the classifier, by one of two gates -- the head codec, which
-   * refuses four as malformed heads, or the closure, which refuses the rest at
-   * mint. The bound control mints in the same run, so these refusals measure the
-   * system rather than a broken construction.
+   * refuses four as malformed heads, or the closure, which refuses the other six
+   * at mint. The bound control mints in the same run, so these refusals measure
+   * the system rather than a broken construction.
    *
-   * ONE CONJUNCT IS REASONED, NOT MEASURED, AND IS MARKED AS SUCH: version
-   * strictly-greater. Against a version-zero predecessor the only non-greater
-   * version is zero, and the codec refuses a version-zero head that carries a
-   * previousHeadDigest -- a different rule pre-empting the one under test.
-   * Reachability is not strictness, so it is recorded here rather than counted
-   * as one of the nine.
+   * THE PREDICATE HAS TEN CONJUNCTS AND THIS SUITE SAID NINE FOR SEVERAL ROUNDS.
+   * The count was taken by listing the field comparisons and missing that the
+   * version relation is a conjunct too -- the same omission that then let it be
+   * argued out of the enumeration. A count stated in prose is not asserted by
+   * anything, so this one is derived instead: nine  operators in the
+   * predicate means ten conjuncts, and the map below has ten rows.
+   *
+   * THE VERSION ROW ALMOST SHIPPED AS "REASONED, NOT MEASURED", AND THAT WOULD
+   * HAVE BEEN WRONG IN AN INSTRUCTIVE WAY. The argument was: against a
+   * version-zero predecessor the only non-greater version is zero, and the codec
+   * refuses a version-zero head carrying a `previousHeadDigest`, so a different
+   * rule pre-empts the one under test. Every clause of that is true and it is
+   * scoped to the PREDECESSOR THAT WAS CHOSEN, not to the conjunct. Pick a
+   * predecessor above zero -- the version-2 active head -- and a version-1
+   * tombstone violates strictly-greater with neither head at zero. The codec
+   * accepts it and the closure refuses it with the same predecessor-not-exact
+   * message as the other four. Reachability is not strictness, but neither is a
+   * sound argument about one construction a statement about the population.
+   *
+   * THE ROW EARNS ITS PLACE BY THE MUTANT IT KILLS. Relaxing `>` to `>=` in the
+   * binding predicate is a one-character edit that would let a tombstone bind a
+   * predecessor at its OWN version -- the equal-version confusion the open ADR
+   * question turns on -- and nothing else in this suite watches it.
+   *
+   * AND THIS TEST IS A TRIPWIRE FOR ANOTHER MODULE'S GATE, not only a record of
+   * today's behaviour. The unconstructibility it proves rests on the verification
+   * closure applying the binding predicate before it mints. If that gate is ever
+   * relaxed, these heads begin to mint and every refusal below turns red at once.
    */
   it('refuses every unbound construction before the classifier is reached', async () => {
     const control = await mintStorageSummaryForHeadV1(tombstoneOfV1(predecessor, '1'));
     expect(control.minted).toBe(true);
 
     const p = predecessor as unknown as Record<string, string>;
-    const levers: ReadonlyArray<readonly [string, Record<string, unknown>]> = Object.freeze([
-      ['previousHeadDigest', {
-        previousHeadDigest: flipLeadV1(computeAgentProfileHeadObjectDigestV1(predecessor)),
-      }],
-      ['networkId', { networkId: 'otp:9999' }],
-      ['peerId', { peerId: flipLeadV1(p.peerId) }],
-      ['peerPublicKey', { peerPublicKey: flipLeadV1(p.peerPublicKey) }],
-      ['authoritySequence', { authoritySequence: '3' }],
-      ['acceptedTransitionDigest', {
-        acceptedTransitionDigest: flipLeadV1(p.acceptedTransitionDigest),
-      }],
-      ['evmIssuer', { evmIssuer: flipLeadV1(p.evmIssuer) }],
-      ['rootSubject', { rootSubject: `${p.rootSubject}x` }],
-      ['projectionSchemaDigest', {
-        projectionSchemaDigest: flipLeadV1(p.projectionSchemaDigest),
-      }],
-    ]);
+    const unbound = (overrides: Record<string, unknown>) =>
+      () => tombstoneOfV1(predecessor, '1', overrides);
+    // A THUNK PER LEVER, because one conjunct cannot be reached by perturbing a
+    // field: strictly-greater is violated by the PREDECESSOR CHOICE, not by an
+    // override, so it needs to build its own head.
+    const levers: ReadonlyArray<readonly [string, () => AgentProfileTombstoneHeadObjectV1]> =
+      Object.freeze([
+        ['previousHeadDigest', unbound({
+          previousHeadDigest: flipLeadV1(computeAgentProfileHeadObjectDigestV1(predecessor)),
+        })],
+        ['networkId', unbound({ networkId: 'otp:9999' })],
+        ['peerId', unbound({ peerId: flipLeadV1(p.peerId) })],
+        ['peerPublicKey', unbound({ peerPublicKey: flipLeadV1(p.peerPublicKey) })],
+        ['authoritySequence', unbound({ authoritySequence: '3' })],
+        ['acceptedTransitionDigest', unbound({
+          acceptedTransitionDigest: flipLeadV1(p.acceptedTransitionDigest),
+        })],
+        ['evmIssuer', unbound({ evmIssuer: flipLeadV1(p.evmIssuer) })],
+        ['rootSubject', unbound({ rootSubject: `${p.rootSubject}x` })],
+        ['projectionSchemaDigest', unbound({
+          projectionSchemaDigest: flipLeadV1(p.projectionSchemaDigest),
+        })],
+        // A version-1 tombstone under the version-2 ACTIVE head: strictly-greater
+        // violated with NEITHER head at zero, so the version-zero codec rule
+        // cannot pre-empt the conjunct under test.
+        ['version-not-strictly-greater', () => tombstoneOfV1(
+          CORE_CURRENT_HEAD_V1 as unknown as AgentProfileHeadObjectV1,
+          '1',
+        )],
+      ]);
 
     const refusedAt: Record<string, string> = {};
-    for (const [name, overrides] of levers) {
+    for (const [name, build] of levers) {
       let head: AgentProfileTombstoneHeadObjectV1;
       try {
-        head = tombstoneOfV1(predecessor, '1', overrides);
+        head = build();
       } catch {
         refusedAt[name] = 'head-codec';
         continue;
@@ -535,6 +570,7 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
       evmIssuer: 'head-codec',
       rootSubject: 'head-codec',
       projectionSchemaDigest: 'closure-mint',
+      'version-not-strictly-greater': 'closure-mint',
     });
   });
 });
