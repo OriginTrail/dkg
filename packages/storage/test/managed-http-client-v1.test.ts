@@ -3,6 +3,7 @@ import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { OwnedManagedHttpClient } from '../src/adapters/managed-http-client.js';
+import { isStoreResponseTooLargeErrorV1 } from '../src/http-response-limit.js';
 
 /**
  * A local server with one deliberately slow route, so a second request must
@@ -142,6 +143,18 @@ describe('OwnedManagedHttpClient', () => {
           maxResponseBytes: 5,
         }),
       ).rejects.toThrow(/response body exceeded 5 bytes/);
+
+      // The refusal must carry the CANONICAL code, not just a recognisable message.
+      // Callers that degrade on an oversized response (the legacy agent-profile gate reads
+      // report it as undecidable rather than failing their page) recognise this refusal by
+      // code. Asserting only the message let the tag be deleted with every suite green:
+      // the reader tests supply the code themselves, so they cannot witness this client
+      // emitting it.
+      const refusal = await client.post(`${base}/chunked-overflow`, UPDATE, 'x', 5_000, undefined, {
+        maxRequestBytes: 1,
+        maxResponseBytes: 5,
+      }).then(() => null, (error: unknown) => error);
+      expect(isStoreResponseTooLargeErrorV1(refusal)).toBe(true);
 
       await vi.waitFor(() => expect(overflowClosedBeforeTail).toBe(true));
     } finally {
