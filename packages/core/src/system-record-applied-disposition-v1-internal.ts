@@ -128,7 +128,7 @@ function hasPersistedTransitionEquivocationV1(
  * LOAD-BEARING -- it is not a defensive default. Measured at integration head
  * 97f4c9e69: the write path cannot currently produce an `active` row carrying
  * slots, because the unquarantine gate
- * (`system-record-next-state-v1-internal.ts:1246`) defers while slots are
+ * (`system-record-next-state-v1-internal.ts:1238`) defers while slots are
  * occupied. But that is a property of ONE disjunct in ONE classifier, not of
  * the row: the active derivation CARRIES slots forward from the snapshot
  * (:362-364) rather than clearing them, and persisted state imposes no coupling

@@ -7,7 +7,9 @@ import {
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   evaluateAgentProfileLateTombstoneAdvanceV1,
   type AgentProfileAuthorityTransitionV1,
+  assertAgentProfileHeadObjectV1,
   type AgentProfileHeadObjectV1,
+  type AgentProfileTombstoneHeadObjectV1,
   type SystemRecordMaterializationReceiptV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
@@ -63,8 +65,16 @@ const LATE_SEQUENCE = '1';
  * The ADR's state, built rather than described: a present row at the current
  * sequence, a tombstone candidate BELOW it, that tombstone's exact active
  * predecessor, and the retained transition out of the tombstone's sequence.
+ *
+ * THE UNSAFE CAST IS CONFINED HERE AND VALIDATED BEFORE IT ESCAPES. Building a
+ * head means editing an object the codec owns, so the shaping has to happen on a
+ * loose record; what must not happen is that looseness reaching the test bodies,
+ * where a fixture that drifted out of shape would be caught by an unrelated
+ * assertion or not at all. `validateAgentProfileHeadObjectV1` runs on the way
+ * out, so every caller receives a head the codec has accepted and a malformed
+ * fixture fails at construction with the codec's own message.
  */
-function tombstoneOfV1(predecessor: AgentProfileHeadObjectV1): AgentProfileHeadObjectV1 {
+function tombstoneOfV1(predecessor: AgentProfileHeadObjectV1): AgentProfileTombstoneHeadObjectV1 {
   const shaped: Record<string, unknown> = {
     ...structuredClone(predecessor),
     state: 'tombstone',
@@ -83,7 +93,12 @@ function tombstoneOfV1(predecessor: AgentProfileHeadObjectV1): AgentProfileHeadO
   ]) {
     delete shaped[key];
   }
-  return Object.freeze(shaped) as unknown as AgentProfileHeadObjectV1;
+  const built = Object.freeze(shaped) as unknown as AgentProfileHeadObjectV1;
+  assertAgentProfileHeadObjectV1(built);
+  if (built.state !== 'tombstone') {
+    throw new Error(`fixture built a ${built.state} head where a tombstone was required`);
+  }
+  return built;
 }
 
 function buildLateTombstoneCandidateV1(): AgentProfileHeadObjectV1 {
@@ -323,8 +338,7 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     const bound = evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,
       {
-        nowMs: TERMINAL_FIXTURE_NOW_MS_V1,
-        acceptedTransition: binding,
+        retainedTransition: { transition: binding, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
       } as never,
       lineageFor(binding) as never,
@@ -332,8 +346,7 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     const unbound = evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,
       {
-        nowMs: TERMINAL_FIXTURE_NOW_MS_V1,
-        acceptedTransition: retained,
+        retainedTransition: { transition: retained, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
       } as never,
       lineageFor(retained) as never,
@@ -351,7 +364,6 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     expect(evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,
       {
-        nowMs: TERMINAL_FIXTURE_NOW_MS_V1,
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
       } as never,
       lineageFor(retained) as never,
@@ -376,7 +388,6 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     expect(evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,
       {
-        nowMs: TERMINAL_FIXTURE_NOW_MS_V1,
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
       } as never,
       Object.freeze([
@@ -392,5 +403,78 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       decision: 'reject',
       reason: 'late tombstone entry requires a candidate below the accepted authority sequence',
     });
+  });
+
+  /**
+   * A CLOCK FAILURE MUST REFUSE, NOT INVERT THE VERDICT.
+   *
+   * FOUND BY REVIEW, AND IT WAS REAL. This arm reads a NON-ACCEPT from the
+   * transition verifier as "the tombstone takes precedence", and that verifier
+   * also refuses on an unusable clock. So while the entry took a bare `nowMs`,
+   * the SAME binding transition returned `stale` with a real clock and `accept`
+   * with `Number.NaN` or `-1` -- a clock failure silently admitting a tombstone
+   * that a valid clock supersedes, on inputs the full evaluator refuses at its
+   * front door. Three values are pinned because they fail `isSafeNow` for
+   * different reasons -- not-a-number, negative, non-integer -- and a guard
+   * written for one of those is not a guard for the others.
+   */
+  it('refuses an unusable clock instead of reading it as tombstone precedence', () => {
+    const withClock = (nowMs: number) => evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      {
+        retainedTransition: { transition: binding, nowMs },
+        tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
+      } as never,
+      lineageFor(binding) as never,
+    );
+    expect({
+      nan: withClock(Number.NaN),
+      negative: withClock(-1),
+      fractional: withClock(1.5),
+    }).toStrictEqual({
+      nan: { decision: 'reject', reason: 'verification clock is invalid' },
+      negative: { decision: 'reject', reason: 'verification clock is invalid' },
+      fractional: { decision: 'reject', reason: 'verification clock is invalid' },
+    });
+  });
+
+  it('refuses a candidate head issued beyond the future clock-skew bound', () => {
+    const future = Object.freeze({
+      ...structuredClone(candidate as unknown as Record<string, unknown>),
+      issuedAt: '2027-08-05T12:11:00Z',
+    }) as unknown as AgentProfileHeadObjectV1;
+    expect(evaluateAgentProfileLateTombstoneAdvanceV1(
+      future,
+      {
+        retainedTransition: { transition: binding, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+        tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
+      } as never,
+      lineageFor(binding) as never,
+    )).toStrictEqual({
+      decision: 'reject',
+      reason: 'head issuedAt exceeds the future clock-skew bound',
+    });
+  });
+
+  /**
+   * THE INVARIANT THE PAIRING BUYS, asserted rather than described.
+   *
+   * `accept` and `stale` are the only decisions that admit a candidate or settle
+   * it, and both are reachable only when a retained transition AND its clock
+   * arrived together -- because they are ONE field. A caller holding neither,
+   * which is every caller in this repository today, cannot express an admission
+   * at all. That makes the storage seam's reject-for-retry a property of the type
+   * boundary rather than of which branch happens to run first.
+   */
+  it('cannot reach accept or stale without a retained transition', () => {
+    const observed = [
+      {},
+      { tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE) },
+    ].map((evidence) => (evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      evidence as never,
+      lineageFor(binding) as never,
+    ) as { decision: string }).decision);
+    expect(observed).toStrictEqual(['reject', 'reject']);
   });
 });

@@ -51,6 +51,12 @@ import {
   JOIN_VERDICT_TOTALS_V1,
 } from './helpers/authority-verdict-diff-join-table-v1.js';
 import { runStorageSweepV1 } from './helpers/authority-verdict-diff-storage-sweep-v1.js';
+import {
+  LATE_TOMBSTONE_COUNTERFACTUAL_CORE_DECISIONS_V1,
+  LATE_TOMBSTONE_SEAM_MOVEMENT_V1,
+  LATE_TOMBSTONE_SEAM_POPULATION_V1,
+  reachesLateTombstoneDisjunctV1,
+} from './helpers/authority-verdict-diff-late-tombstone-seam-v1.js';
 
 /**
  * THE JOIN, PINNED.
@@ -508,5 +514,53 @@ describe('authority verdict diff: the join', { timeout: JOIN_SUITE_TIMEOUT_MS },
   it('carries its findings as data rather than as a commit message', () => {
     expect(JOIN_FINDINGS_V1).toHaveLength(13);
     for (const finding of JOIN_FINDINGS_V1) expect(finding.length).toBeGreaterThan(200);
+  });
+
+  /**
+   * THE SEAM PINS, ASSERTED AGAINST THE LIVE JOIN.
+   *
+   * They shipped for one review round as exported constants with NO CONSUMER --
+   * pinned numbers that read as evidence and could not fail. Surfaced by a review
+   * comment about the file they lived in, which is the second time this artifact
+   * has been improved by a remark aimed somewhere else.
+   */
+  it('pins the late-tombstone seam movement against the run that produced it', async () => {
+    const { rows } = await join();
+    const seamRows = rows.filter((row) => row.storageLabel.startsWith('deferred|late-tombstone')
+      || row.storageLabel.startsWith('deferred|undecided-authority'));
+    const after: Record<string, number> = {};
+    for (const row of seamRows) {
+      const key = `after :: ${row.verdict} ${row.coreDecisionKey} -> ${row.storageLabel}`;
+      after[key] = (after[key] ?? 0) + row.cells;
+    }
+    const expectedAfter = Object.fromEntries(
+      Object.entries(LATE_TOMBSTONE_SEAM_MOVEMENT_V1).filter(([k]) => k.startsWith('after ::')),
+    );
+    expect(after).toStrictEqual(expectedAfter);
+
+    const total = Object.values(expectedAfter).reduce((a, b) => a + b, 0);
+    expect(total).toBe(
+      LATE_TOMBSTONE_SEAM_POPULATION_V1['comparable cells reaching the late-tombstone disjunct'],
+    );
+    // The BEFORE rows conserve to the same population, which is what makes the
+    // movement a movement rather than two unrelated tables.
+    expect(Object.entries(LATE_TOMBSTONE_SEAM_MOVEMENT_V1)
+      .filter(([k]) => k.startsWith('before ::'))
+      .reduce((sum, [, v]) => sum + v, 0)).toBe(total);
+    // And the counterfactual is labelled as one: it covers the same population
+    // under a design that is NOT shipping.
+    expect(Object.values(LATE_TOMBSTONE_COUNTERFACTUAL_CORE_DECISIONS_V1)
+      .reduce((a, b) => a + b, 0)).toBe(total);
+  }, JOIN_SUITE_TIMEOUT_MS);
+
+  it('pins the seam population from the cell axes', () => {
+    const cells = resolveConstructibilityV1(enumerateVerdictDiffCellsV1()).constructible;
+    const seam = cells.filter(reachesLateTombstoneDisjunctV1);
+    const byStatus: Record<string, number> = {};
+    for (const cell of seam) {
+      const k = String(cell.appliedStatus);
+      byStatus[k] = (byStatus[k] ?? 0) + 1;
+    }
+    expect(byStatus).toStrictEqual({ active: 1152, dirty: 1152, tombstone: 1152 });
   });
 });

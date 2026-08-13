@@ -97,7 +97,16 @@ describe('core authority decision reason harvest', () => {
     }
     const ambiguous = [...sites].filter(([, s]) => s.length > 1).map(([l]) => l);
     expect(ambiguous.sort()).toEqual([...CORE_AMBIGUOUS_REJECT_LITERALS_V1].sort());
-    expect(ambiguous).toHaveLength(6);
+    // SIX UNTIL THE LATE-TOMBSTONE ENTRY MIRRORED THE CLOCK GATES. That entry has
+    // to refuse an unusable clock and a too-far-future head ITSELF -- delegating
+    // them would let a clock failure read as tombstone precedence -- so both
+    // literals now have a second producing site. `head issuedAt exceeds the
+    // future clock-skew bound` crossed from one site to two and joined the
+    // register; `verification clock is invalid` was already ambiguous across the
+    // two files and went from two sites to three. The register growing is the
+    // honest record of a branch a caller can no longer distinguish, and it is
+    // the price of the guard rather than an oversight.
+    expect(ambiguous).toHaveLength(7);
   });
 
   // THE GUARD IS KEYED ON THE MECHANISM, NOT ON THE LITERAL THAT ESCAPED.
@@ -136,7 +145,7 @@ describe('core authority decision reason harvest', () => {
   // broke -- the zero-is-indistinguishable-from-a-broken-probe failure.
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
     // 32 until the late-tombstone entry added its own precondition reject.
-    expect([...reject.values()].flat().length).toBe(33);
+    expect([...reject.values()].flat().length).toBe(35);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });
@@ -171,7 +180,18 @@ function harvestEvidenceOptionals(): { declared: string[]; snapshotted: string[]
     .map((line) => /^\s*readonly\s+(\w+)\?:/.exec(line)?.[1])
     .filter((name): name is string => name !== undefined);
 
-  const optionals = /const optionals = \[([^\]]*)\]/.exec(source)?.[1] ?? '';
+  // ANCHORED TO THE FUNCTION IT MEANS, not to the first `const optionals` in the
+  // file. It used to be the latter, and that was a latent defect this PR fired:
+  // a SECOND snapshot helper with its own optionals list was added ABOVE this
+  // one, so the pin silently began harvesting the other function's members and
+  // compared them against this interface's declarations. The row stayed a row
+  // and measured the wrong pair. A regex keyed on a shape that is unique only
+  // until someone writes a second instance is a check that cannot fail on
+  // schedule.
+  const snapshotFn = source.indexOf('function snapshotHeadAdvanceEvidenceV1');
+  if (snapshotFn < 0) throw new Error('snapshotHeadAdvanceEvidenceV1 not found in core source');
+  const optionals = /const optionals = \[([^\]]*)\]/
+    .exec(source.slice(snapshotFn))?.[1] ?? '';
   const snapshotted = [...optionals.matchAll(/'([^']+)'/g)].map((match) => match[1]);
   return { declared, snapshotted };
 }

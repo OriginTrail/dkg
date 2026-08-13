@@ -295,10 +295,10 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: ['stale', 'already-applied', 'ready', 'deferred|verified-state-mismatch'],
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:196',
+      'packages/core/src/system-record-authority-v1-internal.ts:245',
       'packages/core/src/system-record-authority-v1-internal.ts:199',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1282',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1284-1293',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1274',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1276-1285',
       'packages/storage/src/system-record-next-state-v1-internal.ts:270',
     ],
     note: 'MAPPING core stale TO {stale} ALONE WOULD FABRICATE A DIVERGENCE, and '
@@ -321,9 +321,9 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: ['deferred|authority-fork'],
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:200',
+      'packages/core/src/system-record-authority-v1-internal.ts:249',
       'packages/core/src/system-record-authority-v1-internal.ts:508',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1294',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1286',
     ],
     note: 'No storage outcome is spelled `quarantine`: storage\'s quarantine is an '
       + 'axis-H INPUT operation, not an outcome. The image is still groundable and '
@@ -351,7 +351,7 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
       'packages/core/src/system-record-authority-v1-internal.ts:139-141',
-      'packages/core/src/system-record-authority-v1-internal.ts:171-172',
+      'packages/core/src/system-record-authority-v1-internal.ts:220-221',
       'packages/storage/test/authority-verdict-diff-projection-v1.test.ts:129',
     ],
     note: 'NO IMAGE CAN BE GROUNDED, and the reason is structural rather than a gap '
@@ -391,7 +391,7 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     image: STORAGE_WITHHOLDING_V1,
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
-      'packages/core/src/system-record-authority-v1-internal.ts:98-103',
+      'packages/core/src/system-record-authority-v1-internal.ts:147-152',
       'packages/storage/src/system-record-next-state-v1-internal.ts:164-179',
       'packages/storage/test/authority-verdict-diff-projection-equivalence-v1.test.ts',
     ],

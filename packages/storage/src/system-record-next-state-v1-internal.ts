@@ -1037,20 +1037,6 @@ function classifyTombstoneAdvance(
 }
 
 /**
- * Storage holds no verification clock on this path.
- *
- * `admittedDeadlineMs` is a lane budget, not a wall clock, and passing it would
- * hand core a number that LOOKS like a timestamp. Core reads the clock only
- * after a retained transition has matched (authority :312 -> authority-
- * verification :30), which this path cannot supply, so no reachable decision
- * consults it. When a producer for that transition appears, an unusable clock
- * makes core refuse with `verification clock is invalid` rather than decide on a
- * fabricated one -- the residue of the missing operand is a refusal, never an
- * admission.
- */
-const NO_VERIFICATION_CLOCK_V1 = Number.NaN;
-
-/**
  * The ADR 0002 :129-133 late-tombstone decision, taken by core.
  *
  * NOTHING HERE RE-CHECKS AUTHORITY. The predecessor and retained-transition
@@ -1084,13 +1070,19 @@ function classifyLateTombstoneAdvance(
   if (classification.outcome !== 'decided') {
     return Object.freeze({ outcome: 'deferred', reason: 'undecided-authority-classification' });
   }
+  // THE EVIDENCE IS EXACTLY WHAT THIS PACKAGE HOLDS, and no clock appears in it.
+  // `retainedTransition` carries the transition and its verifying clock as one
+  // field, so a caller with neither -- which is every caller here, because
+  // AgentProfileAuthorityTransitionV1 occurs nowhere in this package and the
+  // applied row persists digests only -- cannot express an admission at all.
+  // Core's answer is therefore the ADR's reject-for-retry, by construction
+  // rather than by a sentinel nothing happens to read.
   const predecessor = facts.verifiedAuthoritySummary.tombstonePredecessor;
   const decision = evaluateAgentProfileLateTombstoneAdvanceV1(
     facts.head,
-    Object.freeze({
-      nowMs: NO_VERIFICATION_CLOCK_V1,
-      ...(predecessor === undefined ? {} : { tombstonePredecessor: predecessor }),
-    }),
+    Object.freeze(
+      predecessor === undefined ? {} : { tombstonePredecessor: predecessor },
+    ),
     current.transitionLineage,
   );
   // EVERY BRANCH OF CORE'S DECISION IS WRITTEN OUT, and the exhaustiveness is

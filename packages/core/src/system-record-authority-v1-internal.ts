@@ -85,6 +85,55 @@ export interface AgentProfileHeadAdvanceEvidenceV1 {
   readonly forkBaseHead?: AgentProfileHeadObjectV1;
 }
 
+/**
+ * The retained transition out of a late tombstone's sequence, WITH the clock
+ * that verifies it.
+ *
+ * They are one field because neither is meaningful alone on this path: the
+ * transition is only ever checked by a clocked verifier, and a clock with no
+ * transition is a value nothing reads. Pairing them makes "a binding transition
+ * plus an unusable clock" -- the shape that inverted a `stale` into an `accept`
+ * -- unrepresentable rather than merely refused.
+ */
+export interface AgentProfileLateTombstoneRetainedTransitionV1 {
+  readonly transition: AgentProfileAuthorityTransitionV1;
+  readonly nowMs: number;
+}
+
+/**
+ * Exactly the operands the ADR 0002 :129-133 rule reads, and nothing else.
+ *
+ * Deliberately NOT {@link AgentProfileHeadAdvanceEvidenceV1}: that shape carries
+ * fork resolutions, evidence heads, a summary and a mandatory clock, none of
+ * which this rule consults, and a caller forced to fill a required `nowMs` it
+ * does not have will invent one.
+ */
+export interface AgentProfileLateTombstoneEvidenceV1 {
+  readonly tombstonePredecessor?: AgentProfileActiveHeadObjectV1;
+  readonly retainedTransition?: AgentProfileLateTombstoneRetainedTransitionV1;
+}
+
+function snapshotLateTombstoneEvidenceV1(
+  value: unknown,
+): AgentProfileLateTombstoneEvidenceV1 {
+  const probe = snapshotSystemRecordDataRecord(value, 'late tombstone evidence');
+  const optionals = ['tombstonePredecessor', 'retainedTransition'].filter(
+    (key) => hasOwnDataProperty(probe, key),
+  );
+  const evidence = snapshotExactDataRecord(probe, optionals, 'late tombstone evidence');
+  const retained = evidence.retainedTransition === undefined
+    ? undefined
+    : snapshotExactDataRecord(
+      evidence.retainedTransition,
+      ['transition', 'nowMs'],
+      'late tombstone retained transition',
+    );
+  return Object.freeze({
+    ...evidence,
+    ...(retained === undefined ? {} : { retainedTransition: Object.freeze({ ...retained }) }),
+  }) as unknown as AgentProfileLateTombstoneEvidenceV1;
+}
+
 export function evaluateAgentProfileHeadAdvanceV1(
   accepted: AgentProfileAcceptedAuthorityStateV1,
   candidate: AgentProfileHeadObjectV1,
@@ -344,12 +393,11 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  *
  * `evidence.tombstonePredecessor` is REQUIRED in substance: without it the
  * decision is `reject | late tombstone lacks its exact verified active
- * predecessor`. It is typed optional because it belongs to a shared evidence
- * shape, not because this arm tolerates its absence.
+ * predecessor`.
  *
- * `evidence.acceptedTransition` MUST be the retained transition OUT of the
- * candidate's sequence -- `lineage[candidateSequence]`, the rotation into the
- * NEXT sequence -- not the rotation into the candidate's own. Supplying the
+ * `evidence.retainedTransition.transition` MUST be the retained transition OUT
+ * of the candidate's sequence -- `lineage[candidateSequence]`, the rotation into
+ * the NEXT sequence -- not the rotation into the candidate's own. Supplying the
  * wrong one is refused rather than misread, because :303-305 compares prior
  * sequence, next sequence AND digest against the retained entry.
  *
@@ -361,19 +409,27 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * a RETRYABLE outcome; mapping it onto a terminal one reintroduces the exact
  * behaviour this entry exists to remove.
  *
- * `evidence.nowMs` is read ONLY after a retained transition has matched, by the
- * delegate at authority-verification :30. A caller with no verification clock
- * may pass a value that cannot validate, and the residue is a refusal rather
- * than an admission -- but it must not pass a plausible-looking number it did
- * not measure.
+ * THE CLOCK TRAVELS WITH THE TRANSITION, AND THAT PAIRING IS A SAFETY PROPERTY
+ * RATHER THAN TIDINESS. This arm reads a NON-ACCEPT from the transition verifier
+ * as "the tombstone takes precedence" (:312-315). The verifier also refuses on
+ * an unusable clock -- so a caller that supplied a binding transition together
+ * with an invalid `nowMs` would have a clock failure INVERT the verdict from
+ * `stale` into `accept`, admitting a tombstone that a valid clock supersedes.
+ * Measured before it was fixed: NaN and -1 both returned `accept` where the same
+ * inputs with a real clock returned `stale`, while the full evaluator rejected
+ * them at its front door. So the two operands are ONE optional field, and the
+ * clock gates the full evaluator runs at :96-103 are mirrored below rather than
+ * delegated. The invariant this buys, asserted in the suite: **`accept` and
+ * `stale` are reachable only when a retained transition AND a valid clock were
+ * both supplied.** A caller with neither cannot express an admission at all.
  */
 export function evaluateAgentProfileLateTombstoneAdvanceV1(
   candidate: AgentProfileHeadObjectV1,
-  evidence: AgentProfileHeadAdvanceEvidenceV1,
+  evidence: AgentProfileLateTombstoneEvidenceV1,
   acceptedTransitionLineage: readonly AgentProfileAppliedTransitionV1[],
 ): SystemRecordAuthorityDecisionV1 {
   const candidateState = validateAgentProfileHeadObjectV1(candidate);
-  const evidenceState = snapshotHeadAdvanceEvidenceV1(evidence);
+  const supplied = snapshotLateTombstoneEvidenceV1(evidence);
   const lineage = validateAppliedTransitionLineage(acceptedTransitionLineage);
   const candidateSequence = parseCanonicalDecimalU64(candidateState.authoritySequence);
   if (candidateSequence >= BigInt(lineage.length)) {
@@ -382,9 +438,35 @@ export function evaluateAgentProfileLateTombstoneAdvanceV1(
       reason: 'late tombstone entry requires a candidate below the accepted authority sequence',
     };
   }
+  const retained = supplied.retainedTransition;
+  if (retained !== undefined) {
+    // MIRRORED FROM :96-103, NOT DELEGATED. Below this point a non-accept from
+    // the transition verifier MEANS "the tombstone takes precedence", so a clock
+    // the verifier would refuse on must be turned into a reject HERE or it
+    // becomes an admission there.
+    if (!isSafeNow(retained.nowMs)) {
+      return { decision: 'reject', reason: 'verification clock is invalid' };
+    }
+    if (isIssuedTooFarInFuture(candidateState.issuedAt, retained.nowMs)) {
+      return {
+        decision: 'reject',
+        reason: 'head issuedAt exceeds the future clock-skew bound',
+      };
+    }
+  }
   return evaluateLowerSequenceAgentProfileHeadAdvanceV1(
     candidateState,
-    evidenceState,
+    snapshotHeadAdvanceEvidenceV1({
+      // Unreachable when no transition was supplied: the arm refuses at :300-311
+      // before any clock is read. It is an unusable value rather than a
+      // plausible one so that a future reordering fails closed instead of
+      // deciding on a number nobody measured.
+      nowMs: retained === undefined ? Number.NaN : retained.nowMs,
+      ...(supplied.tombstonePredecessor === undefined
+        ? {}
+        : { tombstonePredecessor: supplied.tombstonePredecessor }),
+      ...(retained === undefined ? {} : { acceptedTransition: retained.transition }),
+    }),
     lineage,
     candidateSequence,
   );

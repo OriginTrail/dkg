@@ -114,6 +114,8 @@ export {
   isDirectResolvingSuccessorV1,
   type AgentProfileAcceptedAuthorityStateV1,
   type AgentProfileHeadAdvanceEvidenceV1,
+  type AgentProfileLateTombstoneEvidenceV1,
+  type AgentProfileLateTombstoneRetainedTransitionV1,
   type SystemRecordAuthorityDecisionV1,
 } from './system-record-authority-v1-internal.js';
 

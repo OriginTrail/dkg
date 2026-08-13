@@ -225,72 +225,6 @@ export const JOIN_LEVEL1_TABLE_V1: Readonly<Record<string, number>> = {
   'NO-MAPPING quarantine|transition-equivocation -> stale': 768,
 };
 
-/**
- * THE LATE-TOMBSTONE SEAM'S MOVEMENT, PRE-PINNED BEFORE THE ROUTING LANDED.
- *
- * Every count here was derived from the axis arithmetic and from the storage
- * gates, and measured against the UNROUTED tree, before any of the routing
- * existed. It is kept as its own table because the movement is invisible in
- * every bucket total: AGREEMENT 1,152, DIVERGENCE 192 and NO-MAPPING 384 are
- * identical before and after, while all 1,728 cells changed their storage
- * outcome. A coverage gate reading only the four-bucket partition stays green
- * through the entire behaviour change of this seam.
- *
- * THE POPULATION IS DECLARED FROM THE GATES, never from the answer: operation
- * 'tombstone' (entry :171-181), a present snapshot (:959 advances an absent
- * one), an applied status other than 'quarantined' (:976-980 defers those), a
- * tombstone candidate (:930 refuses any other head), and axis D 'below'
- * (:1000). The SECOND disjunct at :1001-1002 -- equal sequence, lower version --
- * is a different ADR rule (:126-128) and was measured to contain 3,456 cells of
- * which ZERO are adjudicated, so "nothing else moved" there is structural.
- */
-export const LATE_TOMBSTONE_SEAM_MOVEMENT_V1: Readonly<Record<string, number>> = {
-  'before :: AGREEMENT reject -> stale': 1152,
-  'before :: DIVERGENCE accept -> stale': 192,
-  'before :: NO-MAPPING quarantine|transition-equivocation -> stale': 384,
-  'after :: AGREEMENT reject -> deferred|late-tombstone-evidence-incomplete': 384,
-  'after :: AGREEMENT reject -> deferred|undecided-authority-classification': 768,
-  'after :: DIVERGENCE accept -> deferred|late-tombstone-evidence-incomplete': 64,
-  'after :: DIVERGENCE accept -> deferred|undecided-authority-classification': 128,
-  'after :: NO-MAPPING quarantine|transition-equivocation -> deferred|late-tombstone-evidence-incomplete': 128,
-  'after :: NO-MAPPING quarantine|transition-equivocation -> deferred|undecided-authority-classification': 256,
-};
-
-/** The seam's comparable population, and the split the routing turns on. */
-export const LATE_TOMBSTONE_SEAM_POPULATION_V1: Readonly<Record<string, number>> = {
-  'comparable cells reaching the late-tombstone disjunct': 1728,
-  'of those, applied status active (classification decided)': 576,
-  'of those, applied status tombstone (classification undecided)': 576,
-  'of those, applied status dirty (classification undecided)': 576,
-  'not comparable: no mintable summary for the candidate': 1728,
-  'same-sequence lower-version disjunct, adjudicated': 0,
-  'same-sequence lower-version disjunct, not comparable': 3456,
-};
-
-/**
- * THE COUNTERFACTUAL, LABELLED AS ONE SO IT IS NEVER READ AS THE SHIPPED DESIGN.
- *
- * Before the routing existed, core was run over EVERY comparable seam cell using
- * the operands storage really holds. All 1,728 came back with one decision --
- * `reject | late tombstone requires the exact retained resurrection transition`
- * -- because storage cannot supply a retained transition for any of them.
- *
- * THE SHIPPED DESIGN DOES NOT PRODUCE THAT UNIFORM ROW, and pinning it would
- * have pinned a design that is not shipping. Only the 576 cells whose applied
- * row carries a decided authority classification reach core at all; the other
- * 1,152 stop at the precondition and defer under their own reason. So the live
- * pin is LATE_TOMBSTONE_SEAM_MOVEMENT_V1, which carries the two-reason split per
- * row and per status. A reason-agnostic pin would have been satisfied by any
- * deferral label and could not have caught the split collapsing.
- *
- * Kept because it is the measurement that sized the seam before anything was
- * built, and because it states what core WOULD answer for the 1,152 if their
- * classification were ever decided.
- */
-export const LATE_TOMBSTONE_COUNTERFACTUAL_CORE_DECISIONS_V1:
-Readonly<Record<string, number>> = {
-  'reject|late tombstone requires the exact retained resurrection transition': 1728,
-};
 
 /**
  * PER ENTRY, AND PER IMAGE MEMBER.
@@ -406,7 +340,7 @@ export const JOIN_DIVERGENCES_V1: Readonly<Record<string, number>> = {
  * THE DIRECTION OF THAT ARM WAS WRITTEN BACKWARDS HERE, AND IT IS A
  * SECURITY-RELEVANT GATE. The sentence used to read "returns `accept` once the
  * retained resurrection transition validates". Measured at
- * `packages/core/src/system-record-authority-v1-internal.ts:312-315`, the arm
+ * `packages/core/src/system-record-authority-v1-internal.ts:361-364`, the arm
  * returns `stale` when `evaluateAuthorityTransitionV1` ACCEPTS -- a validating
  * transition names the tombstone as its prior head, so a valid descendant
  * exists and the tombstone is superseded -- and returns `accept` OTHERWISE,
@@ -674,8 +608,8 @@ export const JOIN_IMPOSSIBILITY_PROOFS_V1: readonly JoinImpossibilityProofV1[] =
     subject: "the throw at system-record-next-state-v1-internal.ts:260-262, 'equal system-record "
       + "head cannot exist in absent state'",
     citations: [
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1292',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1240',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1284',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1232',
       'packages/storage/src/system-record-state-snapshot-v1-internal.ts:76',
     ],
     proof: "materialization 'reuse' is PRODUCED at exactly one site, :1249 (the literal occurs "
