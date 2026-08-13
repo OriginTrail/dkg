@@ -1080,7 +1080,7 @@ class WorkerCatchupRunner implements CatchupRunner {
         request: {
           ...request,
           graphOwnedDurableRecovery:
-            typeof (this.agent as any).syncDurableRecoveryContextGraph === 'function',
+            typeof this.agent.syncDurableRecoveryContextGraph === 'function',
         },
       });
     });
@@ -1184,12 +1184,6 @@ class WorkerCatchupRunner implements CatchupRunner {
         const [peerId, contextGraphId, priority, source] = args as [
           string, string, number | undefined, unknown,
         ];
-        if (typeof agent.syncDurableRecoveryContextGraph === 'function') {
-          const recovery = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
-            candidatePeerIds: [peerId],
-          });
-          return recovery.result;
-        }
         return agent.syncFromPeerDetailed(
           peerId,
           [contextGraphId],
@@ -1207,6 +1201,14 @@ class WorkerCatchupRunner implements CatchupRunner {
             ),
           },
         );
+      }
+      case 'syncDurableRecovery': {
+        const [peerId, contextGraphId] = args as [string, string];
+        const recovery = await this.agent.syncDurableRecoveryContextGraph(contextGraphId, {
+          candidatePeerIds: [peerId],
+          candidatesAreSyncCapable: true,
+        });
+        return recovery.result;
       }
       case 'syncSharedMemory': {
         const [peerId, contextGraphId, priority, source, selected] = args as [

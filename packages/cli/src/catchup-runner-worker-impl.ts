@@ -422,9 +422,11 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
   // Isolate per-peer failures: if one peer's sync steps throw, aggregate what we
   // can from the other peers instead of failing the entire subscribe/catch-up.
   const syncPeer = async (peerId: string, pass: CatchupPassContext): Promise<PeerRound> => {
-    const fromDurableAuthority = graphOwnedDurablePeerId !== undefined
-      ? peerId === graphOwnedDurablePeerId
-      : prepared.authoritativePeerId !== undefined && peerId === prepared.authoritativePeerId;
+    // A graph-owner bridge peer is only the scheduler entry point. It is not
+    // evidence that this peer is the metadata-resolved curator and therefore
+    // cannot turn an empty aggregate response into authority-hosted readiness.
+    const fromDurableAuthority = prepared.authoritativePeerId !== undefined
+      && peerId === prepared.authoritativePeerId;
     const fromSharedMemoryAuthority = authoritativeSharedMemoryPeerIds.size > 0
       ? authoritativeSharedMemoryPeerIds.has(peerId)
       : prepared.authoritativePeerId !== undefined && peerId === prepared.authoritativePeerId;
@@ -451,7 +453,13 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     const syncDurable = (
       { priority, source }: CatchupPlaneContext,
     ): Promise<CatchupDurableResult> =>
-      invoke<DurableSyncResult>('syncDurable', peerId, request.contextGraphId, priority, source)
+      invoke<DurableSyncResult>(
+        request.graphOwnedDurableRecovery ? 'syncDurableRecovery' : 'syncDurable',
+        peerId,
+        request.contextGraphId,
+        priority,
+        source,
+      )
         .catch(() => createFailedPeerDurableSyncResult())
         .then((rawDurable) => ({
           ...rawDurable,

@@ -94,7 +94,7 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
           };
         case 'waitForSyncProtocol':
           return true;
-        case 'syncDurable':
+        case 'syncDurableRecovery':
           durableCalls.push(args[0] as string);
           return durableResult();
         case 'finalizeCatchup':
@@ -107,6 +107,84 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(durableCalls).toEqual(['peer-a']);
     expect(result.peersTried).toBe(1);
     expect(result.peersNotAttempted).toBe(2);
+  });
+
+  it('does not credit a graph-owner bridge peer with curator-hosted emptiness', async () => {
+    const peerIds = ['peer-a', 'peer-b'];
+
+    const result = await runWorkerCatchup({
+      contextGraphId: 'cg-graph-owner-empty',
+      includeSharedMemory: false,
+      graphOwnedDurableRecovery: true,
+    }, async (method) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            authoritativePeerId: undefined,
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurableRecovery':
+          return {
+            ...durableResult(),
+            insertedTriples: 0,
+            fetchedMetaTriples: 0,
+            fetchedDataTriples: 0,
+            insertedMetaTriples: 0,
+            insertedDataTriples: 0,
+            bytesReceived: 0,
+            emptyResponses: 1,
+            completedPhases: 2,
+          };
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(result.cleanPlaneCompletions?.durable.authorityEmptyPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.durable.emptyPeers).toBe(1);
+  });
+
+  it('keeps shared-memory fan-out when the host owns graph-level durable recovery', async () => {
+    const peerIds = ['peer-a', 'peer-b', 'peer-c'];
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup({
+      contextGraphId: 'cg-graph-owner-mixed',
+      includeSharedMemory: true,
+      graphOwnedDurableRecovery: true,
+    }, async (method, args) => {
+      switch (method) {
+        case 'prepareCatchup':
+          return {
+            isPrivateContextGraph: false,
+            peerIds,
+            connectedPeers: peerIds.length,
+          };
+        case 'waitForSyncProtocol':
+          return true;
+        case 'syncDurableRecovery':
+          durableCalls.push(args[0] as string);
+          return durableResult();
+        case 'syncSharedMemory':
+          sharedCalls.push(args[0] as string);
+          return sharedResult();
+        case 'finalizeCatchup':
+          return null;
+        default:
+          throw new Error(`unexpected invoke: ${method}`);
+      }
+    });
+
+    expect(durableCalls).toEqual(['peer-a']);
+    expect(sharedCalls.sort()).toEqual([...peerIds].sort());
+    expect(result.peersTried).toBe(3);
   });
 
   it('stops the walk at the first peer that proves every requested plane', async () => {

@@ -10,6 +10,15 @@ import {
   type ProtocolOutboxStore,
   type ContextGraphJoinPolicyRecord,
   parseContextGraphJoinPolicyRecord,
+  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
+  isValidSyncCheckpointEntry,
+  transitionSyncCheckpointManifestOffset,
+  transitionSyncCheckpointOffset,
+  transitionSyncCheckpointResponderSession,
+  withoutSyncCheckpointResponderSession,
+  type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
+  type SyncCheckpointEntry,
 } from '@origintrail-official/dkg-core';
 
 export {
@@ -17,7 +26,7 @@ export {
   SqliteContextGraphRegistryScanCursorStore,
 } from './chain-cursor-stores.js';
 
-const SCHEMA_VERSION = 33;
+export const SCHEMA_VERSION = 34;
 // Default operator retention. Lowered from 90 → 14 days on V15 (2026-05) after
 // a production incident in which the `logs` table + its FTS5 shadow tables
 // grew to ~9 GB on a 12-day-old node and corrupted the SQLite page (header
@@ -314,6 +323,9 @@ export class DashboardDB {
       }
       if (!columns.has('responder_session_expires_at')) {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_expires_at INTEGER;`);
+      }
+      if (!columns.has('responder_session_offset')) {
+        this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN responder_session_offset INTEGER;`);
       }
       if (!columns.has('manifest_digest')) {
         this.db.exec(`ALTER TABLE sync_checkpoints ADD COLUMN manifest_digest TEXT;`);
@@ -958,6 +970,7 @@ export class DashboardDB {
           expires_at INTEGER NOT NULL,
           responder_session_id TEXT,
           responder_session_expires_at INTEGER,
+          responder_session_offset INTEGER CHECK (responder_session_offset >= 0),
           manifest_digest TEXT,
           manifest_prefix_digest TEXT,
           terminal INTEGER NOT NULL DEFAULT 0 CHECK (terminal IN (0, 1))
@@ -1247,6 +1260,18 @@ export class DashboardDB {
       // SQLite checkpoints have the same safety contract as the in-memory
       // requester store and survive daemon restarts.
       ensureSyncCheckpointResumeColumns();
+    }
+    if (version < 34) {
+      // The V33 manifest-bound continuation must not share a key with V32,
+      // which interpreted OFFSET as an unverified raw responder coordinate.
+      // Drop every pre-versioned durable DATA row before new code starts using
+      // the `|checkpoint:v2` namespace, so a later rollback also fails closed.
+      ensureSyncCheckpointResumeColumns();
+      this.db.prepare(`
+        DELETE FROM sync_checkpoints
+         WHERE key LIKE '%|durable|data%'
+           AND key NOT LIKE '%|durable|data|checkpoint:v2%'
+      `).run();
     }
     this.db.pragma(`user_version = ${SCHEMA_VERSION}`);
     if (upgradedExistingDb && !this.explicitRetentionDays) {
@@ -3356,11 +3381,6 @@ export class DashboardDB {
 
 // --- Sync requester checkpoints (issue #1138 A3) ---
 
-const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
-type SyncManifestDigest = `sha256:${string}`;
-type SyncManifestPrefixDigest = `sha256:${string}`;
-const SYNC_DIGEST_PATTERN = /^sha256:[0-9a-f]{64}$/;
-
 export class SqliteSyncCheckpointStore {
   private readonly db: Database.Database;
   private readonly clock: () => number;
@@ -3375,19 +3395,10 @@ export class SqliteSyncCheckpointStore {
     this.ttlMs = options.ttlMs ?? DEFAULT_SYNC_CHECKPOINT_TTL_MS;
   }
 
-  get(key: string, now = this.clock()): {
-    offset: number;
-    updatedAtMs: number;
-    expiresAtMs: number;
-    manifestDigest?: SyncManifestDigest;
-    manifestPrefixDigest?: SyncManifestPrefixDigest;
-    terminal?: boolean;
-    responderSessionId?: string;
-    responderSessionExpiresAtMs?: number;
-  } | undefined {
+  private readRow(key: string): SyncCheckpointEntry | undefined {
     const row = this.db.prepare(
       `SELECT offset, updated_at, expires_at,
-              responder_session_id, responder_session_expires_at,
+              responder_session_id, responder_session_expires_at, responder_session_offset,
               manifest_digest, manifest_prefix_digest, terminal
          FROM sync_checkpoints WHERE key = ?`,
     ).get(key) as {
@@ -3396,21 +3407,12 @@ export class SqliteSyncCheckpointStore {
       expires_at: number;
       responder_session_id: string | null;
       responder_session_expires_at: number | null;
-      manifest_digest: SyncManifestDigest | null;
-      manifest_prefix_digest: SyncManifestPrefixDigest | null;
+      responder_session_offset: number | null;
+      manifest_digest: DurableManifestDigest | null;
+      manifest_prefix_digest: DurableManifestPrefixDigest | null;
       terminal: number;
     } | undefined;
     if (!row) return undefined;
-    if (row.expires_at < now) {
-      this.delete(key);
-      return undefined;
-    }
-    const hasFreshResponderSession = Boolean(row.responder_session_id)
-      && Number.isSafeInteger(row.responder_session_expires_at)
-      && (row.responder_session_expires_at ?? 0) > now;
-    if (row.responder_session_id && !hasFreshResponderSession) {
-      this.clearResponderSession(key);
-    }
     return {
       offset: row.offset,
       updatedAtMs: row.updated_at,
@@ -3420,99 +3422,113 @@ export class SqliteSyncCheckpointStore {
       ...(row.manifest_prefix_digest
         ? { manifestPrefixDigest: row.manifest_prefix_digest }
         : {}),
-      ...(hasFreshResponderSession
-        ? {
-            responderSessionId: row.responder_session_id!,
-            responderSessionExpiresAtMs: row.responder_session_expires_at!,
-          }
+      // Preserve each nullable session column independently so the shared
+      // validator can distinguish an absent session from a torn/malformed
+      // persisted session. Collapsing a partial row to no session fields would
+      // turn corrupt durable state into an apparently valid ordinary offset.
+      ...(row.responder_session_id !== null
+        ? { responderSessionId: row.responder_session_id }
+        : {}),
+      ...(row.responder_session_expires_at !== null
+        ? { responderSessionExpiresAtMs: row.responder_session_expires_at }
+        : {}),
+      ...(row.responder_session_offset !== null
+        ? { responderSessionOffset: row.responder_session_offset }
         : {}),
     };
   }
 
-  set(key: string, value: number, nowMs = this.clock()): void {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
+  get(key: string, now = this.clock()): SyncCheckpointEntry | undefined {
+    const entry = this.readRow(key);
+    if (!entry) return undefined;
+    if (!isValidSyncCheckpointEntry(entry) || entry.expiresAtMs < now) {
+      this.delete(key);
+      return undefined;
     }
+    if (
+      entry.responderSessionId
+      && (entry.responderSessionExpiresAtMs ?? 0) <= now
+    ) {
+      const withoutExpiredSession = withoutSyncCheckpointResponderSession(entry);
+      this.writeEntry(key, withoutExpiredSession);
+      return withoutExpiredSession;
+    }
+    return entry;
+  }
+
+  private writeEntry(key: string, entry: SyncCheckpointEntry): void {
     this.db.prepare(`
-      INSERT INTO sync_checkpoints (key, offset, updated_at, expires_at)
-      VALUES (?, ?, ?, ?)
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at, responder_session_offset,
+        manifest_digest, manifest_prefix_digest, terminal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(key) DO UPDATE SET
         offset = excluded.offset,
         updated_at = excluded.updated_at,
         expires_at = excluded.expires_at,
-        manifest_digest = NULL,
-        manifest_prefix_digest = NULL,
-        terminal = 0,
-        responder_session_id = CASE
-          WHEN sync_checkpoints.manifest_digest IS NULL
-           AND sync_checkpoints.responder_session_expires_at > ?
-            THEN sync_checkpoints.responder_session_id
-          ELSE NULL
-        END,
-        responder_session_expires_at = CASE
-          WHEN sync_checkpoints.manifest_digest IS NULL
-           AND sync_checkpoints.responder_session_expires_at > ?
-            THEN sync_checkpoints.responder_session_expires_at
-          ELSE NULL
-        END
-    `).run(key, value, nowMs, nowMs + this.ttlMs, nowMs, nowMs);
+        responder_session_id = excluded.responder_session_id,
+        responder_session_expires_at = excluded.responder_session_expires_at,
+        responder_session_offset = excluded.responder_session_offset,
+        manifest_digest = excluded.manifest_digest,
+        manifest_prefix_digest = excluded.manifest_prefix_digest,
+        terminal = excluded.terminal
+    `).run(
+      key,
+      entry.offset,
+      entry.updatedAtMs,
+      entry.expiresAtMs,
+      entry.responderSessionId ?? null,
+      entry.responderSessionExpiresAtMs ?? null,
+      entry.responderSessionOffset ?? null,
+      entry.manifestDigest ?? null,
+      entry.manifestPrefixDigest ?? null,
+      entry.terminal ? 1 : 0,
+    );
+  }
+
+  set(
+    key: string,
+    value: number,
+    nowMs = this.clock(),
+    responderSessionOffset?: number,
+  ): void {
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointOffset({
+        key,
+        existing: this.get(key, nowMs),
+        value,
+        nowMs,
+        ttlMs: this.ttlMs,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   setManifestBoundOffset(
     key: string,
     value: number,
-    manifestDigest: SyncManifestDigest,
+    manifestDigest: DurableManifestDigest,
     nowMs = this.clock(),
-    manifestPrefixDigest?: SyncManifestPrefixDigest,
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
     terminal = false,
+    responderSessionOffset?: number,
   ): void {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
-    }
-    if (!SYNC_DIGEST_PATTERN.test(manifestDigest)) {
-      throw new Error(`Invalid sync manifest digest for ${key}`);
-    }
-    if (
-      manifestPrefixDigest !== undefined
-      && !SYNC_DIGEST_PATTERN.test(manifestPrefixDigest)
-    ) {
-      throw new Error(`Invalid sync manifest prefix digest for ${key}`);
-    }
-    this.db.prepare(`
-      INSERT INTO sync_checkpoints (
-        key, offset, updated_at, expires_at,
-        manifest_digest, manifest_prefix_digest, terminal
-      ) VALUES (?, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        offset = excluded.offset,
-        updated_at = excluded.updated_at,
-        expires_at = excluded.expires_at,
-        manifest_digest = excluded.manifest_digest,
-        manifest_prefix_digest = excluded.manifest_prefix_digest,
-        terminal = excluded.terminal,
-        responder_session_id = CASE
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-           AND sync_checkpoints.responder_session_expires_at > ?
-            THEN sync_checkpoints.responder_session_id
-          ELSE NULL
-        END,
-        responder_session_expires_at = CASE
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-           AND sync_checkpoints.responder_session_expires_at > ?
-            THEN sync_checkpoints.responder_session_expires_at
-          ELSE NULL
-        END
-    `).run(
-      key,
-      value,
-      nowMs,
-      nowMs + this.ttlMs,
-      manifestDigest,
-      manifestPrefixDigest ?? null,
-      terminal ? 1 : 0,
-      nowMs,
-      nowMs,
-    );
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointManifestOffset({
+        key,
+        existing: this.get(key, nowMs),
+        value,
+        manifestDigest,
+        nowMs,
+        ttlMs: this.ttlMs,
+        manifestPrefixDigest,
+        terminal,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   setResponderSession(
@@ -3520,80 +3536,36 @@ export class SqliteSyncCheckpointStore {
     sessionId: string,
     expiresAtMs: number,
     nowMs = this.clock(),
-    manifestDigest?: SyncManifestDigest,
-    manifestPrefixDigest?: SyncManifestPrefixDigest,
+    manifestDigest?: DurableManifestDigest,
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+    responderSessionOffset?: number,
   ): void {
-    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
-      throw new Error(`Invalid sync responder session for ${key}`);
-    }
     if (expiresAtMs <= nowMs) {
       this.clearResponderSession(key);
       return;
     }
-    if (manifestDigest !== undefined && !SYNC_DIGEST_PATTERN.test(manifestDigest)) {
-      throw new Error(`Invalid sync manifest digest for ${key}`);
-    }
-    if (
-      manifestPrefixDigest !== undefined
-      && !SYNC_DIGEST_PATTERN.test(manifestPrefixDigest)
-    ) {
-      throw new Error(`Invalid sync manifest prefix digest for ${key}`);
-    }
-    this.db.prepare(`
-      INSERT INTO sync_checkpoints (
-        key, offset, updated_at, expires_at,
-        responder_session_id, responder_session_expires_at,
-        manifest_digest, manifest_prefix_digest
-      ) VALUES (?, 0, ?, ?, ?, ?, ?, ?)
-      ON CONFLICT(key) DO UPDATE SET
-        offset = CASE
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-            THEN sync_checkpoints.offset
-          ELSE 0
-        END,
-        updated_at = CASE
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-            THEN sync_checkpoints.updated_at
-          ELSE excluded.updated_at
-        END,
-        expires_at = CASE
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-            THEN sync_checkpoints.expires_at
-          ELSE excluded.expires_at
-        END,
-        manifest_digest = excluded.manifest_digest,
-        terminal = CASE
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-            THEN sync_checkpoints.terminal
-          ELSE 0
-        END,
-        manifest_prefix_digest = CASE
-          WHEN excluded.manifest_prefix_digest IS NOT NULL
-            THEN excluded.manifest_prefix_digest
-          WHEN sync_checkpoints.manifest_digest IS excluded.manifest_digest
-            THEN sync_checkpoints.manifest_prefix_digest
-          ELSE NULL
-        END,
-        responder_session_id = excluded.responder_session_id,
-        responder_session_expires_at = excluded.responder_session_expires_at
-    `).run(
-      key,
-      nowMs,
-      nowMs + this.ttlMs,
-      sessionId,
-      expiresAtMs,
-      manifestDigest ?? null,
-      manifestPrefixDigest ?? null,
-    );
+    const transition = this.db.transaction(() => {
+      this.writeEntry(key, transitionSyncCheckpointResponderSession({
+        key,
+        existing: this.get(key, nowMs),
+        sessionId,
+        expiresAtMs,
+        nowMs,
+        ttlMs: this.ttlMs,
+        manifestDigest,
+        manifestPrefixDigest,
+        responderSessionOffset,
+      }));
+    });
+    transition();
   }
 
   clearResponderSession(key: string): void {
-    this.db.prepare(`
-      UPDATE sync_checkpoints
-         SET responder_session_id = NULL,
-             responder_session_expires_at = NULL
-       WHERE key = ?
-    `).run(key);
+    const transition = this.db.transaction(() => {
+      const existing = this.readRow(key);
+      if (existing) this.writeEntry(key, withoutSyncCheckpointResponderSession(existing));
+    });
+    transition();
   }
 
   delete(key: string): void {

@@ -13,6 +13,7 @@ export interface DurableRecoverySliceEvidence {
   readonly terminalPersisted: boolean;
   readonly checkpointAdvanced: boolean;
   readonly manifestRebound: boolean;
+  readonly metadataContinuationAdvanced?: boolean;
   readonly deniedPhases: number;
   readonly rejectedKcs: number;
   readonly dataRejectedMissingMeta: number;
@@ -26,6 +27,7 @@ export function classifyDurableRecoverySlice(
   if (
     evidence.checkpointAdvanced
     || evidence.manifestRebound
+    || evidence.metadataContinuationAdvanced === true
   ) return 'partial-progress';
   if (
     evidence.deniedPhases > 0

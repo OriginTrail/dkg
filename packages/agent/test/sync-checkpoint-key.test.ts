@@ -4,7 +4,7 @@ import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/che
 describe('getSyncCheckpointKey', () => {
   it('keeps an unscoped key when no sinceBatchId is given', () => {
     expect(getSyncCheckpointKey('peerA', 'mfacts', false, 'data')).toBe(
-      'peerA|mfacts|durable|data',
+      'peerA|mfacts|durable|data|checkpoint:v2',
     );
   });
 
@@ -19,7 +19,7 @@ describe('getSyncCheckpointKey', () => {
       'peerA|mfacts|durable|snapshot|ref-1',
     );
     expect(getSyncCheckpointKey('peerA', 'mfacts', false, 'data', 'ref-1')).toBe(
-      'peerA|mfacts|durable|data',
+      'peerA|mfacts|durable|data|checkpoint:v2',
     );
   });
 
@@ -28,7 +28,7 @@ describe('getSyncCheckpointKey', () => {
     const delta7 = getSyncCheckpointKey('peerA', 'mfacts', false, 'data', undefined, '7');
     const delta9 = getSyncCheckpointKey('peerA', 'mfacts', false, 'data', undefined, '9');
 
-    expect(delta7).toBe('peerA|mfacts|durable|data|since:7');
+    expect(delta7).toBe('peerA|mfacts|durable|data|checkpoint:v2|since:7');
     expect(delta7).not.toBe(full);
     expect(delta7).not.toBe(delta9);
   });

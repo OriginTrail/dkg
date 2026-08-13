@@ -23,6 +23,11 @@ import {
   type SyncCheckpointStore,
 } from '../checkpoint/state.js';
 import {
+  resolveManifestCheckpointDecision,
+  resolveResponderResumeDecision,
+  resolveResponderSessionLossCleanup,
+} from './manifest-resume-policy.js';
+import {
   createDurableDataSyncSessionId,
   createSyncResponderSessionId,
   DURABLE_DATA_SYNC_SESSION_TTL_MS,
@@ -43,6 +48,7 @@ type UnfinishedSyncResponderSession = {
   syncSessionId: string;
   expiresAt: number;
   manifestDigest?: DurableManifestDigest;
+  responderSessionOffset?: number;
 };
 
 const unfinishedSyncResponderSessions = new Map<string, UnfinishedSyncResponderSession>();
@@ -85,6 +91,9 @@ function getPersistedSyncResponderSession(
   return {
     syncSessionId: checkpoint.responderSessionId,
     expiresAt: checkpoint.responderSessionExpiresAtMs!,
+    ...(checkpoint.responderSessionOffset !== undefined
+      ? { responderSessionOffset: checkpoint.responderSessionOffset }
+      : {}),
     ...(checkpoint.manifestDigest ? { manifestDigest: checkpoint.manifestDigest } : {}),
   };
 }
@@ -95,10 +104,12 @@ function persistUnfinishedSyncResponderSession(
   session: UnfinishedSyncResponderSession,
   manifestDigest: DurableManifestDigest | undefined,
   manifestPrefixDigest: DurableManifestPrefixDigest | undefined,
+  responderSessionOffset: number,
   now = Date.now(),
 ): void {
   rememberUnfinishedSyncResponderSession(checkpointKey, {
     ...session,
+    responderSessionOffset,
     ...(manifestDigest ? { manifestDigest } : {}),
   }, now);
   checkpointStore.setResponderSession?.(
@@ -108,6 +119,7 @@ function persistUnfinishedSyncResponderSession(
     now,
     manifestDigest,
     manifestPrefixDigest,
+    responderSessionOffset,
   );
 }
 
@@ -156,8 +168,13 @@ function createResponderSessionId(includeSharedMemory: boolean, phase: SyncPhase
 
 export interface SyncPageResult {
   quads: Quad[];
+  /** Absolute raw responder row coordinate for every retained quad. */
+  quadRawOffsets?: number[];
   bytesReceived: number;
+  /** Verified manifest coordinate used by checkpoint/materialization logic. */
   resumedFromOffset: number;
+  /** Raw responder-session coordinate used on the wire for this invocation. */
+  rawResumedFromOffset?: number;
   /**
    * True only when this phase started without reusing a requester-side
    * responder snapshot token. Optional for rolling deep-import compatibility;
@@ -167,6 +184,8 @@ export interface SyncPageResult {
   /** META generation actually used to authorize this DATA continuation. */
   manifestDigest?: DurableManifestDigest;
   nextOffset: number;
+  /** Raw responder-session coordinate after the last accepted page. */
+  rawNextOffset?: number;
   checkpointKey: string;
   completed: boolean;
   timedOut: boolean;
@@ -582,6 +601,8 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   } = params;
 
   const allQuads: Quad[] = [];
+  const allQuadRawOffsets: number[] = [];
+  let hasCompleteQuadRawOffsetMapping = true;
   // Check for a pre-aborted signal BEFORE starting phase telemetry so a caller
   // that passes an already-aborted signal never records a phase_start without a
   // terminal outcome. Every started phase is guaranteed a finish() below.
@@ -604,77 +625,47 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     unfinishedSyncResponderSessions.delete(checkpointKey);
   }
   let checkpoint = checkpointStore.get(checkpointKey);
-  let responderSessionNeedsPriming = false;
-  if (manifestDigest && checkpoint) {
-    const currentPrefixDigest = manifestPrefixDigestAtOffset?.(checkpoint.offset);
-    const fullGenerationMatches = checkpoint.manifestDigest === manifestDigest;
-    const savedPrefixMatches = checkpoint.manifestPrefixDigest !== undefined
-      && checkpoint.manifestPrefixDigest === currentPrefixDigest;
-    const offsetHasCurrentBoundaryProof = checkpoint.offset === 0
-      || currentPrefixDigest !== undefined;
-
-    if (!fullGenerationMatches) {
-      if (
-        assetUals === undefined
-        && checkpoint.offset > 0
-        && savedPrefixMatches
-        && checkpointStore.setManifestBoundOffset
-      ) {
-        // The suffix changed, but every descriptor through the verified graph
-        // boundary is byte-identical. Rebind that prefix to the fresh META
-        // generation and rotate only the responder snapshot. The new token is
-        // primed at offset zero below before it is allowed to jump to this
-        // boundary, so raw responder cursor semantics remain generation-local.
-        checkpointStore.setManifestBoundOffset(
-          checkpointKey,
-          checkpoint.offset,
-          manifestDigest,
-          Date.now(),
-          currentPrefixDigest,
-        );
-        unfinishedSyncResponderSessions.delete(checkpointKey);
-        checkpoint = checkpointStore.get(checkpointKey);
-        responderSessionNeedsPriming = true;
-        logInfo(
-          ctx,
-          `Reusing verified durable prefix for "${contextGraphId}" through offset ${checkpoint?.offset ?? 0} after META generation change`,
-        );
-      } else {
-        // OFFSET has meaning only inside the exact META generation that
-        // produced it. Missing legacy prefix proof, a changed prefix, or a
-        // custom store that cannot atomically rebind the tuple all restart.
-        deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-        checkpoint = undefined;
-      }
-    } else if (!offsetHasCurrentBoundaryProof) {
-      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-      checkpoint = undefined;
-    } else if (
-      checkpoint.offset > 0
-      && checkpoint.manifestPrefixDigest !== undefined
-      && !savedPrefixMatches
-    ) {
-      deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-      checkpoint = undefined;
-    } else if (
-      checkpoint.offset > 0
-      && currentPrefixDigest !== undefined
-      && checkpoint.manifestPrefixDigest === undefined
-      && checkpointStore.setManifestBoundOffset
-    ) {
-      // Upgrade an otherwise generation-bound checkpoint so a later suffix
-      // change or responder restart can reuse its verified prefix safely.
-      checkpointStore.setManifestBoundOffset(
-        checkpointKey,
-        checkpoint.offset,
-        manifestDigest,
-        Date.now(),
-        currentPrefixDigest,
-      );
-      checkpoint = checkpointStore.get(checkpointKey);
-    }
+  const savedPrefixDigest = checkpoint && manifestDigest
+    ? manifestPrefixDigestAtOffset?.(checkpoint.offset)
+    : undefined;
+  const manifestCheckpointDecision = resolveManifestCheckpointDecision({
+    checkpoint,
+    manifestDigest,
+    prefixDigestAtOffset: savedPrefixDigest,
+    hasExactAssetFilter: assetUals !== undefined,
+  });
+  if (manifestCheckpointDecision.kind === 'reset') {
+    // OFFSET has meaning only inside the exact META generation that produced
+    // it. A missing/changed prefix or a store that cannot persist the binding
+    // restarts both the verified and raw responder coordinates.
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+    checkpoint = undefined;
+  } else if (manifestCheckpointDecision.kind === 'rebind-and-prime') {
+    checkpointStore.setManifestBoundOffset(
+      checkpointKey,
+      checkpoint!.offset,
+      manifestDigest!,
+      Date.now(),
+      manifestCheckpointDecision.prefixDigest,
+    );
+    unfinishedSyncResponderSessions.delete(checkpointKey);
+    checkpoint = checkpointStore.get(checkpointKey);
+    logInfo(
+      ctx,
+      `Reusing verified durable prefix for "${contextGraphId}" through offset ${checkpoint?.offset ?? 0} after META generation change`,
+    );
+  } else if (manifestCheckpointDecision.prefixUpgrade) {
+    // Upgrade an otherwise generation-bound checkpoint so a later suffix
+    // change or responder restart can reuse its verified prefix safely.
+    checkpointStore.setManifestBoundOffset(
+      checkpointKey,
+      checkpoint!.offset,
+      manifestDigest!,
+      Date.now(),
+      manifestCheckpointDecision.prefixUpgrade,
+    );
+    checkpoint = checkpointStore.get(checkpointKey);
   }
-  let offset = checkpoint?.offset ?? 0;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
   // A successful caller deletes the checkpoint after verification/storage.
@@ -683,45 +674,44 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
   const savedResponderSession = usesPageSession
     ? (
-        (checkpoint
+        getPersistedSyncResponderSession(checkpoint, manifestDigest, sessionStartedAt)
+        ?? (checkpoint
           ? getUnfinishedSyncResponderSession(checkpointKey, manifestDigest, sessionStartedAt)
           : undefined)
-        ?? getPersistedSyncResponderSession(checkpoint, manifestDigest, sessionStartedAt)
       )
     : undefined;
   const responderSessionStartedFresh = savedResponderSession === undefined;
-  if (usesPageSession && offset > 0 && !savedResponderSession) {
-    const currentPrefixDigest = manifestPrefixDigestAtOffset?.(offset);
-    if (
-      assetUals === undefined
-      && manifestDigest
-      && checkpoint?.manifestDigest === manifestDigest
-      && checkpoint?.manifestPrefixDigest === currentPrefixDigest
-      && currentPrefixDigest !== undefined
-    ) {
-      // The local verified prefix remains proven, but the responder token was
-      // evicted/restarted. Prime a new immutable responder generation instead
-      // of throwing away the local prefix.
-      responderSessionNeedsPriming = true;
-    } else {
-      checkpointStore.delete(checkpointKey);
-      offset = 0;
-    }
+  const responderResumeDecision = resolveResponderResumeDecision({
+    checkpoint,
+    usesPageSession,
+    savedResponderSessionOffset: savedResponderSession?.responderSessionOffset,
+    manifestRebindNeedsPriming: manifestCheckpointDecision.kind === 'rebind-and-prime',
+  });
+  if (responderResumeDecision.kind === 'reset-unmappable') {
+    // A verified manifest coordinate is not necessarily a raw responder
+    // coordinate. Once the immutable token is gone, restart instead of
+    // guessing that both coordinate spaces match.
+    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
+    checkpoint = undefined;
   }
-  const resumedFromOffset = offset;
+  const verifiedOffset = responderResumeDecision.verifiedOffset;
+  let offset = responderResumeDecision.rawOffset;
+  const responderSessionNeedsPriming = responderResumeDecision.kind === 'prime';
+  const resumedFromOffset = verifiedOffset;
+  const rawResumedFromOffset = offset;
   const verifiedResumePrefixDigest = resumedFromOffset > 0
     ? manifestPrefixDigestAtOffset?.(resumedFromOffset)
     : undefined;
-  const canRotateResponderAtVerifiedPrefix = Boolean(
-    usesPageSession
-    && assetUals === undefined
-    && resumedFromOffset > 0
-    && manifestDigest
-    && checkpoint?.manifestDigest === manifestDigest
-    && verifiedResumePrefixDigest !== undefined
-    && checkpoint?.manifestPrefixDigest === verifiedResumePrefixDigest
-    && checkpointStore.clearResponderSession,
-  );
+  const responderSessionLossCleanup = resolveResponderSessionLossCleanup({
+    usesPageSession,
+    hasExactAssetFilter: assetUals !== undefined,
+    checkpoint,
+    manifestDigest,
+    verifiedOffset: resumedFromOffset,
+    rawOffset: rawResumedFromOffset,
+    prefixDigestAtOffset: verifiedResumePrefixDigest,
+    supportsSessionClear: checkpointStore.clearResponderSession !== undefined,
+  });
   let bytesReceived = 0;
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
@@ -768,9 +758,55 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     ? {
       syncSessionId,
       expiresAt: savedResponderSession?.expiresAt ?? sessionStartedAt + DURABLE_DATA_SYNC_SESSION_TTL_MS,
+      responderSessionOffset: savedResponderSession?.responderSessionOffset ?? rawResumedFromOffset,
       ...(manifestDigest ? { manifestDigest } : {}),
     }
     : undefined;
+
+  const requestPage = async (
+    requestOffset: number,
+    selectPageSize: () => number,
+    onRetry: (attempt: number, delay: number, error: unknown) => void,
+  ): Promise<Uint8Array> => sendSyncRequest({
+    remotePeerId,
+    timeoutMs: Math.min(
+      syncPageTimeoutMs,
+      Math.max(2000, Math.floor(Math.max(0, deadline - Date.now()) / syncRouterAttempts)),
+    ),
+    retryAttempts: syncPageRetryAttempts,
+    signal,
+    contextGraphId,
+    offset: requestOffset,
+    protocolId: protocolSync,
+    plane: syncPlaneFor(includeSharedMemory),
+    phase,
+    requestFactory: async () => {
+      throwIfAborted(signal);
+      successfulPageSize = selectPageSize();
+      const request = await buildSyncRequest(
+        contextGraphId,
+        requestOffset,
+        successfulPageSize,
+        includeSharedMemory,
+        remotePeerId,
+        phase,
+        snapshotRef,
+        sinceBatchId,
+        syncSessionId,
+        recovery,
+        assetUals,
+      );
+      throwIfAborted(signal);
+      return request;
+    },
+    send,
+    validateResponse: (responseBytes) => {
+      if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
+        throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
+      }
+    },
+    onRetry,
+  });
 
   try {
     if (
@@ -787,47 +823,17 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         syncPageSize,
         Math.max(adaptivePageSizer.current(), SYNC_PAGE_SIZE + 1),
       );
-      successfulPageSize = primePageSize;
-      const primeBytes = await sendSyncRequest({
-        remotePeerId,
-        timeoutMs: Math.min(
-          syncPageTimeoutMs,
-          Math.max(2000, Math.floor(Math.max(0, deadline - Date.now()) / syncRouterAttempts)),
-        ),
-        retryAttempts: syncPageRetryAttempts,
-        signal,
-        contextGraphId,
-        offset: 0,
-        protocolId: protocolSync,
-        plane: syncPlaneFor(includeSharedMemory),
-        phase,
-        requestFactory: async () => buildSyncRequest(
-          contextGraphId,
-          0,
-          primePageSize,
-          includeSharedMemory,
-          remotePeerId,
-          phase,
-          snapshotRef,
-          sinceBatchId,
-          syncSessionId,
-          recovery,
-          assetUals,
-        ),
-        send,
-        validateResponse: (responseBytes) => {
-          if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
-            throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
-          }
-        },
-        onRetry: (attempt, delay, err) => {
+      const primeBytes = await requestPage(
+        0,
+        () => primePageSize,
+        (attempt, delay, err) => {
           logWarn(
             ctx,
             `Sync generation-prime retry ${attempt}/${syncPageRetryAttempts} for offset 0 `
             + `(delay ${Math.round(delay)}ms): ${err instanceof Error ? err.message : String(err)}`,
           );
         },
-      });
+      );
       throwIfAborted(signal);
       const primeBody = decodeSyncResponse(primeBytes);
       if (
@@ -870,56 +876,22 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         break;
       }
 
-      const remainingMs = Math.max(0, deadline - Date.now());
-      const timeoutMs = Math.min(
-        syncPageTimeoutMs,
-        Math.max(2000, Math.floor(remainingMs / syncRouterAttempts)),
-      );
-
       const curOffset = offset;
       const transportStartedAt = Date.now();
-      const responseBytes = await sendSyncRequest({
-        remotePeerId,
-        timeoutMs,
-        retryAttempts: syncPageRetryAttempts,
-        signal,
-        contextGraphId,
-        offset,
-        protocolId: protocolSync,
-        // W1 attempt labels. The admission source is NOT threaded here: it
-        // belongs to the enclosing operation and is read from the ambient
-        // context at the record site, which also keeps it structurally out of
-        // every coalescing key.
-        plane: syncPlaneFor(includeSharedMemory),
-        phase,
-        // `requestFactory` runs per-attempt so each retry carries a
-        // fresh `issuedAtMs`/`requestId`. Required for sync's auth
-        // gate (`SYNC_AUTH_MAX_AGE_MS` freshness TTL +
-        // `seenRequestIds` replay protection). The matching
-        // fresh-messageId-per-attempt is generated inside
-        // `sendSyncRequest`. See `sendSyncRequest`'s jsdoc for the
-        // full rationale (codex review on #569 follow-ups #1, #4-#8).
-        requestFactory: async () => {
-          throwIfAborted(signal);
-          successfulPageSize = adaptivePageSizer.current();
-          const request = await buildSyncRequest(contextGraphId, curOffset, successfulPageSize, includeSharedMemory, remotePeerId, phase, snapshotRef, sinceBatchId, syncSessionId, recovery, assetUals);
-          throwIfAborted(signal);
-          return request;
-        },
-        send,
-        validateResponse: (responseBytes) => {
-          if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
-            throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
-          }
-        },
-        onRetry: (attempt, delay, err) => {
+      // The shared request helper rebuilds auth material on every attempt and
+      // is also used by generation priming, so both modes keep identical
+      // transport/replay semantics.
+      const responseBytes = await requestPage(
+        curOffset,
+        () => adaptivePageSizer.current(),
+        (attempt, delay, err) => {
           const adjustment = adaptivePageSizer.onRetryFailure(err, signal);
           const pageSizeNote = adjustment.currentPageSize < adjustment.previousPageSize
             ? `; reducing page size ${adjustment.previousPageSize}->${adjustment.currentPageSize}`
             : '';
           logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
-      });
+      );
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
       responsePages += 1;
@@ -935,7 +907,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         throw toSyncPeerRespondedError(error);
       }
 
-      let parsed: { quads: Quad[]; totalQuads: number };
+      let parsed: { quads: Quad[]; totalQuads: number; sourceIndexes?: number[] };
       let decodeDurationMs = 0;
       let parseDurationMs = 0;
       try {
@@ -983,6 +955,23 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           );
         }
         acceptedHeapBytesEstimate = nextAcceptedHeapBytesEstimate;
+        const sourceIndexes = parsed.sourceIndexes;
+        if (
+          sourceIndexes !== undefined
+          && sourceIndexes.length === parsed.quads.length
+          && sourceIndexes.every(
+            (index, position) => Number.isSafeInteger(index)
+              && index >= 0
+              && index < parsed.totalQuads
+              && (position === 0 || index > sourceIndexes[position - 1]!),
+          )
+        ) {
+          allQuadRawOffsets.push(...sourceIndexes.map((index) => curOffset + index));
+        } else if (parsed.totalQuads === parsed.quads.length) {
+          allQuadRawOffsets.push(...parsed.quads.map((_, index) => curOffset + index));
+        } else if (parsed.quads.length > 0) {
+          hasCompleteQuadRawOffsetMapping = false;
+        }
       } catch (error) {
         throw toSyncPeerRespondedError(error);
       }
@@ -1044,7 +1033,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       // terminal token until its requester-side TTL elapses. Some transports
       // still destroy a responder's text and expose a generic reset, which is
       // why the zero-accepted-page fallback below remains necessary.
-      if (canRotateResponderAtVerifiedPrefix) {
+      if (responderSessionLossCleanup === 'clear-session') {
         // The token is invalid, not the already verified local graph prefix.
         // Keep its generation-bound boundary, forget only the token, and let
         // the next bounded round prime a fresh responder generation at zero
@@ -1082,7 +1071,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         // previously certified checkpoint. At worst, a concurrent supersession
         // after that accepted page costs one extra retry: its zero-page failure
         // reaches this branch and then rotates the session safely.
-        if (canRotateResponderAtVerifiedPrefix) {
+        if (responderSessionLossCleanup === 'clear-session') {
           forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
         } else {
           unfinishedSyncResponderSessions.delete(checkpointKey);
@@ -1109,6 +1098,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
           refreshedResponderSession,
           manifestDigest,
           manifestPrefixDigestAtOffset?.(resumedFromOffset),
+          offset,
         );
       }
     }
@@ -1136,11 +1126,16 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       phaseTelemetry.finish('timed_out', allQuads.length);
       return acceptedIncompletePrefixResult({
         quads: allQuads,
+        ...(hasCompleteQuadRawOffsetMapping
+          ? { quadRawOffsets: allQuadRawOffsets }
+          : {}),
         bytesReceived,
         resumedFromOffset,
+        rawResumedFromOffset,
         responderSessionStartedFresh,
         ...(manifestDigest ? { manifestDigest } : {}),
         nextOffset: offset,
+        rawNextOffset: offset,
         checkpointKey,
       });
     }
@@ -1157,8 +1152,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     // validation/integrity rejection, local request construction/signing, and
     // caller/node aborts all throw and force the owner to discard its prefix.
     if (
-      includeSharedMemory
-      && phase === 'meta'
+      phase === 'meta'
       && returnAcceptedPrefixOnRetryableTransportFailure === true
       && responsePages > 0
       && allQuads.length > 0
@@ -1167,16 +1161,21 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     ) {
       logWarn(
         ctx,
-        `Selected SWM metadata transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; retaining a private prefix at raw offset ${offset}`,
+        `Metadata transport interrupted after ${allQuads.length} accepted triples for "${contextGraphId}"; retaining an owner-private prefix at raw offset ${offset}`,
       );
       phaseTelemetry.finish('timed_out', allQuads.length);
       return acceptedIncompletePrefixResult({
         quads: allQuads,
+        ...(hasCompleteQuadRawOffsetMapping
+          ? { quadRawOffsets: allQuadRawOffsets }
+          : {}),
         bytesReceived,
         resumedFromOffset,
+        rawResumedFromOffset,
         responderSessionStartedFresh,
         ...(manifestDigest ? { manifestDigest } : {}),
         nextOffset: offset,
+        rawNextOffset: offset,
         checkpointKey,
       });
     }
@@ -1222,6 +1221,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
         refreshedResponderSession,
         manifestDigest,
         manifestPrefixDigestAtOffset?.(resumedFromOffset),
+        offset,
       );
     } else {
       forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
@@ -1240,11 +1240,16 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
 
   return {
     quads: allQuads,
+    ...(hasCompleteQuadRawOffsetMapping
+      ? { quadRawOffsets: allQuadRawOffsets }
+      : {}),
     bytesReceived,
     resumedFromOffset,
+    rawResumedFromOffset,
     responderSessionStartedFresh,
     ...(manifestDigest ? { manifestDigest } : {}),
     nextOffset: offset,
+    rawNextOffset: offset,
     checkpointKey,
     completed: !timedOut && !yielded,
     timedOut,

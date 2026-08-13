@@ -27,6 +27,7 @@ import {
 } from '../src/sync/requester/page-fetch.js';
 import {
   runDurableSync,
+  type DurableMetaContinuation,
   type DurableSyncFetchRequest,
   type DurableSyncGraphScopedStoreRequest,
 } from '../src/sync/requester/durable-sync.js';
@@ -219,18 +220,24 @@ function createTwoRoundHarness(
         return 'applied';
       },
       deleteCheckpoint: (key) => deleteSyncPageCheckpoint(checkpointStore, key),
-      setCheckpoint: (key, offset, manifestDigest, manifestPrefixDigest, terminal) => {
-        if (manifestDigest) {
+      setCheckpoint: (key, checkpoint) => {
+        if (checkpoint.binding) {
           checkpointStore.setManifestBoundOffset(
             key,
-            offset,
-            manifestDigest,
+            checkpoint.offset,
+            checkpoint.binding.manifestDigest,
             Date.now(),
-            manifestPrefixDigest,
-            terminal,
+            checkpoint.binding.manifestPrefixDigest,
+            checkpoint.binding.terminal,
+            checkpoint.responderSessionOffset,
           );
         }
-        else checkpointStore.set(key, offset);
+        else checkpointStore.set(
+          key,
+          checkpoint.offset,
+          Date.now(),
+          checkpoint.responderSessionOffset,
+        );
       },
       logInfo: () => {},
       logWarn: () => {},
@@ -431,7 +438,7 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(second.complete).toBe(false);
   });
 
-  it('reuses a proven prefix after the responder forgets its session', async () => {
+  it('restarts safely after the responder forgets a session coordinate', async () => {
     const { contextGraphId, remotePeerId, x } = makeScenario('responder-restart', (cg) => ({
       x: ordered([asset(cg, 1), asset(cg, 3)]),
       y: [],
@@ -456,25 +463,20 @@ describe('manifest-bound durable DATA continuation', () => {
     const second = await harness.run({
       meta,
       dataPage: (offset) => offset === 0
-        ? prefix
-        : offset === prefix.length
-          ? x[1]!.payload
-          : [],
+        ? [...prefix, ...x[1]!.payload]
+        : [],
     });
 
-    expect(harness.dataRequests.map(({ offset }) => offset).slice(0, 2))
-      .toEqual([0, prefix.length]);
+    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0]);
     expect(harness.dataRequests[0]?.syncSessionId)
       .not.toBe(established.responderSessionId);
-    expect(harness.dataRequests[1]?.syncSessionId)
-      .toBe(harness.dataRequests[0]?.syncSessionId);
     expect(second.complete).toBe(true);
   });
 
   it.each([
     ['declared session expiry', 'sync session expired'],
     ['opaque transport reset before any resumed page', 'stream reset'],
-  ])('retains a proven prefix after %s', async (_name, failureMessage) => {
+  ])('restarts safely after %s', async (_name, failureMessage) => {
     const { contextGraphId, remotePeerId, x } = makeScenario('responder-expired', (cg) => ({
       x: ordered([asset(cg, 1), asset(cg, 3)]),
       y: [],
@@ -507,14 +509,11 @@ describe('manifest-bound durable DATA continuation', () => {
     const recovered = await harness.run({
       meta,
       dataPage: (offset) => offset === 0
-        ? prefix
-        : offset === prefix.length
-          ? x[1]!.payload
-          : [],
+        ? [...prefix, ...x[1]!.payload]
+        : [],
     });
 
-    expect(harness.dataRequests.map(({ offset }) => offset).slice(0, 2))
-      .toEqual([0, prefix.length]);
+    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0]);
     expect(harness.dataRequests[0]?.syncSessionId)
       .not.toBe(established.responderSessionId);
     expect(recovered.complete).toBe(true);
@@ -633,6 +632,103 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(dataFetches).toBe(0);
     expect(result.complete).toBe(false);
     expect(result.failedPhases).toBe(1);
+  });
+
+  it('retains bounded META across owner slices and authorizes DATA only after completion', async () => {
+    const contextGraphId = `manifest-bounded-meta-${scenarioSequence++}`;
+    const remotePeerId = 'peer-bounded-meta';
+    const fixtures = ordered([
+      asset(contextGraphId, 1),
+      asset(contextGraphId, 3),
+    ]);
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const data = fixtures.flatMap((entry) => entry.payload);
+    const splitAt = Math.floor(meta.length / 2);
+    const continuation: DurableMetaContinuation = {
+      requesterScope: `durable-recovery-meta:${contextGraphId}`,
+    };
+    const checkpoints: Array<[string, number]> = [];
+    const stored: string[] = [];
+    let round = 0;
+    let dataFetches = 0;
+
+    const run = () => runDurableSync({
+      ctx,
+      remotePeerId,
+      contextGraphIds: [contextGraphId],
+      durableMetaContinuation: continuation,
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase, manifestDigest }) => {
+        if (phase === 'meta') {
+          return round === 0
+            ? {
+                quads: meta.slice(0, splitAt),
+                bytesReceived: splitAt,
+                resumedFromOffset: 0,
+                rawResumedFromOffset: 0,
+                nextOffset: splitAt,
+                rawNextOffset: splitAt,
+                checkpointKey: `${contextGraphId}:recovery-meta`,
+                completed: false,
+                timedOut: true,
+              }
+            : {
+                quads: meta.slice(splitAt),
+                bytesReceived: meta.length - splitAt,
+                resumedFromOffset: splitAt,
+                rawResumedFromOffset: splitAt,
+                nextOffset: meta.length,
+                rawNextOffset: meta.length,
+                checkpointKey: `${contextGraphId}:recovery-meta`,
+                completed: true,
+                timedOut: false,
+              };
+        }
+        dataFetches += 1;
+        return {
+          quads: data,
+          bytesReceived: data.length,
+          resumedFromOffset: 0,
+          rawResumedFromOffset: 0,
+          nextOffset: data.length,
+          rawNextOffset: data.length,
+          checkpointKey: `${contextGraphId}:data`,
+          completed: true,
+          timedOut: false,
+          manifestDigest,
+        };
+      },
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({ asset: verified }) => {
+        stored.push(verified.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (key, checkpoint) => { checkpoints.push([key, checkpoint.offset]); },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    const first = await run();
+    expect(first.complete).toBe(false);
+    expect(first.checkpointAdvances).toBe(1);
+    expect(first.timedOutPhases).toBe(1);
+    expect(dataFetches).toBe(0);
+    expect(continuation.state).toMatchObject({
+      checkpointKey: `${contextGraphId}:recovery-meta`,
+      nextOffset: splitAt,
+      rawNextOffset: splitAt,
+    });
+
+    round = 1;
+    const second = await run();
+    expect(second.complete).toBe(true);
+    expect(dataFetches).toBe(1);
+    expect(stored).toEqual(fixtures.map(({ ual }) => ual));
+    expect(continuation.state).toBeUndefined();
+    expect(checkpoints).toContainEqual([`${contextGraphId}:data`, data.length]);
   });
 
   it('deletes a resumed META suffix checkpoint before refusing DATA', async () => {

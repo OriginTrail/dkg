@@ -133,6 +133,47 @@ describe('byte-budget sync pagination', () => {
     expect(request.requesterSignatureR).toMatch(/^0x/);
   });
 
+  it('keeps an exact DATA request on page-only mode after fallback reaches 64 rows', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const exactUal = 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/1';
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'data',
+      assetUals: [exactUal],
+      needsAuth: true,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    expect(request).toMatchObject({
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      assetUals: [exactUal],
+    });
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: request.limit,
+      includeSharedMemory: false,
+      phase: request.phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: true,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      cacheMode: 'page-only',
+      exactGraphReadMode: 'page-only',
+    });
+  });
+
   // #1916: durable META now negotiates byte-budget paging exactly like durable
   // DATA. These two cases pin the request-builder's meta advertisement directly:
   // a regression dropping 'meta' from the useByteBudgetPage condition would

@@ -85,6 +85,12 @@ function orderedAssets(): AssetFixture[] {
     .sort((left, right) => left.graph.localeCompare(right.graph));
 }
 
+function manifest(meta: readonly Quad[]) {
+  const plan = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID);
+  if (!plan) throw new Error('test fixture did not produce a graph-scoped manifest');
+  return plan;
+}
+
 function pageResult(
   phase: 'data' | 'meta',
   overrides: Partial<SyncPageResult>,
@@ -136,7 +142,7 @@ describe('bounded rootless durable progress', () => {
 
     const plan = planBoundedGraphScopedDurableBatch(
       rawData,
-      meta,
+      manifest(meta),
       0,
       rawData.length,
       false,
@@ -167,7 +173,7 @@ describe('bounded rootless durable progress', () => {
 
     const plan = planBoundedGraphScopedDurableBatch(
       rawData,
-      meta,
+      manifest(meta),
       0,
       rawData.length,
       false,
@@ -192,14 +198,17 @@ describe('bounded rootless durable progress', () => {
 
     const plan = planBoundedGraphScopedDurableBatch(
       rawData,
-      meta,
+      manifest(meta),
       0,
       rawData.length + 63,
       false,
+      0,
+      rawData.map((_, index) => index),
     );
 
     expect(plan).not.toBeNull();
     expect(plan?.safeNextOffset).toBe(4);
+    expect(plan?.safeRawNextOffset).toBe(4);
     expect(plan?.completedGraphCount).toBe(1);
     expect(plan?.changedDataGraphs).toEqual([fixtures[0]!.graph]);
     expect(plan?.dataQuads).toEqual(fixtures[0]!.payload);
@@ -243,7 +252,7 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      setCheckpoint: (key, checkpoint) => { checkpoints.push([key, checkpoint.offset]); },
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -280,7 +289,7 @@ describe('bounded rootless durable progress', () => {
 
     const plan = planBoundedGraphScopedDurableBatch(
       rawData,
-      [...meta, poison],
+      manifest([...meta, poison]),
       0,
       rawData.length,
       false,
@@ -309,7 +318,7 @@ describe('bounded rootless durable progress', () => {
 
     const plan = planBoundedGraphScopedDurableBatch(
       rawData,
-      meta,
+      manifest(meta),
       0,
       rawData.length,
       false,
@@ -361,7 +370,7 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      setCheckpoint: (key, checkpoint) => { checkpoints.push([key, checkpoint.offset]); },
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -394,6 +403,7 @@ describe('bounded rootless durable progress', () => {
       manifestDigest?: string;
       manifestPrefixDigest?: string;
       terminal?: boolean;
+      responderSessionOffset?: number;
     }> = [];
 
     const firstSummary = await runDurableSync({
@@ -405,7 +415,12 @@ describe('bounded rootless durable progress', () => {
         phase,
       }: DurableSyncFetchRequest) => phase === 'meta'
         ? pageResult('meta', { quads: meta, nextOffset: meta.length })
-        : pageResult('data', { quads: data, nextOffset: data.length }),
+        : pageResult('data', {
+            quads: data,
+            quadRawOffsets: [1, 2, 3, 4, 6, 7, 8, 9],
+            rawNextOffset: 10,
+            nextOffset: data.length,
+          }),
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
       storeGraphScopedAsset: async ({
@@ -420,8 +435,15 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (key, offset, manifestDigest, manifestPrefixDigest, terminal) => {
-        checkpoints.push({ key, offset, manifestDigest, manifestPrefixDigest, terminal });
+      setCheckpoint: (key, checkpoint) => {
+        checkpoints.push({
+          key,
+          offset: checkpoint.offset,
+          manifestDigest: checkpoint.binding?.manifestDigest,
+          manifestPrefixDigest: checkpoint.binding?.manifestPrefixDigest,
+          terminal: checkpoint.binding?.terminal,
+          responderSessionOffset: checkpoint.responderSessionOffset,
+        });
       },
       logInfo: () => {},
       logWarn: () => {},
@@ -442,6 +464,7 @@ describe('bounded rootless durable progress', () => {
       manifestDigest: manifest.manifestDigest,
       manifestPrefixDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
       terminal: false,
+      responderSessionOffset: 5,
     }]);
 
     const resumedOffset = checkpoints[0]!.offset;
@@ -471,8 +494,11 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (_key, offset, _manifestDigest, _manifestPrefixDigest, terminal) => {
-        continuationCheckpoints.push({ offset, terminal });
+      setCheckpoint: (_key, checkpoint) => {
+        continuationCheckpoints.push({
+          offset: checkpoint.offset,
+          terminal: checkpoint.binding?.terminal,
+        });
       },
       logInfo: () => {},
       logWarn: () => {},
@@ -528,8 +554,11 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (_key, offset, _manifestDigest, _manifestPrefixDigest, terminal) => {
-        checkpoints.push({ offset, terminal });
+      setCheckpoint: (_key, checkpoint) => {
+        checkpoints.push({
+          offset: checkpoint.offset,
+          terminal: checkpoint.binding?.terminal,
+        });
       },
       logInfo: () => {},
       logWarn: () => {},
@@ -585,8 +614,12 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (_key, offset, manifestDigest, _manifestPrefixDigest, terminal) => {
-        checkpoints.push({ offset, manifestDigest, terminal });
+      setCheckpoint: (_key, checkpoint) => {
+        checkpoints.push({
+          offset: checkpoint.offset,
+          manifestDigest: checkpoint.binding?.manifestDigest,
+          terminal: checkpoint.binding?.terminal,
+        });
       },
       logInfo: (_ctx, message) => { info.push(message); },
       logWarn: () => {},
@@ -640,7 +673,7 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: () => {},
-      setCheckpoint: (_key, offset) => { checkpoints.push(offset); },
+      setCheckpoint: (_key, checkpoint) => { checkpoints.push(checkpoint.offset); },
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -767,7 +800,7 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: (key) => { deleted.push(key); },
-      setCheckpoint: (key, offset) => { checkpoints.push([key, offset]); },
+      setCheckpoint: (key, checkpoint) => { checkpoints.push([key, checkpoint.offset]); },
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
@@ -824,8 +857,11 @@ describe('bounded rootless durable progress', () => {
         return 'applied';
       },
       deleteCheckpoint: (key) => { deleted.push(key); },
-      setCheckpoint: (_key, offset, _manifestDigest, _manifestPrefixDigest, terminal) => {
-        checkpoints.push({ offset, terminal });
+      setCheckpoint: (_key, checkpoint) => {
+        checkpoints.push({
+          offset: checkpoint.offset,
+          terminal: checkpoint.binding?.terminal,
+        });
       },
       logInfo: () => {},
       logWarn: () => {},
@@ -843,6 +879,53 @@ describe('bounded rootless durable progress', () => {
     expect(inserted.flat().some((quad) => quad.graph === fixtures[2]!.graph)).toBe(false);
   });
 
+  it.each([
+    ['missing', undefined],
+    ['mismatched', `sha256:${'ff'.repeat(32)}` as const],
+  ])('rejects a resumed DATA response with a %s manifest binding', async (_name, responseDigest) => {
+    const fixtures = orderedAssets();
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const suffix = fixtures.slice(1).flatMap((entry) => entry.payload);
+    const deleted: string[] = [];
+    const materialized: string[] = [];
+    let verificationCalls = 0;
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-unbound-resume',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: meta, nextOffset: meta.length })
+        : pageResult('data', {
+          quads: suffix,
+          resumedFromOffset: fixtures[0]!.payload.length,
+          nextOffset: fixtures.flatMap((entry) => entry.payload).length,
+          ...(responseDigest ? { manifestDigest: responseDigest } : {}),
+        }),
+      processDurableBatchInWorker: (...args) => {
+        verificationCalls += 1;
+        return processBatch(...args);
+      },
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({ asset }) => {
+        materialized.push(asset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.complete).toBe(false);
+    expect(summary.failedPhases).toBe(1);
+    expect(verificationCalls).toBe(0);
+    expect(materialized).toEqual([]);
+    expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
+  });
+
   it('resets a checkpoint that resumes inside an exact assertion graph', async () => {
     const fixtures = orderedAssets();
     const meta = fixtures.flatMap((entry) => entry.meta);
@@ -857,10 +940,11 @@ describe('bounded rootless durable progress', () => {
     const warnings: string[] = [];
     let verificationCalls = 0;
 
-    expect(isGraphScopedDurableManifestBoundary(meta, 0)).toBe(true);
-    expect(isGraphScopedDurableManifestBoundary(meta, 4)).toBe(true);
-    expect(isGraphScopedDurableManifestBoundary(meta, misalignedOffset)).toBe(false);
-    expect(isGraphScopedDurableManifestBoundary(meta, 13)).toBe(false);
+    const manifestPlan = manifest(meta);
+    expect(isGraphScopedDurableManifestBoundary(manifestPlan, 0)).toBe(true);
+    expect(isGraphScopedDurableManifestBoundary(manifestPlan, 4)).toBe(true);
+    expect(isGraphScopedDurableManifestBoundary(manifestPlan, misalignedOffset)).toBe(false);
+    expect(isGraphScopedDurableManifestBoundary(manifestPlan, 13)).toBe(false);
 
     const summary = await runDurableSync({
       ctx,
@@ -924,12 +1008,6 @@ describe('bounded rootless durable progress', () => {
       ...fixtures[2]!.payload.slice(0, 2),
     ];
 
-    expect(planBoundedGraphScopedDurableBatch(
-      rawData,
-      mixedMeta,
-      0,
-      rawData.length,
-      false,
-    )).toBeNull();
+    expect(createGraphScopedDurableManifestPlan(mixedMeta, CONTEXT_GRAPH_ID)).toBeNull();
   });
 });
