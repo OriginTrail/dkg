@@ -144,7 +144,7 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
         // already has, measured rather than assumed: both evaluators branch on
         // an absent current before any sequence logic runs (core
         // system-record-authority-v1-internal.ts:111/:531/:678; storage
-        // next-state-v1-internal.ts:1105 returns rematerialize immediately).
+        // next-state-v1-internal.ts:1112 returns rematerialize immediately).
         const sequences = snapshot === 'present'
           ? [...A.D_sequenceRelation] as (VerdictDiffCellV1['sequenceRelation'])[]
           : [undefined];
@@ -173,7 +173,7 @@ export function enumerateVerdictDiffCellsV1(): readonly VerdictDiffCellV1[] {
               // transition-equivocation decision the spec names this axis for is
               // core system-record-authority-v1-internal.ts:171, whose referent is
               // `current`, and :111 diverts to the absent branch before it ever
-              // runs; storage returns at next-state-v1-internal.ts:1105 for an
+              // runs; storage returns at next-state-v1-internal.ts:1112 for an
               // absent snapshot without reading the field at all. Left ungated the
               // fixture could not build 'equal' and 'differ' as DISTINCT inputs
               // there -- both cells would carry identical inputs, so it is not an

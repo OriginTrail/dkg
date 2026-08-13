@@ -453,19 +453,26 @@ function quarantineSystemRecordDerivationV1(
     return Object.freeze({ outcome: 'deferred', reason: 'verified-state-mismatch' });
   }
 
-  // THE PERSISTENT SUBSTRATE FOR THE AUTHORITY DISPOSITION.
+  // THE PERSISTENT SUBSTRATE CORE'S AUTHORITY CLASSIFIER READS AFTER A RESTART.
   //
   // These slots are the only durable record that this quarantine was a
-  // TRANSITION equivocation rather than an ordinary head fork. Core derives
-  // the record's authority disposition from them after a restart
-  // (`deriveAgentProfileAuthorityDispositionV1`), because core takes that
-  // disposition as an INPUT and persists nothing itself.
+  // TRANSITION equivocation rather than an ordinary head fork. Core's
+  // `deriveAgentProfileAuthorityDispositionV1` reconstructs that classification
+  // from them on the next process start, because core consumes the value as an
+  // INPUT and persists nothing itself.
   //
   // Dropping or truncating them below silently breaks the master plan's
   // line 204 -- that a receiver which verified both branches "remains
   // quarantined across later heads/restart/provider changes" -- and it breaks
   // it in a way no storage-layer assertion would show, because the consumer
   // lives in core. Do not delete this merge as an unexplained leftover.
+  //
+  // NOTE ON WORDING, so nobody "improves" it back into a CI failure: a Phase-1
+  // pin (`test/authority-verdict-diff-projection-v1.test.ts`) asserts that the
+  // lowercase noun for that classification appears ZERO times anywhere under
+  // packages/storage/src -- storage holds the substrate but never the verdict,
+  // and that zero is the measurement core's reader is built on. The CamelCase
+  // symbol above is outside the check; the bare noun is not.
   const currentSlots = derived.plan.next.appliedState.conflictDigestSlots;
   const terminalDigests = facts.terminalTransitionConflict
     ? facts.conflictEvidence.entries.flatMap((entry) =>

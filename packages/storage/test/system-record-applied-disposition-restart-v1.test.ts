@@ -133,7 +133,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    *
    * FAIL-BEFORE, and the reason this test is the one that catches it: delete
    * the transition-digest merge at
-   * `system-record-next-state-v1-internal.ts:469-477` and the quarantined row
+   * `system-record-next-state-v1-internal.ts:476-484` and the quarantined row
    * persists with empty slots, so the re-derivation below returns
    * `head-fork-quarantined` and this goes red. No storage-layer assertion would
    * notice, because the consumer of the value lives in core and takes it as an
@@ -183,7 +183,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
   /*
    * ROW 3 OUTRANKS ROW 2, ON A ROW THE READER CAN ACTUALLY RECEIVE.
    *
-   * The unquarantine gate (`next-state:1111`) refuses while slots are occupied,
+   * The unquarantine gate (`next-state:1118`) refuses while slots are occupied,
    * so TODAY no write path produces an `active` row carrying them -- that
    * refusal is already pinned at `system-record-next-state-v1.test.ts:840`,
    * with its clearing control at :807/:857, and is not restated here.
@@ -260,7 +260,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    * SYSTEM_RECORD_MAX_CONFLICT_DIGESTS total object digests
    * (agent-profile-evidence-codecs :236-238). Overflow is therefore reachable
    * only by ACCUMULATION -- the merge unions the persisted slots with the new
-   * terminal digests (next-state :469-477) -- so the construction quarantines
+   * terminal digests (next-state :476-484) -- so the construction quarantines
    * twice with distinct transition evidence.
    */
   it('re-derives the equivocation from a row whose slots overflowed the cap', async () => {
