@@ -4343,7 +4343,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           peerId,
           this.config.syncContextGraphs ?? [],
           createOperationContext('sync'),
-          { completeProviderOnly: automaticPeerSweep },
         );
         sharedMemorySyncPlans.set(peerId, plan);
       }
@@ -4561,7 +4560,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     ctx: OperationContext,
     options: {
-      completeProviderOnly?: boolean;
       requireCompleteProviderMatch?: boolean;
     } = {},
   ): Promise<SharedMemorySyncContextGraphPlan> {
@@ -4690,14 +4688,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         continue;
       }
       if (
-        options.completeProviderOnly
-        && remotePeerId !== undefined
+        remotePeerId !== undefined
         && completeSwmProviders.length > 0
         && !completeSwmProviders.includes(remotePeerId)
       ) {
         this.log.debug(
           ctx,
-          `SWM sync: skipping "${contextGraphId}" from ${remotePeerId.slice(-8)} — RFC-64 complete provider selected`,
+          `SWM sync: rejecting "${contextGraphId}" from ${remotePeerId.slice(-8)} — RFC-64 complete provider selected`,
         );
         continue;
       }
@@ -6670,9 +6667,39 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
     );
     const planned = options?.sharedMemorySyncPlan;
-    const plan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
+    const initialPlan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
       ? planned
       : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
+    // A caller-supplied plan is only an optimization snapshot; it is not an
+    // authority token. Re-apply the RFC-64 complete-provider fence at the
+    // execution boundary so manual catch-up, coalesced work, or a stale plan
+    // cannot import a selected public CG from an arbitrary peer.
+    const rejectedPublicContextGraphIds = new Set(
+      initialPlan.publicContextGraphIds.filter((contextGraphId) => {
+        const completeSwmProviders = this.resolveRfc64CompleteSwmProviderPeerIdsV1(
+          contextGraphId,
+        );
+        return completeSwmProviders.length > 0
+          && !completeSwmProviders.includes(remotePeerId);
+      }),
+    );
+    for (const contextGraphId of rejectedPublicContextGraphIds) {
+      this.log.debug(
+        ctx,
+        `SWM sync: rejecting preplanned "${contextGraphId}" from ${remotePeerId.slice(-8)} — RFC-64 complete provider selected`,
+      );
+    }
+    const plan = rejectedPublicContextGraphIds.size === 0
+      ? initialPlan
+      : {
+        publicContextGraphIds: initialPlan.publicContextGraphIds.filter(
+          (contextGraphId) => !rejectedPublicContextGraphIds.has(contextGraphId),
+        ),
+        privateRecoverFromCurator: initialPlan.privateRecoverFromCurator,
+        eligibleContextGraphIds: initialPlan.eligibleContextGraphIds.filter(
+          (contextGraphId) => !rejectedPublicContextGraphIds.has(contextGraphId),
+        ),
+      };
     const publicContextGraphIds = orderContextGraphIdsByPriority(
       plan.publicContextGraphIds,
       this.config.syncContextGraphPriorities,
