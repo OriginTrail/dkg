@@ -128,7 +128,7 @@ function hasPersistedTransitionEquivocationV1(
  * LOAD-BEARING -- it is not a defensive default. Measured at integration head
  * 97f4c9e69: the write path cannot currently produce an `active` row carrying
  * slots, because the unquarantine gate
- * (`system-record-next-state-v1-internal.ts:1223`) defers while slots are
+ * (`system-record-next-state-v1-internal.ts:1246`) defers while slots are
  * occupied. But that is a property of ONE disjunct in ONE classifier, not of
  * the row: the active derivation CARRIES slots forward from the snapshot
  * (:362-364) rather than clearing them, and persisted state imposes no coupling
@@ -142,7 +142,7 @@ export function deriveAgentProfileAuthorityDispositionV1(
   applied: SystemRecordAppliedStateV1,
 ): AgentProfileAuthorityDispositionResultV1 {
   // No snapshot, nothing quarantined: core rejects any other reading of an
-  // absent row (authority :217, :579), so this is forced, not chosen.
+  // absent row (authority :217, :607), so this is forced, not chosen.
   if (applied.state === 'absent') return decided('discoverable');
 
   if (hasPersistedTransitionEquivocationV1(applied)) {
@@ -155,12 +155,12 @@ export function deriveAgentProfileAuthorityDispositionV1(
     case 'quarantined':
       // Quarantined with no transition evidence retained: a head fork, which
       // core clears through its fork-resolution-successor branch (authority
-      // :373, :480, :616) rather than holding permanently.
+      // :401, :508, :644) rather than holding permanently.
       return decided('head-fork-quarantined');
     case 'tombstone':
       // NOT inert, and NOT `discoverable`. The projection is deleted (plan
       // :250-253) so discovery is moot, but core reads the disposition on the
-      // authority branches (:139, :373) when deciding the NEXT candidate for
+      // authority branches (:139, :401) when deciding the NEXT candidate for
       // this record, and V1 defines no answer for a tombstoned row. Reporting
       // the gap is the only reading that does not invent a clearance.
       return undecidedTerminal('tombstone');

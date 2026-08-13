@@ -23,8 +23,8 @@ export const CORE_BARE_DECISIONS_V1 = ['accept', 'stale'] as const;
  * caller acts on.
  */
 export const CORE_QUARANTINE_REASONS_V1 = {
-  'head-fork': { sites: [189, 200, 463] },
-  'transition-equivocation': { sites: [140, 172, 431, 530, 555, 611, 614] },
+  'head-fork': { sites: [189, 200, 491] },
+  'transition-equivocation': { sites: [140, 172, 459, 558, 583, 639, 642] },
 } as const;
 
 /**
@@ -47,32 +47,32 @@ export const CORE_QUARANTINE_REASONS_V1 = {
  * line-anchored one says which sites moved and by how much.
  */
 export const CORE_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly number[]>> = {
-  'absent state cannot retain authority history or quarantine': [220, 582],
-  'accepted authority state has incomplete transition lineage': [124, 593],
+  'absent state cannot retain authority history or quarantine': [220, 610],
+  'accepted authority state has incomplete transition lineage': [124, 621],
   'accepted head does not bind its retained transition lineage': [133],
   'active closure contains tombstone-only authority evidence': [268],
   'authority history is incomplete': [152],
-  'authority transition reuses a root retained by this record': [412, 628],
+  'authority transition reuses a root retained by this record': [440, 656],
   'cold noninitial head requires its verified authority closure': [237],
   'cold tombstone closure lacks its exact deletion predecessor': [259],
-  'current frontier fork requires its exact direct resolving successor': [509],
-  'exact accepted authority transition is missing': [391],
-  'fork resolution issuedAt exceeds the future clock-skew bound': [515],
+  'current frontier fork requires its exact direct resolving successor': [537],
+  'exact accepted authority transition is missing': [419],
+  'fork resolution issuedAt exceeds the future clock-skew bound': [543],
   'head issuedAt exceeds the future clock-skew bound': [101],
-  'historical or unsolicited fork resolution is audit-only': [486],
-  'late tombstone entry requires a candidate below the accepted authority sequence': [354],
+  'historical or unsolicited fork resolution is audit-only': [514],
+  'late tombstone entry requires a candidate below the accepted authority sequence': [382],
   'late tombstone lacks its exact verified active predecessor': [292],
   'late tombstone requires the exact retained resurrection transition': [309],
-  'next-sequence head does not bind transition issuer/root': [421],
-  'next-sequence tombstone requires its exact same-sequence active predecessor': [397],
+  'next-sequence head does not bind transition issuer/root': [449],
+  'next-sequence tombstone requires its exact same-sequence active predecessor': [425],
   'same-sequence authority changed': [168],
-  'stable record key changed': [137, 600],
+  'stable record key changed': [137, 628],
   'tombstone is terminal within its authority sequence': [193],
-  'tombstone lacks its exact verified active predecessor': [458],
-  'transition has no accepted predecessor': [587],
-  'transition verification time is invalid': [569],
-  'transitions do not target the same authority tuple': [549],
-  'unresolved head fork cannot advance authority sequence': [376, 619],
+  'tombstone lacks its exact verified active predecessor': [486],
+  'transition has no accepted predecessor': [615],
+  'transition verification time is invalid': [597],
+  'transitions do not target the same authority tuple': [577],
+  'unresolved head fork cannot advance authority sequence': [404, 647],
   'verification clock is invalid': [97],
   'verified authority closure has incomplete lineage': [247],
 };

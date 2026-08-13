@@ -128,22 +128,39 @@ describe('verdict-diff evaluator input projections', { timeout: VERDICT_DIFF_SUI
     expect([core.min, core.max]).toEqual([1, 8]);
   });
 
-  // STORAGE CONSUMES CORE'S DISPOSITION AND DERIVES NONE OF ITS OWN.
+  // A SCOPED ABSENCE CLAIM, made checkable. Core consumes `disposition` as an
+  // input and persists nothing; the claim that storage has no source for it is
+  // what Phase 2 exists to fix, so it is pinned rather than remembered -- and
+  // pinned at the scope actually searched, which is this directory only.
   //
-  // This used to assert `disposition` appeared ZERO times in packages/storage/src,
-  // pinned at the scope actually searched. Routing the late-tombstone seam through
-  // core made that false on purpose: storage now READS the disposition off the
-  // applied row through core's reader, which is what lets it tell a decided row
-  // from one V1 has left undecided.
-  //
-  // WHAT REPLACES IT IS THE STRONGER CLAIM, and it is the one the seam's absolute
-  // constraint actually needs: storage may CONSUME core's derivation and must
-  // never RE-DERIVE one. A zero-occurrence pin could not have expressed that --
-  // it would have gone red at the first legitimate consumer and said nothing at
-  // all about a hand-rolled copy of the mapping, which is the failure this slice
-  // was written to prevent. So the check names the one permitted symbol, bounds
-  // its call sites, and refuses any other source of the word.
-  it('consumes core\'s disposition reader and re-derives no disposition of its own', () => {
+  // KEPT VERBATIM THROUGH THE LATE-TOMBSTONE ROUTING, WHICH IS THE POINT. That
+  // slice added the first storage-side consumer and its first draft REPLACED
+  // this walk with the three targeted claims below. That was wrong, and the
+  // reason generalises: this raw substring zero is a TRIPWIRE and those are
+  // GUARDS. A guard catches exactly what it names; the tripwire catches what
+  // nobody thought to name -- a prose comment, a future literal, a copied
+  // constant. It caught a neighbouring PR's ordinary-English comment within the
+  // hour of being live. Guards COMPOSE with a tripwire and never replace one,
+  // and this zero is cited as a premise in shipped artifacts, so replacing it
+  // would have silently falsified those citations. The routing keeps the zero by
+  // using the CamelCase symbol only and naming its reason member
+  // `undecided-authority-classification`.
+  it('finds no disposition producer anywhere in packages/storage/src', () => {
+    const root = new URL('../src/', import.meta.url);
+    const walk = (dir: URL): string[] => readdirSync(dir, { withFileTypes: true })
+      .flatMap((entry) => (entry.isDirectory()
+        ? walk(new URL(`${entry.name}/`, dir))
+        : entry.name.endsWith('.ts') ? [readFileSync(new URL(entry.name, dir), 'utf8')] : []));
+    const hits = walk(root).filter((source) => source.includes('disposition'));
+    expect(hits).toHaveLength(0);
+  });
+
+  // ADDITIONS, NOT A REPLACEMENT. The walk above says the word is absent; these
+  // say what the one legitimate consumer is allowed to do. Both are needed: the
+  // absence claim cannot distinguish a correct consumer from a hand-rolled copy
+  // of core's mapping, because a copy that avoided the word entirely would
+  // satisfy it.
+  it('consumes core\'s authority-classification reader and re-derives none of its own', () => {
     const root = new URL('../src/', import.meta.url);
     const walk = (dir: URL): { file: string; source: string }[] => readdirSync(
       dir,
@@ -158,25 +175,38 @@ describe('verdict-diff evaluator input projections', { timeout: VERDICT_DIFF_SUI
     // below, which is the shape this suite exists to refuse.
     expect(files.length).toBeGreaterThan(40);
 
-    const mentioning = files.filter((f) => f.source.includes('disposition'));
-    expect(mentioning.map((f) => f.file)).toStrictEqual(
+    // THE CONSUMER IS KEYED ON THE CamelCase SYMBOL, which is the only form the
+    // walk above permits -- and that is not a workaround, it is what makes both
+    // checks live at once. Counting OCCURRENCES rather than files, because two
+    // calls in one file are two facts and a file count would report them as one.
+    const importing = files.filter(
+      (f) => f.source.includes('deriveAgentProfileAuthorityDispositionV1'),
+    );
+    expect(importing.map((f) => f.file)).toStrictEqual(
       ['system-record-next-state-v1-internal.ts'],
     );
-
-    const occurrences = mentioning[0]!.source.match(/disposition/gi) ?? [];
-    const calls = mentioning[0]!.source.match(
-      /deriveAgentProfileAuthorityDispositionV1\(/g,
-    ) ?? [];
-    // EXACTLY ONE CALL, and every other mention is the imported name, the local
-    // binding, prose, or the reason token -- never a second derivation. Counting
-    // OCCURRENCES rather than lines, because two mentions on one line are two
-    // facts and a line count would report them as one.
+    const calls = importing.flatMap(
+      (f) => f.source.match(/deriveAgentProfileAuthorityDispositionV1\(/g) ?? [],
+    );
     expect(calls).toHaveLength(1);
-    expect(occurrences.length).toBeGreaterThan(calls.length);
+
+    // EVERY REFERENCE IS ACCOUNTED FOR, NOT JUST EVERY CALL, and this line exists
+    // because the call count alone SURVIVED its own mutant: `const alias =
+    // deriveAgentProfileAuthorityDispositionV1;` is a reference and not a call,
+    // so it passed a check whose whole job is bounding this consumer -- and an
+    // alias can be invoked anywhere afterwards. Three occurrences: the import,
+    // one docblock mention, and the single call. A fourth is either a second
+    // consumer or an alias, and both are this seam's problem.
+    const references = importing.flatMap(
+      (f) => f.source.match(/deriveAgentProfileAuthorityDispositionV1/g) ?? [],
+    );
+    expect(references).toHaveLength(3);
 
     // AND THE DOMAIN ITSELF IS NOT RESTATED HERE. A storage-side copy of core's
-    // three disposition values is the exact re-implementation the seam forbids,
-    // and it would be invisible to a call-site count.
+    // three classification values is the exact re-implementation this seam
+    // forbids, and it would be invisible to a call-site count -- a copy written
+    // without the noun would pass the walk above and this one both, which is why
+    // the values are named individually.
     for (const literal of [
       "'discoverable'",
       "'head-fork-quarantined'",

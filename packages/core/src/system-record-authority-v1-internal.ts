@@ -334,10 +334,38 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * that reimplemented the predecessor or retained-transition checks would be
  * deciding authority outside core, which is what this entry exists to prevent.
  *
- * `acceptedTransitionLineage` is the ACCEPTED state's lineage, whose length is
+ * THE OPERAND CONTRACT, stated because a caller cannot infer it from the types.
+ *
+ * `acceptedTransitionLineage` is the ACCEPTED state's lineage, whose length IS
  * the current authority sequence -- the identity the full evaluator enforces at
- * :121-126. The candidate's sequence is read off the candidate, so a caller
- * cannot pass one that disagrees with the head it is deciding.
+ * :121-126. The candidate's own sequence is read off the candidate, so a caller
+ * cannot pass one that disagrees with the head it is deciding, and a candidate
+ * at or above the accepted sequence is refused rather than evaluated.
+ *
+ * `evidence.tombstonePredecessor` is REQUIRED in substance: without it the
+ * decision is `reject | late tombstone lacks its exact verified active
+ * predecessor`. It is typed optional because it belongs to a shared evidence
+ * shape, not because this arm tolerates its absence.
+ *
+ * `evidence.acceptedTransition` MUST be the retained transition OUT of the
+ * candidate's sequence -- `lineage[candidateSequence]`, the rotation into the
+ * NEXT sequence -- not the rotation into the candidate's own. Supplying the
+ * wrong one is refused rather than misread, because :303-305 compares prior
+ * sequence, next sequence AND digest against the retained entry.
+ *
+ * WHEN IT IS ABSENT, THE ANSWER IS A REJECT AND NEVER A STALE. That is ADR 0002
+ * :132-133 ("Missing retained-transition evidence rejects for retry rather than
+ * treating the tombstone as stale"), and it is the case every caller hits today:
+ * the applied state persists transition DIGESTS, so a receiver holding only
+ * persisted state cannot produce the object. A caller must map that reject onto
+ * a RETRYABLE outcome; mapping it onto a terminal one reintroduces the exact
+ * behaviour this entry exists to remove.
+ *
+ * `evidence.nowMs` is read ONLY after a retained transition has matched, by the
+ * delegate at authority-verification :30. A caller with no verification clock
+ * may pass a value that cannot validate, and the residue is a refusal rather
+ * than an admission -- but it must not pass a plausible-looking number it did
+ * not measure.
  */
 export function evaluateAgentProfileLateTombstoneAdvanceV1(
   candidate: AgentProfileHeadObjectV1,

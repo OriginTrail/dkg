@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1238',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1261',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -192,7 +192,7 @@ export const CORE_PROJECTIONS_V1 = 25920;
  *
  * A NAME-GREP WOULD NOT HAVE BEEN ENOUGH, which is why the instrument is
  * empirical rather than textual. Core copies the field into its evidence snapshot
- * through an allowlist at system-record-authority-v1-internal.ts:701, so it
+ * through an allowlist at system-record-authority-v1-internal.ts:729, so it
  * travels inside an object; a branch reading it off the whole snapshot, or by
  * dynamic access, would never appear in a grep for the symbol. Running the
  * branches closes that gap for the branches actually run.
@@ -439,7 +439,7 @@ export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = 
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:701',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:729',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',

@@ -84,12 +84,12 @@ export type SystemRecordActiveDerivationDeferredReasonV1 =
    */
   | 'late-tombstone-evidence-incomplete'
   /**
-   * The applied row's authority disposition is one V1 has not decided (a
+   * The applied row's authority classification is one V1 has not decided (a
    * tombstoned or shadow-dirty row). Named separately from every other deferral
    * because the honest fact is that nothing was decided, not that something was
    * compared and disagreed.
    */
-  | 'undecided-authority-disposition';
+  | 'undecided-authority-classification';
 
 export type SystemRecordActiveDerivationCapacityReasonV1 =
   | 'state-revision-overflow'
@@ -1076,13 +1076,13 @@ function classifyLateTombstoneAdvance(
   current: SystemRecordAppliedStatePresentV1,
 ): TombstoneAdvance {
   // WHAT V1 HAS NOT DECIDED IS NOT DECIDED HERE. A tombstoned or shadow-dirty
-  // row has no authority disposition in V1, and core's accepted state has no
-  // member for "unknown" -- supplying `discoverable` would invent the clearance
-  // this result type exists to withhold. Deferring keeps the candidate
+  // row has no authority classification in V1, and core's accepted state has no
+  // member for "unknown" -- supplying the discoverable value would invent the
+  // clearance this result type exists to withhold. Deferring keeps the candidate
   // retryable; treating it as stale would discard it on an undecided row.
-  const disposition = deriveAgentProfileAuthorityDispositionV1(snapshot.appliedState);
-  if (disposition.outcome !== 'decided') {
-    return Object.freeze({ outcome: 'deferred', reason: 'undecided-authority-disposition' });
+  const classification = deriveAgentProfileAuthorityDispositionV1(snapshot.appliedState);
+  if (classification.outcome !== 'decided') {
+    return Object.freeze({ outcome: 'deferred', reason: 'undecided-authority-classification' });
   }
   const predecessor = facts.verifiedAuthoritySummary.tombstonePredecessor;
   const decision = evaluateAgentProfileLateTombstoneAdvanceV1(
@@ -1093,20 +1093,43 @@ function classifyLateTombstoneAdvance(
     }),
     current.transitionLineage,
   );
+  // EVERY BRANCH OF CORE'S DECISION IS WRITTEN OUT, and the exhaustiveness is
+  // enforced by the compiler rather than by a `default` arm. A default would map
+  // a decision this seam has never been shown onto the retry outcome silently --
+  // including a `quarantine`, which is a durable state elsewhere in core and
+  // must not be laundered into a deferral by falling off the end of a switch.
   switch (decision.decision) {
     case 'accept':
       return Object.freeze({ outcome: 'advance' });
     case 'stale':
       return Object.freeze({ outcome: 'stale' });
-    default:
-      // Core's `reject` on this arm is the ADR's "rejects for retry", and its
-      // `quarantine` cannot be reached from here (the arm returns only accept,
-      // stale or reject). Both map to the retryable outcome; neither may map to
-      // `stale`, which is the behaviour this seam exists to remove.
+    case 'reject':
+      // The ADR's "rejects for retry rather than treating the tombstone as
+      // stale". This must never map to `stale`; that mapping is the behaviour
+      // this seam exists to remove.
       return Object.freeze({
         outcome: 'deferred',
         reason: 'late-tombstone-evidence-incomplete',
       });
+    case 'quarantine':
+      // UNREACHABLE FROM THIS ARM TODAY -- it returns only accept, stale or
+      // reject -- and written out rather than defaulted because that is a fact
+      // about core's arm, not about this switch. A quarantine is durable state
+      // in core; if the arm ever produces one, the honest answer here is to
+      // withhold rather than to guess which durable state storage should write.
+      return Object.freeze({
+        outcome: 'deferred',
+        reason: 'late-tombstone-evidence-incomplete',
+      });
+    default: {
+      // Reached only when core's decision union grows. The assignment is the
+      // compile error that makes a new decision this seam's problem rather than
+      // a candidate quietly deferred under a reason that does not describe it.
+      const unmapped: never = decision;
+      throw new Error(
+        `unmapped system-record authority decision: ${JSON.stringify(unmapped)}`,
+      );
+    }
   }
 }
 

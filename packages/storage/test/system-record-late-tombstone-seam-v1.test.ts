@@ -175,12 +175,12 @@ describe('the late-tombstone seam (ADR 0002 :129-133)', () => {
       tombstone: {
         kind: 'derivation',
         verdict: 'deferred',
-        reason: 'undecided-authority-disposition',
+        reason: 'undecided-authority-classification',
       },
       dirty: {
         kind: 'derivation',
         verdict: 'deferred',
-        reason: 'undecided-authority-disposition',
+        reason: 'undecided-authority-classification',
       },
     });
   });

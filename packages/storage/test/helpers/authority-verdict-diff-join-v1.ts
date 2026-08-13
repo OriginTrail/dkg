@@ -214,7 +214,7 @@ export const STORAGE_OUTCOME_CODOMAIN_V1: readonly string[] = [
   // reason added to the source union moves this list and takes the images with
   // it, instead of being absorbed silently.
   'deferred|late-tombstone-evidence-incomplete',
-  'deferred|undecided-authority-disposition',
+  'deferred|undecided-authority-classification',
   'capacity-exhausted|state-revision-overflow',
   'capacity-exhausted|capacity-revision-overflow',
   'capacity-exhausted|record-count-cap',
@@ -297,8 +297,8 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     citations: [
       'packages/core/src/system-record-authority-v1-internal.ts:196',
       'packages/core/src/system-record-authority-v1-internal.ts:199',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1259',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1261-1270',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1282',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1284-1293',
       'packages/storage/src/system-record-next-state-v1-internal.ts:270',
     ],
     note: 'MAPPING core stale TO {stale} ALONE WOULD FABRICATE A DIVERGENCE, and '
@@ -322,8 +322,8 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
     semantics: JOIN_SEMANTICS_V1.CHANGING,
     citations: [
       'packages/core/src/system-record-authority-v1-internal.ts:200',
-      'packages/core/src/system-record-authority-v1-internal.ts:480',
-      'packages/storage/src/system-record-next-state-v1-internal.ts:1271',
+      'packages/core/src/system-record-authority-v1-internal.ts:508',
+      'packages/storage/src/system-record-next-state-v1-internal.ts:1294',
     ],
     note: 'No storage outcome is spelled `quarantine`: storage\'s quarantine is an '
       + 'axis-H INPUT operation, not an outcome. The image is still groundable and '
@@ -331,7 +331,7 @@ export const JOIN_LEVEL1_MAP_V1: readonly JoinLevel1EntryV1[] = [
       + 'whose digest differs, which is exactly the condition storage tests at :1251 '
       + 'before returning deferred(authority-fork). WHAT DIFFERS IS DURABILITY, and '
       + 'it is the concrete answer to what storage loses by not being routed through '
-      + 'core: core\'s quarantine is STATE. At :480 `evaluateSameSequenceActiveAdvance'
+      + 'core: core\'s quarantine is STATE. At :508 `evaluateSameSequenceActiveAdvance'
       + 'V1` branches on `acceptedState.disposition === \'head-fork-quarantined\'` and '
       + 'routes the NEXT candidate down the fork-resolution-successor path. Storage\'s '
       + 'defer leaves no trace at all: the next candidate is evaluated identically to '
