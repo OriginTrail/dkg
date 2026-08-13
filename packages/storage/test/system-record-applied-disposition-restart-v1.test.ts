@@ -79,7 +79,7 @@ function restartFromPersistedQuads(
  * (`system-record-verified-replacement-v1-internal.ts:776-778`). So the two
  * arms below differ by the thing the substrate actually keys on.
  */
-async function quarantinedForkV1(terminalTransitionConflict: boolean, _withHandles = false) {
+async function quarantinedForkV1(terminalTransitionConflict: boolean) {
   const { binding, epochQuad } = makeAuthenticActiveReplacementFixtureV1('authoritative');
   const fork = await makeForkResolvingSuccessorFixtureV1(
     binding,
@@ -264,7 +264,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    * twice with distinct transition evidence.
    */
   it('re-derives the equivocation from a row whose slots overflowed the cap', async () => {
-    const { networkId, quarantined, binding, forkedIssue } = await quarantinedForkV1(true, true);
+    const { networkId, quarantined, binding, forkedIssue } = await quarantinedForkV1(true);
     const first = quarantined.plan.next.appliedState;
     expect(first.conflictDigestSlots.length).toBe(2);
     expect(first.conflictOverflow).toBe(false);
@@ -304,7 +304,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
    * with the behaviour.
    */
   it('merges the transition digests and leaves the fork digests out', async () => {
-    const { quarantined, binding, forkedIssue } = await quarantinedForkV1(true, true);
+    const { quarantined, binding, forkedIssue } = await quarantinedForkV1(true);
     const forked = forkedIssue.head as AgentProfileActiveHeadObjectV1;
     const forkedDigest = computeAgentProfileHeadObjectDigestV1(forked);
     const forkOnlyDigest = `0x${'ee'.repeat(32)}` as Digest32V1;
