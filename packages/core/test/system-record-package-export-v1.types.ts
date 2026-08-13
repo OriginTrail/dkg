@@ -2,6 +2,7 @@ import type {
   AgentProfileAcceptedAuthorityStateV1,
   AgentProfileAuthorityDispositionV1,
   AgentProfileAuthorityDispositionResultV1,
+  AgentProfileUndecidedTerminalStatusV1,
   AgentProfileActiveHeadObjectV1,
   AgentProfileAppliedTransitionV1,
   AgentProfileAuthorityTransitionV1,
@@ -191,6 +192,36 @@ type UNDECIDED_ARM_KEEPS_BOTH_TERMINAL_STATUSES =
       : never
     : never;
 const undecidedArmKeepsBothTerminalStatuses: UNDECIDED_ARM_KEEPS_BOTH_TERMINAL_STATUSES = true;
+
+/*
+ * THE NAMED TERMINAL-STATUS TYPE IS PART OF THE PUBLISHED CONTRACT TOO.
+ *
+ * The other two exported types carry exactness pins; this one did not, so the
+ * barrel could have stopped exporting it — or widened it — while every existing
+ * assertion still compiled. Raised in review. Imported from the PUBLIC package
+ * entry above, so removing the export breaks this file rather than only a
+ * downstream consumer.
+ *
+ * Bidirectional, like its siblings: a member added AND a member removed both
+ * fail. It is also checked against the arm that consumes it, so the exported
+ * name and the result type cannot drift apart while each stays internally
+ * consistent.
+ */
+type UNDECIDED_TERMINAL_STATUS_IS_EXACTLY_THE_TWO =
+  AgentProfileUndecidedTerminalStatusV1 extends 'tombstone' | 'dirty'
+    ? 'tombstone' | 'dirty' extends AgentProfileUndecidedTerminalStatusV1 ? true : never
+    : never;
+const undecidedTerminalStatusIsExactlyTheTwo: UNDECIDED_TERMINAL_STATUS_IS_EXACTLY_THE_TWO = true;
+
+/** ...and it is the same type the undecided arm actually carries. */
+type UNDECIDED_ARM_USES_THE_EXPORTED_STATUS_TYPE =
+  UndecidedStatus extends AgentProfileUndecidedTerminalStatusV1
+    ? AgentProfileUndecidedTerminalStatusV1 extends UndecidedStatus ? true : never
+    : never;
+const undecidedArmUsesTheExportedStatusType: UNDECIDED_ARM_USES_THE_EXPORTED_STATUS_TYPE = true;
+
+void undecidedTerminalStatusIsExactlyTheTwo;
+void undecidedArmUsesTheExportedStatusType;
 
 void decidedArmIsExactlyCoresUnion;
 void undecidedArmKeepsBothTerminalStatuses;
