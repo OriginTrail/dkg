@@ -231,13 +231,43 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
   describe('end to end, only the mode differs', () => {
     const conflicting = quad(ROOT, 'urn:p', 'rewritten-by-legacy');
 
-    /** Answers the reserved-state join for any claim, and the projection for any subject. */
-    function storeWithAppliedRecord() {
+    const NETWORK_ID = 'otp:2043';
+
+    /**
+     * The claim IRI a correctly-configured adapter actually asks for, RECORDED from a live
+     * run rather than restated.
+     *
+     * This fixture used to echo back whichever claim the query happened to name, so it
+     * answered for ANY network identity — an adapter that dropped or hard-coded the wrong
+     * one still looked covered, on the path where being wrong means unsigned legacy quads
+     * land on top of signed state. Recording the real question keeps the identity
+     * load-bearing without restating its derivation: the id is base64url-encoded into the
+     * claim subject, and restating that encoding here would just be testing the fixture.
+     */
+    async function claimAskedFor(networkId: string): Promise<string> {
+      const seen: string[] = [];
+      const recorder = {
+        query: async (sparql: string) => {
+          seen.push(sparql);
+          return { type: 'bindings' as const, bindings: [] };
+        },
+      } as never;
+      const probe = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
+        store: recorder, networkId, mode: 'authoritative',
+      }));
+      await probe.filterPage([conflicting]);
+      return /<([^>]*root:[^>]*)>/.exec(seen[0] ?? '')?.[1] ?? '';
+    }
+
+    /** Answers the reserved-state join ONLY for the exact claim it was built for. */
+    function storeWithAppliedRecord(claim: string) {
       const query = vi.fn(async (sparql: string) => (
         sparql.includes('?claim ?table')
           ? {
             type: 'bindings' as const,
-            bindings: [{ claim: /<([^>]*root:[^>]*)>/.exec(sparql)?.[1] ?? '', table: `"[\\"${ROOT}\\"]"^^<urn:json>` }],
+            bindings: sparql.includes(`<${claim}>`)
+              ? [{ claim, table: `"[\\"${ROOT}\\"]"^^<urn:json>` }]
+              : [],
           }
           : {
             type: 'bindings' as const,
@@ -256,7 +286,9 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
 
     it('withholds the conflicting quad when the projection is authoritative', async () => {
       const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
-        store: storeWithAppliedRecord(), networkId: 'otp:2043', mode: 'authoritative',
+        store: storeWithAppliedRecord(await claimAskedFor(NETWORK_ID)),
+        networkId: NETWORK_ID,
+        mode: 'authoritative',
       }));
 
       const { offered } = await runSeam([conflicting, uncovered], gate);
@@ -264,9 +296,28 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
       expect(offered).toEqual([uncovered]);
     });
 
+    // The identity half. Same store, same mode, same page — only the adapter's network
+    // identity is wrong, so it asks about a claim the store does not hold and the root is
+    // uncovered. Without this, an adapter that dropped or hard-coded `networkId` would
+    // still pass the case above, and in production would miss applied roots and insert
+    // unsigned legacy quads over signed state.
+    it('does not cover the root when the adapter carries the wrong network identity', async () => {
+      const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
+        store: storeWithAppliedRecord(await claimAskedFor(NETWORK_ID)),
+        networkId: 'otp:20430',
+        mode: 'authoritative',
+      }));
+
+      const { offered } = await runSeam([conflicting, uncovered], gate);
+
+      expect(offered).toEqual([conflicting, uncovered]);
+    });
+
     it('passes the same quad through when the projection is only shadow', async () => {
       const gate = createLegacyAgentProfileGateV1(createLegacyAgentProfileGateLookupV1({
-        store: storeWithAppliedRecord(), networkId: 'otp:2043', mode: 'shadow',
+        store: storeWithAppliedRecord(await claimAskedFor(NETWORK_ID)),
+        networkId: NETWORK_ID,
+        mode: 'shadow',
       }));
 
       const { offered } = await runSeam([conflicting, uncovered], gate);
