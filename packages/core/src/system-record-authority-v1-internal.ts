@@ -449,6 +449,15 @@ function evaluateLateTombstoneRuleV1(
   // of temporal reasons would have needed a third edit the next time the verifier
   // learned a refusal, so the mapping is inverted -- name the ONE refusal that
   // means precedence and propagate every other verbatim.
+  //
+  // THIS IS THE CLASS'S ONLY MEMBER, SWEPT RATHER THAN ASSUMED. Fourteen sites
+  // across packages/*/src turn an authority verification into a branch: five
+  // calls to `evaluateAuthorityTransitionV1`, two to the conflict evaluator, and
+  // seven negated binding predicates. THIRTEEN map a refusal onto a refusal --
+  // a throw, a `fail(...)`, or the decision propagated verbatim. This is the only
+  // site with an AFFIRMATIVE outcome available to invert into, because it is the
+  // only one where the ADR gives a refusal a meaning of its own. A future site
+  // that reads a refusal as an affirmative joins this class and needs this shape.
   if (
     verified.decision === 'reject'
     && verified.reason === TRANSITION_NAMES_ANOTHER_PREDECESSOR_V1
