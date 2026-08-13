@@ -31,6 +31,7 @@ import {
   SYSTEM_RECORD_MAX_PROJECTION_QUADS,
 } from '@origintrail-official/dkg-core/system-record-v1';
 import type { Quad, QueryResult, TripleStore } from '../src/triple-store.js';
+import { OxigraphStore } from '../src/index.js';
 
 const NETWORK_ID = 'otp:2043';
 const ROOT = `did:dkg:agent:0x${'1'.repeat(40)}`;
@@ -417,5 +418,68 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(rows.length).toBeLessThan(SYSTEM_RECORD_MAX_PROJECTION_QUADS);
     expect(read.truncated).toBe(true);
     expect(read.rows).toEqual([]);
+  });
+});
+
+/**
+ * The queries actually PARSE AND RUN.
+ *
+ * Adopted from review. Every case above answers through a string-scanning fake, which
+ * validates this module's expectations about its own SPARQL rather than the SPARQL. A
+ * regression emitting malformed text that still contained `GRAPH <...>`, `?claim ?table`
+ * and the right IRIs would satisfy that fake completely — and a real store would reject
+ * it, which at the seam means the lookup THROWS and the per-context-graph catch drops the
+ * whole page. Silent loss of legacy sync, from a suite that stayed green.
+ *
+ * So this seeds a real Oxigraph and runs both reads end to end. It is deliberately a
+ * smoke test: the bounded/overflow edges stay on the fake, where they can be driven
+ * precisely. What this adds is the one property the fake structurally cannot give —
+ * that the emitted query is valid against the engine production uses.
+ */
+describe('the generated SPARQL against a real store', () => {
+  const PROJECTION_GRAPH = systemRecordProjectionGraphV1('authoritative');
+
+  async function seededStore(): Promise<OxigraphStore> {
+    const store = new OxigraphStore();
+    await store.insert([
+      ...appliedRecordQuads(ROOT, [ROOT]),
+      { subject: ROOT, predicate: 'urn:p', object: '"signed"', graph: PROJECTION_GRAPH },
+    ]);
+    return store;
+  }
+
+  it('resolves the applied root through a real engine, and stays inert under shadow', async () => {
+    const store = await seededStore();
+
+    const live = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT],
+    });
+    const shadow = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'shadow', roots: [ROOT],
+    });
+
+    expect(live.records).toEqual([{ root: ROOT, ownedSubjects: [ROOT] }]);
+    expect(live.unclassifiedRoots).toEqual([]);
+    // The mode counterfactual again, but here the authoritative half proves the query is
+    // executable rather than merely well-scanned — so the shadow half's emptiness is
+    // known to be the mode and not a query the engine refused.
+    expect(shadow.records).toEqual([]);
+  });
+
+  it('reads the projection row through a real engine, and stays inert under shadow', async () => {
+    const store = await seededStore();
+
+    const live = await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects: [ROOT],
+    });
+    const shadow = await readLegacyAgentProfileProjectionV1({
+      store, mode: 'shadow', subjects: [ROOT],
+    });
+
+    expect(live.truncated).toBe(false);
+    expect(live.rows).toEqual([
+      { subject: ROOT, predicate: 'urn:p', object: '"signed"', graph: PROJECTION_GRAPH },
+    ]);
+    expect(shadow.rows).toEqual([]);
   });
 });
