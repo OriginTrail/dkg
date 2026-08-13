@@ -20,11 +20,50 @@ import {
 import type { CanonicalRfc3339SecondsV1 } from './system-record-agent-profile-primitives-v1-internal.js';
 import type { SystemRecordAuthorityDecisionV1 } from './system-record-authority-types-v1-internal.js';
 
+/**
+ * Does this transition rotate OUT OF that exact head?
+ *
+ * The structural half of transition verification, named so a caller can ask it
+ * WITHOUT going through the clocked evaluator and without matching the English
+ * refusal the evaluator produces. That distinction is load-bearing at the
+ * late-tombstone seam: there, "the transition names another predecessor" is the
+ * ADR's "otherwise the tombstone takes precedence", while every temporal refusal
+ * means "not verifiable now" -- and a seam that told them apart by reason TEXT
+ * would silently change meaning if this module ever reworded or split it.
+ *
+ * Deliberately clock-free. Binding is a property of the two objects; whether the
+ * transition may be ACTED on additionally depends on time, and that stays in
+ * {@link evaluateAuthorityTransitionV1}.
+ */
+export function isAuthorityTransitionBoundToPriorHeadV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  priorHead: AgentProfileHeadObjectV1,
+): boolean {
+  const validatedTransition = validateAuthorityTransition(transition);
+  const validatedPrior = validateAgentProfileHeadObjectV1(priorHead);
+  return validatedTransition.networkId === validatedPrior.networkId
+    && validatedTransition.peerId === validatedPrior.peerId
+    && validatedTransition.peerPublicKey === validatedPrior.peerPublicKey
+    && validatedTransition.priorAuthoritySequence === validatedPrior.authoritySequence
+    && validatedTransition.priorHeadDigest
+      === computeAgentProfileHeadObjectDigestV1(validatedPrior)
+    && validatedTransition.priorEvmIssuer === validatedPrior.evmIssuer;
+}
+
+/**
+ * ACCEPT OR REJECT, never stale and never quarantine.
+ *
+ * Measured over its own body: one accept and six rejects. The declared type used
+ * to be the full authority union, which is wider than anything this function can
+ * produce -- and a caller narrowing its own result then has to write arms for
+ * states that cannot arrive, or launder them. Stating the real codomain here is
+ * what lets those callers stay narrow honestly.
+ */
 export function evaluateAuthorityTransitionV1(
   transition: AgentProfileAuthorityTransitionV1,
   priorHead: AgentProfileHeadObjectV1,
   nowMs: number,
-): SystemRecordAuthorityDecisionV1 {
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'accept' | 'reject' }> {
   const validatedTransition = validateAuthorityTransition(transition);
   const validatedPrior = validateAgentProfileHeadObjectV1(priorHead);
   if (!isSafeNow(nowMs)) return { decision: 'reject', reason: 'verification clock is invalid' };
@@ -34,15 +73,7 @@ export function evaluateAuthorityTransitionV1(
       reason: 'transition issuedAt exceeds the future clock-skew bound',
     };
   }
-  const priorDigest = computeAgentProfileHeadObjectDigestV1(validatedPrior);
-  if (
-    validatedTransition.networkId !== validatedPrior.networkId ||
-    validatedTransition.peerId !== validatedPrior.peerId ||
-    validatedTransition.peerPublicKey !== validatedPrior.peerPublicKey ||
-    validatedTransition.priorAuthoritySequence !== validatedPrior.authoritySequence ||
-    validatedTransition.priorHeadDigest !== priorDigest ||
-    validatedTransition.priorEvmIssuer !== validatedPrior.evmIssuer
-  ) {
+  if (!isAuthorityTransitionBoundToPriorHeadV1(validatedTransition, validatedPrior)) {
     return {
       decision: 'reject',
       reason: 'transition does not bind the accepted predecessor',

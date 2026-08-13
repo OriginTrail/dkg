@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1253',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1246',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -192,7 +192,7 @@ export const CORE_PROJECTIONS_V1 = 25920;
  *
  * A NAME-GREP WOULD NOT HAVE BEEN ENOUGH, which is why the instrument is
  * empirical rather than textual. Core copies the field into its evidence snapshot
- * through an allowlist at system-record-authority-v1-internal.ts:927, so it
+ * through an allowlist at system-record-authority-v1-internal.ts:917, so it
  * travels inside an object; a branch reading it off the whole snapshot, or by
  * dynamic access, would never appear in a grep for the symbol. Running the
  * branches closes that gap for the branches actually run.
@@ -433,13 +433,13 @@ export const CORE_HARNESS_LIMITATIONS_V1: readonly HarnessLimitationV1[] = [
 export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'core-single-semantic-read',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:314',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:321',
     contains: 'const summary = evidenceState.verifiedAuthoritySummary;',
     why: "Core's ONLY semantic read of the field, and it sits inside the absent-state branch.",
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:927',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:917',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',
@@ -723,7 +723,7 @@ export const CORE_SWEEP_FINDINGS_V1: readonly string[] = [
   // something anyone routes around.
   'THE ASYMMETRY: CORE NEVER READS `verifiedAuthoritySummary` ON ANY PRESENT-STATE '
   + 'PATH, WHILE STORAGE BIND-CHECKS IT HARD. Core has exactly ONE semantic read of '
-  + 'the field, at system-record-authority-v1-internal.ts:314, inside the ABSENT-state '
+  + 'the field, at system-record-authority-v1-internal.ts:321, inside the ABSENT-state '
   + 'branch; the five present-state branch functions (:274 lower-sequence, :318 '
   + 'next-sequence, :389 same-sequence tombstone, :427 same-sequence active, :445 '
   + 'fork-resolution successor) never read it, which is why omitting it moves no '

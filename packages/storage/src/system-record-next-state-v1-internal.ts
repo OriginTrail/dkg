@@ -1085,11 +1085,14 @@ function classifyLateTombstoneAdvance(
     ),
     current.transitionLineage,
   );
-  // EVERY BRANCH OF CORE'S DECISION IS WRITTEN OUT, and the exhaustiveness is
-  // enforced by the compiler rather than by a `default` arm. A default would map
-  // a decision this seam has never been shown onto the retry outcome silently --
-  // including a `quarantine`, which is a durable state elsewhere in core and
-  // must not be laundered into a deferral by falling off the end of a switch.
+  // EVERY BRANCH IS WRITTEN OUT AND THE SET IS THE RULE'S OWN, not the whole
+  // authority union. `AgentProfileLateTombstoneDecisionV1` is accept | stale |
+  // reject, so there is no arm here for a state the rule cannot produce -- this
+  // switch previously carried a `quarantine` arm that mapped a DURABLE authority
+  // state onto "incomplete evidence" and compiled cleanly, which is a mislabel
+  // waiting for the day core widens. Narrowing the result deleted it, and the
+  // `never` below turns any future widening into a compile error at this seam
+  // rather than a silent deferral.
   switch (decision.decision) {
     case 'accept':
       return Object.freeze({ outcome: 'advance' });
@@ -1099,16 +1102,6 @@ function classifyLateTombstoneAdvance(
       // The ADR's "rejects for retry rather than treating the tombstone as
       // stale". This must never map to `stale`; that mapping is the behaviour
       // this seam exists to remove.
-      return Object.freeze({
-        outcome: 'deferred',
-        reason: 'late-tombstone-evidence-incomplete',
-      });
-    case 'quarantine':
-      // UNREACHABLE FROM THIS ARM TODAY -- it returns only accept, stale or
-      // reject -- and written out rather than defaulted because that is a fact
-      // about core's arm, not about this switch. A quarantine is durable state
-      // in core; if the arm ever produces one, the honest answer here is to
-      // withhold rather than to guess which durable state storage should write.
       return Object.freeze({
         outcome: 'deferred',
         reason: 'late-tombstone-evidence-incomplete',

@@ -44,6 +44,7 @@ import {
   isAgentProfileHeadBoundToAcceptedTransitionV1,
   isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
+  isAuthorityTransitionBoundToPriorHeadV1,
   isSafeNow,
   isTombstoneBoundToPredecessorV1,
   validateAgentProfileForkResolutionEvidenceV1,
@@ -54,6 +55,7 @@ export {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAuthorityTransitionV1,
   isAgentProfileHeadBoundToAcceptedTransitionV1,
+  isAuthorityTransitionBoundToPriorHeadV1,
   isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
   isSafeNow,
@@ -113,6 +115,24 @@ export interface AgentProfileLateTombstoneEvidenceV1 {
   readonly retainedTransition?: AgentProfileLateTombstoneRetainedTransitionV1;
 }
 
+/**
+ * What the ADR 0002 :129-133 rule can decide, and nothing wider.
+ *
+ * The rule admits the tombstone, finds it superseded, or refuses -- it has no
+ * quarantine to reach, because quarantine is a frontier/equivocation outcome
+ * decided before this arm is ever dispatched to. Narrowing the RESULT rather
+ * than returning the full authority union is what keeps a caller from having to
+ * write an arm for a state this rule cannot produce: an unreachable arm is a
+ * mapping decision made in advance and silently, and this one would have folded
+ * a NEW durable authority state into "incomplete evidence" while compiling
+ * cleanly. If quarantine ever becomes reachable here, widening this type is the
+ * deliberate, compile-visible step that makes every caller answer for it.
+ */
+export type AgentProfileLateTombstoneDecisionV1 = Extract<
+  SystemRecordAuthorityDecisionV1,
+  { readonly decision: 'accept' | 'stale' | 'reject' }
+>;
+
 function snapshotLateTombstoneEvidenceV1(
   value: unknown,
 ): AgentProfileLateTombstoneEvidenceV1 {
@@ -135,19 +155,6 @@ function snapshotLateTombstoneEvidenceV1(
 }
 
 /**
- * The ONE refusal from the transition verifier that means the ADR's "otherwise
- * the tombstone takes precedence".
- *
- * Named rather than inlined so the allow-list has a single definition, and a
- * reword of the verifier's literal is a visible edit here instead of a silent
- * change of meaning at the seam. Its producer is
- * `system-record-authority-verification-v1-internal.ts:48`, which the reject
- * harvest pins.
- */
-const TRANSITION_NAMES_ANOTHER_PREDECESSOR_V1 =
-  'transition does not bind the accepted predecessor';
-
-/**
  * The clock preflight both public entries owe, in ONE place.
  *
  * It was inline at each, which put two reason literals at two sites apiece and
@@ -162,7 +169,7 @@ const TRANSITION_NAMES_ANOTHER_PREDECESSOR_V1 =
 function rejectInvalidHeadClockV1(
   candidateState: AgentProfileHeadObjectV1,
   nowMs: number,
-): SystemRecordAuthorityDecisionV1 | undefined {
+): Extract<SystemRecordAuthorityDecisionV1, { readonly decision: 'reject' }> | undefined {
   if (!isSafeNow(nowMs)) {
     return { decision: 'reject', reason: 'verification clock is invalid' };
   }
@@ -384,7 +391,7 @@ function evaluateLateTombstoneRuleV1(
   retainedTransition: AgentProfileLateTombstoneRetainedTransitionV1 | undefined,
   lineage: readonly AgentProfileAppliedTransitionV1[],
   candidateSequence: bigint,
-): SystemRecordAuthorityDecisionV1 {
+): AgentProfileLateTombstoneDecisionV1 {
   const predecessor =
     tombstonePredecessor === undefined
       ? undefined
@@ -429,39 +436,22 @@ function evaluateLateTombstoneRuleV1(
     // superseded.
     return { decision: 'stale' };
   }
-  // ONLY ONE REFUSAL MEANS "THE TOMBSTONE TAKES PRECEDENCE", AND IT IS AN
-  // ALLOW-LIST BECAUSE THE ALTERNATIVE FAILED TWICE.
+  // ONLY "NAMES ANOTHER PREDECESSOR" MEANS THE TOMBSTONE TAKES PRECEDENCE, and
+  // it is asked STRUCTURALLY rather than read off the verifier's refusal text.
   //
-  // ADR 0002 :131-132 says the descendant is valid only when the transition
-  // NAMES the tombstone as its predecessor, "otherwise the tombstone takes
-  // precedence". That "otherwise" is about NAMING. The verifier, though, also
-  // refuses for reasons that mean "not verifiable now" rather than "not this
-  // tombstone's descendant" -- an unusable clock, a transition issued beyond the
-  // future-skew bound, an expiry window not yet passed. Reading any of those as
-  // precedence ADMITS a tombstone that the same evidence with a later clock
-  // marks stale.
+  // ADR 0002 :131-132 makes the descendant valid only when the transition NAMES
+  // this tombstone, "otherwise the tombstone takes precedence" -- so the
+  // affirmative rests on a structural fact about two objects. Every other refusal
+  // the verifier produces means "not verifiable now" (an unusable clock, a
+  // transition beyond the future-skew bound, an expiry window not yet passed) and
+  // propagates verbatim: reading one of those as precedence ADMITS a tombstone
+  // that the same evidence with a later clock marks stale.
   //
-  // This has now been the same defect twice, one layer apart: first the
-  // caller-supplied `nowMs`, fixed by a preflight; then the TRANSITION'S OWN
-  // `issuedAt`, which the preflight does not cover and which the verifier
-  // refuses on separately. Measured: a binding transition returned `stale` when
-  // issued at the fixture clock and `accept` when dated a year ahead. A deny-list
-  // of temporal reasons would have needed a third edit the next time the verifier
-  // learned a refusal, so the mapping is inverted -- name the ONE refusal that
-  // means precedence and propagate every other verbatim.
-  //
-  // THIS IS THE CLASS'S ONLY MEMBER, SWEPT RATHER THAN ASSUMED. Fourteen sites
-  // across packages/*/src turn an authority verification into a branch: five
-  // calls to `evaluateAuthorityTransitionV1`, two to the conflict evaluator, and
-  // seven negated binding predicates. THIRTEEN map a refusal onto a refusal --
-  // a throw, a `fail(...)`, or the decision propagated verbatim. This is the only
-  // site with an AFFIRMATIVE outcome available to invert into, because it is the
-  // only one where the ADR gives a refusal a meaning of its own. A future site
-  // that reads a refusal as an affirmative joins this class and needs this shape.
-  if (
-    verified.decision === 'reject'
-    && verified.reason === TRANSITION_NAMES_ANOTHER_PREDECESSOR_V1
-  ) {
+  // The two measured inversions behind this shape, and the sweep showing this is
+  // the only site in the package with an affirmative outcome available to invert
+  // into, are recorded in the late-tombstone seam suite beside the constructions
+  // that prove them.
+  if (!isAuthorityTransitionBoundToPriorHeadV1(transition, candidateState)) {
     return { decision: 'accept' };
   }
   return verified;
@@ -562,7 +552,7 @@ export function evaluateAgentProfileLateTombstoneAdvanceV1(
   candidate: AgentProfileTombstoneHeadObjectV1,
   evidence: AgentProfileLateTombstoneEvidenceV1,
   acceptedTransitionLineage: readonly AgentProfileAppliedTransitionV1[],
-): SystemRecordAuthorityDecisionV1 {
+): AgentProfileLateTombstoneDecisionV1 {
   const candidateState = validateAgentProfileHeadObjectV1(candidate);
   if (candidateState.state !== 'tombstone') {
     return {

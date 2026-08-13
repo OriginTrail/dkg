@@ -19,6 +19,7 @@ import type {
   AgentProfileIdentityFactsInputV1,
   AgentProfileIdentityFactsV1,
   AgentProfileIndexedSubjectKindV1,
+  AgentProfileLateTombstoneDecisionV1,
   AgentProfileLateTombstoneEvidenceV1,
   AgentProfileLateTombstoneRetainedTransitionV1,
   AgentProfileLinkedSubjectKindV1,
