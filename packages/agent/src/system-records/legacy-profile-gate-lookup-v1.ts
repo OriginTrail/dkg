@@ -15,6 +15,7 @@
 import {
   readLegacyAgentProfileAppliedRootsV1,
   readLegacyAgentProfileProjectionV1,
+  systemRecordProjectionGraphV1,
   type SystemRecordMaterializationModeV1,
 } from '@origintrail-official/dkg-storage/internal/system-record-legacy-gate-read-v1';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -28,6 +29,11 @@ export function createLegacyAgentProfileGateLookupV1(input: {
 }): LegacyAgentProfileGateLookupV1 {
   const { store, networkId, mode } = input;
   return Object.freeze({
+    // Derived from the SAME `mode` the two reads below are given, and derived by the
+    // materializer's own function rather than restated as an agent-side constant. That is
+    // what keeps the destination-graph conjunct and the reads from ever disagreeing about
+    // which graph is authoritative.
+    projectionGraph: systemRecordProjectionGraphV1(mode),
     lookupAppliedRoots: (roots: readonly string[], signal?: AbortSignal) =>
       readLegacyAgentProfileAppliedRootsV1({ store, networkId, mode, roots, signal }),
     lookupProjectionMembership: (subjects: readonly string[], signal?: AbortSignal) =>

@@ -53,7 +53,15 @@ function fakeLookup(
     rows: projection.filter((row) => subjects.includes(row.subject)),
     truncated: false,
   }));
-  return { lookup: { lookupAppliedRoots, lookupProjectionMembership }, lookupAppliedRoots };
+  return {
+    lookup: { projectionGraph: AGENTS_GRAPH, lookupAppliedRoots, lookupProjectionMembership },
+    lookupAppliedRoots,
+  };
+}
+
+/** A quad bound for a context graph that is NOT where the applied projection lives. */
+function quadInGraph(subject: string, predicate: string, object: string, graph: string): Quad {
+  return { subject, predicate, object, graph };
 }
 
 /**
@@ -66,13 +74,14 @@ async function runSeam(
   page: Quad[],
   gate?: ReturnType<typeof createLegacyAgentProfileGateV1>,
   servePhase: 'data' | 'meta' = 'data',
+  contextGraphId = 'agents',
 ) {
   const inserted: Quad[][] = [];
   let served = false;
   const result = await runDurableSyncDetailed({
     ctx,
     remotePeerId: 'peer',
-    contextGraphIds: ['agents'],
+    contextGraphIds: [contextGraphId],
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 1_000),
     fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => {
       // Serve the page once on the requested phase, then run dry so the loop terminates.
@@ -128,6 +137,30 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     const { offered } = await runSeam(
       [conflicting, uncovered],
       createLegacyAgentProfileGateV1(lookup),
+    );
+
+    expect(offered).toEqual([uncovered]);
+    expect(offered).not.toContainEqual(conflicting);
+  });
+
+  // T1, half A — the half that scoping by the page's context-graph id would get WRONG.
+  // The page is served under `project-x`, but the quad it carries is bound for the
+  // aggregate graph where the applied projection lives, so the collision is real and the
+  // quad must be withheld. A lane-scoped gate (`pid === 'agents'`) would insert it, which
+  // is failing toward insertion — the direction :1505 forbids.
+  it('withholds an aggregate-graph quad even when the page is not the agents lane', async () => {
+    const { lookup } = fakeLookup(
+      [{ root: ROOT, ownedSubjects: [ROOT] }],
+      [projectionRow(ROOT, 'urn:p', 'signed')],
+    );
+    const conflicting = quad(ROOT, 'urn:p', 'rewritten-by-legacy');
+    const uncovered = quad('urn:ordinary-subject', 'urn:p', 'o');
+
+    const { offered } = await runSeam(
+      [conflicting, uncovered],
+      createLegacyAgentProfileGateV1(lookup),
+      'data',
+      'project-x',
     );
 
     expect(offered).toEqual([uncovered]);

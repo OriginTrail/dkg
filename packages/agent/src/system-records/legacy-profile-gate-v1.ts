@@ -100,14 +100,25 @@ export interface LegacyAgentProfileProjectionV1 {
  * page and never per root or per quad.
  *
  * BOTH BYTE CAPS BELONG TO THE IMPLEMENTATION, AND NEITHER MAY BE HONOURED SILENTLY.
- * :926 caps request one at 1 MiB and request two at 2 MiB, and by the time the gate holds
- * a result the bytes have already transferred — so the gate can only refuse to trust an
- * answer, never prevent it. An implementation that cannot honour a cap reports the
- * shortfall (`unclassifiedRoots` / `truncated`); it must not simply return less, because
- * a short response is indistinguishable from "no record here" and so fails toward
- * insertion — the one direction :1505 forbids.
+ * :926 caps request one at 1 MiB and request two at 2 MiB. Where the store has a wire the
+ * implementation may refuse the body before parsing it; where it does not, the cap can
+ * only be measured after the answer arrives. Either way the gate can only refuse to TRUST
+ * an answer, so an implementation that cannot honour a cap reports the shortfall
+ * (`unclassifiedRoots` / `truncated`); it must not simply return less, because a short
+ * response is indistinguishable from "no record here" and so fails toward insertion —
+ * the one direction :1505 forbids.
  */
 export interface LegacyAgentProfileGateLookupV1 {
+  /**
+   * The graph an applied projection occupies under THIS lookup's mode — the only graph in
+   * which legacy insertion can physically collide with signed state.
+   *
+   * It rides on the lookup rather than arriving as a separate gate argument so the graph
+   * and the reads cannot be handed different modes: one value, one mode, one home. A gate
+   * built against one mode's projection graph while reading another's would be deciding
+   * collisions in a graph it never actually read.
+   */
+  readonly projectionGraph: string;
   /** Request one: which of these derived roots carry an applied signed record. */
   lookupAppliedRoots(
     roots: readonly string[],
@@ -212,10 +223,24 @@ export function createLegacyAgentProfileGateV1(
     ): Promise<LegacyAgentProfileGateResultV1> {
       // Phase 1 — derive once per quad, keeping the result positionally so the final pass
       // never re-derives. No query.
+      //
+      // TWO CONJUNCTS, AND NEITHER IMPLIES THE OTHER. A quad is a candidate only if its
+      // subject derives an agent root AND it is destined for the graph the applied
+      // projection occupies. The subject alone is not enough: the collision this gate
+      // exists to prevent is PHYSICAL, so a quad about an agent bound for some other
+      // context graph cannot overwrite signed state and must pass through untouched.
+      // The destination alone is not enough either: the aggregate graph holds quads about
+      // subjects no signed record covers, and those take the ordinary legacy path.
+      //
+      // Scoping by the page's context-graph id instead would be the unsafe reading: a page
+      // whose id is not `agents` can still carry a quad destined for the aggregate graph,
+      // and lane-scoping would insert it — failing toward insertion, which :1505 forbids.
       const rootByIndex: (string | null)[] = new Array(quads.length);
       const roots = new Set<string>();
       for (const [index, quad] of quads.entries()) {
-        const root = deriveLegacyAgentProfileRootV1(quad.subject);
+        const root = quad.graph === lookup.projectionGraph
+          ? deriveLegacyAgentProfileRootV1(quad.subject)
+          : null;
         rootByIndex[index] = root;
         if (root !== null) roots.add(root);
       }

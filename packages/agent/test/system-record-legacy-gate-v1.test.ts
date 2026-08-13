@@ -70,7 +70,11 @@ function fakeLookup(
     rows: projection.filter((row) => subjects.includes(row.subject)),
     truncated: bounds.truncated ?? false,
   }));
-  const lookup: LegacyAgentProfileGateLookupV1 = { lookupAppliedRoots, lookupProjectionMembership };
+  const lookup: LegacyAgentProfileGateLookupV1 = {
+    projectionGraph: AGENTS_GRAPH,
+    lookupAppliedRoots,
+    lookupProjectionMembership,
+  };
   return { lookup, lookupAppliedRoots, lookupProjectionMembership };
 }
 
@@ -199,6 +203,31 @@ describe('LegacyAgentProfileGateV1 — covered roots (:924, :925)', () => {
     expect(result.discardedDuplicates).toBe(1);
     expect(result.withheld).toEqual([]);
     expect(result.conflictedRoots).toBe(0);
+  });
+
+  // T1, half B — the half that scoping by SUBJECT ALONE gets wrong, and the reason the
+  // two conjuncts are independent. This quad names a covered agent root and would
+  // conflict with the projection on content, but it is bound for a different context
+  // graph, where the signed projection does not live. Nothing can be overwritten there,
+  // so withholding it would be pure data loss in an unrelated graph.
+  //
+  // The zero-read assertion is what makes it a scope test rather than a duplicate of the
+  // pass-through case: a gate that consulted the store and then decided to pass would
+  // also satisfy the offer assertion, while spending :926's budget on a page that cannot
+  // collide with anything.
+  it('passes an agent-root quad bound for another context graph, and reads nothing', async () => {
+    const { lookup, lookupAppliedRoots } = fakeLookup([applied], projection);
+    const elsewhere = {
+      subject: ROOT, predicate: 'p', object: 'different', graph: 'did:dkg:context-graph:project-x',
+    };
+
+    const result = await createLegacyAgentProfileGateV1(lookup).filterPage([elsewhere]);
+
+    expect(result.insert).toEqual([elsewhere]);
+    expect(result.withheld).toEqual([]);
+    expect(result.conflictedRoots).toBe(0);
+    expect(result.storeRequests).toBe(0);
+    expect(lookupAppliedRoots).not.toHaveBeenCalled();
   });
 
   it('withholds a conflicting quad and counts the root as conflicted', async () => {

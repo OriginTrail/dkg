@@ -197,10 +197,18 @@ export interface DurableSyncContext {
    *
    * Filter-before-insert at this seam, the same shape the oversize guard uses, so that
    * unsigned legacy quads never reach the store for a root that already carries an
-   * applied signed record. It is scoped by SUBJECT, not by context graph: a page that
-   * derives no `did:dkg:agent:` root is returned untouched and costs no store read, so
-   * the gate is inert on every non-`agents` page without needing to know which page it
-   * is looking at.
+   * applied signed record.
+   *
+   * SCOPE, STATED AS MEASURED. The gate is scoped by DESTINATION GRAPH conjoined with the
+   * subject derivation — not by the page's context-graph id, and not by the subject alone.
+   * A quad is a candidate only when it derives a `did:dkg:agent:` root AND is bound for
+   * the graph the applied projection occupies, because that is the only place legacy
+   * insertion can physically collide with signed state.
+   *
+   * It is therefore inert, at no store read, on any page carrying no such quad. It is NOT
+   * accurate to say it is inert on "every non-`agents` page": a page under any id can
+   * carry a quad bound for the aggregate graph, and that quad is exactly the one that
+   * scoping by page id would have inserted over signed state.
    *
    * OPTIONAL, and deliberately not fail-closed on absence. The trigger for a
    * fail-closed throw would be "this page derived an agent root", which is true of every
@@ -293,9 +301,9 @@ async function runDurableSyncWithBudget(
    *
    * Data and meta are fetched in separate pagination loops and are therefore separate
    * pages, so each is entitled to :926's two store requests and gating both stays inside
-   * that bound. A page deriving no agent root short-circuits inside the gate and issues
-   * no read at all, which is what makes gating the meta page free in the default
-   * configuration (`agents/_meta` is opt-in and off).
+   * that bound. A page carrying no quad bound for the projection graph short-circuits
+   * inside the gate and issues no read at all, which is what makes gating the meta page
+   * free in the default configuration (`agents/_meta` is opt-in and off).
    */
   const gateLegacyAgentProfilePage = async (pid: string, quads: Quad[]): Promise<Quad[]> => {
     if (legacyAgentProfileGate === undefined || quads.length === 0) return quads;

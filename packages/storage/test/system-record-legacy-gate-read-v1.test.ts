@@ -22,6 +22,14 @@ import {
   systemRecordRootClaimSubjectV1,
 } from '../src/system-record-rdf-schema-v1-internal.js';
 import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../src/internal-graph-policy.js';
+// The REAL caps. A fixture that restated them would still pass against a reader that cut
+// at a different bound, which is the whole property these cases exist to pin.
+import {
+  SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
+  SYSTEM_RECORD_MAX_PROJECTION_BYTES,
+  SYSTEM_RECORD_MAX_OWNED_SUBJECTS,
+  SYSTEM_RECORD_MAX_PROJECTION_QUADS,
+} from '@origintrail-official/dkg-core/system-record-v1';
 import type { Quad, QueryResult, TripleStore } from '../src/triple-store.js';
 
 const NETWORK_ID = 'otp:2043';
@@ -219,5 +227,115 @@ describe('legacy agent-profile gate read — projection membership', () => {
     expect(read.truncated).toBe(true);
     expect(read.rows).toEqual([]);
     expect(store.queries).toEqual([]);
+  });
+});
+
+/**
+ * The overflow channels the gate acts on, driven through the REAL reader.
+ *
+ * Everything above this point either fakes the reported channel at the gate layer or
+ * exercises a pre-query shortcut that returns before the store is touched. Neither reaches
+ * the code that DECIDES a response was too large — the running byte total, the cut, and
+ * the row-count detection. Those are the branches the whole byte-cap argument rests on,
+ * and until now they could have been deleted with the suite still green.
+ *
+ * The caps are the real imported constants, so these cannot pass against a reader that
+ * invented its own bound.
+ */
+describe('bounded-read overflow, computed by the real reader', () => {
+  /**
+   * A bulky but entirely VALID owned-subject table: the root plus the largest run of
+   * capability subjects the record may own, UTF-8 sorted and duplicate-free.
+   *
+   * Bulk has to come from many real subjects rather than one long one. A padded IRI is
+   * rejected as a table that cannot be decoded against its own root, and an over-long
+   * table trips its own 256 KiB cap — either way the root lands in `unclassifiedRoots`
+   * for a reason that has nothing to do with the response budget, and the test would pass
+   * while proving nothing about the cut.
+   */
+  function bulkOwnedSubjects(root: string): string[] {
+    const capabilities = Array.from(
+      { length: SYSTEM_RECORD_MAX_OWNED_SUBJECTS - 1 },
+      // `cap<n>` is the REAL indexed-genid shape. `capability<n>` looks plausible and is
+      // rejected: it starts with the `cap` prefix but leaves `ability<n>`, which is not an
+      // ordinal. A fixture using it lands every root in `unclassifiedRoots` for a
+      // validation reason and the byte-budget assertion would never be reached.
+      (_, i) => `${root}/.well-known/genid/cap${i + 1}`,
+    ).sort();
+    return [root, ...capabilities];
+  }
+
+  function bulkRecordQuads(root: string): Quad[] {
+    return appliedRecordQuads(root, bulkOwnedSubjects(root));
+  }
+
+  it('reports the roots that cross the applied-roots byte budget, and keeps the ones before', async () => {
+    // No SINGLE table can cross the response budget — an owned-subject table has its own
+    // smaller cap, and an over-cap table is rejected as undecodable for a different
+    // reason entirely. The response budget is a RUNNING total across roots, so crossing
+    // it is inherently a multi-root property and the fixture has to be built that way.
+    //
+    // Asserting BOTH halves is the point: a reader that gave up on the whole batch as
+    // soon as any budget was touched would also "withhold safely", while destroying the
+    // coverage this gate exists to provide.
+    const root = (i: number) => `did:dkg:agent:0x${(i + 1).toString(16).repeat(40).slice(0, 40)}`;
+    // The budget is measured against the literal the reader actually retains, so the cut
+    // point is derived from that same literal rather than from a guessed table size.
+    const per = jsonLiteral(bulkOwnedSubjects(root(0))).length;
+    const fits = Math.floor(SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES / per);
+    const roots = Array.from({ length: fits + 2 }, (_, i) => root(i));
+    const ordered = [...roots].sort();
+    const store = fakeStore(ordered.flatMap(bulkRecordQuads));
+
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots,
+    });
+
+    // Deterministic in sorted root order, so WHICH roots fall outside the budget is a
+    // function of the request rather than of result ordering.
+    expect(read.records.map((record) => record.root)).toEqual(ordered.slice(0, fits));
+    expect(read.unclassifiedRoots).toEqual(ordered.slice(fits));
+    expect(read.unclassifiedRoots.length).toBeGreaterThan(0);
+  });
+
+  it('reports truncated when the projection response exceeds the row cap', async () => {
+    const rows = Array.from({ length: SYSTEM_RECORD_MAX_PROJECTION_QUADS + 1 }, (_, i) => ({
+      subject: ROOT,
+      predicate: `urn:p${i}`,
+      object: '"o"',
+      graph: systemRecordProjectionGraphV1('authoritative'),
+    }));
+    const store = fakeStore(rows);
+
+    const read = await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects: [ROOT],
+    });
+
+    expect(read.truncated).toBe(true);
+    expect(read.rows).toEqual([]);
+    // It really asked — this is the post-decode branch, not the pre-query shortcut the
+    // subject-bound case above takes.
+    expect(store.queries).toHaveLength(1);
+  });
+
+  it('reports truncated when the projection response exceeds the byte cap under the row cap', async () => {
+    // Deliberately FEW rows, so only the byte accounting can detect this. A reader that
+    // implemented the row cap alone passes every other case in this file and fails here.
+    const wide = Math.ceil(SYSTEM_RECORD_MAX_PROJECTION_BYTES / 4);
+    const rows = Array.from({ length: 5 }, (_, i) => ({
+      subject: ROOT,
+      predicate: `urn:p${i}`,
+      object: `"${'y'.repeat(wide)}"`,
+      graph: systemRecordProjectionGraphV1('authoritative'),
+    }));
+    const store = fakeStore(rows);
+
+    const read = await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects: [ROOT],
+    });
+
+    expect(rows.length).toBeLessThan(SYSTEM_RECORD_MAX_PROJECTION_QUADS);
+    expect(read.truncated).toBe(true);
+    expect(read.rows).toEqual([]);
   });
 });

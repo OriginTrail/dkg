@@ -57,6 +57,21 @@ import {
  */
 export type { SystemRecordMaterializationModeV1 };
 
+/**
+ * The graph an applied projection occupies for a mode — the ONLY graph in which legacy
+ * insertion can physically collide with signed state.
+ *
+ * Exported for the gate's destination-graph scope. It is deliberately the materializer's
+ * own function rather than a constant restated agent-side: the gate must decide "would
+ * this insert land where the projection lives" against the same answer the projection
+ * itself uses, or the two could disagree about which graph is authoritative.
+ *
+ * Under `shadow` this is the namespace-hidden reserved graph, which no legacy page ever
+ * targets — so the mode keeps the gate inert here too, and for the same reason as the
+ * reads: pre-cutover there is nothing for legacy insertion to collide with.
+ */
+export { systemRecordProjectionGraphV1 };
+
 /** One applied signed record, keyed by the agent root the caller asked about. */
 export interface LegacyAgentProfileAppliedRootV1 {
   readonly root: string;
@@ -85,6 +100,22 @@ function termBytes(value: string): number {
 
 function assertQueryableIri(iri: string): void {
   if (!isSafeIri(iri)) throw new Error('legacy agent-profile gate read built an unsafe IRI');
+}
+
+/**
+ * The transport's own refusal to buffer an oversized body, recognised by its stable
+ * `code` rather than by its message.
+ *
+ * Only the canonical `StoreResponseTooLargeError` counts. A store whose client reports
+ * the overrun as an untyped error still propagates — which fails CLOSED (the page is
+ * dropped, nothing is inserted), just more bluntly. That is named as a known residual
+ * rather than papered over with message matching, which would silently widen to
+ * unrelated failures and start reporting real errors as "could not classify".
+ */
+function isStoreResponseTooLargeV1(error: unknown): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && (error as { code?: unknown }).code === 'STORE_RESPONSE_TOO_LARGE';
 }
 
 function valuesClause(variable: string, iris: readonly string[]): string {
@@ -150,11 +181,22 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
     + `  }\n`
     + `}\nLIMIT ${ordered.length + 1}`;
 
-  const bindings = selectBindings(await store.query(query, {
-    source: 'storage.systemRecord.legacyGate.appliedRoots',
-    priority: 'background',
-    signal,
-  }) as { type: string; bindings?: Array<Record<string, string>> });
+  let bindings: Array<Record<string, string>>;
+  try {
+    bindings = selectBindings(await store.query(query, {
+      source: 'storage.systemRecord.legacyGate.appliedRoots',
+      priority: 'background',
+      maxResponseBytes: SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES,
+      signal,
+    }) as { type: string; bindings?: Array<Record<string, string>> });
+  } catch (error) {
+    if (!isStoreResponseTooLargeV1(error)) throw error;
+    // The transport refused the body before parsing it. Report rather than rethrow: at
+    // the seam a throw drops the whole page, which is the retry-storm this port contract
+    // was rewritten to avoid, and "could not classify" is already the answer the gate
+    // knows how to act on.
+    return Object.freeze({ records: [], unclassifiedRoots: Object.freeze([...ordered]) });
+  }
 
   const tableByRoot = new Map<string, string>();
   for (const binding of bindings) {
@@ -242,11 +284,18 @@ export async function readLegacyAgentProfileProjectionV1(input: {
     + `  }\n`
     + `}\nLIMIT ${SYSTEM_RECORD_MAX_PROJECTION_QUADS + 1}`;
 
-  const bindings = selectBindings(await store.query(query, {
-    source: 'storage.systemRecord.legacyGate.projection',
-    priority: 'background',
-    signal,
-  }) as { type: string; bindings?: Array<Record<string, string>> });
+  let bindings: Array<Record<string, string>>;
+  try {
+    bindings = selectBindings(await store.query(query, {
+      source: 'storage.systemRecord.legacyGate.projection',
+      priority: 'background',
+      maxResponseBytes: SYSTEM_RECORD_MAX_PROJECTION_BYTES,
+      signal,
+    }) as { type: string; bindings?: Array<Record<string, string>> });
+  } catch (error) {
+    if (!isStoreResponseTooLargeV1(error)) throw error;
+    return Object.freeze({ rows: [], truncated: true });
+  }
 
   if (bindings.length > SYSTEM_RECORD_MAX_PROJECTION_QUADS) {
     return Object.freeze({ rows: [], truncated: true });
