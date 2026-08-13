@@ -139,7 +139,7 @@ describe('Phase C sync envelope — sinceBatchId is unsigned', () => {
       assetUals: [EXACT_UAL],
     });
     const text = new TextDecoder().decode(bytes);
-    expect(text).toContain('mfacts|0|100|session|session-1|since|42|assets|');
+    expect(text).toContain('mfacts|0|100|data|session|session-1|since|42|assets|');
     expect(decodeURIComponent(text.split('|assets|')[1]!)).toBe(JSON.stringify([EXACT_UAL]));
   });
 

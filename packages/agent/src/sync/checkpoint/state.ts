@@ -1,4 +1,22 @@
 import type { SyncPhase } from '../auth/request-build.js';
+import {
+  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
+  isValidSyncCheckpointEntry,
+  transitionSyncCheckpointManifestOffset,
+  transitionSyncCheckpointOffset,
+  transitionSyncCheckpointResponderSession,
+  withoutSyncCheckpointResponderSession,
+  type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
+  type SyncCheckpointEntry,
+} from '@origintrail-official/dkg-core';
+
+export {
+  DEFAULT_SYNC_CHECKPOINT_TTL_MS,
+  type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
+  type SyncCheckpointEntry,
+};
 
 /**
  * Requester-only namespace for one selected-SWM transfer owner.
@@ -8,32 +26,12 @@ import type { SyncPhase } from '../auth/request-build.js';
  * prefix across bounded outer reconciler invocations; unrelated owners can
  * never share its cursor/session.
  */
-export type SyncCheckpointScope = `selected-swm-meta:${string}`;
+export type SyncCheckpointScope =
+  | `selected-swm-meta:${string}`
+  | `durable-recovery-meta:${string}`;
 
 /** Runtime-distinct namespace owned only by retained selected-SWM metadata. */
 export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;
-
-export const DEFAULT_SYNC_CHECKPOINT_TTL_MS = 24 * 60 * 60 * 1000;
-
-export type DurableManifestDigest = `sha256:${string}`;
-export type DurableManifestPrefixDigest = `sha256:${string}`;
-
-export interface SyncCheckpointEntry {
-  offset: number;
-  updatedAtMs: number;
-  expiresAtMs: number;
-  /** Canonical META generation that gives this DATA offset/session meaning. */
-  manifestDigest?: DurableManifestDigest;
-  /** Canonical descriptor prefix already verified through `offset`. */
-  manifestPrefixDigest?: DurableManifestPrefixDigest;
-  /**
-   * Opaque responder snapshot token paired with this offset. OFFSET is only
-   * meaningful while the responder still owns the same immutable row list;
-   * persisting the token lets a requester resume safely across its own restart.
-   */
-  responderSessionId?: string;
-  responderSessionExpiresAtMs?: number;
-}
 
 export interface SyncCheckpointStore {
   /**
@@ -42,14 +40,16 @@ export interface SyncCheckpointStore {
    * stale entries from this read path; pruneExpired() is maintenance only.
    */
   get(key: string, nowMs?: number): SyncCheckpointEntry | undefined;
-  set(key: string, value: number, nowMs?: number): void;
+  set(key: string, value: number, nowMs?: number, responderSessionOffset?: number): void;
   /** Advance a verified DATA offset without detaching it from its META generation. */
-  setManifestBoundOffset?(
+  setManifestBoundOffset(
     key: string,
     value: number,
     manifestDigest: DurableManifestDigest,
     nowMs?: number,
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal?: boolean,
+    responderSessionOffset?: number,
   ): void;
   /** Persist the responder snapshot token without advancing the verified offset. */
   setResponderSession?(
@@ -59,6 +59,7 @@ export interface SyncCheckpointStore {
     nowMs?: number,
     manifestDigest?: DurableManifestDigest,
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    responderSessionOffset?: number,
   ): void;
   /** Forget only the snapshot token while retaining the verified offset. */
   clearResponderSession?(key: string): void;
@@ -79,6 +80,10 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
   get(key: string, nowMs = this.clock()): SyncCheckpointEntry | undefined {
     const entry = this.entries.get(key);
     if (!entry) return undefined;
+    if (!isValidSyncCheckpointEntry(entry)) {
+      this.entries.delete(key);
+      return undefined;
+    }
     if (entry.expiresAtMs < nowMs) {
       this.entries.delete(key);
       return undefined;
@@ -87,39 +92,27 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
       entry.responderSessionId
       && (entry.responderSessionExpiresAtMs ?? 0) <= nowMs
     ) {
-      const withoutExpiredSession: SyncCheckpointEntry = {
-        offset: entry.offset,
-        updatedAtMs: entry.updatedAtMs,
-        expiresAtMs: entry.expiresAtMs,
-        ...(entry.manifestDigest ? { manifestDigest: entry.manifestDigest } : {}),
-        ...(entry.manifestPrefixDigest
-          ? { manifestPrefixDigest: entry.manifestPrefixDigest }
-          : {}),
-      };
+      const withoutExpiredSession = withoutSyncCheckpointResponderSession(entry);
       this.entries.set(key, withoutExpiredSession);
       return withoutExpiredSession;
     }
     return entry;
   }
 
-  set(key: string, value: number, nowMs = this.clock()): void {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
-    }
-    const existing = this.entries.get(key);
-    this.entries.set(key, {
-      offset: value,
-      updatedAtMs: nowMs,
-      expiresAtMs: nowMs + this.ttlMs,
-      ...(existing?.manifestDigest === undefined
-        && existing?.responderSessionId
-        && (existing.responderSessionExpiresAtMs ?? 0) > nowMs
-        ? {
-            responderSessionId: existing.responderSessionId,
-            responderSessionExpiresAtMs: existing.responderSessionExpiresAtMs,
-          }
-        : {}),
-    });
+  set(
+    key: string,
+    value: number,
+    nowMs = this.clock(),
+    responderSessionOffset?: number,
+  ): void {
+    this.entries.set(key, transitionSyncCheckpointOffset({
+      key,
+      existing: this.entries.get(key),
+      value,
+      nowMs,
+      ttlMs: this.ttlMs,
+      responderSessionOffset,
+    }));
   }
 
   setManifestBoundOffset(
@@ -128,36 +121,20 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
     manifestDigest: DurableManifestDigest,
     nowMs = this.clock(),
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    terminal = false,
+    responderSessionOffset?: number,
   ): void {
-    if (!Number.isSafeInteger(value) || value < 0) {
-      throw new Error(`Invalid sync checkpoint offset for ${key}: ${value}`);
-    }
-    if (!/^sha256:[0-9a-f]{64}$/.test(manifestDigest)) {
-      throw new Error(`Invalid sync manifest digest for ${key}`);
-    }
-    if (
-      manifestPrefixDigest !== undefined
-      && !/^sha256:[0-9a-f]{64}$/.test(manifestPrefixDigest)
-    ) {
-      throw new Error(`Invalid sync manifest prefix digest for ${key}`);
-    }
-    const existing = this.entries.get(key);
-    const bindingMatches = existing?.manifestDigest === manifestDigest;
-    this.entries.set(key, {
-      offset: value,
-      updatedAtMs: nowMs,
-      expiresAtMs: nowMs + this.ttlMs,
+    this.entries.set(key, transitionSyncCheckpointManifestOffset({
+      key,
+      existing: this.entries.get(key),
+      value,
       manifestDigest,
-      ...(manifestPrefixDigest ? { manifestPrefixDigest } : {}),
-      ...(bindingMatches
-        && existing?.responderSessionId
-        && (existing.responderSessionExpiresAtMs ?? 0) > nowMs
-        ? {
-            responderSessionId: existing.responderSessionId,
-            responderSessionExpiresAtMs: existing.responderSessionExpiresAtMs,
-          }
-        : {}),
-    });
+      nowMs,
+      ttlMs: this.ttlMs,
+      manifestPrefixDigest,
+      terminal,
+      responderSessionOffset,
+    }));
   }
 
   setResponderSession(
@@ -167,43 +144,29 @@ export class MemorySyncCheckpointStore implements SyncCheckpointStore {
     nowMs = this.clock(),
     manifestDigest?: DurableManifestDigest,
     manifestPrefixDigest?: DurableManifestPrefixDigest,
+    responderSessionOffset?: number,
   ): void {
-    if (!sessionId || !Number.isSafeInteger(expiresAtMs)) {
-      throw new Error(`Invalid sync responder session for ${key}`);
-    }
     if (expiresAtMs <= nowMs) {
       this.clearResponderSession(key);
       return;
     }
-    const existing = this.entries.get(key);
-    const bindingMatches = existing?.manifestDigest === manifestDigest;
-    this.entries.set(key, {
-      offset: bindingMatches ? existing?.offset ?? 0 : 0,
-      updatedAtMs: bindingMatches ? existing?.updatedAtMs ?? nowMs : nowMs,
-      expiresAtMs: bindingMatches ? existing?.expiresAtMs ?? nowMs + this.ttlMs : nowMs + this.ttlMs,
-      ...(manifestDigest ? { manifestDigest } : {}),
-      ...(manifestPrefixDigest
-        ? { manifestPrefixDigest }
-        : bindingMatches && existing?.manifestPrefixDigest
-          ? { manifestPrefixDigest: existing.manifestPrefixDigest }
-          : {}),
-      responderSessionId: sessionId,
-      responderSessionExpiresAtMs: expiresAtMs,
-    });
+    this.entries.set(key, transitionSyncCheckpointResponderSession({
+      key,
+      existing: this.entries.get(key),
+      sessionId,
+      expiresAtMs,
+      nowMs,
+      ttlMs: this.ttlMs,
+      manifestDigest,
+      manifestPrefixDigest,
+      responderSessionOffset,
+    }));
   }
 
   clearResponderSession(key: string): void {
     const existing = this.entries.get(key);
     if (!existing) return;
-    this.entries.set(key, {
-      offset: existing.offset,
-      updatedAtMs: existing.updatedAtMs,
-      expiresAtMs: existing.expiresAtMs,
-      ...(existing.manifestDigest ? { manifestDigest: existing.manifestDigest } : {}),
-      ...(existing.manifestPrefixDigest
-        ? { manifestPrefixDigest: existing.manifestPrefixDigest }
-        : {}),
-    });
+    this.entries.set(key, withoutSyncCheckpointResponderSession(existing));
   }
 
   delete(key: string): void {
@@ -296,5 +259,11 @@ export function getSyncCheckpointKey(
   const recoverySuffix = recovery ? '|recovery' : '';
   const assetsSuffix = assetFilterKey ? `|assets:${encodeURIComponent(assetFilterKey)}` : '';
   const requesterScopeSuffix = requesterScope ? `|requester:${requesterScope}` : '';
-  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${refSuffix}${sinceSuffix}${recoverySuffix}${assetsSuffix}${requesterScopeSuffix}`;
+  // V34: keep manifest-aware durable DATA progress invisible to older binaries.
+  // V32 used this key as a raw OFFSET with no generation or prefix proof; sharing
+  // it with the manifest-bound state would let a downgrade skip unverified rows.
+  const durableDataVersionSuffix = !includeSharedMemory && phase === 'data'
+    ? '|checkpoint:v2'
+    : '';
+  return `${remotePeerId}|${contextGraphId}|${includeSharedMemory ? 'swm' : 'durable'}|${phase}${durableDataVersionSuffix}${refSuffix}${sinceSuffix}${recoverySuffix}${assetsSuffix}${requesterScopeSuffix}`;
 }

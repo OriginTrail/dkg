@@ -3,6 +3,7 @@ import { SYSTEM_CONTEXT_GRAPHS, type OperationContext } from '@origintrail-offic
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   runDurableSync,
+  type DurableSyncCheckpointWrite,
   type DurableSyncFetchRequest,
 } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
@@ -170,7 +171,7 @@ describe('sync requester bailout', () => {
   });
 
   it('stops durable fanout after a sync page timeout', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const fetchSyncPages = recorder(async ({
       contextGraphId,
       phase,
@@ -196,7 +197,10 @@ describe('sync requester bailout', () => {
 
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.backoffWorthyFailures).toBe(0);
-    expect(setCheckpoint.calls).toContainEqual(['slow-cg:data', 500]);
+    expect(setCheckpoint.calls).toContainEqual([
+      'slow-cg:data',
+      { offset: 500, responderSessionOffset: undefined },
+    ]);
     expect(fetchSyncPages.calls.some(([request]) => (
       request.contextGraphId === 'next-cg'
     ))).toBe(false);

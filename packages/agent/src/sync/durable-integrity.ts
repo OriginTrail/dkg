@@ -140,8 +140,10 @@ export interface BoundedGraphScopedDurableBatch {
   dataQuads: Quad[];
   /** Exact graphs whose descriptors are in scope for this verification round. */
   changedDataGraphs: string[];
-  /** Absolute responder row offset at the last complete graph boundary. */
+  /** Absolute verified manifest offset at the last complete graph boundary. */
   safeNextOffset: number;
+  /** Raw immutable responder-session cursor at that verified boundary. */
+  safeRawNextOffset: number;
   /** Number of positive-size assertion graphs completed in this round. */
   completedGraphCount: number;
   /** Total public rows declared by the verified graph-scoped manifest. */
@@ -157,6 +159,34 @@ function compareUnicodeCodePoints(leftValue: string, rightValue: string): number
     if (delta !== 0) return delta;
   }
   return left.length - right.length;
+}
+
+function digestGraphScopedMetadataRows(rows: readonly Quad[]): string {
+  const hash = createHash('sha256');
+  const encoder = new TextEncoder();
+  const append = (value: string): void => {
+    const bytes = encoder.encode(value);
+    const length = Buffer.allocUnsafe(4);
+    length.writeUInt32BE(bytes.byteLength);
+    hash.update(length);
+    hash.update(bytes);
+  };
+  const canonical = [...rows].sort((left, right) => (
+    compareUnicodeCodePoints(left.subject, right.subject)
+    || compareUnicodeCodePoints(left.predicate, right.predicate)
+    || compareUnicodeCodePoints(left.object, right.object)
+    || compareUnicodeCodePoints(left.graph, right.graph)
+  ));
+  append('origintrail.dkg.durable-graph-metadata');
+  append('1');
+  append(String(canonical.length));
+  for (const row of canonical) {
+    append(row.subject);
+    append(row.predicate);
+    append(row.object);
+    append(row.graph);
+  }
+  return hash.digest('hex');
 }
 
 function readOrderedGraphScopedDescriptors(
@@ -186,7 +216,7 @@ function readOrderedGraphScopedDescriptors(
 }
 
 export const DURABLE_MANIFEST_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest';
-export const DURABLE_MANIFEST_DIGEST_VERSION = 1;
+export const DURABLE_MANIFEST_DIGEST_VERSION = 2;
 export const DURABLE_MANIFEST_PREFIX_DIGEST_DOMAIN = 'origintrail.dkg.durable-data-manifest-prefix';
 
 export interface GraphScopedDurableManifestPlan {
@@ -241,6 +271,7 @@ export function encodeGraphScopedDurableManifest(
     append(descriptor.claimedRootHex);
     append(String(descriptor.privateTripleCount));
     append(descriptor.privateRootHex ?? '');
+    append(descriptor.metadataDigestHex);
   }
 
   const encoded = new Uint8Array(byteLength);
@@ -341,30 +372,20 @@ export function graphScopedDurableManifestPrefixAtOffset(
   };
 }
 
-function isGraphScopedDurableManifestPlan(
-  value: readonly Quad[] | GraphScopedDurableManifestPlan,
-): value is GraphScopedDurableManifestPlan {
-  return !Array.isArray(value);
-}
-
 /**
  * Check whether a persisted OFFSET is an exact graph boundary in the current
- * rootless manifest. `null` means the metadata is not a pure, structurally
- * valid graph-scoped manifest and therefore cannot justify boundary repair.
+ * rootless manifest. Callers must construct and validate the plan once at the
+ * completed META boundary; raw metadata is deliberately not a second mode.
  */
 export function isGraphScopedDurableManifestBoundary(
-  manifestOrMeta: readonly Quad[] | GraphScopedDurableManifestPlan,
+  manifest: GraphScopedDurableManifestPlan,
   offset: number,
-): boolean | null {
+): boolean {
   if (!Number.isSafeInteger(offset) || offset < 0) return false;
-  const descriptors = isGraphScopedDurableManifestPlan(manifestOrMeta)
-    ? manifestOrMeta.descriptors
-    : readOrderedGraphScopedDescriptors([], manifestOrMeta);
-  if (!descriptors) return null;
   if (offset === 0) return true;
 
   let boundary = 0;
-  for (const descriptor of descriptors) {
+  for (const descriptor of manifest.descriptors) {
     boundary += descriptor.publicTripleCount;
     if (!Number.isSafeInteger(boundary)) return false;
     if (offset === boundary) return true;
@@ -386,32 +407,39 @@ export function isGraphScopedDurableManifestBoundary(
  */
 export function planBoundedGraphScopedDurableBatch(
   dataQuads: readonly Quad[],
-  manifestOrMeta: readonly Quad[] | GraphScopedDurableManifestPlan,
+  manifest: GraphScopedDurableManifestPlan,
   resumedFromOffset: number,
   rawNextOffset: number,
   phaseCompleted: boolean,
+  rawResumedFromOffset = resumedFromOffset,
+  quadRawOffsets?: readonly number[],
 ): BoundedGraphScopedDurableBatch | null {
   if (
     !Number.isSafeInteger(resumedFromOffset)
     || resumedFromOffset < 0
     || !Number.isSafeInteger(rawNextOffset)
-    || rawNextOffset < resumedFromOffset
-    || (!isGraphScopedDurableManifestPlan(manifestOrMeta) && manifestOrMeta.length === 0)
+    || !Number.isSafeInteger(rawResumedFromOffset)
+    || rawResumedFromOffset < 0
+    || rawNextOffset < rawResumedFromOffset
   ) return null;
 
-  // Do not require the responder cursor delta to equal the number of received
-  // rows. Older responders can advance their session cursor past a short
-  // exact-graph read before the requester observes the transport deadline.
-  // Graph ownership, exact descriptor counts, and Merkle verification below
-  // still make only the complete leading graphs checkpointable: a skipped row
-  // makes its graph incomplete and drops that graph plus every later graph.
-  // Requiring cursor/row equality here discarded that independently verifiable
-  // prefix and recreated the all-or-nothing retry loop this planner prevents.
+  const effectiveRawOffsets = quadRawOffsets === undefined
+    ? rawNextOffset - rawResumedFromOffset === dataQuads.length
+      ? dataQuads.map((_, index) => rawResumedFromOffset + index)
+      : null
+    : [...quadRawOffsets];
+  if (
+    effectiveRawOffsets === null
+    || effectiveRawOffsets.length !== dataQuads.length
+    || effectiveRawOffsets.some(
+      (offset, index) => !Number.isSafeInteger(offset)
+        || offset < rawResumedFromOffset
+        || offset >= rawNextOffset
+        || (index > 0 && offset <= effectiveRawOffsets[index - 1]!),
+    )
+  ) return null;
 
-  const descriptors = isGraphScopedDurableManifestPlan(manifestOrMeta)
-    ? manifestOrMeta.descriptors
-    : readOrderedGraphScopedDescriptors(dataQuads, manifestOrMeta);
-  if (!descriptors) return null;
+  const descriptors = manifest.descriptors;
   const descriptorByGraph = new Map(
     descriptors.map((descriptor) => [descriptor.assertionGraph, descriptor] as const),
   );
@@ -496,11 +524,24 @@ export function planBoundedGraphScopedDurableBatch(
 
   const boundedData = dataQuads.filter((quad) => completeGraphs.has(quad.graph));
   if (boundedData.length !== safeNextOffset - resumedFromOffset) return null;
+  const boundedRawOffsets = effectiveRawOffsets.filter(
+    (_, index) => completeGraphs.has(dataQuads[index]!.graph),
+  );
+  let safeRawNextOffset = boundedRawOffsets.length > 0
+    ? boundedRawOffsets[boundedRawOffsets.length - 1]! + 1
+    : rawResumedFromOffset;
+  if (phaseCompleted && safeNextOffset === manifestOffset) {
+    // A terminal empty response proves every trailing raw row was either
+    // consumed or filtered, so the immutable responder cursor is at EOF.
+    safeRawNextOffset = rawNextOffset;
+  }
+  if (safeRawNextOffset > rawNextOffset) return null;
 
   return {
     dataQuads: boundedData,
     changedDataGraphs: [...completeGraphs],
     safeNextOffset,
+    safeRawNextOffset,
     completedGraphCount,
     manifestRowCount: manifestOffset,
   };
@@ -518,6 +559,8 @@ export interface GraphScopedDescriptor {
   privateRoot?: Uint8Array;
   privateRootHex?: string;
   claimedRootHex: string;
+  /** Canonical digest of every metadata row that will drive materialization. */
+  metadataDigestHex: string;
 }
 
 interface IntegrityMetadataIndex {
@@ -1684,6 +1727,7 @@ function parseGraphScopedDescriptor(ual: string, rows: readonly Quad[]): GraphSc
         }
       : {}),
     claimedRootHex: normalizeHex32(requireSingle(MERKLE_ROOT, 'merkleRoot'), 'merkleRoot'),
+    metadataDigestHex: digestGraphScopedMetadataRows(rows),
   };
 }
 
