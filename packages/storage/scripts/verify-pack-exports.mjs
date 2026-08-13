@@ -48,7 +48,7 @@ const GATE = Object.freeze({
   exportsAllowlist: [
     '.',
     './internal/managed-oxigraph-ownership-v1',
-    // #2052 D-8 (#53) — the legacy `agents` gate's two bounded reads. A DELIBERATE
+    // #2052 D-8 — the legacy `agents` gate's two bounded reads. A DELIBERATE
     // surface addition: the gate lives in the agent package and the reads must not,
     // because only storage knows where reserved state and projections live. Narrow
     // subpath rather than the barrel, so the reads stay reachable by exactly one

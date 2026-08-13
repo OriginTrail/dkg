@@ -1,5 +1,5 @@
 /**
- * The covering predicate for the inbound legacy `agents` gate (#2052 D-8, #53).
+ * The covering predicate for the inbound legacy `agents` gate (#2052 D-8).
  *
  * The headline here is the MODE COUNTERFACTUAL. "Pre-cutover the gate is inert" is only a
  * safety property if inertness is caused by the mode; an implementation that returns

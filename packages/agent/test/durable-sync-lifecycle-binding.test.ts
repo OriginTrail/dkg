@@ -333,7 +333,7 @@ describe('durable sync lifecycle chain binding', () => {
     });
   });
 
-  // #2052 D-8 (#53). The seam's gate port is OPTIONAL, so "durable sync uses a gate when
+  // #2052 D-8. The seam's gate port is OPTIONAL, so "durable sync uses a gate when
   // it is given one" — proven in durable-sync-legacy-profile-gate.test.ts — says nothing
   // about production: a construction site that silently omitted the field would satisfy
   // that test and still ship an open door. This asserts the SUPPLY, at the only

@@ -5092,7 +5092,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           signal: operationSignal,
         });
       },
-      // #2052 D-8 (#53) — the inbound legacy `agents` gate. Supplied here because this is
+      // #2052 D-8 — the inbound legacy `agents` gate. Supplied here because this is
       // the only production construction site for the legacy durable-sync seam.
       //
       // THE LITERAL `shadow` IS CORRECT HERE, AND IS NOT A DEFAULT STANDING IN FOR A

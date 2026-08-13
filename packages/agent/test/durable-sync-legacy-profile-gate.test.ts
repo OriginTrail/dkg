@@ -130,7 +130,7 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     expect(offered).not.toContainEqual(conflicting);
   });
 
-  // Without a gate the seam must behave exactly as it did before #53, because
+  // Without a gate the seam must behave exactly as it did before this slice, because
   // `runDurableSync` is reachable outside this package and the port is optional.
   it('offers the page unchanged when no gate is supplied', async () => {
     const conflicting = quad(ROOT, 'urn:p', 'rewritten-by-legacy');

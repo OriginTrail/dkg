@@ -1,5 +1,5 @@
 /**
- * The production lookup behind `LegacyAgentProfileGateV1` (#2052 D-8, #53).
+ * The production lookup behind `LegacyAgentProfileGateV1` (#2052 D-8).
  *
  * A thin adapter and nothing more: it holds no policy, caches nothing, and decides
  * nothing. The gate owns the classification, storage owns the two bounded reads and both
