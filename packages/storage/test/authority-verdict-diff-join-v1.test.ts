@@ -547,10 +547,14 @@ describe('authority verdict diff: the join', { timeout: JOIN_SUITE_TIMEOUT_MS },
     expect(Object.entries(LATE_TOMBSTONE_SEAM_MOVEMENT_V1)
       .filter(([k]) => k.startsWith('before ::'))
       .reduce((sum, [, v]) => sum + v, 0)).toBe(total);
-    // And the counterfactual is labelled as one: it covers the same population
-    // under a design that is NOT shipping.
-    expect(Object.values(LATE_TOMBSTONE_COUNTERFACTUAL_CORE_DECISIONS_V1)
-      .reduce((a, b) => a + b, 0)).toBe(total);
+    // THE COUNTERFACTUAL IS PINNED BY ITS LABEL, NOT ONLY BY ITS SUM. Asserting
+    // the total alone was a check that could not fail for the thing it claimed:
+    // renaming the key to `accept: 1728` satisfied the sum while destroying the
+    // statement -- that core REJECTS for missing retained-transition evidence is
+    // the whole content of the row. Found by review; the exact map is compared.
+    expect(LATE_TOMBSTONE_COUNTERFACTUAL_CORE_DECISIONS_V1).toStrictEqual({
+      'reject|late tombstone requires the exact retained resurrection transition': total,
+    });
   }, JOIN_SUITE_TIMEOUT_MS);
 
   it('pins the seam population from the cell axes', () => {

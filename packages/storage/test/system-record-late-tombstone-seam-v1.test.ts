@@ -370,6 +370,41 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
   });
 
   /**
+   * A TEMPORAL REFUSAL IS NOT "THE TOMBSTONE TAKES PRECEDENCE".
+   *
+   * FOUND BY REVIEW, AND IT IS THE SAME DEFECT AS THE CLOCK INVERSION ONE LAYER
+   * DOWN. The previous round fixed the caller-supplied `nowMs` with a preflight.
+   * The verifier ALSO refuses on the transition's own `issuedAt`, which the
+   * preflight does not cover -- so a binding transition dated a year ahead was
+   * read as "does not bind" and returned `accept`, admitting a tombstone that
+   * the same transition at a valid time marks `stale`. Measured before the fix:
+   * `stale` issued now, `accept` issued in 2027.
+   *
+   * The mapping is now an ALLOW-LIST: only the verifier's naming refusal means
+   * the ADR's "otherwise", and every other refusal propagates verbatim. This row
+   * pins the propagation by its exact reason, so a future denylist -- or a new
+   * temporal refusal the seam has not been shown -- cannot quietly become an
+   * admission.
+   */
+  it('propagates a temporal refusal instead of reading it as precedence', () => {
+    const futureDated = Object.freeze({
+      ...structuredClone(binding as unknown as Record<string, unknown>),
+      issuedAt: '2027-08-05T12:00:00Z',
+    }) as unknown as AgentProfileAuthorityTransitionV1;
+    expect(evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      {
+        retainedTransition: { transition: futureDated, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+        tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(futureDated),
+    )).toStrictEqual({
+      decision: 'reject',
+      reason: 'transition issuedAt exceeds the future clock-skew bound',
+    });
+  });
+
+  /**
    * A PRESENT-BUT-WRONG TRANSITION, WHICH IS A DIFFERENT CONTRACT FROM AN ABSENT
    * ONE.
    *

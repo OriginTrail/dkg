@@ -135,6 +135,19 @@ function snapshotLateTombstoneEvidenceV1(
 }
 
 /**
+ * The ONE refusal from the transition verifier that means the ADR's "otherwise
+ * the tombstone takes precedence".
+ *
+ * Named rather than inlined so the allow-list has a single definition, and a
+ * reword of the verifier's literal is a visible edit here instead of a silent
+ * change of meaning at the seam. Its producer is
+ * `system-record-authority-verification-v1-internal.ts:48`, which the reject
+ * harvest pins.
+ */
+const TRANSITION_NAMES_ANOTHER_PREDECESSOR_V1 =
+  'transition does not bind the accepted predecessor';
+
+/**
  * The clock preflight both public entries owe, in ONE place.
  *
  * It was inline at each, which put two reason literals at two sites apiece and
@@ -404,19 +417,45 @@ function evaluateLateTombstoneRuleV1(
       reason: 'late tombstone requires the exact retained resurrection transition',
     };
   }
-  // THE CLOCK GATES BELONG HERE, not at one entry, because below this line a
-  // refusal from the transition verifier MEANS "the tombstone takes precedence".
-  // A clock the verifier would refuse on must become a reject before that
-  // reading applies, or the failure inverts the verdict instead of stopping it.
   const clockRefusal = rejectInvalidHeadClockV1(candidateState, retainedTransition.nowMs);
   if (clockRefusal !== undefined) return clockRefusal;
-  return evaluateAuthorityTransitionV1(
+  const verified = evaluateAuthorityTransitionV1(
     transition,
     candidateState,
     retainedTransition.nowMs,
-  ).decision === 'accept'
-    ? { decision: 'stale' }
-    : { decision: 'accept' };
+  );
+  if (verified.decision === 'accept') {
+    // A valid descendant of the tombstoned sequence exists, so the tombstone is
+    // superseded.
+    return { decision: 'stale' };
+  }
+  // ONLY ONE REFUSAL MEANS "THE TOMBSTONE TAKES PRECEDENCE", AND IT IS AN
+  // ALLOW-LIST BECAUSE THE ALTERNATIVE FAILED TWICE.
+  //
+  // ADR 0002 :131-132 says the descendant is valid only when the transition
+  // NAMES the tombstone as its predecessor, "otherwise the tombstone takes
+  // precedence". That "otherwise" is about NAMING. The verifier, though, also
+  // refuses for reasons that mean "not verifiable now" rather than "not this
+  // tombstone's descendant" -- an unusable clock, a transition issued beyond the
+  // future-skew bound, an expiry window not yet passed. Reading any of those as
+  // precedence ADMITS a tombstone that the same evidence with a later clock
+  // marks stale.
+  //
+  // This has now been the same defect twice, one layer apart: first the
+  // caller-supplied `nowMs`, fixed by a preflight; then the TRANSITION'S OWN
+  // `issuedAt`, which the preflight does not cover and which the verifier
+  // refuses on separately. Measured: a binding transition returned `stale` when
+  // issued at the fixture clock and `accept` when dated a year ahead. A deny-list
+  // of temporal reasons would have needed a third edit the next time the verifier
+  // learned a refusal, so the mapping is inverted -- name the ONE refusal that
+  // means precedence and propagate every other verbatim.
+  if (
+    verified.decision === 'reject'
+    && verified.reason === TRANSITION_NAMES_ANOTHER_PREDECESSOR_V1
+  ) {
+    return { decision: 'accept' };
+  }
+  return verified;
 }
 
 function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
