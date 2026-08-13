@@ -315,15 +315,28 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
 
     // Adopted from review: the MIDDLE link of the cancellation chain. Durable-sync -> gate
     // is proven at the seam, and reader -> store.query is proven in the storage suite, but
-    // the adapter between them is the code this PR actually adds and nothing covered it.
-    // Dropping `signal` from either read call here would pass both of those tests while an
-    // aborted sync stopped cancelling the production reads.
+    // the adapter between them is the code this PR adds and nothing covered it.
+    //
+    // CORRECTED after a second review round: the first version of this case used a store
+    // that answered nothing, so `lookupAppliedRoots` found no records, no subjects were
+    // collected, and `lookupProjectionMembership` WAS NEVER CALLED. It asserted "every
+    // options object carries the signal" over a set of exactly one — proving one link
+    // while its name claimed two. The store now returns a covered root AND a projection
+    // row, so both adapter calls actually run, and the count is asserted so the case
+    // cannot quietly go back to proving half of itself.
     it('forwards the abort signal through the adapter into both store reads', async () => {
       const options: Array<Record<string, unknown>> = [];
       const store = {
-        query: async (_sparql: string, opts?: Record<string, unknown>) => {
+        query: async (sparql: string, opts?: Record<string, unknown>) => {
           options.push(opts ?? {});
-          return { type: 'bindings' as const, bindings: [] };
+          if (sparql.includes('?claim ?table')) {
+            const claim = /<([^>]*root:[^>]*)>/.exec(sparql)?.[1] ?? '';
+            return {
+              type: 'bindings' as const,
+              bindings: [{ claim, table: `"[\\"${ROOT}\\"]"^^<${SYSTEM_RECORD_V1_JSON_DATATYPE}>` }],
+            };
+          }
+          return { type: 'bindings' as const, bindings: [{ s: ROOT, p: 'urn:p', o: '"signed"' }] };
         },
       } as never;
       const controller = new AbortController();
@@ -333,8 +346,8 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
 
       await gate.filterPage([conflicting], controller.signal);
 
-      // Request one must have run and carried the caller's own signal.
-      expect(options.length).toBeGreaterThan(0);
+      // BOTH bounded reads must have run — one alone would prove only half the adapter.
+      expect(options).toHaveLength(2);
       for (const opts of options) expect(opts.signal).toBe(controller.signal);
     });
 

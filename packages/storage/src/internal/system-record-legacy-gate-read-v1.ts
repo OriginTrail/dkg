@@ -136,6 +136,18 @@ function isStoreResponseTooLargeV1(error: unknown): boolean {
     && (error as { code?: unknown }).code === 'STORE_RESPONSE_TOO_LARGE';
 }
 
+/**
+ * The canonical query builder's own refusal to emit an over-bound REQUEST.
+ *
+ * Distinguished from its accounting-mismatch throws, which would be defects in this
+ * module and must keep propagating. Matching the bound suffix rather than the label keeps
+ * this from widening if the label is ever reworded.
+ */
+function isBoundedBuilderOverflowV1(error: unknown): boolean {
+  return error instanceof Error
+    && / exceeds its (encoded|retained)-byte bound$/.test(error.message);
+}
+
 function valuesClause(variable: string, iris: readonly string[]): string {
   for (const iri of iris) assertQueryableIri(iri);
   return `VALUES ${variable} { ${iris.map((iri) => `<${iri}>`).join(' ')} }`;
@@ -353,8 +365,25 @@ export async function readLegacyAgentProfileProjectionV1(input: {
   //
   // Its own preconditions are already satisfied above: it throws below one subject and
   // above the owned-subject bound, and both are returned early.
+  //
+  // AND ITS REFUSAL IS TRANSLATED, NOT PROPAGATED. Adopted from review, which caught a
+  // defect this adoption itself introduced: the builder refuses an over-bound request by
+  // THROWING, where the previous local construction had no request bound at all. So
+  // adopting it turned "no cap" into "a cap that kills the page" — the throw escapes
+  // through the gate, the per-context-graph catch drops the whole page, and durable sync
+  // retries it forever. A request this reader cannot ask is exactly the case the gate
+  // already has an answer for: report it undecidable and let the gate withhold.
+  //
+  // Valid long owned subjects reach this: the subject count can sit under its bound while
+  // the encoded VALUES clause crosses the request cap.
   const ordered = [...subjects].sort();
-  const query = buildSystemRecordProjectionInspectionQueryV1(mode, ordered);
+  let query: string;
+  try {
+    query = buildSystemRecordProjectionInspectionQueryV1(mode, ordered);
+  } catch (error) {
+    if (!isBoundedBuilderOverflowV1(error)) throw error;
+    return Object.freeze({ rows: [], truncated: true });
+  }
 
   let bindings: Array<Record<string, string>>;
   try {

@@ -473,6 +473,30 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(read.unclassifiedRoots).toContain(OTHER_ROOT);
   });
 
+  // Adopted from review, and it is a defect the canonical-builder adoption itself created.
+  // That builder REFUSES an over-bound request by throwing, where the previous local
+  // construction had no request bound at all. Unhandled, the throw escapes the gate, the
+  // per-context-graph catch drops the whole page, and durable sync retries it forever --
+  // instead of the gate's own answer for "cannot ask an exact question", which is to
+  // withhold. Subject COUNT stays under its bound here; the encoded VALUES clause is what
+  // crosses the request cap, which is why the count guard above does not catch it.
+  it('reports truncated when the request itself would exceed its bound', async () => {
+    const long = 'a'.repeat(300_000);
+    const subjects = Array.from({ length: 20 }, (_, i) => `${ROOT}/.well-known/genid/cap${i + 1}${long}`);
+    const store = fakeStore([]);
+
+    const read = await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects,
+    });
+
+    // Under its own subject bound, so this is the REQUEST size, not the count.
+    expect(subjects.length).toBeLessThan(SYSTEM_RECORD_MAX_OWNED_SUBJECTS);
+    expect(read.truncated).toBe(true);
+    expect(read.rows).toEqual([]);
+    // It never got as far as asking.
+    expect(store.queries).toEqual([]);
+  });
+
   // The bound must be IN THE QUERY, not only in the post-decode check. Adopted from
   // review: drop the projection `LIMIT` and every other case here still passes, because
   // the fake returns all fixture rows and `bindings.length` catches the overflow after
