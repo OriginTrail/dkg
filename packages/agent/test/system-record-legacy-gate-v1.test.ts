@@ -26,6 +26,7 @@ import {
   type LegacyAgentProfileAppliedRootV1,
   type LegacyAgentProfileGateLookupV1,
 } from '../src/system-records/legacy-profile-gate-v1.js';
+import { systemRecordProjectionGraphV1 } from '@origintrail-official/dkg-storage/internal/system-record-legacy-gate-read-v1';
 
 const AGENTS_GRAPH = 'did:dkg:context-graph:agents';
 
@@ -203,6 +204,39 @@ describe('LegacyAgentProfileGateV1 — covered roots (:924, :925)', () => {
     expect(result.discardedDuplicates).toBe(1);
     expect(result.withheld).toEqual([]);
     expect(result.conflictedRoots).toBe(0);
+  });
+
+  // Review found a REAL pre-activation data-loss bug here, and this is its regression.
+  //
+  // The batch-cap overflow disposition is set BEFORE the lookup runs, so under the old
+  // subject-only scoping a shadow-mode page carrying more than the cap's worth of agent
+  // roots had its overflow roots marked unclassified and WITHHELD — even though the
+  // shadow lookup answers empty and nothing authoritative exists to protect. Silent loss
+  // of legacy quads before cutover, with the checkpoint advancing over it.
+  //
+  // Under destination-graph scoping the shadow projection graph is the namespace-hidden
+  // reserved one, which no legacy page targets, so no root is derived at all and the
+  // overflow path is never reached. This pins that: ABOVE the cap, everything passes and
+  // nothing is read.
+  it('passes a page above the batch cap untouched in shadow mode, and reads nothing', async () => {
+    const { lookup, lookupAppliedRoots } = fakeLookup([applied], projection);
+    const shadow: LegacyAgentProfileGateLookupV1 = {
+      ...lookup,
+      // The materializer's own answer for shadow, not a restated constant.
+      projectionGraph: systemRecordProjectionGraphV1('shadow'),
+    };
+    const page = Array.from(
+      { length: LEGACY_AGENT_PROFILE_GATE_MAX_BATCH_ROOTS_V1 + 1 },
+      (_, i) => quad(`did:dkg:agent:0x${i.toString(16).padStart(40, '0')}`, 'p', 'o'),
+    );
+
+    const result = await createLegacyAgentProfileGateV1(shadow).filterPage(page);
+
+    expect(result.insert).toEqual(page);
+    expect(result.withheld).toEqual([]);
+    expect(result.unclassifiedRoots).toBe(0);
+    expect(result.storeRequests).toBe(0);
+    expect(lookupAppliedRoots).not.toHaveBeenCalled();
   });
 
   // T1, half B — the half that scoping by SUBJECT ALONE gets wrong, and the reason the
