@@ -40,7 +40,7 @@ import {
  *
  * WHY THIS EXISTS AS A TEST RATHER THAN AS A GREP. Core copies the field into its
  * evidence snapshot through an allowlist at
- * system-record-authority-v1-internal.ts:864, so it travels INSIDE an object. A
+ * system-record-authority-v1-internal.ts:879, so it travels INSIDE an object. A
  * branch reading it off the whole snapshot, or by dynamic access, would never
  * appear in a grep for the symbol -- the symbol is absent from the branch and the
  * read still happens. Only running the branches closes that gap.

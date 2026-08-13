@@ -369,6 +369,38 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     });
   });
 
+  /**
+   * A PRESENT-BUT-WRONG TRANSITION, WHICH IS A DIFFERENT CONTRACT FROM AN ABSENT
+   * ONE.
+   *
+   * FOUND BY REVIEW, AND CONFIRMED BY A SURVIVING MUTANT: every other row in this
+   * file pairs the supplied transition with a lineage built FROM that same
+   * transition, so the comparison at authority :303-305 always matched and
+   * deleting the digest conjunct left the whole lane green. The ADR's word is
+   * "the EXACT retained transition"; a suite that never supplies an inexact one
+   * cannot tell exactness from presence.
+   *
+   * Everything here is valid except the pairing: a well-formed transition, its
+   * real predecessor, a real clock -- against a lineage whose entry names a
+   * DIFFERENT transition. The refusal must be the retained-transition one rather
+   * than a predecessor or clock refusal, which is what makes it a test of this
+   * conjunct rather than of whichever guard happens to fire first.
+   */
+  it('rejects a well-formed transition that is not the one the lineage retained', () => {
+    expect(evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      {
+        retainedTransition: { transition: binding, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+        tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      // The lineage retains `retained`, not `binding`.
+      lineageFor(retained),
+    )).toStrictEqual({
+      decision: 'reject',
+      reason: 'late tombstone requires the exact retained resurrection transition',
+    });
+  });
+
   it('rejects for retry, not stale, when the retained transition is absent', () => {
     expect(evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,

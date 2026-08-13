@@ -97,7 +97,12 @@ describe('core authority decision reason harvest', () => {
     }
     const ambiguous = [...sites].filter(([, s]) => s.length > 1).map(([l]) => l);
     expect(ambiguous.sort()).toEqual([...CORE_AMBIGUOUS_REJECT_LITERALS_V1].sort());
-    // SIX UNTIL THE LATE-TOMBSTONE ENTRY MIRRORED THE CLOCK GATES. That entry has
+    // SIX, BACK FROM SEVEN. The late-tombstone entry briefly mirrored the clock
+    // gates inline, which gave both literals a second producing site and pushed
+    // one into this register as pure bookkeeping. Extracting the shared preflight
+    // returned it: one producer per literal in this file, and the register
+    // measures observational ambiguity again rather than duplication.
+    // ORIGINAL NOTE (kept, it explains the mechanism): That entry has
     // to refuse an unusable clock and a too-far-future head ITSELF -- delegating
     // them would let a clock failure read as tombstone precedence -- so both
     // literals now have a second producing site. `head issuedAt exceeds the
@@ -106,7 +111,7 @@ describe('core authority decision reason harvest', () => {
     // two files and went from two sites to three. The register growing is the
     // honest record of a branch a caller can no longer distinguish, and it is
     // the price of the guard rather than an oversight.
-    expect(ambiguous).toHaveLength(7);
+    expect(ambiguous).toHaveLength(6);
   });
 
   // THE GUARD IS KEYED ON THE MECHANISM, NOT ON THE LITERAL THAT ESCAPED.
@@ -145,7 +150,7 @@ describe('core authority decision reason harvest', () => {
   // broke -- the zero-is-indistinguishable-from-a-broken-probe failure.
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
     // 32 until the late-tombstone entry added its own precondition reject.
-    expect([...reject.values()].flat().length).toBe(36);
+    expect([...reject.values()].flat().length).toBe(34);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });

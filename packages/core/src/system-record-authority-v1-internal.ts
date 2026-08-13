@@ -134,6 +134,34 @@ function snapshotLateTombstoneEvidenceV1(
   }) as unknown as AgentProfileLateTombstoneEvidenceV1;
 }
 
+/**
+ * The clock preflight both public entries owe, in ONE place.
+ *
+ * It was inline at each, which put two reason literals at two sites apiece and
+ * pushed a literal into the observationally-ambiguous register purely as
+ * bookkeeping. A boundary rule whose reason strings are externally harvested
+ * should have one producer per literal, or a reword has to be applied in as many
+ * places as it is written and the harvest cannot say which branch fired.
+ *
+ * Returns `undefined` when the clock is usable, so a caller reads it as a
+ * refusal-or-continue rather than a boolean it has to remember the polarity of.
+ */
+function rejectInvalidHeadClockV1(
+  candidateState: AgentProfileHeadObjectV1,
+  nowMs: number,
+): SystemRecordAuthorityDecisionV1 | undefined {
+  if (!isSafeNow(nowMs)) {
+    return { decision: 'reject', reason: 'verification clock is invalid' };
+  }
+  if (isIssuedTooFarInFuture(candidateState.issuedAt, nowMs)) {
+    return {
+      decision: 'reject',
+      reason: 'head issuedAt exceeds the future clock-skew bound',
+    };
+  }
+  return undefined;
+}
+
 export function evaluateAgentProfileHeadAdvanceV1(
   accepted: AgentProfileAcceptedAuthorityStateV1,
   candidate: AgentProfileHeadObjectV1,
@@ -142,14 +170,8 @@ export function evaluateAgentProfileHeadAdvanceV1(
   const candidateState = validateAgentProfileHeadObjectV1(candidate);
   const acceptedState = snapshotAcceptedAuthorityStateV1(accepted);
   const evidenceState = snapshotHeadAdvanceEvidenceV1(evidence);
-  if (!isSafeNow(evidenceState.nowMs))
-    return { decision: 'reject', reason: 'verification clock is invalid' };
-  if (isIssuedTooFarInFuture(candidateState.issuedAt, evidenceState.nowMs)) {
-    return {
-      decision: 'reject',
-      reason: 'head issuedAt exceeds the future clock-skew bound',
-    };
-  }
+  const clockRefusal = rejectInvalidHeadClockV1(candidateState, evidenceState.nowMs);
+  if (clockRefusal !== undefined) return clockRefusal;
   const lineage = validateAppliedTransitionLineage(acceptedState.transitionLineage);
   const current =
     acceptedState.current === undefined
@@ -386,15 +408,8 @@ function evaluateLateTombstoneRuleV1(
   // refusal from the transition verifier MEANS "the tombstone takes precedence".
   // A clock the verifier would refuse on must become a reject before that
   // reading applies, or the failure inverts the verdict instead of stopping it.
-  if (!isSafeNow(retainedTransition.nowMs)) {
-    return { decision: 'reject', reason: 'verification clock is invalid' };
-  }
-  if (isIssuedTooFarInFuture(candidateState.issuedAt, retainedTransition.nowMs)) {
-    return {
-      decision: 'reject',
-      reason: 'head issuedAt exceeds the future clock-skew bound',
-    };
-  }
+  const clockRefusal = rejectInvalidHeadClockV1(candidateState, retainedTransition.nowMs);
+  if (clockRefusal !== undefined) return clockRefusal;
   return evaluateAuthorityTransitionV1(
     transition,
     candidateState,
