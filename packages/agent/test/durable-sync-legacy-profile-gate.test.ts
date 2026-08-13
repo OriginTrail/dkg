@@ -172,6 +172,35 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     expect(seen[0]).toBe(controller.signal);
   });
 
+  // Adopted from review. The gate keeps a quad out of the store TWO ways -- `withheld`
+  // (conflict or undecidable) and exact-duplicate DISCARD -- and every seam case here
+  // proved only the first. The reviewer's regression is the point: a seam rewritten as
+  // `quads.filter((q) => !gated.withheld.includes(q))` passes every other case in this
+  // file while forwarding exact duplicates back into the store, re-inserting rows the
+  // signed projection already holds.
+  //
+  // The seam contract is "offer exactly `gated.insert`", and only a duplicate can tell
+  // that apart from "offer everything the gate did not withhold".
+  it('does not offer an exact duplicate of the signed projection to the store', async () => {
+    const { lookup } = fakeLookup(
+      [{ root: ROOT, ownedSubjects: [ROOT] }],
+      [projectionRow(ROOT, 'urn:p', 'signed')],
+    );
+    // Byte-for-byte what the projection already holds.
+    const duplicate = quad(ROOT, 'urn:p', 'signed');
+    const uncovered = quad('urn:ordinary-subject', 'urn:p', 'o');
+
+    const { offered, result } = await runSeam(
+      [duplicate, uncovered],
+      createLegacyAgentProfileGateV1(lookup),
+    );
+
+    expect(offered).toEqual([uncovered]);
+    expect(offered).not.toContainEqual(duplicate);
+    // And it must not be counted as progress the store never took.
+    expect(result.result.insertedTriples).toBe(1);
+  });
+
   // T1, half A — the half that scoping by the page's context-graph id would get WRONG.
   // The page is served under `project-x`, but the quad it carries is bound for the
   // aggregate graph where the applied projection lives, so the collision is real and the

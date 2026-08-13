@@ -113,10 +113,22 @@ export interface LegacyAgentProfileGateLookupV1 {
    * The graph an applied projection occupies under THIS lookup's mode — the only graph in
    * which legacy insertion can physically collide with signed state.
    *
-   * It rides on the lookup rather than arriving as a separate gate argument so the graph
-   * and the reads cannot be handed different modes: one value, one mode, one home. A gate
-   * built against one mode's projection graph while reading another's would be deciding
-   * collisions in a graph it never actually read.
+   * It rides on the lookup rather than arriving as a separate gate argument so that the
+   * graph and the reads travel together. A gate built against one mode's projection graph
+   * while reading another's would be deciding collisions in a graph it never actually
+   * read.
+   *
+   * WHERE THAT IS ENFORCED, STATED PRECISELY BECAUSE THIS SAYING IT IS NOT ENFORCEMENT.
+   * The consistency is guaranteed by the ADAPTER, not by this type: the production
+   * constructor takes one `mode` and derives all three members from it, so production
+   * cannot mint a mixed lookup. This interface is deliberately three independent members
+   * so the gate can be driven by fakes that never touch storage — which is what its own
+   * suite does — and that permissiveness is the cost of it.
+   *
+   * So a HAND-BUILT lookup can pair one mode's graph with another mode's reads and will
+   * compile. Nothing here stops it; only the adapter's single `mode` input does. Making
+   * that unrepresentable in the type is a real improvement and is filed as its own change,
+   * because it reshapes the port every fake also implements.
    */
   readonly projectionGraph: string;
   /** Request one: which of these derived roots carry an applied signed record. */
