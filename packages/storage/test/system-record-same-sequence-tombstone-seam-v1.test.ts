@@ -475,18 +475,20 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
    * it will mint a summary at all, so the producer of the evidence storage
    * demands enforces exactly the conjunction core's rule tests.
    *
-   * ALL TEN CONJUNCTS ARE ATTEMPTED INDIVIDUALLY BELOW and every one is refused
-   * upstream of the classifier, by one of two gates -- the head codec, which
-   * refuses four as malformed heads, or the closure, which refuses the other six
-   * at mint. The bound control mints in the same run, so these refusals measure
-   * the system rather than a broken construction.
+   * ALL TEN CONJUNCTS ARE ATTEMPTED INDIVIDUALLY BELOW, across ELEVEN rows --
+   * the version conjunct needs two, for the reason given under the mutant
+   * heading -- and every one is refused upstream of the classifier by one of two
+   * gates: the head codec, which refuses four as malformed heads, or the
+   * closure, which refuses the other seven at mint. The bound control mints in
+   * the same run, so these refusals measure the system rather than a broken
+   * construction.
    *
    * THE PREDICATE HAS TEN CONJUNCTS AND THIS SUITE SAID NINE FOR SEVERAL ROUNDS.
    * The count was taken by listing the field comparisons and missing that the
    * version relation is a conjunct too -- the same omission that then let it be
    * argued out of the enumeration. A count stated in prose is not asserted by
-   * anything, so this one is derived instead: nine  operators in the
-   * predicate means ten conjuncts, and the map below has ten rows.
+   * anything, so this one is derived instead: nine `&&` operators in the
+   * predicate means ten conjuncts, and the map below covers all ten.
    *
    * THE VERSION ROW ALMOST SHIPPED AS "REASONED, NOT MEASURED", AND THAT WOULD
    * HAVE BEEN WRONG IN AN INSTRUCTIVE WAY. The argument was: against a
@@ -500,10 +502,21 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
    * message as the other four. Reachability is not strictness, but neither is a
    * sound argument about one construction a statement about the population.
    *
-   * THE ROW EARNS ITS PLACE BY THE MUTANT IT KILLS. Relaxing `>` to `>=` in the
-   * binding predicate is a one-character edit that would let a tombstone bind a
-   * predecessor at its OWN version -- the equal-version confusion the open ADR
-   * question turns on -- and nothing else in this suite watches it.
+   * THE MUTANT THAT ROW WAS ADDED FOR SURVIVED IT, AND THAT IS WHY THERE ARE
+   * TWO. Relaxing `>` to `>=` in the binding predicate is the one-character edit
+   * that would let a tombstone bind a predecessor at its OWN version -- the
+   * equal-version confusion the open ADR question turns on. The row above was
+   * justified by that mutant and does not kill it: it violates strictly-greater
+   * FROM BELOW, where the two operators agree, so with `>=` applied in src and
+   * in the rebuilt dist the enumeration stayed GREEN on all ten rows. The
+   * equal-version row is the discriminator, and it was proven to be one: under
+   * the same mutant it alone moves, from `closure-mint` to REACHED THE
+   * CLASSIFIER, while every other row holds.
+   *
+   * The general form is worth more than the instance. A row justified by a
+   * mutant has to be RUN against that mutant, because a construction chosen to
+   * violate a conjunct is not automatically a construction that separates the
+   * operator expressing it.
    *
    * AND THIS TEST IS A TRIPWIRE FOR ANOTHER MODULE'S GATE, not only a record of
    * today's behaviour. The unconstructibility it proves rests on the verification
@@ -544,6 +557,19 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
           CORE_CURRENT_HEAD_V1 as unknown as AgentProfileHeadObjectV1,
           '1',
         )],
+        // AND THE EQUAL-VERSION ROW, WHICH IS THE ONE THAT WATCHES THE OPERATOR.
+        // The row above violates strictly-greater FROM BELOW, and there `>` and
+        // `>=` agree -- 1 is neither greater than nor equal to 2 -- so relaxing
+        // the operator leaves it refused and the mutant it was added for
+        // SURVIVES. Measured that way before this row existed, not reasoned:
+        // with `>=` in place the enumeration stayed green on ten rows. Only a
+        // tombstone at its predecessor's OWN version separates the two
+        // operators, which is also the equal-version case the open ADR question
+        // turns on.
+        ['version-equal-to-predecessor', () => tombstoneOfV1(
+          CORE_CURRENT_HEAD_V1 as unknown as AgentProfileHeadObjectV1,
+          CORE_CURRENT_HEAD_V1.version,
+        )],
       ]);
 
     const refusedAt: Record<string, string> = {};
@@ -571,6 +597,7 @@ describe('the same-sequence tombstone disjunct (ADR 0002 :112-114, :126)', () =>
       rootSubject: 'head-codec',
       projectionSchemaDigest: 'closure-mint',
       'version-not-strictly-greater': 'closure-mint',
+      'version-equal-to-predecessor': 'closure-mint',
     });
   });
 });
