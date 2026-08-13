@@ -88,6 +88,7 @@ describe('System Record V1 module ownership', () => {
       'system-record-signatures-v1-internal.ts',
       'system-record-authority-verification-v1-internal.ts',
       'system-record-authority-v1-internal.ts',
+      'system-record-applied-disposition-v1-internal.ts',
       'system-record-verification-closure-v1-internal.ts',
       'system-record-cache-accounting-v1-internal.ts',
       'system-record-object-identity-descriptors-v1-internal.ts',
