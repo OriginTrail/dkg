@@ -135,7 +135,8 @@ describe('core authority decision reason harvest', () => {
   // rows above would all pass against an empty map if the regex or the path
   // broke -- the zero-is-indistinguishable-from-a-broken-probe failure.
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
-    expect([...reject.values()].flat().length).toBe(32);
+    // 32 until the late-tombstone entry added its own precondition reject.
+    expect([...reject.values()].flat().length).toBe(33);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });

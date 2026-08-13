@@ -23,7 +23,9 @@ import {
   computeSystemRecordMaterializationReceiptDigestV1,
   computeSystemRecordRootClaimSetDigestV1,
   computeSystemRecordStableKeyHashV1,
+  deriveAgentProfileAuthorityDispositionV1,
   EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
+  evaluateAgentProfileLateTombstoneAdvanceV1,
   parseCanonicalOwnedSubjectTableObjectV1,
   parseCanonicalSystemRecordAppliedStateV1,
   parseCanonicalSystemRecordCapacityStateV1,
@@ -70,7 +72,24 @@ export type SystemRecordActiveDerivationDeferredReasonV1 =
   | 'authority-fork'
   | 'authority-history-mismatch'
   | 'verified-state-mismatch'
-  | 'root-state-changed';
+  | 'root-state-changed'
+  /**
+   * A tombstone below the current authority sequence whose ADR 0002 :129-133
+   * evidence core did not accept -- today always the retained transition, which
+   * this package has no channel for. The ADR's own clause makes this a RETRY
+   * ("Missing retained-transition evidence rejects for retry rather than
+   * treating the tombstone as stale"), so it is deliberately distinct from
+   * `authority-history-mismatch`: absorbing it there would hide the movement
+   * this seam makes in a row that already carries four thousand cells.
+   */
+  | 'late-tombstone-evidence-incomplete'
+  /**
+   * The applied row's authority disposition is one V1 has not decided (a
+   * tombstoned or shadow-dirty row). Named separately from every other deferral
+   * because the honest fact is that nothing was decided, not that something was
+   * compared and disagreed.
+   */
+  | 'undecided-authority-disposition';
 
 export type SystemRecordActiveDerivationCapacityReasonV1 =
   | 'state-revision-overflow'
@@ -997,12 +1016,98 @@ function classifyTombstoneAdvance(
       )) {
     return Object.freeze({ outcome: 'advance' });
   }
-  if (BigInt(facts.head.authoritySequence) < BigInt(current.transitionLineage.length)
-      || (facts.head.authoritySequence === String(current.transitionLineage.length)
-        && BigInt(facts.head.version) < BigInt(snapshot.headVersion))) {
+  // A TOMBSTONE BELOW THE CURRENT SEQUENCE IS CORE'S DECISION, NOT AN
+  // ARITHMETIC ONE. ADR 0002 :129-133 requires the exact active predecessor and
+  // the exact retained transition out of that sequence to be verified, with the
+  // tombstone taking precedence unless that transition names it as predecessor,
+  // and missing retained-transition evidence rejecting FOR RETRY rather than
+  // treating the tombstone as stale. Returning `stale` here decided all of that
+  // from two sequence numbers.
+  if (BigInt(facts.head.authoritySequence) < BigInt(current.transitionLineage.length)) {
+    return classifyLateTombstoneAdvance(snapshot, facts, current);
+  }
+  // The SAME-sequence, lower-version case is a different rule (ADR :126-128)
+  // and is deliberately left on the comparison: it is not a tombstone "learned
+  // below the current applied sequence".
+  if (facts.head.authoritySequence === String(current.transitionLineage.length)
+      && BigInt(facts.head.version) < BigInt(snapshot.headVersion)) {
     return Object.freeze({ outcome: 'stale' });
   }
   return Object.freeze({ outcome: 'deferred', reason: 'authority-history-mismatch' });
+}
+
+/**
+ * Storage holds no verification clock on this path.
+ *
+ * `admittedDeadlineMs` is a lane budget, not a wall clock, and passing it would
+ * hand core a number that LOOKS like a timestamp. Core reads the clock only
+ * after a retained transition has matched (authority :312 -> authority-
+ * verification :30), which this path cannot supply, so no reachable decision
+ * consults it. When a producer for that transition appears, an unusable clock
+ * makes core refuse with `verification clock is invalid` rather than decide on a
+ * fabricated one -- the residue of the missing operand is a refusal, never an
+ * admission.
+ */
+const NO_VERIFICATION_CLOCK_V1 = Number.NaN;
+
+/**
+ * The ADR 0002 :129-133 late-tombstone decision, taken by core.
+ *
+ * NOTHING HERE RE-CHECKS AUTHORITY. The predecessor and retained-transition
+ * clauses live in core's arm and are reached through
+ * `evaluateAgentProfileLateTombstoneAdvanceV1`; this function supplies the
+ * operands this module actually holds and maps core's decision onto the
+ * derivation's outcomes. Storage's own preconditions still run and still run
+ * FIRST: `assertTrustedTombstoneReplacement` (:920-948) throws before any
+ * classification, and its conjuncts overlap rather than nest with core's, so
+ * routing adds core's checks without dropping storage's.
+ *
+ * THE RETAINED TRANSITION IS NOT AVAILABLE HERE, and that is a property of the
+ * inputs rather than an omission: `AgentProfileAuthorityTransitionV1` has no
+ * occurrence anywhere in this package, the applied row persists transition
+ * DIGESTS only, and the candidate's verification closure covers its own lineage
+ * rather than the rotation out of its sequence. So core's missing-evidence
+ * clause governs today and the outcome is a RETRY. The accepting and stale arms
+ * become reachable unchanged the moment a producer supplies that transition.
+ */
+function classifyLateTombstoneAdvance(
+  snapshot: Extract<SystemRecordAppliedSnapshotV1, { readonly state: 'present' }>,
+  facts: SystemRecordVerifiedTombstoneReplacementFactsV1,
+  current: SystemRecordAppliedStatePresentV1,
+): TombstoneAdvance {
+  // WHAT V1 HAS NOT DECIDED IS NOT DECIDED HERE. A tombstoned or shadow-dirty
+  // row has no authority disposition in V1, and core's accepted state has no
+  // member for "unknown" -- supplying `discoverable` would invent the clearance
+  // this result type exists to withhold. Deferring keeps the candidate
+  // retryable; treating it as stale would discard it on an undecided row.
+  const disposition = deriveAgentProfileAuthorityDispositionV1(snapshot.appliedState);
+  if (disposition.outcome !== 'decided') {
+    return Object.freeze({ outcome: 'deferred', reason: 'undecided-authority-disposition' });
+  }
+  const predecessor = facts.verifiedAuthoritySummary.tombstonePredecessor;
+  const decision = evaluateAgentProfileLateTombstoneAdvanceV1(
+    facts.head,
+    Object.freeze({
+      nowMs: NO_VERIFICATION_CLOCK_V1,
+      ...(predecessor === undefined ? {} : { tombstonePredecessor: predecessor }),
+    }),
+    current.transitionLineage,
+  );
+  switch (decision.decision) {
+    case 'accept':
+      return Object.freeze({ outcome: 'advance' });
+    case 'stale':
+      return Object.freeze({ outcome: 'stale' });
+    default:
+      // Core's `reject` on this arm is the ADR's "rejects for retry", and its
+      // `quarantine` cannot be reached from here (the arm returns only accept,
+      // stale or reject). Both map to the retryable outcome; neither may map to
+      // `stale`, which is the behaviour this seam exists to remove.
+      return Object.freeze({
+        outcome: 'deferred',
+        reason: 'late-tombstone-evidence-incomplete',
+      });
+  }
 }
 
 function persistedStateMatchesVerifiedTombstone(

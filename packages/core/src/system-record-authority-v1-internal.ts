@@ -315,6 +315,53 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
     : { decision: 'accept' };
 }
 
+/**
+ * The ADR 0002 :129-133 decision for a tombstone learned BELOW the current
+ * applied authority sequence.
+ *
+ * WHY THIS ENTRY EXISTS RATHER THAN {@link evaluateAgentProfileHeadAdvanceV1}.
+ * That evaluator requires the accepted head as an OBJECT, and a receiver that
+ * has persisted its accepted state holds a head DIGEST plus the transition
+ * lineage, not the head itself. Synthesising one would invent `peerPublicKey`,
+ * `evmIssuer`, `issuedAt`, `projectionSchemaDigest` and `version`, producing a
+ * head whose digest does not match the persisted one -- a fabricated operand
+ * decided here as though it were evidence. The arm below reads none of those
+ * fields, so the honest entry is the one whose operands the caller really holds.
+ *
+ * IT IS THE SAME ARM, NOT A SECOND IMPLEMENTATION. Every clause of the rule
+ * stays in `evaluateLowerSequenceAgentProfileHeadAdvanceV1`; this function
+ * validates its inputs the way the full evaluator does and delegates. A caller
+ * that reimplemented the predecessor or retained-transition checks would be
+ * deciding authority outside core, which is what this entry exists to prevent.
+ *
+ * `acceptedTransitionLineage` is the ACCEPTED state's lineage, whose length is
+ * the current authority sequence -- the identity the full evaluator enforces at
+ * :121-126. The candidate's sequence is read off the candidate, so a caller
+ * cannot pass one that disagrees with the head it is deciding.
+ */
+export function evaluateAgentProfileLateTombstoneAdvanceV1(
+  candidate: AgentProfileHeadObjectV1,
+  evidence: AgentProfileHeadAdvanceEvidenceV1,
+  acceptedTransitionLineage: readonly AgentProfileAppliedTransitionV1[],
+): SystemRecordAuthorityDecisionV1 {
+  const candidateState = validateAgentProfileHeadObjectV1(candidate);
+  const evidenceState = snapshotHeadAdvanceEvidenceV1(evidence);
+  const lineage = validateAppliedTransitionLineage(acceptedTransitionLineage);
+  const candidateSequence = parseCanonicalDecimalU64(candidateState.authoritySequence);
+  if (candidateSequence >= BigInt(lineage.length)) {
+    return {
+      decision: 'reject',
+      reason: 'late tombstone entry requires a candidate below the accepted authority sequence',
+    };
+  }
+  return evaluateLowerSequenceAgentProfileHeadAdvanceV1(
+    candidateState,
+    evidenceState,
+    lineage,
+    candidateSequence,
+  );
+}
+
 function evaluateNextSequenceAgentProfileHeadAdvanceV1(
   acceptedState: AgentProfileAcceptedAuthorityStateV1,
   current: AgentProfileHeadObjectV1,

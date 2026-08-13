@@ -33,8 +33,8 @@ export type StorageProjectionOutcomeV1 =
   /**
    * No verified authority summary can be minted for this head, so the storage
    * entry cannot be driven AT ALL. It is a REQUIRED field on all three facts
-   * variants and is bind-checked at system-record-next-state-v1-internal.ts:882
-   * -866, behind the brand assert at :850 -- so there is no way to reach the
+   * variants and is bind-checked at system-record-next-state-v1-internal.ts:901
+   * -866, behind the brand assert at :869 -- so there is no way to reach the
    * classifier without one, and no verdict to compare.
    */
   | { readonly kind: 'summary-unmintable'; readonly message: string }

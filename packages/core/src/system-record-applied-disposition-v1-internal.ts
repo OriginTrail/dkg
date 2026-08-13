@@ -62,10 +62,10 @@ function undecidedTerminal(
  * THE SUBSTRATE, AND WHY IT NEEDS NO PER-SLOT TYPE TAG. `conflictDigestSlots`
  * has exactly three write sites, all in storage's
  * `system-record-next-state-v1-internal.ts`: the active carry-forward
- * (:343-345), the quarantine merge (:476-484) and the tombstone carry-forward
- * (:715-717). Only the merge ADDS, it adds only `entry.type === 'transition'`
- * digests (:478-479), and only when `facts.terminalTransitionConflict` is set
- * (:477) -- the flag that distinguishes a transition equivocation from an
+ * (:362-364), the quarantine merge (:476-484) and the tombstone carry-forward
+ * (:734-736). Only the merge ADDS, it adds only `entry.type === 'transition'`
+ * digests (:497-498), and only when `facts.terminalTransitionConflict` is set
+ * (:496) -- the flag that distinguishes a transition equivocation from an
  * ordinary head fork, and one storage re-derives from the evidence entries and
  * cross-checks (`system-record-verified-replacement-v1-internal.ts:776-778`) so
  * it cannot be asserted independently of the evidence it describes. A non-empty
@@ -93,7 +93,7 @@ function undecidedTerminal(
  *
  * `conflictOverflow` is included because it records slots that were dropped:
  * the merge keeps only the first `SYSTEM_RECORD_MAX_CONFLICT_DIGESTS` and sets
- * the flag for the remainder (:482-484). Reading the array alone would let a
+ * the flag for the remainder (:501-503). Reading the array alone would let a
  * record that equivocated MORE than the cap read as clean -- the failure mode
  * would arrive exactly on the worst-behaved peers.
  *
@@ -128,10 +128,10 @@ function hasPersistedTransitionEquivocationV1(
  * LOAD-BEARING -- it is not a defensive default. Measured at integration head
  * 97f4c9e69: the write path cannot currently produce an `active` row carrying
  * slots, because the unquarantine gate
- * (`system-record-next-state-v1-internal.ts:1118`) defers while slots are
+ * (`system-record-next-state-v1-internal.ts:1223`) defers while slots are
  * occupied. But that is a property of ONE disjunct in ONE classifier, not of
  * the row: the active derivation CARRIES slots forward from the snapshot
- * (:343-345) rather than clearing them, and persisted state imposes no coupling
+ * (:362-364) rather than clearing them, and persisted state imposes no coupling
  * at all between `status` and the slots -- an `active`, `dirty` or `tombstone`
  * row carrying slots was built and decoded through the real reserved-state
  * codec while proving out this slice. A reader consumes decoded quads, not the
@@ -142,7 +142,7 @@ export function deriveAgentProfileAuthorityDispositionV1(
   applied: SystemRecordAppliedStateV1,
 ): AgentProfileAuthorityDispositionResultV1 {
   // No snapshot, nothing quarantined: core rejects any other reading of an
-  // absent row (authority :217, :532), so this is forced, not chosen.
+  // absent row (authority :217, :579), so this is forced, not chosen.
   if (applied.state === 'absent') return decided('discoverable');
 
   if (hasPersistedTransitionEquivocationV1(applied)) {
@@ -155,18 +155,18 @@ export function deriveAgentProfileAuthorityDispositionV1(
     case 'quarantined':
       // Quarantined with no transition evidence retained: a head fork, which
       // core clears through its fork-resolution-successor branch (authority
-      // :326, :433, :569) rather than holding permanently.
+      // :373, :480, :616) rather than holding permanently.
       return decided('head-fork-quarantined');
     case 'tombstone':
       // NOT inert, and NOT `discoverable`. The projection is deleted (plan
       // :250-253) so discovery is moot, but core reads the disposition on the
-      // authority branches (:139, :326) when deciding the NEXT candidate for
+      // authority branches (:139, :373) when deciding the NEXT candidate for
       // this record, and V1 defines no answer for a tombstoned row. Reporting
       // the gap is the only reading that does not invent a clearance.
       return undecidedTerminal('tombstone');
     case 'dirty':
       // The shadow-mode tombstone derivation's status
-      // (`system-record-next-state-v1-internal.ts:699`, mirrored at :1015). Its
+      // (`system-record-next-state-v1-internal.ts:718`, mirrored at :1120). Its
       // disposition follows whatever the cutover decides shadow rows mean, so
       // it is undecided for the same reason and under its own status -- one
       // decision must not silently answer the other.

@@ -128,17 +128,62 @@ describe('verdict-diff evaluator input projections', { timeout: VERDICT_DIFF_SUI
     expect([core.min, core.max]).toEqual([1, 8]);
   });
 
-  // A SCOPED ABSENCE CLAIM, made checkable. Core consumes `disposition` as an
-  // input and persists nothing; the claim that storage has no source for it is
-  // what Phase 2 exists to fix, so it is pinned rather than remembered -- and
-  // pinned at the scope actually searched, which is this directory only.
-  it('finds no disposition producer anywhere in packages/storage/src', () => {
+  // STORAGE CONSUMES CORE'S DISPOSITION AND DERIVES NONE OF ITS OWN.
+  //
+  // This used to assert `disposition` appeared ZERO times in packages/storage/src,
+  // pinned at the scope actually searched. Routing the late-tombstone seam through
+  // core made that false on purpose: storage now READS the disposition off the
+  // applied row through core's reader, which is what lets it tell a decided row
+  // from one V1 has left undecided.
+  //
+  // WHAT REPLACES IT IS THE STRONGER CLAIM, and it is the one the seam's absolute
+  // constraint actually needs: storage may CONSUME core's derivation and must
+  // never RE-DERIVE one. A zero-occurrence pin could not have expressed that --
+  // it would have gone red at the first legitimate consumer and said nothing at
+  // all about a hand-rolled copy of the mapping, which is the failure this slice
+  // was written to prevent. So the check names the one permitted symbol, bounds
+  // its call sites, and refuses any other source of the word.
+  it('consumes core\'s disposition reader and re-derives no disposition of its own', () => {
     const root = new URL('../src/', import.meta.url);
-    const walk = (dir: URL): string[] => readdirSync(dir, { withFileTypes: true })
-      .flatMap((entry) => (entry.isDirectory()
-        ? walk(new URL(`${entry.name}/`, dir))
-        : entry.name.endsWith('.ts') ? [readFileSync(new URL(entry.name, dir), 'utf8')] : []));
-    const hits = walk(root).filter((source) => source.includes('disposition'));
-    expect(hits).toHaveLength(0);
+    const walk = (dir: URL): { file: string; source: string }[] => readdirSync(
+      dir,
+      { withFileTypes: true },
+    ).flatMap((entry) => (entry.isDirectory()
+      ? walk(new URL(`${entry.name}/`, dir))
+      : entry.name.endsWith('.ts')
+        ? [{ file: entry.name, source: readFileSync(new URL(entry.name, dir), 'utf8') }]
+        : []));
+    const files = walk(root);
+    // Non-vacuity first: a walk that found nothing would satisfy every claim
+    // below, which is the shape this suite exists to refuse.
+    expect(files.length).toBeGreaterThan(40);
+
+    const mentioning = files.filter((f) => f.source.includes('disposition'));
+    expect(mentioning.map((f) => f.file)).toStrictEqual(
+      ['system-record-next-state-v1-internal.ts'],
+    );
+
+    const occurrences = mentioning[0]!.source.match(/disposition/gi) ?? [];
+    const calls = mentioning[0]!.source.match(
+      /deriveAgentProfileAuthorityDispositionV1\(/g,
+    ) ?? [];
+    // EXACTLY ONE CALL, and every other mention is the imported name, the local
+    // binding, prose, or the reason token -- never a second derivation. Counting
+    // OCCURRENCES rather than lines, because two mentions on one line are two
+    // facts and a line count would report them as one.
+    expect(calls).toHaveLength(1);
+    expect(occurrences.length).toBeGreaterThan(calls.length);
+
+    // AND THE DOMAIN ITSELF IS NOT RESTATED HERE. A storage-side copy of core's
+    // three disposition values is the exact re-implementation the seam forbids,
+    // and it would be invisible to a call-site count.
+    for (const literal of [
+      "'discoverable'",
+      "'head-fork-quarantined'",
+      "'transition-equivocation-quarantined'",
+    ]) {
+      expect(files.filter((f) => f.source.includes(literal)).map((f) => f.file))
+        .toStrictEqual([]);
+    }
   });
 });

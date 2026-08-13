@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1133',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1238',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -192,7 +192,7 @@ export const CORE_PROJECTIONS_V1 = 25920;
  *
  * A NAME-GREP WOULD NOT HAVE BEEN ENOUGH, which is why the instrument is
  * empirical rather than textual. Core copies the field into its evidence snapshot
- * through an allowlist at system-record-authority-v1-internal.ts:654, so it
+ * through an allowlist at system-record-authority-v1-internal.ts:701, so it
  * travels inside an object; a branch reading it off the whole snapshot, or by
  * dynamic access, would never appear in a grep for the symbol. Running the
  * branches closes that gap for the branches actually run.
@@ -439,27 +439,27 @@ export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = 
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:654',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:701',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',
   },
   {
     id: 'storage-binds-candidate-head-digest',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:882',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:901',
     contains: 'summary.candidateHeadDigest !== headDigest',
     why: 'Storage refuses a summary that does not name the head it is presented with.',
   },
   {
     id: 'storage-binds-lineage-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:883',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:902',
     contains: 'BigInt(summary.transitionLineage.length) '
       + '!== parseCanonicalDecimalU64(facts.head.authoritySequence)',
     why: 'The lineage-length invariant: the discriminating conjunct, and unique in the file.',
   },
   {
     id: 'storage-binds-root-history-length',
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:884',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:903',
     contains: 'summary.historicalRoots.length !== summary.transitionLineage.length',
     why: 'The retained-root count must match the lineage it is retained against.',
   },

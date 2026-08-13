@@ -23,8 +23,8 @@ export const CORE_BARE_DECISIONS_V1 = ['accept', 'stale'] as const;
  * caller acts on.
  */
 export const CORE_QUARANTINE_REASONS_V1 = {
-  'head-fork': { sites: [189, 200, 416] },
-  'transition-equivocation': { sites: [140, 172, 384, 483, 508, 564, 567] },
+  'head-fork': { sites: [189, 200, 463] },
+  'transition-equivocation': { sites: [140, 172, 431, 530, 555, 611, 614] },
 } as const;
 
 /**
@@ -34,37 +34,45 @@ export const CORE_QUARANTINE_REASONS_V1 = {
  * produce it.
  *
  * Harvested from packages/core/src/system-record-authority-v1-internal.ts:
- * 27 distinct literals across 32 sites.
+ * 28 distinct literals across 33 sites.
  *
  * AN UNMAPPED OBSERVED LITERAL IS A FAILURE, not a skip: it means a reject was
  * added or reworded, and the map says which case to look at.
+ *
+ * EVERY SITE BELOW :316 MOVED BY +47 WHEN THE LATE-TOMBSTONE ENTRY WAS ADDED,
+ * and that is this pin working rather than a maintenance tax. The entry itself
+ * is 47 lines of function and docblock inserted after the lower-sequence arm, so
+ * twelve citations shifted together and the twenty-eighth literal appeared at
+ * :354. A file-contains pin would have stayed green through all of it; only a
+ * line-anchored one says which sites moved and by how much.
  */
 export const CORE_REJECT_REASON_SITES_V1: Readonly<Record<string, readonly number[]>> = {
-  'absent state cannot retain authority history or quarantine': [220, 535],
-  'accepted authority state has incomplete transition lineage': [124, 546],
+  'absent state cannot retain authority history or quarantine': [220, 582],
+  'accepted authority state has incomplete transition lineage': [124, 593],
   'accepted head does not bind its retained transition lineage': [133],
   'active closure contains tombstone-only authority evidence': [268],
   'authority history is incomplete': [152],
-  'authority transition reuses a root retained by this record': [365, 581],
+  'authority transition reuses a root retained by this record': [412, 628],
   'cold noninitial head requires its verified authority closure': [237],
   'cold tombstone closure lacks its exact deletion predecessor': [259],
-  'current frontier fork requires its exact direct resolving successor': [462],
-  'exact accepted authority transition is missing': [344],
-  'fork resolution issuedAt exceeds the future clock-skew bound': [468],
+  'current frontier fork requires its exact direct resolving successor': [509],
+  'exact accepted authority transition is missing': [391],
+  'fork resolution issuedAt exceeds the future clock-skew bound': [515],
   'head issuedAt exceeds the future clock-skew bound': [101],
-  'historical or unsolicited fork resolution is audit-only': [439],
+  'historical or unsolicited fork resolution is audit-only': [486],
+  'late tombstone entry requires a candidate below the accepted authority sequence': [354],
   'late tombstone lacks its exact verified active predecessor': [292],
   'late tombstone requires the exact retained resurrection transition': [309],
-  'next-sequence head does not bind transition issuer/root': [374],
-  'next-sequence tombstone requires its exact same-sequence active predecessor': [350],
+  'next-sequence head does not bind transition issuer/root': [421],
+  'next-sequence tombstone requires its exact same-sequence active predecessor': [397],
   'same-sequence authority changed': [168],
-  'stable record key changed': [137, 553],
+  'stable record key changed': [137, 600],
   'tombstone is terminal within its authority sequence': [193],
-  'tombstone lacks its exact verified active predecessor': [411],
-  'transition has no accepted predecessor': [540],
-  'transition verification time is invalid': [522],
-  'transitions do not target the same authority tuple': [502],
-  'unresolved head fork cannot advance authority sequence': [329, 572],
+  'tombstone lacks its exact verified active predecessor': [458],
+  'transition has no accepted predecessor': [587],
+  'transition verification time is invalid': [569],
+  'transitions do not target the same authority tuple': [549],
+  'unresolved head fork cannot advance authority sequence': [376, 619],
   'verification clock is invalid': [97],
   'verified authority closure has incomplete lineage': [247],
 };
