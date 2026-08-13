@@ -268,7 +268,55 @@ type ACCEPTED_DISPOSITIONS_ARE_EXACTLY_THE_UNION =
     : never;
 const acceptedDispositionsAreExactlyTheUnion: ACCEPTED_DISPOSITIONS_ARE_EXACTLY_THE_UNION = true;
 
+/**
+ * THE LATE-TOMBSTONE EVIDENCE CONTRACT, PINNED WHERE IT COMPILES.
+ *
+ * The published boundary makes one safety promise a caller can act on: the
+ * retained transition and the clock that verifies it are ONE field, so nobody
+ * can hand the rule a binding transition with an unusable clock. That promise
+ * lived only in prose and in runtime cases -- and those cases cast their
+ * fixtures, so they would keep passing if the type widened. No test DIRECTORY in
+ * this repository is in any tsc program; THIS file is, which is the only reason
+ * these assertions are worth writing rather than decorative.
+ *
+ * Each is a conditional type resolving to `never` when the property breaks, so
+ * the assignment underneath is the compile error.
+ */
+type LATE_TOMBSTONE_EVIDENCE_HAS_NO_TOP_LEVEL_CLOCK =
+  'nowMs' extends keyof AgentProfileLateTombstoneEvidenceV1 ? never : true;
+const lateTombstoneEvidenceHasNoTopLevelClock:
+LATE_TOMBSTONE_EVIDENCE_HAS_NO_TOP_LEVEL_CLOCK = true;
+
+type LATE_TOMBSTONE_EVIDENCE_HAS_NO_BARE_TRANSITION =
+  'acceptedTransition' extends keyof AgentProfileLateTombstoneEvidenceV1 ? never : true;
+const lateTombstoneEvidenceHasNoBareTransition:
+LATE_TOMBSTONE_EVIDENCE_HAS_NO_BARE_TRANSITION = true;
+
+const LATE_TOMBSTONE_EVIDENCE_KEYS_V1 = ['tombstonePredecessor', 'retainedTransition'] as const;
+type LATE_TOMBSTONE_EVIDENCE_KEYS_ARE_EXACT =
+  keyof AgentProfileLateTombstoneEvidenceV1 extends
+    (typeof LATE_TOMBSTONE_EVIDENCE_KEYS_V1)[number]
+    ? (typeof LATE_TOMBSTONE_EVIDENCE_KEYS_V1)[number] extends
+      keyof AgentProfileLateTombstoneEvidenceV1 ? true : never
+    : never;
+const lateTombstoneEvidenceKeysAreExact: LATE_TOMBSTONE_EVIDENCE_KEYS_ARE_EXACT = true;
+
+/**
+ * BOTH HALVES REQUIRED. If either becomes optional the pairing stops being a
+ * pairing and a caller can once again supply a transition with no clock -- the
+ * exact shape that turned a `stale` into an `accept`.
+ */
+type RETAINED_TRANSITION_REQUIRES_BOTH_HALVES =
+  undefined extends AgentProfileLateTombstoneRetainedTransitionV1['transition'] ? never
+    : undefined extends AgentProfileLateTombstoneRetainedTransitionV1['nowMs'] ? never
+      : true;
+const retainedTransitionRequiresBothHalves: RETAINED_TRANSITION_REQUIRES_BOTH_HALVES = true;
+
 void appliedStatusesAreExactlyTheUnion;
 void acceptedDispositionsAreExactlyTheUnion;
+void lateTombstoneEvidenceHasNoTopLevelClock;
+void lateTombstoneEvidenceHasNoBareTransition;
+void lateTombstoneEvidenceKeysAreExact;
+void retainedTransitionRequiresBothHalves;
 
 export {};

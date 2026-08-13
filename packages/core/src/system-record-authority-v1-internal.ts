@@ -320,17 +320,33 @@ function evaluateAbsentAgentProfileHeadAdvanceV1(
   return { decision: 'accept' };
 }
 
-function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
+/**
+ * THE RULE ITSELF, over exactly its own operands.
+ *
+ * Both entries call this, so there is ONE implementation and no sentinel
+ * anywhere: the full evaluator adapts its wider evidence object into these
+ * arguments, and the late-tombstone entry passes what its caller already holds.
+ * It used to take the whole head-advance evidence shape, which forced a caller
+ * with no clock to invent one and made the safety of that invention depend on
+ * which branch happened to run first inside this function. The operands are the
+ * contract now, so that ordering is no longer load-bearing.
+ *
+ * `retainedTransition` carries its own clock because the transition is only ever
+ * checked by a clocked verifier -- see the entry's docblock for the inversion
+ * that pairing prevents.
+ */
+function evaluateLateTombstoneRuleV1(
   candidateState: AgentProfileHeadObjectV1,
-  evidenceState: AgentProfileHeadAdvanceEvidenceV1,
+  tombstonePredecessor: AgentProfileActiveHeadObjectV1 | undefined,
+  retainedTransition: AgentProfileLateTombstoneRetainedTransitionV1 | undefined,
   lineage: readonly AgentProfileAppliedTransitionV1[],
   candidateSequence: bigint,
 ): SystemRecordAuthorityDecisionV1 {
   if (candidateState.state === 'active') return { decision: 'stale' };
   const predecessor =
-    evidenceState.tombstonePredecessor === undefined
+    tombstonePredecessor === undefined
       ? undefined
-      : validateAgentProfileHeadObjectV1(evidenceState.tombstonePredecessor);
+      : validateAgentProfileHeadObjectV1(tombstonePredecessor);
   if (
     predecessor === undefined ||
     predecessor.state !== 'active' ||
@@ -343,12 +359,13 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
   }
   const retained = lineage[Number(candidateSequence)];
   const transition =
-    evidenceState.acceptedTransition === undefined
+    retainedTransition === undefined
       ? undefined
-      : validateAuthorityTransition(evidenceState.acceptedTransition);
+      : validateAuthorityTransition(retainedTransition.transition);
   if (
     retained === undefined ||
     transition === undefined ||
+    retainedTransition === undefined ||
     transition.priorAuthoritySequence !== retained.priorAuthoritySequence ||
     transition.nextAuthoritySequence !== retained.nextAuthoritySequence ||
     computeAgentProfileAuthorityTransitionDigestV1(transition) !== retained.transitionDigest
@@ -358,10 +375,43 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
       reason: 'late tombstone requires the exact retained resurrection transition',
     };
   }
-  return evaluateAuthorityTransitionV1(transition, candidateState, evidenceState.nowMs).decision ===
-    'accept'
+  // THE CLOCK GATES BELONG HERE, not at one entry, because below this line a
+  // refusal from the transition verifier MEANS "the tombstone takes precedence".
+  // A clock the verifier would refuse on must become a reject before that
+  // reading applies, or the failure inverts the verdict instead of stopping it.
+  if (!isSafeNow(retainedTransition.nowMs)) {
+    return { decision: 'reject', reason: 'verification clock is invalid' };
+  }
+  if (isIssuedTooFarInFuture(candidateState.issuedAt, retainedTransition.nowMs)) {
+    return {
+      decision: 'reject',
+      reason: 'head issuedAt exceeds the future clock-skew bound',
+    };
+  }
+  return evaluateAuthorityTransitionV1(
+    transition,
+    candidateState,
+    retainedTransition.nowMs,
+  ).decision === 'accept'
     ? { decision: 'stale' }
     : { decision: 'accept' };
+}
+
+function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
+  candidateState: AgentProfileHeadObjectV1,
+  evidenceState: AgentProfileHeadAdvanceEvidenceV1,
+  lineage: readonly AgentProfileAppliedTransitionV1[],
+  candidateSequence: bigint,
+): SystemRecordAuthorityDecisionV1 {
+  return evaluateLateTombstoneRuleV1(
+    candidateState,
+    evidenceState.tombstonePredecessor,
+    evidenceState.acceptedTransition === undefined
+      ? undefined
+      : { transition: evidenceState.acceptedTransition, nowMs: evidenceState.nowMs },
+    lineage,
+    candidateSequence,
+  );
 }
 
 /**
@@ -438,35 +488,10 @@ export function evaluateAgentProfileLateTombstoneAdvanceV1(
       reason: 'late tombstone entry requires a candidate below the accepted authority sequence',
     };
   }
-  const retained = supplied.retainedTransition;
-  if (retained !== undefined) {
-    // MIRRORED FROM :96-103, NOT DELEGATED. Below this point a non-accept from
-    // the transition verifier MEANS "the tombstone takes precedence", so a clock
-    // the verifier would refuse on must be turned into a reject HERE or it
-    // becomes an admission there.
-    if (!isSafeNow(retained.nowMs)) {
-      return { decision: 'reject', reason: 'verification clock is invalid' };
-    }
-    if (isIssuedTooFarInFuture(candidateState.issuedAt, retained.nowMs)) {
-      return {
-        decision: 'reject',
-        reason: 'head issuedAt exceeds the future clock-skew bound',
-      };
-    }
-  }
-  return evaluateLowerSequenceAgentProfileHeadAdvanceV1(
+  return evaluateLateTombstoneRuleV1(
     candidateState,
-    snapshotHeadAdvanceEvidenceV1({
-      // Unreachable when no transition was supplied: the arm refuses at :300-311
-      // before any clock is read. It is an unusable value rather than a
-      // plausible one so that a future reordering fails closed instead of
-      // deciding on a number nobody measured.
-      nowMs: retained === undefined ? Number.NaN : retained.nowMs,
-      ...(supplied.tombstonePredecessor === undefined
-        ? {}
-        : { tombstonePredecessor: supplied.tombstonePredecessor }),
-      ...(retained === undefined ? {} : { acceptedTransition: retained.transition }),
-    }),
+    supplied.tombstonePredecessor,
+    supplied.retainedTransition,
     lineage,
     candidateSequence,
   );

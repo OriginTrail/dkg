@@ -9,6 +9,8 @@ import {
   type AgentProfileAuthorityTransitionV1,
   assertAgentProfileHeadObjectV1,
   type AgentProfileHeadObjectV1,
+  type AgentProfileAppliedTransitionV1,
+  type AgentProfileLateTombstoneEvidenceV1,
   type AgentProfileTombstoneHeadObjectV1,
   type SystemRecordMaterializationReceiptV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
@@ -317,7 +319,9 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
     priorHeadDigest: candidateDigest,
   }) as unknown as AgentProfileAuthorityTransitionV1;
 
-  function lineageFor(transition: AgentProfileAuthorityTransitionV1) {
+  function lineageFor(
+    transition: AgentProfileAuthorityTransitionV1,
+  ): readonly AgentProfileAppliedTransitionV1[] {
     return Object.freeze([
       Object.freeze({
         priorAuthoritySequence: '0',
@@ -340,16 +344,16 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       {
         retainedTransition: { transition: binding, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
-      } as never,
-      lineageFor(binding) as never,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(binding),
     );
     const unbound = evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,
       {
         retainedTransition: { transition: retained, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
-      } as never,
-      lineageFor(retained) as never,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(retained),
     );
     expect({ bound, unbound }).toStrictEqual({
       // A valid descendant of the tombstoned sequence exists, so the tombstone
@@ -365,8 +369,8 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       candidate,
       {
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
-      } as never,
-      lineageFor(retained) as never,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(retained),
     )).toStrictEqual({
       decision: 'reject',
       reason: 'late tombstone requires the exact retained resurrection transition',
@@ -389,7 +393,7 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       candidate,
       {
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
-      } as never,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
       Object.freeze([
         Object.freeze({
           priorAuthoritySequence: '0',
@@ -398,7 +402,7 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
             coreSequenceTransitionV1('1'),
           ),
         }),
-      ]) as never,
+      ]),
     )).toStrictEqual({
       decision: 'reject',
       reason: 'late tombstone entry requires a candidate below the accepted authority sequence',
@@ -424,8 +428,8 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       {
         retainedTransition: { transition: binding, nowMs },
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
-      } as never,
-      lineageFor(binding) as never,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(binding),
     );
     expect({
       nan: withClock(Number.NaN),
@@ -448,8 +452,8 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       {
         retainedTransition: { transition: binding, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
         tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE),
-      } as never,
-      lineageFor(binding) as never,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(binding),
     )).toStrictEqual({
       decision: 'reject',
       reason: 'head issuedAt exceeds the future clock-skew bound',
@@ -472,8 +476,8 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       { tombstonePredecessor: coreSequenceActiveHeadV1(LATE_SEQUENCE) },
     ].map((evidence) => (evaluateAgentProfileLateTombstoneAdvanceV1(
       candidate,
-      evidence as never,
-      lineageFor(binding) as never,
+      evidence,
+      lineageFor(binding),
     ) as { decision: string }).decision);
     expect(observed).toStrictEqual(['reject', 'reject']);
   });
