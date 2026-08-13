@@ -27,7 +27,6 @@ const DKG = 'http://dkg.io/ontology/';
 export type FinalizedSwmTwinReconciliationOutcome =
   | 'retired'
   | 'already-retired-finalized'
-  | 'absent'
   | 'head-missing-or-ambiguous'
   | 'head-version-mismatch'
   | 'vm-metadata-mismatch'
