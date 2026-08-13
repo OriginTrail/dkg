@@ -201,6 +201,36 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     expect(result.result.insertedTriples).toBe(1);
   });
 
+  // Adopted from review. Awaiting the gate opens an abort WINDOW: the operation can be
+  // cancelled while `filterPage` is in flight, and the post-gate `throwIfOperationAborted`
+  // is what stops the page reaching the store afterwards. Every signal case so far proved
+  // the signal is HANDED OVER; none proved the guard that acts on it, so deleting that
+  // guard left them all green while durable sync wrote quads after cancellation.
+  it('does not insert when the operation is aborted while the gate is running', async () => {
+    const controller = new AbortController();
+    const page = [quad('urn:ordinary-subject', 'urn:p', 'o')];
+    // Cancels mid-gate, then returns the page untouched — the gate itself withholds
+    // nothing, so only the post-gate abort check can keep this out of the store.
+    const aborting = {
+      filterPage: async (quads: Quad[]) => {
+        controller.abort();
+        return {
+          insert: quads,
+          withheld: [],
+          discardedDuplicates: 0,
+          conflictedRoots: 0,
+          unclassifiedRoots: 0,
+          storeRequests: 0,
+        };
+      },
+    } as unknown as ReturnType<typeof createLegacyAgentProfileGateV1>;
+
+    const { offered, result } = await runSeam(page, aborting, 'data', 'agents', controller.signal);
+
+    expect(offered).toEqual([]);
+    expect(result.result.insertedTriples).toBe(0);
+  });
+
   // T1, half A — the half that scoping by the page's context-graph id would get WRONG.
   // The page is served under `project-x`, but the quad it carries is bound for the
   // aggregate graph where the applied projection lives, so the collision is real and the

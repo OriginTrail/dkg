@@ -51,6 +51,7 @@ import {
   buildSystemRecordProjectionInspectionQueryV1,
   retainedSystemRecordInspectionQuadsBytesV1,
 } from '../system-record-inspection-v1-internal.js';
+import { isSystemRecordBoundedBuildOverflowV1 } from '../system-record-bounded-utf8-builder-v1-internal.js';
 import {
   SYSTEM_RECORD_V1_JSON_DATATYPE,
   SYSTEM_RECORD_V1_PREDICATES,
@@ -137,15 +138,17 @@ function isStoreResponseTooLargeV1(error: unknown): boolean {
 }
 
 /**
- * The canonical query builder's own refusal to emit an over-bound REQUEST.
+ * The canonical query builder's own refusal to emit an over-bound REQUEST, recognised by
+ * the builder's OWN typed code rather than by its English message.
  *
- * Distinguished from its accounting-mismatch throws, which would be defects in this
- * module and must keep propagating. Matching the bound suffix rather than the label keeps
- * this from widening if the label is ever reworded.
+ * The first version of this matched the message text, which review correctly called
+ * brittle — and inconsistent with the argument made a few lines above about the transport
+ * cap, where message matching was rejected for exactly this reason. A reworded message
+ * would have silently stopped translating a refusal; an unrelated error ending the same
+ * way would have been swallowed as truncation.
  */
 function isBoundedBuilderOverflowV1(error: unknown): boolean {
-  return error instanceof Error
-    && / exceeds its (encoded|retained)-byte bound$/.test(error.message);
+  return isSystemRecordBoundedBuildOverflowV1(error);
 }
 
 function valuesClause(variable: string, iris: readonly string[]): string {
