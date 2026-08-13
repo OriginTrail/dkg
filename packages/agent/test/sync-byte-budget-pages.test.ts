@@ -235,6 +235,36 @@ describe('byte-budget sync pagination', () => {
     expect(result.completed).toBe(true);
   });
 
+  it('returns a soft page boundary as incomplete progress without a timeout', async () => {
+    let sends = 0;
+    const observedProgress: Array<{ resumedFromOffset: number; nextOffset: number }> = [];
+    const result = await fetchSyncPages(pageFetchParams({
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: `did:dkg:context-graph:${CG_ID}`,
+      parseAndFilter: async () => ({ quads: [], totalQuads: SYNC_PAGE_SIZE }),
+      send: async () => {
+        sends += 1;
+        return new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .');
+      },
+      shouldStopAfterPage: (progress) => {
+        observedProgress.push(progress);
+        return true;
+      },
+    }));
+
+    expect(sends).toBe(1);
+    expect(observedProgress).toEqual([{
+      resumedFromOffset: 0,
+      nextOffset: SYNC_PAGE_SIZE,
+    }]);
+    expect(result).toMatchObject({
+      nextOffset: SYNC_PAGE_SIZE,
+      completed: false,
+      timedOut: false,
+    });
+  });
+
   it('keeps a successful fallback size sticky and probes upward gradually', async () => {
     const requestedSizes: number[] = [];
     let sends = 0;

@@ -281,6 +281,7 @@ import {
   createContextGraphSyncDeadline,
   createDurableSyncBudget,
   createDurableSyncFetchTimeoutMs,
+  DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   normalizeDurableSyncTimeoutMs,
 } from './sync/requester/durable-sync-budget.js';
@@ -447,8 +448,11 @@ const REHYDRATE_THROTTLE_BATCH = 8;
 // scan and then waiting for an unrelated periodic reconciler. The cap is a
 // hard safety bound; the no-progress guard below is the normal termination.
 const MAX_POST_APPROVAL_CURATOR_SYNC_ROUNDS = 64;
-/** One recovery owner yields admission after this bounded physical slice. */
-const DURABLE_RECOVERY_SLICE_TIMEOUT_MS = 120_000;
+/** A recovery owner stops starting new assets after this scheduling quantum. */
+const DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS = 120_000;
+/** Hard fault ceiling: maximum-size transfer plus local settlement headroom. */
+const DURABLE_RECOVERY_HARD_TIMEOUT_MS =
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS + DURABLE_SYNC_SETTLEMENT_HEADROOM_MS;
 
 // type alias so listPendingJoinApprovalRetries() retains its old
 // public shape while it stubs out to []. PR-12 rebuilds the operator
@@ -1066,6 +1070,7 @@ function durableSyncSingleFlightKey(params: {
   hasSignal: boolean;
   hasCurrentFence: boolean;
   exactAssetUals?: readonly string[];
+  settlementSliceTimeoutMs?: number;
   priority?: number;
 }): string | null {
   if (
@@ -1086,6 +1091,7 @@ function durableSyncSingleFlightKey(params: {
     authenticationTimeoutMs: params.authenticationTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
+    settlementSliceTimeoutMs: params.settlementSliceTimeoutMs ?? null,
     priority: params.priority ?? null,
   });
 }
@@ -1194,6 +1200,7 @@ function asSyncFetchAbortError(reason: unknown): Error {
 
 function createDurableSyncOperationBoundary(options: {
   totalTimeoutMs?: number;
+  maximumTimeoutMs?: number;
   signal?: AbortSignal;
 }): {
   deadline?: number;
@@ -1207,7 +1214,10 @@ function createDurableSyncOperationBoundary(options: {
     };
   }
 
-  const timeoutMs = normalizeDurableSyncTimeoutMs(options.totalTimeoutMs);
+  const timeoutMs = normalizeDurableSyncTimeoutMs(
+    options.totalTimeoutMs,
+    options.maximumTimeoutMs,
+  );
   const deadline = Date.now() + timeoutMs;
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort(
@@ -1359,6 +1369,13 @@ export type DurableSyncOptions = {
    */
   totalTimeoutMs?: number;
   /**
+   * Soft graph-settlement scheduling quantum. Once it expires, a recovery
+   * finishes and checkpoints the asset already in flight, then returns before
+   * starting another asset. Unlike `totalTimeoutMs`, this never aborts an
+   * authentication or atomic materialization that has already started.
+   */
+  settlementSliceTimeoutMs?: number;
+  /**
    * Cancels the whole durable operation. Paging and graph-scoped chain
    * authentication observe the signal directly; verification and atomic
    * materialization check it before any subsequent commit boundary.
@@ -1412,6 +1429,7 @@ type LegacyDurableContextGraphOptions = {
   exactAssetUals?: string[];
   authenticationTimeoutMs?: number;
   operationDeadline?: number;
+  settlementSliceTimeoutMs?: number;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
 };
@@ -5346,14 +5364,20 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const exactAssetUals = options?.exactAssetUals === undefined
       ? undefined
       : requireExactAssetUals(options.exactAssetUals);
+    const extendedRecovery = exactAssetUals !== undefined
+      || options?.settlementSliceTimeoutMs !== undefined;
     const operationBoundary = createDurableSyncOperationBoundary({
       totalTimeoutMs: options?.totalTimeoutMs,
+      maximumTimeoutMs: extendedRecovery
+        ? DURABLE_RECOVERY_HARD_TIMEOUT_MS
+        : undefined,
       signal: options?.signal,
     });
     const authenticationTimeoutMs = normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs);
     const fetchTimeoutMs = createDurableSyncFetchTimeoutMs({
       totalTimeoutMs: options?.totalTimeoutMs,
       exactRecovery: exactAssetUals !== undefined,
+      extendedRecovery,
     });
     const orderedContextGraphIds = orderContextGraphIdsByPriority(
       contextGraphIds,
@@ -5390,6 +5414,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 exactAssetUals,
                 authenticationTimeoutMs,
                 operationDeadline: operationBoundary.deadline,
+                settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
                 signal: operationBoundary.signal,
                 isCurrent: options?.isCurrent,
               },
@@ -5479,6 +5504,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
       exactAssetUals,
+      settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       priority: options?.priority,
     });
     const runWithinBoundary = async () => {
@@ -5584,6 +5610,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       exactAssetUals,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationDeadline,
+      settlementSliceTimeoutMs,
       signal,
       isCurrent,
     } = options;
@@ -5636,6 +5663,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs,
       authenticationTimeoutMs,
       exactRecovery: exactAssetUals !== undefined,
+      extendedRecovery: settlementSliceTimeoutMs !== undefined,
       operationDeadline,
     }).createContextGraphBudget({
       contextGraphId,
@@ -5651,6 +5679,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       durableSyncBudget: {
         createContextGraphBudget: () => contextGraphBudget,
       },
+      settlementSliceDeadline: settlementSliceTimeoutMs === undefined
+        ? undefined
+        : Math.min(
+            Date.now() + normalizeDurableSyncTimeoutMs(settlementSliceTimeoutMs),
+            operationDeadline ?? Number.POSITIVE_INFINITY,
+          ),
       signal,
       fetchSyncPages: ({
         ctx: opCtx,
@@ -5663,6 +5697,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         manifestDigest,
         manifestPrefixDigestAtOffset,
         forceFreshSession,
+        shouldStopAfterPage,
         fetchContext,
       }) => {
         return this.fetchSyncPages(
@@ -5681,6 +5716,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               || onVerifiedFullSnapshot !== undefined,
             manifestDigest,
             manifestPrefixDigestAtOffset,
+            shouldStopAfterPage,
             assetUals: exactAssetUals,
           },
         );
@@ -6278,6 +6314,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshSession,
       manifestDigest,
       manifestPrefixDigestAtOffset,
+      shouldStopAfterPage,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
@@ -6294,7 +6331,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // A caller signal defines an operation-owned cancellation contract. Do not
     // place those fetches in the shared page map: even equal wall-clock
     // deadlines do not make independently abortable operations compatible.
-    const coalescingKey = signal
+    const coalescingKey = signal || shouldStopAfterPage
       ? null
       : syncPageFetchCoalescingKey({
         remotePeerId,
@@ -6395,6 +6432,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       forceFreshSession,
       manifestDigest,
       manifestPrefixDigestAtOffset,
+      shouldStopAfterPage,
       buildSyncRequest: this.buildSyncRequest.bind(this),
       parseAndFilter: (nquadsText, targetGraphUri, targetContextGraphId) => {
         if (phase === 'snapshot') {
@@ -7417,7 +7455,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               undefined,
               {
                 stopOnBackoffWorthyFailure: true,
-                totalTimeoutMs: DURABLE_RECOVERY_SLICE_TIMEOUT_MS,
+                totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+                settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
                 signal: this.node.stopSignal ?? undefined,
                 priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
                 source: 'vm-recovery',

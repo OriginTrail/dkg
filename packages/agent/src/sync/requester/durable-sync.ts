@@ -32,7 +32,7 @@ import {
   type DurableManifestDigest,
   type DurableManifestPrefixDigest,
 } from '../checkpoint/state.js';
-import type { SyncPageResult } from './page-fetch.js';
+import type { SyncPageProgress, SyncPageResult } from './page-fetch.js';
 import type {
   GraphScopedMaterializationOutcome,
   VerifiedGraphScopedAsset,
@@ -157,6 +157,8 @@ export interface DurableSyncFetchRequest {
   ) => DurableManifestPrefixDigest | undefined;
   /** Identity is unprovable; rotate any saved DATA continuation before fetch. */
   readonly forceFreshSession?: boolean;
+  /** Soft, progress-only page boundary supplied by a recovery owner. */
+  readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
   readonly fetchContext: DurableSyncFetchContext;
 }
 
@@ -188,6 +190,12 @@ export interface DurableSyncContext {
   onAccessDenied?: (contextGraphId: string) => void;
   syncAgentsMeta?: boolean;
   durableSyncBudget: DurableSyncBudget;
+  /**
+   * Soft scheduling boundary for graph-scoped settlement. The requester
+   * always lets one asset cross authentication + atomic materialization, then
+   * yields at the next manifest-bound checkpoint instead of starting another.
+   */
+  settlementSliceDeadline?: number;
   /** Whole-operation cancellation propagated by bounded foreground callers. */
   signal?: AbortSignal;
   fetchSyncPages: (request: DurableSyncFetchRequest) => Promise<SyncPageResult>;
@@ -332,6 +340,20 @@ function createManifestSettlementCheckpointer(options: {
   };
 }
 
+function manifestHasCompleteGraphAfterOffset(
+  manifest: GraphScopedDurableManifestPlan,
+  resumedFromOffset: number,
+  nextOffset: number,
+): boolean {
+  let boundaryOffset = 0;
+  for (const descriptor of manifest.descriptors) {
+    boundaryOffset += descriptor.publicTripleCount;
+    if (boundaryOffset > nextOffset) return false;
+    if (boundaryOffset > resumedFromOffset) return true;
+  }
+  return false;
+}
+
 export function runDurableSync(
   context: DurableSyncContext,
 ): Promise<InitializedDurableSyncResult>;
@@ -367,6 +389,7 @@ async function runDurableSyncWithBudget(
     onAccessDenied,
     syncAgentsMeta = true,
     durableSyncBudget,
+    settlementSliceDeadline,
     signal,
     fetchSyncPages,
     sinceBatchIdFor,
@@ -552,6 +575,7 @@ async function runDurableSyncWithBudget(
           offset: number,
         ) => DurableManifestPrefixDigest | undefined,
         forceFreshSession?: boolean,
+        shouldStopAfterPage?: (progress: SyncPageProgress) => boolean,
       ): Promise<SyncPageResult> => fetchSyncPages({
         ctx,
         remotePeerId,
@@ -563,6 +587,7 @@ async function runDurableSyncWithBudget(
         manifestDigest,
         manifestPrefixDigestAtOffset,
         forceFreshSession,
+        shouldStopAfterPage,
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const metaResult: SyncPageResult = skipAgentsMeta
@@ -642,6 +667,16 @@ async function runDurableSyncWithBudget(
           )?.prefixDigest
           : undefined,
         forceFreshUnboundDataSession,
+        graphScopedManifest && settlementSliceDeadline !== undefined
+          ? (progress) => (
+              Date.now() >= settlementSliceDeadline
+              && manifestHasCompleteGraphAfterOffset(
+                graphScopedManifest!,
+                progress.resumedFromOffset,
+                progress.nextOffset,
+              )
+            )
+          : undefined,
       );
       throwIfOperationAborted();
       peerRespondedForContextGraph = true;
@@ -949,10 +984,21 @@ async function runDurableSyncWithBudget(
           })
         : undefined;
       let incrementalCheckpointAdvanceRecorded = false;
+      let mayYieldAtSettledManifestBoundary = false;
+      let yieldedAtSettledManifestBoundary = false;
       const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
         ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
         : deadline;
-      for (const asset of partitioned.assets) {
+      for (const [assetIndex, asset] of partitioned.assets.entries()) {
+        if (
+          assetIndex > 0
+          && mayYieldAtSettledManifestBoundary
+          && settlementSliceDeadline !== undefined
+          && Date.now() >= settlementSliceDeadline
+        ) {
+          yieldedAtSettledManifestBoundary = true;
+          break;
+        }
         throwIfOperationAborted();
         const outcome = await storeGraphScopedAsset!({
           asset,
@@ -974,10 +1020,20 @@ async function runDurableSyncWithBudget(
           logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         }
         const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
+        if (settledCheckpoint) mayYieldAtSettledManifestBoundary = true;
         if (settledCheckpoint?.numericAdvance && !incrementalCheckpointAdvanceRecorded) {
           recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
           incrementalCheckpointAdvanceRecorded = true;
         }
+      }
+      if (yieldedAtSettledManifestBoundary) {
+        logInfo(
+          ctx,
+          `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
+        );
+        markDurableTerminalBoundary(accumulator, false);
+        endPhase();
+        break;
       }
       if (partitioned.remainingData.length > 0) {
         throwIfOperationAborted();

@@ -179,7 +179,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             priority: 2_000,
             source: 'vm-recovery',
             stopOnBackoffWorthyFailure: true,
-            totalTimeoutMs: 120_000,
+            totalTimeoutMs: 660_000,
+            settlementSliceTimeoutMs: 120_000,
           }),
         ]);
         expect(syncSharedMemoryFromPeerDetailed.calls.at(-1)).toEqual([

@@ -484,6 +484,131 @@ describe('bounded rootless durable progress', () => {
     expect(continuationCheckpoints).toContainEqual({ offset: data.length, terminal: true });
   });
 
+  it('lets one large asset finish after the soft settlement slice has expired', async () => {
+    const [fixture] = orderedAssets();
+    const meta = fixture!.meta;
+    const data = fixture!.payload;
+    const materialized: string[] = [];
+    const checkpoints: Array<{ offset: number; terminal?: boolean }> = [];
+    const pageYieldDecisions: boolean[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-large-asset',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      // This scheduling boundary is already in the past. It must prevent only
+      // the NEXT asset, never abort the complete asset currently being settled.
+      settlementSliceDeadline: 0,
+      fetchSyncPages: async ({
+        phase,
+        shouldStopAfterPage,
+      }: DurableSyncFetchRequest) => {
+        if (phase === 'meta') {
+          return pageResult('meta', { quads: meta, nextOffset: meta.length });
+        }
+        pageYieldDecisions.push(
+          shouldStopAfterPage?.({
+            resumedFromOffset: 0,
+            nextOffset: data.length - 1,
+          }) ?? false,
+          shouldStopAfterPage?.({
+            resumedFromOffset: 0,
+            nextOffset: data.length,
+          }) ?? false,
+        );
+        return pageResult('data', { quads: data, nextOffset: data.length });
+      },
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({
+        asset: verifiedAsset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(verifiedAsset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (_key, offset, _manifestDigest, _manifestPrefixDigest, terminal) => {
+        checkpoints.push({ offset, terminal });
+      },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(materialized).toEqual([fixture!.ual]);
+    expect(pageYieldDecisions).toEqual([false, true]);
+    expect(summary.complete).toBe(true);
+    expect(summary.failedPhases).toBe(0);
+    expect(checkpoints.at(-1)).toEqual({ offset: data.length, terminal: true });
+  });
+
+  it('yields before a second asset after checkpointing the first safe boundary', async () => {
+    const fixtures = orderedAssets().slice(0, 2);
+    const meta = fixtures.flatMap((entry) => entry.meta);
+    const data = fixtures.flatMap((entry) => entry.payload);
+    const manifest = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID)!;
+    const materialized: string[] = [];
+    const checkpoints: Array<{
+      offset: number;
+      manifestDigest?: string;
+      terminal?: boolean;
+    }> = [];
+    const info: string[] = [];
+    const pageYieldDecisions: boolean[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-soft-slice',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      settlementSliceDeadline: 0,
+      fetchSyncPages: async ({
+        phase,
+        shouldStopAfterPage,
+      }: DurableSyncFetchRequest) => {
+        if (phase === 'meta') {
+          return pageResult('meta', { quads: meta, nextOffset: meta.length });
+        }
+        pageYieldDecisions.push(shouldStopAfterPage?.({
+          resumedFromOffset: 0,
+          nextOffset: data.length,
+        }) ?? false);
+        return pageResult('data', { quads: data, nextOffset: data.length });
+      },
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({
+        asset: verifiedAsset,
+      }: DurableSyncGraphScopedStoreRequest) => {
+        materialized.push(verifiedAsset.ual);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: (_key, offset, manifestDigest, _manifestPrefixDigest, terminal) => {
+        checkpoints.push({ offset, manifestDigest, terminal });
+      },
+      logInfo: (_ctx, message) => { info.push(message); },
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(materialized).toEqual([fixtures[0]!.ual]);
+    expect(pageYieldDecisions).toEqual([true]);
+    expect(summary).toMatchObject({
+      complete: false,
+      failedPhases: 0,
+      timedOutPhases: 0,
+      checkpointAdvances: 1,
+    });
+    expect(checkpoints).toEqual([{
+      offset: fixtures[0]!.payload.length,
+      manifestDigest: manifest.manifestDigest,
+      terminal: false,
+    }]);
+    expect(info).toContainEqual(expect.stringContaining('settlement slice expired'));
+  });
+
   it('waits for adjacent zero-public descriptors before checkpointing their shared offset', async () => {
     const positive = orderedAssets();
     const zeroAssetNumber = Number(positive[1]!.ual.split('/').at(-1));

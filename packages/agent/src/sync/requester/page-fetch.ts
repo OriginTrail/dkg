@@ -172,6 +172,11 @@ export interface SyncPageResult {
   timedOut: boolean;
 }
 
+export interface SyncPageProgress {
+  readonly resumedFromOffset: number;
+  readonly nextOffset: number;
+}
+
 function acceptedIncompletePrefixResult(
   result: Omit<SyncPageResult, 'completed' | 'timedOut'>,
 ): SyncPageResult {
@@ -376,6 +381,12 @@ export interface SyncPageFetchOptions {
   readonly requesterScope?: SyncCheckpointScope;
   readonly maxAcceptedQuads?: number;
   readonly maxAcceptedHeapBytesEstimate?: number;
+  /**
+   * Soft owner boundary evaluated only after a page made forward progress.
+   * Returning true yields an incomplete prefix without classifying the peer as
+   * timed out; callers must still verify and checkpoint a safe graph boundary.
+   */
+  readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
 }
 
 export class SyncPageAccumulationLimitError extends Error {
@@ -463,6 +474,8 @@ interface FetchSyncPagesParams {
   maxAcceptedQuads?: number;
   /** Retained V8 heap estimate; checked before each parsed page is appended. */
   maxAcceptedHeapBytesEstimate?: number;
+  /** Soft, progress-only page boundary; never interrupts an in-flight request. */
+  shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
   /** Optional bounded agent-local profiles keyed inside the requester. */
   pageSizeProfileCache?: SyncPageSizeProfileCache;
   parseAndFilter: (nquadsText: string, graphUri: string, contextGraphId: string) => Promise<{ quads: Quad[]; totalQuads: number }>;
@@ -559,6 +572,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     maxAcceptedBytes,
     maxAcceptedQuads,
     maxAcceptedHeapBytesEstimate,
+    shouldStopAfterPage,
     pageSizeProfileCache,
     parseAndFilter,
     send,
@@ -712,6 +726,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
   let timedOut = false;
+  let yielded = false;
   // Start an unknown peer/path at the conservative initial page size, then
   // grow toward the throughput ceiling only after sustained success. Reduce
   // within the existing bounded retry budget if a response cannot traverse
@@ -991,6 +1006,11 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
       // probes upward only after sustained success, at most doubling each time.
       adaptivePageSizer.onPageSuccess();
 
+      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset })) {
+        yielded = true;
+        break;
+      }
+
       if (debugSyncProgress) {
         logInfo(
           ctx,
@@ -1226,7 +1246,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     ...(manifestDigest ? { manifestDigest } : {}),
     nextOffset: offset,
     checkpointKey,
-    completed: !timedOut,
+    completed: !timedOut && !yielded,
     timedOut,
   };
 }
