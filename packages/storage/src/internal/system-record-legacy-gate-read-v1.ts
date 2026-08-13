@@ -219,6 +219,11 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
   for (const root of ordered) {
     const table = tableByRoot.get(root);
     if (table === undefined) continue; // Asked, answered: no applied record.
+    // DELIBERATELY NOT `retainedSystemRecordInspectionQuadsBytesV1`, which request two
+    // uses. That helper measures QUADS; what is retained here is a single literal — the
+    // owned-subject table — so wrapping it in a synthetic quad to reuse the helper would
+    // inflate the count with subject, predicate and graph terms this response never
+    // carries. Same cap, different measured object.
     retainedBytes += termBytes(table);
     if (retainedBytes > SYSTEM_RECORD_MAX_ATOMIC_RESERVED_INSPECTION_RESPONSE_BYTES) {
       // Past the budget the answer is no longer one this reader will vouch for. Every
