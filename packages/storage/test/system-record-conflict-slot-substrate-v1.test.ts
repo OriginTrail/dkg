@@ -32,10 +32,32 @@ function sourceOf(name: string): string {
   return readFileSync(new URL(name, STORAGE_SRC), 'utf8');
 }
 
+/**
+ * EVERY `.ts` UNDER `packages/storage/src`, INCLUDING NESTED DIRECTORIES.
+ *
+ * This walked only the top level until review caught it. `packages/storage/src`
+ * has three subdirectories (`adapters`, `internal`, `structured-mutation`)
+ * holding 20 of its 66 source files, so the "only one module writes the slots"
+ * claim was measured over 46 files and asserted over 66 -- an absence claim
+ * scoped to a tree smaller than the one it named, on a security-relevant
+ * invariant. A writer added at `src/internal/…` would have passed silently.
+ *
+ * Paths are returned relative to `src/` so a nested writer is NAMED in the
+ * failure rather than merely changing a count.
+ */
+function storageSourceFiles(prefix = ''): readonly string[] {
+  const dir = prefix === '' ? STORAGE_SRC : new URL(`${prefix}`, STORAGE_SRC);
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const relative = `${prefix}${entry.name}`;
+    if (entry.isDirectory()) out.push(...storageSourceFiles(`${relative}/`));
+    else if (entry.name.endsWith('.ts')) out.push(relative);
+  }
+  return out;
+}
+
 function filesMentioning(token: string): readonly string[] {
-  return readdirSync(STORAGE_SRC)
-    .filter((name) => name.endsWith('.ts'))
-    .filter((name) => sourceOf(name).includes(token));
+  return storageSourceFiles().filter((name) => sourceOf(name).includes(token));
 }
 
 /** Lines that mention the slots, with their 1-based numbers, for reporting. */
@@ -46,10 +68,30 @@ function slotLines(source: string): readonly { readonly line: number; readonly t
 }
 
 describe('the conflict-slot substrate the authority disposition is derived from', () => {
+  /*
+   * THE SCAN REACHES NESTED DIRECTORIES -- asserted directly, because the
+   * absence claim below is only as wide as this walk. Naming the subdirectories
+   * rather than comparing a count means a walk that silently stops descending
+   * fails here, at the instrument, instead of downstream where it would read as
+   * "no other writer exists".
+   */
+  it('walks the whole storage source tree, not just its top level', () => {
+    const files = storageSourceFiles();
+    const nested = files.filter((name) => name.includes('/'));
+    expect(nested.length).toBeGreaterThan(0);
+    for (const directory of ['adapters/', 'internal/', 'structured-mutation/']) {
+      expect(files.some((name) => name.startsWith(directory))).toBe(true);
+    }
+    // Positive control on the reader the walk feeds: a token that really is in a
+    // nested file is found through it.
+    expect(filesMentioning('export').length).toBeGreaterThan(files.length / 2);
+  });
+
   it('is written in exactly one storage module', () => {
-    // Scope stated: this sweeps packages/storage/src. Core's occurrences are the
-    // type field, the canonical key list and validation -- declaration, not
-    // derivation -- and are asserted separately below by their absence here.
+    // Scope stated and now actually held: this sweeps ALL of
+    // packages/storage/src, nested directories included. Core's occurrences are
+    // the type field, the canonical key list and validation -- declaration, not
+    // derivation.
     expect(filesMentioning('conflictDigestSlots')).toEqual([NEXT_STATE]);
   });
 

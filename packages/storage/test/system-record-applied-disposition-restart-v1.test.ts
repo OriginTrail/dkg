@@ -26,6 +26,8 @@ import {
 } from '../src/system-record-state-snapshot-v1-internal.js';
 import {
   createSystemRecordVerifiedReplacementRegistryV1,
+  type SystemRecordActiveReplacementIssueV1,
+  type SystemRecordVerifiedCandidateIssueV1,
 } from '../src/system-record-verified-replacement-v1-internal.js';
 import {
   makeAuthenticActiveReplacementFixtureV1,
@@ -288,7 +290,7 @@ describe('authority disposition survives a restart on persisted quads alone', ()
  */
 function overflowQuarantineV1(
   binding: Parameters<typeof makeForkResolvingSuccessorFixtureV1>[0],
-  forkedIssue: { readonly head: unknown },
+  forkedIssue: SystemRecordActiveReplacementIssueV1,
   quarantined: SystemRecordActiveReplacementReadyV1,
 ) {
   const forked = forkedIssue.head as AgentProfileActiveHeadObjectV1;
@@ -310,13 +312,18 @@ function overflowQuarantineV1(
   }) as AgentProfileConflictEvidenceV1;
 
   const registry = createSystemRecordVerifiedReplacementRegistryV1();
-  const facts = registry.consumer.consume(registry.issuer.issueCandidate({
+  // `satisfies` rather than a cast: the registry's own issue contract is checked
+  // HERE, where the fixture is assembled, so a required field added to
+  // SystemRecordQuarantineReplacementIssueV1 fails at this line instead of
+  // disappearing into the registry at runtime.
+  const issue = {
     operation: 'quarantine',
     ...forkedIssue,
     conflictEvidenceDigest: computeAgentProfileConflictEvidenceDigestV1(evidence),
     canonicalConflictEvidenceBytes: canonicalizeAgentProfileConflictEvidenceV1(evidence),
     terminalTransitionConflict: true,
-  } as never), binding);
+  } satisfies SystemRecordVerifiedCandidateIssueV1;
+  const facts = registry.consumer.consume(registry.issuer.issueCandidate(issue), binding);
   const derived = deriveSystemRecordReplacementV1({
     facts,
     snapshot: restartFromPersistedQuads(facts.networkId, quarantined),
