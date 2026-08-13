@@ -14,6 +14,7 @@ export * from './publisher-extension.js';
 export * from './imported-artifact-bytes.js';
 export * from './imported-artifact-metadata.js';
 export * from './sync-control-object.js';
+export * from './sync-checkpoint-state.js';
 export * from './cg-policy-objects.js';
 export * from './administrative-authority-objects.js';
 export * from './author-catalog-authority-objects.js';

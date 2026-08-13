@@ -184,6 +184,7 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   const requestedLimit = Number.isSafeInteger(limit)
     ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
     : SYNC_PAGE_SIZE;
+  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
   // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
   // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
   // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
@@ -192,8 +193,12 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
   // cap below, so digests stay wire-compatible.
   const useByteBudgetPage = !includeSharedMemory
     && (phase === 'data' || phase === 'meta')
-    && requestedLimit > SYNC_PAGE_SIZE;
-  const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
+    && (
+      requestedLimit > SYNC_PAGE_SIZE
+      // Exact DATA must remain on the responder's bounded page-only path after
+      // adaptive transport fallback reduces the row hint below the legacy cap.
+      || (phase === 'data' && assetUals !== undefined)
+    );
 
   if (!needsAuth) {
     const prefix = includeSharedMemory ? `workspace:${contextGraphId}` : contextGraphId;

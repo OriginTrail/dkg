@@ -18,6 +18,7 @@ import {
   encodeGraphScopedDurableManifest,
   graphScopedDurableManifestPrefixAtOffset,
   type GraphScopedDescriptor,
+  type GraphScopedDurableManifestPlan,
 } from '../src/sync/durable-integrity.js';
 
 const CONTEXT_GRAPH_ID = 'manifest-digest-test';
@@ -41,7 +42,12 @@ function asset(
     object: `"${options.valuePrefix ?? 'value'}-${index}"`,
     graph,
   }));
-  const privateQuads: Quad[] = [];
+  const privateQuads: Quad[] = tripleCount === 0 ? [{
+    subject: `urn:manifest:${kaNumber}:private`,
+    predicate: 'urn:manifest:value',
+    object: '"private"',
+    graph: '',
+  }] : [];
   const privateMerkleRoot = computePrivateRootV10(privateQuads);
   return {
     payload,
@@ -57,7 +63,8 @@ function asset(
       timestamp: new Date(0),
       assertionVersion: '1',
       publicTripleCount: payload.length,
-      privateTripleCount: 0,
+      privateTripleCount: privateQuads.length,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
       assertionGraph: graph,
       ...(options.subGraphName ? { subGraphName: options.subGraphName } : {}),
     }, { status: 'tentative' }),
@@ -78,6 +85,7 @@ function descriptor(overrides: Partial<GraphScopedDescriptor> = {}): GraphScoped
     publicTripleCount: 2,
     privateTripleCount: 0,
     claimedRootHex: '11'.repeat(32),
+    metadataDigestHex: '44'.repeat(32),
     ...overrides,
   };
 }
@@ -139,12 +147,34 @@ describe('canonical durable manifest digest', () => {
       descriptor({ publicTripleCount: 3 }),
       descriptor({ claimedRootHex: '22'.repeat(32) }),
       descriptor({ privateTripleCount: 1, privateRootHex: '33'.repeat(32) }),
+      descriptor({ metadataDigestHex: '55'.repeat(32) }),
     ];
 
     for (const mutation of mutations) {
       expect(sha256(encodeGraphScopedDurableManifest(CONTEXT_GRAPH_ID, [mutation])))
         .not.toBe(baseDigest);
     }
+  });
+
+  it('changes when receipt or materialization metadata changes without changing DATA', () => {
+    const original = asset(1);
+    const transactionHash = `0x${'ab'.repeat(32)}`;
+    const withReceipt: Quad[] = [
+      ...original.meta,
+      {
+        subject: original.meta[0]!.subject,
+        predicate: 'http://dkg.io/ontology/transactionHash',
+        object: `"${transactionHash}"`,
+        graph: original.meta[0]!.graph,
+      },
+    ];
+
+    const before = createGraphScopedDurableManifestPlan(original.meta, CONTEXT_GRAPH_ID);
+    const after = createGraphScopedDurableManifestPlan(withReceipt, CONTEXT_GRAPH_ID);
+
+    expect(after?.manifestRowCount).toBe(before?.manifestRowCount);
+    expect(after?.descriptors[0]?.claimedRootHex).toBe(before?.descriptors[0]?.claimedRootHex);
+    expect(after?.manifestDigest).not.toBe(before?.manifestDigest);
   });
 
   it('is order-sensitive using the same ordered descriptors as the DATA plan', () => {
@@ -205,5 +235,76 @@ describe('canonical durable manifest digest', () => {
     expect(appendedPrefix?.prefixDigest).toBe(originalPrefix?.prefixDigest);
     expect(changed?.prefixDigest).not.toBe(originalPrefix?.prefixDigest);
     expect(graphScopedDurableManifestPrefixAtOffset(appended, boundary - 1)).toBeNull();
+  });
+
+  it('binds zero-width descriptors to the only numeric boundary that can name them', () => {
+    const manifest = createGraphScopedDurableManifestPlan(
+      [
+        asset(1, { tripleCount: 0 }),
+        asset(2),
+        asset(3, { tripleCount: 0 }),
+        asset(4),
+        asset(5, { tripleCount: 0 }),
+      ].flatMap((entry) => entry.meta),
+      CONTEXT_GRAPH_ID,
+    )!;
+    const firstPositive = manifest.descriptors.findIndex(
+      ({ publicTripleCount }) => publicTripleCount > 0,
+    );
+    expect(firstPositive).toBeGreaterThanOrEqual(0);
+
+    const atZero = graphScopedDurableManifestPrefixAtOffset(manifest, 0)!;
+    expect(atZero.descriptorCount).toBe(firstPositive);
+
+    const firstBoundary = manifest.descriptors[firstPositive]!.publicTripleCount;
+    let expectedAtFirstBoundary = firstPositive + 1;
+    while (
+      expectedAtFirstBoundary < manifest.descriptors.length
+      && manifest.descriptors[expectedAtFirstBoundary]!.publicTripleCount === 0
+    ) expectedAtFirstBoundary += 1;
+
+    const afterFirstPositive = graphScopedDurableManifestPrefixAtOffset(
+      manifest,
+      firstBoundary,
+    )!;
+    expect(afterFirstPositive.descriptorCount).toBe(expectedAtFirstBoundary);
+    expect(afterFirstPositive.prefixDigest).not.toBe(atZero.prefixDigest);
+
+    const publicA = descriptor({
+      ual: 'public-a',
+      assertionGraph: 'graph:a',
+      publicTripleCount: 2,
+    });
+    const publicB = descriptor({
+      ual: 'public-b',
+      assertionGraph: 'graph:b',
+      publicTripleCount: 2,
+    });
+    const zero = descriptor({
+      ual: 'private-only',
+      assertionGraph: 'graph:private-only',
+      publicTripleCount: 0,
+      privateTripleCount: 1,
+      privateRootHex: '66'.repeat(32),
+    });
+    const plan = (descriptors: GraphScopedDescriptor[]): GraphScopedDurableManifestPlan => ({
+      contextGraphId: CONTEXT_GRAPH_ID,
+      manifestDigest: `sha256:${'00'.repeat(32)}`,
+      descriptors,
+      manifestRowCount: descriptors.reduce(
+        (total, entry) => total + entry.publicTripleCount,
+        0,
+      ),
+    });
+    const base = plan([publicA, publicB]);
+    const leadingZero = plan([zero, publicA, publicB]);
+    const boundaryZero = plan([publicA, zero, publicB]);
+
+    expect(graphScopedDurableManifestPrefixAtOffset(leadingZero, 0)?.prefixDigest)
+      .not.toBe(graphScopedDurableManifestPrefixAtOffset(base, 0)?.prefixDigest);
+    expect(graphScopedDurableManifestPrefixAtOffset(boundaryZero, 2)?.prefixDigest)
+      .not.toBe(graphScopedDurableManifestPrefixAtOffset(base, 2)?.prefixDigest);
+    expect(graphScopedDurableManifestPrefixAtOffset(boundaryZero, 2)?.descriptorCount)
+      .toBe(2);
   });
 });

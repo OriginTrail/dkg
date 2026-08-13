@@ -19,6 +19,8 @@ export interface SyncVerifyResult {
 export interface SyncParseResult {
   quads: Quad[];
   totalQuads: number;
+  /** Raw page index for each retained quad, preserving responder coordinates. */
+  sourceIndexes?: number[];
 }
 
 export interface SharedMemoryProcessResult {

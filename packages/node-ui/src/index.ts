@@ -7,6 +7,7 @@ export {
   SqliteChangelogCursorStore,
   SqliteChangelogEraGuard,
   SqliteKaNumberStore,
+  SCHEMA_VERSION,
   // Notifications-pane redesign (V16): activity-digest primitives shared
   // with the daemon's `assertion_activity` emitters + scoped read path.
   ACTIVITY_DIGEST_WINDOW_MS,

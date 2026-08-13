@@ -11,6 +11,7 @@ import {
   DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
   DURABLE_DATA_PHASE_MIN_BUDGET_MS,
   DURABLE_META_PHASE_BUDGET_FRACTION,
+  EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS,
   type DurableSyncBudget,
 } from '../src/sync/requester/durable-sync-budget.js';
 import {
@@ -203,6 +204,14 @@ describe('durable sync deadline budget', () => {
   it('reserves settlement headroom inside an explicit operation timeout', () => {
     expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 299_000 }))
       .toBe(299_000 - DURABLE_SYNC_SETTLEMENT_HEADROOM_MS);
+  });
+
+  it('gives a soft-sliced recovery the full maximum-size transfer window', () => {
+    expect(createDurableSyncFetchTimeoutMs({
+      totalTimeoutMs:
+        EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS + DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
+      extendedRecovery: true,
+    })).toBe(EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS);
   });
 
   it('keeps historical fetch-only budgets without an outer operation timeout', () => {

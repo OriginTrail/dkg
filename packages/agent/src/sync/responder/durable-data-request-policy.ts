@@ -37,7 +37,8 @@ export function resolveDurableDataRequestPolicy(params: {
   const usesByteBudgetPage = !params.includeSharedMemory &&
     params.phase === 'data' &&
     params.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
-    hintedPageRows > params.legacyLimit;
+    hintedPageRows > 0 &&
+    (hintedPageRows > params.legacyLimit || params.hasExactAssetFilter);
   const pageOnlyExactFetch = usesByteBudgetPage && params.hasExactAssetFilter;
 
   return {

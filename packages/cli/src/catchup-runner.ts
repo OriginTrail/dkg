@@ -142,6 +142,8 @@ export interface CatchupJobResult {
 export interface CatchupRunRequest {
   contextGraphId: string;
   includeSharedMemory: boolean;
+  /** Host agent owns one durable transfer across every peer-shaped Worker round. */
+  graphOwnedDurableRecovery?: boolean;
 }
 
 export interface CatchupPhaseProgress extends DurableProgressSummary {
@@ -1072,7 +1074,15 @@ class WorkerCatchupRunner implements CatchupRunner {
     const runId = this.nextRunId++;
     return new Promise<CatchupJobResult>((resolve, reject) => {
       this.pendingRuns.set(runId, { resolve, reject });
-      this.worker.postMessage({ type: 'run', runId, request });
+      this.worker.postMessage({
+        type: 'run',
+        runId,
+        request: {
+          ...request,
+          graphOwnedDurableRecovery:
+            typeof this.agent.syncDurableRecoveryContextGraph === 'function',
+        },
+      });
     });
   }
 
@@ -1191,6 +1201,14 @@ class WorkerCatchupRunner implements CatchupRunner {
             ),
           },
         );
+      }
+      case 'syncDurableRecovery': {
+        const [peerId, contextGraphId] = args as [string, string];
+        const recovery = await this.agent.syncDurableRecoveryContextGraph(contextGraphId, {
+          candidatePeerIds: [peerId],
+          candidatesAreSyncCapable: true,
+        });
+        return recovery.result;
       }
       case 'syncSharedMemory': {
         const [peerId, contextGraphId, priority, source, selected] = args as [

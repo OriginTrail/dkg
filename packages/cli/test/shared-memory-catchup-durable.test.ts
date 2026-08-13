@@ -208,6 +208,99 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     });
   });
 
+  it('routes every durable candidate through one graph recovery owner without double counting', async () => {
+    const cgId = 'coordinated-durable-cg';
+    const peerA = 'peer-a';
+    const peerB = 'peer-b';
+    const peerAResult = detailedDurableResult({
+      insertedTriples: 10,
+      insertedDataTriples: 10,
+      complete: false,
+      checkpointAdvances: 1,
+    });
+    const peerBResult = detailedDurableResult({
+      insertedTriples: 20,
+      insertedDataTriples: 20,
+      complete: true,
+      checkpointAdvances: 1,
+    });
+    const aggregateResult = detailedDurableResult({
+      insertedTriples: 30,
+      insertedDataTriples: 30,
+      complete: true,
+      checkpointAdvances: 2,
+    });
+    const syncDurableRecoveryContextGraph = vi.fn(async () => ({
+      outcome: 'terminal',
+      result: aggregateResult,
+      peerResults: [
+        { peerId: peerA, result: peerAResult },
+        { peerId: peerB, result: peerBResult },
+      ],
+      slices: 2,
+      peerId: peerB,
+      safeOffset: 30,
+    }));
+    const syncFromPeerDetailed = vi.fn();
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => [peerA, peerB].map((peerId) => ({
+            remotePeer: { toString: () => peerId },
+          })),
+        },
+      },
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      syncDurableRecoveryContextGraph,
+      syncFromPeerDetailed,
+    };
+    const { ctx, res } = buildCatchupCtx(
+      {
+        contextGraphId: cgId,
+        includeSharedMemory: false,
+        includeDurable: true,
+        hostCatchupFallback: false,
+      },
+      agent,
+    );
+
+    await handleMemoryRoutes(ctx);
+
+    expect(syncDurableRecoveryContextGraph).toHaveBeenCalledTimes(1);
+    expect(syncDurableRecoveryContextGraph).toHaveBeenCalledWith(cgId, {
+      candidatePeerIds: [peerA, peerB],
+      restrictToCandidatePeerIds: true,
+      candidatesAreSyncCapable: true,
+    });
+    expect(syncFromPeerDetailed).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toMatchObject({
+      ok: true,
+      durableComplete: true,
+      peersAttempted: 2,
+      totalDurableInsertedTriples: 30,
+      results: [
+        {
+          peerId: peerA,
+          durableInsertedTriples: 10,
+          durableComplete: false,
+        },
+        {
+          peerId: peerB,
+          durableInsertedTriples: 20,
+          durableComplete: true,
+        },
+      ],
+      perContextGraph: [{
+        contextGraphId: cgId,
+        durableInsertedTriples: 30,
+        durableComplete: true,
+      }],
+    });
+  });
+
   it('supports durable-only recovery without starting either SWM catchup path', async () => {
     const cgId = 'private-durable-only-cg';
     const peerId = 'peer-curator';
