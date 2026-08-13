@@ -415,6 +415,64 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(read.truncated).toBe(true);
   });
 
+  /**
+   * A store that returns EXACT bindings for request one.
+   *
+   * The quad-driven fake cannot express these cases: it resolves one table per claim with
+   * `.find`, so it can never emit a duplicate row, and it cannot simulate a response that
+   * hit its own bound. Both defects here live in how the reader interprets the binding
+   * LIST, so the fixture has to speak at that layer.
+   */
+  function bindingStore(rows: Array<Record<string, string>>): TripleStore {
+    return {
+      async query(sparql: string) {
+        if (!sparql.includes('?claim ?table')) return { type: 'bindings' as const, bindings: [] };
+        return { type: 'bindings' as const, bindings: rows };
+      },
+    } as unknown as TripleStore;
+  }
+
+  const claimOf = (root: string) => systemRecordRootClaimSubjectV1(NETWORK_ID, root);
+
+  // Adopted from review, and it is a fail-OPEN the port contract exists to close. A
+  // duplicate current claim means the reserved graph is not a shape this reader can
+  // classify; the previous code kept whichever table arrived first, so durable sync could
+  // decide insert-or-discard from an arbitrary reserved row.
+  it('reports a root undecided when the reserved graph answers for it twice', async () => {
+    const store = bindingStore([
+      { claim: claimOf(ROOT), table: jsonLiteral([ROOT]) },
+      { claim: claimOf(ROOT), table: jsonLiteral([]) },
+    ]);
+
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT],
+    });
+
+    expect(read.records).toEqual([]);
+    expect(read.unclassifiedRoots).toEqual([ROOT]);
+  });
+
+  // The sharper half of the same finding: duplicate rows consume the query's own LIMIT, so
+  // a DIFFERENT root's row can be cut from the answer. Reading that root as "no applied
+  // record" classifies it uncovered and inserts unsigned legacy quads over signed state.
+  // Absence is only an answer when the answer was exact.
+  it('does not read absence as "no record" when the response filled its bound', async () => {
+    // Two roots asked about, three rows returned — all for ROOT. OTHER_ROOT's row could
+    // have been the one the bound cut.
+    const store = bindingStore([
+      { claim: claimOf(ROOT), table: jsonLiteral([ROOT]) },
+      { claim: claimOf(ROOT), table: jsonLiteral([]) },
+      { claim: claimOf(ROOT), table: jsonLiteral([ROOT]) },
+    ]);
+
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT, OTHER_ROOT],
+    });
+
+    expect(read.records.map((r) => r.root)).not.toContain(OTHER_ROOT);
+    expect(read.unclassifiedRoots).toContain(OTHER_ROOT);
+  });
+
   // The bound must be IN THE QUERY, not only in the post-decode check. Adopted from
   // review: drop the projection `LIMIT` and every other case here still passes, because
   // the fake returns all fixture rows and `bindings.length` catches the overflow after

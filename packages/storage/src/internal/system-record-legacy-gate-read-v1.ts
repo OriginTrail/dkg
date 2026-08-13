@@ -216,23 +216,48 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
     return Object.freeze({ records: [], unclassifiedRoots: Object.freeze([...ordered]) });
   }
 
+  // THE RESPONSE MAY NOT BE THE EXACT SET, AND THAT CHANGES WHAT ABSENCE MEANS.
+  //
+  // The query asks for `LIMIT ordered.length + 1`, so at most one row per requested root
+  // plus one. More rows than roots means either duplicates or a bound that cut the answer
+  // short — and a cut answer can have pushed a DIFFERENT root's row out of the result.
+  // Reading that root as "no applied record" would classify it uncovered and insert
+  // unsigned legacy quads over signed state, which is the exact fail-open this port
+  // contract exists to close. So when the answer is not exact, absence stops being an
+  // answer and every undecided root is reported undecided.
+  const saturated = bindings.length > ordered.length;
+
   const tableByRoot = new Map<string, string>();
+  // Roots the reserved graph answered for more than once. A duplicate current claim means
+  // the graph is not the shape this reader can classify, and picking whichever row arrived
+  // first would be deciding insert-or-discard from an arbitrary one.
+  const ambiguousRoots = new Set<string>();
   for (const binding of bindings) {
     const root = binding.claim === undefined ? undefined : rootByClaim.get(binding.claim);
-    // A row for a claim nobody asked about, or a duplicate current claim, means the
-    // reserved graph is not the shape this reader assumes. Ignore the row rather than
-    // guess: an unrecognised row can only make coverage narrower, and the roots it would
-    // have covered stay unclassified below.
+    // A row for a claim nobody asked about cannot narrow or widen coverage; ignore it.
     if (root === undefined || binding.table === undefined) continue;
-    if (!tableByRoot.has(root)) tableByRoot.set(root, binding.table);
+    if (tableByRoot.has(root)) {
+      ambiguousRoots.add(root);
+      continue;
+    }
+    tableByRoot.set(root, binding.table);
   }
 
   const records: LegacyAgentProfileAppliedRootV1[] = [];
   const unclassifiedRoots: string[] = [];
   let retainedBytes = 0;
   for (const root of ordered) {
+    if (ambiguousRoots.has(root)) {
+      unclassifiedRoots.push(root);
+      continue;
+    }
     const table = tableByRoot.get(root);
-    if (table === undefined) continue; // Asked, answered: no applied record.
+    if (table === undefined) {
+      // Asked, answered: no applied record — but ONLY when the answer was exact. Under a
+      // saturated response the row for this root may simply not have fitted.
+      if (saturated) unclassifiedRoots.push(root);
+      continue;
+    }
     // DELIBERATELY NOT `retainedSystemRecordInspectionQuadsBytesV1`, which request two
     // uses. That helper measures QUADS; what is retained here is a single literal — the
     // owned-subject table — so wrapping it in a synthetic quad to reuse the helper would
