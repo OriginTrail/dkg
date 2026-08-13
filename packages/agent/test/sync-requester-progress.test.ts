@@ -25,7 +25,7 @@ import {
   SyncPageAccumulationLimitError,
   type SyncPageResult,
 } from '../src/sync/requester/page-fetch.js';
-import { markSyncTransportFailure } from '../src/sync/error-tags.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 
 function recorder<A extends unknown[], R>(impl: (...args: A) => R) {
   const calls: A[] = [];
@@ -69,8 +69,7 @@ function deniedError(): Error & { syncDenied: boolean } {
 
 function transportError(message: string): Error {
   const err = new Error(message);
-  markSyncTransportFailure(err);
-  return err;
+  return toSyncTransportFailureError(err);
 }
 
 function quad(subject: string): Quad {
@@ -368,6 +367,10 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['resumed-cg'],
+      // Full rootless snapshots now require a fresh, complete META manifest
+      // before DATA. Exercise phase-level progress accounting on the delta
+      // path, where independent resumed META/DATA cursors remain valid.
+      sinceBatchIdFor: () => 'progress-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ contextGraphId, phase }) => (
         pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 })
@@ -515,6 +518,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['meta-only-cg'],
+      sinceBatchIdFor: () => 'meta-only-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -559,6 +563,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-controls'],
+      sinceBatchIdFor: () => 'discarded-controls-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -639,6 +644,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-non-iri'],
+      sinceBatchIdFor: () => 'discarded-non-iri-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -681,6 +687,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-mixed'],
+      sinceBatchIdFor: () => 'discarded-mixed-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -1608,6 +1615,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
       snapshotsResolved: 0,
       snapshotsTotal: 2,
       manifestComplete: true,
+      descriptorsAuthoritative: true,
       missingCount: 2,
       // The ref that was never served, named — not an empty placeholder. The
       // sample and the count come from the same walk, so they cannot disagree.
@@ -1714,8 +1722,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           return pageResult(contextGraphId, phase);
         },
@@ -1767,6 +1776,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 2,
         snapshotsTotal: 2,
         manifestComplete: true,
+        descriptorsAuthoritative: true,
         missingCount: 0,
         missingSample: [],
         materializationFailures: 0,
@@ -1870,7 +1880,12 @@ describe('public SWM snapshot coverage (#2050)', () => {
     // 1` below would be measuring something else), and NOTHING may be
     // described (or this row would silently become a second copy of the mixed
     // row above, travelling the described path it is meant to avoid).
-    expect(collectPublicSnapshotMetadata(meta)).toEqual([{ ref: digest, digest, count: payload.length }]);
+    expect(collectPublicSnapshotMetadata(meta)).toEqual([{
+      ref: digest,
+      digest,
+      count: payload.length,
+      publishedAtMs: 0,
+    }]);
     expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: COVERAGE_CG, metaQuads: meta })).toEqual([]);
 
     // The blob is already cached: the state of a node whose earlier pass
@@ -1903,8 +1918,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly, so `manifestComplete` is true — the
           // other half of the vacuity gate. A truncated meta phase parses no
@@ -1953,6 +1969,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 1,
         snapshotsTotal: 1,
         manifestComplete: true,
+        descriptorsAuthoritative: true,
         missingCount: 0,
         missingSample: [],
         materializationFailures: 0,
@@ -2087,8 +2104,9 @@ describe('public SWM snapshot coverage (#2050)', () => {
           phase: string,
           _graph: string,
           _deadline: number,
-          snapshotRef?: string,
+          fetchOptions?: { snapshotRef?: string },
         ) => {
+          const snapshotRef = fetchOptions?.snapshotRef;
           if (phase === 'snapshot') snapshotFetches.push(String(snapshotRef));
           // Every phase completes cleanly. That is not incidental: it is what
           // makes `manifestComplete` true, which is the field that turns this
@@ -2153,6 +2171,7 @@ describe('public SWM snapshot coverage (#2050)', () => {
         snapshotsResolved: 0,
         snapshotsTotal: 2,
         manifestComplete: true,
+        descriptorsAuthoritative: false,
         missingCount: 2,
         missingSample: [],
         materializationFailures: 0,
@@ -2386,6 +2405,7 @@ describe('T14 — a throwing snapshot round still reports what it resolved', () 
       snapshotsResolved: 2,
       snapshotsTotal: 3,
       manifestComplete: true,
+      descriptorsAuthoritative: true,
       missingCount: 1,
       missingSample: [unreachable.digest],
       materializationFailures: 0,

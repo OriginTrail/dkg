@@ -64,6 +64,8 @@ export interface SyncRowListMemo {
        * the retained-entry set.
        */
       refreshGeneration?: string;
+      /** Offset-zero retry may rebuild an evicted/expired snapshot safely. */
+      refreshExpired?: boolean;
       requireExisting?: boolean;
       signal?: AbortSignal;
     },
@@ -363,6 +365,7 @@ export function createResponderSyncRowListMemo(
       if (priorExpiry) {
         if (
           options?.refresh ||
+          options?.refreshExpired ||
           (requestedGeneration !== undefined &&
             priorExpiry.refreshGeneration !== requestedGeneration)
         ) deleteExpired(key);

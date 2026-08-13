@@ -61,6 +61,7 @@ import {
   AbortableStoreWorkLifecycle,
   composeAbortSignals,
 } from '../abortable-store-work-lifecycle.js';
+import { parseNQuadsTextTolerant } from '../nquads-text.js';
 
 function throwIfAborted(signal: AbortSignal | undefined): void {
   if (!signal?.aborted) return;
@@ -608,7 +609,7 @@ export class SparqlHttpStore implements TripleStore {
         const text = options?.maxResponseBytes === undefined
           ? await res.text()
           : await readResponseTextBounded(res, options.maxResponseBytes);
-        const quads = parseNQuadsText(text);
+        const quads = parseNQuadsTextTolerant(text);
         return { type: 'quads', quads };
       },
     );
@@ -825,29 +826,6 @@ function formatTerm(term: string): string {
   if (term.startsWith('_:')) return term;
   if (term.startsWith('<')) return term;
   return `<${term}>`;
-}
-
-function parseNQuadsText(text: string): DKGQuad[] {
-  const quads: DKGQuad[] = [];
-  for (const raw of text.split('\n')) {
-    const line = raw.trim();
-    if (!line || line.startsWith('#')) continue;
-    const match = line.match(
-      /^(<[^>]+>|_:\S+)\s+(<[^>]+>)\s+(<[^>]+>|_:\S+|"(?:[^"\\]|\\.)*"(?:@\S+|\^\^<[^>]+>)?)\s*(?:(<[^>]+>)\s*)?\.$/,
-    );
-    if (!match) continue;
-    quads.push({
-      subject: stripAngle(match[1]),
-      predicate: stripAngle(match[2]),
-      object: match[3].startsWith('<') ? stripAngle(match[3]) : match[3],
-      graph: match[4] ? stripAngle(match[4]) : '',
-    });
-  }
-  return quads;
-}
-
-function stripAngle(s: string): string {
-  return s.startsWith('<') && s.endsWith('>') ? s.slice(1, -1) : s;
 }
 
 function escapeUri(uri: string): string {

@@ -12,7 +12,13 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
-import { planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
+import {
+  createGraphScopedDurableManifestPlan,
+  graphScopedDurableManifestPrefixAtOffset,
+  isGraphScopedDurableManifestBoundary,
+  planBoundedGraphScopedDurableBatch,
+  type GraphScopedDurableManifestPlan,
+} from '../durable-integrity.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import {
   createDurableSyncAccumulator,
@@ -21,7 +27,11 @@ import {
   recordDurableSyncDiagnostics,
   type InitializedDurableSyncResult,
 } from '../durable-progress.js';
-import { getSyncCheckpointKey } from '../checkpoint/state.js';
+import {
+  getSyncCheckpointKey,
+  type DurableManifestDigest,
+  type DurableManifestPrefixDigest,
+} from '../checkpoint/state.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type {
   GraphScopedMaterializationOutcome,
@@ -58,6 +68,24 @@ export type {
 export type { LegacyDurableSyncContext } from './durable-sync-compat.js';
 export { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
 export type { ExactDurableFetchDisposition } from './exact-durable-fetch.js';
+
+/** Normalize arbitrary AbortSignal reasons without mutating caller-owned errors. */
+function normalizeDurableSyncAbortReason(reason: unknown): Error {
+  if (reason instanceof Error && reason.name === 'AbortError') return reason;
+
+  const error = new Error(
+    reason instanceof Error
+      ? reason.message || 'Durable sync aborted'
+      : typeof reason === 'string'
+        ? reason
+        : 'Durable sync aborted',
+  );
+  error.name = 'AbortError';
+  if (reason !== undefined) {
+    (error as Error & { cause?: unknown }).cause = reason;
+  }
+  return error;
+}
 
 export interface DetailedDurableSyncResult {
   readonly result: InitializedDurableSyncResult;
@@ -121,10 +149,16 @@ export interface DurableSyncFetchRequest {
   readonly snapshotRef?: string;
   readonly sinceBatchId?: string;
   readonly exactAssetUals?: string[];
+  /** Canonical META generation that authorizes this DATA continuation. */
+  readonly manifestDigest?: DurableManifestDigest;
+  /** Canonical descriptor-prefix proof for safe cross-generation reuse. */
+  readonly manifestPrefixDigestAtOffset?: (
+    offset: number,
+  ) => DurableManifestPrefixDigest | undefined;
   /**
    * Rebuild the responder row list instead of resuming an earlier phase.
-   * Verified rootless snapshots need the complete metadata manifest on every
-   * round so a data checkpoint can be mapped back to exact graph boundaries.
+   * Verified META and unbound DATA requests use this when a saved responder
+   * session cannot prove the complete graph generation required for reuse.
    */
   readonly forceFreshSession?: boolean;
   readonly fetchContext: DurableSyncFetchContext;
@@ -204,7 +238,12 @@ export interface DurableSyncContext {
   /** Runs after verified snapshot writes and before phase checkpoints advance. */
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   deleteCheckpoint: (key: string) => void;
-  setCheckpoint: (key: string, offset: number) => void;
+  setCheckpoint: (
+    key: string,
+    offset: number,
+    manifestDigest?: DurableManifestDigest,
+    manifestPrefixDigest?: DurableManifestPrefixDigest,
+  ) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
@@ -263,11 +302,7 @@ async function runDurableSyncWithBudget(
 
   const throwIfOperationAborted = () => {
     if (!signal?.aborted) return;
-    const error = signal.reason instanceof Error
-      ? signal.reason
-      : new Error(typeof signal.reason === 'string' ? signal.reason : 'Durable sync aborted');
-    error.name = 'AbortError';
-    throw error;
+    throw normalizeDurableSyncAbortReason(signal.reason);
   };
   const fetchContext = (deadline: number): DurableSyncFetchContext => ({
     deadline,
@@ -283,6 +318,7 @@ async function runDurableSyncWithBudget(
       updateCheckpoint: boolean;
       countProgress?: boolean;
       emptyPhase?: boolean;
+      manifestPlan?: GraphScopedDurableManifestPlan;
     },
   ) => {
     const countProgress = options.countProgress ?? true;
@@ -313,7 +349,27 @@ async function runDurableSyncWithBudget(
     if (!options.updateCheckpoint) return;
     if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
-      setCheckpoint(result.checkpointKey, result.nextOffset);
+      if (options.manifestPlan) {
+        const prefix = graphScopedDurableManifestPrefixAtOffset(
+          options.manifestPlan,
+          result.nextOffset,
+        );
+        if (!prefix) {
+          deleteCheckpoint(result.checkpointKey);
+          throw new Error(
+            `Refusing to checkpoint durable DATA offset ${result.nextOffset}: `
+            + 'the completed META manifest has no matching graph boundary',
+          );
+        }
+        setCheckpoint(
+          result.checkpointKey,
+          result.nextOffset,
+          options.manifestPlan.manifestDigest,
+          prefix.prefixDigest,
+        );
+      } else {
+        setCheckpoint(result.checkpointKey, result.nextOffset);
+      }
     }
   };
 
@@ -379,6 +435,11 @@ async function runDurableSyncWithBudget(
         phase: 'data' | 'meta',
         graphUri: string,
         sinceBatchId?: string,
+        manifestDigest?: DurableManifestDigest,
+        manifestPrefixDigestAtOffset?: (
+          offset: number,
+        ) => DurableManifestPrefixDigest | undefined,
+        forceFreshSession?: boolean,
       ): Promise<SyncPageResult> => fetchSyncPages({
         ctx,
         remotePeerId,
@@ -387,10 +448,14 @@ async function runDurableSyncWithBudget(
         graphUri,
         sinceBatchId,
         exactAssetUals,
+        manifestDigest,
+        manifestPrefixDigestAtOffset,
         // DATA safely resumes at verified graph boundaries. META is the
         // manifest that proves those boundaries, so resuming it independently
         // would return only a suffix and make the DATA prefix unverifiable.
-        forceFreshSession: phase === 'meta' && rootlessVerifiedFullSnapshot,
+        // Preserve a stronger caller request for unbound DATA sessions.
+        forceFreshSession: forceFreshSession
+          || (phase === 'meta' && rootlessVerifiedFullSnapshot),
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
       const metaResult: SyncPageResult = skipAgentsMeta
@@ -410,14 +475,71 @@ async function runDurableSyncWithBudget(
       // the post-processing timeout gate below still prevents fanout to the
       // next context graph when stopOnBackoffWorthyFailure is enabled.
       throwIfOperationAborted();
-      const rawDataResult = await fetchPhase('data', dataGraph, sinceBatchId);
+      let effectiveMetaResult = metaResult;
+      let exactAssetDescriptorCoverageComplete = true;
+      if (exactAssetUals !== undefined) {
+        // Scope META before it defines the DATA generation. Older responders
+        // can ignore the exact-asset wire filter and over-return descriptors;
+        // those unrelated assets must not enter the continuation digest or
+        // bounded DATA plan for the requested subset.
+        const exactMeta = filterExactAssetDurablePayload(
+          [],
+          metaResult.quads,
+          exactAssetUals,
+        );
+        effectiveMetaResult = { ...metaResult, quads: exactMeta.metaQuads };
+        exactAssetDescriptorCoverageComplete = exactMeta.descriptorCoverageComplete;
+      }
+      let graphScopedManifest: GraphScopedDurableManifestPlan | null = null;
+      let forceFreshUnboundDataSession = false;
+      if (sinceBatchId === undefined && !isSystemContextGraph) {
+        if (
+          !metaResult.completed
+          || metaResult.timedOut
+          || metaResult.resumedFromOffset !== 0
+        ) {
+          // A suffix or incomplete META phase is not a manifest. It cannot
+          // identify the generation of a saved DATA OFFSET/session, so do not
+          // fetch or advance DATA under it. A legacy resumed META checkpoint
+          // is discarded so the next round can obtain the complete manifest.
+          if (metaResult.resumedFromOffset !== 0) {
+            deleteCheckpoint(metaResult.checkpointKey);
+          }
+          throw Object.assign(
+            new Error(
+              `Cannot authorize durable DATA continuation for "${pid}": `
+              + 'META did not complete from offset zero',
+            ),
+            { code: 'SYNC_DATA_MANIFEST_INCOMPLETE' },
+          );
+        }
+        graphScopedManifest = createGraphScopedDurableManifestPlan(
+          effectiveMetaResult.quads,
+          pid,
+        );
+        // Legacy/mixed/malformed metadata has no canonical generation identity.
+        // It may still complete safely in one round, but never by trusting a
+        // saved nonzero offset or responder token.
+        forceFreshUnboundDataSession = graphScopedManifest === null;
+      }
+      const rawDataResult = await fetchPhase(
+        'data',
+        dataGraph,
+        sinceBatchId,
+        graphScopedManifest?.manifestDigest,
+        graphScopedManifest
+          ? (offset) => graphScopedDurableManifestPrefixAtOffset(
+            graphScopedManifest!,
+            offset,
+          )?.prefixDigest
+          : undefined,
+        forceFreshUnboundDataSession,
+      );
       throwIfOperationAborted();
       peerRespondedForContextGraph = true;
       endPhase();
       const fetchDurationMs = Date.now() - fetchStartedAt;
-      let effectiveMetaResult = metaResult;
       let dataResult = rawDataResult;
-      let exactAssetDescriptorCoverageComplete = true;
       if (exactAssetUals !== undefined) {
         const exact = filterExactAssetDurablePayload(
           rawDataResult.quads,
@@ -457,9 +579,54 @@ async function runDurableSyncWithBudget(
         sinceBatchId === undefined
         && !isSystemContextGraph
       ) {
+        if (
+          graphScopedManifest
+          && dataResult.resumedFromOffset > 0
+          && dataResult.manifestDigest !== graphScopedManifest.manifestDigest
+        ) {
+          deleteCheckpoint(dataResult.checkpointKey);
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": resumed DATA `
+              + 'continuation is not bound to the completed META generation',
+            ),
+            { code: 'SYNC_DATA_MANIFEST_UNBOUND' },
+          );
+        }
+        const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
+          ? isGraphScopedDurableManifestBoundary(
+            graphScopedManifest ?? effectiveMetaResult.quads,
+            dataResult.resumedFromOffset,
+          )
+          : true;
+        if (resumeIsManifestBoundary === false) {
+          // An OFFSET inside an exact assertion graph can never produce a
+          // complete first graph in this round. Keeping it creates a permanent
+          // N-1 verification loop (for example 9,999/10,000 rows). Delete the
+          // paired responder session/checkpoint and retry from offset zero on
+          // the next bounded sync; never store this non-contiguous suffix.
+          deleteCheckpoint(dataResult.checkpointKey);
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": resumed offset `
+              + `${dataResult.resumedFromOffset} is inside an assertion graph; `
+              + 'resetting the data checkpoint to a manifest boundary',
+            ),
+            { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
+          );
+        }
+        const responderCursorDelta = dataResult.nextOffset - dataResult.resumedFromOffset;
+        if (responderCursorDelta !== dataResult.quads.length) {
+          logWarn(
+            ctx,
+            `Rootless durable cursor drift for "${pid}": responder advanced `
+              + `${responderCursorDelta} row(s) but delivered ${dataResult.quads.length}; `
+              + 'projecting only the verified complete-graph prefix',
+          );
+        }
         const bounded = planBoundedGraphScopedDurableBatch(
           dataResult.quads,
-          effectiveMetaResult.quads,
+          graphScopedManifest ?? effectiveMetaResult.quads,
           dataResult.resumedFromOffset,
           dataResult.nextOffset,
           dataResult.completed,
@@ -489,13 +656,19 @@ async function runDurableSyncWithBudget(
 
       startPhase('verify');
       const verifyStartedAt = Date.now();
-      const processed = await processDurableBatchInWorker(
-        dataForVerification,
-        effectiveMetaResult.quads,
-        ctx,
-        isSystemContextGraph,
-        verificationMode,
-      );
+      let processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>;
+      try {
+        processed = await processDurableBatchInWorker(
+          dataForVerification,
+          effectiveMetaResult.quads,
+          ctx,
+          isSystemContextGraph,
+          verificationMode,
+        );
+      } catch (error) {
+        if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
+        throw error;
+      }
       throwIfOperationAborted();
       endPhase();
       const verifyDurationMs = Date.now() - verifyStartedAt;
@@ -518,11 +691,15 @@ async function runDurableSyncWithBudget(
       // instead of silently skipping it.
       const batchVerifiedCleanly = processed.rejectedKcs === 0;
       if (!batchVerifiedCleanly) {
+        if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
         logWarn(
           ctx,
           `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
         );
         recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs });
+      }
+      if (graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
+        deleteCheckpoint(rawDataResult.checkpointKey);
       }
 
       const notifyVerifiedFullSnapshot = async (): Promise<void> => {
@@ -618,6 +795,7 @@ async function runDurableSyncWithBudget(
         recordPhaseOutcome(effectiveDataResult, {
           updateCheckpoint: updateDataCheckpoint,
           emptyPhase,
+          manifestPlan: graphScopedManifest ?? undefined,
         });
         markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
         if (exactFetchDispositionIndex !== undefined) {
@@ -667,7 +845,7 @@ async function runDurableSyncWithBudget(
         } else if (outcome === 'stale') {
           logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         } else {
-          logWarn(ctx, `Quarantined oversized graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+          logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
         }
       }
       if (partitioned.remainingData.length > 0) {
@@ -699,7 +877,10 @@ async function runDurableSyncWithBudget(
       await notifyVerifiedFullSnapshot();
       throwIfOperationAborted();
       recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(effectiveDataResult, { updateCheckpoint: updateDataCheckpoint });
+      recordPhaseOutcome(effectiveDataResult, {
+        updateCheckpoint: updateDataCheckpoint,
+        manifestPlan: graphScopedManifest ?? undefined,
+      });
       markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
       if (exactFetchDispositionIndex !== undefined) {
         exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();

@@ -142,7 +142,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     }> = [];
     const publishCalls: Array<{ contextGraphId: string; selection: any; opts: any }> = [];
     const remainingClearCalls: any[][] = [];
-    const rfc64CatalogCalls: any[] = [];
     const rfc64SwmInventoryRemovalCalls: any[] = [];
     const warnings: string[] = [];
 
@@ -181,10 +180,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         status: 'confirmed',
         publicQuads: [],
       };
-    };
-    agent.recordConfirmedRfc64PublicCatalogAssetV1 = async (input: any) => {
-      rfc64CatalogCalls.push(input);
-      throw new Error('simulated finalized RFC-64 catalog failure');
     };
     agent.removeRfc64SwmAuthorInventoryShadowV1 = async (input: any) => {
       rfc64SwmInventoryRemovalCalls.push(input);
@@ -237,17 +232,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
     expect(result.status).toBe('confirmed');
-    expect(rfc64CatalogCalls).toHaveLength(1);
-    expect(rfc64CatalogCalls[0]).toMatchObject({
-      contextGraphId: CG,
-      assertionCoordinate: NAME,
-      publicQuads: [PUBLIC_QUAD],
-    });
-    expect(rfc64CatalogCalls[0].seal).toMatchObject({
-      authorAddress: AGENT_B,
-      reservedKaId: RESERVED_KA_ID,
-      kaUal: KA_UAL,
-    });
     expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
     expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
       contextGraphId: CG,
@@ -258,7 +242,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       },
     });
     expect(warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining('simulated finalized RFC-64 catalog failure'),
       expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
     ]));
   });

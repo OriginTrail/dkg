@@ -5628,7 +5628,6 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId: request.contextGraphId,
       subGraphName: request.subGraphName,
       assertionCoordinate: request.name,
-      publicQuads: snapshotQuads,
       seal,
       assertionUri,
       ctx,
@@ -6201,7 +6200,6 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
-      publicQuads: canonicalSwmQuads,
       seal,
       assertionUri,
       ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6218,7 +6216,6 @@ export class PublishMethods extends DKGAgentBase {
       contextGraphId: string;
       subGraphName?: string;
       assertionCoordinate: string;
-      publicQuads: readonly Quad[];
       seal: AssertionSeal;
       assertionUri: string;
       ctx: OperationContext;

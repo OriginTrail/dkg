@@ -3,7 +3,7 @@ import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams }
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
-import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
+import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublishRequest, encodeEncryptedWorkspacePayload, encryptWorkspacePayload, contextGraphDataUri, contextGraphDataGraphUri, contextGraphMetaUri, contextGraphPrivateUri, contextGraphAssertionUri, contextGraphLayerUri, MemoryLayer, assertionLifecycleUri, contextGraphSubGraphUri, contextGraphSubGraphMetaUri, contextGraphSubGraphPrivateUri, SYSTEM_CONTEXT_GRAPHS, validateSubGraphName, isSafeIri, assertSafeIri, assertSafeRdfTerm, assertQuadLiteralsMutf8Safe, DKG_GOSSIP_MAX_MESSAGE_BYTES, SwmGossipPayloadTooLargeError, STORAGE_ACK_MAX_STAGING_BYTES, type Ed25519Keypair, buildAuthorAttestationTypedData, buildUpdateAuthorAttestationTypedData, AUTHOR_SCHEME_VERSION_V1, TrustLevel, TRUST_LEVEL_PREDICATE, assertNoUserAuthoredTrustLevelQuads, buildTrustLevelQuads, isTrustLevelQuad, isSwmMerkleExcludedQuad, WORKSPACE_OWNER_PREDICATE, DKG_ENTITY, DKG_ROOT_ENTITY_LEGACY, ENTITY_PRED_ALT, parseAssertionSealQuads, ASSERTION_SEAL_PREDICATES, DKG_ONTOLOGY, GRAPH_KA_CONTENT_SCOPE_VERSION, isAllocatableKaAuthorV1, LegacyKnowledgeAssetReadOnlyError, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { GraphManager, invalidateSwmMaterializationWitness, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type PublishOptions, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
@@ -52,6 +52,8 @@ import {
   WM_CURRENT_ASSERTION_PRED,
   SWM_CURRENT_ASSERTION_PRED,
   VM_CURRENT_ASSERTION_PRED,
+  SHARE_OPERATION_ID_PRED,
+  PROMOTE_OPERATION_INTENT_PRED,
   toHex,
   buildScopedMinimalMeta,
   resolveUalByBatchId,
@@ -84,6 +86,12 @@ import {
   type CASCondition,
 } from './errors.js';
 import { isQuorumUnmetError } from './ack-errors.js';
+import { stripOptionalLiteral } from './sparql-binding-literal.js';
+import {
+  runLegacyWorkingMemoryMigration,
+  type LegacyWmMigrationHost,
+  type LegacyWmMigrationResult,
+} from './legacy-wm-migration.js';
 import { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
 import {
   PublisherPlanner,
@@ -112,8 +120,6 @@ export {
 // finalize(layer:"swm") so a subset share — which also stamps dkg:rootEntity
 // member rows — cannot be sealed-in-SWM and published as a partial asset.
 const SWM_SHARE_COMPLETE_PRED = 'http://dkg.io/ontology/swmShareComplete';
-const SHARE_OPERATION_ID_PRED = 'http://dkg.io/ontology/shareOperationId';
-const PROMOTE_OPERATION_INTENT_PRED = 'http://dkg.io/ontology/promoteOperationIntent';
 
 type PromoteOperationIntent = {
   version: 1;
@@ -854,19 +860,6 @@ function selectPublicStagingQuads(
     return undefined;
   }
   return publicNquadsBytes;
-}
-
-function stripOptionalLiteral(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  if (value.startsWith('"')) {
-    try {
-      return JSON.parse(value);
-    } catch {
-      const lastQuote = value.lastIndexOf('"');
-      return value.slice(1, lastQuote > 0 ? lastQuote : undefined);
-    }
-  }
-  return value;
 }
 
 function parsePromoteOperationIntent(
@@ -7357,6 +7350,86 @@ export class DKGPublisher implements Publisher {
     this.sharedMemoryOwnedEntities.delete(swmOwnershipKey);
   }
 
+  /**
+   * Explicit, opt-in migration for a legacy name-keyed Working Memory draft.
+   *
+   * The normal mutation APIs deliberately keep legacy/root-scoped KAs
+   * read-only. Local durable integrations such as `agent-context/chat-turns`,
+   * however, can predate graph-scoped KA storage and must survive an upgrade.
+   * This operation is therefore intentionally separate from `assertionCreate`:
+   * callers must select the exact local assertion they are willing to migrate.
+   *
+   * The publisher only owns the lifecycle write lock and the primitive
+   * boundary; phase ordering, classification, and the safety properties live
+   * in `legacy-wm-migration.ts`.
+   */
+  async migrateLegacyRootScopedWorkingMemory(
+    contextGraphId: string,
+    name: string,
+    agentAddress: string,
+    subGraphName?: string,
+    opts?: { allocateKaNumber?: () => Promise<{ number: bigint; reservedUal: string }> },
+  ): Promise<LegacyWmMigrationResult> {
+    return this.withAssertionLifecycleWriteLock(
+      contextGraphId,
+      name,
+      agentAddress,
+      subGraphName,
+      () => runLegacyWorkingMemoryMigration(this.legacyWmMigrationHost(), {
+        contextGraphId,
+        name,
+        agentAddress,
+        subGraphName,
+        allocateKaNumber: opts?.allocateKaNumber,
+      }),
+    );
+  }
+
+  /**
+   * The complete primitive surface the legacy-WM migration is allowed to
+   * touch. Everything here is a thin binding onto existing publisher
+   * internals — no migration policy.
+   */
+  private legacyWmMigrationHost(): LegacyWmMigrationHost {
+    return {
+      store: this.store,
+      prepareSubGraph: async (contextGraphId, subGraphName) => {
+        DKGPublisher.validateOptionalSubGraph(subGraphName);
+        await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
+      },
+      loadMigratableContent: async (selector) => {
+        // Two independent reads off one selector — no ordering requirement
+        // between them, so read them together.
+        const [publicQuads, privateQuads] = await Promise.all([
+          this.assertionScopedQuads(selector.sourceGraph),
+          this.privateStore.getKnowledgeAssetPrivateDraftTriples(
+            selector.contextGraphId,
+            selector.agentAddress,
+            selector.name,
+            selector.subGraphName,
+          ),
+        ]);
+        return { publicQuads, privateQuads };
+      },
+      assertContentMigratable: (publicQuads, privateQuads) => {
+        rejectUserAuthoredProtocolMetadata(publicQuads);
+        rejectOversizedRdfLiterals(publicQuads, 'legacyWorkingMemoryMigration.publicQuads');
+        rejectOversizedRdfLiterals(privateQuads, 'legacyWorkingMemoryMigration.privateQuads');
+      },
+      hasRetainedSourceContent: async (sourceGraph) =>
+        (await this.assertionScopedQuads(sourceGraph)).length > 0,
+      canSelfAllocateGraphIdentity: (agentAddress) =>
+        this.kaAllocator !== undefined && isAllocatableKaAuthorV1(agentAddress),
+      createGraphScopedDraft: (contextGraphId, name, agentAddress, subGraphName, opts) =>
+        this.assertionCreateUnlocked(contextGraphId, name, agentAddress, subGraphName, opts),
+      writeGraphScopedDraft: (contextGraphId, name, agentAddress, quads, subGraphName) =>
+        this.assertionWriteUnlocked(contextGraphId, name, agentAddress, quads, subGraphName),
+      wmGraphUri: (contextGraphId, agentAddress, name, subGraphName) =>
+        this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName),
+      logInfo: (message) => this.log.info(createOperationContext('system'), message),
+    };
+  }
+
   async assertionCreate(
     contextGraphId: string,
     name: string,
@@ -7478,7 +7551,7 @@ export class DKGPublisher implements Publisher {
       if (m) kaNumber = BigInt(m[1]);
     } else if (opts?.allocateKaNumber) {
       ({ number: kaNumber, reservedUal } = await opts.allocateKaNumber());
-    } else if (this.kaAllocator && /^0x[a-fA-F0-9]{40}$/.test(agentAddress)) {
+    } else if (this.kaAllocator && isAllocatableKaAuthorV1(agentAddress)) {
       // Direct (non-agent-wrapper) callers still get a number from the SHARED allocator
       // (same instance the agent wrapper uses — no double-mint), so the per-KA graph is
       // the ONE layout. Without this, a direct create would fall back to a name-keyed

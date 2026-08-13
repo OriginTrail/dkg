@@ -15,7 +15,7 @@ export const RFC64_M0_RECOVERY_SCENARIO_MANIFEST = Object.freeze([
     id: 'curated-parity',
     rowId: 'public-curated-cold-warm-parity',
     label: 'Public-curated cold/warm parity',
-    title: 'keeps warm and cold public-curated receivers at one exact finalized head across restart',
+    title: 'keeps warm and cold public-curated receivers at one exact catalog head and SWM state across restart',
   }),
 ]);
 

@@ -307,6 +307,8 @@ export interface KAUpdateVerification {
   onChainMerkleRoot?: Uint8Array;
   /** The block number of the on-chain update transaction. */
   blockNumber?: number;
+  /** The canonical block hash of the on-chain update transaction. */
+  blockHash?: string;
   /** The transaction index within the block (for deterministic same-block ordering). */
   txIndex?: number;
   /** Chain-truth Merkle-root array length after this update. */
@@ -365,7 +367,14 @@ export interface CreateContextGraphParams {
 
 /** One context graph entry from chain (from `NameClaimed` events of ContextGraphNameRegistry). */
 export interface ContextGraphOnChain {
-  /** bytes32 hex — keccak256(bytes(name)). */
+  /**
+   * ContextGraphNameRegistry key: bytes32 hex — keccak256(bytes(name)).
+   *
+   * Despite the legacy field name, this is NOT the positive decimal
+   * ContextGraphStorage id. Consumers that need that id must resolve this
+   * name hash through `resolveContextGraphIdByNameHash` before persisting or
+   * using an authoritative Context Graph binding.
+   */
   contextGraphId: string;
   creator: string;
   accessPolicy: number;
@@ -952,6 +961,35 @@ export interface OperationalWalletRegistrationResult {
 /** Optional cancellation boundary for caller-owned, read-only chain work. */
 export interface ChainReadOptions {
   signal?: AbortSignal;
+}
+
+/**
+ * Scalar KA state returned by
+ * `DKGKnowledgeAssets.getKnowledgeAssetUpdateContext(uint256)`.
+ *
+ * Unlike the legacy metadata getter, this view does not copy the unbounded
+ * Merkle-root and burn-history arrays. Recovery planners can therefore obtain
+ * the current version and transfer-size inputs with one constant-cost,
+ * cancellable RPC read.
+ */
+export interface KnowledgeAssetUpdateContext {
+  merkleRootsCount: bigint;
+  minted: bigint;
+  /**
+   * Contract/economic `byteSize`. This equals the full canonical public
+   * N-Quads footprint only for a chain-confirmed public CG (`accessPolicy=0`).
+   * Private CGs record the public `_catalog` footprint here, so recovery code
+   * must not use this value as an encrypted/member-payload transfer estimate.
+   */
+  byteSize: bigint;
+  endEpoch: bigint;
+  tokenAmount: bigint;
+  isImmutable: boolean;
+  /**
+   * Current post-sort-and-dedupe public-tree leaf count. It is not a private
+   * ciphertext/member-payload wire-size surrogate.
+   */
+  merkleLeafCount: number;
 }
 
 /**
@@ -1617,6 +1655,18 @@ export interface ChainAdapter {
   getMerkleRootCount?(kaId: bigint, options?: ChainReadOptions): Promise<bigint>;
 
   /**
+   * Constant-cost scalar update context for a KA. Consumers that need version
+   * plus sizing data should prefer this over separate root-count and leaf-count
+   * reads so one RPC supplies the complete recovery descriptor. Sizing hints
+   * remain bound to `merkleRootsCount`; callers that separately read the root
+   * must reject the hints if the version changes between reads.
+   */
+  getKnowledgeAssetUpdateContext?(
+    kaId: bigint,
+    options?: ChainReadOptions,
+  ): Promise<KnowledgeAssetUpdateContext>;
+
+  /**
    * V10 flat-KC merkle leaf count (sorted + deduped) recorded on-chain
    * for `kaId`. Used by the prover to (a) validate the local extraction
    * matches the published shape before building a proof, and (b) sanity
@@ -1840,6 +1890,23 @@ export interface ChainAdapter {
     contextGraphId: bigint,
     options?: ChainReadOptions,
   ): Promise<string | null>;
+
+  /**
+   * Resolve the numeric ContextGraphStorage slot whose current write-once
+   * `getNameHash` value equals `nameHash`.
+   *
+   * This is the cold-start inverse of {@link getContextGraphNameHash}: a node
+   * that selected a CG after its creation event fell outside the live poller's
+   * lookback still needs an authoritative hash -> numeric-id binding before it
+   * can evaluate policy or authorize SWM. Implementations MUST fail closed on
+   * ambiguous matches. Implementations may impose a fixed fast-enumeration
+   * budget and MUST switch before per-slot reads when the current high-water id
+   * exceeds it.
+   */
+  resolveContextGraphIdByNameHash?(
+    nameHash: string,
+    options?: ChainReadOptions,
+  ): Promise<bigint | null>;
 }
 
 // ----- Backward-compat deprecated aliases -----

@@ -155,6 +155,8 @@ export interface CatchupPlanePolicyOptions<
 > extends CatchupPlanePolicyClock, CatchupPlaneSourceOverride {
   mode: CatchupMode;
   includeSharedMemory: boolean;
+  /** Durable-first by default; selected graph-complete SWM may lead explicitly. */
+  planeOrder?: 'durable-first' | 'shared-first';
   syncDurable: (context: CatchupPlaneContext) => Promise<TDurable>;
   syncSharedMemory: (context: CatchupPlaneContext) => Promise<TShared>;
 }
@@ -163,8 +165,20 @@ export interface CatchupPlanePolicyResult<
   TDurable extends CatchupPlaneResult,
   TShared extends CatchupPlaneResult,
 > {
-  durable: TDurable;
+  durable: TDurable | null;
   shared: TShared | null;
+  /** Explicit reason for every plane this policy intentionally did not run. */
+  skippedPlanes: Readonly<Partial<Record<
+    'durable' | 'shared',
+    'not-requested' | 'leading-plane-deferred'
+  >>>;
+}
+
+export interface CatchupDurableFirstPolicyResult<
+  TDurable extends CatchupPlaneResult,
+  TShared extends CatchupPlaneResult,
+> extends CatchupPlanePolicyResult<TDurable, TShared> {
+  durable: TDurable;
 }
 
 export function catchupPriorityForMode(mode: CatchupMode): number | undefined {
@@ -341,21 +355,63 @@ export async function runCatchupPlaneWithPolicy<T extends CatchupPlaneResult>(
 
 /**
  * Canonical foreground/background catch-up policy shared by the in-agent and
- * worker-backed runners. Durable metadata must settle before SWM starts; when
- * only SWM is deferred, retries never refetch the already-completed durable
- * plane.
+ * worker-backed runners. Durable-first remains the default. A caller with an
+ * independently verified graph-complete SWM authority may request shared-first;
+ * whichever plane leads owns the deferral boundary, so the second plane never
+ * consumes capacity after the leading plane was locally deferred.
  */
+export function runCatchupPlanesWithPolicy<
+  TDurable extends CatchupPlaneResult,
+  TShared extends CatchupPlaneResult,
+>(
+  options: CatchupPlanePolicyOptions<TDurable, TShared> & {
+    includeSharedMemory: true;
+    planeOrder: 'shared-first';
+  },
+): Promise<CatchupPlanePolicyResult<TDurable, TShared>>;
+export function runCatchupPlanesWithPolicy<
+  TDurable extends CatchupPlaneResult,
+  TShared extends CatchupPlaneResult,
+>(
+  options: CatchupPlanePolicyOptions<TDurable, TShared> & {
+    planeOrder?: 'durable-first';
+  },
+): Promise<CatchupDurableFirstPolicyResult<TDurable, TShared>>;
+export function runCatchupPlanesWithPolicy<
+  TDurable extends CatchupPlaneResult,
+  TShared extends CatchupPlaneResult,
+>(
+  options: CatchupPlanePolicyOptions<TDurable, TShared>,
+): Promise<CatchupPlanePolicyResult<TDurable, TShared>>;
 export async function runCatchupPlanesWithPolicy<
   TDurable extends CatchupPlaneResult,
   TShared extends CatchupPlaneResult,
 >(
   options: CatchupPlanePolicyOptions<TDurable, TShared>,
 ): Promise<CatchupPlanePolicyResult<TDurable, TShared>> {
+  if (options.planeOrder === 'shared-first' && options.includeSharedMemory) {
+    const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, options);
+    if ((shared.deferredBackpressure ?? 0) > 0) {
+      return {
+        durable: null,
+        shared,
+        skippedPlanes: { durable: 'leading-plane-deferred' },
+      };
+    }
+    const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, options);
+    return { durable, shared, skippedPlanes: {} };
+  }
   const durable = await runCatchupPlaneWithPolicy(options.mode, options.syncDurable, options);
   if (!options.includeSharedMemory || (durable.deferredBackpressure ?? 0) > 0) {
-    return { durable, shared: null };
+    return {
+      durable,
+      shared: null,
+      skippedPlanes: {
+        shared: options.includeSharedMemory ? 'leading-plane-deferred' : 'not-requested',
+      },
+    };
   }
 
   const shared = await runCatchupPlaneWithPolicy(options.mode, options.syncSharedMemory, options);
-  return { durable, shared };
+  return { durable, shared, skippedPlanes: {} };
 }

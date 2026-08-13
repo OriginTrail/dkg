@@ -29,6 +29,12 @@ describe('ProtocolRouter', () => {
       expect(isRecoverableSendError(new Error('ECONNREFUSED'))).toBe(true);
       expect(isRecoverableSendError(new Error('EPIPE'))).toBe(true);
       expect(isRecoverableSendError(new Error('The operation was aborted'))).toBe(true);
+      expect(isRecoverableSendError(new Error('send timeout'))).toBe(true);
+      expect(isRecoverableSendError(new Error('operation timed out'))).toBe(true);
+      expect(isRecoverableSendError(new Error('operation was aborted due to timeout'))).toBe(true);
+      expect(isRecoverableSendError(new Error('peer-closed-stream'))).toBe(true);
+      expect(isRecoverableSendError(new Error('The stream has been reset'))).toBe(true);
+      expect(isRecoverableSendError(new Error('Remote closed connection during opening'))).toBe(true);
       expect(isRecoverableSendError(new Error('no valid addresses'))).toBe(true);
       expect(isRecoverableSendError(new Error('NO_RESERVATION'))).toBe(true);
       expect(isRecoverableSendError(new Error('no reservation for relay'))).toBe(true);

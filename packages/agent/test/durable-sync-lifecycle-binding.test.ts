@@ -29,6 +29,7 @@ import {
   durableSyncRequestPageSize,
   LifecycleSyncMethods,
 } from '../src/dkg-agent-lifecycle.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
@@ -107,7 +108,7 @@ async function captureGraphScopedStore(
     chain,
     store: {},
     subscribedContextGraphs: new Map(),
-    contextGraphBindingGenerations: new Map(),
+    contextGraphBindingState: new ContextGraphBindingState(),
     wireIdToLocalCgId: new Map(),
     graphScopedStoreClosed: false,
     graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -197,7 +198,7 @@ describe('durable sync lifecycle chain binding', () => {
       .toBe(1_800_000_299_000);
   });
 
-  it('reserves settlement time before the totalTimeoutMs hard boundary', async () => {
+  it('stops fetching before the outer totalTimeoutMs boundary without a caller signal', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_800_000_000_000);
     const agentLike: any = {
@@ -231,7 +232,7 @@ describe('durable sync lifecycle chain binding', () => {
         undefined,
         undefined,
         undefined,
-        { totalTimeoutMs: 30_000 },
+        { totalTimeoutMs: 299_000 },
       );
       await vi.advanceTimersByTimeAsync(0);
 
@@ -241,17 +242,17 @@ describe('durable sync lifecycle chain binding', () => {
         contextGraphId,
         remainingContextGraphs: 1,
       });
-      expect(contextGraphBudget.fetchDeadline).toBe(1_800_000_024_000);
+      expect(contextGraphBudget.fetchDeadline).toBe(1_800_000_239_000);
 
-      await vi.advanceTimersByTimeAsync(24_000);
+      await vi.advanceTimersByTimeAsync(239_000);
       expect(capturedContext?.signal?.aborted).toBe(false);
 
-      await vi.advanceTimersByTimeAsync(6_000);
+      await vi.advanceTimersByTimeAsync(60_000);
       await sync;
 
       expect(capturedContext?.signal?.aborted).toBe(true);
       expect(contextGraphBudget.createGraphScopedAuthenticationDeadline())
-        .toBe(1_800_000_030_000);
+        .toBe(1_800_000_299_000);
     } finally {
       vi.useRealTimers();
     }
@@ -311,7 +312,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain: { chainId: 'none' },
       store: {},
       subscribedContextGraphs: new Map(),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       bindSubscriptionOnChainId: vi.fn(),
       persistContextGraphSubscriptionStrict: vi.fn(),
@@ -507,7 +508,7 @@ describe('durable sync lifecycle chain binding', () => {
     expect(admission).toEqual({ source: 'swm-recovery' });
   });
 
-  it('reserves settlement time for an explicit hard timeout while internal exact recovery keeps 600 seconds', async () => {
+  it('reserves settlement time inside an explicit exact-asset timeout while internal VM recovery keeps 600 seconds', async () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const agentLike: any = {
@@ -541,7 +542,7 @@ describe('durable sync lifecycle chain binding', () => {
       mockedRunDurableSyncDetailed.mock.calls[0]![0].durableSyncBudget
         .createContextGraphBudget({ contextGraphId, remainingContextGraphs: 1 })
         .fetchDeadline,
-    ).toBe(1_800_000_024_000);
+    ).toBe(1_800_000_010_000);
 
     mockedRunDurableSyncDetailed.mockClear();
     agentLike.runLegacyDurableSyncDetailed = LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed;
@@ -685,7 +686,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -872,7 +873,7 @@ describe('durable sync lifecycle chain binding', () => {
         },
       },
       subscribedContextGraphs: new Map([[contextGraphId, oldSubscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       enqueueContextGraphSubscriptionPersistWrite,
     };
 
@@ -926,7 +927,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),
@@ -1126,7 +1127,7 @@ describe('durable sync lifecycle chain binding', () => {
       chain,
       store: {},
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
-      contextGraphBindingGenerations: new Map(),
+      contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
       graphScopedStoreClosed: false,
       graphScopedStorePhysicalRuns: new Set<Promise<unknown>>(),

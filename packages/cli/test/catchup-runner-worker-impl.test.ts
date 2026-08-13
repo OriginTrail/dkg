@@ -57,19 +57,18 @@ const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 /**
  * SCOPE OF THESE TESTS — read before trusting a green run.
  *
- * Every case below hands the worker an `authoritativePeerId` through the stubbed
- * `prepareCatchup` boundary. **No production resolver route currently produces
- * one.** `resolveCuratorSyncPeer` was changed in `e7f46dca2` so that nothing
- * earns `metadata` provenance, because a curator-to-peer binding read out of
- * accumulated `<cg>/_meta` identifies the graph that HOLDS the rows, not the
- * writer that SUPPLIED them — and ordinary durable-meta catch-up lets a
- * contacted peer write those very rows.
+ * Most older cases below hand the worker an `authoritativePeerId` through the
+ * stubbed `prepareCatchup` boundary. No production metadata resolver currently
+ * produces that durable/VM authority: `resolveCuratorSyncPeer` was changed in
+ * `e7f46dca2` because a curator-to-peer binding read out of accumulated
+ * `<cg>/_meta` identifies the graph that HOLDS the rows, not the writer that
+ * SUPPLIED them. RFC-64 now has a separate production route for explicit,
+ * operator-pinned graph-complete SWM providers; the focused test below covers
+ * that resolver-to-worker bridge and keeps its authority separate from VM.
  *
- * So these tests verify that the worker HANDLES an authority correctly IF it is
- * given one. They do NOT verify that the early stop or the per-plane narrowing
- * happens in the shipped build — it cannot, and byte volume is at the pre-fix
- * level until #2018 lands a trusted binding. Read as end-to-end evidence for the
- * fan-out reduction they would be claiming something untrue.
+ * Therefore the injected metadata-authority cases remain worker-contract tests,
+ * while the RFC-64 SWM case is production-wiring evidence for SWM selection.
+ * Do not read the former as proof that VM authority resolution is already live.
  *
  * They are kept rather than deleted because #2018 re-enables exactly this
  * machinery, and deleting them would remove the contract it has to satisfy. When
@@ -142,6 +141,219 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
     expect(result.sharedMemorySynced).toBe(1);
     expect(result.denied).toBe(false);
     expect(finalizeCalls).toEqual([['cg-one-payload', 1, 1]]);
+  });
+
+  it('uses distinct RFC-64 SWM and metadata VM authorities without fallback fan-out', async () => {
+    const peerIds = ['peer-swm', 'peer-curator', 'peer-a', 'peer-b'];
+    const durableCalls: string[] = [];
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-plane-authorities', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(args[0] as string);
+            return durableResult();
+          case 'syncSharedMemory': {
+            if (args[4] !== true) {
+              throw new Error('complete SWM provider must select the RFC-64 lane');
+            }
+            sharedCalls.push(args[0] as string);
+            const shared = sharedResult();
+            return {
+              kind: 'selected-shared-memory',
+              shared: {
+                ...shared,
+                insertedTriples: 0,
+                fetchedDataTriples: 0,
+                insertedDataTriples: 0,
+                bytesReceived: 0,
+                emptyResponses: 1,
+                failedPhases: 1,
+                snapshotPlaneIncomplete: 1,
+                resolvedSnapshotPlaneIncomplete: 1,
+                timedOutPhases: 1,
+                metadataContinuationYields: 1,
+                resolvedMetadataContinuationYields: 1,
+              },
+              selectedScopeComplete: true,
+            };
+          }
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(durableCalls).toEqual(['peer-curator']);
+    expect(sharedCalls).toEqual(['peer-swm']);
+    expect(result.peersTried).toBe(2);
+    expect(result.peersNotAttempted).toBe(2);
+    expect(result.diagnostics?.durable.authorityUnanswered).toBe(false);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(false);
+    // The selected provider proved the exact graph-complete scope without
+    // transferring anything new. Raw historical yield counters remain visible,
+    // but the typed terminal verdict is the positive readiness proof.
+    expect(result.sharedMemorySynced).toBe(0);
+    expect(result.diagnostics?.sharedMemory.failedPhases).toBe(1);
+    expect(result.diagnostics?.sharedMemory.timedOutPhases).toBe(1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers).toBe(1);
+    expect(result.peersSucceeded).toBe(2);
+  });
+
+  it('runs selected SWM before durable when one peer owns both authorities', async () => {
+    const calls: string[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-one-selected-authority', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-both',
+              authoritativePeerId: 'peer-both',
+              authoritativeSharedMemoryPeerIds: ['peer-both'],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-both', 'peer-fallback'],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            calls.push('shared');
+            return {
+              kind: 'selected-shared-memory',
+              shared: sharedResult(),
+              selectedScopeComplete: true,
+            };
+          case 'syncDurable':
+            calls.push('durable');
+            return durableResult();
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(calls).toEqual(['shared', 'durable']);
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(1);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers).toBe(1);
+    expect(result.cleanPlaneCompletions?.durable.verifiedDataPeers).toBe(1);
+  });
+
+  it('does not run durable after selected SWM is deferred by backpressure', async () => {
+    let selectedCalls = 0;
+    let durableCalls = 0;
+    const finalizeCalls: unknown[][] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-selected-authority-deferred', includeSharedMemory: true },
+      async (method) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-both',
+              authoritativePeerId: 'peer-both',
+              authoritativeSharedMemoryPeerIds: ['peer-both'],
+              isPrivateContextGraph: false,
+              peerIds: ['peer-both'],
+              connectedPeers: 1,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncSharedMemory':
+            selectedCalls += 1;
+            return {
+              kind: 'selected-shared-memory',
+              shared: {
+                ...sharedResult(),
+                insertedTriples: 0,
+                insertedDataTriples: 0,
+                completedPhases: 0,
+                deferredBackpressure: 1,
+              },
+              selectedScopeComplete: false,
+            };
+          case 'syncDurable':
+            durableCalls += 1;
+            return durableResult();
+          case 'finalizeCatchup':
+            finalizeCalls.push([]);
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(selectedCalls).toBeGreaterThanOrEqual(2);
+    expect(durableCalls).toBe(0);
+    expect(result.deferredBackpressure).toBe(1);
+    expect(finalizeCalls).toEqual([]);
+  });
+
+  it('fails selected SWM closed when its explicit scope is incomplete', async () => {
+    const peerIds = ['peer-swm', 'peer-curator'];
+    const selectedCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: 'cg-selected-incomplete', includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              preferredPeerId: 'peer-curator',
+              authoritativePeerId: 'peer-curator',
+              authoritativeSharedMemoryPeerIds: ['peer-swm'],
+              isPrivateContextGraph: false,
+              peerIds,
+              connectedPeers: peerIds.length,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            expect(args[4]).toBe(true);
+            selectedCalls.push(String(args[0]));
+            return {
+              kind: 'selected-shared-memory',
+              shared: sharedResult(),
+              selectedScopeComplete: false,
+            };
+          case 'finalizeCatchup':
+            return null;
+          default:
+            throw new Error(`unexpected invoke: ${method}`);
+        }
+      },
+    );
+
+    expect(selectedCalls).toEqual(['peer-swm']);
+    expect(result.cleanPlaneCompletions?.sharedMemory.verifiedDataPeers).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.selectedScopeCompletePeers ?? 0).toBe(0);
+    expect(result.cleanPlaneCompletions?.sharedMemory.incompleteResponders).toBe(1);
+    expect(result.diagnostics?.sharedMemory.authorityUnanswered).toBe(true);
+    // Only the durable curator succeeded. Clean-looking selected payload
+    // counters cannot promote an explicitly incomplete terminal boundary.
+    expect(result.peersSucceeded).toBe(1);
   });
 
   it('escalates waves and still caps in-flight peer syncs when no peer proves the plane', async () => {

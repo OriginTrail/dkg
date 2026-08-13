@@ -1,4 +1,4 @@
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
 import { GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -18,12 +18,25 @@ import {
   generateShareMetadata,
   toHex,
 } from './metadata.js';
-import { computePrivateRootV10 as computePrivateRoot } from './merkle.js';
+import {
+  computePrivateRootV10 as computePrivateRoot,
+} from './merkle.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
+
+function workspaceHeadStoreOptions(
+  options: QueryOptions | undefined,
+  operation: 'deleteByPattern' | 'insert',
+): QueryOptions | undefined {
+  if (!options) return undefined;
+  return {
+    ...options,
+    ...(options.source ? { source: `${options.source}.${operation}` } : {}),
+  };
+}
 
 export type WorkspaceSelection = 'all' | { rootEntities: readonly string[] };
 
@@ -318,6 +331,7 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
   assertionVersion: string | number | bigint;
   shareOperationId: string;
   subGraphName?: string;
+  queryOptions?: QueryOptions;
 }): Promise<void> {
   const scope = createGraphKnowledgeAssetScope(params.kaUal, params.assertionVersion);
   const subGraphName = normalizeOptionalSubGraphName(params.subGraphName);
@@ -332,7 +346,10 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     scope,
     subGraphName,
   );
-  await params.store.deleteByPattern({ graph: metaGraph, subject });
+  await params.store.deleteByPattern(
+    { graph: metaGraph, subject },
+    workspaceHeadStoreOptions(params.queryOptions, 'deleteByPattern'),
+  );
   const rows: Quad[] = [
     { subject, predicate: `${DKG}contentScopeVersion`, object: intLit(GRAPH_KA_CONTENT_SCOPE_VERSION), graph: metaGraph },
     { subject, predicate: `${DKG}kaUal`, object: scope.ual, graph: metaGraph },
@@ -340,7 +357,10 @@ export async function storeKnowledgeAssetWorkspaceHead(params: {
     { subject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
     { subject, predicate: `${DKG}shareOperationId`, object: lit(params.shareOperationId), graph: metaGraph },
   ];
-  await params.store.insert(rows);
+  await params.store.insert(
+    rows,
+    workspaceHeadStoreOptions(params.queryOptions, 'insert'),
+  );
 }
 
 export async function resolveWorkspaceSelection(params: {

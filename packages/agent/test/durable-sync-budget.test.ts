@@ -6,7 +6,9 @@ import {
   createContextGraphSyncDeadline,
   createDurableMetaPhaseFetchDeadline,
   createDurableSyncBudget,
+  createDurableSyncFetchTimeoutMs,
   createGraphScopedAuthenticationDeadline,
+  DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
   DURABLE_DATA_PHASE_MIN_BUDGET_MS,
   DURABLE_META_PHASE_BUDGET_FRACTION,
   type DurableSyncBudget,
@@ -85,6 +87,7 @@ function requesterBudgetContext(options: {
   mapFetchResult?: (phase: 'data' | 'meta', page: SyncPageResult) => SyncPageResult;
   onVerify?: () => void;
   onVerifiedFullSnapshot?: DurableSyncContext['onVerifiedFullSnapshot'];
+  logWarn?: DurableSyncContext['logWarn'];
   emptyResponses?: number;
   storeInsert?: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   storeGraphScopedAsset: (
@@ -139,7 +142,7 @@ function requesterBudgetContext(options: {
     deleteCheckpoint: () => {},
     setCheckpoint: () => {},
     logInfo: () => {},
-    logWarn: () => {},
+    logWarn: options.logWarn ?? (() => {}),
     logDebug: () => {},
   };
 }
@@ -195,6 +198,21 @@ describe('durable sync deadline budget', () => {
     expect(
       createContextGraphSyncDeadline({ remainingContextGraphs: 1 }),
     ).toBe(1_120_000);
+  });
+
+  it('reserves settlement headroom inside an explicit operation timeout', () => {
+    expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 299_000 }))
+      .toBe(299_000 - DURABLE_SYNC_SETTLEMENT_HEADROOM_MS);
+  });
+
+  it('keeps historical fetch-only budgets without an outer operation timeout', () => {
+    expect(createDurableSyncFetchTimeoutMs()).toBe(120_000);
+    expect(createDurableSyncFetchTimeoutMs({ exactRecovery: true })).toBe(600_000);
+  });
+
+  it('never removes the minimum usable fetch window from short operations', () => {
+    expect(createDurableSyncFetchTimeoutMs({ totalTimeoutMs: 30_000 }))
+      .toBe(10_000);
   });
 
   it('uses a caller-supplied bounded graph-scoped authentication budget', () => {
@@ -712,6 +730,66 @@ describe('durable sync deadline budget', () => {
       failedPhases: 1,
     });
     expect(storeInsert).not.toHaveBeenCalled();
+  });
+
+  it('handles a default DOMException abort after a quarantined atomic store outcome', async () => {
+    const controller = new AbortController();
+    const logWarn = vi.fn<DurableSyncContext['logWarn']>();
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      storeGraphScopedAsset: async () => {
+        controller.abort();
+        return 'quarantined';
+      },
+      logWarn,
+    });
+
+    expect(controller.signal.reason).toBeInstanceOf(DOMException);
+    expect((controller.signal.reason as Error).name).toBe('AbortError');
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    const warnings = logWarn.mock.calls.map(([, message]) => message);
+    expect(warnings).toContain(
+      'Quarantined graph-scoped durable assertion did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1 v1',
+    );
+    expect(warnings.some((message) => message.includes('oversized'))).toBe(false);
+    expect(warnings.some((message) => message.includes('only a getter'))).toBe(false);
+  });
+
+  it('handles an immutable non-abort Error reason without mutating it', async () => {
+    const controller = new AbortController();
+    const reason = Object.freeze(new Error('shutdown lifecycle fence'));
+    const logWarn = vi.fn<DurableSyncContext['logWarn']>();
+    const storeInsert = vi.fn(async (_request: DurableSyncStoreInsertRequest) => {});
+
+    const result = await runRequesterBudgetHarness({
+      durableSyncBudget: requesterBudget(() => Date.now() + 60_000),
+      signal: controller.signal,
+      graphScoped: false,
+      onVerify: () => controller.abort(reason),
+      storeInsert,
+      storeGraphScopedAsset: async () => 'applied',
+      logWarn,
+    });
+
+    expect(result).toMatchObject({
+      insertedTriples: 0,
+      complete: false,
+      failedPhases: 1,
+    });
+    expect(controller.signal.reason).toBe(reason);
+    expect(reason.name).toBe('Error');
+    expect(storeInsert).not.toHaveBeenCalled();
+    const warnings = logWarn.mock.calls.map(([, message]) => message);
+    expect(warnings.some((message) => message.includes('shutdown lifecycle fence'))).toBe(true);
+    expect(warnings.some((message) => message.includes('read only'))).toBe(false);
+    expect(warnings.some((message) => message.includes('read-only'))).toBe(false);
+    expect(warnings.some((message) => message.includes('only a getter'))).toBe(false);
   });
 });
 

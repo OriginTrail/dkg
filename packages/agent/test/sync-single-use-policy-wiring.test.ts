@@ -20,7 +20,8 @@ const fetchSyncPagesMock = vi.hoisted(() => vi.fn(async (params: any) => {
   };
 }));
 
-vi.mock('../src/sync/requester/page-fetch.js', () => ({
+vi.mock('../src/sync/requester/page-fetch.js', async (importOriginal) => ({
+  ...await importOriginal<typeof import('../src/sync/requester/page-fetch.js')>(),
   fetchSyncPages: fetchSyncPagesMock,
 }));
 
@@ -96,12 +97,7 @@ describe('LifecycleSyncMethods sync transport policy wiring', () => {
       'data',
       'did:dkg:public-context-graph',
       Date.now() + 60_000,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      uals,
+      { assetUals: uals },
     );
 
     expect(fetchSyncPagesMock).toHaveBeenCalledWith(expect.objectContaining({

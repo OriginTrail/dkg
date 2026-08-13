@@ -758,7 +758,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
   });
 
-  it('records clean private shared-memory progress without fabricating durable readiness', async () => {
+  it('records clean private shared-memory progress without reporting VM-complete catch-up', async () => {
     const result = await subscribe({
       hasConfirmedMeta: true,
       isPrivate: true,
@@ -772,8 +772,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
 
     expect(result.runCalls).toBe(1);
-    expect(result.job.status).toBe('done');
-    expect(result.job.error).toBeUndefined();
+    expect(result.job).toMatchObject({
+      status: 'unreachable',
+      error: expect.stringContaining('durable VM catch-up did not complete'),
+    });
     expect(result.job.result).toMatchObject({
       dataSynced: 0,
       sharedMemorySynced: 4,
@@ -918,6 +920,39 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       version: 1,
       durableVerified: false,
       sharedMemoryVerified: false,
+    });
+  });
+
+  it('does not synthesize done from existing SWM-only provenance when VM is unverified', async () => {
+    const result = await subscribe({
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      includeSharedMemory: false,
+      result: privateSharedMemoryOnlyResult(),
+      readiness: {
+        version: 1,
+        durableVerified: false,
+        sharedMemoryVerified: true,
+      },
+      initial: {
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+      },
+    });
+
+    expect(result.response.catchup.status).toBe('queued');
+    expect(result.runCalls).toBe(1);
+    expect(result.job.status).toBe('unreachable');
+    expect(result.state).toMatchObject({
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+    });
+    expect(result.readiness).toMatchObject({
+      durableVerified: false,
+      sharedMemoryVerified: true,
     });
   });
 

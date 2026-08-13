@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 import yaml from 'js-yaml';
 import type {
   DKGAgentConfig,
+  SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
   SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
@@ -628,6 +629,13 @@ export interface DkgConfig {
    * than the default (64).
    */
   maxRehydratedContextGraphSubscriptions?: number;
+  /**
+   * Restore persisted Context Graph subscriptions into live gossip and sync
+   * state on daemon boot. Defaults to true. Set false for a preserved-store,
+   * query-only boot; rows and RDF content are not deleted. Environment override:
+   * DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED.
+   */
+  contextGraphSubscriptionRehydrationEnabled?: boolean;
   /** Out-of-line storage for large public SWM RDF literal object terms. */
   largeLiteralStorage?: LargeLiteralStorageConfig;
   /** Out-of-line storage for immutable public SWM operation snapshots. */
@@ -647,14 +655,16 @@ export interface DkgConfig {
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
-   * Global cap for concurrent sync jobs. Defaults to 2; set 0 to disable.
+   * Global cap for concurrent sync jobs. Defaults to 10; set 0 to disable.
    * Env DKG_SYNC_GLOBAL_MAX_INFLIGHT wins.
    */
   syncGlobalMaxInflight?: number;
   /** Backwards-compatible alias for syncGlobalMaxInflight. Env DKG_SYNC_GLOBAL_LIMIT wins. */
   syncGlobalLimit?: number;
-  /** Max sync jobs waiting behind the global cap. Defaults to 2x the inflight cap. */
+  /** Hard cap for queued sync jobs. Shared mode defaults to 2x the inflight cap. */
   syncGlobalQueueLimit?: number;
+  /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
+  syncAdmission?: SyncAdmissionConfig;
   /** Retained sync responder snapshot limits (rows and estimated bytes). */
   syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
@@ -1002,6 +1012,38 @@ export {
 /** Resolve context graphs from config. */
 export function resolveContextGraphs(config: DkgConfig): string[] {
   return config.contextGraphs ?? [];
+}
+
+const CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV =
+  'DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED';
+
+/**
+ * Resolve the startup subscription-rehydration gate. The environment override
+ * wins so an operator can safely boot an existing store without rewriting its
+ * config file. Unknown values fail startup instead of silently choosing the
+ * network-active default.
+ */
+export function resolveContextGraphSubscriptionRehydrationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV],
+): boolean {
+  if (envValue !== undefined) {
+    const normalized = envValue.trim().toLowerCase();
+    if (normalized === '1' || normalized === 'true') return true;
+    if (normalized === '0' || normalized === 'false') return false;
+    throw new Error(
+      `${CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV} must be one of 1, 0, true, or false ` +
+      `(received ${JSON.stringify(envValue)})`,
+    );
+  }
+  if (configValue === undefined) return true;
+  if (typeof configValue !== 'boolean') {
+    throw new Error(
+      'contextGraphSubscriptionRehydrationEnabled must be a boolean ' +
+      `(received ${JSON.stringify(configValue)})`,
+    );
+  }
+  return configValue;
 }
 
 /** Resolve context graphs from network config. */

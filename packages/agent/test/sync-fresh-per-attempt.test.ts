@@ -1,8 +1,12 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { fetchSyncPages } from '../src/sync/requester/page-fetch.js';
+import {
+  fetchSyncPages,
+  SyncPageSizeProfileCache,
+} from '../src/sync/requester/page-fetch.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from '../src/sync/durable-session.js';
 import { didSyncPeerRespond, isSyncTransportFailure } from '../src/sync/error-tags.js';
+import { SYNC_REQUEST_SAFE_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 
 /**
@@ -185,7 +189,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(didSyncPeerRespond(transportError)).toBe(false);
   });
 
-  it('backs a preferred 256-row page down to the 64-row frame-safe floor across retries', async () => {
+  it('reaches the 64-row frame-safe floor on the first transport retry', async () => {
     const limits: number[] = [];
     let attempts = 0;
     const promise = fetchSyncPages({
@@ -231,7 +235,7 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       completed: true,
       nextOffset: 0,
     });
-    expect(limits).toEqual([256, 128, 64]);
+    expect(limits).toEqual([256, 64, 64]);
   });
 
   it('tags parser failures after response bytes as peer responses', async () => {
@@ -1743,6 +1747,14 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
 
   it('retries legacy responder busy bodies before parsing a page', async () => {
     const warnings: string[] = [];
+    const limits: number[] = [];
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const pageSizeProfileScope = {
+      remotePeerId: REMOTE_PEER_ID,
+      contextGraphId: CG_ID,
+      includeSharedMemory: false,
+      phase: 'data' as const,
+    };
     let sendCalls = 0;
 
     await runFetchWithFakeTimers(
@@ -1761,12 +1773,16 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
         syncDeniedResponse: '#DENIED',
         debugSyncProgress: false,
         protocolSync: PROTOCOL_ID,
+        pageSizeProfileCache,
         checkpointStore: {
           get: () => freshCheckpoint(0),
           set: () => {},
           delete: () => {},
         },
-        buildSyncRequest: async () => new TextEncoder().encode('request'),
+        buildSyncRequest: async (_cg, _offset, limit) => {
+          limits.push(limit);
+          return new TextEncoder().encode('request');
+        },
         parseAndFilter: singleQuadParser,
         send: async () => {
           sendCalls++;
@@ -1779,6 +1795,8 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     );
 
     expect(sendCalls).toBe(2);
+    expect(limits).toEqual([100, SYNC_REQUEST_SAFE_PAGE_SIZE]);
+    expect(pageSizeProfileCache.preferred(pageSizeProfileScope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
     expect(warnings.some((message) => message.includes('Legacy sync responder busy'))).toBe(true);
   });
 

@@ -13,7 +13,7 @@ import {
 } from '../src/sync/requester/ordered-sync.js';
 import { SyncBackpressureBusyError } from '../src/sync/backpressure.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { markSyncTransportFailure } from '../src/sync/error-tags.js';
+import { toSyncTransportFailureError } from '../src/sync/error-tags.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 
 const ctx = { kind: 'system', id: 'test', startedAt: 0 } as OperationContext;
@@ -47,8 +47,7 @@ function pageResult(
 
 function transportError(message: string): Error {
   const err = new Error(message);
-  markSyncTransportFailure(err);
-  return err;
+  return toSyncTransportFailureError(err);
 }
 
 function deniedError(): Error & { syncDenied: boolean } {
@@ -537,6 +536,8 @@ describe('lifecycle shared-memory fanout isolation', () => {
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
+      syncSharedMemoryFromPeerDetailedExecution:
+        LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
   }
 

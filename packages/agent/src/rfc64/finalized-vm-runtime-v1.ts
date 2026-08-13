@@ -23,18 +23,19 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
-  createFinalizedContextGraphRpcResolverV1,
-  resolveFinalizedContextGraphReadWithSignalV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedContextGraphReadV1,
   type FinalizedVmChainCandidateV1,
   type FinalizedVmChainInventoryV1,
-  type StrictCurrentFinalizedEvmReadV1,
   type StrictCurrentFinalizedEvmSnapshotScopeV1,
+  type StrictCurrentFinalizedEvmSnapshotSessionV1,
 } from '@origintrail-official/dkg-chain';
-import { ethers } from 'ethers';
 
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
+import {
+  Rfc64FinalizedPolicyVerifierErrorV1,
+  resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1,
+} from './finalized-policy-verifier-v1.js';
 import {
   composeFinalizedVmSetV1,
   type ComposedFinalizedVmSetV1,
@@ -165,26 +166,10 @@ export function createFinalizedVmRuntimeV1(
     const verified = await config.snapshot(
       { chainId: config.chainId, signal: request.signal },
       async (session): Promise<VerifiedSnapshotV1> => {
-        const read: StrictCurrentFinalizedEvmReadV1 = async (readRequest) => {
-          if (readRequest.chainId !== session.chainId) {
-            fail('finalized-vm-runtime-anchor', 'policy read requested a different chain');
-          }
-          const returnData = await session.read(readRequest.calls);
-          return Object.freeze({
-            chainId: session.chainId,
-            blockNumber: session.blockNumber,
-            blockHash: session.blockHash,
-            returnData,
-          });
-        };
-        const finalizedContextGraph = await resolveFinalizedContextGraphReadWithSignalV1(
-          createFinalizedContextGraphRpcResolverV1(read),
-          {
-            chainId: config.chainId,
-            contextGraphId: request.onChainContextGraphId,
-            governanceContract: config.contextGraphStorageAddress,
-          },
-          request.signal,
+        const finalizedContextGraph = await resolveFinalizedPolicyForVmRuntime(
+          config,
+          request,
+          session,
         );
         const inventory = await scanFinalizedVmChainInventoryInSnapshotV1(
           {
@@ -197,12 +182,6 @@ export function createFinalizedVmRuntimeV1(
           session,
         );
         assertExactAnchor(finalizedContextGraph, inventory);
-        assertAcceptedPublicPolicy(
-          config,
-          request.catalogLane,
-          request.acceptedPolicy,
-          finalizedContextGraph,
-        );
 
         const composed = composeFinalizedVmSetV1({
           assertedAtKav10Address: config.knowledgeAssetsLifecycleAddress,
@@ -327,42 +306,44 @@ function snapshotCatalogLane(input: FinalizedVmCatalogLaneV1): FinalizedVmCatalo
   });
 }
 
-function assertAcceptedPublicPolicy(
+async function resolveFinalizedPolicyForVmRuntime(
   config: RuntimeConfigSnapshotV1,
-  catalogLane: FinalizedVmCatalogLaneV1,
-  policy: Readonly<ContextGraphPolicyV1>,
-  finalized: Readonly<FinalizedContextGraphReadV1>,
-): void {
-  const source = policy.source;
-  const expectedNameHash = ethers.keccak256(
-    ethers.toUtf8Bytes(catalogLane.contextGraphId),
-  ).toLowerCase();
-  const sourcePrecedesAnchor = source.kind === 'finalized-chain'
-    && BigInt(source.blockNumber) <= BigInt(finalized.blockNumber);
-  const sameSourceAnchor = source.kind === 'finalized-chain'
-    && source.blockNumber === finalized.blockNumber;
-  if (
-    policy.accessPolicy !== 0
-    || policy.networkId !== config.networkId
-    || policy.contextGraphId !== catalogLane.contextGraphId
-    || policy.governanceChainId !== config.chainId
-    || policy.governanceContractAddress !== config.contextGraphStorageAddress
-    || source.kind !== 'finalized-chain'
-    || source.chainId !== config.chainId
-    || source.contractAddress !== config.contextGraphStorageAddress
-    || !sourcePrecedesAnchor
-    || (sameSourceAnchor && source.blockHash !== finalized.blockHash)
-    || !finalized.active
-    || finalized.nameHash !== expectedNameHash
-    || finalized.accessPolicy !== policy.accessPolicy
-    || finalized.publishPolicy !== policy.publishPolicy
-    || finalized.publishAuthority !== policy.publishAuthority
-    || finalized.publishAuthorityAccountId !== policy.publishAuthorityAccountId
-  ) {
-    fail(
-      'finalized-vm-runtime-policy',
-      'accepted public policy or cleartext name binding differs from finalized chain truth',
+  request: RuntimeRequestSnapshotV1,
+  session: StrictCurrentFinalizedEvmSnapshotSessionV1,
+): Promise<Readonly<FinalizedContextGraphReadV1>> {
+  try {
+    return await resolveAndVerifyRfc64FinalizedPolicyInSnapshotV1(
+      {
+        networkId: config.networkId,
+        chainId: config.chainId,
+        contextGraphStorageAddress: config.contextGraphStorageAddress,
+      },
+      {
+        catalogLane: request.catalogLane,
+        onChainContextGraphId: request.onChainContextGraphId,
+        acceptedPolicy: request.acceptedPolicy,
+        signal: request.signal,
+      },
+      session,
     );
+  } catch (cause) {
+    if (cause instanceof Rfc64FinalizedPolicyVerifierErrorV1) {
+      if (cause.code === 'finalized-policy-verifier-policy') {
+        fail(
+          'finalized-vm-runtime-policy',
+          'accepted public policy or cleartext name binding differs from finalized chain truth',
+          cause,
+        );
+      }
+      if (cause.code === 'finalized-policy-verifier-anchor') {
+        fail('finalized-vm-runtime-anchor', 'finalized policy anchor is invalid', cause);
+      }
+      if (cause.code === 'finalized-policy-verifier-config') {
+        fail('finalized-vm-runtime-config', 'finalized policy config is invalid', cause);
+      }
+      fail('finalized-vm-runtime-request', 'finalized policy request is invalid', cause);
+    }
+    throw cause;
   }
 }
 

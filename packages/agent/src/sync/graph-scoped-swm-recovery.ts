@@ -138,20 +138,17 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       );
     }
 
-    const shareOperationId = requireLiteral(headRows, SHARE_OPERATION_ID, 'shareOperationId').trim();
-    if (!shareOperationId) throw new Error(`Graph-scoped SWM head ${headSubject} has an empty shareOperationId`);
-    const operationSubject = `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`;
-    const operationRows = byGraphAndSubject.get(`${metaGraph}\u0000${operationSubject}`) ?? [];
-    validateOperationRows({
-      rows: operationRows,
+    const operation = resolveEquivalentHeadOperation({
+      headRows,
+      byGraphAndSubject,
       contextGraphId: params.contextGraphId,
       metaGraph,
-      operationSubject,
-      shareOperationId,
+      headSubject,
       kaUal: scope.ual,
       assertionVersion: scope.assertionVersion,
       subGraphName,
     });
+    const { shareOperationId, operationSubject, operationRows } = operation;
 
     const publicQuadsDigest = requireLiteral(
       operationRows,
@@ -236,7 +233,11 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
       publisherPeerId,
       ...(subGraphName ? { subGraphName } : {}),
-      metadataQuads: [...headRows, ...operationRows],
+      metadataQuads: [
+        ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
+        operation.headShareOperationRow,
+        ...operationRows,
+      ],
     });
   }
 
@@ -249,6 +250,115 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
     assertionOwners.set(descriptor.assertionGraph, descriptor.kaUal);
   }
   return descriptors;
+}
+
+/**
+ * Collapse only the current-head pointer rows covered by parsed descriptors.
+ * Superseded operation subjects may remain as immutable history, but a head
+ * itself must name exactly one operation or LIMIT-1 readers become arbitrary.
+ */
+export function canonicalizeGraphScopedSwmHeadRows(params: {
+  readonly metaQuads: readonly Quad[];
+  readonly descriptors: readonly GraphScopedSwmRecoveryDescriptor[];
+}): Quad[] {
+  const selectedByHead = new Map(
+    params.descriptors.map((descriptor) => [
+      `${descriptor.metaGraph}\u0000${descriptor.headSubject}`,
+      descriptor.shareOperationId,
+    ]),
+  );
+  return params.metaQuads.filter((row) => {
+    if (row.predicate !== SHARE_OPERATION_ID) return true;
+    const selected = selectedByHead.get(`${row.graph}\u0000${row.subject}`);
+    return selected === undefined || stripLiteral(row.object).trim() === selected;
+  });
+}
+
+interface ResolvedHeadOperation {
+  readonly shareOperationId: string;
+  readonly operationSubject: string;
+  readonly operationRows: readonly Quad[];
+  readonly headShareOperationRow: Quad;
+}
+
+/**
+ * Storage-ACK persistence and originator persistence can legitimately produce
+ * two operation ids for the same exact assertion. Accept that residue only
+ * when every recovery-relevant operation row is byte-equivalent (apart from
+ * operation id and timestamp), then choose the newest operation
+ * deterministically. Any content or policy disagreement remains fail-closed.
+ */
+function resolveEquivalentHeadOperation(params: {
+  readonly headRows: readonly Quad[];
+  readonly byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>;
+  readonly contextGraphId: string;
+  readonly metaGraph: string;
+  readonly headSubject: string;
+  readonly kaUal: string;
+  readonly assertionVersion: string;
+  readonly subGraphName?: string;
+}): ResolvedHeadOperation {
+  const shareOperationIds = [...new Set(
+    distinctObjects(params.headRows, SHARE_OPERATION_ID)
+      .map(stripLiteral)
+      .map((value) => value.trim()),
+  )];
+  if (shareOperationIds.length === 0) {
+    throw new Error(`Graph-scoped SWM head ${params.headSubject} is missing shareOperationId`);
+  }
+  if (shareOperationIds.some((value) => value.length === 0)) {
+    throw new Error(`Graph-scoped SWM head ${params.headSubject} has an empty shareOperationId`);
+  }
+
+  const candidates = shareOperationIds.map((shareOperationId) => {
+    const operationSubject = `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`;
+    const operationRows = params.byGraphAndSubject.get(
+      `${params.metaGraph}\u0000${operationSubject}`,
+    ) ?? [];
+    validateOperationRows({
+      rows: operationRows,
+      contextGraphId: params.contextGraphId,
+      metaGraph: params.metaGraph,
+      operationSubject,
+      shareOperationId,
+      kaUal: params.kaUal,
+      assertionVersion: params.assertionVersion,
+      subGraphName: params.subGraphName,
+    });
+    const publishedAt = stripLiteral(requireSingle(operationRows, PUBLISHED_AT, 'publishedAt'));
+    const publishedAtMs = Date.parse(publishedAt);
+    if (!Number.isFinite(publishedAtMs)) {
+      throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
+    }
+    const equivalenceKey = operationRows
+      .filter((row) => row.predicate !== SHARE_OPERATION_ID && row.predicate !== PUBLISHED_AT)
+      .map((row) => `${row.predicate}\u0000${row.object}\u0000${row.graph}`)
+      .sort()
+      .join('\u0001');
+    const headShareOperationRow = params.headRows
+      .filter((row) => row.predicate === SHARE_OPERATION_ID)
+      .filter((row) => stripLiteral(row.object).trim() === shareOperationId)
+      .sort((left, right) => left.object.localeCompare(right.object))[0];
+    if (!headShareOperationRow) {
+      throw new Error(`Graph-scoped SWM head ${params.headSubject} is missing shareOperationId`);
+    }
+    return {
+      shareOperationId,
+      operationSubject,
+      operationRows,
+      headShareOperationRow,
+      publishedAtMs,
+      equivalenceKey,
+    };
+  });
+
+  if (new Set(candidates.map((candidate) => candidate.equivalenceKey)).size > 1) {
+    throw new Error(`ambiguous shareOperationId`);
+  }
+  candidates.sort((left, right) =>
+    right.publishedAtMs - left.publishedAtMs
+    || right.shareOperationId.localeCompare(left.shareOperationId));
+  return candidates[0]!;
 }
 
 /** Load and re-verify one immutable snapshot, then stamp its exact SWM graph. */

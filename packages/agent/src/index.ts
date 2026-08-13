@@ -76,6 +76,12 @@ export { FinalizationHandler } from './finalization-handler.js';
 export {
   VmReconcileDispatcher,
 } from './chain-reconciler.js';
+export { resolveSyncReconcilerEnabled } from './sync/backpressure.js';
+export {
+  classifySharedMemoryFreshness,
+  type SelectedSharedMemorySyncResult,
+  type SharedMemoryFreshnessSummary,
+} from './sync/shared-memory-freshness.js';
 export {
   ContextGraphOnChainIdUnresolvedError,
   VmReconcileQueueClosedError,
@@ -148,6 +154,7 @@ export {
   syncPriorityClass,
   validateSyncResponderSnapshotLimitsConfig,
   type SyncAdmissionSource,
+  type SyncAdmissionConfig,
   type SyncContextGraphPriorityConfig,
   type SyncPriorityClass,
   type SyncResponderSnapshotLimitsConfig,
@@ -229,6 +236,8 @@ export {
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationStatus,
   type ContextGraphSubscriptionStore,
+  type SelectedVmReconcileCursorStore,
+  type SelectedVmReconcileCursorRecord,
   type ContextGraphWritePreflightProbe,
   type PeerHealth,
   type CclPublishedEvaluationRecord,

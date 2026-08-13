@@ -64,12 +64,36 @@ function mixedPeerResult(verifiedDataPeers: number): CatchupJobResult {
   };
 }
 
+function durableMetaOnlyResult(): CatchupJobResult {
+  const result = mixedPeerResult(0);
+  result.dataSynced = 0;
+  result.denied = false;
+  result.deniedPeers = 0;
+  result.peersSucceeded = 1;
+  if (!result.diagnostics?.durable) {
+    throw new Error('durable diagnostics missing');
+  }
+  result.diagnostics.durable.fetchedDataTriples = 0;
+  result.diagnostics.durable.insertedDataTriples = 0;
+  result.diagnostics.durable.fetchedMetaTriples = 8;
+  result.diagnostics.durable.insertedMetaTriples = 8;
+  result.diagnostics.durable.metaOnlyResponses = 1;
+  result.diagnostics.durable.timedOutPhases = 0;
+  return result;
+}
+
 describe('context graph catch-up readiness classification', () => {
   const readinessBeforeCatchup = {
     version: 0,
     durableVerified: false,
     sharedMemoryVerified: false,
     updatedAt: 0,
+  };
+  const swmVerifiedReadinessBeforeCatchup = {
+    version: CONTEXT_GRAPH_READINESS_VERSION,
+    durableVerified: false,
+    sharedMemoryVerified: true,
+    updatedAt: 1,
   };
 
   it('uses a clean per-peer completion even when aggregate diagnostics contain denial and timeout', () => {
@@ -189,6 +213,119 @@ describe('context graph catch-up readiness classification', () => {
       },
     });
     expect(classification.eventPayload).toBeUndefined();
+  });
+
+  it('does not let clean shared memory mask incomplete durable VM', () => {
+    const result = mixedPeerResult(0);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.peersSucceeded = 1;
+    result.sharedMemorySynced = 7;
+    result.cleanPlaneCompletions!.sharedMemory.verifiedDataPeers = 1;
+    result.diagnostics!.sharedMemory.fetchedDataTriples = 7;
+    result.diagnostics!.sharedMemory.insertedDataTriples = 7;
+    result.diagnostics!.sharedMemory.completedPhases = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      statePatch: {
+        // The existing compatibility/write-readiness bit may be opened by a
+        // persisted usable plane; the terminal job verdict may not.
+        synced: true,
+        sharedMemorySynced: true,
+      },
+      readinessPatch: {
+        durableVerified: false,
+        sharedMemoryVerified: true,
+      },
+      eventPayload: {
+        dataSynced: 0,
+        sharedMemorySynced: 7,
+      },
+    });
+    expect(classification.error).toContain('incomplete plane remains unready');
+  });
+
+  it('accepts an explicit selected-SWM terminal proof with no new inserts', () => {
+    const result = mixedPeerResult(1);
+    result.denied = false;
+    result.deniedPeers = 0;
+    result.sharedMemorySynced = 0;
+    result.cleanPlaneCompletions!.sharedMemory.selectedScopeCompletePeers = 1;
+    // These remain raw telemetry from voluntary yields that the selected lane
+    // resolved before producing its terminal verdict. They must not be erased,
+    // and they must not override the stronger typed proof either.
+    result.diagnostics!.sharedMemory.failedPhases = 1;
+    result.diagnostics!.sharedMemory.timedOutPhases = 1;
+    result.diagnostics!.sharedMemory.emptyResponses = 1;
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'done',
+      statePatch: {
+        synced: true,
+        sharedMemorySynced: true,
+      },
+      readinessPatch: {
+        durableVerified: true,
+        sharedMemoryVerified: true,
+      },
+      eventPayload: {
+        sharedMemorySynced: 0,
+      },
+    });
+  });
+
+  it('does not let previously verified shared memory mask a later durable-only request', () => {
+    const result = durableMetaOnlyResult();
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: false,
+      hasConfirmedMeta: true,
+      isPrivate: false,
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+    });
+  });
+
+  it('reports the private durable-VM shortfall when SWM was already verified', () => {
+    const result = durableMetaOnlyResult();
+
+    const classification = classifyContextGraphCatchupReadiness({
+      result,
+      includeSharedMemory: true,
+      hasConfirmedMeta: true,
+      isPrivate: true,
+      readinessBeforeCatchup: swmVerifiedReadinessBeforeCatchup,
+    });
+
+    expect(classification).toMatchObject({
+      jobStatus: 'unreachable',
+      error: 'Shared-memory context-graph data synchronized, but durable VM catch-up did not complete. Retry to finish finalized VM synchronization.',
+      statePatch: { synced: true, sharedMemorySynced: true },
+      readinessPatch: { durableVerified: false, sharedMemoryVerified: true },
+    });
   });
 
   // Emptiness is only provable as a whole-round verdict: an empty response is
