@@ -69,12 +69,24 @@ function undecidedTerminal(
  * ordinary head fork, and one storage re-derives from the evidence entries and
  * cross-checks (`system-record-verified-replacement-v1-internal.ts:776-778`) so
  * it cannot be asserted independently of the evidence it describes. A non-empty
- * slot array therefore MEANS a terminal transition conflict was once merged,
- * and nothing else in the system can put a digest there. That write-site
- * structure is pinned by
- * `packages/storage/test/system-record-conflict-slot-substrate-v1.test.ts`, so
- * this reader's premise fails loudly rather than silently if a future writer
- * repurposes the array.
+ * slot array therefore MEANS a terminal transition conflict was once merged.
+ *
+ * WHAT HOLDS THAT PREMISE, AND WHAT DOES NOT -- stated plainly, because the gap
+ * is real. Three BEHAVIOURAL tests carry it, in
+ * `packages/storage/test/system-record-applied-disposition-restart-v1.test.ts`:
+ * deleting the merge turns the restart derivation red; fork-typed evidence
+ * leaves the slots empty and re-derives as `head-fork-quarantined`; and a row
+ * whose slots genuinely overflowed the cap still re-derives as an equivocation.
+ * Those pin what the writer DOES.
+ *
+ * NOT pinned: that no OTHER writer can populate the array. A structural test
+ * asserting that was tried and withdrawn -- a source-shape check is not tied to
+ * the executed path, so it fails on behaviour-preserving refactors while a
+ * genuinely new writer can evade it, and a weak supplement that reads as
+ * coverage is worse than none. The durable fix is a named typed helper owning
+ * the merge, used by writer and reader, which belongs to the slice that touches
+ * storage's write path. Until then this reader's premise rests on the write
+ * sites being few and reviewed, not on a guard.
  *
  * `conflictOverflow` is included because it records slots that were dropped:
  * the merge keeps only the first `SYSTEM_RECORD_MAX_CONFLICT_DIGESTS` and sets

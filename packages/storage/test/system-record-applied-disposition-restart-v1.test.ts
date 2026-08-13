@@ -1,6 +1,7 @@
 import {
   canonicalizeAgentProfileConflictEvidenceV1,
   computeAgentProfileConflictEvidenceDigestV1,
+  computeAgentProfileHeadObjectDigestV1,
   computeSystemRecordAppliedStateDigestV1,
   computeSystemRecordStableKeyHashV1,
   deriveAgentProfileAuthorityDispositionV1,
@@ -281,6 +282,80 @@ describe('authority disposition survives a restart on persisted quads alone', ()
     expect(restarted.appliedState.conflictOverflow).toBe(true);
     expect(deriveAgentProfileAuthorityDispositionV1(restarted.appliedState))
       .toEqual({ outcome: 'decided', disposition: 'transition-equivocation-quarantined' });
+  }, 120_000);
+
+  /*
+   * ONLY TRANSITION-TYPED DIGESTS REACH THE SLOTS -- pinned by CONSTRUCTION.
+   *
+   * The reader's whole premise is that a digest in the array means a terminal
+   * TRANSITION conflict. The merge enforces that with a type filter, but the
+   * `terminalTransitionConflict` gate runs first, so a fixture carrying only
+   * fork evidence never presents a fork entry to the filter at all -- which
+   * means a filter WIDENED to accept fork digests as well survives every other
+   * test in this file. Measured, not assumed: widening it leaves all of them
+   * green.
+   *
+   * This is the case that sees it. One evidence object carrying BOTH a fork
+   * entry and a transition entry, past the gate because the transition entry
+   * makes the conflict terminal, so the filter is the only thing standing
+   * between the fork digests and the slots. An earlier version of this slice
+   * covered the same property by asserting on storage's SOURCE TEXT; that was
+   * withdrawn in review as not tied to the executed path, and this replaces it
+   * with the behaviour.
+   */
+  it('merges the transition digests and leaves the fork digests out', async () => {
+    const { quarantined, binding, forkedIssue } = await quarantinedForkV1(true, true);
+    const forked = forkedIssue.head as AgentProfileActiveHeadObjectV1;
+    const forkedDigest = computeAgentProfileHeadObjectDigestV1(forked);
+    const forkOnlyDigest = `0x${'ee'.repeat(32)}` as Digest32V1;
+    const transitionOnly = Object.freeze([
+      `0x${'71'.repeat(32)}`,
+      `0x${'72'.repeat(32)}`,
+    ].sort()) as readonly Digest32V1[];
+
+    // Canonical entry order is fork before transition (the codec sorts on a
+    // type-keyed tuple), and the issuer requires the fork entry to name the
+    // candidate's own sequence, version and digest.
+    const evidence = Object.freeze({
+      objectType: 'conflict-evidence',
+      kind: 'agents',
+      networkId: forked.networkId,
+      peerId: forked.peerId,
+      entries: Object.freeze([
+        Object.freeze({
+          type: 'fork',
+          authoritySequence: forked.authoritySequence,
+          version: forked.version,
+          objectDigests: Object.freeze([forkedDigest, forkOnlyDigest].sort()),
+        }),
+        Object.freeze({
+          type: 'transition',
+          priorAuthoritySequence: forked.authoritySequence,
+          nextAuthoritySequence: String(BigInt(forked.authoritySequence) + 1n),
+          objectDigests: transitionOnly,
+        }),
+      ]),
+    }) as AgentProfileConflictEvidenceV1;
+
+    const registry = createSystemRecordVerifiedReplacementRegistryV1();
+    const issue = {
+      operation: 'quarantine',
+      ...forkedIssue,
+      conflictEvidenceDigest: computeAgentProfileConflictEvidenceDigestV1(evidence),
+      canonicalConflictEvidenceBytes: canonicalizeAgentProfileConflictEvidenceV1(evidence),
+      terminalTransitionConflict: true,
+    } satisfies SystemRecordVerifiedCandidateIssueV1;
+    const merged = expectReady(deriveSystemRecordReplacementV1({
+      facts: registry.consumer.consume(registry.issuer.issueCandidate(issue), binding),
+      snapshot: restartFromPersistedQuads(forked.networkId, quarantined),
+      observedRootClaimQuads: quarantined.plan.next.rootClaimQuads,
+    }));
+
+    const slots = merged.plan.next.appliedState.conflictDigestSlots;
+    // Both transition digests landed...
+    for (const digest of transitionOnly) expect(slots).toContain(digest);
+    // ...and the digest that appears ONLY in the fork entry did not.
+    expect(slots).not.toContain(forkOnlyDigest);
   }, 120_000);
 });
 
