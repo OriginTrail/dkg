@@ -27,12 +27,17 @@ const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const OPERATION_ID = 'op-finalized-twin';
 
-function fixture(subGraphName?: string): Readonly<{
+function fixture(
+  subGraphName?: string,
+  privateCommitment?: Readonly<{ tripleCount: number; merkleRoot: string }>,
+): Readonly<{
   asset: VerifiedGraphScopedAsset;
   swmGraph: string;
   swmMetaGraph: string;
   headSubject: string;
   payload: Quad[];
+  privateTripleCount: number;
+  privateMerkleRoot?: string;
 }> {
   const scope = createGraphKnowledgeAssetScope(UAL, 3);
   const vmGraph = knowledgeAssetLayerGraphUri(
@@ -51,9 +56,11 @@ function fixture(subGraphName?: string): Readonly<{
     { subject: 'urn:asset', predicate: 'urn:value', object: '"finalized"', graph: vmGraph },
     { subject: 'urn:asset', predicate: 'urn:version', object: '"3"', graph: vmGraph },
   ];
+  const privateTripleCount = privateCommitment?.tripleCount ?? 0;
+  const privateMerkleRoot = privateCommitment?.merkleRoot;
   const merkleRoot = ethers.hexlify(computeFlatKCRootV10(
     payload.map((quad) => ({ ...quad, graph: '' })),
-    [],
+    privateMerkleRoot === undefined ? [] : [ethers.getBytes(privateMerkleRoot)],
   ));
   const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
   const metadataQuads: Quad[] = [
@@ -61,7 +68,10 @@ function fixture(subGraphName?: string): Readonly<{
     { subject: UAL, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}status`, object: '"confirmed"', graph: metaGraph },
     { subject: UAL, predicate: `${DKG}publicTripleCount`, object: `"${payload.length}"^^<${XSD_INTEGER}>`, graph: metaGraph },
-    { subject: UAL, predicate: `${DKG}privateTripleCount`, object: `"0"^^<${XSD_INTEGER}>`, graph: metaGraph },
+    { subject: UAL, predicate: `${DKG}privateTripleCount`, object: `"${privateTripleCount}"^^<${XSD_INTEGER}>`, graph: metaGraph },
+    ...(privateMerkleRoot === undefined
+      ? []
+      : [{ subject: UAL, predicate: `${DKG}privateMerkleRoot`, object: `"${privateMerkleRoot}"`, graph: metaGraph }]),
     { subject: UAL, predicate: `${DKG}merkleRoot`, object: `"${merkleRoot}"`, graph: metaGraph },
     ...(subGraphName === undefined
       ? []
@@ -83,6 +93,8 @@ function fixture(subGraphName?: string): Readonly<{
       : `did:dkg:context-graph:${CG}/_shared_memory_meta`,
     headSubject: `${UAL}#dkg-swm-head`,
     payload,
+    privateTripleCount,
+    ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
   };
 }
 
@@ -170,9 +182,17 @@ async function seedTwin(
     {
       subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
       predicate: `${DKG}privateTripleCount`,
-      object: `"0"^^<${XSD_INTEGER}>`,
+      object: `"${input.privateTripleCount}"^^<${XSD_INTEGER}>`,
       graph: input.swmMetaGraph,
     },
+    ...(input.privateMerkleRoot === undefined
+      ? []
+      : [{
+          subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+          predicate: `${DKG}privateMerkleRoot`,
+          object: `"${input.privateMerkleRoot}"`,
+          graph: input.swmMetaGraph,
+        }]),
   ]);
 }
 
@@ -187,7 +207,10 @@ function descriptorFor(input: ReturnType<typeof fixture>) {
     shareOperationId: OPERATION_ID,
     publicQuadsDigest: workspacePublicQuadsDigest(input.payload),
     publicQuadsCount: input.payload.length,
-    privateTripleCount: 0,
+    privateTripleCount: input.privateTripleCount,
+    ...(input.privateMerkleRoot === undefined
+      ? {}
+      : { privateMerkleRoot: input.privateMerkleRoot }),
     publicSnapshotRef: workspacePublicQuadsDigest(input.payload),
     publisherPeerId: 'peer-source',
     metadataQuads: [],
@@ -240,6 +263,38 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(retire).toHaveBeenCalledTimes(1);
     expect(await store.countQuads(input.swmGraph)).toBe(0);
   });
+
+  it.each(['vm-arrival', 'swm-arrival'] as const)(
+    'retires a byte-identical twin with matching private commitments on %s',
+    async (arrival) => {
+      const store = new OxigraphStore();
+      const privateMerkleRoot = `0x${'ab'.repeat(32)}`;
+      const input = fixture(undefined, { tripleCount: 1, merkleRoot: privateMerkleRoot });
+      await seedTwin(store, input);
+      const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+        await store.dropGraph(candidate.swmGraph);
+      });
+
+      const result = arrival === 'vm-arrival'
+        ? reconcileFinalizedSwmTwin({
+            store,
+            writeLocks: new Map(),
+            asset: input.asset,
+            retire,
+          })
+        : reconcileFinalizedSwmTwinFromDescriptor({
+            store,
+            writeLocks: new Map(),
+            contextGraphId: CG,
+            descriptor: descriptorFor(input),
+            retire,
+          });
+
+      await expect(result).resolves.toBe('retired');
+      expect(retire).toHaveBeenCalledTimes(1);
+      expect(await store.countQuads(input.swmGraph)).toBe(0);
+    },
+  );
 
   it('preserves a newer or different SWM revision', async () => {
     const store = new OxigraphStore();

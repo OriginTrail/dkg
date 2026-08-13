@@ -121,28 +121,6 @@ async function distinctObjects(store: TripleStore, graph: string, subject: strin
 }
 
 describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', () => {
-  it('forwards the production finalized-twin reconciliation dependency', async () => {
-    const store = new OxigraphStore();
-    const reconcileFinalizedTwin = vi.fn(async () => 'suppress-metadata' as const);
-    const materializer = createSharedMemorySnapshotMaterializer({
-      store,
-      writeLocks: new Map(),
-      invalidateListContextGraphsCache: () => {},
-      reconcileFinalizedTwin,
-    });
-    const descriptor = descriptorFor(v1);
-
-    await expect(materializer.reconcileFinalizedTwin?.(CG, descriptor))
-      .resolves.toBe('suppress-metadata');
-    expect(reconcileFinalizedTwin).toHaveBeenCalledWith(CG, descriptor);
-  });
-
-  it('keeps finalized-twin reconciliation absent when no dependency is provided', () => {
-    const store = new OxigraphStore();
-    const { materializer } = materializerFor(store);
-    expect(materializer.reconcileFinalizedTwin).toBeUndefined();
-  });
-
   it('shares one assertion graph across versions (the premise of the digest guard)', () => {
     expect(v1.assertionGraph).toBe(v2.assertionGraph);
     expect(v1.payload).toHaveLength(v2.payload.length);

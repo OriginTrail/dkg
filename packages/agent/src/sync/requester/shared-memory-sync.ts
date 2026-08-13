@@ -57,13 +57,24 @@ function metadataQuadKey(quad: Quad): string {
  * compensation all consult this object so a caller cannot update only one of
  * those ledgers and accidentally resurrect retired SWM metadata.
  */
-class SnapshotMetadataCommitLedger {
+type FinalizedTwinMetadataDisposition = 'preserve' | 'suppress-metadata';
+type FinalizedTwinReconciler = (
+  contextGraphId: string,
+  descriptor: GraphScopedSwmRecoveryDescriptor,
+) => Promise<FinalizedTwinMetadataDisposition>;
+
+class GraphScopedSnapshotCommitCoordinator {
   readonly #verifiedKeys: ReadonlySet<string>;
   readonly #writtenKeys = new Set<string>();
   readonly #suppressedKeys = new Set<string>();
+  readonly #reconcileFinalizedTwin: FinalizedTwinReconciler | undefined;
 
-  constructor(verifiedMeta: readonly Quad[]) {
+  constructor(
+    verifiedMeta: readonly Quad[],
+    reconcileFinalizedTwin: FinalizedTwinReconciler | undefined,
+  ) {
     this.#verifiedKeys = new Set(verifiedMeta.map(metadataQuadKey));
+    this.#reconcileFinalizedTwin = reconcileFinalizedTwin;
   }
 
   unwrittenVerifiedRows(descriptor: GraphScopedSwmRecoveryDescriptor): Quad[] {
@@ -79,10 +90,34 @@ class SnapshotMetadataCommitLedger {
     for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
   }
 
-  suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
+  #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
     for (const quad of descriptor.metadataQuads) {
       const key = metadataQuadKey(quad);
       if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
+    }
+  }
+
+  /**
+   * Own post-materialization reconciliation and its metadata disposition as
+   * one commit decision. The caller cannot retire a twin without updating the
+   * same ledger that filters the round's final bulk append.
+   */
+  async reconcileAfterMaterialization(params: {
+    contextGraphId: string;
+    descriptor: GraphScopedSwmRecoveryDescriptor;
+    onDeferred: (cause: unknown) => void;
+  }): Promise<void> {
+    if (!this.#reconcileFinalizedTwin) return;
+    try {
+      const disposition = await this.#reconcileFinalizedTwin(
+        params.contextGraphId,
+        params.descriptor,
+      );
+      if (disposition === 'suppress-metadata') this.#suppress(params.descriptor);
+    } catch (cause) {
+      // Snapshot materialization is already durable. Preserve the twin and
+      // retry on a later pass instead of reclassifying a successful sync.
+      params.onDeferred(cause);
     }
   }
 
@@ -320,6 +355,12 @@ interface SharedMemorySyncContext {
    * Absent entirely => materialization is skipped (never half-applied).
    */
   snapshotMaterializer?: SharedMemorySnapshotMaterializer;
+  /**
+   * Optional VM-aware effect used by the round-owned snapshot commit
+   * coordinator. It is deliberately separate from the generic materializer:
+   * only the coordinator may translate its result into metadata suppression.
+   */
+  reconcileFinalizedTwin?: FinalizedTwinReconciler;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -373,6 +414,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     ensureContextGraph,
     storeInsert,
     snapshotMaterializer,
+    reconcileFinalizedTwin,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -725,7 +767,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // Each KA's own verified metadata is therefore rewritten here, inside the
       // same write lock, immediately after the delete — narrowing a window that
       // already exists rather than opening a new one.
-      const metadataLedger = new SnapshotMetadataCommitLedger(processed.verifiedMeta);
+      const snapshotCommit = new GraphScopedSnapshotCommitCoordinator(
+        processed.verifiedMeta,
+        reconcileFinalizedTwin,
+      );
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
@@ -761,11 +806,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const insertVerifiedDescriptorMeta = async (
         descriptor: GraphScopedSwmRecoveryDescriptor,
       ): Promise<void> => {
-        const rows = metadataLedger.unwrittenVerifiedRows(descriptor);
+        const rows = snapshotCommit.unwrittenVerifiedRows(descriptor);
         if (rows.length === 0) return;
         await ensureContextGraphOnce();
         await storeInsert([...rows]);
-        metadataLedger.recordWritten(rows);
+        snapshotCommit.recordWritten(rows);
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
       };
@@ -915,23 +960,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // arrives. Reconcile only after releasing the materialization
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
-            try {
-              const disposition = await snapshotMaterializer.reconcileFinalizedTwin?.(pid, descriptor);
-              if (disposition === 'suppress-metadata') {
-                // The callback removed this exact SWM graph AND its head/op
-                // rows. Suppress the later bulk metadata append too; without
-                // this, an already-materialized retry would recreate dangling
-                // SWM metadata after the graph had been correctly retired.
-                metadataLedger.suppress(descriptor);
-              }
-            } catch (err) {
-              // The verified snapshot and its head are already durable. Tier
-              // cleanup is best-effort and must not reclassify that completed
-              // materialization as missing; leaving SWM intact is the safe
-              // fallback and a later pass can retry the exact reconciliation.
-              logWarn(ctx, `SWM sync deferred finalized-twin reconciliation for ${descriptor.kaUal}: `
-                + `${err instanceof Error ? err.message : String(err)}`);
-            }
+            await snapshotCommit.reconcileAfterMaterialization({
+              contextGraphId: pid,
+              descriptor,
+              onDeferred: (cause) => logWarn(
+                ctx,
+                `SWM sync deferred finalized-twin reconciliation for ${descriptor.kaUal}: `
+                  + `${cause instanceof Error ? cause.message : String(cause)}`,
+              ),
+            });
           } catch (err) {
             // A failed replace must never be able to look materialized later.
             // Suppressing it here while the surrounding sync still inserts the
@@ -1161,11 +1198,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Keep the old count identity for ordinary rows. Only retired rows are
         // filtered, while the per-KA ledger remains a key-set subset of the
         // verified input and is subtracted solely when its row survives.
-        const metaForBulkInsert = metadataLedger.bulkRows(verifiedMetaForInsert);
+        const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
         if (metaForBulkInsert.length > 0) {
           await storeInsert(metaForBulkInsert);
         }
-        const retainedAlreadyCounted = metadataLedger.alreadyCountedRetainedRows();
+        const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();
         const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
         summary.insertedTriples += newlyCountedMeta;
         summary.insertedMetaTriples += newlyCountedMeta;

@@ -6883,38 +6883,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             store: this.store,
             writeLocks: this.writeLocks,
             invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-            reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
-              try {
-                const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
-                  store: this.store,
-                  writeLocks: this.writeLocks,
-                  contextGraphId,
-                  descriptor,
-                  retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
-                });
-                if (retirement === 'retired') {
-                  this.invalidateListContextGraphsCache();
-                  this.log.info(
-                    ctx,
-                    `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
-                  );
-                }
-                return retirement === 'retired' || retirement === 'already-retired-finalized'
-                  ? 'suppress-metadata'
-                  : 'preserve';
-              } catch (cause) {
-                // Snapshot materialization is already complete. Preserve the
-                // SWM graph and retry on a later pass rather than changing a
-                // successful sync into a failure.
-                this.log.warn(
-                  ctx,
-                  `Deferred finalized SWM twin reconciliation for ${descriptor.kaUal}: `
-                  + `${cause instanceof Error ? cause.message : String(cause)}`,
-                );
-                return 'preserve';
-              }
-            },
           }),
+          reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
+            const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              contextGraphId,
+              descriptor,
+              retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+            });
+            if (retirement === 'retired') {
+              this.invalidateListContextGraphsCache();
+              this.log.info(
+                ctx,
+                `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
+              );
+            }
+            return retirement === 'retired' || retirement === 'already-retired-finalized'
+              ? 'suppress-metadata'
+              : 'preserve';
+          },
           storeInsert: async (quads) => {
             // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
             // literals BEFORE insert so the SWM page cursor advances instead

@@ -212,11 +212,11 @@ function harness(overrides: HarnessOverrides = {}) {
           events.push('head-swapped');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
         },
-        reconcileFinalizedTwin: async () => {
-          events.push('finalized-twin-reconciled');
-          await overrides.reconcileImpl?.();
-          return overrides.reconcileDisposition ?? 'preserve';
-        },
+      },
+      reconcileFinalizedTwin: async () => {
+        events.push('finalized-twin-reconciled');
+        await overrides.reconcileImpl?.();
+        return overrides.reconcileDisposition ?? 'preserve';
       },
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
@@ -292,6 +292,16 @@ describe('public SWM snapshot materialization', () => {
     ]);
     expect(h.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
       .toHaveLength(0);
+  });
+
+  it('does not bulk-recreate metadata after freshly materializing and retiring a twin', async () => {
+    const h = harness({ reconcileDisposition: 'suppress-metadata' });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(h.replaced).toHaveLength(1);
+    const reconciliation = h.events.indexOf('finalized-twin-reconciled');
+    expect(reconciliation).toBeGreaterThan(h.events.indexOf('lock-released'));
+    expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
   });
 
   it('closes the gossip race: in-lock version re-check skips a superseded snapshot', async () => {
