@@ -374,6 +374,26 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(store.options[1]?.maxResponseBytes).toBe(SYSTEM_RECORD_MAX_PROJECTION_BYTES);
   });
 
+  // Adopted from review. Both reads happen while durable sync may be aborting, and the
+  // signal was threaded through production without any test making it load-bearing:
+  // dropping it left every case here green while an aborted sync would sit inside the
+  // gate lookup until the store answered. Identity is asserted, not mere presence — a
+  // read forwarding SOME signal is not the same as forwarding the caller's.
+  it('forwards the caller abort signal to both bounded reads', async () => {
+    const store = fakeStore(appliedRecordQuads(ROOT, [ROOT]));
+    const controller = new AbortController();
+
+    await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT], signal: controller.signal,
+    });
+    await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects: [ROOT], signal: controller.signal,
+    });
+
+    expect(store.options[0]?.signal).toBe(controller.signal);
+    expect(store.options[1]?.signal).toBe(controller.signal);
+  });
+
   // ...and only a contract if the refusal is TRANSLATED. Rethrowing instead would drop the
   // whole page at the seam, which is the retry-storm the port contract exists to avoid —
   // and no test here would have noticed, because no fake store threw the canonical error.
