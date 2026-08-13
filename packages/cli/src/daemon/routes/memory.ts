@@ -116,8 +116,10 @@ import {
   createCatchupRunner,
   formatDurableCatchupFailure,
   runDurableCatchupLeg,
+  summarizeDurableLeg,
   type CatchupJobResult,
   type CatchupRunner,
+  type DurableCatchupAttempt,
   type DurableCatchupFailureReason,
   type DurableCatchupLegState,
   type DurableLegDiagnostics,
@@ -840,6 +842,8 @@ WHERE {
     type PerCgLeg = {
       contextGraphId: string;
       perPeer: PerPeerLeg[];
+      /** Graph-owner outcome used for terminal request classification. */
+      durableAttempts?: DurableCatchupAttempt[];
       insertedTriples: number;
       durableInsertedTriples: number;
     };
@@ -880,8 +884,25 @@ WHERE {
       const swmSelected = new Set(swmSelectedPeers);
       const durableSelected = new Set(durableSelectedPeers);
       const selectedPeers = uniquePeerIds([...swmSelectedPeers, ...durableSelectedPeers]);
+
+      // A modern agent owns durable recovery once per Context Graph. Every
+      // explicit/on-connect/reconciler trigger joins this same owner, which
+      // prevents this route from competing for a second slow-lane slot as
+      // `durable:unspecified`. Keep the direct per-peer leg only as a
+      // compatibility path for older agents.
+      const coordinatedDurablePromise = durableSelectedPeers.length > 0
+        && typeof (agent as any).syncDurableRecoveryContextGraph === 'function'
+        ? (agent as any).syncDurableRecoveryContextGraph(cgId, {
+            candidatePeerIds: durableSelectedPeers,
+            restrictToCandidatePeerIds: true,
+            candidatesAreSyncCapable: true,
+          })
+        : undefined;
+      const directSelectedPeers = coordinatedDurablePromise
+        ? swmSelectedPeers
+        : selectedPeers;
       const settled = await Promise.allSettled(
-        selectedPeers.map(async (candidate) => {
+        directSelectedPeers.map(async (candidate) => {
           let swm = 0;
           let durable = 0;
           let durableState: DurableCatchupLegState | undefined;
@@ -914,7 +935,7 @@ WHERE {
               );
             }
           }
-          if (durableSelected.has(candidate)) {
+          if (durableSelected.has(candidate) && !coordinatedDurablePromise) {
             // The helper owns one outer deadline for fetch, verification, and
             // authentication. Its AbortSignal prevents entry into later commit
             // boundaries; an already-started atomic commit gets a bounded
@@ -948,7 +969,7 @@ WHERE {
       const perPeer: PerPeerLeg[] = settled.map((s, idx) => {
         if (s.status === 'fulfilled') {
           return {
-            peerId: selectedPeers[idx],
+            peerId: directSelectedPeers[idx],
             insertedTriples: s.value.insertedTriples,
             durableInsertedTriples: s.value.durableInsertedTriples,
             ...(s.value.durableState ? { durableState: s.value.durableState } : {}),
@@ -959,17 +980,84 @@ WHERE {
           };
         }
         return {
-          peerId: selectedPeers[idx],
+          peerId: directSelectedPeers[idx],
           insertedTriples: 0,
           durableInsertedTriples: 0,
           error: s.reason?.message ?? String(s.reason),
         };
       });
+      let durableAttempts: DurableCatchupAttempt[] | undefined;
+      let coordinatedDurableInsertedTriples: number | undefined;
+      if (coordinatedDurablePromise) {
+        try {
+          const recovery = await coordinatedDurablePromise;
+          const aggregate = summarizeDurableLeg(recovery.result);
+          const aggregateError = formatDurableCatchupFailure(aggregate.failureReasons);
+          durableAttempts = [{
+            durableState: aggregate.state,
+            durableComplete: aggregate.complete,
+            ...(aggregateError ? { durableError: aggregateError } : {}),
+          }];
+          coordinatedDurableInsertedTriples = aggregate.insertedTriples;
+
+          // Keep peer attribution for operators, but classify completion and
+          // count totals from the graph-level aggregate exactly once.
+          const attributableResults = recovery.peerResults.length > 0
+            ? recovery.peerResults
+            : [{
+                peerId: recovery.peerId ?? durableSelectedPeers[0],
+                result: recovery.result,
+              }];
+          for (const peerResult of attributableResults) {
+            const summary = summarizeDurableLeg(peerResult.result);
+            const durableError = formatDurableCatchupFailure(summary.failureReasons);
+            const existing = perPeer.find((entry) => entry.peerId === peerResult.peerId);
+            const durableFields = {
+              durableInsertedTriples: summary.insertedTriples,
+              durableState: summary.state,
+              durableComplete: summary.complete,
+              durableDiagnostics: summary.diagnostics,
+              ...(durableError ? { durableError } : {}),
+            };
+            if (existing) {
+              Object.assign(existing, durableFields);
+            } else {
+              perPeer.push({
+                peerId: peerResult.peerId,
+                insertedTriples: 0,
+                ...durableFields,
+              });
+            }
+          }
+        } catch (err: any) {
+          const error = err?.message ?? String(err);
+          durableAttempts = [{ durableState: 'failed', durableComplete: false, durableError: error }];
+          coordinatedDurableInsertedTriples = 0;
+          const peerId = durableSelectedPeers[0];
+          const existing = perPeer.find((entry) => entry.peerId === peerId);
+          if (existing) {
+            existing.durableState = 'failed';
+            existing.durableComplete = false;
+            existing.durableError = error;
+          } else {
+            perPeer.push({
+              peerId,
+              insertedTriples: 0,
+              durableInsertedTriples: 0,
+              durableState: 'failed',
+              durableComplete: false,
+              durableError: error,
+            });
+          }
+        }
+      }
       perCgLegs.push({
         contextGraphId: cgId,
         perPeer,
+        ...(durableAttempts ? { durableAttempts } : {}),
         insertedTriples: perPeer.reduce((sum, p) => sum + p.insertedTriples, 0),
-        durableInsertedTriples: perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
+        durableInsertedTriples: coordinatedDurableInsertedTriples
+          ?? perPeer.reduce((sum, p) => sum + (p.durableInsertedTriples ?? 0), 0),
       });
     }
 
@@ -1097,7 +1185,7 @@ WHERE {
     // responses backward-compatible, and reserve 503 for the unambiguous case
     // where every durable-only attempt failed without a usable result.
     const durableOutcome = classifyDurableCatchupRequest(
-      perCgLegs.map((cg) => cg.perPeer),
+      perCgLegs.map((cg) => cg.durableAttempts ?? cg.perPeer),
       includeDurable,
       includeSharedMemory,
     );

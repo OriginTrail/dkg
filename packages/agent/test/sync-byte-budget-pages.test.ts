@@ -9,7 +9,9 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
   SYNC_PAGE_SIZE,
+  SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../src/dkg-agent-constants.js';
@@ -131,6 +133,47 @@ describe('byte-budget sync pagination', () => {
     expect(request.requesterSignatureR).toMatch(/^0x/);
   });
 
+  it('keeps an exact DATA request on page-only mode after fallback reaches 64 rows', async () => {
+    const wallet = ethers.Wallet.createRandom();
+    const exactUal = 'did:dkg:hardhat:31337/0x0000000000000000000000000000000000000001/1';
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      includeSharedMemory: false,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'data',
+      assetUals: [exactUal],
+      needsAuth: true,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+      claimedAgentAddress: wallet.address,
+      claimedAgentPrivateKey: wallet.privateKey,
+    });
+
+    const request = JSON.parse(new TextDecoder().decode(encoded));
+    expect(request).toMatchObject({
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      assetUals: [exactUal],
+    });
+    expect(resolveDurableDataRequestPolicy({
+      legacyLimit: request.limit,
+      includeSharedMemory: false,
+      phase: request.phase,
+      pageMode: request.pageMode,
+      pageRowsHint: request.pageRowsHint,
+      hasExactAssetFilter: true,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      cacheMode: 'page-only',
+      exactGraphReadMode: 'page-only',
+    });
+  });
+
   // #1916: durable META now negotiates byte-budget paging exactly like durable
   // DATA. These two cases pin the request-builder's meta advertisement directly:
   // a regression dropping 'meta' from the useByteBudgetPage condition would
@@ -226,11 +269,41 @@ describe('byte-budget sync pagination', () => {
     });
 
     expect(requested).toEqual([
-      { offset: 0, limit: SYNC_REQUEST_PAGE_SIZE },
-      { offset: SYNC_PAGE_SIZE, limit: SYNC_REQUEST_PAGE_SIZE },
+      { offset: 0, limit: SYNC_REQUEST_INITIAL_PAGE_SIZE },
+      { offset: SYNC_PAGE_SIZE, limit: SYNC_REQUEST_INITIAL_PAGE_SIZE },
     ]);
     expect(result.nextOffset).toBe(SYNC_PAGE_SIZE);
     expect(result.completed).toBe(true);
+  });
+
+  it('returns a soft page boundary as incomplete progress without a timeout', async () => {
+    let sends = 0;
+    const observedProgress: Array<{ resumedFromOffset: number; nextOffset: number }> = [];
+    const result = await fetchSyncPages(pageFetchParams({
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: `did:dkg:context-graph:${CG_ID}`,
+      parseAndFilter: async () => ({ quads: [], totalQuads: SYNC_PAGE_SIZE }),
+      send: async () => {
+        sends += 1;
+        return new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .');
+      },
+      shouldStopAfterPage: (progress) => {
+        observedProgress.push(progress);
+        return true;
+      },
+    }));
+
+    expect(sends).toBe(1);
+    expect(observedProgress).toEqual([{
+      resumedFromOffset: 0,
+      nextOffset: SYNC_PAGE_SIZE,
+    }]);
+    expect(result).toMatchObject({
+      nextOffset: SYNC_PAGE_SIZE,
+      completed: false,
+      timedOut: false,
+    });
   });
 
   it('keeps a successful fallback size sticky and probes upward gradually', async () => {
@@ -249,17 +322,18 @@ describe('byte-budget sync pagination', () => {
       send: async () => {
         sends += 1;
         if (sends === 1) throw new Error('relay stream reset');
-        return sends <= 4
+        return sends <= SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD + 1
           ? new TextEncoder().encode('<urn:s> <urn:p> <urn:o> <urn:g> .')
           : new Uint8Array();
       },
     }));
 
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
-      SYNC_REQUEST_SAFE_PAGE_SIZE,
-      SYNC_REQUEST_SAFE_PAGE_SIZE,
-      SYNC_REQUEST_SAFE_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+      ...Array.from(
+        { length: SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD },
+        () => SYNC_REQUEST_SAFE_PAGE_SIZE,
+      ),
       SYNC_REQUEST_SAFE_PAGE_SIZE * 2,
     ]);
     expect(result.completed).toBe(true);
@@ -288,7 +362,7 @@ describe('byte-budget sync pagination', () => {
 
     await expect(run()).rejects.toThrow('sync responder queue wait exceeded');
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
     ]);
@@ -321,13 +395,13 @@ describe('byte-budget sync pagination', () => {
     }));
 
     await expect(run()).rejects.toThrow('terminal relay stream reset');
-    expect(requestedSizes).toEqual([SYNC_REQUEST_PAGE_SIZE]);
+    expect(requestedSizes).toEqual([SYNC_REQUEST_INITIAL_PAGE_SIZE]);
     expect(pageSizeProfileCache.preferred(scope)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
 
     failTransport = false;
     await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
     expect(requestedSizes).toEqual([
-      SYNC_REQUEST_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
       SYNC_REQUEST_SAFE_PAGE_SIZE,
     ]);
   });

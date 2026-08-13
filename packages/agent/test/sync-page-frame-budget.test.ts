@@ -6,7 +6,9 @@ import {
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
   SYNC_PAGE_SIZE,
+  SYNC_REQUEST_INITIAL_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
   SYNC_RESPONSE_FRAME_HEADROOM_BYTES,
@@ -25,6 +27,8 @@ describe('sync requester transport frame budget', () => {
   it('keeps the adaptive retry floor below the protocol read cap', () => {
     expect(SYNC_REQUEST_PAGE_SIZE).toBe(8_192);
     expect(SYNC_REQUEST_PAGE_SIZE).toBe(SYNC_BYTE_BUDGET_MAX_ROWS);
+    expect(SYNC_REQUEST_INITIAL_PAGE_SIZE).toBe(512);
+    expect(SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD).toBe(8);
     expect(SYNC_REQUEST_SAFE_PAGE_SIZE).toBe(64);
     expect(SYNC_RESPONSE_FRAME_HEADROOM_BYTES).toBe(6 * 1024 * 1024);
     expect(SYNC_BYTE_BUDGET_RESPONSE_BYTES).toBe(4 * 1024 * 1024);

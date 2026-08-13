@@ -9,6 +9,7 @@ import { swmFixtures } from './swm-descriptor-fixtures.js';
 import {
   runDurableSync,
   runDurableSyncDetailed,
+  type DurableSyncCheckpointWrite,
   type DurableSyncFetchRequest,
   type DurableSyncStoreInsertRequest,
 } from '../src/sync/requester/durable-sync.js';
@@ -367,6 +368,10 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['resumed-cg'],
+      // Full rootless snapshots now require a fresh, complete META manifest
+      // before DATA. Exercise phase-level progress accounting on the delta
+      // path, where independent resumed META/DATA cursors remain valid.
+      sinceBatchIdFor: () => 'progress-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ contextGraphId, phase }) => (
         pageResult(contextGraphId, phase, { resumedFromOffset: 500, nextOffset: 500 })
@@ -386,7 +391,7 @@ describe('sync requester progress accounting', () => {
   });
 
   it('counts only the clean-empty durable phase when its sibling times out', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -414,11 +419,14 @@ describe('sync requester progress accounting', () => {
     expect(summary.completedPhases).toBe(1);
     expect(summary.checkpointAdvances).toBe(1);
     expect(deleteCheckpoint.calls).toContainEqual(['large-cg:meta']);
-    expect(setCheckpoint.calls).toContainEqual(['large-cg:data', 500]);
+    expect(setCheckpoint.calls).toContainEqual([
+      'large-cg:data',
+      { offset: 500, responderSessionOffset: undefined },
+    ]);
   });
 
   it('does not report durable checkpoint progress when data is rejected for missing meta', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -455,7 +463,7 @@ describe('sync requester progress accounting', () => {
 
   it('does not advance durable checkpoints when integrity verification rejects a KA', async () => {
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const logWarn = recorder((_ctx: OperationContext, _message: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -501,7 +509,7 @@ describe('sync requester progress accounting', () => {
   it('advances only the durable meta checkpoint after storing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-meta');
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -514,6 +522,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['meta-only-cg'],
+      sinceBatchIdFor: () => 'meta-only-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -540,11 +549,14 @@ describe('sync requester progress accounting', () => {
     expect(storeInsert.calls[0]![0]).toHaveProperty('signal', undefined);
     expect(deleteCheckpoint.calls).toEqual([]);
     expect(setCheckpoint.calls).toHaveLength(1);
-    expect(setCheckpoint.calls).toContainEqual(['meta-only-cg:meta', 5]);
+    expect(setCheckpoint.calls).toContainEqual([
+      'meta-only-cg:meta',
+      { offset: 5, responderSessionOffset: undefined },
+    ]);
   });
 
   it('advances the meta cursor when every fetched metadata row was deliberately discarded', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -558,6 +570,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-controls'],
+      sinceBatchIdFor: () => 'discarded-controls-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -581,11 +594,14 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toEqual([]);
     expect(deleteCheckpoint.calls).toEqual([]);
-    expect(setCheckpoint.calls).toEqual([['discarded-controls:meta', 3]]);
+    expect(setCheckpoint.calls).toEqual([[
+      'discarded-controls:meta',
+      { offset: 3, responderSessionOffset: undefined },
+    ]]);
   });
 
   it('keeps the meta cursor pinned when discarded rows do not account for the whole page', async () => {
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -624,7 +640,7 @@ describe('sync requester progress accounting', () => {
     // into consumedUnpersistedMetaTriples === totalFetchedMetaQuads and no meta
     // is persisted. The requester must still advance the meta cursor (the rows
     // were deliberately consumed) or durable sync pins on the same poisoned page.
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -638,6 +654,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-non-iri'],
+      sinceBatchIdFor: () => 'discarded-non-iri-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -659,14 +676,17 @@ describe('sync requester progress accounting', () => {
     expect(summary.checkpointAdvances).toBe(0);
     expect(storeInsert.calls).toEqual([]);
     expect(deleteCheckpoint.calls).toEqual([]);
-    expect(setCheckpoint.calls).toEqual([['discarded-non-iri:meta', 3]]);
+    expect(setCheckpoint.calls).toEqual([[
+      'discarded-non-iri:meta',
+      { offset: 3, responderSessionOffset: undefined },
+    ]]);
   });
 
   it('advances the meta cursor when a mixed page is fully discarded by controls + non-IRI drops (#1921)', async () => {
     // A mixed all-discarded page (some unverified controls + some non-IRI rows):
     // the worker sums both reasons into consumedUnpersistedMetaTriples === the
     // fetched total, so the requester advances the cursor rather than pinning.
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
@@ -680,6 +700,7 @@ describe('sync requester progress accounting', () => {
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: ['discarded-mixed'],
+      sinceBatchIdFor: () => 'discarded-mixed-cursor',
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages,
       processDurableBatchInWorker: async () => ({
@@ -700,13 +721,16 @@ describe('sync requester progress accounting', () => {
     expect(summary.metaOnlyResponses).toBe(1);
     expect(storeInsert.calls).toEqual([]);
     expect(deleteCheckpoint.calls).toEqual([]);
-    expect(setCheckpoint.calls).toEqual([['discarded-mixed:meta', 3]]);
+    expect(setCheckpoint.calls).toEqual([[
+      'discarded-mixed:meta',
+      { offset: 3, responderSessionOffset: undefined },
+    ]]);
   });
 
   it('deletes only the durable meta checkpoint after completing metadata-only responses', async () => {
     const metaQuad = quad('meta-only-complete-meta');
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,
@@ -751,7 +775,7 @@ describe('sync requester progress accounting', () => {
   it('stores verified private-only metadata and advances both durable checkpoints cleanly', async () => {
     const metaQuad = quad('verified-private-only-meta');
     const storeInsert = recorder(async (_request: DurableSyncStoreInsertRequest) => {});
-    const setCheckpoint = recorder((_key: string, _offset: number) => {});
+    const setCheckpoint = recorder((_key: string, _checkpoint: DurableSyncCheckpointWrite) => {});
     const deleteCheckpoint = recorder((_key: string) => {});
     const fetchSyncPages = durableFetchRecorder(async ({
       contextGraphId,

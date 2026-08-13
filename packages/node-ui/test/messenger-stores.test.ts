@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { RESPONSE_CACHE_BYTES } from '@origintrail-official/dkg-core';
 import {
   DashboardDB,
+  SCHEMA_VERSION,
   SqliteMessageIdempotencyStore,
   SqliteProtocolOutboxStore,
 } from '../src/db.js';
@@ -45,8 +46,8 @@ describe('V12 migration', () => {
     // `message_idempotency` table. Both bumps are tested at the
     // DB layer in `db.test.ts`; this assertion just pins the
     // substrate store fixtures to the current schema. V33 adds
-    // deployment-scoped selected VM-reconcile cursors.
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    // manifest-bound durable sync checkpoint fields.
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 });
 

@@ -94,11 +94,19 @@ function verifySyncedDataImpl(
 }
 
 function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
-  const quads = parseNQuads(text);
+  const rawQuads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
+  const quads: Quad[] = [];
+  const sourceIndexes: number[] = [];
+  for (const [index, quad] of rawQuads.entries()) {
+    if (quad.graph !== graphUri && !quad.graph.startsWith(cgUriPrefix)) continue;
+    quads.push(quad);
+    sourceIndexes.push(index);
+  }
   return {
-    quads: quads.filter((q) => q.graph === graphUri || q.graph.startsWith(cgUriPrefix)),
-    totalQuads: quads.length,
+    quads,
+    totalQuads: rawQuads.length,
+    sourceIndexes,
   };
 }
 

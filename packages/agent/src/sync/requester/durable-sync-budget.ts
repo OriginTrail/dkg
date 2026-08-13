@@ -10,9 +10,11 @@ export const MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS = 300_000;
 // during local settlement. Callers without an explicit operation boundary keep
 // their historical fetch-only budgets.
 export const DURABLE_SYNC_SETTLEMENT_HEADROOM_MS = 60_000;
-// A maximum-size valid KA is 10,000 triples. Field measurements on the slowest
-// observed canary path project roughly 425 seconds for its byte-paged transfer,
-// so exact VM repair gets a separate hard 10-minute transfer ceiling.
+// A valid graph-scoped KA may occupy the full 4 MiB staging envelope and can
+// contain far more than 10,000 short triples. Field measurements on the
+// slowest observed canary path project roughly 425 seconds for a maximum-size
+// byte-paged transfer, so foreground graph recovery gets a separate hard
+// 10-minute transfer ceiling.
 export const EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS = 600_000;
 // Meta and data historically drew down ONE shared per-CG deadline, and the
 // meta stream of a large system CG (agents/ontology run to tens of thousands
@@ -84,20 +86,27 @@ export function normalizeDurableSyncTimeoutMs(
  *
  * An explicit `totalTimeoutMs` owns the whole operation, not just transport,
  * so reserve bounded headroom for verification, storage, and checkpointing.
- * Exact recovery keeps its wider fetch-only ceiling when no outer operation
- * timeout exists.
+ * Exact and soft-sliced graph recovery keep their wider fetch-only ceiling
+ * when no outer operation timeout exists.
  */
 export function createDurableSyncFetchTimeoutMs(options: {
   totalTimeoutMs?: number;
   exactRecovery?: boolean;
+  extendedRecovery?: boolean;
 } = {}): number {
   if (options.totalTimeoutMs === undefined) {
-    return options.exactRecovery
+    return options.exactRecovery || options.extendedRecovery
       ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
       : normalizeDurableSyncTimeoutMs(undefined);
   }
 
-  const operationTimeoutMs = normalizeDurableSyncTimeoutMs(options.totalTimeoutMs);
+  const extendedRecovery = options.exactRecovery || options.extendedRecovery;
+  const operationTimeoutMs = normalizeDurableSyncTimeoutMs(
+    options.totalTimeoutMs,
+    extendedRecovery
+      ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS + DURABLE_SYNC_SETTLEMENT_HEADROOM_MS
+      : MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
+  );
   return Math.max(
     SYNC_MIN_GRAPH_BUDGET_MS,
     operationTimeoutMs - DURABLE_SYNC_SETTLEMENT_HEADROOM_MS,
@@ -160,6 +169,7 @@ export function createDurableSyncBudget(options: {
   fetchTimeoutMs?: number;
   authenticationTimeoutMs?: number;
   exactRecovery?: boolean;
+  extendedRecovery?: boolean;
   operationDeadline?: number;
   now?: () => number;
 }): DurableSyncBudget {
@@ -169,7 +179,7 @@ export function createDurableSyncBudget(options: {
         createContextGraphSyncDeadline({
           remainingContextGraphs,
           totalTimeoutMs: options.fetchTimeoutMs,
-          maximumMs: options.exactRecovery
+          maximumMs: options.exactRecovery || options.extendedRecovery
             ? EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS
             : MAX_DURABLE_SYNC_TOTAL_TIMEOUT_MS,
           now: options.now,

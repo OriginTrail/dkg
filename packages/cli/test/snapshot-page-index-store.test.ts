@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { DashboardDB } from '@origintrail-official/dkg-node-ui';
+import { DashboardDB, SCHEMA_VERSION } from '@origintrail-official/dkg-node-ui';
 import type { SnapshotPageIndexRecord } from '@origintrail-official/dkg-publisher';
 import { SqliteSnapshotPageIndexStore } from '../src/daemon/snapshot-page-index-store.js';
 import { createPublicSnapshotStore } from '../src/publisher-runner.js';
@@ -89,7 +89,7 @@ describe('SqliteSnapshotPageIndexStore', () => {
     await pageIndexes.upsert(record);
 
     expect(await pageIndexes.get(DIGEST)).toEqual(record);
-    expect(dashboard.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(dashboard.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 
   it('falls back to the snapshot when the real SQLite connection cannot read or write', async () => {

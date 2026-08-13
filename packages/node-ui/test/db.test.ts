@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import Database from 'better-sqlite3';
-import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE } from '../src/db.js';
+import { DashboardDB, SqliteChainEventCursorStore, SqliteContextGraphRegistryScanCursorStore, SqliteKaNumberStore, SqliteSyncCheckpointStore, SqliteChangelogCursorStore, SqliteChangelogEraGuard, buildActivityDigestKey, ACTIVITY_DIGEST_WINDOW_MS, ASSERTION_ACTIVITY_TYPE, SCHEMA_VERSION } from '../src/db.js';
 
 let db: DashboardDB;
 let dir: string;
@@ -86,7 +86,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -142,7 +142,7 @@ describe('DashboardDB — metric snapshots', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const newSnapshotCols = (db.db.prepare('PRAGMA table_info(metric_snapshots)').all() as { name: string }[])
       .map(c => c.name);
@@ -673,7 +673,7 @@ describe('DashboardDB — V15 migration: drop FTS5 logs index', () => {
 
     const upgraded = new DashboardDB({ dataDir: upgradeDir });
     try {
-      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(32);
+      expect(upgraded.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
       const ftsTables = upgraded.db.prepare(
         `SELECT name FROM sqlite_master WHERE type IN ('table','view') AND name LIKE 'logs_fts%'`,
@@ -741,7 +741,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     db.close();
 
     const raw = new Database(dbPath);
-    expect(raw.pragma('user_version', { simple: true })).toBe(32);
+    expect(raw.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     raw.exec('DROP TRIGGER IF EXISTS cap_cg_join_policy_audit_rows;');
     raw.close();
 
@@ -765,7 +765,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     const columns = db.db.pragma(
       'table_info(context_graph_join_approval_ledger)',
     ) as Array<{ name: string }>;
@@ -786,7 +786,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     expect(db.db.prepare(`
       SELECT name FROM sqlite_master
       WHERE type = 'table' AND name = 'context_graph_join_policy_audit'
@@ -868,7 +868,7 @@ describe('DashboardDB — V27 join-approval ledger migration', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     const trigger = db.db.prepare(`
       SELECT sql FROM sqlite_master
       WHERE type = 'trigger' AND name = 'cap_cg_join_policy_audit_rows'
@@ -1255,7 +1255,7 @@ describe('DashboardDB — selected-only VM reconcile cursors', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     expect(db.getRetentionDays()).toBe(42);
 
     db.upsertSelectedVmReconcileCursor({
@@ -1370,7 +1370,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1391,7 +1391,7 @@ describe('DashboardDB — V17 subscription columns migration (Phase B)', () => {
       .map((c) => c.name);
     expect(cols).toContain('on_chain_hash');
     expect(cols).toContain('last_reconciled_ordinal');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 });
 
@@ -1475,7 +1475,7 @@ describe('DashboardDB — V19 core_hosted column migration (Phase D)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(context_graph_subscriptions)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -1504,7 +1504,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
   });
 
   it('fresh install lands at the current schema and already carries the ka_numbers table', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1541,7 +1541,7 @@ describe('DashboardDB — V20 ka_numbers table migration (B2 KA-number allocator
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const table = db.db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' AND name='ka_numbers'",
@@ -1623,6 +1623,9 @@ describe('SqliteKaNumberStore — bigint counter (codex PR #976 F6)', () => {
 
 describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   let now = Date.now();
+  const manifestA = 'sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa';
+  const manifestB = 'sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb';
+  const prefixA = 'sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc';
 
   beforeEach(() => {
     now = Date.now();
@@ -1634,7 +1637,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
   });
 
   it('fresh install carries the sync_checkpoints table and expiry index', () => {
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     const tables = db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all();
@@ -1649,6 +1652,9 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     );
     expect(columns).toContain('responder_session_id');
     expect(columns).toContain('responder_session_expires_at');
+    expect(columns).toContain('manifest_digest');
+    expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
   });
 
   it('round-trips, overwrites, deletes, and expires checkpoints', () => {
@@ -1709,6 +1715,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
       expiresAtMs: now + 24 * 60 * 60 * 1000,
       responderSessionId: 'durable-data:restart-safe',
       responderSessionExpiresAtMs: sessionExpiresAt,
+      responderSessionOffset: 573235,
     });
 
     db.close();
@@ -1735,6 +1742,199 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     });
   });
 
+  it('persists a manifest-bound verified prefix across restart and safely rebinds it', () => {
+    const key = 'peer|cg|durable|data';
+    const sessionExpiresAt = now + 10 * 60 * 1000;
+    const store = checkpointStore();
+
+    store.setManifestBoundOffset(key, 573235, manifestA, now, prefixA);
+    store.setResponderSession(key, 'durable-data:generation-a', sessionExpiresAt, now, manifestA);
+    expect(store.get(key)).toEqual({
+      offset: 573235,
+      updatedAtMs: now,
+      expiresAtMs: now + 24 * 60 * 60 * 1000,
+      manifestDigest: manifestA,
+      manifestPrefixDigest: prefixA,
+      responderSessionId: 'durable-data:generation-a',
+      responderSessionExpiresAtMs: sessionExpiresAt,
+      responderSessionOffset: 573235,
+    });
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
+    expect(reopened.get(key)).toMatchObject({
+      offset: 573235,
+      manifestDigest: manifestA,
+      manifestPrefixDigest: prefixA,
+      responderSessionId: 'durable-data:generation-a',
+    });
+
+    // The requester has already proven this prefix is byte-identical in the
+    // fresh META generation. Rebinding retains the verified offset and prefix
+    // but must discard the responder token from the old immutable row list.
+    now += 1;
+    reopened.setManifestBoundOffset(key, 573235, manifestB, now, prefixA);
+    expect(reopened.get(key)).toEqual({
+      offset: 573235,
+      updatedAtMs: now,
+      expiresAtMs: now + 24 * 60 * 60 * 1000,
+      manifestDigest: manifestB,
+      manifestPrefixDigest: prefixA,
+    });
+
+    // Priming a fresh responder generation with the new manifest must not
+    // reset the already-verified local prefix to zero.
+    reopened.setResponderSession(
+      key,
+      'durable-data:generation-b',
+      sessionExpiresAt,
+      now,
+      manifestB,
+    );
+    expect(reopened.get(key)).toMatchObject({
+      offset: 573235,
+      manifestDigest: manifestB,
+      manifestPrefixDigest: prefixA,
+      responderSessionId: 'durable-data:generation-b',
+    });
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const restarted = new SqliteSyncCheckpointStore(db, { clock: () => now });
+    expect(restarted.get(key)).toMatchObject({
+      offset: 573235,
+      manifestDigest: manifestB,
+      manifestPrefixDigest: prefixA,
+      responderSessionId: 'durable-data:generation-b',
+    });
+
+    now = sessionExpiresAt + 1;
+    expect(restarted.get(key)).toEqual({
+      offset: 573235,
+      updatedAtMs: sessionExpiresAt - 10 * 60 * 1000 + 1,
+      expiresAtMs: sessionExpiresAt - 10 * 60 * 1000 + 1 + 24 * 60 * 60 * 1000,
+      manifestDigest: manifestB,
+      manifestPrefixDigest: prefixA,
+    });
+  });
+
+  it('persists terminal manifest completion across restart and clears it on rebind', () => {
+    const key = 'peer|cg|durable|data';
+    const store = checkpointStore();
+    store.setManifestBoundOffset(key, 6_357_721, manifestA, now, prefixA, true);
+
+    db.close();
+    db = new DashboardDB({ dataDir: dir });
+    const reopened = new SqliteSyncCheckpointStore(db, { clock: () => now });
+    expect(reopened.get(key)).toMatchObject({
+      offset: 6_357_721,
+      manifestDigest: manifestA,
+      manifestPrefixDigest: prefixA,
+      terminal: true,
+    });
+
+    reopened.setManifestBoundOffset(key, 512, manifestB, now + 1, prefixA);
+    expect(reopened.get(key)?.terminal).toBeUndefined();
+  });
+
+  it('resets an offset when a responder session is bound to a different manifest', () => {
+    const key = 'peer|cg|durable|data';
+    const store = checkpointStore();
+    store.setManifestBoundOffset(key, 4096, manifestA, now, prefixA);
+
+    store.setResponderSession(
+      key,
+      'durable-data:unproven-generation',
+      now + 60_000,
+      now,
+      manifestB,
+    );
+
+    expect(store.get(key)).toEqual({
+      offset: 0,
+      updatedAtMs: now,
+      expiresAtMs: now + 24 * 60 * 60 * 1000,
+      manifestDigest: manifestB,
+      responderSessionId: 'durable-data:unproven-generation',
+      responderSessionExpiresAtMs: now + 60_000,
+      responderSessionOffset: 0,
+    });
+
+    // Legacy/non-manifest writes cannot leave a stale cryptographic binding or
+    // responder token attached to an unrelated offset.
+    store.set(key, 128, now + 1);
+    expect(store.get(key)).toEqual({
+      offset: 128,
+      updatedAtMs: now + 1,
+      expiresAtMs: now + 1 + 24 * 60 * 60 * 1000,
+    });
+  });
+
+  it('rejects malformed manifest bindings', () => {
+    const store = checkpointStore();
+    expect(() => store.setManifestBoundOffset(
+      'peer|cg|durable|data',
+      1,
+      'sha256:not-a-digest',
+    )).toThrow('Invalid sync manifest digest');
+    expect(() => store.setManifestBoundOffset(
+      'peer|cg|durable|data',
+      1,
+      manifestA,
+      now,
+      'sha256:not-a-prefix',
+    )).toThrow('Invalid sync manifest prefix digest');
+  });
+
+  it.each([
+    ['invalid manifest digest', {
+      manifest_digest: 'sha256:not-a-digest',
+      manifest_prefix_digest: null,
+      responder_session_id: null,
+      responder_session_expires_at: null,
+      responder_session_offset: null,
+    }],
+    ['orphan manifest prefix', {
+      manifest_digest: null,
+      manifest_prefix_digest: prefixA,
+      responder_session_id: null,
+      responder_session_expires_at: null,
+      responder_session_offset: null,
+    }],
+    ['partial responder session', {
+      manifest_digest: manifestA,
+      manifest_prefix_digest: prefixA,
+      responder_session_id: 'torn-session',
+      responder_session_expires_at: now + 60_000,
+      responder_session_offset: null,
+    }],
+  ])('fails closed and deletes a persisted row with %s', (_name, malformed) => {
+    const key = `peer|cg|durable|data|checkpoint:v2|${_name}`;
+    db.db.prepare(`
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at, responder_session_offset,
+        manifest_digest, manifest_prefix_digest, terminal
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    `).run(
+      key,
+      512,
+      now,
+      now + 60_000,
+      malformed.responder_session_id,
+      malformed.responder_session_expires_at,
+      malformed.responder_session_offset,
+      malformed.manifest_digest,
+      malformed.manifest_prefix_digest,
+    );
+
+    expect(checkpointStore().get(key)).toBeUndefined();
+    expect(db.db.prepare(
+      'SELECT key FROM sync_checkpoints WHERE key = ?',
+    ).get(key)).toBeUndefined();
+  });
+
   it('creates sync_checkpoints when upgrading a pre-V21 DB', () => {
     const dbPath = join(dir, 'node-ui.db');
     db.close();
@@ -1745,7 +1945,7 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     expect(db.db.prepare(
       `SELECT name FROM sqlite_master WHERE type='table' AND name='sync_checkpoints'`,
     ).all()).toHaveLength(1);
@@ -1774,13 +1974,49 @@ describe('DashboardDB — V21 sync_checkpoints table (A3 sync resume)', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     const columns = new Set(
       (db.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
         .map((column) => column.name),
     );
     expect(columns).toContain('responder_session_id');
     expect(columns).toContain('responder_session_expires_at');
+    expect(columns).toContain('manifest_digest');
+    expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
+  });
+
+  it('invalidates unversioned V32 durable DATA progress during the V34 upgrade', () => {
+    const dbPath = join(dir, 'node-ui.db');
+    const key = 'peer|cg|durable|data';
+    db.close();
+
+    const raw = new Database(dbPath);
+    raw.exec(`
+      ALTER TABLE sync_checkpoints DROP COLUMN manifest_digest;
+      ALTER TABLE sync_checkpoints DROP COLUMN manifest_prefix_digest;
+      ALTER TABLE sync_checkpoints DROP COLUMN terminal;
+    `);
+    raw.prepare(`
+      INSERT INTO sync_checkpoints (
+        key, offset, updated_at, expires_at,
+        responder_session_id, responder_session_expires_at
+      ) VALUES (?, ?, ?, ?, ?, ?)
+    `).run(key, 8192, now, now + 60_000, 'legacy-session', now + 30_000);
+    raw.pragma('user_version = 32');
+    raw.close();
+
+    db = new DashboardDB({ dataDir: dir });
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
+    expect(new SqliteSyncCheckpointStore(db, { clock: () => now }).get(key)).toBeUndefined();
+    const columns = new Set(
+      (db.db.prepare('PRAGMA table_info(sync_checkpoints)').all() as Array<{ name: string }>)
+        .map((column) => column.name),
+    );
+    expect(columns).toContain('manifest_digest');
+    expect(columns).toContain('manifest_prefix_digest');
+    expect(columns).toContain('terminal');
+    expect(columns).toContain('responder_session_offset');
   });
 });
 
@@ -2223,7 +2459,7 @@ describe('DashboardDB — V11→V13 chat schema migration chain', () => {
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(chat_messages)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -2289,7 +2525,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     raw.close();
 
     db = new DashboardDB({ dataDir: dir });
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
 
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
@@ -2318,7 +2554,7 @@ describe('DashboardDB — V16 notifications.context_graph_id migration (A1)', ()
     const cols = (db.db.prepare('PRAGMA table_info(notifications)').all() as Array<{ name: string }>)
       .map((c) => c.name);
     expect(cols).toContain('context_graph_id');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 
   it('insertNotification writes context_graph_id to the column; omitted → NULL', () => {
@@ -2561,7 +2797,7 @@ describe('DashboardDB — replication telemetry (Phase F)', () => {
     raw.pragma('user_version = 17');
     raw.close();
     const upgraded = new DashboardDB({ dataDir: dir });
-    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(upgraded.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
     // insert works → table exists
     upgraded.insertReplicationEvent({ ts: now, context_graph_id: 'cg', action: 'promote' });
     expect(upgraded.getReplicationSummary(60_000).promotes).toBe(1);
@@ -2616,6 +2852,6 @@ describe('SqliteChangelogEraGuard — OT-RFC-59 §6 P0 durable era guard', () =>
       .map((t) => t.name);
     expect(tables).toContain('changelog_cursors');
     expect(tables).toContain('changelog_era');
-    expect(db.db.pragma('user_version', { simple: true })).toBe(32);
+    expect(db.db.pragma('user_version', { simple: true })).toBe(SCHEMA_VERSION);
   });
 });

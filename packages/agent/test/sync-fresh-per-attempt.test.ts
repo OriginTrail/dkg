@@ -812,7 +812,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
       syncSessionId: string | undefined;
     }> = [];
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|expired-incomplete-session-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'expired-incomplete-session-cg',
+      false,
+      'data',
+    );
 
     await runFetchWithFakeTimers(
       fetchSyncPages({
@@ -926,7 +931,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     }> = [];
     const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|superseded-incomplete-session-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'superseded-incomplete-session-cg',
+      false,
+      'data',
+    );
     let sendMode: 'timeout' | 'superseded' | 'complete' = 'timeout';
 
     const checkpointStore = {
@@ -1007,7 +1017,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
   it('rotates an expired responder session immediately even when its checkpoint offset is zero', async () => {
     vi.setSystemTime(1_700_100_000_000);
     const contextGraphId = 'expired-offset-zero-session-cg';
-    const checkpointKey = `${REMOTE_PEER_ID}|${contextGraphId}|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      contextGraphId,
+      false,
+      'data',
+    );
     const checkpointStore = new MemorySyncCheckpointStore({ clock: () => Date.now() });
     checkpointStore.set(checkpointKey, 0);
     checkpointStore.setResponderSession(
@@ -1147,7 +1162,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
     const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|generic-abort-resume-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'generic-abort-resume-cg',
+      false,
+      'data',
+    );
     let sendMode: 'timeout' | 'abort' | 'complete' = 'timeout';
 
     const checkpointStore = {
@@ -1233,7 +1253,12 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     const observedBuilds: Array<{ offset: number; syncSessionId: string | undefined }> = [];
     const checkpointValues = new Map<string, ReturnType<typeof freshCheckpoint>>();
     const deletedCheckpoints: string[] = [];
-    const checkpointKey = `${REMOTE_PEER_ID}|accepted-page-then-drop-cg|durable|data`;
+    const checkpointKey = getSyncCheckpointKey(
+      REMOTE_PEER_ID,
+      'accepted-page-then-drop-cg',
+      false,
+      'data',
+    );
     let sendMode: 'timeout' | 'page-then-drop' | 'complete' = 'timeout';
     let callsThisRound = 0;
 
@@ -1395,7 +1420,9 @@ describe('fetchSyncPages: fresh envelope + fresh messageId per retry attempt', (
     expect(observedBuilds[0].offset).toBe(0);
     expect(typeof observedBuilds[0].syncSessionId).toBe('string');
     expect(observedBuilds[0].syncSessionId?.length).toBeGreaterThan(0);
-    expect(deletedCheckpoints).toEqual([`${REMOTE_PEER_ID}|${contextGraphId}|durable|data`]);
+    expect(deletedCheckpoints).toEqual([
+      getSyncCheckpointKey(REMOTE_PEER_ID, contextGraphId, false, 'data'),
+    ]);
   });
 
   it('uses one stable sync session id across pages for durable delta sync', async () => {

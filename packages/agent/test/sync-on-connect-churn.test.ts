@@ -163,7 +163,10 @@ describe('sync-on-connect churn gates', () => {
     });
 
     expect(await (agent as any).trySyncFromPeer(PEER_A)).toBe('synced');
-    expect(syncFromPeerDetailed.calls[0][1]).toEqual(expectedScope);
+    const requestedScope = syncFromPeerDetailed.calls
+      .flatMap((call) => call[1] as string[])
+      .sort();
+    expect(requestedScope).toEqual([...expectedScope].sort());
   });
 
   it('keeps explicit Edge catch-up available for system Context Graphs', async () => {

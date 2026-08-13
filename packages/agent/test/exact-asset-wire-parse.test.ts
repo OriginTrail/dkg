@@ -325,6 +325,67 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     await store.close();
   }, 60_000);
 
+  it('fails at the first short graph instead of borrowing rows from the next graph', async () => {
+    const contextGraphId = 'short-public-exact';
+    const store = new OxigraphStore();
+    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
+    const declaredRows = 4;
+    const assetUals = [
+      `did:dkg:base:84532/${AUTHOR}/201`,
+      `did:dkg:base:84532/${AUTHOR}/202`,
+    ];
+    const payloadGraphs = assetUals.map((ual) => knowledgeAssetLayerGraphUri(
+      contextGraphId,
+      MemoryLayer.VerifiableMemory,
+      createGraphKnowledgeAssetScope(ual, 1),
+    ));
+    const manifestQuads: Quad[] = [];
+    for (const [index, ual] of assetUals.entries()) {
+      const graph = payloadGraphs[index]!;
+      manifestQuads.push(
+        { graph: metaGraph, subject: ual, predicate: `${DKG}contentScopeVersion`, object: integer(GRAPH_KA_CONTENT_SCOPE_VERSION) },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}kaUal`, object: ual },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}assertionVersion`, object: integer(1) },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}assertionGraph`, object: graph },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}contextGraph`, object: contextGraphDataGraphUri(contextGraphId) },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}publicTripleCount`, object: integer(declaredRows) },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}privateTripleCount`, object: integer(0) },
+        { graph: metaGraph, subject: ual, predicate: `${DKG}status`, object: '"confirmed"' },
+      );
+    }
+    await store.insert([
+      ...manifestQuads,
+      ...Array.from({ length: declaredRows - 1 }, (_, index) => ({
+        graph: payloadGraphs[0]!,
+        subject: `urn:short-graph:${index}`,
+        predicate: 'urn:predicate',
+        object: `"value-${index}"`,
+      })),
+      ...Array.from({ length: declaredRows }, (_, index) => ({
+        graph: payloadGraphs[1]!,
+        subject: `urn:complete-next-graph:${index}`,
+        predicate: 'urn:predicate',
+        object: `"value-${index}"`,
+      })),
+    ]);
+
+    await expect(readDurableDataPage({
+      store,
+      graphList: payloadGraphs,
+      contextGraphId,
+      sinceBatchId: null,
+      offset: 0,
+      limit: declaredRows * assetUals.length,
+      assetUals,
+      exactGraphReadMode: 'page-only',
+    })).rejects.toThrow(
+      `Sync exact-graph plan changed while paging ${payloadGraphs[0]}: ` +
+      `expected ${declaredRows} rows at offset 0, found ${declaredRows - 1}`,
+    );
+
+    await store.close();
+  });
+
   it('keeps fake signature fields on the 64-row page-only exact-fetch policy', async () => {
     const contextGraphId = 'fake-signature-public-exact';
     const store = new OxigraphStore();
