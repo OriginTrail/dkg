@@ -395,6 +395,27 @@ describe('bounded-read overflow, computed by the real reader', () => {
     expect(read.truncated).toBe(true);
   });
 
+  // The bound must be IN THE QUERY, not only in the post-decode check. Adopted from
+  // review: drop the projection `LIMIT` and every other case here still passes, because
+  // the fake returns all fixture rows and `bindings.length` catches the overflow after
+  // materialization. That is the wrong layer — the LIMIT is what stops an enormous result
+  // being decoded at all, and the post-decode check is the floor beneath it, not a
+  // substitute. Asserted against the real constants so it cannot pass at a different bound.
+  it('asks the store for a bounded result, not merely a bounded answer', async () => {
+    const store = fakeStore(appliedRecordQuads(ROOT, [ROOT]));
+
+    await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT, OTHER_ROOT],
+    });
+    await readLegacyAgentProfileProjectionV1({
+      store, mode: 'authoritative', subjects: [ROOT],
+    });
+
+    // Request one bounds by the roots it actually asked about, +1 so overflow is visible.
+    expect(store.queries[0]).toContain('LIMIT 3');
+    expect(store.queries[1]).toContain(`LIMIT ${SYSTEM_RECORD_MAX_PROJECTION_QUADS + 1}`);
+  });
+
   // The DISCRIMINATOR between the canonical retained-byte accounting and a hand-rolled
   // `s + p + o` sum. This payload is deliberately UNDER the cap by the naive measure and
   // OVER it by the real one, so a reader counting bytes locally would hand back these rows
