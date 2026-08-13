@@ -1209,6 +1209,35 @@ type SharedMemorySyncContextGraphPlan = {
   eligibleContextGraphIds: string[];
 };
 
+function enforceRfc64CompleteProviderAuthority(
+  plan: SharedMemorySyncContextGraphPlan,
+  remotePeerId: string | undefined,
+  resolveCompleteProviders: (contextGraphId: string) => readonly string[],
+  onRejected: (contextGraphId: string, remotePeerId: string) => void,
+): SharedMemorySyncContextGraphPlan {
+  if (remotePeerId === undefined) return plan;
+  const rejectedPublicContextGraphIds = new Set(
+    plan.publicContextGraphIds.filter((contextGraphId) => {
+      const completeSwmProviders = resolveCompleteProviders(contextGraphId);
+      return completeSwmProviders.length > 0
+        && !completeSwmProviders.includes(remotePeerId);
+    }),
+  );
+  if (rejectedPublicContextGraphIds.size === 0) return plan;
+  for (const contextGraphId of rejectedPublicContextGraphIds) {
+    onRejected(contextGraphId, remotePeerId);
+  }
+  return {
+    publicContextGraphIds: plan.publicContextGraphIds.filter(
+      (contextGraphId) => !rejectedPublicContextGraphIds.has(contextGraphId),
+    ),
+    privateRecoverFromCurator: plan.privateRecoverFromCurator,
+    eligibleContextGraphIds: plan.eligibleContextGraphIds.filter(
+      (contextGraphId) => !rejectedPublicContextGraphIds.has(contextGraphId),
+    ),
+  };
+}
+
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
 
 interface RecoverContextGraphSwmFromPeerDependencies {
@@ -4366,7 +4395,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           peerId,
           this.config.syncContextGraphs ?? [],
           createOperationContext('sync'),
-          { completeProviderOnly: automaticPeerSweep },
         );
         sharedMemorySyncPlans.set(peerId, plan);
       }
@@ -4584,7 +4612,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     contextGraphIds: readonly string[],
     ctx: OperationContext,
     options: {
-      completeProviderOnly?: boolean;
       requireCompleteProviderMatch?: boolean;
     } = {},
   ): Promise<SharedMemorySyncContextGraphPlan> {
@@ -4712,22 +4739,18 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ) {
         continue;
       }
-      if (
-        options.completeProviderOnly
-        && remotePeerId !== undefined
-        && completeSwmProviders.length > 0
-        && !completeSwmProviders.includes(remotePeerId)
-      ) {
-        this.log.debug(
-          ctx,
-          `SWM sync: skipping "${contextGraphId}" from ${remotePeerId.slice(-8)} — RFC-64 complete provider selected`,
-        );
-        continue;
-      }
       publicContextGraphIds.push(contextGraphId);
       eligibleContextGraphIds.push(contextGraphId);
     }
-    return { publicContextGraphIds, privateRecoverFromCurator, eligibleContextGraphIds };
+    return enforceRfc64CompleteProviderAuthority(
+      { publicContextGraphIds, privateRecoverFromCurator, eligibleContextGraphIds },
+      remotePeerId,
+      (contextGraphId) => this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
+      (contextGraphId, peerId) => this.log.debug(
+        ctx,
+        `SWM sync: rejecting "${contextGraphId}" from ${peerId.slice(-8)} — RFC-64 complete provider selected`,
+      ),
+    );
   }
 
   async getSharedMemorySyncContextGraphs(this: DKGAgent, remotePeerId?: string): Promise<string[]> {
@@ -6718,9 +6741,21 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       contextGraphId,
     );
     const planned = options?.sharedMemorySyncPlan;
-    const plan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
+    const initialPlan = planned && sameStringArray(planned.eligibleContextGraphIds, contextGraphIds)
       ? planned
       : await this.planSharedMemorySyncContextGraphs(remotePeerId, contextGraphIds, ctx);
+    // A caller-supplied plan is only an optimization snapshot; it is not an
+    // authority token. Normalize both freshly planned and cached inputs through
+    // the same source-authority helper used by the planner.
+    const plan = enforceRfc64CompleteProviderAuthority(
+      initialPlan,
+      remotePeerId,
+      (contextGraphId) => this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId),
+      (contextGraphId, peerId) => this.log.debug(
+        ctx,
+        `SWM sync: rejecting preplanned "${contextGraphId}" from ${peerId.slice(-8)} — RFC-64 complete provider selected`,
+      ),
+    );
     const publicContextGraphIds = orderContextGraphIdsByPriority(
       plan.publicContextGraphIds,
       this.config.syncContextGraphPriorities,

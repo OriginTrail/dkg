@@ -540,6 +540,9 @@ describe('lifecycle shared-memory fanout isolation', () => {
       syncCheckpoints: new Map(),
       workspaceOwnedEntities: new Map(),
       log: { info: noop, warn: noop, debug: noop },
+      // This fixture exercises ordinary public SWM fanout, not an RFC-64
+      // selected scope.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
       syncSharedMemoryFromPeerDetailedExecution:
         LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     };
