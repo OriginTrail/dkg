@@ -292,5 +292,11 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
     expect(offered).toHaveLength(1);
     expect(result.result.insertedTriples).toBe(1);
     expect(result.result.insertedTriples).not.toBe(page.length);
+    // The data branch writes TWO counters from the gate's insert set, and the aggregate
+    // one alone cannot see a regression in the other: changing only `insertedDataTriples`
+    // back to the page length leaves `insertedTriples` correct and this test green. The
+    // meta branch already asserts its own counter; this is the matching half.
+    expect(result.result.insertedDataTriples).toBe(1);
+    expect(result.result.insertedDataTriples).not.toBe(page.length);
   });
 });
