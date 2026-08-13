@@ -10,6 +10,36 @@ import {
 } from './selected-swm-test-helpers.js';
 
 describe('selected RFC-64 SWM lifecycle queue and budgets', () => {
+  it('does not fetch a selected scope when the caller-supplied plan names a non-provider peer', async () => {
+    const publicCg = 'selected-preplanned-non-provider';
+    const manifest = snapshotManifest(publicCg, 1);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      completeSwmProviders: ['12D3KooWAnotherCompleteProvider'],
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+    });
+
+    try {
+      const summary = await callSelectedSharedMemorySummary(harness.agent, [publicCg], {
+        selectedSwmPriority: true,
+        priority: 2_000,
+        sharedMemorySyncPlan: {
+          publicContextGraphIds: [publicCg],
+          privateRecoverFromCurator: [],
+          eligibleContextGraphIds: [publicCg],
+        },
+      });
+
+      expect(harness.probes.metaFetches()).toBe(0);
+      expect(harness.probes.dataFetches()).toBe(0);
+      expect(harness.probes.snapshotReads()).toBe(0);
+      expect(summary.insertedTriples).toBe(0);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('releases the shared metadata budget before the next serialized owner generation', async () => {
     const publicCg = 'selected-overlap-shared-retention-budget';
     const manifest = snapshotManifest(publicCg, 2);
