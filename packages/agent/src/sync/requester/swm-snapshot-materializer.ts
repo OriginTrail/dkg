@@ -50,6 +50,18 @@ export interface StoredWorkspaceHeadState {
 }
 
 /**
+ * Descriptor-level effect of finalized-twin reconciliation.
+ *
+ * Both successful states suppress a later bulk metadata replay. `retired`
+ * means this call completed the cleanup; `already-retired` means another
+ * serialized cleanup removed the exact head and graph first.
+ */
+export type FinalizedTwinReconciliationResult =
+  | 'retired'
+  | 'already-retired'
+  | 'preserved';
+
+/**
  * Everything `runSharedMemorySync` needs to MATERIALIZE verified public SWM
  * snapshots into the triple store, as ONE cohesive dependency.
  *
@@ -117,7 +129,7 @@ export interface SharedMemorySnapshotMaterializer {
   reconcileFinalizedTwin?(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<boolean>;
+  ): Promise<FinalizedTwinReconciliationResult>;
 }
 
 /**
@@ -135,7 +147,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   reconcileFinalizedTwin?: (
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ) => Promise<boolean>;
+  ) => Promise<FinalizedTwinReconciliationResult>;
 }): SharedMemorySnapshotMaterializer {
   // #2079 operator override, default ON. Blank is UNSET, not false:
   // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for

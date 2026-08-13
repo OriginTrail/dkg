@@ -51,7 +51,10 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import type { StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
+import type {
+  FinalizedTwinReconciliationResult,
+  StoredWorkspaceHeadState,
+} from '../src/sync/requester/swm-snapshot-materializer.js';
 
 const CG = 'ws00-snapshot-materialization';
 const WS = contextGraphWorkspaceGraphUri(CG);
@@ -124,7 +127,7 @@ interface HarnessOverrides {
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
   reconcileImpl?: () => Promise<void>;
-  reconcileRetired?: boolean;
+  reconcileResult?: FinalizedTwinReconciliationResult;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -215,7 +218,7 @@ function harness(overrides: HarnessOverrides = {}) {
         reconcileFinalizedTwin: async () => {
           events.push('finalized-twin-reconciled');
           await overrides.reconcileImpl?.();
-          return overrides.reconcileRetired ?? false;
+          return overrides.reconcileResult ?? 'preserved';
         },
       },
       publicSnapshotStore: snapshotStore,
@@ -281,7 +284,7 @@ describe('public SWM snapshot materialization', () => {
     const h = harness({
       contentPresent: () => true,
       storedHead: () => ({ version: '1', needsRepair: false }),
-      reconcileRetired: true,
+      reconcileResult: 'retired',
     });
     const summary = await h.run();
     expect(summary.failedPhases).toBe(0);
@@ -292,6 +295,36 @@ describe('public SWM snapshot materialization', () => {
     ]);
     expect(h.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
       .toHaveLength(0);
+  });
+
+  it('counts metadata that was inserted and immediately retired', async () => {
+    const h = harness({
+      contentPresent: () => false,
+      reconcileResult: 'retired',
+    });
+    const summary = await h.run();
+    expect(summary.insertedMetaTriples).toBe(h.fx.meta.length);
+    expect(h.inserted.flat().filter((quad) => (
+      quad.subject === `${UAL}#dkg-swm-head`
+      || quad.subject === `urn:dkg:share:${CG}:snapshot-materialization-op`
+    ))).toHaveLength(h.fx.meta.length);
+  });
+
+  it('does not replay metadata when another cleanup wins the reconciliation race', async () => {
+    let h!: ReturnType<typeof harness>;
+    h = harness({
+      contentPresent: () => false,
+      // Model the durable-VM reconciler acquiring the KA lock first and deleting
+      // the SWM graph/head. This requester then observes no head and returns false.
+      reconcileImpl: async () => { h.inserted.length = 0; },
+      reconcileResult: 'already-retired',
+    });
+    await h.run();
+    const recreated = h.inserted.flat().filter((quad) => (
+      quad.subject === `${UAL}#dkg-swm-head`
+      || quad.subject === `urn:dkg:share:${CG}:snapshot-materialization-op`
+    ));
+    expect(recreated).toHaveLength(0);
   });
 
   it('closes the gossip race: in-lock version re-check skips a superseded snapshot', async () => {

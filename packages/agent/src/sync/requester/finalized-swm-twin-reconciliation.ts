@@ -1,11 +1,15 @@
 import {
   MemoryLayer,
   assertSafeIri,
+  contextGraphSharedMemoryMetaUri,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
+  parseContextGraphLayerUri,
   validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
+  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
@@ -16,16 +20,21 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
-import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
+import {
+  parseGraphScopedSwmRecoveryDescriptors,
+  type GraphScopedSwmRecoveryDescriptor,
+} from '../graph-scoped-swm-recovery.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
 export type FinalizedSwmTwinReconciliationOutcome =
   | 'retired'
-  | 'absent'
+  | 'already-retired'
   | 'head-missing-or-ambiguous'
   | 'head-version-mismatch'
   | 'vm-changed'
+  | 'vm-metadata-mismatch'
+  | 'commitment-mismatch'
   | 'content-mismatch';
 
 export interface FinalizedSwmTwinRetirement {
@@ -99,6 +108,14 @@ interface FinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
   readonly swmMetaGraph: string;
   readonly headSubject: string;
   readonly expectedVmDigest: string;
+  readonly expectedPublicQuadsCount: number;
+  readonly expectedSwmOperation?: Readonly<{
+    shareOperationId: string;
+    publicQuadsDigest: string;
+    publicQuadsCount: number;
+    privateTripleCount: number;
+    privateMerkleRoot?: string;
+  }>;
 }
 
 async function reconcileFinalizedSwmTwinEvidence(params: {
@@ -115,26 +132,101 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   );
 
   return withKeyedLocks(params.writeLocks, [lockKey], async () => {
-    const head = await readExactSwmHead(params.store, {
-      metaGraph: evidence.swmMetaGraph,
-      headSubject: evidence.headSubject,
-    });
-    if (head === null) return 'head-missing-or-ambiguous';
-    if (head.version !== evidence.assertionVersion) return 'head-version-mismatch';
+    // The VM graph URI is version-independent, so bytes alone cannot prove
+    // which assertion they belong to. Re-read the canonical confirmed envelope
+    // inside the same proof boundary and bind those bytes to exact current VM
+    // version, graph, public count, private commitment, and Merkle root.
+    const currentVm = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(
+      params.store,
+      { contextGraphId: evidence.contextGraphId, ual: evidence.kaUal },
+    );
+    if (currentVm.state !== 'confirmed') return 'vm-metadata-mismatch';
+    const vmMetadata = currentVm.envelope;
+    if (
+      BigInt(vmMetadata.assertionVersion) !== evidence.assertionVersion
+      || vmMetadata.assertionGraph !== evidence.vmGraph
+      || vmMetadata.subGraphName !== evidence.subGraphName
+      || vmMetadata.publicTripleCount !== evidence.expectedPublicQuadsCount
+    ) {
+      return 'vm-metadata-mismatch';
+    }
+    const expectedOperation = evidence.expectedSwmOperation;
+    if (expectedOperation && !privateCommitmentsEqual(expectedOperation, vmMetadata)) {
+      return 'commitment-mismatch';
+    }
+
+    const vmQuads = await readExactGraph(params.store, evidence.vmGraph);
+    const vmDigest = workspacePublicQuadsDigest(vmQuads);
+    if (
+      vmQuads.length !== vmMetadata.publicTripleCount
+      || vmDigest !== evidence.expectedVmDigest
+    ) {
+      return 'vm-changed';
+    }
+    const computedVmRoot = computeFlatKCRootV10(
+      vmQuads,
+      vmMetadata.privateMerkleRoot ? [vmMetadata.privateMerkleRoot] : [],
+    );
+    if (!bytesEqual(computedVmRoot, vmMetadata.merkleRoot)) {
+      return 'vm-metadata-mismatch';
+    }
+
+    const currentHead = await readCanonicalSwmHead(params.store, evidence);
+    if (currentHead.state === 'invalid') return 'head-missing-or-ambiguous';
+    if (currentHead.state === 'absent') {
+      // A competing finalized-twin cleanup can win after snapshot
+      // materialization releases the lock. Only classify that state as already
+      // retired when both the canonical head and exact SWM graph are gone;
+      // callers may then suppress a stale bulk metadata replay.
+      const remainingSwm = await readExactGraph(params.store, evidence.swmGraph);
+      if (remainingSwm.length > 0) return 'head-missing-or-ambiguous';
+      // Retirement is idempotent and discovers operation rows by exact KA UAL,
+      // not through the now-missing head. Re-run it to finish a failure that
+      // deleted graph/head but left operation metadata behind.
+      await params.retire(evidence);
+      await invalidateSwmMaterializationWitness(params.store, evidence.swmGraph, {
+        priority: 'background',
+        source: 'agent.durableSync.finalizedSwmTwin.witnessInvalidate',
+      }).catch(() => {});
+      return 'already-retired';
+    }
+    const head = currentHead.descriptor;
+    if (BigInt(head.assertionVersion) !== evidence.assertionVersion) {
+      return 'head-version-mismatch';
+    }
     if (head.kaUal !== evidence.kaUal || head.assertionGraph !== evidence.swmGraph) {
       return 'head-missing-or-ambiguous';
     }
+    if (
+      head.publicQuadsDigest !== vmDigest
+      || head.publicQuadsCount !== vmMetadata.publicTripleCount
+      || !privateCommitmentsEqual(head, vmMetadata)
+    ) {
+      return 'commitment-mismatch';
+    }
+    if (expectedOperation && (
+      head.shareOperationId !== expectedOperation.shareOperationId
+      || head.publicQuadsDigest !== expectedOperation.publicQuadsDigest
+      || head.publicQuadsCount !== expectedOperation.publicQuadsCount
+      || !privateCommitmentsEqual(head, expectedOperation)
+    )) {
+      return 'head-missing-or-ambiguous';
+    }
 
-    // Probe VM first. Most SWM snapshots are legitimately unfinalized, so
-    // their VM graph is empty; avoid reading and hashing every full SWM graph
-    // in that overwhelmingly common case. Both reads remain inside the lock.
-    const vmQuads = await readExactGraph(params.store, evidence.vmGraph);
-    const vmDigest = workspacePublicQuadsDigest(vmQuads);
-    if (vmDigest !== evidence.expectedVmDigest) return 'vm-changed';
     const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
-    if (swmQuads.length === 0) return 'absent';
-    if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
+    if (
+      swmQuads.length > 0
+      && (
+        swmQuads.length !== vmMetadata.publicTripleCount
+        || workspacePublicQuadsDigest(swmQuads) !== vmDigest
+      )
+    ) {
+      return 'content-mismatch';
+    }
 
+    // `retire` is intentionally invoked even when the SWM graph is already
+    // absent: production retirement drops graph(s) before metadata, so this is
+    // the idempotent retry that completes a prior graph-first partial failure.
     await params.retire(evidence);
     await invalidateSwmMaterializationWitness(params.store, evidence.swmGraph, {
       priority: 'background',
@@ -146,19 +238,18 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
 
 function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedSwmTwinEvidence {
   const scope = createGraphKnowledgeAssetScope(asset.ual, asset.assertionVersion);
-  const root = `did:dkg:context-graph:${asset.contextGraphId}`;
-  const boundary = '/_verifiable_memory/';
-  const boundaryIndex = asset.assertionGraph.lastIndexOf(boundary);
-  if (boundaryIndex < 0) {
-    throw new Error(`Authenticated VM graph has no verifiable-memory boundary: ${asset.assertionGraph}`);
+  const parsed = parseContextGraphLayerUri(asset.assertionGraph);
+  if (
+    parsed === undefined
+    || parsed.layer !== MemoryLayer.VerifiableMemory
+    || parsed.contextGraphId !== asset.contextGraphId
+    || parsed.agentAddress.toLowerCase() !== scope.agentAddress.toLowerCase()
+    || parsed.kaNumber !== BigInt(scope.kaNumber)
+  ) {
+    throw new Error(`Authenticated VM graph identity mismatch: ${asset.assertionGraph}`);
   }
-  const graphScope = asset.assertionGraph.slice(0, boundaryIndex);
-  let subGraphName: string | undefined;
-  if (graphScope !== root) {
-    if (!graphScope.startsWith(`${root}/`)) {
-      throw new Error(`Authenticated VM graph is outside context graph ${asset.contextGraphId}`);
-    }
-    subGraphName = graphScope.slice(root.length + 1);
+  const subGraphName = parsed.subGraphName;
+  if (subGraphName !== undefined) {
     const validation = validateSubGraphName(subGraphName);
     if (!validation.valid) {
       throw new Error(`Authenticated VM graph has invalid subgraph: ${validation.reason}`);
@@ -181,9 +272,7 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedSwmTwinE
     scope,
     subGraphName,
   );
-  const swmMetaGraph = subGraphName
-    ? `${root}/${subGraphName}/_shared_memory_meta`
-    : `${root}/_shared_memory_meta`;
+  const swmMetaGraph = contextGraphSharedMemoryMetaUri(asset.contextGraphId, subGraphName);
   return {
     contextGraphId: asset.contextGraphId,
     ...(subGraphName === undefined ? {} : { subGraphName }),
@@ -194,6 +283,7 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedSwmTwinE
     swmMetaGraph,
     headSubject: `${asset.ual}#dkg-swm-head`,
     expectedVmDigest: workspacePublicQuadsDigest(asset.dataQuads),
+    expectedPublicQuadsCount: asset.dataQuads.length,
     agentAddress: scope.agentAddress,
     kaNumber: BigInt(scope.kaNumber),
   };
@@ -236,6 +326,16 @@ function evidenceFromSwmDescriptor(
     swmMetaGraph: descriptor.metaGraph,
     headSubject: descriptor.headSubject,
     expectedVmDigest: descriptor.publicQuadsDigest,
+    expectedPublicQuadsCount: descriptor.publicQuadsCount,
+    expectedSwmOperation: {
+      shareOperationId: descriptor.shareOperationId,
+      publicQuadsDigest: descriptor.publicQuadsDigest,
+      publicQuadsCount: descriptor.publicQuadsCount,
+      privateTripleCount: descriptor.privateTripleCount,
+      ...(descriptor.privateMerkleRoot
+        ? { privateMerkleRoot: descriptor.privateMerkleRoot }
+        : {}),
+    },
     agentAddress: scope.agentAddress,
     kaNumber: BigInt(scope.kaNumber),
   };
@@ -257,37 +357,63 @@ async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]
   return result.quads.map((quad) => ({ ...quad, graph: '' }));
 }
 
-async function readExactSwmHead(
+type CanonicalSwmHeadRead =
+  | Readonly<{ state: 'absent' }>
+  | Readonly<{ state: 'invalid' }>
+  | Readonly<{ state: 'present'; descriptor: GraphScopedSwmRecoveryDescriptor }>;
+
+async function readCanonicalSwmHead(
   store: TripleStore,
-  input: Readonly<{ metaGraph: string; headSubject: string }>,
-): Promise<Readonly<{
-  version: bigint;
-  kaUal: string;
-  assertionGraph: string;
-}> | null> {
+  evidence: FinalizedSwmTwinEvidence,
+): Promise<CanonicalSwmHeadRead> {
   const result = await store.query(
-    `SELECT DISTINCT ?version ?kaUal ?assertionGraph WHERE { `
-    + `GRAPH <${assertSafeIri(input.metaGraph)}> { `
-    + `<${assertSafeIri(input.headSubject)}> <${DKG}assertionVersion> ?version ; `
-    + `<${DKG}kaUal> ?kaUal ; <${DKG}assertionGraph> ?assertionGraph } }`,
+    `CONSTRUCT { <${assertSafeIri(evidence.headSubject)}> ?headPredicate ?headObject . `
+    + `?operation ?operationPredicate ?operationObject } WHERE { `
+    + `GRAPH <${assertSafeIri(evidence.swmMetaGraph)}> { `
+    + `<${assertSafeIri(evidence.headSubject)}> ?headPredicate ?headObject . `
+    + `OPTIONAL { <${assertSafeIri(evidence.headSubject)}> <${DKG}shareOperationId> ?shareId . `
+    + `?operation <${DKG}shareOperationId> ?shareId ; `
+    + `<${DKG}kaUal> <${assertSafeIri(evidence.kaUal)}> ; `
+    + `?operationPredicate ?operationObject } } }`,
     { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readHead' },
   );
-  if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
-  const row = result.bindings[0]!;
-  const version = parseInteger(row['version']);
-  const kaUal = row['kaUal'];
-  const assertionGraph = row['assertionGraph'];
-  if (version === null || !kaUal || !assertionGraph) return null;
-  return { version, kaUal, assertionGraph };
+  if (result.type === 'bindings' && result.bindings.length === 0) {
+    return { state: 'absent' };
+  }
+  if (result.type !== 'quads') {
+    throw new Error(`Unexpected SWM head query result for ${evidence.kaUal}: ${result.type}`);
+  }
+  if (result.quads.length === 0) return { state: 'absent' };
+  try {
+    const descriptors = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: evidence.contextGraphId,
+      metaQuads: result.quads.map((quad) => ({ ...quad, graph: evidence.swmMetaGraph })),
+      ...(evidence.subGraphName === undefined
+        ? {}
+        : { registeredSubGraphNames: [evidence.subGraphName] }),
+    });
+    return descriptors.length === 1
+      ? { state: 'present', descriptor: descriptors[0]! }
+      : { state: 'invalid' };
+  } catch {
+    return { state: 'invalid' };
+  }
 }
 
-function parseInteger(value: string | undefined): bigint | null {
-  if (!value) return null;
-  const match = /^"?([0-9]+)"?(?:\^\^<[^>]+>)?$/.exec(value);
-  if (!match?.[1]) return null;
-  try {
-    return BigInt(match[1]);
-  } catch {
-    return null;
-  }
+function privateCommitmentsEqual(
+  left: Readonly<{ privateTripleCount: number; privateMerkleRoot?: string | Uint8Array }>,
+  right: Readonly<{ privateTripleCount: number; privateMerkleRoot?: string | Uint8Array }>,
+): boolean {
+  return left.privateTripleCount === right.privateTripleCount
+    && normalizePrivateRoot(left.privateMerkleRoot) === normalizePrivateRoot(right.privateMerkleRoot);
+}
+
+function normalizePrivateRoot(value: string | Uint8Array | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'string') return value.toLowerCase();
+  return `0x${[...value].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((byte, index) => byte === right[index]);
 }

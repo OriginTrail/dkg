@@ -156,6 +156,40 @@ describe('graph-scoped KA publish storage', () => {
       .resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('removes dangling operation metadata when a prior cleanup already deleted the head', async () => {
+    const scope = createGraphKnowledgeAssetScope(UAL, 1);
+    const swmMetaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_shared_memory_meta`;
+    const operations = Array.from(
+      { length: 18 },
+      (_, index) => `urn:dkg:share:${CONTEXT_GRAPH}:partial-cleanup-${index}`,
+    );
+    const unrelatedOperation = `urn:dkg:share:${CONTEXT_GRAPH}:unrelated-partial-cleanup`;
+    await store.insert([
+      ...operations.flatMap((operation) => [
+        { graph: swmMetaGraph, subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+        { graph: swmMetaGraph, subject: operation, predicate: 'http://dkg.io/ontology/kaUal', object: UAL },
+      ]),
+      { graph: swmMetaGraph, subject: unrelatedOperation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+      { graph: swmMetaGraph, subject: unrelatedOperation, predicate: 'http://dkg.io/ontology/kaUal', object: `did:dkg:base:8453/${AUTHOR}/42` },
+    ]);
+
+    await publisher.clearPublishedKnowledgeAssetSwm(
+      CONTEXT_GRAPH,
+      {
+        kind: 'named-lifecycle',
+        identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) },
+      },
+      undefined,
+      createOperationContext('test'),
+      UAL,
+    );
+
+    await expect(store.query(`ASK { GRAPH <${swmMetaGraph}> { ?operation <http://dkg.io/ontology/kaUal> <${UAL}> } }`))
+      .resolves.toMatchObject({ type: 'boolean', value: false });
+    await expect(store.query(`ASK { GRAPH <${swmMetaGraph}> { <${unrelatedOperation}> ?p ?o } }`))
+      .resolves.toMatchObject({ type: 'boolean', value: true });
+  });
+
   it('replaces the complete VM graph and preserves the prior version on failed swap', async () => {
     const scope = createGraphKnowledgeAssetScope(UAL, 1);
     const vmGraph = knowledgeAssetLayerGraphUri(

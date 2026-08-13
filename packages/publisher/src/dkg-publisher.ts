@@ -7223,26 +7223,37 @@ export class DKGPublisher implements Publisher {
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, subGraphName);
     const swmMetaGraph = this.graphManager.sharedMemoryMetaUri(contextGraphId, subGraphName);
     const headSubject = assertSafeIri(`${kaScope.ual}#dkg-swm-head`);
-    const operationRows = await this.store.query(`
-      SELECT DISTINCT ?operation WHERE {
-        GRAPH <${assertSafeIri(swmMetaGraph)}> {
-          <${headSubject}> <http://dkg.io/ontology/shareOperationId> ?shareId .
-          ?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
-              <http://dkg.io/ontology/WorkspaceOperation> ;
-            <http://dkg.io/ontology/shareOperationId> ?shareId ;
-            <http://dkg.io/ontology/kaUal> <${assertSafeIri(kaScope.ual)}> .
-        }
-      }
-      LIMIT 16
-    `);
-    const operationSubjects = operationRows.type === 'bindings'
-      ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
-      : [];
     const graphs = await resolveSharedMemoryScopeGraphs(this.store, swmGraph, scope);
     for (const graph of graphs) {
       await this.store.dropGraph(graph);
     }
     await this.store.deleteByPattern({ graph: swmMetaGraph, subject: headSubject });
+    // Discover exact-KA operation history in bounded query pages. This lookup does
+    // not depend on the head: graph-first cleanup can fail after deleting the
+    // graph or head, and the next idempotent pass must still discover and
+    // remove every dangling operation subject.
+    const operationSubjects = new Set<string>();
+    let operationOffset = 0;
+    while (true) {
+      const operationRows = await this.store.query(`
+        SELECT DISTINCT ?operation WHERE {
+          GRAPH <${assertSafeIri(swmMetaGraph)}> {
+            ?operation <http://www.w3.org/1999/02/22-rdf-syntax-ns#type>
+                <http://dkg.io/ontology/WorkspaceOperation> ;
+              <http://dkg.io/ontology/kaUal> <${assertSafeIri(kaScope.ual)}> .
+          }
+        }
+        ORDER BY ?operation
+        LIMIT 16
+        OFFSET ${operationOffset}
+      `);
+      const page = operationRows.type === 'bindings'
+        ? [...new Set(operationRows.bindings.map((row) => row['operation']).filter(Boolean))]
+        : [];
+      for (const operationSubject of page) operationSubjects.add(operationSubject);
+      if (page.length < 16) break;
+      operationOffset += 16;
+    }
     for (const operationSubject of operationSubjects) {
       await this.store.deleteByPattern({
         graph: swmMetaGraph,
@@ -7252,7 +7263,7 @@ export class DKGPublisher implements Publisher {
     this.log.info(
       ctx,
       `Cleared graph-scoped KA SWM ${scope.identity.agentAddress}/${scope.identity.kaNumber.toString()} ` +
-        `from ${graphs.length} exact graph(s) and ${operationSubjects.length + 1} metadata subject(s)`,
+        `from ${graphs.length} exact graph(s) and ${operationSubjects.size + 1} metadata subject(s)`,
     );
   }
 

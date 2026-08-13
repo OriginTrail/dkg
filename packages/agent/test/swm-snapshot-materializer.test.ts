@@ -21,7 +21,7 @@
  *     ambiguous mix. A second round is a pure no-op, which also proves the
  *     digest survives the store round-trip (no churn).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -125,6 +125,28 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     expect(v1.assertionGraph).toBe(v2.assertionGraph);
     expect(v1.payload).toHaveLength(v2.payload.length);
     expect(v1.digest).not.toBe(v2.digest);
+  });
+
+  it('forwards the optional production finalized-twin reconciler with its structured result', async () => {
+    const store = new OxigraphStore();
+    const reconcileFinalizedTwin = vi.fn(async () => 'already-retired' as const);
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map(),
+      invalidateListContextGraphsCache: () => {},
+      reconcileFinalizedTwin,
+    });
+    const descriptor = descriptorFor(v1);
+
+    await expect(materializer.reconcileFinalizedTwin?.(CG, descriptor))
+      .resolves.toBe('already-retired');
+    expect(reconcileFinalizedTwin).toHaveBeenCalledWith(CG, descriptor);
+  });
+
+  it('keeps finalized-twin reconciliation optional when production omits the dependency', () => {
+    const store = new OxigraphStore();
+    const { materializer } = materializerFor(store);
+    expect(materializer.reconcileFinalizedTwin).toBeUndefined();
   });
 
   describe('isGraphAssetMaterialized', () => {

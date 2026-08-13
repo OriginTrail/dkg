@@ -6,6 +6,9 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
+  generateGraphKnowledgeAssetMetadata,
+  generateKnowledgeAssetShareMetadata,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
@@ -24,12 +27,18 @@ const UAL = `did:dkg:base:8453/${AUTHOR}/17`;
 const DKG = 'http://dkg.io/ontology/';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
-function fixture(subGraphName?: string): Readonly<{
+function fixture(
+  subGraphName?: string,
+  privateCommitment?: Readonly<{ count: number; root: Uint8Array }>,
+): Readonly<{
   asset: VerifiedGraphScopedAsset;
   swmGraph: string;
   swmMetaGraph: string;
   headSubject: string;
   payload: Quad[];
+  privateTripleCount: number;
+  privateMerkleRoot?: Uint8Array;
+  subGraphName?: string;
 }> {
   const scope = createGraphKnowledgeAssetScope(UAL, 3);
   const vmGraph = knowledgeAssetLayerGraphUri(
@@ -48,6 +57,34 @@ function fixture(subGraphName?: string): Readonly<{
     { subject: 'urn:asset', predicate: 'urn:value', object: '"finalized"', graph: vmGraph },
     { subject: 'urn:asset', predicate: 'urn:version', object: '"3"', graph: vmGraph },
   ];
+  const graphlessPayload = payload.map((quad) => ({ ...quad, graph: '' }));
+  const privateTripleCount = privateCommitment?.count ?? 0;
+  const privateMerkleRoot = privateCommitment?.root;
+  const metadataQuads = generateGraphKnowledgeAssetMetadata({
+    contextGraphId: CG,
+    ual: UAL,
+    merkleRoot: computeFlatKCRootV10(
+      graphlessPayload,
+      privateMerkleRoot ? [privateMerkleRoot] : [],
+    ),
+    publisherPeerId: 'peer-source',
+    timestamp: new Date(0),
+    assertionVersion: 3,
+    publicTripleCount: payload.length,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    assertionGraph: vmGraph,
+    ...(subGraphName ? { subGraphName } : {}),
+  }, {
+    status: 'confirmed',
+    confirmation: {
+      kind: 'finalized-materialization',
+      provenance: {
+        batchId: 17n,
+        materializedVersion: { blockNumber: 10, txIndex: 0 },
+      },
+    },
+  });
   return {
     asset: {
       contextGraphId: CG,
@@ -56,7 +93,7 @@ function fixture(subGraphName?: string): Readonly<{
       assertionGraph: vmGraph,
       metaGraph: `did:dkg:context-graph:${CG}/_meta`,
       dataQuads: payload,
-      metadataQuads: [],
+      metadataQuads,
     },
     swmGraph,
     swmMetaGraph: subGraphName
@@ -64,6 +101,9 @@ function fixture(subGraphName?: string): Readonly<{
       : `did:dkg:context-graph:${CG}/_shared_memory_meta`,
     headSubject: `${UAL}#dkg-swm-head`,
     payload,
+    privateTripleCount,
+    ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+    ...(subGraphName ? { subGraphName } : {}),
   };
 }
 
@@ -74,9 +114,16 @@ async function seedTwin(
     swmObject?: string;
     vmObject?: string;
     headVersion?: bigint;
+    swmPrivateTripleCount?: number;
+    swmPrivateMerkleRoot?: Uint8Array;
   }> = {},
 ): Promise<void> {
   const version = options.headVersion ?? input.asset.assertionVersion;
+  const shareOperationId = `op-v${version.toString()}`;
+  const operationSubject = `urn:dkg:share:${CG}:${shareOperationId}`;
+  const privateTripleCount = options.swmPrivateTripleCount ?? input.privateTripleCount;
+  const privateMerkleRoot = options.swmPrivateMerkleRoot ?? input.privateMerkleRoot;
+  const publicDigest = workspacePublicQuadsDigest(input.payload);
   await store.insert([
     ...input.payload.map((quad) => ({
       ...quad,
@@ -87,6 +134,31 @@ async function seedTwin(
       graph: input.swmGraph,
       ...(options.swmObject === undefined ? {} : { object: options.swmObject }),
     })),
+    ...input.asset.metadataQuads,
+    ...generateKnowledgeAssetShareMetadata({
+      shareOperationId,
+      contextGraphId: CG,
+      kaUal: UAL,
+      assertionVersion: version,
+      publicTripleCount: input.payload.length,
+      privateTripleCount,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+      publisherPeerId: 'peer-source',
+      timestamp: new Date(0),
+      ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
+    }, input.swmMetaGraph),
+    {
+      subject: operationSubject,
+      predicate: `${DKG}publicQuadsDigest`,
+      object: `"${publicDigest}"`,
+      graph: input.swmMetaGraph,
+    },
+    {
+      subject: operationSubject,
+      predicate: `${DKG}publicSnapshotRef`,
+      object: `"${publicDigest}"`,
+      graph: input.swmMetaGraph,
+    },
     {
       subject: input.headSubject,
       predicate: `${DKG}contentScopeVersion`,
@@ -109,6 +181,12 @@ async function seedTwin(
       subject: input.headSubject,
       predicate: `${DKG}assertionGraph`,
       object: input.swmGraph,
+      graph: input.swmMetaGraph,
+    },
+    {
+      subject: input.headSubject,
+      predicate: `${DKG}shareOperationId`,
+      object: `"${shareOperationId}"`,
       graph: input.swmMetaGraph,
     },
   ]);
@@ -156,13 +234,14 @@ describe('durable VM / SWM tier reconciliation', () => {
       descriptor: {
         metaGraph: input.swmMetaGraph,
         headSubject: input.headSubject,
-        operationSubject: `urn:dkg:share:${CG}:op`,
+        operationSubject: `urn:dkg:share:${CG}:op-v3`,
         kaUal: UAL,
         assertionVersion: input.asset.assertionVersion.toString(),
         assertionGraph: input.swmGraph,
-        shareOperationId: 'op',
+        shareOperationId: 'op-v3',
         publicQuadsDigest: workspacePublicQuadsDigest(input.payload),
         publicQuadsCount: input.payload.length,
+        privateTripleCount: 0,
         publicSnapshotRef: workspacePublicQuadsDigest(input.payload),
         publisherPeerId: 'peer-source',
         metadataQuads: [],
@@ -267,14 +346,8 @@ describe('durable VM / SWM tier reconciliation', () => {
       await store.deleteByPattern({
         graph: input.swmMetaGraph,
         subject: input.headSubject,
-        predicate: `${DKG}assertionVersion`,
       });
-      await store.insert([{
-        subject: input.headSubject,
-        predicate: `${DKG}assertionVersion`,
-        object: `"4"^^<${XSD_INTEGER}>`,
-        graph: input.swmMetaGraph,
-      }]);
+      await seedTwin(store, input, { headVersion: 4n });
     });
     await acquired;
     const retire = vi.fn(async () => {});
@@ -288,6 +361,177 @@ describe('durable VM / SWM tier reconciliation', () => {
     await writer;
 
     await expect(reconciliation).resolves.toBe('head-version-mismatch');
+    expect(retire).not.toHaveBeenCalled();
+  });
+
+  it('preserves unfinalized SWM v4 when finalized VM v3 has the same public bytes', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input, { headVersion: 4n });
+    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+
+    const outcome = await reconcileFinalizedSwmTwinFromDescriptor({
+      store,
+      writeLocks: new Map(),
+      contextGraphId: CG,
+      descriptor: {
+        metaGraph: input.swmMetaGraph,
+        headSubject: input.headSubject,
+        operationSubject: `urn:dkg:share:${CG}:op-v4`,
+        kaUal: UAL,
+        assertionVersion: '4',
+        assertionGraph: input.swmGraph,
+        shareOperationId: 'op-v4',
+        publicQuadsDigest: workspacePublicQuadsDigest(input.payload),
+        publicQuadsCount: input.payload.length,
+        privateTripleCount: 0,
+        publicSnapshotRef: workspacePublicQuadsDigest(input.payload),
+        publisherPeerId: 'peer-source',
+        metadataQuads: [],
+      },
+      retire,
+    });
+
+    expect(outcome).toBe('vm-metadata-mismatch');
+    expect(retire).not.toHaveBeenCalled();
+    expect(await store.countQuads(input.swmGraph)).toBe(input.payload.length);
+  });
+
+  it('retries metadata cleanup after a prior retirement removed only the graph', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    const partialRetire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+      throw new Error('metadata delete failed');
+    });
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire: partialRetire,
+    })).rejects.toThrow('metadata delete failed');
+
+    const retryRetire = vi.fn(async () => {
+      await store.deleteByPattern({
+        graph: input.swmMetaGraph,
+        subject: input.headSubject,
+      });
+    });
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire: retryRetire,
+    })).resolves.toBe('retired');
+    expect(retryRetire).toHaveBeenCalledTimes(1);
+    await expect(store.query(
+      `ASK { GRAPH <${input.swmMetaGraph}> { <${input.headSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('reports an exact already-retired state when a competing cleanup removed head and graph', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.dropGraph(input.swmGraph);
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: input.headSubject,
+    });
+    const operationSubject = `urn:dkg:share:${CG}:op-v3`;
+    const retire = vi.fn(async () => {
+      await store.deleteByPattern({
+        graph: input.swmMetaGraph,
+        subject: operationSubject,
+      });
+    });
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('already-retired');
+    expect(retire).toHaveBeenCalledTimes(1);
+    await expect(store.query(
+      `ASK { GRAPH <${input.swmMetaGraph}> { <${operationSubject}> ?p ?o } }`,
+    )).resolves.toMatchObject({ type: 'boolean', value: false });
+  });
+
+  it('preserves matching public bytes when the SWM private commitment differs from VM', async () => {
+    const vmPrivateRoot = new Uint8Array(32).fill(0x11);
+    const swmPrivateRoot = new Uint8Array(32).fill(0x22);
+    const store = new OxigraphStore();
+    const input = fixture(undefined, { count: 2, root: vmPrivateRoot });
+    await seedTwin(store, input, {
+      swmPrivateTripleCount: 2,
+      swmPrivateMerkleRoot: swmPrivateRoot,
+    });
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('commitment-mismatch');
+    expect(retire).not.toHaveBeenCalled();
+    expect(await store.countQuads(input.swmGraph)).toBe(input.payload.length);
+  });
+
+  it('fails closed when the current SWM head points at another assertion graph', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: input.headSubject,
+      predicate: `${DKG}assertionGraph`,
+    });
+    await store.insert([{
+      subject: input.headSubject,
+      predicate: `${DKG}assertionGraph`,
+      object: `${input.swmGraph}/other`,
+      graph: input.swmMetaGraph,
+    }]);
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('head-missing-or-ambiguous');
+    expect(retire).not.toHaveBeenCalled();
+  });
+
+  it('does not treat tentative VM metadata as finalized evidence', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.deleteByPattern({
+      graph: input.asset.metaGraph,
+      subject: UAL,
+      predicate: `${DKG}status`,
+    });
+    await store.insert([{
+      subject: UAL,
+      predicate: `${DKG}status`,
+      object: '"tentative"',
+      graph: input.asset.metaGraph,
+    }]);
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwin({
+      store,
+      writeLocks: new Map(),
+      asset: input.asset,
+      retire,
+    })).resolves.toBe('vm-metadata-mismatch');
     expect(retire).not.toHaveBeenCalled();
   });
 });

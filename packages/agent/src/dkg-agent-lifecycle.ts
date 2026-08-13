@@ -112,6 +112,7 @@ import {
 import {
   reconcileFinalizedSwmTwin,
   reconcileFinalizedSwmTwinFromDescriptor,
+  type FinalizedSwmTwinRetirement,
 } from './sync/requester/finalized-swm-twin-reconciliation.js';
 import {
   EVMChainAdapter,
@@ -1547,6 +1548,25 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  private async retireFinalizedSwmTwin(
+    candidate: FinalizedSwmTwinRetirement,
+    ctx: OperationContext,
+  ): Promise<void> {
+    await this.publisher.clearPublishedKnowledgeAssetSwm(
+      candidate.contextGraphId,
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: candidate.agentAddress,
+          kaNumber: candidate.kaNumber,
+        },
+      },
+      candidate.subGraphName,
+      ctx,
+      candidate.kaUal,
+    );
+  }
+
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
     ctx: OperationContext,
     contextGraphId: string,
@@ -5781,21 +5801,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 store: this.store,
                 writeLocks: this.writeLocks,
                 asset: authentication.asset,
-                retire: async (candidate) => {
-                  await this.publisher.clearPublishedKnowledgeAssetSwm(
-                    candidate.contextGraphId,
-                    {
-                      kind: 'named-lifecycle',
-                      identity: {
-                        agentAddress: candidate.agentAddress,
-                        kaNumber: candidate.kaNumber,
-                      },
-                    },
-                    candidate.subGraphName,
-                    ctx,
-                    candidate.kaUal,
-                  );
-                },
+                retire: (candidate) => this.retireFinalizedSwmTwin(candidate, ctx),
               });
               if (retirement === 'retired') {
                 this.invalidateListContextGraphsCache();
@@ -6885,21 +6891,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   writeLocks: this.writeLocks,
                   contextGraphId,
                   descriptor,
-                  retire: async (candidate) => {
-                    await this.publisher.clearPublishedKnowledgeAssetSwm(
-                      candidate.contextGraphId,
-                      {
-                        kind: 'named-lifecycle',
-                        identity: {
-                          agentAddress: candidate.agentAddress,
-                          kaNumber: candidate.kaNumber,
-                        },
-                      },
-                      candidate.subGraphName,
-                      ctx,
-                      candidate.kaUal,
-                    );
-                  },
+                  retire: (candidate) => this.retireFinalizedSwmTwin(candidate, ctx),
                 });
                 if (retirement === 'retired') {
                   this.invalidateListContextGraphsCache();
@@ -6908,7 +6900,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                     `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
                   );
                 }
-                return retirement === 'retired';
+                return retirement === 'retired' || retirement === 'already-retired'
+                  ? retirement
+                  : 'preserved';
               } catch (cause) {
                 // Snapshot materialization is already complete. Preserve the
                 // SWM graph and retry on a later pass rather than changing a
@@ -6918,7 +6912,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   `Deferred finalized SWM twin reconciliation for ${descriptor.kaUal}: `
                   + `${cause instanceof Error ? cause.message : String(cause)}`,
                 );
-                return false;
+                return 'preserved';
               }
             },
           }),

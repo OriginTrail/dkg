@@ -44,6 +44,8 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly shareOperationId: string;
   readonly publicQuadsDigest: string;
   readonly publicQuadsCount: number;
+  readonly privateTripleCount: number;
+  readonly privateMerkleRoot?: string;
   readonly publicSnapshotRef?: string;
   readonly publicSnapshotGraph?: string;
   readonly publisherPeerId: string;
@@ -175,8 +177,11 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has invalid public/private counts`);
     }
     const privateRoot = optionalSingle(operationRows, PRIVATE_MERKLE_ROOT, 'privateMerkleRoot');
+    const privateMerkleRoot = privateRoot === undefined
+      ? undefined
+      : stripLiteral(privateRoot).toLowerCase();
     if (
-      (privateTripleCount > 0 && !/^0x[0-9a-fA-F]{64}$/.test(stripLiteral(privateRoot ?? '')))
+      (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/.test(privateMerkleRoot ?? ''))
       || (privateTripleCount === 0 && privateRoot !== undefined)
     ) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid private commitment`);
@@ -229,6 +234,8 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       shareOperationId,
       publicQuadsDigest,
       publicQuadsCount,
+      privateTripleCount,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
       ...(publicSnapshotRef ? { publicSnapshotRef } : {}),
       ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
       publisherPeerId,
