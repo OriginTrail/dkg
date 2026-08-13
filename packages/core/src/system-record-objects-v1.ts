@@ -111,7 +111,6 @@ export {
   evaluateAuthorityTransitionConflictV1,
   evaluateAuthorityTransitionV1,
   isAgentProfileHeadBoundToAcceptedTransitionV1,
-  isAuthorityTransitionBoundToPriorHeadV1,
   isDirectResolvingSuccessorV1,
   type AgentProfileAcceptedAuthorityStateV1,
   type AgentProfileHeadAdvanceEvidenceV1,

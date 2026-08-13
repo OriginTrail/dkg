@@ -44,7 +44,7 @@ import {
   isAgentProfileHeadBoundToAcceptedTransitionV1,
   isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
-  isAuthorityTransitionBoundToPriorHeadV1,
+  classifyAuthorityTransitionBindingV1,
   isSafeNow,
   isTombstoneBoundToPredecessorV1,
   validateAgentProfileForkResolutionEvidenceV1,
@@ -55,7 +55,6 @@ export {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAuthorityTransitionV1,
   isAgentProfileHeadBoundToAcceptedTransitionV1,
-  isAuthorityTransitionBoundToPriorHeadV1,
   isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
   isSafeNow,
@@ -381,7 +380,7 @@ function evaluateAbsentAgentProfileHeadAdvanceV1(
  * A lower-sequence ACTIVE candidate is stale, but that is a fact about the
  * SEQUENCE COMPARISON, not about the late-tombstone rule, and it is only sound
  * once the caller has established that both heads belong to the same record --
- * which the full evaluator does at :186 and a standalone caller cannot. Keeping
+ * which `evaluateAgentProfileHeadAdvanceV1` does before dispatching, and a
  * it in the adapter means the exported entry cannot answer for a head this rule
  * says nothing about.
  */
@@ -436,25 +435,38 @@ function evaluateLateTombstoneRuleV1(
     // superseded.
     return { decision: 'stale' };
   }
-  // ONLY "NAMES ANOTHER PREDECESSOR" MEANS THE TOMBSTONE TAKES PRECEDENCE, and
-  // it is asked STRUCTURALLY rather than read off the verifier's refusal text.
+  // THE AFFIRMATIVE NEEDS EVIDENCE FROM THIS RECORD, NOT MERELY A NON-MATCH.
   //
-  // ADR 0002 :131-132 makes the descendant valid only when the transition NAMES
-  // this tombstone, "otherwise the tombstone takes precedence" -- so the
-  // affirmative rests on a structural fact about two objects. Every other refusal
-  // the verifier produces means "not verifiable now" (an unusable clock, a
-  // transition beyond the future-skew bound, an expiry window not yet passed) and
-  // propagates verbatim: reading one of those as precedence ADMITS a tombstone
-  // that the same evidence with a later clock marks stale.
+  // ADR 0002 :131-132 makes the descendant valid only when the retained
+  // transition NAMES this tombstone, "otherwise the tombstone takes precedence"
+  // -- and that "otherwise" presupposes the transition belongs to THIS record's
+  // rotation out of THIS sequence. Three answers, not two:
   //
-  // The two measured inversions behind this shape, and the sweep showing this is
-  // the only site in the package with an affirmative outcome available to invert
+  //   names-another-head -- same authority, same sequence, different head. No
+  //     valid descendant of the tombstone exists, so the tombstone wins.
+  //   unrelated -- a different record, sequence or issuer. It proves nothing
+  //     about this record, and reading it as precedence would let an unrelated
+  //     object decide a tombstone's fate. Measured before the split: a retained
+  //     transition carrying a foreign issuer returned `accept`.
+  //   names-this-head -- it does name us, yet the verifier still refused, which
+  //     can only be a temporal or expiry refusal. Propagated verbatim, because
+  //     "not verifiable now" must never become "not this tombstone's descendant".
+  //
+  // The measured inversions behind this shape, and the sweep showing this is the
+  // only site in the package with an affirmative outcome available to invert
   // into, are recorded in the late-tombstone seam suite beside the constructions
   // that prove them.
-  if (!isAuthorityTransitionBoundToPriorHeadV1(transition, candidateState)) {
-    return { decision: 'accept' };
+  switch (classifyAuthorityTransitionBindingV1(transition, candidateState)) {
+    case 'names-another-head':
+      return { decision: 'accept' };
+    case 'unrelated':
+      return {
+        decision: 'reject',
+        reason: 'late tombstone retained transition belongs to another authority',
+      };
+    default:
+      return verified;
   }
-  return verified;
 }
 
 function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
@@ -465,7 +477,7 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
 ): SystemRecordAuthorityDecisionV1 {
   // The sequence comparison's own answer, and it stays HERE. Reaching this
   // function means the full evaluator has already established that the candidate
-  // and the accepted head are the same record (:186) -- which is what makes
+  // and the accepted head are the same record -- which is what makes
   // "below the sequence, therefore superseded" sound for an active head.
   if (candidateState.state === 'active') return { decision: 'stale' };
   return evaluateLateTombstoneRuleV1(
@@ -502,7 +514,7 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  *
  * `acceptedTransitionLineage` is the ACCEPTED state's lineage, whose length IS
  * the current authority sequence -- the identity the full evaluator enforces at
- * :121-126. The candidate's own sequence is read off the candidate, so a caller
+ * `evaluateAgentProfileHeadAdvanceV1` enforces. The candidate's own sequence is
  * cannot pass one that disagrees with the head it is deciding, and a candidate
  * at or above the accepted sequence is refused rather than evaluated.
  *
@@ -513,7 +525,7 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * `evidence.retainedTransition.transition` MUST be the retained transition OUT
  * of the candidate's sequence -- `lineage[candidateSequence]`, the rotation into
  * the NEXT sequence -- not the rotation into the candidate's own. Supplying the
- * wrong one is refused rather than misread, because :303-305 compares prior
+ * wrong one is refused rather than misread, because the rule compares prior
  * sequence, next sequence AND digest against the retained entry.
  *
  * WHEN IT IS ABSENT, THE ANSWER IS A REJECT AND NEVER A STALE. That is ADR 0002
@@ -526,14 +538,14 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  *
  * THE CLOCK TRAVELS WITH THE TRANSITION, AND THAT PAIRING IS A SAFETY PROPERTY
  * RATHER THAN TIDINESS. This arm reads a NON-ACCEPT from the transition verifier
- * as "the tombstone takes precedence" (:312-315). The verifier also refuses on
+ * as "the tombstone takes precedence". The verifier also refuses on
  * an unusable clock -- so a caller that supplied a binding transition together
  * with an invalid `nowMs` would have a clock failure INVERT the verdict from
  * `stale` into `accept`, admitting a tombstone that a valid clock supersedes.
  * Measured before it was fixed: NaN and -1 both returned `accept` where the same
  * inputs with a real clock returned `stale`, while the full evaluator rejected
  * them at its front door. So the two operands are ONE optional field, and the
- * clock gates the full evaluator runs at :96-103 are mirrored below rather than
+ * clock gates the full evaluator runs are applied by `rejectInvalidHeadClockV1`
  * delegated. The invariant this buys, asserted in the suite: **`accept` and
  * `stale` are reachable only when a retained transition AND a valid clock were
  * both supplied.** A caller with neither cannot express an admission at all.

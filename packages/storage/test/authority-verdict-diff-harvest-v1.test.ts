@@ -150,7 +150,7 @@ describe('core authority decision reason harvest', () => {
   // broke -- the zero-is-indistinguishable-from-a-broken-probe failure.
   it('harvests a non-trivial number of sites, so an empty map cannot pass', () => {
     // 32 until the late-tombstone entry added its own precondition reject.
-    expect([...reject.values()].flat().length).toBe(34);
+    expect([...reject.values()].flat().length).toBe(35);
     expect([...quarantine.values()].flat().length).toBe(10);
   });
 });

@@ -370,6 +370,54 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
   });
 
   /**
+   * EVIDENCE FROM ANOTHER AUTHORITY IS NOT "THE TOMBSTONE TAKES PRECEDENCE".
+   *
+   * FOUND BY REVIEW. The seam asked one structural question -- "does this
+   * transition name this head?" -- and read every NO as the ADR's "otherwise".
+   * That "otherwise" presupposes evidence from THIS record's rotation: a
+   * transition naming a different head at this sequence really does prove no
+   * valid descendant exists, while a transition from another authority proves
+   * nothing about this record at all. Measured before the split: a retained
+   * transition carrying a foreign `priorEvmIssuer` returned `accept`.
+   *
+   * EVERY IDENTITY FIELD IS DRIVEN SEPARATELY, because a fixture differing by one
+   * field cannot prove the others are compared -- the lesson this suite already
+   * learned on the digest conjunct. The last row perturbs only the head digest
+   * and demands `accept`, so the two halves of the classification are pinned
+   * against each other rather than in isolation.
+   */
+  it('refuses retained evidence from another authority, per identity field', () => {
+    const predecessor = coreSequenceActiveHeadV1(LATE_SEQUENCE);
+    const otherIssuer = coreSequenceActiveHeadV1('3') as unknown as { evmIssuer: string };
+    const decide = (overrides: Record<string, unknown>) => {
+      const perturbed = Object.freeze({
+        ...structuredClone(binding as unknown as Record<string, unknown>),
+        ...overrides,
+      }) as unknown as AgentProfileAuthorityTransitionV1;
+      return evaluateAgentProfileLateTombstoneAdvanceV1(
+        candidate,
+        {
+          retainedTransition: { transition: perturbed, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+          tombstonePredecessor: predecessor,
+        } satisfies AgentProfileLateTombstoneEvidenceV1,
+        lineageFor(perturbed),
+      );
+    };
+    const unrelated = {
+      decision: 'reject',
+      reason: 'late tombstone retained transition belongs to another authority',
+    };
+    expect({
+      issuer: decide({ priorEvmIssuer: otherIssuer.evmIssuer }),
+      // Same authority, DIFFERENT head: this one is the ADR's "otherwise".
+      anotherHead: decide({ priorHeadDigest: retained.priorHeadDigest }),
+    }).toStrictEqual({
+      issuer: unrelated,
+      anotherHead: { decision: 'accept' },
+    });
+  });
+
+  /**
    * A TEMPORAL REFUSAL IS NOT "THE TOMBSTONE TAKES PRECEDENCE".
    *
    * FOUND BY REVIEW, AND IT IS THE SAME DEFECT AS THE CLOCK INVERSION ONE LAYER

@@ -21,33 +21,48 @@ import type { CanonicalRfc3339SecondsV1 } from './system-record-agent-profile-pr
 import type { SystemRecordAuthorityDecisionV1 } from './system-record-authority-types-v1-internal.js';
 
 /**
- * Does this transition rotate OUT OF that exact head?
+ * How a retained transition relates to a head, in the three ways that differ.
  *
- * The structural half of transition verification, named so a caller can ask it
- * WITHOUT going through the clocked evaluator and without matching the English
- * refusal the evaluator produces. That distinction is load-bearing at the
- * late-tombstone seam: there, "the transition names another predecessor" is the
- * ADR's "otherwise the tombstone takes precedence", while every temporal refusal
- * means "not verifiable now" -- and a seam that told them apart by reason TEXT
- * would silently change meaning if this module ever reworded or split it.
+ * `names-this-head` -- it rotates out of exactly this head.
+ * `names-another-head` -- SAME record and sequence and issuer, different head.
+ * `unrelated` -- a different record, sequence or issuer entirely.
  *
- * Deliberately clock-free. Binding is a property of the two objects; whether the
- * transition may be ACTED on additionally depends on time, and that stays in
- * {@link evaluateAuthorityTransitionV1}.
+ * THE SECOND AND THIRD ARE NOT THE SAME ANSWER, and collapsing them is a
+ * measured defect rather than a style point. ADR 0002 :131-132's "otherwise the
+ * tombstone takes precedence" presupposes evidence FROM THIS RECORD'S rotation:
+ * a transition that names a different head at this sequence really does prove no
+ * valid descendant of the tombstone exists. Evidence from another authority
+ * proves nothing about this record at all, and treating it as precedence lets an
+ * unrelated object decide a tombstone's fate. Measured before the split: a
+ * retained transition carrying a foreign `priorEvmIssuer` returned `accept`.
  */
-export function isAuthorityTransitionBoundToPriorHeadV1(
+export type AuthorityTransitionBindingV1 =
+  | 'names-this-head'
+  | 'names-another-head'
+  | 'unrelated';
+
+export function classifyAuthorityTransitionBindingV1(
   transition: AgentProfileAuthorityTransitionV1,
   priorHead: AgentProfileHeadObjectV1,
-): boolean {
+): AuthorityTransitionBindingV1 {
   const validatedTransition = validateAuthorityTransition(transition);
   const validatedPrior = validateAgentProfileHeadObjectV1(priorHead);
-  return validatedTransition.networkId === validatedPrior.networkId
-    && validatedTransition.peerId === validatedPrior.peerId
-    && validatedTransition.peerPublicKey === validatedPrior.peerPublicKey
-    && validatedTransition.priorAuthoritySequence === validatedPrior.authoritySequence
-    && validatedTransition.priorHeadDigest
-      === computeAgentProfileHeadObjectDigestV1(validatedPrior)
-    && validatedTransition.priorEvmIssuer === validatedPrior.evmIssuer;
+  // The record-and-rotation identity: who this transition belongs to and which
+  // sequence it leaves. Every field here is about the AUTHORITY, not the head.
+  if (
+    validatedTransition.networkId !== validatedPrior.networkId ||
+    validatedTransition.peerId !== validatedPrior.peerId ||
+    validatedTransition.peerPublicKey !== validatedPrior.peerPublicKey ||
+    validatedTransition.priorAuthoritySequence !== validatedPrior.authoritySequence ||
+    validatedTransition.priorEvmIssuer !== validatedPrior.evmIssuer
+  ) {
+    return 'unrelated';
+  }
+  // Same authority, same sequence: now the head-level question.
+  return validatedTransition.priorHeadDigest
+    === computeAgentProfileHeadObjectDigestV1(validatedPrior)
+    ? 'names-this-head'
+    : 'names-another-head';
 }
 
 /**
@@ -73,7 +88,7 @@ export function evaluateAuthorityTransitionV1(
       reason: 'transition issuedAt exceeds the future clock-skew bound',
     };
   }
-  if (!isAuthorityTransitionBoundToPriorHeadV1(validatedTransition, validatedPrior)) {
+  if (classifyAuthorityTransitionBindingV1(validatedTransition, validatedPrior) !== 'names-this-head') {
     return {
       decision: 'reject',
       reason: 'transition does not bind the accepted predecessor',

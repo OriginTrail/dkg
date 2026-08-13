@@ -257,7 +257,6 @@ const expectedRuntimeExports = Object.freeze([
   'evaluateAuthorityTransitionV1',
   'isAgentProfileHeadBoundToAcceptedTransitionV1',
   'isAllowedAgentProfilePredicateV1',
-  'isAuthorityTransitionBoundToPriorHeadV1',
   'isDirectResolvingSuccessorV1',
   'parseCanonicalAgentProfileAuthorityTransitionV1',
   'parseCanonicalAgentProfileConflictEvidenceV1',
