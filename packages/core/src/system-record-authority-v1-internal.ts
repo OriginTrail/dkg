@@ -41,6 +41,7 @@ import type {
 import {
   assertAgentProfileForkResolutionEvidenceV1,
   evaluateAuthorityTransitionV1,
+  evaluateAuthorityTransitionInternalV1,
   isAgentProfileHeadBoundToAcceptedTransitionV1,
   isDirectResolvingSuccessorV1,
   isIssuedTooFarInFuture,
@@ -380,9 +381,9 @@ function evaluateAbsentAgentProfileHeadAdvanceV1(
  * A lower-sequence ACTIVE candidate is stale, but that is a fact about the
  * SEQUENCE COMPARISON, not about the late-tombstone rule, and it is only sound
  * once the caller has established that both heads belong to the same record --
- * which `evaluateAgentProfileHeadAdvanceV1` does before dispatching, and a
- * it in the adapter means the exported entry cannot answer for a head this rule
- * says nothing about.
+ * which `evaluateAgentProfileHeadAdvanceV1` does before dispatching and a
+ * standalone caller cannot. Keeping it in the adapter means the exported entry
+ * cannot answer for a head this rule says nothing about.
  */
 function evaluateLateTombstoneRuleV1(
   candidateState: AgentProfileTombstoneHeadObjectV1,
@@ -425,7 +426,11 @@ function evaluateLateTombstoneRuleV1(
   }
   const clockRefusal = rejectInvalidHeadClockV1(candidateState, retainedTransition.nowMs);
   if (clockRefusal !== undefined) return clockRefusal;
-  const verified = evaluateAuthorityTransitionV1(
+  // The INTERNAL form: its accept-or-reject type is what lets this rule return a
+  // narrow decision without an arm for a state the verifier cannot produce. The
+  // published entry keeps the full union, because narrowing it would break
+  // consumers outside this repository.
+  const verified = evaluateAuthorityTransitionInternalV1(
     transition,
     candidateState,
     retainedTransition.nowMs,
@@ -452,11 +457,21 @@ function evaluateLateTombstoneRuleV1(
   //     can only be a temporal or expiry refusal. Propagated verbatim, because
   //     "not verifiable now" must never become "not this tombstone's descendant".
   //
+  // A PLAIN `default` WOULD ABSORB A FOURTH BINDING. It would route one into
+  // whichever arm it fell through to, silently and at run time, and this is the
+  // site where the ADR mapping has to be decided rather than defaulted. The
+  // `never` assignment below is the compile error that makes a new binding this
+  // function's problem; the throw is what a non-TS caller gets, since an
+  // unrecognised binding must not resolve to an admission. Refusing with a new
+  // reason literal was the other option and was rejected: it would widen the
+  // observable reject codomain by a case no test can construct.
+  //
   // The measured inversions behind this shape, and the sweep showing this is the
   // only site in the package with an affirmative outcome available to invert
   // into, are recorded in the late-tombstone seam suite beside the constructions
   // that prove them.
-  switch (classifyAuthorityTransitionBindingV1(transition, candidateState)) {
+  const binding = classifyAuthorityTransitionBindingV1(transition, candidateState);
+  switch (binding) {
     case 'names-another-head':
       return { decision: 'accept' };
     case 'unrelated':
@@ -464,8 +479,14 @@ function evaluateLateTombstoneRuleV1(
         decision: 'reject',
         reason: 'late tombstone retained transition belongs to another authority',
       };
-    default:
+    case 'names-this-head':
       return verified;
+    default: {
+      const unmapped: never = binding;
+      throw new Error(
+        `unmapped authority transition binding: ${JSON.stringify(unmapped)}`,
+      );
+    }
   }
 }
 
@@ -513,10 +534,11 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * THE OPERAND CONTRACT, stated because a caller cannot infer it from the types.
  *
  * `acceptedTransitionLineage` is the ACCEPTED state's lineage, whose length IS
- * the current authority sequence -- the identity the full evaluator enforces at
- * `evaluateAgentProfileHeadAdvanceV1` enforces. The candidate's own sequence is
- * cannot pass one that disagrees with the head it is deciding, and a candidate
- * at or above the accepted sequence is refused rather than evaluated.
+ * the current authority sequence -- the identity enforced by
+ * `evaluateAgentProfileHeadAdvanceV1`. The candidate's own sequence is read off
+ * the candidate, so a caller cannot pass one that disagrees with the head it is
+ * deciding, and a candidate at or above the accepted sequence is refused rather
+ * than evaluated.
  *
  * `evidence.tombstonePredecessor` is REQUIRED in substance: without it the
  * decision is `reject | late tombstone lacks its exact verified active
@@ -545,10 +567,11 @@ function evaluateLowerSequenceAgentProfileHeadAdvanceV1(
  * Measured before it was fixed: NaN and -1 both returned `accept` where the same
  * inputs with a real clock returned `stale`, while the full evaluator rejected
  * them at its front door. So the two operands are ONE optional field, and the
- * clock gates the full evaluator runs are applied by `rejectInvalidHeadClockV1`
- * delegated. The invariant this buys, asserted in the suite: **`accept` and
- * `stale` are reachable only when a retained transition AND a valid clock were
- * both supplied.** A caller with neither cannot express an admission at all.
+ * clock gates the full evaluator runs are applied through the shared
+ * `rejectInvalidHeadClockV1` rather than delegated. The invariant this buys,
+ * asserted in the suite: **`accept` and `stale` are reachable only when a
+ * retained transition AND a valid clock were both supplied.** A caller with
+ * neither cannot express an admission at all.
  *
  * IT ANSWERS FOR TOMBSTONES ONLY, at the type AND at runtime. The rule this
  * entry exposes says nothing about an active candidate; the full evaluator's

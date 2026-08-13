@@ -81,6 +81,20 @@ const LATE_SEQUENCE = '1';
  * out, so every caller receives a head the codec has accepted and a malformed
  * fixture fails at construction with the codec's own message.
  */
+/**
+ * A VALID FOREIGN PEER IDENTITY, and the reason it is a constant rather than a
+ * perturbation of the fixture's own.
+ *
+ * The record identity is one peer across every head this fixture serves, so
+ * there is no second identity to borrow. The codec's binding check requires only
+ * that the public key DERIVES the peer id -- no private key is involved -- so a
+ * fixed 32-byte public key gives a stable foreign identity. These two were
+ * produced together by `peerIdFromPublicKey(publicKeyFromRaw(key))`; changing
+ * either one alone makes the pair invalid rather than foreign.
+ */
+const FOREIGN_PEER_ID_V1 = '12D3KooWAZafD5MBdoVVsnVNUrY7WbPB4sL98p4w4nbwBp6iMJqH';
+const FOREIGN_PEER_KEY_V1 = 'CxIZICcuNTxDSlFYX2ZtdHuCiZCXnqWss7rByM_W3eQ';
+
 function tombstoneOfV1(predecessor: AgentProfileHeadObjectV1): AgentProfileTombstoneHeadObjectV1 {
   const shaped: Record<string, unknown> = {
     ...structuredClone(predecessor),
@@ -408,13 +422,99 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
       reason: 'late tombstone retained transition belongs to another authority',
     };
     expect({
-      issuer: decide({ priorEvmIssuer: otherIssuer.evmIssuer }),
+      networkId: decide({ networkId: 'another-network' }),
+      // ONE CASE FOR TWO COMPARISONS, AND IT CANNOT BE SPLIT. The codec asserts
+      // that the public key DERIVES the peer id, so a transition changing
+      // either one alone is refused at validation and never reaches the
+      // classifier at all.
+      //
+      // MEASURED, not reasoned: deleting either comparison on its own leaves
+      // this suite GREEN, and deleting BOTH turns it RED. The solo survivors are
+      // a property of the binding the codec enforces -- no input distinguishes
+      // them -- while the joint mutant is what shows the pair is covered rather
+      // than merely unreachable. Solo removal of `networkId` and of
+      // `priorEvmIssuer` each turn it red.
+      foreignPeer: decide({ peerId: FOREIGN_PEER_ID_V1, peerPublicKey: FOREIGN_PEER_KEY_V1 }),
+      priorEvmIssuer: decide({ priorEvmIssuer: otherIssuer.evmIssuer }),
       // Same authority, DIFFERENT head: this one is the ADR's "otherwise".
       anotherHead: decide({ priorHeadDigest: retained.priorHeadDigest }),
     }).toStrictEqual({
-      issuer: unrelated,
+      networkId: unrelated,
+      foreignPeer: unrelated,
+      priorEvmIssuer: unrelated,
       anotherHead: { decision: 'accept' },
     });
+  });
+
+  /**
+   * THE EVIDENCE SHAPE IS ENFORCED AT RUN TIME, NOT ONLY BY THE COMPILER.
+   *
+   * The type-level pins live in the export-types fixture and protect TypeScript
+   * consumers. They do nothing for a JavaScript caller, or for a TypeScript one
+   * that reaches the entry through `as never` -- and the shape is a safety
+   * contract, not a convenience: a top-level clock beside a retained transition
+   * is the exact arrangement that once turned a `stale` into an `accept`.
+   *
+   * So the refusal is asserted where it actually happens, at the boundary.
+   */
+  it('refuses evidence shapes the type contract forbids, at run time', () => {
+    const predecessor = coreSequenceActiveHeadV1(LATE_SEQUENCE);
+    const call = (evidence: unknown) => () => evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      evidence as AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(binding),
+    );
+    // A bare transition and a standalone clock beside it: the pre-refactor shape.
+    expect(call({
+      tombstonePredecessor: predecessor,
+      acceptedTransition: binding,
+      nowMs: TERMINAL_FIXTURE_NOW_MS_V1,
+    })).toThrow(/late tombstone evidence/);
+    // The pairing broken from the inside: a transition with no clock.
+    expect(call({
+      tombstonePredecessor: predecessor,
+      retainedTransition: { transition: binding },
+    })).toThrow(/late tombstone retained transition/);
+    // And the mirror: a clock with no transition to verify.
+    expect(call({
+      tombstonePredecessor: predecessor,
+      retainedTransition: { nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+    })).toThrow(/late tombstone retained transition/);
+  });
+
+  /**
+   * THE FIFTH IDENTITY CONJUNCT CANNOT BE FALSIFIED THROUGH THIS ENTRY, and the
+   * reason is structural rather than a gap in the row above.
+   *
+   * The classifier also compares the transition's `priorAuthoritySequence`
+   * against the candidate head's `authoritySequence`. Two invariants upstream
+   * force those equal before it is ever consulted: the lineage validator
+   * requires entry `i` to carry `priorAuthoritySequence === String(i)`,
+   * contiguous from zero, and the rule reads its retained entry at exactly
+   * `lineage[candidateSequence]` and refuses any transition disagreeing with it.
+   * So the transition's prior sequence IS the candidate's sequence by the time
+   * the classifier runs.
+   *
+   * A mutant deleting that one conjunct therefore survives every input reachable
+   * from here. It is recorded rather than papered over, because the alternative
+   * -- a fabricated row that "covers" it by tripping the lineage check instead
+   * -- would assert the wrong refusal and read as coverage.
+   */
+  it('cannot reach the classifier with a prior sequence that differs', () => {
+    const predecessor = coreSequenceActiveHeadV1(LATE_SEQUENCE);
+    const mismatched = Object.freeze({
+      ...structuredClone(binding as unknown as Record<string, unknown>),
+      priorAuthoritySequence: '7',
+      nextAuthoritySequence: '8',
+    }) as unknown as AgentProfileAuthorityTransitionV1;
+    expect(() => evaluateAgentProfileLateTombstoneAdvanceV1(
+      candidate,
+      {
+        retainedTransition: { transition: mismatched, nowMs: TERMINAL_FIXTURE_NOW_MS_V1 },
+        tombstonePredecessor: predecessor,
+      } satisfies AgentProfileLateTombstoneEvidenceV1,
+      lineageFor(mismatched),
+    )).toThrow(/contiguous from sequence zero/);
   });
 
   /**
@@ -428,11 +528,25 @@ describe('core decides the late tombstone, and the direction is not the intuitiv
    * the same transition at a valid time marks `stale`. Measured before the fix:
    * `stale` issued now, `accept` issued in 2027.
    *
-   * The mapping is now an ALLOW-LIST: only the verifier's naming refusal means
-   * the ADR's "otherwise", and every other refusal propagates verbatim. This row
-   * pins the propagation by its exact reason, so a future denylist -- or a new
-   * temporal refusal the seam has not been shown -- cannot quietly become an
-   * admission.
+   * WHAT THIS ROW PROVES, SCOPED TO THE ARM IT ACTUALLY DRIVES. It builds from
+   * the binding fixture, so the classification is `names-this-head` -- the ONE
+   * arm on which the verifier's decision is propagated. On that arm a temporal
+   * refusal reaches the caller with its own reason, and this row pins it by that
+   * exact reason.
+   *
+   * IT DOES NOT PROVE THE GENERAL CLAIM IT USED TO ASSERT. The earlier wording
+   * said a new temporal refusal "cannot quietly become an admission", and that
+   * is false as written: on the other two arms the seam never reads the
+   * verifier's decision at all, so EVERY refusal it can produce is discarded
+   * there. That is harmless today only by coincidence -- exactly one non-binding
+   * refusal is reachable and ignoring it does not move the verdict -- and it
+   * stops being harmless the moment the verifier learns a refusal that ought to
+   * mean refuse.
+   *
+   * The claim was corrected rather than the coverage widened, because the two
+   * are different work: this row's scope is now written down, and whether the
+   * seam should establish verifiability BEFORE consulting the classifier is a
+   * structural question recorded against the rule itself.
    */
   it('propagates a temporal refusal instead of reading it as precedence', () => {
     const futureDated = Object.freeze({

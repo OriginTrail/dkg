@@ -97,6 +97,9 @@ import type {
   ValidatedSystemRecordInventoryTreeV1,
   VerifySystemRecordEnvelopeOptionsV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
+// Value import: the pin below reads this function's declared RETURN TYPE, which
+// a type-only import cannot reach.
+import { evaluateAuthorityTransitionV1 } from '@origintrail-official/dkg-core/system-record-v1';
 import {
   createSystemRecordInventoryRowTraversalV1,
   type SystemRecordInventoryRowTraversalFailureV1,
@@ -313,6 +316,23 @@ type RETAINED_TRANSITION_REQUIRES_BOTH_HALVES =
       : true;
 const retainedTransitionRequiresBothHalves: RETAINED_TRANSITION_REQUIRES_BOTH_HALVES = true;
 
+/**
+ * THE PUBLISHED TRANSITION EVALUATOR STILL PROMISES THE WHOLE UNION.
+ *
+ * Narrowing an exported return type is a source-level breaking change even when
+ * no runtime value moves: a consumer's defensive `case 'quarantine':` stops
+ * compiling against the narrower type. A revision of this change did exactly
+ * that, which is why the pin exists. The wider direction is the one nothing else
+ * would catch, because every in-repo caller keeps compiling happily against a
+ * narrowed return.
+ */
+type PUBLIC_TRANSITION_EVALUATOR_RETURNS_THE_FULL_UNION =
+  SystemRecordAuthorityDecisionV1 extends ReturnType<typeof evaluateAuthorityTransitionV1>
+    ? true : never;
+const publicTransitionEvaluatorReturnsTheFullUnion:
+PUBLIC_TRANSITION_EVALUATOR_RETURNS_THE_FULL_UNION = true;
+
+void publicTransitionEvaluatorReturnsTheFullUnion;
 void appliedStatusesAreExactlyTheUnion;
 void acceptedDispositionsAreExactlyTheUnion;
 void lateTombstoneEvidenceHasNoTopLevelClock;

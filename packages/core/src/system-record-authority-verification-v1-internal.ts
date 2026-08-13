@@ -66,15 +66,37 @@ export function classifyAuthorityTransitionBindingV1(
 }
 
 /**
- * ACCEPT OR REJECT, never stale and never quarantine.
+ * THE PUBLISHED SIGNATURE KEEPS THE FULL UNION, and that is deliberate.
  *
- * Measured over its own body: one accept and six rejects. The declared type used
- * to be the full authority union, which is wider than anything this function can
- * produce -- and a caller narrowing its own result then has to write arms for
- * states that cannot arrive, or launder them. Stating the real codomain here is
- * what lets those callers stay narrow honestly.
+ * This function is exported from the package barrel, so its declared return type
+ * is a contract with consumers outside this repository. Narrowing it to the real
+ * codomain -- which is what an earlier revision of this change did -- breaks
+ * their source: a defensive `case 'quarantine':` stops compiling against a
+ * narrower union even though no runtime value changed. That is a breaking change
+ * and it does not belong in a fix.
+ *
+ * `evaluateAuthorityTransitionInternalV1` carries the precise type for callers
+ * inside this package, so the seam can stay narrow without the published surface
+ * moving. When the narrowing is wanted on the public entry it should be its own
+ * change, in a release that says so.
  */
 export function evaluateAuthorityTransitionV1(
+  transition: AgentProfileAuthorityTransitionV1,
+  priorHead: AgentProfileHeadObjectV1,
+  nowMs: number,
+): SystemRecordAuthorityDecisionV1 {
+  return evaluateAuthorityTransitionInternalV1(transition, priorHead, nowMs);
+}
+
+/**
+ * ACCEPT OR REJECT, never stale and never quarantine.
+ *
+ * Measured over its own body: one accept and six rejects. A caller narrowing its
+ * own result would otherwise have to write arms for states that cannot arrive,
+ * or launder them. This is the shape the late-tombstone rule consumes; it is NOT
+ * exported from the package barrel.
+ */
+export function evaluateAuthorityTransitionInternalV1(
   transition: AgentProfileAuthorityTransitionV1,
   priorHead: AgentProfileHeadObjectV1,
   nowMs: number,

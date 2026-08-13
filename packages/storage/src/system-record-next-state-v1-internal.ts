@@ -1049,8 +1049,11 @@ function classifyTombstoneAdvance(
  * routing adds core's checks without dropping storage's.
  *
  * THE RETAINED TRANSITION IS NOT AVAILABLE HERE, and that is a property of the
- * inputs rather than an omission: `AgentProfileAuthorityTransitionV1` has no
- * occurrence anywhere in this package, the applied row persists transition
+ * inputs rather than an omission: `AgentProfileAuthorityTransitionV1` appears in
+ * NO EXECUTABLE CODE in this package -- the only occurrences are these two
+ * comments, which is why the claim names the scope it was measured over rather
+ * than saying "anywhere", a phrasing its own prose falsified -- the applied row
+ * persists transition
  * DIGESTS only, and the candidate's verification closure covers its own lineage
  * rather than the rotation out of its sequence. So core's missing-evidence
  * clause governs today and the outcome is a RETRY. The accepting and stale arms
@@ -1073,8 +1076,9 @@ function classifyLateTombstoneAdvance(
   // THE EVIDENCE IS EXACTLY WHAT THIS PACKAGE HOLDS, and no clock appears in it.
   // `retainedTransition` carries the transition and its verifying clock as one
   // field, so a caller with neither -- which is every caller here, because
-  // AgentProfileAuthorityTransitionV1 occurs nowhere in this package and the
-  // applied row persists digests only -- cannot express an admission at all.
+  // AgentProfileAuthorityTransitionV1 occurs in no executable code in this
+  // package and the applied row persists digests only -- cannot express an
+  // admission at all.
   // Core's answer is therefore the ADR's reject-for-retry, by construction
   // rather than by a sentinel nothing happens to read.
   const predecessor = facts.verifiedAuthoritySummary.tombstonePredecessor;

@@ -39,7 +39,7 @@ export interface VerdictDiffCounterfactualV1 {
 
 export const VERDICT_DIFF_COUNTERFACTUALS_V1: readonly VerdictDiffCounterfactualV1[] = [
   {
-    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1246',
+    site: 'packages/storage/src/system-record-next-state-v1-internal.ts:1250',
     before: "} else if (current.status !== 'active') {",
     after: "} else if (current.status !== 'active' && current.status !== 'tombstone') {",
     appliedProof: 'occurrence count of the original predicate 1 -> 0',
@@ -149,7 +149,7 @@ export const CORE_VERDICT_TABLE_DIGEST_V1 =
  *
  * 145,728 DECIDED IS NOT 145,728 INDEPENDENT OBSERVATIONS. Of the 61,920 cells
  * the S1 removal returns to the table, 20,640 short-circuit at the future
- * clock-skew bound (core :98 testing it, :101 returning) before any other axis
+ * clock-skew bound, which core tests first, before any other axis
  * does anything, so each of those contributes roughly one bit rather than a full
  * axis product. THE RE-PIN CHANGES WHAT IS DECIDED, NOT WHAT IS COVERED -- and
  * this is the number in the artifact most likely to be read as the opposite.
@@ -192,7 +192,7 @@ export const CORE_PROJECTIONS_V1 = 25920;
  *
  * A NAME-GREP WOULD NOT HAVE BEEN ENOUGH, which is why the instrument is
  * empirical rather than textual. Core copies the field into its evidence snapshot
- * through an allowlist at system-record-authority-v1-internal.ts:929, so it
+ * through the `core-evidence-allowlist-copy` citation below, so it
  * travels inside an object; a branch reading it off the whole snapshot, or by
  * dynamic access, would never appear in a grep for the symbol. Running the
  * branches closes that gap for the branches actually run.
@@ -433,13 +433,13 @@ export const CORE_HARNESS_LIMITATIONS_V1: readonly HarnessLimitationV1[] = [
 export const CORE_SUMMARY_ASYMMETRY_CITATIONS_V1: readonly SourceCitationV1[] = [
   {
     id: 'core-single-semantic-read',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:320',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:321',
     contains: 'const summary = evidenceState.verifiedAuthoritySummary;',
     why: "Core's ONLY semantic read of the field, and it sits inside the absent-state branch.",
   },
   {
     id: 'core-evidence-allowlist-copy',
-    site: 'packages/core/src/system-record-authority-v1-internal.ts:929',
+    site: 'packages/core/src/system-record-authority-v1-internal.ts:952',
     contains: "'verifiedAuthoritySummary',",
     why: 'The allowlist that carries the field into the evidence snapshot, which is why a '
       + 'name-grep over the branch functions could not have settled this on its own.',
