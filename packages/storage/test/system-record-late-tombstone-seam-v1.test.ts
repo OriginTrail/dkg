@@ -4,15 +4,12 @@ import {
   computeAgentProfileAuthorityTransitionDigestV1,
   computeAgentProfileHeadObjectDigestV1,
   computeSystemRecordAppliedStateDigestV1,
-  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   evaluateAgentProfileHeadAdvanceV1,
   evaluateAgentProfileLateTombstoneAdvanceV1,
   type AgentProfileAuthorityTransitionV1,
-  assertAgentProfileHeadObjectV1,
   type AgentProfileHeadObjectV1,
   type AgentProfileAppliedTransitionV1,
   type AgentProfileLateTombstoneEvidenceV1,
-  type AgentProfileTombstoneHeadObjectV1,
   type SystemRecordMaterializationReceiptV1,
 } from '@origintrail-official/dkg-core/system-record-v1';
 
@@ -39,6 +36,7 @@ import {
   type StorageDriverV1,
 } from './helpers/authority-verdict-diff-storage-driver-v1.js';
 import { TERMINAL_FIXTURE_NOW_MS_V1 } from './helpers/system-record-terminal-replacement-fixture.js';
+import { buildTombstoneHeadFromPredecessorV1 } from './helpers/tombstone-head-fixture-v1.js';
 
 /**
  * THE LATE-TOMBSTONE SEAM: ADR 0002 :129-133, ROUTED THROUGH CORE.
@@ -95,32 +93,7 @@ const LATE_SEQUENCE = '1';
 const FOREIGN_PEER_ID_V1 = '12D3KooWAZafD5MBdoVVsnVNUrY7WbPB4sL98p4w4nbwBp6iMJqH';
 const FOREIGN_PEER_KEY_V1 = 'CxIZICcuNTxDSlFYX2ZtdHuCiZCXnqWss7rByM_W3eQ';
 
-function tombstoneOfV1(predecessor: AgentProfileHeadObjectV1): AgentProfileTombstoneHeadObjectV1 {
-  const shaped: Record<string, unknown> = {
-    ...structuredClone(predecessor),
-    state: 'tombstone',
-    version: String(BigInt((predecessor as { version: string }).version) + 1n),
-    previousHeadDigest: computeAgentProfileHeadObjectDigestV1(predecessor),
-    ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
-    ownedSubjectCount: '0',
-    projectionBytes: '0',
-    projectionQuads: '0',
-  };
-  // A tombstone commits none of the active head's projection or seal fields,
-  // and the head codec refuses the shape if any of them survives.
-  for (const key of [
-    'contentDigest', 'bundleDigest', 'graphScopedAuthorSeal', 'validUntil',
-    'assertionCoordinate',
-  ]) {
-    delete shaped[key];
-  }
-  const built = Object.freeze(shaped) as unknown as AgentProfileHeadObjectV1;
-  assertAgentProfileHeadObjectV1(built);
-  if (built.state !== 'tombstone') {
-    throw new Error(`fixture built a ${built.state} head where a tombstone was required`);
-  }
-  return built;
-}
+const tombstoneOfV1 = buildTombstoneHeadFromPredecessorV1;
 
 function buildLateTombstoneCandidateV1(): AgentProfileHeadObjectV1 {
   return tombstoneOfV1(coreSequenceActiveHeadV1(LATE_SEQUENCE) as AgentProfileHeadObjectV1);

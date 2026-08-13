@@ -1,9 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
-  assertAgentProfileHeadObjectV1,
   computeAgentProfileHeadObjectDigestV1,
-  EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
   evaluateAgentProfileSameSequenceTombstoneAdvanceV1,
   type AgentProfileHeadObjectV1,
   type AgentProfileSameSequenceAppliedRowV1,
@@ -20,6 +18,7 @@ import {
   prepareStorageDriverV1,
   requireStorageSummaryForHeadV1,
 } from './helpers/authority-verdict-diff-storage-driver-v1.js';
+import { buildTombstoneHeadFromPredecessorV1 } from './helpers/tombstone-head-fixture-v1.js';
 
 /**
  * THE SAME-SEQUENCE TOMBSTONE DISJUNCT.
@@ -62,53 +61,22 @@ import {
  * the change is legible rather than merely claimed.
  */
 /**
- * THE VERSION IS A PARAMETER, AND THAT IS THE WHOLE UNLOCK.
+ * WHY A TOMBSTONE NAMING THE CHAIN BASE MINTS AT ALL, which is this suite's own
+ * load-bearing coincidence rather than the shared builder's.
  *
- * `isTombstoneBoundToPredecessorV1` requires the tombstone's version to be
- * STRICTLY GREATER than its predecessor's -- not adjacent. Minting at
- * `predecessor.version + 1` reaches exactly one relation and makes the other two
- * look unconstructible; from the version-0 base, every relation against an
- * applied version-2 row is available.
+ * The closure resolves the predecessor through the tombstone's OWN
+ * `previousHeadDigest` against the ancestry, while the mint graph supplies only
+ * the owned-subject TABLE. That table is correct for either head because the
+ * current head is a spread of the base with `version` and `previousHeadDigest`
+ * overridden, so the two share `ownedSubjectTableDigest` and `rootSubject`. If
+ * those ever diverge this construction breaks with a refusal phrased like a
+ * domain error rather than a fixture one, which is why the coincidence is
+ * written down rather than relied on silently.
  *
- * WHY A TOMBSTONE NAMING THE BASE MINTS AT ALL: the closure resolves the
- * predecessor through the tombstone's OWN `previousHeadDigest` against the
- * ancestry, while the mint graph supplies only the owned-subject TABLE. That
- * table is correct for either head because the current head is a spread of the
- * base with `version` and `previousHeadDigest` overridden, so the two share
- * `ownedSubjectTableDigest` and `rootSubject`. If those ever diverge this
- * construction breaks with a refusal phrased like a domain error rather than a
- * fixture one, which is why the coincidence is written down rather than relied on
- * silently.
+ * The builder itself is shared with the late-tombstone suite; the version being
+ * a PARAMETER is the unlock, and its reasoning lives with the builder.
  */
-function tombstoneOfV1(
-  predecessor: AgentProfileHeadObjectV1,
-  version?: string,
-  overrides: Record<string, unknown> = {},
-): AgentProfileTombstoneHeadObjectV1 {
-  const shaped: Record<string, unknown> = {
-    ...structuredClone(predecessor),
-    state: 'tombstone',
-    version: version ?? String(BigInt((predecessor as { version: string }).version) + 1n),
-    previousHeadDigest: computeAgentProfileHeadObjectDigestV1(predecessor),
-    ownedSubjectTableDigest: EMPTY_OWNED_SUBJECT_TABLE_DIGEST_V1,
-    ownedSubjectCount: '0',
-    projectionBytes: '0',
-    projectionQuads: '0',
-    ...overrides,
-  };
-  for (const key of [
-    'contentDigest', 'bundleDigest', 'graphScopedAuthorSeal', 'validUntil',
-    'assertionCoordinate',
-  ]) {
-    delete shaped[key];
-  }
-  const built = Object.freeze(shaped) as unknown as AgentProfileHeadObjectV1;
-  assertAgentProfileHeadObjectV1(built);
-  if (built.state !== 'tombstone') {
-    throw new Error(`fixture built a ${built.state} head where a tombstone was required`);
-  }
-  return built;
-}
+const tombstoneOfV1 = buildTombstoneHeadFromPredecessorV1;
 
 /** Flips the leading character, which unbinds a field without reshaping it. */
 function flipLeadV1(value: string): string {
