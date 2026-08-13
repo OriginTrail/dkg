@@ -76,6 +76,7 @@ async function runSeam(
   gate?: ReturnType<typeof createLegacyAgentProfileGateV1>,
   servePhase: 'data' | 'meta' = 'data',
   contextGraphId = 'agents',
+  signal?: AbortSignal,
 ) {
   const inserted: Quad[][] = [];
   let served = false;
@@ -114,6 +115,7 @@ async function runSeam(
       inserted.push([...quads]);
     },
     legacyAgentProfileGate: gate,
+    signal,
     deleteCheckpoint: noop,
     setCheckpoint: noop,
     logInfo: noop,
@@ -142,6 +144,32 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
 
     expect(offered).toEqual([uncovered]);
     expect(offered).not.toContainEqual(conflicting);
+  });
+
+  // Adopted from review, the seam half of the cancellation finding. The reader half lives
+  // in the storage suite; this proves the signal actually REACHES the gate from durable
+  // sync. Threading it through production without a test meant a regression calling
+  // `filterPage(quads)` would leave every case here green while an aborted sync waited on
+  // the gate's store reads.
+  //
+  // Identity again, not presence: a seam handing the gate SOME signal is not the same as
+  // handing it the operation's own.
+  it('hands the gate the operation abort signal', async () => {
+    const { lookup } = fakeLookup([], []);
+    const seen: Array<AbortSignal | undefined> = [];
+    const real = createLegacyAgentProfileGateV1(lookup);
+    const recording = {
+      filterPage: (quads: Quad[], signal?: AbortSignal) => {
+        seen.push(signal);
+        return real.filterPage(quads, signal);
+      },
+    } as ReturnType<typeof createLegacyAgentProfileGateV1>;
+    const controller = new AbortController();
+
+    await runSeam([quad(ROOT, 'urn:p', 'o')], recording, 'data', 'agents', controller.signal);
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(controller.signal);
   });
 
   // T1, half A — the half that scoping by the page's context-graph id would get WRONG.
