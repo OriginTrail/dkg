@@ -124,7 +124,7 @@ interface HarnessOverrides {
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
   reconcileImpl?: () => Promise<void>;
-  reconcileRetired?: boolean;
+  reconcileDisposition?: 'preserve' | 'suppress-metadata';
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -215,7 +215,7 @@ function harness(overrides: HarnessOverrides = {}) {
         reconcileFinalizedTwin: async () => {
           events.push('finalized-twin-reconciled');
           await overrides.reconcileImpl?.();
-          return overrides.reconcileRetired ?? false;
+          return overrides.reconcileDisposition ?? 'preserve';
         },
       },
       publicSnapshotStore: snapshotStore,
@@ -281,7 +281,7 @@ describe('public SWM snapshot materialization', () => {
     const h = harness({
       contentPresent: () => true,
       storedHead: () => ({ version: '1', needsRepair: false }),
-      reconcileRetired: true,
+      reconcileDisposition: 'suppress-metadata',
     });
     const summary = await h.run();
     expect(summary.failedPhases).toBe(0);

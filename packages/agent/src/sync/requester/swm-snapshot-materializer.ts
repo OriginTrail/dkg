@@ -49,6 +49,9 @@ export interface StoredWorkspaceHeadState {
   needsRepair: boolean;
 }
 
+/** Metadata disposition returned by post-materialization VM/SWM reconciliation. */
+export type FinalizedTwinMetadataDisposition = 'preserve' | 'suppress-metadata';
+
 /**
  * Everything `runSharedMemorySync` needs to MATERIALIZE verified public SWM
  * snapshots into the triple store, as ONE cohesive dependency.
@@ -117,7 +120,7 @@ export interface SharedMemorySnapshotMaterializer {
   reconcileFinalizedTwin?(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<boolean>;
+  ): Promise<FinalizedTwinMetadataDisposition>;
 }
 
 /**
@@ -135,7 +138,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
   reconcileFinalizedTwin?: (
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ) => Promise<boolean>;
+  ) => Promise<FinalizedTwinMetadataDisposition>;
 }): SharedMemorySnapshotMaterializer {
   // #2079 operator override, default ON. Blank is UNSET, not false:
   // `DKG_SWM_MATERIALIZATION_WITNESS=` is the normal compose/.env shape for

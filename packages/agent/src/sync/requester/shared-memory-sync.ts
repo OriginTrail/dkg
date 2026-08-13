@@ -47,6 +47,60 @@ function boundSampledRef(ref: string): string {
     : ref;
 }
 
+function metadataQuadKey(quad: Quad): string {
+  return `${quad.graph} ${quad.subject} ${quad.predicate} ${quad.object}`;
+}
+
+/**
+ * Own the one-round metadata commit policy for graph-scoped snapshots.
+ * Per-KA writes, finalized-twin suppression, the final bulk append and counter
+ * compensation all consult this object so a caller cannot update only one of
+ * those ledgers and accidentally resurrect retired SWM metadata.
+ */
+class SnapshotMetadataCommitLedger {
+  readonly #verifiedKeys: ReadonlySet<string>;
+  readonly #writtenKeys = new Set<string>();
+  readonly #suppressedKeys = new Set<string>();
+
+  constructor(verifiedMeta: readonly Quad[]) {
+    this.#verifiedKeys = new Set(verifiedMeta.map(metadataQuadKey));
+  }
+
+  unwrittenVerifiedRows(descriptor: GraphScopedSwmRecoveryDescriptor): Quad[] {
+    return descriptor.metadataQuads.filter((quad) => {
+      const key = metadataQuadKey(quad);
+      return this.#verifiedKeys.has(key)
+        && !this.#writtenKeys.has(key)
+        && !this.#suppressedKeys.has(key);
+    });
+  }
+
+  recordWritten(rows: readonly Quad[]): void {
+    for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
+  }
+
+  suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
+    for (const quad of descriptor.metadataQuads) {
+      const key = metadataQuadKey(quad);
+      if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
+    }
+  }
+
+  bulkRows(rows: readonly Quad[]): Quad[] {
+    return this.#suppressedKeys.size === 0
+      ? [...rows]
+      : rows.filter((quad) => !this.#suppressedKeys.has(metadataQuadKey(quad)));
+  }
+
+  alreadyCountedRetainedRows(): number {
+    let count = 0;
+    for (const key of this.#writtenKeys) {
+      if (!this.#suppressedKeys.has(key)) count += 1;
+    }
+    return count;
+  }
+}
+
 /**
  * Snapshot-walk progress carried OUT of a throw.
  *
@@ -671,17 +725,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // Each KA's own verified metadata is therefore rewritten here, inside the
       // same write lock, immediately after the delete — narrowing a window that
       // already exists rather than opening a new one.
-      const quadKey = (quad: Quad): string =>
-        `${quad.graph} ${quad.subject} ${quad.predicate} ${quad.object}`;
-      const verifiedMetaKeys = new Set(processed.verifiedMeta.map(quadKey));
-      // Which verified meta rows the per-KA path has already written this round.
-      // Plain accumulation, NOT overlap compensation: descriptor `metadataQuads`
-      // are pairwise disjoint by construction — a head subject belongs to one
-      // descriptor by the parser's grouping key, and an operation subject is
-      // pinned to a single `kaUal`/`assertionVersion` by `validateOperationRows`.
-      const perKaInsertedMetaKeys = new Set<string>();
-      /** Head/op rows retired because the same exact KA is finalized in VM. */
-      const retiredMetaKeys = new Set<string>();
+      const metadataLedger = new SnapshotMetadataCommitLedger(processed.verifiedMeta);
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
@@ -717,13 +761,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const insertVerifiedDescriptorMeta = async (
         descriptor: GraphScopedSwmRecoveryDescriptor,
       ): Promise<void> => {
-        const rows = descriptor.metadataQuads.filter(
-          (quad) => verifiedMetaKeys.has(quadKey(quad)) && !perKaInsertedMetaKeys.has(quadKey(quad)),
-        );
+        const rows = metadataLedger.unwrittenVerifiedRows(descriptor);
         if (rows.length === 0) return;
         await ensureContextGraphOnce();
         await storeInsert([...rows]);
-        for (const quad of rows) perKaInsertedMetaKeys.add(quadKey(quad));
+        metadataLedger.recordWritten(rows);
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
       };
@@ -874,15 +916,13 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             // lock; the production callback reacquires the same per-KA lock
             // and re-verifies current head + both graph digests before delete.
             try {
-              const retired = await snapshotMaterializer.reconcileFinalizedTwin?.(pid, descriptor);
-              if (retired) {
+              const disposition = await snapshotMaterializer.reconcileFinalizedTwin?.(pid, descriptor);
+              if (disposition === 'suppress-metadata') {
                 // The callback removed this exact SWM graph AND its head/op
                 // rows. Suppress the later bulk metadata append too; without
                 // this, an already-materialized retry would recreate dangling
                 // SWM metadata after the graph had been correctly retired.
-                for (const quad of descriptor.metadataQuads) {
-                  retiredMetaKeys.add(quadKey(quad));
-                }
+                metadataLedger.suppress(descriptor);
               }
             } catch (err) {
               // The verified snapshot and its head are already durable. Tier
@@ -1121,15 +1161,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // Keep the old count identity for ordinary rows. Only retired rows are
         // filtered, while the per-KA ledger remains a key-set subset of the
         // verified input and is subtracted solely when its row survives.
-        const metaForBulkInsert = retiredMetaKeys.size === 0
-          ? verifiedMetaForInsert
-          : verifiedMetaForInsert.filter((quad) => !retiredMetaKeys.has(quadKey(quad)));
+        const metaForBulkInsert = metadataLedger.bulkRows(verifiedMetaForInsert);
         if (metaForBulkInsert.length > 0) {
           await storeInsert(metaForBulkInsert);
         }
-        const retainedAlreadyCounted = [...perKaInsertedMetaKeys]
-          .filter((key) => !retiredMetaKeys.has(key))
-          .length;
+        const retainedAlreadyCounted = metadataLedger.alreadyCountedRetainedRows();
         const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
         summary.insertedTriples += newlyCountedMeta;
         summary.insertedMetaTriples += newlyCountedMeta;
