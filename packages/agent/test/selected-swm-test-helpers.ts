@@ -324,7 +324,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
     readonly deadline: () => number;
   };
   readonly priorities?: Readonly<Record<string, number>>;
-  /** RFC-64 complete providers accepted for the selected public scope. */
+  /**
+   * RFC-64 complete providers accepted for the selected public scope.
+   * Defaults to [PEER] because this harness models the selected RFC-64 lane;
+   * pass [] explicitly when testing ordinary public SWM behavior.
+   */
   readonly completeSwmProviders?: readonly string[];
   readonly onSnapshotRead?: (probe: {
     readonly ref: string;
