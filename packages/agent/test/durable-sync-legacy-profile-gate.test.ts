@@ -11,6 +11,7 @@
  * while the composition was wrong in any way the stub happened to mirror.
  */
 import { describe, expect, it, vi } from 'vitest';
+import { SYSTEM_RECORD_V1_JSON_DATATYPE } from '@origintrail-official/dkg-storage/internal/system-record-legacy-gate-read-v1';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
 
@@ -266,7 +267,7 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
           ? {
             type: 'bindings' as const,
             bindings: sparql.includes(`<${claim}>`)
-              ? [{ claim, table: `"[\\"${ROOT}\\"]"^^<urn:json>` }]
+              ? [{ claim, table: `"[\\"${ROOT}\\"]"^^<${SYSTEM_RECORD_V1_JSON_DATATYPE}>` }]
               : [],
           }
           : {

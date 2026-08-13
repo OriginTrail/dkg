@@ -54,6 +54,8 @@ const verdicts = [
   [!(cfg.publicError in internal), 'the public error is not doubled through the authority entry'],
   [(cfg.gateReadExports ?? []).every((n) => typeof gateRead[n] === 'function'),
     `gate-read entry exports its consumed surface (missing: ${(cfg.gateReadExports ?? []).filter((n) => typeof gateRead[n] !== 'function').join(',') || '-'})`],
+  [(cfg.gateReadConstants ?? []).every((n) => typeof gateRead[n] === 'string' && gateRead[n].length > 0),
+    `gate-read entry exports its consumed constants (missing: ${(cfg.gateReadConstants ?? []).filter((n) => typeof gateRead[n] !== 'string').join(',') || '-'})`],
 ];
 for (const [ok, label] of verdicts) {
   if (!ok) {

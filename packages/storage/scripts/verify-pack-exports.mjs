@@ -55,6 +55,8 @@ const GATE = Object.freeze({
     'readLegacyAgentProfileProjectionV1',
     'systemRecordProjectionGraphV1',
   ],
+  /** Non-function members of the same subpath, checked by presence rather than type. */
+  gateReadConstants: ['SYSTEM_RECORD_V1_JSON_DATATYPE'],
   /** The packed exports map must carry EXACTLY these keys. */
   exportsAllowlist: [
     '.',

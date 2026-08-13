@@ -171,6 +171,27 @@ describe('legacy agent-profile gate read — the mode counterfactual (#2052 D-8)
     expect(read.unclassifiedRoots).toEqual([]);
   });
 
+  // Adopted from review. The reader used to take any literal's VALUE, so a table carrying
+  // a perfectly valid JSON payload under a datatype the writer never emits was accepted as
+  // a real applied record. The payload here is valid on purpose — only the datatype is
+  // wrong — so this fails for exactly one reason.
+  it('reports a root undecided when the table literal carries the wrong datatype', async () => {
+    const quads = appliedRecordQuads(ROOT, [ROOT]).map((quad) => (
+      quad.predicate === SYSTEM_RECORD_V1_PREDICATES.ownedSubjectTable
+        ? { ...quad, object: `"[\\"${ROOT}\\"]"^^<urn:not-the-canonical-datatype>` }
+        : quad
+    ));
+    const store = fakeStore(quads);
+
+    const read = await readLegacyAgentProfileAppliedRootsV1({
+      store, networkId: NETWORK_ID, mode: 'authoritative', roots: [ROOT],
+    });
+
+    // Undecided, NOT "no applied record" — the distinction that keeps legacy quads out.
+    expect(read.records).toEqual([]);
+    expect(read.unclassifiedRoots).toEqual([ROOT]);
+  });
+
   it('reports a root undecided when its owned-subject table will not decode', async () => {
     const quads = appliedRecordQuads(ROOT, [ROOT]).map((quad) => (
       quad.predicate === SYSTEM_RECORD_V1_PREDICATES.ownedSubjectTable

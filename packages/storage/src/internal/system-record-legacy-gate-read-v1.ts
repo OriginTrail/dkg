@@ -49,6 +49,7 @@ import { SYSTEM_RECORD_V1_STATE_GRAPH } from '../internal-graph-policy.js';
 // term measurement; request two measures rows, which is exactly what this helper counts.
 import { retainedSystemRecordInspectionQuadsBytesV1 } from '../system-record-inspection-v1-internal.js';
 import {
+  SYSTEM_RECORD_V1_JSON_DATATYPE,
   SYSTEM_RECORD_V1_PREDICATES,
   systemRecordProjectionGraphV1,
   systemRecordRootClaimSubjectV1,
@@ -75,6 +76,16 @@ export type { SystemRecordMaterializationModeV1 };
  * reads: pre-cutover there is nothing for legacy insertion to collide with.
  */
 export { systemRecordProjectionGraphV1 };
+
+/**
+ * The canonical typed-literal datatype an owned-subject table must carry.
+ *
+ * Exported because this reader now ENFORCES it: a table literal of any other datatype is
+ * reported undecided rather than accepted. A consumer constructing or asserting against
+ * reserved state needs the same constant the reader compares to, or its fixtures test a
+ * shape production never produces — which is exactly how the missing check was found.
+ */
+export { SYSTEM_RECORD_V1_JSON_DATATYPE };
 
 /** One applied signed record, keyed by the agent root the caller asked about. */
 export interface LegacyAgentProfileAppliedRootV1 {
@@ -232,7 +243,19 @@ export async function readLegacyAgentProfileAppliedRootsV1(input: {
       continue;
     }
     const literal = parseRdfLiteralTerm(table);
-    if (literal === null) {
+    // The DATATYPE is part of the contract, not decoration. Adopted from review, which
+    // caught it with a fixture typed `urn:json` that passed anyway: this reader used to
+    // take any literal's value, so reserved state the writer could never emit — a plain
+    // literal, a language-tagged one, any datatype at all — was accepted as a valid
+    // applied record. The canonical decode below still bounded what such a table could
+    // SAY, but a reader looser than its writer's encoding is a hole on its own.
+    //
+    // A mismatch is UNDECIDED, never "no record" — the same disposition as a table that
+    // will not decode, for the same reason: an answer this reader cannot vouch for must
+    // not become the `uncovered` that lets legacy quads through.
+    if (literal === null
+      || literal.kind !== 'typed'
+      || literal.datatype !== SYSTEM_RECORD_V1_JSON_DATATYPE) {
       unclassifiedRoots.push(root);
       continue;
     }
