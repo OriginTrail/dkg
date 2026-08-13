@@ -62,7 +62,11 @@ function fakeLookup(
  * `inserted` collects every quad the seam actually offered the store, which is the
  * observable the property is stated in terms of.
  */
-async function runSeam(page: Quad[], gate?: ReturnType<typeof createLegacyAgentProfileGateV1>) {
+async function runSeam(
+  page: Quad[],
+  gate?: ReturnType<typeof createLegacyAgentProfileGateV1>,
+  servePhase: 'data' | 'meta' = 'data',
+) {
   const inserted: Quad[][] = [];
   let served = false;
   const result = await runDurableSyncDetailed({
@@ -71,8 +75,8 @@ async function runSeam(page: Quad[], gate?: ReturnType<typeof createLegacyAgentP
     contextGraphIds: ['agents'],
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 1_000),
     fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => {
-      // Serve the page once on the data phase, then run dry so the loop terminates.
-      const first = phase === 'data' && !served;
+      // Serve the page once on the requested phase, then run dry so the loop terminates.
+      const first = phase === servePhase && !served;
       if (first) served = true;
       return {
         quads: first ? page : [],
@@ -128,6 +132,35 @@ describe('durable-sync legacy agent-profile gate seam (#2052 D-8)', () => {
 
     expect(offered).toEqual([uncovered]);
     expect(offered).not.toContainEqual(conflicting);
+  });
+
+  // The meta branch is a SECOND insertion path with its own gate call, its own
+  // skip-when-empty and its own diagnostic field, and every other test here serves the
+  // page on the data phase only. So a regression that reverted `remainingMeta` to
+  // `storeInsert({ quads: partitioned.remainingMeta })` would leave this whole file
+  // green — the fixture would simply never route a quad through the branch it broke.
+  //
+  // The count is asserted as well as the offer, because those are two different
+  // failures: forwarding the raw page breaks the offer, while gating correctly but
+  // still counting `partitioned.remainingMeta.length` would report progress the store
+  // never took and no offer-only assertion could see it.
+  it('gates the metadata branch, and counts insertedMetaTriples from what was offered', async () => {
+    const { lookup } = fakeLookup(
+      [{ root: ROOT, ownedSubjects: [ROOT] }],
+      [projectionRow(ROOT, 'urn:p', 'signed')],
+    );
+    const conflicting = quad(ROOT, 'urn:p', 'rewritten-by-legacy');
+    const uncovered = quad('urn:ordinary-subject', 'urn:p', 'o');
+
+    const { offered, result } = await runSeam(
+      [conflicting, uncovered],
+      createLegacyAgentProfileGateV1(lookup),
+      'meta',
+    );
+
+    expect(offered).toEqual([uncovered]);
+    expect(offered).not.toContainEqual(conflicting);
+    expect(result.result.insertedMetaTriples).toBe(1);
   });
 
   // Without a gate the seam must behave exactly as it did before this slice, because
