@@ -72,12 +72,15 @@ function undecidedTerminal(
  * slot array therefore MEANS a terminal transition conflict was once merged.
  *
  * WHAT HOLDS THAT PREMISE, AND WHAT DOES NOT -- stated plainly, because the gap
- * is real. Three BEHAVIOURAL tests carry it, in
+ * is real. Four BEHAVIOURAL tests carry it, in
  * `packages/storage/test/system-record-applied-disposition-restart-v1.test.ts`:
  * deleting the merge turns the restart derivation red; fork-typed evidence
- * leaves the slots empty and re-derives as `head-fork-quarantined`; and a row
- * whose slots genuinely overflowed the cap still re-derives as an equivocation.
- * Those pin what the writer DOES.
+ * leaves the slots empty and re-derives as `head-fork-quarantined`; a row whose
+ * slots genuinely overflowed the cap still re-derives as an equivocation; and
+ * evidence carrying a fork entry AND a transition entry lands only the
+ * transition digests -- the one that pins the TYPE FILTER, since the
+ * `terminalTransitionConflict` gate runs first and fork-only evidence never
+ * reaches the filter at all. Those pin what the writer DOES.
  *
  * NOT pinned: that no OTHER writer can populate the array. A structural test
  * asserting that was tried and withdrawn -- a source-shape check is not tied to
