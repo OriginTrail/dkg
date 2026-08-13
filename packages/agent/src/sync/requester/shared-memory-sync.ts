@@ -48,7 +48,9 @@ function boundSampledRef(ref: string): string {
 }
 
 function metadataQuadKey(quad: Quad): string {
-  return `${quad.graph} ${quad.subject} ${quad.predicate} ${quad.object}`;
+  // JSON's tuple boundaries are unambiguous even when a literal contains the
+  // whitespace/delimiter text that made the former flattened key lossy.
+  return JSON.stringify([quad.graph, quad.subject, quad.predicate, quad.object]);
 }
 
 /**

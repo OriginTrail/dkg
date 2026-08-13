@@ -7,6 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   computeFlatKCRootV10,
+  generateKnowledgeAssetShareMetadata,
   swmKaWriteLockKey,
   withKeyedLocks,
   workspacePublicQuadsDigest,
@@ -18,6 +19,7 @@ import {
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 
 const CG = 'durable-vm-swm-twin';
@@ -295,6 +297,85 @@ describe('durable VM / SWM tier reconciliation', () => {
       expect(await store.countQuads(input.swmGraph)).toBe(0);
     },
   );
+
+  it('parses and reconciles a matching non-zero private commitment end to end', async () => {
+    const store = new OxigraphStore();
+    const privateMerkleRoot = `0x${'cd'.repeat(32)}`;
+    const input = fixture(undefined, { tripleCount: 1, merkleRoot: privateMerkleRoot });
+    await seedTwin(store, input);
+    const operationSubject = `urn:dkg:share:${CG}:${OPERATION_ID}`;
+    const parsedMeta: Quad[] = [
+      ...generateKnowledgeAssetShareMetadata({
+        shareOperationId: OPERATION_ID,
+        contextGraphId: CG,
+        kaUal: UAL,
+        assertionVersion: 3,
+        publicTripleCount: input.payload.length,
+        privateTripleCount: 1,
+        privateMerkleRoot: ethers.getBytes(privateMerkleRoot),
+        publisherPeerId: 'peer-source',
+        timestamp: new Date(0),
+      }, input.swmMetaGraph),
+      {
+        subject: operationSubject,
+        predicate: `${DKG}publicQuadsDigest`,
+        object: `"${workspacePublicQuadsDigest(input.payload)}"`,
+        graph: input.swmMetaGraph,
+      },
+      {
+        subject: operationSubject,
+        predicate: `${DKG}publicSnapshotRef`,
+        object: `"${workspacePublicQuadsDigest(input.payload)}"`,
+        graph: input.swmMetaGraph,
+      },
+      {
+        subject: input.headSubject,
+        predicate: `${DKG}contentScopeVersion`,
+        object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"^^<${XSD_INTEGER}>`,
+        graph: input.swmMetaGraph,
+      },
+      { subject: input.headSubject, predicate: `${DKG}kaUal`, object: UAL, graph: input.swmMetaGraph },
+      {
+        subject: input.headSubject,
+        predicate: `${DKG}assertionVersion`,
+        object: `"3"^^<${XSD_INTEGER}>`,
+        graph: input.swmMetaGraph,
+      },
+      {
+        subject: input.headSubject,
+        predicate: `${DKG}assertionGraph`,
+        object: input.swmGraph,
+        graph: input.swmMetaGraph,
+      },
+      {
+        subject: input.headSubject,
+        predicate: `${DKG}shareOperationId`,
+        object: `"${OPERATION_ID}"`,
+        graph: input.swmMetaGraph,
+      },
+    ];
+    const descriptors = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: parsedMeta,
+    });
+    expect(descriptors).toHaveLength(1);
+    expect(descriptors[0]).toMatchObject({
+      privateTripleCount: 1,
+      privateMerkleRoot: privateMerkleRoot.toLowerCase(),
+    });
+    const retire = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+    });
+
+    await expect(reconcileFinalizedSwmTwinFromDescriptor({
+      store,
+      writeLocks: new Map(),
+      contextGraphId: CG,
+      descriptor: descriptors[0]!,
+      retire,
+    })).resolves.toBe('retired');
+    expect(retire).toHaveBeenCalledTimes(1);
+  });
 
   it('preserves a newer or different SWM revision', async () => {
     const store = new OxigraphStore();
