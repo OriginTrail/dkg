@@ -324,6 +324,8 @@ export interface SelectedSwmLifecycleHarnessOptions {
     readonly deadline: () => number;
   };
   readonly priorities?: Readonly<Record<string, number>>;
+  /** RFC-64 complete providers accepted for the selected public scope. */
+  readonly completeSwmProviders?: readonly string[];
   readonly onSnapshotRead?: (probe: {
     readonly ref: string;
     readonly publicAdmission: number;
@@ -427,6 +429,7 @@ export interface SelectedSwmLifecycleAgentFixture {
   contextGraphMetaProjection: { markDirtyFromQuads: () => void };
   oversizeTombstoneLog: { record: () => void };
   log: { info: () => void; warn: () => void; debug: () => void };
+  resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId: string) => string[];
   syncSharedMemoryFromPeerDetailedExecution:
     typeof LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution;
 }
@@ -709,6 +712,11 @@ export function createSelectedSwmLifecycleHarness(
     contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
     oversizeTombstoneLog: { record: () => {} },
     log: { info: () => {}, warn: () => {}, debug: () => {} },
+    resolveRfc64CompleteSwmProviderPeerIdsV1: (contextGraphId) => (
+      contextGraphId === options.contextGraphs.public
+        ? [...(options.completeSwmProviders ?? [PEER])]
+        : []
+    ),
     syncSharedMemoryFromPeerDetailedExecution:
       LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution,
     getSelectedSwmMetaTransfers: () => {
