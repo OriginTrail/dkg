@@ -4,15 +4,17 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
-## [10.0.14] - 2026-08-10
+## [10.0.14] - 2026-08-14
 
-A selected-public convergence release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains opt-in and public-only; private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**
+A selected-public convergence release. An Edge node can opt a bounded set of publicly readable Context Graphs into RFC-64: an operator-approved graph-complete provider drives bounded native Shared Memory recovery, while Verifiable Memory remains independently derived from finalized blockchain inventory. Both lanes continue across partial progress and provider gaps, and VM recovery batches assets by bounded byte/quad footprint instead of treating an arbitrarily large graph as one transfer. Signed SWM inventory remains shadow evidence in this release and does not drive receiver synchronization. RFC-64 remains operator-selected and public-only: a valid non-empty bootstrap manifest activates its selected scope when `enabled` is omitted, while an absent block or explicit `enabled: false` remains dormant. Private encrypted live sharing is unchanged, and private catalog-based cold join is not part of this release. **No smart-contract changes or deployments are required.**
 
 ### Upgrading from 10.0.13
 
 | Change | Impact | Action |
 | --- | --- | --- |
-| Selected public RFC-64 convergence is usable end to end | For an explicitly selected public CG, a configured graph-complete provider recovers SWM-only assets through native durable sync and finalized chain inventory recovers VM assets. Empty or disabled configuration remains dormant | Configure `rfc64PublicCatalog` only for public CGs the Edge should maintain, and list a `completeSwmProviders` peer only after establishing that graph-wide property; leave the block absent to retain 10.0.13 behavior |
+| Selected public RFC-64 convergence is usable end to end | For an explicitly selected public CG, a configured graph-complete provider recovers SWM-only assets through native durable sync and finalized chain inventory recovers VM assets. An absent block or explicitly disabled configuration remains dormant; an empty or malformed activation block is rejected | Configure `rfc64PublicCatalog` only for public CGs the Edge should maintain, and list a `completeSwmProviders` peer only after establishing that graph-wide property; leave the block absent to retain 10.0.13 behavior |
+| A valid selected manifest activates without a redundant enable flag | When `rfc64PublicCatalog.enabled` is omitted, one accepted non-empty bootstrap manifest now starts the bounded selected-public lane; an absent block or explicit `enabled: false` still prevents activation | Existing `enabled: true` configurations remain valid. Omit the field when the manifest itself should express activation, or set it explicitly to `false` as an emergency/operator kill switch |
+| Finalized VM retires its byte-identical SWM twin | A receiver that proves the current finalized VM version, status and full public/private commitment removes the stale SWM representation instead of retaining one Knowledge Asset in both tiers | No action. Newer, changed, ambiguous or incompletely authenticated SWM is preserved fail closed |
 | Selected VM recovery uses bounded footprint-aware batches | Multiple small assets can share one recovery request, while byte, quad and heap estimates keep large transfers bounded | No action; the scheduler derives safe batches from authoritative or conservative size evidence |
 | Persisted user subscriptions rehydrate on daemon startup | An operator-selected graph resumes automatically after restart instead of remaining a dormant database row | Set `DKG_CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENABLED=false` only as an emergency kill-switch |
 | Dashboard SQLite schema 32 → 33 | Selected-VM cursors are fenced by deployment identity; v32 optimization cursors are discarded so a redeploy cannot reuse another chain deployment's numeric IDs or watermark | No action; the graph data is retained and selected VM reconciliation safely resumes from chain inventory |
@@ -26,6 +28,7 @@ A selected-public convergence release. An Edge node can opt a bounded set of pub
 ### Changed
 
 - **RFC-64 catalogs describe SWM only** (#2147): VM is never accepted from a catalog as authority; finalized blockchain inventory remains the VM catalog for both discovery and completeness. Automatic signed-catalog production from ordinary publication is not enabled by this release.
+- **Selected manifests activate the RFC-64 lane directly** (#2272): a valid accepted non-empty bootstrap manifest with `enabled` omitted is active by default, while an absent block and explicit `enabled: false` stay dormant. This removes a redundant configuration switch without expanding an Edge node beyond its operator-selected Context Graphs.
 - **Cold selected CG bindings resolve directly from chain state** (#2205): a fresh receiver can map the configured public graph to its numeric on-chain identity without relying on pre-existing ontology/store metadata, and ambiguous or stale bindings fail closed.
 - **Publisher workspace-head writes remain on the StorageACK lane** (#2178), preventing unrelated normal-lane store work from delaying acknowledgement-critical state.
 - **Prime Agent legacy chat memory migrates to numbered, graph-scoped working memory** (#2151, #2153) without mistaking orphan lifecycle rows for legacy drafts.
@@ -34,12 +37,13 @@ A selected-public convergence release. An Edge node can opt a bounded set of pub
 
 - **Node information no longer exposes configured RPC endpoints** (#2211); status retains health and failover evidence without serializing endpoint credentials.
 - **Selected SWM and VM recovery no longer stop after the first partial result** (#2146, #2210), and selected work is not displaced indefinitely by unrelated background synchronization (#2182).
+- **A finalized public Knowledge Asset no longer remains duplicated across SWM and VM** (#2262): both arrival orders use current chain status plus the complete public/private commitment to retire only an exact stale SWM twin; ambiguous, newer or changed SWM remains untouched.
 - **VM recovery cursors cannot cross deployment boundaries** (#2184); upgrading drops only the unsafe optimization cursor, never SWM or VM content.
 
 ### Deployment
 
 - **No contract changes.** No Solidity source, ABI, or deployment-registry update is required.
-- RFC-64 remains disabled unless `rfc64PublicCatalog.enabled` is true with one bounded, network-matching public-policy manifest. Edge scope remains operator-selected; Core nodes retain their separate coverage responsibilities.
+- RFC-64 remains dormant when `rfc64PublicCatalog` is absent or `enabled` is explicitly `false`. When `enabled` is omitted, activation requires one bounded, network-matching, accepted public-policy bootstrap manifest. Edge scope remains operator-selected; Core nodes retain their separate coverage responsibilities.
 
 ### Known limitations
 
