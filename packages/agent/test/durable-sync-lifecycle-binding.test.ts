@@ -1056,6 +1056,110 @@ describe('durable sync lifecycle chain binding', () => {
     expect(disposition).toBe('suppress-metadata');
   });
 
+  it('retires a fresh SWM twin through named lifecycle cleanup and suppresses its metadata', async () => {
+    let disposition: unknown;
+    const retirement = {
+      contextGraphId,
+      kaUal: ual,
+      agentAddress: '0x1111111111111111111111111111111111111111',
+      kaNumber: 1n,
+      swmGraph: 'urn:swm',
+    } satisfies FinalizedSwmTwinRetirement;
+    mockedReconcileFinalizedSwmTwinFromDescriptor.mockImplementationOnce(
+      async ({ retire }) => {
+        await retire(retirement);
+        return 'retired';
+      },
+    );
+    mockedRunSharedMemorySync.mockImplementationOnce(async (syncContext) => {
+      disposition = await syncContext.reconcileFinalizedTwin?.(contextGraphId, {
+        kaUal: ual,
+      } as never);
+      return {
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 1,
+        checkpointAdvances: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        backoffWorthyFailures: 0,
+        deferredBackpressure: 0,
+        snapshotPlaneIncomplete: 0,
+        metadataContinuationYields: 0,
+        replayPhaseBytesReceived: 0,
+        snapshotPhaseBytesReceived: 0,
+      };
+    });
+    const clearPublishedKnowledgeAssetSwm = vi.fn(async () => {});
+    const agentLike: any = {
+      config: {},
+      store: {},
+      writeLocks: new Map(),
+      publicSnapshotStore: undefined,
+      syncCheckpoints: new Map(),
+      workspaceOwnedEntities: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      listSubGraphs: async () => [],
+      fetchSyncPages: async () => { throw new Error('unexpected fetch'); },
+      getOrCreateSyncVerifyWorker: () => { throw new Error('unexpected verifier'); },
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _cg: string,
+        _lane: string,
+        _operation: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      publisher: { clearPublishedKnowledgeAssetSwm },
+      // Ordinary public CG: no RFC-64 complete-provider authority applies.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    agentLike.retireFinalizedSwmTwinCandidate = (
+      LifecycleSyncMethods.prototype as any
+    ).retireFinalizedSwmTwinCandidate;
+
+    await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
+      agentLike,
+      '12D3KooWLifecyclePeer',
+      [contextGraphId],
+      {
+        sharedMemorySyncPlan: {
+          eligibleContextGraphIds: [contextGraphId],
+          publicContextGraphIds: [contextGraphId],
+          privateRecoverFromCurator: [],
+        },
+      },
+    );
+
+    expect(mockedReconcileFinalizedSwmTwinFromDescriptor).toHaveBeenCalledOnce();
+    expect(clearPublishedKnowledgeAssetSwm).toHaveBeenCalledWith(
+      contextGraphId,
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: retirement.agentAddress,
+          kaNumber: retirement.kaNumber,
+        },
+      },
+      undefined,
+      expect.objectContaining({ operationName: 'sync' }),
+      ual,
+    );
+    expect(agentLike.invalidateListContextGraphsCache).toHaveBeenCalledOnce();
+    expect(disposition).toBe('suppress-metadata');
+  });
+
   it('does not let a stale strict snapshot overwrite a newer host-only persistence write', async () => {
     const oldSubscription = { subscribed: true, onChainId: '14' };
     const hostOnlySubscription = { subscribed: false, coreHosted: true, onChainId: '14' };
