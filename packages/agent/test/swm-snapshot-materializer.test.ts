@@ -21,7 +21,7 @@
  *     ambiguous mix. A second round is a pure no-op, which also proves the
  *     digest survives the store round-trip (no churn).
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,

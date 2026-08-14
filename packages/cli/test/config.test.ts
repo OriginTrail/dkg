@@ -131,6 +131,32 @@ describe('resolveRfc64PublicCatalogActivation', () => {
     });
   });
 
+  it('activates a valid selected manifest without a redundant enabled switch', () => {
+    const resolved = resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-by-manifest')],
+        },
+      },
+    }, chainIdentity);
+
+    expect(resolved).toMatchObject({
+      enabled: true,
+      selectedContextGraphs: ['selected-by-manifest'],
+    });
+  });
+
+  it('still rejects a non-boolean enabled value', () => {
+    expect(() => resolveRfc64PublicCatalogActivation({
+      rfc64PublicCatalog: {
+        enabled: 'true',
+        bootstrap: {
+          acceptedPublicPolicies: [policy('selected-invalid-switch')],
+        },
+      } as any,
+    }, chainIdentity)).toThrow(/enabled must be a boolean/u);
+  });
+
   it('keeps receiver-only activation selected while leaving auto-publish absent', () => {
     const resolved = resolveRfc64PublicCatalogActivation({
       rfc64PublicCatalog: {

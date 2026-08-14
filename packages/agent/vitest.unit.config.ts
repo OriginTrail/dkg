@@ -56,6 +56,7 @@ export default defineConfig({
       "test/durable-sync-since-threading.test.ts",
       "test/durable-sync-budget.test.ts",
       "test/durable-sync-graph-scoped-materialization.test.ts",
+      "test/finalized-swm-twin-reconciliation.test.ts",
       "test/durable-sync-lifecycle-binding.test.ts",
       "test/durable-manifest-digest.test.ts",
       "test/durable-manifest-continuation.test.ts",

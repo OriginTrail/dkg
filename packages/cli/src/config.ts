@@ -486,10 +486,10 @@ export interface GraphSetIndexConfig {
 }
 
 /**
- * Explicit selected-public RFC-64 activation. Omitted or `enabled: false`
- * leaves the catalog data plane fail-closed with no accepted policies and no
- * ordinary-publication hook. The bootstrap manifest is the selected CG set;
- * the daemon adds only those graph IDs to durable synchronization.
+ * Selected-public RFC-64 activation. An accepted bootstrap manifest activates
+ * its selected CGs by default; an omitted block or explicit `enabled: false`
+ * leaves the catalog data plane fail-closed. The daemon adds only manifest
+ * graph IDs to durable synchronization.
  */
 export type Rfc64PublicCatalogActivationConfig = Rfc64PublicCatalogActivationConfigV1;
 export type ResolvedRfc64PublicCatalogActivationConfig =

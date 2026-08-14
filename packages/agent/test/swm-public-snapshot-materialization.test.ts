@@ -77,7 +77,7 @@ function page(quads: Quad[], completed = true): SyncPageResult {
 }
 
 /** One graph-scoped KA share: payload + the meta the strict parser demands. */
-function fixture(subGraphName?: string) {
+function fixture(subGraphName?: string, publisherPeerId = 'peer-source') {
   const scope = createGraphKnowledgeAssetScope(UAL, 1);
   const metaGraph = subGraphName
     ? `did:dkg:context-graph:${CG}/${subGraphName}/_shared_memory_meta`
@@ -99,7 +99,7 @@ function fixture(subGraphName?: string) {
       assertionVersion: 1,
       publicTripleCount: payload.length,
       privateTripleCount: 0,
-      publisherPeerId: 'peer-source',
+      publisherPeerId,
       timestamp: new Date(0),
       ...(subGraphName ? { subGraphName } : {}),
     }, metaGraph),
@@ -123,10 +123,14 @@ interface HarnessOverrides {
   subGraphName?: string;
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
+  reconcileImpl?: () => Promise<void>;
+  reconcileDisposition?: 'preserve' | 'suppress-metadata';
+  publisherPeerId?: string;
+  additionalVerifiedMeta?: Quad[];
 }
 
 function harness(overrides: HarnessOverrides = {}) {
-  const fx = fixture(overrides.subGraphName);
+  const fx = fixture(overrides.subGraphName, overrides.publisherPeerId);
   const snapshotStore = new MemorySnapshotStore();
   const events: string[] = [];
   const replaced: Array<{ graphUri: string; quads: Quad[] }> = [];
@@ -151,7 +155,7 @@ function harness(overrides: HarnessOverrides = {}) {
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
       fetchSyncPages: async (_c, _p, _cg, _inc, phase, _g, _dl, fetchOptions): Promise<SyncPageResult> => {
         const snapshotRef = fetchOptions?.snapshotRef;
-        if (phase === 'meta') return page(fx.meta);
+        if (phase === 'meta') return page([...fx.meta, ...(overrides.additionalVerifiedMeta ?? [])]);
         if (phase === 'snapshot') {
           events.push('snapshot-fetched');
           snapshotFetches.push(String(snapshotRef));
@@ -211,6 +215,11 @@ function harness(overrides: HarnessOverrides = {}) {
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
         },
       },
+      reconcileFinalizedTwin: async () => {
+        events.push('finalized-twin-reconciled');
+        await overrides.reconcileImpl?.();
+        return overrides.reconcileDisposition ?? 'preserve';
+      },
       publicSnapshotStore: snapshotStore,
       deleteCheckpoint: () => {},
       setCheckpoint: () => {},
@@ -251,6 +260,75 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
     expect(h.events.indexOf('meta-inserted')).toBeGreaterThan(h.events.indexOf('head-swapped'));
     expect(h.headSwaps).toEqual([{ contextGraphId: CG, headSubject: `${UAL}#dkg-swm-head` }]);
+  });
+
+  it('reconciles a possible finalized twin only after releasing the SWM write lock', async () => {
+    const h = harness();
+    await h.run();
+    expect(h.events.indexOf('finalized-twin-reconciled'))
+      .toBeGreaterThan(h.events.indexOf('lock-released'));
+  });
+
+  it('keeps a completed SWM materialization successful when twin cleanup defers', async () => {
+    const h = harness({
+      reconcileImpl: async () => { throw new Error('cleanup unavailable'); },
+    });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(h.replaced).toHaveLength(1);
+    expect(h.events).toContain('finalized-twin-reconciled');
+  });
+
+  it('does not recreate SWM head metadata after retiring an already-materialized twin', async () => {
+    const h = harness({
+      contentPresent: () => true,
+      storedHead: () => ({ version: '1', needsRepair: false }),
+      reconcileDisposition: 'suppress-metadata',
+    });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(h.events).toContain('finalized-twin-reconciled');
+    const retiredSubjects = new Set([
+      `${UAL}#dkg-swm-head`,
+      `urn:dkg:share:${CG}:snapshot-materialization-op`,
+    ]);
+    expect(h.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
+      .toHaveLength(0);
+  });
+
+  it('does not bulk-recreate metadata after freshly materializing and retiring a twin', async () => {
+    const h = harness({ reconcileDisposition: 'suppress-metadata' });
+    const summary = await h.run();
+    expect(summary.failedPhases).toBe(0);
+    expect(h.replaced).toHaveLength(1);
+    const reconciliation = h.events.indexOf('finalized-twin-reconciled');
+    expect(reconciliation).toBeGreaterThan(h.events.indexOf('lock-released'));
+    expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
+  });
+
+  it('does not alias delimiter-like RDF terms in the suppression ledger', async () => {
+    const fx = fixture(undefined, 'peer source');
+    const publisherRow = fx.meta.find((quad) => quad.predicate === `${DKG}publisherPeerId`)!;
+    // This distinct tuple flattened to exactly the same space-joined string as
+    // publisherRow. It models an admitted future RDF term shape without making
+    // the coordinator depend on today's stricter IRI grammar.
+    const collisionRow: Quad = {
+      graph: `${publisherRow.graph} ${publisherRow.subject}`,
+      subject: publisherRow.predicate,
+      predicate: '"peer',
+      object: 'source"',
+    };
+    const h = harness({
+      publisherPeerId: 'peer source',
+      additionalVerifiedMeta: [collisionRow],
+      reconcileDisposition: 'suppress-metadata',
+    });
+
+    await h.run();
+
+    expect(h.inserted.flat()).toContainEqual(collisionRow);
+    const reconciliation = h.events.indexOf('finalized-twin-reconciled');
+    expect(h.events.slice(reconciliation + 1)).toContain('meta-inserted');
   });
 
   it('closes the gossip race: in-lock version re-check skips a superseded snapshot', async () => {
