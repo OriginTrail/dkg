@@ -8,6 +8,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
+  SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
 } from '../../dkg-agent-constants.js';
@@ -571,6 +572,16 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const usesMetaByteBudget = !isWorkspace &&
       phase === 'meta' &&
       request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
+    // The authenticated `limit` deliberately remains capped at the legacy
+    // responder size for rolling-upgrade signature compatibility. Upgraded
+    // META requesters carry the larger row target in the additive hint, just
+    // like DATA. Honour it here: readDurableMetaPage and the serializer below
+    // still enforce the response byte budget and whole-subject boundaries.
+    const durableMetaLimit = usesMetaByteBudget &&
+      typeof request.pageRowsHint === 'number' &&
+      Number.isSafeInteger(request.pageRowsHint)
+      ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
+      : limit;
     if (!contextGraphId || typeof contextGraphId !== 'string') {
       // Count this early return too — it short-circuits before limiter.run, so
       // without this it would never reach the syncResponseTotal{ok}/{error}
@@ -780,7 +791,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
               },
             ),
             offset,
-            limit,
+            limit: durableMetaLimit,
             signal,
             rowListMemo: session ? durableMetaRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
