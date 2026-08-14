@@ -66,7 +66,10 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
 import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
-import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import {
+  durableSyncRequestPageSize,
+  LifecycleSyncMethods,
+} from '../src/dkg-agent-lifecycle.js';
 import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import {
   runDurableSync,
@@ -205,6 +208,11 @@ async function captureGraphScopedStore(
 }
 
 describe('durable sync lifecycle chain binding', () => {
+  it('keeps metadata byte-budgeted when durable data is tuned to 128 rows', () => {
+    expect(durableSyncRequestPageSize('data', 128)).toBe(128);
+    expect(durableSyncRequestPageSize('meta', 128)).toBe(8_192);
+  });
+
   beforeEach(() => {
     mockedRunDurableSync.mockClear();
     mockedRunDurableSyncDetailed.mockClear();

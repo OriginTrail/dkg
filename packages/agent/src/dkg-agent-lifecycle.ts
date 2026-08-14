@@ -482,10 +482,12 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
+  SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
+  SYNC_MIN_GRAPH_BUDGET_MS,
   SYNC_PAGE_TIMEOUT_MS,
   SYNC_ROUTER_ATTEMPTS,
   SYNC_PROTOCOL_CHECK_ATTEMPTS,
@@ -824,6 +826,19 @@ function combineSyncAdmissionSignals(
   };
 }
 
+/**
+ * Durable DATA may be intentionally tuned down for large assertion payloads,
+ * but durable META is a compact proof manifest that must complete before any
+ * DATA prefix can be mapped to verified graph boundaries. Keep META on the
+ * negotiated byte-budget row hint while preserving the caller's DATA size.
+ */
+export function durableSyncRequestPageSize(
+  phase: SyncPhase,
+  dataPageSize: number = SYNC_REQUEST_PAGE_SIZE,
+): number {
+  return phase === 'meta' ? SYNC_BYTE_BUDGET_MAX_ROWS : dataPageSize;
+}
+
 function syncPageFetchCoalescingKey(params: {
   remotePeerId: string;
   contextGraphId: string;
@@ -1099,12 +1114,25 @@ function asSyncFetchAbortError(reason: unknown): Error {
   return err;
 }
 
+const DURABLE_SYNC_SETTLEMENT_HEADROOM_FRACTION = 0.2;
+const DURABLE_SYNC_SETTLEMENT_HEADROOM_MAX_MS = 60_000;
+
+function durableSyncFetchDeadline(startedAt: number, timeoutMs: number): number {
+  const settlementHeadroomMs = Math.min(
+    DURABLE_SYNC_SETTLEMENT_HEADROOM_MAX_MS,
+    Math.floor(timeoutMs * DURABLE_SYNC_SETTLEMENT_HEADROOM_FRACTION),
+    Math.max(0, timeoutMs - SYNC_MIN_GRAPH_BUDGET_MS),
+  );
+  return startedAt + timeoutMs - settlementHeadroomMs;
+}
+
 function createDurableSyncOperationBoundary(options: {
   totalTimeoutMs?: number;
   maximumTimeoutMs?: number;
   signal?: AbortSignal;
 }): {
   deadline?: number;
+  fetchDeadline?: number;
   signal?: AbortSignal;
   dispose: () => void;
 } {
@@ -1119,7 +1147,9 @@ function createDurableSyncOperationBoundary(options: {
     options.totalTimeoutMs,
     options.maximumTimeoutMs,
   );
-  const deadline = Date.now() + timeoutMs;
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  const fetchDeadline = durableSyncFetchDeadline(startedAt, timeoutMs);
   const controller = new AbortController();
   const abortFromCaller = () => controller.abort(
     asSyncFetchAbortError(options.signal?.reason),
@@ -1138,6 +1168,7 @@ function createDurableSyncOperationBoundary(options: {
 
   return {
     deadline,
+    fetchDeadline,
     signal: controller.signal,
     dispose: () => {
       clearTimeout(timeout);
@@ -1360,6 +1391,7 @@ type LegacyDurableContextGraphOptions = {
   fetchTimeoutMs?: number;
   exactAssetUals?: string[];
   authenticationTimeoutMs?: number;
+  operationFetchDeadline?: number;
   operationDeadline?: number;
   settlementSliceTimeoutMs?: number;
   signal?: AbortSignal;
@@ -5375,6 +5407,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 fetchTimeoutMs,
                 exactAssetUals,
                 authenticationTimeoutMs,
+                operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
                 settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
                 signal: operationBoundary.signal,
@@ -5572,6 +5605,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetUals,
       authenticationTimeoutMs = fetchTimeoutMs,
+      operationFetchDeadline,
       operationDeadline,
       settlementSliceTimeoutMs,
       signal,
@@ -5627,6 +5661,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       fetchTimeoutMs,
       authenticationTimeoutMs,
       exactRecovery: exactAssetUals !== undefined,
+      operationFetchDeadline,
       extendedRecovery: settlementSliceTimeoutMs !== undefined,
       operationDeadline,
     }).createContextGraphBudget({
@@ -6405,7 +6440,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       syncPageTimeoutMs: SYNC_PAGE_TIMEOUT_MS,
       syncRouterAttempts: SYNC_ROUTER_ATTEMPTS,
       syncPageRetryAttempts: SYNC_PAGE_RETRY_ATTEMPTS,
-      syncPageSize: SYNC_REQUEST_PAGE_SIZE,
+      syncPageSize: durableSyncRequestPageSize(phase),
       syncDeniedResponse: SYNC_DENIED_RESPONSE,
       // Caller AbortSignals are waiter-scoped below: one duplicate trigger
       // timing out must not abort the shared fetch for the other waiters. The
