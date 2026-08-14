@@ -864,10 +864,23 @@ describe('rootless graph-scoped KA lifecycle', () => {
     snapshotQuery.mockRestore();
 
     const operationSubject = `urn:dkg:share:${CG_ID}:${intent.shareOperationId}`;
+    const recoveryVmGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.VerifiableMemory,
+      queuedScope.agentAddress,
+      BigInt(queuedScope.kaNumber),
+    );
+    const recoveryVmRows = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${recoveryVmGraph}> { ?s ?p ?o } }`,
+    );
+    if (recoveryVmRows.type !== 'quads' || recoveryVmRows.quads.length === 0) {
+      throw new Error('expected exact VM candidate before snapshot-retirement recovery');
+    }
     await store.deleteByPattern({
       graph: contextGraphSharedMemoryMetaUri(CG_ID),
       subject: operationSubject,
     });
+    await store.deleteByPattern({ graph: recoveryVmGraph });
     await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
@@ -875,8 +888,22 @@ describe('rootless graph-scoped KA lifecycle', () => {
       code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
     });
 
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    await store.insert(recoveryVmRows.quads.map((quad) => ({
+      ...quad,
+      graph: recoveryVmGraph,
+    })));
+    // RFC-64 may retire the redundant SWM snapshot after independently
+    // materializing exact VM but before the async publisher records its receipt.
+    // Recovery must accept that already-verified public VM candidate even when
+    // the original publish did not request SWM cleanup.
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any);
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
 
     const history = await agent.assertion.history(CG_ID, name);
