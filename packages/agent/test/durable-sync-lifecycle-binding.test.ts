@@ -58,8 +58,10 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   >();
   return {
     ...actual,
-    reconcileFinalizedSwmTwin: vi.fn(async () => 'not-found' as const),
-    reconcileFinalizedSwmTwinFromDescriptor: vi.fn(async () => 'not-found' as const),
+    reconcileFinalizedSwmTwin: vi.fn(async () => 'head-missing-or-ambiguous' as const),
+    reconcileFinalizedSwmTwinFromDescriptor: vi.fn(
+      async () => 'head-missing-or-ambiguous' as const,
+    ),
   };
 });
 
