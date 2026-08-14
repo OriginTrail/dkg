@@ -410,6 +410,20 @@ describe('/api/status finalization recovery health', () => {
 });
 
 describe('/api/status RFC-64 selected-public activation', () => {
+  it('reports RFC-64 selected public scheduling as the default for explicit subscriptions', async () => {
+    const response = await requestStatusWithAgent({
+      // Runtime subscribe mutates the agent scope, not the startup CLI config.
+      getSyncContextGraphIds: () => ['explicit-public-cg'],
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      selectedContextGraphs: ['explicit-public-cg'],
+      catalogBackedContextGraphs: [],
+    });
+  });
+
   it('reports the fail-closed disabled state without invoking catalog controls', async () => {
     const catalogStats = vi.fn(() => {
       throw new Error('disabled status must not read catalog service state');

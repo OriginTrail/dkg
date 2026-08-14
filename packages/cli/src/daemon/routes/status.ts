@@ -98,7 +98,6 @@ import {
   type LocalAgentIntegrationStatus,
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
-  resolveNetworkDefaultContextGraphs,
   resolveNetworkConfigName,
   resolveSharedMemoryTtlMs,
   repoDir,
@@ -772,6 +771,12 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           providers: accepted.completeSwmProviders,
         }))
       : [];
+    const rfc64SelectedPublicSyncContextGraphs = typeof agent.getSyncContextGraphIds === 'function'
+      ? agent.getSyncContextGraphIds()
+      : [
+        ...resolveContextGraphs(config),
+        ...rfc64PublicCatalogActivation.selectedContextGraphs,
+      ];
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
       closed: false,
@@ -888,6 +893,17 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
         completeSwmProviders: rfc64CompleteSwmProviders,
         service: rfc64PublicCatalogService,
         bootstrap: rfc64PublicCatalogBootstrap,
+      },
+      // Product-default scheduling is deliberately separate from the signed
+      // catalog authority surface above. Every explicitly requested CG is
+      // eligible for RFC-64 selected PUBLIC-SWM scheduling; private CGs retain
+      // curator recovery, and only `completeSwmProviders` may prove a whole
+      // public SWM scope terminal. The harness knows its generated CG is public
+      // and uses this exact requested-scope projection as its no-spend preflight.
+      rfc64SelectedPublicSync: {
+        defaultEnabled: true,
+        selectedContextGraphs: [...new Set(rfc64SelectedPublicSyncContextGraphs)],
+        catalogBackedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
       },
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
