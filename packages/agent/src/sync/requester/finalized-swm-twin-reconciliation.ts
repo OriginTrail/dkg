@@ -99,8 +99,7 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   });
 }
 
-interface FinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
-  readonly source: 'vm' | 'swm';
+interface CommonFinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
   readonly assertionVersion: bigint;
   readonly vmGraph: string;
   readonly vmMetaGraph: string;
@@ -110,8 +109,22 @@ interface FinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
   readonly expectedPublicQuadsCount: number;
   readonly privateTripleCount: number;
   readonly privateMerkleRoot?: string;
-  readonly expectedMerkleRoot?: string;
 }
+
+interface VmArrivalFinalizedSwmTwinEvidence extends CommonFinalizedSwmTwinEvidence {
+  /** VM catch-up authenticated this exact finalized root before reconciliation. */
+  readonly arrival: 'vm';
+  readonly expectedMerkleRoot: string;
+}
+
+interface SwmArrivalFinalizedSwmTwinEvidence extends CommonFinalizedSwmTwinEvidence {
+  /** SWM materialization supplied the descriptor; current VM state is re-proved locally. */
+  readonly arrival: 'swm';
+}
+
+type FinalizedSwmTwinEvidence =
+  | VmArrivalFinalizedSwmTwinEvidence
+  | SwmArrivalFinalizedSwmTwinEvidence;
 
 async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly store: TripleStore;
@@ -149,7 +162,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       // under the same KA lock; a missing head here means a concurrent VM-first
       // reconciliation completed after that lock was released. Suppressing the
       // outer bulk metadata append prevents resurrection of a dangling head.
-      if (evidence.source !== 'swm') return 'head-missing-or-ambiguous';
+      if (evidence.arrival === 'vm') return 'head-missing-or-ambiguous';
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
       if (swmQuads.length === 0) return 'already-retired-finalized';
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
@@ -196,7 +209,7 @@ async function retireAndInvalidate(
   }).catch(() => {});
 }
 
-function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedSwmTwinEvidence {
+function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalizedSwmTwinEvidence {
   const scope = createGraphKnowledgeAssetScope(asset.ual, asset.assertionVersion);
   const subGraphName = optionalMetadataLiteral(asset, `${DKG}subGraphName`);
   if (subGraphName !== undefined) {
@@ -232,7 +245,7 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedSwmTwinE
     throw new Error('Authenticated VM metadata is not confirmed');
   }
   return {
-    source: 'vm',
+    arrival: 'vm',
     contextGraphId: asset.contextGraphId,
     ...(subGraphName === undefined ? {} : { subGraphName }),
     kaUal: asset.ual,
@@ -255,7 +268,7 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedSwmTwinE
 function evidenceFromSwmDescriptor(
   contextGraphId: string,
   descriptor: GraphScopedSwmRecoveryDescriptor,
-): FinalizedSwmTwinEvidence {
+): SwmArrivalFinalizedSwmTwinEvidence {
   const scope = createGraphKnowledgeAssetScope(
     descriptor.kaUal,
     descriptor.assertionVersion,
@@ -278,7 +291,7 @@ function evidenceFromSwmDescriptor(
     descriptor.subGraphName,
   );
   return {
-    source: 'swm',
+    arrival: 'swm',
     contextGraphId,
     ...(descriptor.subGraphName === undefined
       ? {}
@@ -376,7 +389,7 @@ function vmMetadataMatchesEvidence(
     : [ethers.getBytes(evidence.privateMerkleRoot)];
   const computedMerkleRoot = ethers.hexlify(computeFlatKCRootV10([...vmQuads], privateRoots)).toLowerCase();
   return metadata.merkleRoot === computedMerkleRoot
-    && (evidence.expectedMerkleRoot === undefined
+    && (evidence.arrival === 'swm'
       || evidence.expectedMerkleRoot === computedMerkleRoot);
 }
 
