@@ -44,6 +44,9 @@ export interface GraphScopedSwmRecoveryDescriptor {
   readonly shareOperationId: string;
   readonly publicQuadsDigest: string;
   readonly publicQuadsCount: number;
+  /** Authenticated private-content commitment carried by the active operation. */
+  readonly privateTripleCount: number;
+  readonly privateMerkleRoot?: string;
   readonly publicSnapshotRef?: string;
   readonly publicSnapshotGraph?: string;
   readonly publisherPeerId: string;
@@ -229,6 +232,10 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       shareOperationId,
       publicQuadsDigest,
       publicQuadsCount,
+      privateTripleCount,
+      ...(privateRoot === undefined
+        ? {}
+        : { privateMerkleRoot: stripLiteral(privateRoot).toLowerCase() }),
       ...(publicSnapshotRef ? { publicSnapshotRef } : {}),
       ...(publicSnapshotGraph ? { publicSnapshotGraph } : {}),
       publisherPeerId,

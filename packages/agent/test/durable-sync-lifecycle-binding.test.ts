@@ -22,6 +22,47 @@ vi.mock('../src/sync/requester/graph-scoped-materialization.js', async (importOr
   };
 });
 
+vi.mock('../src/sync/requester/shared-memory-sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/sync/requester/shared-memory-sync.js')>();
+  return {
+    ...actual,
+    runSharedMemorySync: vi.fn(async () => ({
+      insertedTriples: 0,
+      fetchedMetaTriples: 0,
+      fetchedDataTriples: 0,
+      insertedMetaTriples: 0,
+      insertedDataTriples: 0,
+      bytesReceived: 0,
+      resumedPhases: 0,
+      timedOutPhases: 0,
+      completedPhases: 0,
+      checkpointAdvances: 0,
+      deniedPhases: 0,
+      emptyResponses: 0,
+      droppedDataTriples: 0,
+      failedPeers: 0,
+      failedPhases: 0,
+      backoffWorthyFailures: 0,
+      deferredBackpressure: 0,
+      snapshotPlaneIncomplete: 0,
+      metadataContinuationYields: 0,
+      replayPhaseBytesReceived: 0,
+      snapshotPhaseBytesReceived: 0,
+    })),
+  };
+});
+
+vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (importOriginal) => {
+  const actual = await importOriginal<
+    typeof import('../src/sync/requester/finalized-swm-twin-reconciliation.js')
+  >();
+  return {
+    ...actual,
+    reconcileFinalizedSwmTwin: vi.fn(async () => 'not-found' as const),
+    reconcileFinalizedSwmTwinFromDescriptor: vi.fn(async () => 'not-found' as const),
+  };
+});
+
 import { PROTOCOL_SYNC_CHANGELOG } from '@origintrail-official/dkg-core';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -40,6 +81,12 @@ import {
   materializeVerifiedGraphScopedAsset,
   type VerifiedGraphScopedAsset,
 } from '../src/sync/requester/graph-scoped-materialization.js';
+import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinFromDescriptor,
+  type FinalizedSwmTwinRetirement,
+} from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'agent-blackbox-vm';
@@ -51,6 +98,11 @@ const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as Oper
 const mockedRunDurableSync = vi.mocked(runDurableSync);
 const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
+const mockedRunSharedMemorySync = vi.mocked(runSharedMemorySync);
+const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwin);
+const mockedReconcileFinalizedSwmTwinFromDescriptor = vi.mocked(
+  reconcileFinalizedSwmTwinFromDescriptor,
+);
 
 function graphScopedAsset(
   root: Uint8Array,
@@ -121,6 +173,8 @@ async function captureGraphScopedStore(
     invalidateListContextGraphsCache: vi.fn(),
     contextGraphMetaProjection: { markDirtyFromQuads: vi.fn() },
     log: { info: () => {}, warn, debug: () => {} },
+    publisher: { clearPublishedKnowledgeAssetSwm: async () => {} },
+    writeLocks: new Map(),
   };
   agentLike.localCgMatchesOnChainSlot = (DKGAgent.prototype as any).localCgMatchesOnChainSlot;
   agentLike.requireLocalCgMatchesOnChainSlot = (
@@ -128,6 +182,9 @@ async function captureGraphScopedStore(
   ).requireLocalCgMatchesOnChainSlot;
   agentLike.isWireIdKeyedSubscription = (DKGAgent.prototype as any).isWireIdKeyedSubscription;
   agentLike.raceChainPolicyRead = (DKGAgent.prototype as any).raceChainPolicyRead;
+  agentLike.retireFinalizedSwmTwinCandidate = (
+    LifecycleSyncMethods.prototype as any
+  ).retireFinalizedSwmTwinCandidate;
   options.onAgentLike?.(agentLike);
 
   await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraph.call(
@@ -160,6 +217,11 @@ describe('durable sync lifecycle chain binding', () => {
     mockedRunDurableSync.mockClear();
     mockedRunDurableSyncDetailed.mockClear();
     mockedMaterialize.mockClear();
+    mockedRunSharedMemorySync.mockClear();
+    mockedReconcileFinalizedSwmTwin.mockReset();
+    mockedReconcileFinalizedSwmTwin.mockResolvedValue('not-found');
+    mockedReconcileFinalizedSwmTwinFromDescriptor.mockReset();
+    mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValue('not-found');
   });
 
   afterEach(() => {
@@ -847,6 +909,255 @@ describe('durable sync lifecycle chain binding', () => {
 
     expect(mockedMaterialize).toHaveBeenCalledOnce();
     expect(mockedMaterialize.mock.calls[0]![0].shouldQuarantineCommitted?.()).toBe(false);
+  });
+
+  it('wires durable VM reconciliation to named-lifecycle cleanup without failing materialization', async () => {
+    const root = new Uint8Array(32);
+    root[31] = 2;
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 2n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+      verifyKAUpdate: async () => ({
+        verified: true,
+        onChainMerkleRoot: root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }),
+    } as ChainAdapter;
+    const clearPublishedKnowledgeAssetSwm = vi.fn(async () => {
+      throw new Error('cleanup store unavailable');
+    });
+    const warnings = vi.fn();
+    let agentLike!: any;
+    mockedReconcileFinalizedSwmTwin.mockImplementationOnce(async ({ retire }) => {
+      await retire({
+        contextGraphId,
+        kaUal: ual,
+        agentAddress: '0x1111111111111111111111111111111111111111',
+        kaNumber: 1n,
+        swmGraph: 'urn:swm',
+      } satisfies FinalizedSwmTwinRetirement);
+      return 'retired';
+    });
+    const storeGraphScopedAsset = await captureGraphScopedStore(chain, warnings, {
+      onAgentLike: (value) => {
+        agentLike = value;
+        value.publisher = { clearPublishedKnowledgeAssetSwm };
+      },
+    });
+
+    await expect(storeGraphScopedAsset(
+      graphScopedStoreRequest(graphScopedAsset(root), Date.now() + 60_000),
+    )).resolves.toBe('applied');
+
+    expect(clearPublishedKnowledgeAssetSwm).toHaveBeenCalledWith(
+      contextGraphId,
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: '0x1111111111111111111111111111111111111111',
+          kaNumber: 1n,
+        },
+      },
+      undefined,
+      ctx,
+      ual,
+    );
+    expect(warnings).toHaveBeenCalledWith(
+      ctx,
+      expect.stringContaining('Deferred SWM twin reconciliation'),
+    );
+    expect(mockedMaterialize).toHaveBeenCalledOnce();
+    expect(agentLike.invalidateListContextGraphsCache).toHaveBeenCalled();
+  });
+
+  it('maps already-retired SWM recovery evidence to metadata suppression at the lifecycle boundary', async () => {
+    let disposition: unknown;
+    mockedReconcileFinalizedSwmTwinFromDescriptor.mockResolvedValueOnce(
+      'already-retired-finalized',
+    );
+    mockedRunSharedMemorySync.mockImplementationOnce(async (syncContext) => {
+      disposition = await syncContext.reconcileFinalizedTwin?.(contextGraphId, {
+        kaUal: ual,
+      } as never);
+      return {
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 1,
+        checkpointAdvances: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        backoffWorthyFailures: 0,
+        deferredBackpressure: 0,
+        snapshotPlaneIncomplete: 0,
+        metadataContinuationYields: 0,
+        replayPhaseBytesReceived: 0,
+        snapshotPhaseBytesReceived: 0,
+      };
+    });
+    const agentLike: any = {
+      config: {},
+      store: {},
+      writeLocks: new Map(),
+      publicSnapshotStore: undefined,
+      syncCheckpoints: new Map(),
+      workspaceOwnedEntities: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      listSubGraphs: async () => [],
+      fetchSyncPages: async () => { throw new Error('unexpected fetch'); },
+      getOrCreateSyncVerifyWorker: () => { throw new Error('unexpected verifier'); },
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _cg: string,
+        _lane: string,
+        _operation: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      publisher: { clearPublishedKnowledgeAssetSwm: vi.fn() },
+      // Ordinary public CG: no RFC-64 complete-provider authority applies.
+      // Required once #2271's execution-boundary source fence is in the base.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    agentLike.retireFinalizedSwmTwinCandidate = (
+      LifecycleSyncMethods.prototype as any
+    ).retireFinalizedSwmTwinCandidate;
+
+    await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
+      agentLike,
+      '12D3KooWLifecyclePeer',
+      [contextGraphId],
+      {
+        sharedMemorySyncPlan: {
+          eligibleContextGraphIds: [contextGraphId],
+          publicContextGraphIds: [contextGraphId],
+          privateRecoverFromCurator: [],
+        },
+      },
+    );
+
+    expect(mockedReconcileFinalizedSwmTwinFromDescriptor).toHaveBeenCalledOnce();
+    expect(disposition).toBe('suppress-metadata');
+  });
+
+  it('retires a fresh SWM twin through named lifecycle cleanup and suppresses its metadata', async () => {
+    let disposition: unknown;
+    const retirement = {
+      contextGraphId,
+      kaUal: ual,
+      agentAddress: '0x1111111111111111111111111111111111111111',
+      kaNumber: 1n,
+      swmGraph: 'urn:swm',
+    } satisfies FinalizedSwmTwinRetirement;
+    mockedReconcileFinalizedSwmTwinFromDescriptor.mockImplementationOnce(
+      async ({ retire }) => {
+        await retire(retirement);
+        return 'retired';
+      },
+    );
+    mockedRunSharedMemorySync.mockImplementationOnce(async (syncContext) => {
+      disposition = await syncContext.reconcileFinalizedTwin?.(contextGraphId, {
+        kaUal: ual,
+      } as never);
+      return {
+        insertedTriples: 0,
+        fetchedMetaTriples: 0,
+        fetchedDataTriples: 0,
+        insertedMetaTriples: 0,
+        insertedDataTriples: 0,
+        bytesReceived: 0,
+        resumedPhases: 0,
+        timedOutPhases: 0,
+        completedPhases: 1,
+        checkpointAdvances: 0,
+        deniedPhases: 0,
+        emptyResponses: 0,
+        droppedDataTriples: 0,
+        failedPeers: 0,
+        failedPhases: 0,
+        backoffWorthyFailures: 0,
+        deferredBackpressure: 0,
+        snapshotPlaneIncomplete: 0,
+        metadataContinuationYields: 0,
+        replayPhaseBytesReceived: 0,
+        snapshotPhaseBytesReceived: 0,
+      };
+    });
+    const clearPublishedKnowledgeAssetSwm = vi.fn(async () => {});
+    const agentLike: any = {
+      config: {},
+      store: {},
+      writeLocks: new Map(),
+      publicSnapshotStore: undefined,
+      syncCheckpoints: new Map(),
+      workspaceOwnedEntities: new Map(),
+      oversizeTombstoneLog: { record: () => {} },
+      contextGraphMetaProjection: { markDirtyFromQuads: () => {} },
+      invalidateListContextGraphsCache: vi.fn(),
+      listSubGraphs: async () => [],
+      fetchSyncPages: async () => { throw new Error('unexpected fetch'); },
+      getOrCreateSyncVerifyWorker: () => { throw new Error('unexpected verifier'); },
+      runContextGraphSyncWithBackpressure: async (
+        _ctx: unknown,
+        _cg: string,
+        _lane: string,
+        _operation: string,
+        work: () => Promise<unknown>,
+      ) => work(),
+      publisher: { clearPublishedKnowledgeAssetSwm },
+      // Ordinary public CG: no RFC-64 complete-provider authority applies.
+      resolveRfc64CompleteSwmProviderPeerIdsV1: async () => [],
+      log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
+    };
+    agentLike.retireFinalizedSwmTwinCandidate = (
+      LifecycleSyncMethods.prototype as any
+    ).retireFinalizedSwmTwinCandidate;
+
+    await LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(
+      agentLike,
+      '12D3KooWLifecyclePeer',
+      [contextGraphId],
+      {
+        sharedMemorySyncPlan: {
+          eligibleContextGraphIds: [contextGraphId],
+          publicContextGraphIds: [contextGraphId],
+          privateRecoverFromCurator: [],
+        },
+      },
+    );
+
+    expect(mockedReconcileFinalizedSwmTwinFromDescriptor).toHaveBeenCalledOnce();
+    expect(clearPublishedKnowledgeAssetSwm).toHaveBeenCalledWith(
+      contextGraphId,
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: retirement.agentAddress,
+          kaNumber: retirement.kaNumber,
+        },
+      },
+      undefined,
+      expect.objectContaining({ operationName: 'sync' }),
+      ual,
+    );
+    expect(agentLike.invalidateListContextGraphsCache).toHaveBeenCalledOnce();
+    expect(disposition).toBe('suppress-metadata');
   });
 
   it('does not let a stale strict snapshot overwrite a newer host-only persistence write', async () => {
