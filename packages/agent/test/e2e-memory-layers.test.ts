@@ -869,10 +869,23 @@ describe('rootless graph-scoped KA lifecycle', () => {
     snapshotQuery.mockRestore();
 
     const operationSubject = `urn:dkg:share:${CG_ID}:${intent.shareOperationId}`;
+    const recoveryVmGraph = contextGraphLayerUri(
+      CG_ID,
+      MemoryLayer.VerifiableMemory,
+      queuedScope.agentAddress,
+      BigInt(queuedScope.kaNumber),
+    );
+    const recoveryVmRows = await store.query(
+      `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${recoveryVmGraph}> { ?s ?p ?o } }`,
+    );
+    if (recoveryVmRows.type !== 'quads' || recoveryVmRows.quads.length === 0) {
+      throw new Error('expected exact VM candidate before snapshot-retirement recovery');
+    }
     await store.deleteByPattern({
       graph: contextGraphSharedMemoryMetaUri(CG_ID),
       subject: operationSubject,
     });
+    await store.deleteByPattern({ graph: recoveryVmGraph });
     await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
       ...recoveryInput,
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
@@ -880,15 +893,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
       code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
     });
 
-    // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary, on the
-    // CURRENT-version path. The previous row stopped inside the read-only normalizer, which cannot
-    // mutate anything, so it could not see that the r28 guard sat inside the superseded branch
-    // while `handleChainReconciledKC` on this path ran unguarded. An expired pass must not begin
-    // lifecycle materialization while it still holds the claim lock.
-    //
-    // The abort is armed BEFORE the call, so the deadline is already reached by the time the reads
-    // finish and the mutation would start. The spy is the observable: the finalization handler is
-    // the mutating collaborator, and it must never be entered.
+    await store.insert(recoveryVmRows.quads.map((quad) => ({
+      ...quad,
+      graph: recoveryVmGraph,
+    })));
+    // RFC-64 may retire the redundant SWM snapshot after independently
+    // materializing exact VM but before the async publisher records its receipt.
+    // The deadline guard below must still protect that recovery path.
     // r29 (🔴 3822354184 / 🔴 3822354192) — the deadline at the REAL mutation boundary. The
     // previous row stopped inside the read-only normalizer, which cannot mutate anything, so it
     // could not see that the r28 guard sat inside the superseded branch while the current-version
@@ -923,8 +934,14 @@ describe('rootless graph-scoped KA lifecycle', () => {
       }
     }
 
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
-    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any);
+    await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any);
     expect(recoveryCleanup).not.toHaveBeenCalled();
 
     // PR #2300 r1 (🟡 3809054841) — the record shape item 5 exists for: a persisted FAILED job

@@ -5005,18 +5005,53 @@ export class PublishMethods extends DKGAgentBase {
           publicSnapshotStore: this.publicSnapshotStore,
         });
       } catch (error) {
-        if (
-          !(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)
-          || request.clearSharedMemoryAfter !== true
-        ) {
+        if (!(error instanceof KnowledgeAssetOperationPublicSnapshotNotFoundError)) {
           throw error;
         }
-        // Explicit post-publish cleanup may remove the redundant snapshot. The
-        // signed seal plus immutable queued counts still verifies exact VM.
+
+        // RFC-64 reconciliation may observe the finalized chain receipt and
+        // retire the byte-identical SWM twin before the async publisher records
+        // its own receipt. In that race the operation snapshot is intentionally
+        // gone even when the original request did not ask for cleanup. Admit
+        // only a public, count-complete VM candidate here; handleChainReconciledKC
+        // below still recomputes and verifies its Merkle root against the chain
+        // before any receipt or lifecycle state is repaired.
+        let recoveredVmCandidate = false;
+        if (
+          request.clearSharedMemoryAfter !== true
+          && request.accessPolicy === 'public'
+          && request.publicTripleCount > 0
+        ) {
+          const scope = createGraphKnowledgeAssetScope(
+            request.kaUal,
+            request.assertionVersion,
+          );
+          const vmGraph = contextGraphLayerUri(
+            request.contextGraphId,
+            MemoryLayer.VerifiableMemory,
+            scope.agentAddress,
+            BigInt(scope.kaNumber),
+            request.subGraphName,
+          );
+          const candidate = await this.store.query(
+            `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+          );
+          recoveredVmCandidate = candidate.type === 'quads'
+            && candidate.quads.length === request.publicTripleCount;
+        }
+        if (request.clearSharedMemoryAfter !== true && !recoveredVmCandidate) {
+          throw error;
+        }
+
+        // Explicit cleanup, or an RFC-64-retired SWM twin with a complete VM
+        // candidate, may remove the redundant snapshot. The signed seal,
+        // immutable queued counts and chain-root verification below remain the
+        // authority for exact VM recovery.
         this.log.info(
           ctx,
           `Named KA recovery for "${request.name}" has no durable public snapshot; `
-            + `using the immutable seal envelope: ${error instanceof Error ? error.message : String(error)}`,
+            + `${recoveredVmCandidate ? 'verifying the materialized VM candidate' : 'using the immutable seal envelope'}: `
+            + `${error instanceof Error ? error.message : String(error)}`,
         );
       }
       if (snapshot) {
