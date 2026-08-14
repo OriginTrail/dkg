@@ -156,7 +156,11 @@ export interface DurableSyncFetchRequest {
   readonly manifestPrefixDigestAtOffset?: (
     offset: number,
   ) => DurableManifestPrefixDigest | undefined;
-  /** Identity is unprovable; rotate any saved DATA continuation before fetch. */
+  /**
+   * Rebuild the responder row list instead of resuming an earlier phase.
+   * Verified META and unbound DATA requests use this when a saved responder
+   * session cannot prove the complete graph generation required for reuse.
+   */
   readonly forceFreshSession?: boolean;
   /** Soft, progress-only page boundary supplied by a recovery owner. */
   readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
@@ -698,7 +702,10 @@ async function runDurableSyncWithBudget(
       const metaFetchDeadline = isSystemContextGraph
         ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
         : deadline;
+      const sinceBatchId = sinceBatchIdFor?.(pid);
       const exactAssetUals = exactAssetUalsFor?.(pid);
+      const rootlessVerifiedFullSnapshot = sinceBatchId === undefined
+        && !isSystemContextGraph;
       if (exactAssetUals !== undefined) {
         exactFetchDispositionIndex = exactFetchDispositions.push('incomplete') - 1;
       }
@@ -731,7 +738,17 @@ async function runDurableSyncWithBudget(
         exactAssetUals,
         manifestDigest,
         manifestPrefixDigestAtOffset,
-        forceFreshSession,
+        // DATA safely resumes at verified graph boundaries. META is the
+        // manifest that proves those boundaries, so resuming it independently
+        // would return only a suffix and make the DATA prefix unverifiable.
+        // The durable recovery coordinator retains and validates its own META
+        // prefix across slices, so its scoped continuation must remain resumable.
+        forceFreshSession: forceFreshSession
+          || (
+            phase === 'meta'
+            && rootlessVerifiedFullSnapshot
+            && durableMetaContinuation === undefined
+          ),
         shouldStopAfterPage,
         ...(phase === 'meta' && durableMetaContinuation
           ? {
@@ -810,7 +827,6 @@ async function runDurableSyncWithBudget(
         }
         durableMetaContinuation.state = undefined;
       }
-      const sinceBatchId = sinceBatchIdFor?.(pid);
       const buildsManifest = sinceBatchId === undefined && !isSystemContextGraph;
       if (buildsManifest) {
         if (

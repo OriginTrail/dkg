@@ -340,6 +340,7 @@ describe('bounded rootless durable progress', () => {
     const inserted: Quad[][] = [];
     const materialized: Array<{ dataQuads: Quad[] }> = [];
     const checkpoints: Array<[string, number]> = [];
+    const freshSessions: Array<['data' | 'meta', boolean | undefined]> = [];
 
     const summary = await runDurableSync({
       ctx,
@@ -348,17 +349,21 @@ describe('bounded rootless durable progress', () => {
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({
         phase,
-      }: DurableSyncFetchRequest) => phase === 'meta'
-        ? pageResult('meta', {
-          quads: meta,
-          nextOffset: meta.length,
-        })
-        : pageResult('data', {
-          quads: rawData,
-          nextOffset: rawData.length,
-          completed: false,
-          timedOut: true,
-        }),
+        forceFreshSession,
+      }: DurableSyncFetchRequest) => {
+        freshSessions.push([phase, forceFreshSession]);
+        return phase === 'meta'
+          ? pageResult('meta', {
+            quads: meta,
+            nextOffset: meta.length,
+          })
+          : pageResult('data', {
+            quads: rawData,
+            nextOffset: rawData.length,
+            completed: false,
+            timedOut: true,
+          });
+      },
       processDurableBatchInWorker: processBatch,
       storeInsert: async ({ quads }: DurableSyncStoreInsertRequest) => {
         inserted.push(quads);
@@ -381,6 +386,11 @@ describe('bounded rootless durable progress', () => {
     expect(summary.timedOutPhases).toBe(1);
     expect(summary.insertedDataTriples).toBe(8);
     expect(checkpoints).toContainEqual([`${CONTEXT_GRAPH_ID}:data`, 8]);
+    expect(checkpoints.some(([key]) => key === `${CONTEXT_GRAPH_ID}:meta`)).toBe(false);
+    expect(freshSessions).toEqual([
+      ['meta', true],
+      ['data', false],
+    ]);
     expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual([
       ...fixtures[0]!.payload,
       ...fixtures[1]!.payload,
