@@ -47,6 +47,97 @@ function boundSampledRef(ref: string): string {
     : ref;
 }
 
+function metadataQuadKey(quad: Quad): string {
+  // JSON's tuple boundaries are unambiguous even when a literal contains the
+  // whitespace/delimiter text that made the former flattened key lossy.
+  return JSON.stringify([quad.graph, quad.subject, quad.predicate, quad.object]);
+}
+
+/**
+ * Own the one-round metadata commit policy for graph-scoped snapshots.
+ * Per-KA writes, finalized-twin suppression, the final bulk append and counter
+ * compensation all consult this object so a caller cannot update only one of
+ * those ledgers and accidentally resurrect retired SWM metadata.
+ */
+type FinalizedTwinMetadataDisposition = 'preserve' | 'suppress-metadata';
+type FinalizedTwinReconciler = (
+  contextGraphId: string,
+  descriptor: GraphScopedSwmRecoveryDescriptor,
+) => Promise<FinalizedTwinMetadataDisposition>;
+
+class GraphScopedSnapshotCommitCoordinator {
+  readonly #verifiedKeys: ReadonlySet<string>;
+  readonly #writtenKeys = new Set<string>();
+  readonly #suppressedKeys = new Set<string>();
+  readonly #reconcileFinalizedTwin: FinalizedTwinReconciler | undefined;
+
+  constructor(
+    verifiedMeta: readonly Quad[],
+    reconcileFinalizedTwin: FinalizedTwinReconciler | undefined,
+  ) {
+    this.#verifiedKeys = new Set(verifiedMeta.map(metadataQuadKey));
+    this.#reconcileFinalizedTwin = reconcileFinalizedTwin;
+  }
+
+  unwrittenVerifiedRows(descriptor: GraphScopedSwmRecoveryDescriptor): Quad[] {
+    return descriptor.metadataQuads.filter((quad) => {
+      const key = metadataQuadKey(quad);
+      return this.#verifiedKeys.has(key)
+        && !this.#writtenKeys.has(key)
+        && !this.#suppressedKeys.has(key);
+    });
+  }
+
+  recordWritten(rows: readonly Quad[]): void {
+    for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
+  }
+
+  #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
+    for (const quad of descriptor.metadataQuads) {
+      const key = metadataQuadKey(quad);
+      if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
+    }
+  }
+
+  /**
+   * Own post-materialization reconciliation and its metadata disposition as
+   * one commit decision. The caller cannot retire a twin without updating the
+   * same ledger that filters the round's final bulk append.
+   */
+  async reconcileAfterMaterialization(params: {
+    contextGraphId: string;
+    descriptor: GraphScopedSwmRecoveryDescriptor;
+    onDeferred: (cause: unknown) => void;
+  }): Promise<void> {
+    if (!this.#reconcileFinalizedTwin) return;
+    try {
+      const disposition = await this.#reconcileFinalizedTwin(
+        params.contextGraphId,
+        params.descriptor,
+      );
+      if (disposition === 'suppress-metadata') this.#suppress(params.descriptor);
+    } catch (cause) {
+      // Snapshot materialization is already durable. Preserve the twin and
+      // retry on a later pass instead of reclassifying a successful sync.
+      params.onDeferred(cause);
+    }
+  }
+
+  bulkRows(rows: readonly Quad[]): Quad[] {
+    return this.#suppressedKeys.size === 0
+      ? [...rows]
+      : rows.filter((quad) => !this.#suppressedKeys.has(metadataQuadKey(quad)));
+  }
+
+  alreadyCountedRetainedRows(): number {
+    let count = 0;
+    for (const key of this.#writtenKeys) {
+      if (!this.#suppressedKeys.has(key)) count += 1;
+    }
+    return count;
+  }
+}
+
 /**
  * Snapshot-walk progress carried OUT of a throw.
  *
@@ -266,6 +357,12 @@ interface SharedMemorySyncContext {
    * Absent entirely => materialization is skipped (never half-applied).
    */
   snapshotMaterializer?: SharedMemorySnapshotMaterializer;
+  /**
+   * Optional VM-aware effect used by the round-owned snapshot commit
+   * coordinator. It is deliberately separate from the generic materializer:
+   * only the coordinator may translate its result into metadata suppression.
+   */
+  reconcileFinalizedTwin?: FinalizedTwinReconciler;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   getRegisteredSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
   getExcludedSubGraphNames?: (contextGraphId: string) => Promise<readonly string[]>;
@@ -319,6 +416,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
     ensureContextGraph,
     storeInsert,
     snapshotMaterializer,
+    reconcileFinalizedTwin,
     publicSnapshotStore,
     getRegisteredSubGraphNames,
     getExcludedSubGraphNames,
@@ -671,15 +769,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // Each KA's own verified metadata is therefore rewritten here, inside the
       // same write lock, immediately after the delete — narrowing a window that
       // already exists rather than opening a new one.
-      const quadKey = (quad: Quad): string =>
-        `${quad.graph} ${quad.subject} ${quad.predicate} ${quad.object}`;
-      const verifiedMetaKeys = new Set(processed.verifiedMeta.map(quadKey));
-      // Which verified meta rows the per-KA path has already written this round.
-      // Plain accumulation, NOT overlap compensation: descriptor `metadataQuads`
-      // are pairwise disjoint by construction — a head subject belongs to one
-      // descriptor by the parser's grouping key, and an operation subject is
-      // pinned to a single `kaUal`/`assertionVersion` by `validateOperationRows`.
-      const perKaInsertedMetaKeys = new Set<string>();
+      const snapshotCommit = new GraphScopedSnapshotCommitCoordinator(
+        processed.verifiedMeta,
+        reconcileFinalizedTwin,
+      );
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
@@ -715,13 +808,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const insertVerifiedDescriptorMeta = async (
         descriptor: GraphScopedSwmRecoveryDescriptor,
       ): Promise<void> => {
-        const rows = descriptor.metadataQuads.filter(
-          (quad) => verifiedMetaKeys.has(quadKey(quad)) && !perKaInsertedMetaKeys.has(quadKey(quad)),
-        );
+        const rows = snapshotCommit.unwrittenVerifiedRows(descriptor);
         if (rows.length === 0) return;
         await ensureContextGraphOnce();
         await storeInsert([...rows]);
-        for (const quad of rows) perKaInsertedMetaKeys.add(quadKey(quad));
+        snapshotCommit.recordWritten(rows);
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
       };
@@ -866,6 +957,20 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   + `as ${asset.assertionGraph} (${asset.quads.length} triples)`);
               },
             );
+            // The opposite ordering from durable VM catch-up is equally
+            // possible: VM may already be present when this SWM snapshot
+            // arrives. Reconcile only after releasing the materialization
+            // lock; the production callback reacquires the same per-KA lock
+            // and re-verifies current head + both graph digests before delete.
+            await snapshotCommit.reconcileAfterMaterialization({
+              contextGraphId: pid,
+              descriptor,
+              onDeferred: (cause) => logWarn(
+                ctx,
+                `SWM sync deferred finalized-twin reconciliation for ${descriptor.kaUal}: `
+                  + `${cause instanceof Error ? cause.message : String(cause)}`,
+              ),
+            });
           } catch (err) {
             // A failed replace must never be able to look materialized later.
             // Suppressing it here while the surrounding sync still inserts the
@@ -1072,9 +1177,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedDataTriples += validWsQuads.length;
       }
       if (verifiedMetaForInsert.length > 0) {
-        // Still written in full — an RDF store is a set, so rewriting the rows
-        // the per-KA path already wrote is a no-op, and the rows for KAs that
-        // were NOT materialized still have to land.
+        // Rows written by the per-KA path are ordinarily harmless to replay —
+        // an RDF store is a set. Rows for a twin retired after that path are
+        // different: replaying them would recreate a dangling SWM head/op after
+        // its exact graph was removed, so those rows are excluded from the
+        // actual bulk write.
         //
         // The COUNT subtracts what was already counted, which makes
         // `insertedMetaTriples` mean this:
@@ -1090,14 +1197,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // and zero means nothing was materialized rather than that the writes
         // were thrown away.
         //
-        // Subtracting the ledger SIZE rather than re-filtering `verifiedMeta` is
-        // what keeps the usable-round identity exact if a meta response ever
-        // carries the same quad twice (an OFFSET-window overlap under concurrent
-        // insert is the plausible source): a re-filter drops both copies and
-        // undercounts by one. Valid because every per-KA row is filtered through
-        // `verifiedMetaKeys`, so the ledger is always a subset of these keys.
-        await storeInsert(verifiedMetaForInsert);
-        const newlyCountedMeta = verifiedMetaForInsert.length - perKaInsertedMetaKeys.size;
+        // Keep the old count identity for ordinary rows. Only retired rows are
+        // filtered, while the per-KA ledger remains a key-set subset of the
+        // verified input and is subtracted solely when its row survives.
+        const metaForBulkInsert = snapshotCommit.bulkRows(verifiedMetaForInsert);
+        if (metaForBulkInsert.length > 0) {
+          await storeInsert(metaForBulkInsert);
+        }
+        const retainedAlreadyCounted = snapshotCommit.alreadyCountedRetainedRows();
+        const newlyCountedMeta = metaForBulkInsert.length - retainedAlreadyCounted;
         summary.insertedTriples += newlyCountedMeta;
         summary.insertedMetaTriples += newlyCountedMeta;
       }

@@ -110,6 +110,11 @@ import {
   type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import {
+  reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinFromDescriptor,
+  type FinalizedSwmTwinRetirement,
+} from './sync/requester/finalized-swm-twin-reconciliation.js';
+import {
   EVMChainAdapter,
   NoChainAdapter,
   buildKnowledgeAssetUal,
@@ -1604,6 +1609,24 @@ function emptySwmRecoveryResult(): RecoverContextGraphSwmResult {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  private async retireFinalizedSwmTwinCandidate(
+    candidate: FinalizedSwmTwinRetirement,
+    ctx: OperationContext,
+  ): Promise<void> {
+    await this.publisher.clearPublishedKnowledgeAssetSwm(
+      candidate.contextGraphId,
+      {
+        kind: 'named-lifecycle',
+        identity: {
+          agentAddress: candidate.agentAddress,
+          kaNumber: candidate.kaNumber,
+        },
+      },
+      candidate.subGraphName,
+      ctx,
+      candidate.kaUal,
+    );
+  }
   async runContextGraphSyncWithBackpressure<T>(this: DKGAgent,
     ctx: OperationContext,
     contextGraphId: string,
@@ -5830,6 +5853,31 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           if (outcome === 'applied') {
             this.invalidateListContextGraphsCache();
             this.contextGraphMetaProjection.markDirtyFromQuads(authentication.asset.metadataQuads);
+            try {
+              const retirement = await reconcileFinalizedSwmTwin({
+                store: this.store,
+                writeLocks: this.writeLocks,
+                asset: authentication.asset,
+                retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+              });
+              if (retirement === 'retired') {
+                this.invalidateListContextGraphsCache();
+                this.log.info(
+                  ctx,
+                  `Retired byte-identical SWM twin after durable VM materialization for ${asset.ual}`,
+                );
+              }
+            } catch (cause) {
+              // VM materialization is already durable and independently
+              // verified. A best-effort tier cleanup must never turn that
+              // success into a failed sync; the untouched SWM copy remains
+              // safe and the next durable replay can reconcile it again.
+              this.log.warn(
+                ctx,
+                `Deferred SWM twin reconciliation for ${asset.ual}: `
+                + `${cause instanceof Error ? cause.message : String(cause)}`,
+              );
+            }
           }
           return outcome;
         });
@@ -6906,6 +6954,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             writeLocks: this.writeLocks,
             invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
           }),
+          reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
+            const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              contextGraphId,
+              descriptor,
+              retire: (candidate) => this.retireFinalizedSwmTwinCandidate(candidate, ctx),
+            });
+            if (retirement === 'retired') {
+              this.invalidateListContextGraphsCache();
+              this.log.info(
+                ctx,
+                `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
+              );
+            }
+            return retirement === 'retired' || retirement === 'already-retired-finalized'
+              ? 'suppress-metadata'
+              : 'preserve';
+          },
           storeInsert: async (quads) => {
             // Oversize guard (OT-RFC-56): drop+tombstone protocol-violating
             // literals BEFORE insert so the SWM page cursor advances instead
