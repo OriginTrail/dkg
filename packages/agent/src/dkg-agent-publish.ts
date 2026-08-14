@@ -4998,6 +4998,7 @@ export class PublishMethods extends DKGAgentBase {
           );
           const candidate = await this.store.query(
             `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
+            { source: 'agent.asyncVmPublish.recoveredVmCandidate' },
           );
           recoveredVmCandidate = candidate.type === 'quads'
             && candidate.quads.length === request.publicTripleCount;

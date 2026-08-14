@@ -1149,7 +1149,14 @@ describe('durable graph-scoped KA materialization', () => {
       });
       expect(materialize).not.toHaveBeenCalled();
       expect(deleteCheckpoint).not.toHaveBeenCalled();
-      expect(setCheckpoint).not.toHaveBeenCalled();
+      expect(setCheckpoint).toHaveBeenCalledWith(
+        `${contextGraphId}:data`,
+        expect.objectContaining({
+          offset: 0,
+          responderSessionOffset: 0,
+          binding: expect.objectContaining({ terminal: false }),
+        }),
+      );
       expect(await graphQuads(requesterStore, assertionGraph)).toEqual([]);
 
       const complete = run(fieldSizedData, true);

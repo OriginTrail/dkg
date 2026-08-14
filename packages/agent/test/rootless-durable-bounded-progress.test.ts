@@ -400,6 +400,100 @@ describe('bounded rootless durable progress', () => {
     expect(inserted.flat().some((quad) => fixtures.some((entry) => entry.graph === quad.graph))).toBe(false);
   });
 
+  it('rewinds a responder cursor when a timeout leaves only a partial graph', async () => {
+    const [fixture] = orderedAssets();
+    const partialData = fixture!.payload.slice(0, 2);
+    const checkpoints: Array<{
+      offset: number;
+      responderSessionOffset?: number;
+      manifestDigest?: string;
+      terminal?: boolean;
+    }> = [];
+    const deleted: string[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-partial-graph-timeout',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: fixture!.meta, nextOffset: fixture!.meta.length })
+        : pageResult('data', {
+            quads: partialData,
+            nextOffset: partialData.length,
+            rawNextOffset: partialData.length,
+            completed: false,
+            timedOut: true,
+          }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => 'applied',
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: (_key, checkpoint) => {
+        checkpoints.push({
+          offset: checkpoint.offset,
+          responderSessionOffset: checkpoint.responderSessionOffset,
+          manifestDigest: checkpoint.binding?.manifestDigest,
+          terminal: checkpoint.binding?.terminal,
+        });
+      },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.complete).toBe(false);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(deleted).not.toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(checkpoints).toContainEqual({
+      offset: 0,
+      responderSessionOffset: 0,
+      manifestDigest: expect.stringMatching(/^sha256:[0-9a-f]{64}$/),
+      terminal: false,
+    });
+  });
+
+  it('self-heals a raw EOF checkpoint stranded ahead of its verified graph boundary', async () => {
+    const [fixture] = orderedAssets();
+    const manifestDigest = manifest(fixture!.meta).manifestDigest;
+    const deleted: string[] = [];
+    const dataCheckpoints: number[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-stranded-raw-eof',
+      contextGraphIds: [CONTEXT_GRAPH_ID],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      fetchSyncPages: async ({ phase }: DurableSyncFetchRequest) => phase === 'meta'
+        ? pageResult('meta', { quads: fixture!.meta, nextOffset: fixture!.meta.length })
+        : pageResult('data', {
+            quads: [],
+            resumedFromOffset: 0,
+            rawResumedFromOffset: fixture!.payload.length,
+            nextOffset: fixture!.payload.length,
+            rawNextOffset: fixture!.payload.length,
+            manifestDigest,
+            completed: true,
+            timedOut: false,
+          }),
+      processDurableBatchInWorker: processBatch,
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async () => 'applied',
+      deleteCheckpoint: (key) => { deleted.push(key); },
+      setCheckpoint: (key, checkpoint) => {
+        if (key.endsWith(':data')) dataCheckpoints.push(checkpoint.offset);
+      },
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.complete).toBe(false);
+    expect(summary.insertedDataTriples).toBe(0);
+    expect(deleted).toContain(`${CONTEXT_GRAPH_ID}:data`);
+    expect(dataCheckpoints).toEqual([]);
+  });
+
   it('persists an authenticated asset prefix before a later authentication deadline', async () => {
     const fixtures = orderedAssets();
     const selected = fixtures.slice(0, 2);
