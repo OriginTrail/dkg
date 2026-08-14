@@ -1,9 +1,11 @@
 # RFC-64 selected-public catalog activation
 
-RFC-64 public catalog synchronization is opt-in. A node with no
-`rfc64PublicCatalog` block, or with `enabled: false`, keeps the catalog lane
-fail-closed: it accepts no catalog policy, starts no bootstrap pulls, and does
-not advance catalogs after ordinary KA publication.
+RFC-64 public catalog synchronization is selected and fail-closed. A valid
+`rfc64PublicCatalog.bootstrap.acceptedPublicPolicies` manifest activates the
+exact CGs it names; no second enable switch is required. A node with no
+`rfc64PublicCatalog` block, or with explicit `enabled: false`, accepts no catalog
+policy, starts no bootstrap pulls, and does not advance catalogs after ordinary
+KA publication.
 
 This activation is intentionally selective. The operator supplies a bounded
 manifest of independently verified, finalized public-CG policy envelopes. The
@@ -24,7 +26,6 @@ Add the following shape to `~/.dkg/config.json`:
 ```json
 {
   "rfc64PublicCatalog": {
-    "enabled": true,
     "autoPublish": {
       "peers": ["12D3Koo...receiver"],
       "catalogIssuerDelegationExpiresAt": "1893456000000"
@@ -77,6 +78,9 @@ Add the following shape to `~/.dkg/config.json`:
   }
 }
 ```
+
+`enabled: true` remains accepted for compatibility, but is redundant when a
+valid manifest is present. `enabled: false` is the explicit kill switch.
 
 The example shows structure only. Do not invent or copy placeholder control
 values. The complete `policyEnvelope` must be the output of an independent
@@ -136,7 +140,7 @@ Restart the daemon and inspect `GET /api/status`:
 }
 ```
 
-For a signed-catalog target gate, `enabled: true` is not sufficient. Every
+For a signed-catalog target gate, activation alone is not sufficient. Every
 intended target must report `outcome: "applied"`, a non-null
 `appliedHeadDigest`, and the expected `inventoryRowCount`. A `not-found` or
 `failed` target is a failed catalog gate even if ordinary durable sync reports

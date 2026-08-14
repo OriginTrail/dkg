@@ -833,6 +833,29 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
   });
 
+  it('projects a manifest-selected activation without an explicit enabled switch', async () => {
+    const selectedPolicy = buildOpenOwnerContextGraphPolicyV1({
+      networkId: NETWORK_ID,
+      contextGraphId: CONTEXT_GRAPH_ID,
+      ownerAddress: AUTHOR,
+    });
+    const agent = await startNativeAgentWithOptions({
+      name: 'direct-manifest-selected-sync-scope',
+      activation: {
+        deploymentProfile: NATIVE_DEPLOYMENT,
+        bootstrap: {
+          acceptedPublicPolicies: [{
+            policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(selectedPolicy),
+            targets: [],
+          }],
+        },
+      },
+    });
+
+    expect((agent as any).config.syncContextGraphs).toContain(CONTEXT_GRAPH_ID);
+    expect((agent as any).config.rfc64PublicCatalogBootstrap).toBeDefined();
+  });
+
   it('keeps direct disabled activation fail-closed even when stale controls are present', async () => {
     const ignoredPolicy = buildOpenOwnerContextGraphPolicyV1({
       networkId: NETWORK_ID,
