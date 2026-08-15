@@ -25,7 +25,7 @@ import {
   serializeResponderRowsWithinByteBudget,
   type SyncRow,
 } from '../src/sync/responder/graph-plan.js';
-import { resolveDurableDataRequestPolicy } from '../src/sync/responder/durable-data-request-policy.js';
+import { resolveDataRequestPolicy } from '../src/sync/responder/data-request-policy.js';
 import {
   linesFromNquads,
   registerTestSyncHandler,
@@ -104,6 +104,26 @@ describe('byte-budget sync pagination', () => {
     );
   });
 
+  it('advertises byte-budget paging for public shared-memory data', async () => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: true,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'data',
+      needsAuth: false,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+    });
+
+    expect(new TextDecoder().decode(encoded)).toBe(
+      `workspace:${CG_ID}|0|${SYNC_REQUEST_PAGE_SIZE}|data`
+      + `|page-mode|${SYNC_BYTE_BUDGET_PAGE_MODE}|page-rows|${SYNC_REQUEST_PAGE_SIZE}`,
+    );
+  });
+
   it('keeps the authenticated legacy limit signed while adding the larger hint', async () => {
     const wallet = ethers.Wallet.createRandom();
     const signedLimits: number[] = [];
@@ -159,7 +179,7 @@ describe('byte-budget sync pagination', () => {
       pageRowsHint: SYNC_REQUEST_SAFE_PAGE_SIZE,
       assetUals: [exactUal],
     });
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveDataRequestPolicy({
       legacyLimit: request.limit,
       includeSharedMemory: false,
       phase: request.phase,
@@ -520,6 +540,81 @@ describe('byte-budget sync pagination', () => {
     await store.close();
   });
 
+  it('lets negotiated shared-memory data use the larger byte-bounded page', async () => {
+    const store = new OxigraphStore();
+    const graph = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
+    await store.insert(Array.from({ length: 1_200 }, (_, i) => ({
+      graph,
+      subject: 'urn:shared-memory-root',
+      predicate: `urn:predicate:${i.toString().padStart(4, '0')}`,
+      object: `"value-${i}"`,
+    })));
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+
+    const legacy = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: true,
+      phase: 'data',
+      syncSessionId: 'legacy-swm-data-session',
+    });
+    expect(linesFromNquads(legacy)).toHaveLength(SYNC_PAGE_SIZE);
+
+    const upgraded = await cap.invoke({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: true,
+      phase: 'data',
+      syncSessionId: 'byte-budget-swm-data-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    });
+    expect(linesFromNquads(upgraded)).toHaveLength(1_200);
+    expect(new TextEncoder().encode(upgraded).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+
+    await store.close();
+  });
+
+  it('keeps an oversized SWM byte-budget session alive for the serialized continuation', async () => {
+    const store = new OxigraphStore();
+    const graph = `did:dkg:context-graph:${CG_ID}/_shared_memory`;
+    const totalRows = 900;
+    await store.insert(Array.from({ length: totalRows }, (_, i) => ({
+      graph,
+      subject: 'urn:shared-memory-oversized-root',
+      predicate: `urn:predicate:${i.toString().padStart(4, '0')}`,
+      object: `"${'x'.repeat(6_000)}-${i}"`,
+    })));
+    const cap = registerTestSyncHandler(store, { syncPageSize: SYNC_PAGE_SIZE });
+    const request = {
+      contextGraphId: CG_ID,
+      limit: SYNC_PAGE_SIZE,
+      includeSharedMemory: true,
+      phase: 'data' as const,
+      syncSessionId: 'byte-budget-swm-oversized-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    };
+
+    const first = await cap.invoke({ ...request, offset: 0 });
+    const firstRows = linesFromNquads(first);
+    expect(firstRows.length).toBeGreaterThan(0);
+    expect(firstRows.length).toBeLessThan(totalRows);
+    expect(new TextEncoder().encode(first).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+
+    // The store-loaded slice was short (900 < 8192), but the byte serializer
+    // exposed only a prefix. The same responder session must still own the
+    // suffix addressed by this continuation offset.
+    const second = await cap.invoke({ ...request, offset: firstRows.length });
+    expect(linesFromNquads(second)).toHaveLength(totalRows - firstRows.length);
+
+    await store.close();
+  });
+
   it('honours the negotiated row hint for durable meta while legacy meta remains capped', async () => {
     const store = new OxigraphStore();
     const contextGraphId = 'byte-budget-meta-cg';
@@ -634,7 +729,7 @@ describe('byte-budget sync pagination', () => {
   });
 
   it('derives exact-fetch resource policy without trusting signature fields', () => {
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveDataRequestPolicy({
       legacyLimit: SYNC_PAGE_SIZE,
       includeSharedMemory: false,
       phase: 'data',
@@ -648,9 +743,23 @@ describe('byte-budget sync pagination', () => {
       exactGraphReadMode: 'page-only',
     });
 
-    expect(resolveDurableDataRequestPolicy({
+    expect(resolveDataRequestPolicy({
       legacyLimit: SYNC_PAGE_SIZE,
       includeSharedMemory: false,
+      phase: 'data',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+      hasExactAssetFilter: false,
+    })).toEqual({
+      usesByteBudgetPage: true,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      cacheMode: 'session-snapshot',
+      exactGraphReadMode: 'snapshot-or-page',
+    });
+
+    expect(resolveDataRequestPolicy({
+      legacyLimit: SYNC_PAGE_SIZE,
+      includeSharedMemory: true,
       phase: 'data',
       pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
       pageRowsHint: SYNC_REQUEST_PAGE_SIZE,

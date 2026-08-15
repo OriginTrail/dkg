@@ -271,6 +271,38 @@ describe('runSharedMemorySync ownership hydration', () => {
     }
   });
 
+  it('admits encoded graph-backed snapshots only for shared-memory data', async () => {
+    const worker = new SyncVerifyWorker();
+    const contextGraphId = '0x1111111111111111111111111111111111111111/public-cg';
+    const workspaceGraph = contextGraphSharedMemoryUri(contextGraphId);
+    const snapshotGraph = `did:dkg:context-graph:${encodeURIComponent(contextGraphId)}`
+      + '/_shared_memory_snapshots/_/operation/ka';
+    const nquads = `<urn:s> <urn:p> "value" <${snapshotGraph}> .`;
+
+    try {
+      const workspace = await worker.parseAndFilter(nquads, workspaceGraph, contextGraphId);
+      expect(workspace.quads).toHaveLength(1);
+      expect(workspace.quads[0]?.graph).toBe(snapshotGraph);
+
+      const malformed = await worker.parseAndFilter(
+        '<urn:s> <urn:p> "value" <did:dkg:context-graph:0x1111111111111111111111111111111111111111%2Fpublic-cg/_shared_memory_snapshots/_/operation/extra/ka> .',
+        workspaceGraph,
+        contextGraphId,
+      );
+      expect(malformed.quads).toHaveLength(0);
+
+      const durable = await worker.parseAndFilter(
+        nquads,
+        `did:dkg:context-graph:${contextGraphId}`,
+        contextGraphId,
+      );
+      expect(durable.quads).toHaveLength(0);
+      expect(durable.totalQuads).toBe(1);
+    } finally {
+      await worker.close();
+    }
+  });
+
   it('rejects forged replicated registrations with noncanonical subjects', async () => {
     const worker = new SyncVerifyWorker();
     const inserted: Quad[] = [];

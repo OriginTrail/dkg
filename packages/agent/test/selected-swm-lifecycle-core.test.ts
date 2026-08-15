@@ -153,6 +153,7 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       contextGraphs: { public: publicCg },
       manifest: graphBackedManifest(publicCg),
       clock: { now: () => 1_000, deadline: () => 61_000 },
+      dataPage: { quads: [], completed: true, timedOut: false },
     });
 
     try {
@@ -173,7 +174,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(selected.shared.fetchedMetaTriples).toBeGreaterThan(0);
       expect(selected.shared.insertedMetaTriples).toBe(0);
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
-      expect(selected.shared.swmCoverage).toBeUndefined();
+      expect(selected.shared.swmCoverage).toMatchObject({
+        snapshotsResolved: 0,
+        snapshotsTotal: 1,
+        missingCount: 1,
+        materializationFailures: 1,
+      });
       expect(selected.selectedScopeComplete).toBe(false);
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
     } finally {
@@ -181,16 +187,12 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
-  it('keeps mixed store-backed and graph-backed metadata incomplete until every operation is proven', async () => {
-    const publicCg = 'selected-mixed-snapshot-evidence';
-    const storeBacked = snapshotManifest(publicCg, 1);
-    const graphBacked = graphBackedManifest(publicCg);
+  it('completes selected graph-backed SWM after count/digest-bound materialization', async () => {
+    const publicCg = 'selected-graph-backed-materialized';
+    const manifest = graphBackedManifest(publicCg);
     const harness = createSelectedSwmLifecycleHarness({
       contextGraphs: { public: publicCg },
-      manifest: {
-        meta: [...storeBacked.meta, ...graphBacked.meta],
-        payloadByRef: storeBacked.payloadByRef,
-      },
+      manifest,
       clock: { now: () => 1_000, deadline: () => 61_000 },
     });
 
@@ -214,11 +216,198 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
         snapshotsResolved: 1,
         snapshotsTotal: 1,
         missingCount: 0,
+        materializationFailures: 0,
+      });
+      expect(selected.shared.insertedDataTriples).toBe(manifest.dataQuads.length);
+      expect(selected.shared.droppedDataTriples).toBe(0);
+      expect(selected.shared.failedPhases).toBe(0);
+      expect(selected.selectedScopeComplete).toBe(true);
+      expect(harness.probes.dataRequesterScopes).toEqual(['selected-swm-data:graph-v1']);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('fails closed when graph-backed metadata advertises a malformed transport graph', async () => {
+    const publicCg = 'selected-malformed-graph-backed';
+    const manifest = graphBackedManifest(publicCg);
+    const malformedGraph = 'did:dkg:context-graph:not-the-selected-cg/_shared_memory_snapshots/_/bad/ka';
+    manifest.meta = manifest.meta.map((quad) => (
+      quad.predicate === `${DKG}publicSnapshotGraph`
+        ? { ...quad, object: malformedGraph }
+        : quad
+    ));
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      dataPage: { quads: [], completed: true, timedOut: false },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(selected.shared.swmCoverage).toMatchObject({
+        snapshotsResolved: 0,
+        snapshotsTotal: 1,
+        descriptorsAuthoritative: false,
+        missingCount: 1,
       });
       expect(selected.shared.insertedMetaTriples).toBe(0);
       expect(selected.shared.failedPhases).toBeGreaterThan(0);
       expect(selected.selectedScopeComplete).toBe(false);
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('rewinds a failed graph-backed materialization to its DATA graph boundary', async () => {
+    const publicCg = 'selected-graph-backed-failed-rewind';
+    const manifest = graphBackedManifest(publicCg);
+    const corruptData = manifest.dataQuads.map((quad) => ({ ...quad, object: '"corrupt"' }));
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+      dataPage: {
+        quads: corruptData,
+        completed: true,
+        timedOut: false,
+        resumedFromOffset: 10,
+        nextOffset: 11,
+        rawResumedFromOffset: 10,
+        rawNextOffset: 11,
+        quadRawOffsets: [10],
+      },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(selected.shared.failedPhases).toBeGreaterThan(0);
+      expect(selected.selectedScopeComplete).toBe(false);
+      expect(harness.agent.syncCheckpoints.get(`${publicCg}:data`)).toBe(10);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('keeps legacy root-slice graph advertisements fail-closed in the selected KA lane', async () => {
+    const publicCg = 'selected-legacy-graph-backed-root-slice';
+    const manifest = snapshotManifest(publicCg, 1);
+    const subject = manifest.meta[0]!.subject;
+    const transportGraph = `did:dkg:context-graph:${encodeURIComponent(publicCg)}`
+      + '/_shared_memory_snapshots/_/legacy-op/root/_shared_memory';
+    manifest.meta.push({
+      subject,
+      predicate: `${DKG}publicSnapshotGraph`,
+      object: transportGraph,
+      graph: manifest.meta[0]!.graph,
+    });
+    manifest.dataQuads = [{
+      subject: 'urn:legacy-root',
+      predicate: 'http://schema.org/value',
+      object: '"legacy"',
+      graph: transportGraph,
+    }];
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(selected.shared.swmCoverage).toBeUndefined();
+      expect(selected.shared.insertedDataTriples).toBe(0);
+      // The lane-level contract is the fail-closed evidence: this unsupported
+      // legacy advertisement must stay incomplete and retryable even when the
+      // ordinary SWM summary has no transport/store phase failure to count.
+      expect(selected.selectedScopeComplete).toBe(false);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(true);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('completes mixed store-backed and graph-backed metadata after every operation is proven', async () => {
+    const publicCg = 'selected-mixed-snapshot-evidence';
+    const storeBacked = snapshotManifest(publicCg, 1);
+    const graphBacked = graphBackedManifest(publicCg);
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest: {
+        meta: [...storeBacked.meta, ...graphBacked.meta],
+        payloadByRef: storeBacked.payloadByRef,
+        dataQuads: graphBacked.dataQuads,
+      },
+      clock: { now: () => 1_000, deadline: () => 61_000 },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        {
+          selectedSwmPriority: true,
+          priority: 2_000,
+          sharedMemorySyncPlan: {
+            publicContextGraphIds: [publicCg],
+            privateRecoverFromCurator: [],
+            eligibleContextGraphIds: [publicCg],
+          },
+        },
+      );
+
+      expect(selected.shared.swmCoverage).toMatchObject({
+        contextGraphId: publicCg,
+        snapshotsResolved: 2,
+        snapshotsTotal: 2,
+        missingCount: 0,
+      });
+      expect(selected.shared.insertedMetaTriples).toBeGreaterThan(0);
+      expect(selected.shared.failedPhases).toBe(0);
+      expect(selected.selectedScopeComplete).toBe(true);
+      expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
     } finally {
       await harness.close();
     }

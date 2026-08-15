@@ -489,13 +489,58 @@ function subGraphForMetaGraph(contextGraphId: string, metaGraph: string): string
   return name;
 }
 
-function knowledgeAssetSnapshotGraph(
+export interface GraphBackedSwmSnapshotGraphIdentity {
+  readonly contextGraphId: string;
+  readonly shareOperationId: string;
+  readonly subGraphName?: string;
+}
+
+/** Canonical immutable transport graph for one graph-scoped SWM operation. */
+export function knowledgeAssetSnapshotGraph(
   contextGraphId: string,
   shareOperationId: string,
   subGraphName?: string,
 ): string {
   const parts = [contextGraphId, subGraphName ?? '_', shareOperationId].map(encodeURIComponent);
   return `did:dkg:context-graph:${parts[0]}/_shared_memory_snapshots/${parts[1]}/${parts[2]}/ka`;
+}
+
+/**
+ * Parse the canonical graph-backed SWM transport identity. Returning null is
+ * deliberately fail-closed: callers must not treat a merely similar URI as an
+ * immutable snapshot graph.
+ */
+export function parseGraphBackedSwmSnapshotGraph(
+  graph: string,
+): GraphBackedSwmSnapshotGraphIdentity | null {
+  const prefix = 'did:dkg:context-graph:';
+  const marker = '/_shared_memory_snapshots/';
+  if (!graph.startsWith(prefix) || !graph.endsWith('/ka')) return null;
+  const markerIndex = graph.indexOf(marker, prefix.length);
+  if (markerIndex < 0) return null;
+  const encodedContextGraphId = graph.slice(prefix.length, markerIndex);
+  const tail = graph.slice(markerIndex + marker.length, -3);
+  const parts = tail.split('/');
+  if (!encodedContextGraphId || parts.length !== 2 || parts.some((part) => !part)) return null;
+  try {
+    const contextGraphId = decodeURIComponent(encodedContextGraphId);
+    const encodedSubGraphName = parts[0]!;
+    const shareOperationId = decodeURIComponent(parts[1]!);
+    const subGraphName = encodedSubGraphName === '_'
+      ? undefined
+      : decodeURIComponent(encodedSubGraphName);
+    if (
+      !contextGraphId
+      || !shareOperationId
+      || (subGraphName !== undefined && !validateSubGraphName(subGraphName).valid)
+    ) return null;
+    const identity = { contextGraphId, shareOperationId, ...(subGraphName ? { subGraphName } : {}) };
+    return knowledgeAssetSnapshotGraph(contextGraphId, shareOperationId, subGraphName) === graph
+      ? identity
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 function groupByGraphAndSubject(quads: readonly Quad[]): Map<string, Quad[]> {

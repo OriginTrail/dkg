@@ -28,10 +28,13 @@ export {
  */
 export type SyncCheckpointScope =
   | `selected-swm-meta:${string}`
+  | `selected-swm-data:${string}`
   | `durable-recovery-meta:${string}`;
 
 /** Runtime-distinct namespace owned only by retained selected-SWM metadata. */
 export type SelectedSwmMetaRetentionScope = `selected-swm-meta:retained:${string}`;
+/** Runtime-distinct namespace owned only by selected SWM DATA replay. */
+export type SelectedSwmDataCheckpointScope = `selected-swm-data:${string}`;
 
 export interface SyncCheckpointStore {
   /**

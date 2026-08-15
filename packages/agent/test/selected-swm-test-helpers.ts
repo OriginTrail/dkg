@@ -35,6 +35,7 @@ export const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 export function snapshotManifest(contextGraphId: string, count: number): {
   meta: Quad[];
   payloadByRef: Map<string, Quad[]>;
+  dataQuads: Quad[];
 } {
   const metaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
   const meta: Quad[] = [];
@@ -64,7 +65,7 @@ export function snapshotManifest(contextGraphId: string, count: number): {
     );
     payloadByRef.set(digest, payload);
   }
-  return { meta, payloadByRef };
+  return { meta, payloadByRef, dataQuads: [] };
 }
 
 export function graphBackedManifest(contextGraphId: string): ReturnType<typeof snapshotManifest> {
@@ -132,7 +133,11 @@ export function graphBackedManifest(contextGraphId: string): ReturnType<typeof s
       graph: metaGraph,
     },
   ];
-  return { meta, payloadByRef: new Map() };
+  return {
+    meta,
+    payloadByRef: new Map(),
+    dataQuads: payload.map((quad) => ({ ...quad, graph: snapshotGraph })),
+  };
 }
 
 export function cleanDurableResult(): SharedMemorySyncResult {
@@ -369,6 +374,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
     readonly quads?: readonly Quad[];
     readonly completed: boolean;
     readonly timedOut: boolean;
+    readonly resumedFromOffset?: number;
+    readonly nextOffset?: number;
+    readonly rawResumedFromOffset?: number;
+    readonly rawNextOffset?: number;
+    readonly quadRawOffsets?: readonly number[];
   };
 }
 
@@ -449,6 +459,7 @@ export interface SelectedSwmLifecycleHarness {
     readonly processedMetaBatches: readonly Quad[][];
     readonly dataFetches: () => number;
     readonly metaRequesterScopes: readonly (string | undefined)[];
+    readonly dataRequesterScopes: readonly (string | undefined)[];
     readonly metaSinceBatchIds: readonly (string | undefined)[];
     readonly metaReturnAcceptedPrefixOnRetryableTransportFailure: readonly boolean[];
     readonly maxActiveAdmissions: () => number;
@@ -521,6 +532,7 @@ export function createSelectedSwmLifecycleHarness(
   let metaFetches = 0;
   let dataFetches = 0;
   const metaRequesterScopes: Array<string | undefined> = [];
+  const dataRequesterScopes: Array<string | undefined> = [];
   const metaSinceBatchIds: Array<string | undefined> = [];
   const metaReturnAcceptedPrefixOnRetryableTransportFailure: boolean[] = [];
   const processedMetaBatches: Quad[][] = [];
@@ -639,15 +651,28 @@ export function createSelectedSwmLifecycleHarness(
       }
       if (phase === 'data') {
         dataFetches += 1;
+        dataRequesterScopes.push(requesterScope);
         if (dataFetches <= (options.dataFailuresBeforeSuccess ?? 0)) {
           throw new Error('simulated aggregate-data transport failure');
         }
         if (options.dataPage) {
+          const resumedFromOffset = options.dataPage.resumedFromOffset ?? 0;
+          const nextOffset = options.dataPage.nextOffset
+            ?? resumedFromOffset + (options.dataPage.quads?.length ?? 0);
           return {
             quads: [...(options.dataPage.quads ?? [])],
             bytesReceived: options.dataPage.quads?.length ?? 0,
-            resumedFromOffset: 0,
-            nextOffset: options.dataPage.quads?.length ?? 0,
+            resumedFromOffset,
+            nextOffset,
+            ...(options.dataPage.rawResumedFromOffset !== undefined
+              ? { rawResumedFromOffset: options.dataPage.rawResumedFromOffset }
+              : {}),
+            ...(options.dataPage.rawNextOffset !== undefined
+              ? { rawNextOffset: options.dataPage.rawNextOffset }
+              : {}),
+            ...(options.dataPage.quadRawOffsets !== undefined
+              ? { quadRawOffsets: [...options.dataPage.quadRawOffsets] }
+              : {}),
             checkpointKey: `${contextGraphId}:${phase}`,
             completed: options.dataPage.completed,
             timedOut: options.dataPage.timedOut,
@@ -656,6 +681,8 @@ export function createSelectedSwmLifecycleHarness(
       }
       const quads = phase === 'meta' && contextGraphId === options.contextGraphs.public
         ? options.manifest.meta
+        : phase === 'data' && contextGraphId === options.contextGraphs.public
+          ? options.manifest.dataQuads
         : [];
       return {
         quads,
@@ -745,6 +772,7 @@ export function createSelectedSwmLifecycleHarness(
       processedMetaBatches,
       dataFetches: () => dataFetches,
       metaRequesterScopes,
+      dataRequesterScopes,
       metaSinceBatchIds,
       metaReturnAcceptedPrefixOnRetryableTransportFailure,
       maxActiveAdmissions: () => maxActiveAdmissions,

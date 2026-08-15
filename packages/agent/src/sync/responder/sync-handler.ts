@@ -55,7 +55,7 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from '../priority-admission-queue.js';
-import { resolveDurableDataRequestPolicy } from './durable-data-request-policy.js';
+import { resolveDataRequestPolicy } from './data-request-policy.js';
 
 const MAX_SYNC_SESSION_TOKENS = 256;
 
@@ -556,7 +556,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     const assetSelectionKey = assetUals === undefined
       ? 'full'
       : exactAssetFilterKey(assetUals);
-    const durableDataPolicy = resolveDurableDataRequestPolicy({
+    const dataRequestPolicy = resolveDataRequestPolicy({
       legacyLimit: limit,
       includeSharedMemory: isWorkspace,
       phase,
@@ -564,7 +564,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       pageRowsHint: request.pageRowsHint,
       hasExactAssetFilter: assetUals !== undefined,
     });
-    const usesByteBudgetPage = durableDataPolicy.usesByteBudgetPage;
+    const usesByteBudgetPage = dataRequestPolicy.usesByteBudgetPage;
     // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
     // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
     // the page ≤ budget for BOTH modes, so this only selects the belt-and-
@@ -735,7 +735,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: dataRequestPolicy.limit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
@@ -743,10 +743,16 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             refreshGeneration: session?.refreshGeneration,
             freshGraphPlanMemo: freshSwmDataGraphPlanMemo,
             exactGraphPlanMemo: swmDataExactGraphPlanMemo,
+            // A byte-bounded response may serialize only a prefix of the
+            // loaded row slice. Keep the session until an explicit empty page
+            // proves EOF, matching the durable DATA lane below.
+            releaseCacheOnShortPage: !usesByteBudgetPage,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = usesByteBudgetPage
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -851,12 +857,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           contextGraphId,
           sinceBatchId,
           offset,
-          limit: durableDataPolicy.limit,
+          limit: dataRequestPolicy.limit,
           signal,
-          rowListMemo: session && durableDataPolicy.cacheMode === 'session-snapshot'
+          rowListMemo: session && dataRequestPolicy.cacheMode === 'session-snapshot'
             ? durableDataRowsMemo
             : undefined,
-          rowListCacheScope: session && durableDataPolicy.cacheMode === 'session-snapshot'
+          rowListCacheScope: session && dataRequestPolicy.cacheMode === 'session-snapshot'
             ? peerId
             : undefined,
           refreshRowList: session?.refreshRowList,
@@ -867,7 +873,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           // because that slice was short; the explicit empty request is EOF.
           releaseCacheOnShortPage: !usesByteBudgetPage,
           assetUals,
-          exactGraphReadMode: durableDataPolicy.exactGraphReadMode,
+          exactGraphReadMode: dataRequestPolicy.exactGraphReadMode,
         });
         const queryDurationMs = Date.now() - queryStartedAt;
         const serializeStartedAt = Date.now();

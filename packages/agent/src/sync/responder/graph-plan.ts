@@ -35,7 +35,8 @@ import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/w
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
-import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import type { ExactGraphReadMode } from './data-request-policy.js';
+import { parseGraphBackedSwmSnapshotGraph } from '../graph-scoped-swm-recovery.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -49,6 +50,8 @@ const DKG_SUB_GRAPH = `${DKG}SubGraph`;
 const DKG_WORKSPACE_OPERATION = `${DKG}WorkspaceOperation`;
 const DKG_PUBLISHED_AT = `${DKG}publishedAt`;
 const DKG_ROOT_ENTITY = `${DKG}rootEntity`;
+const DKG_PUBLIC_SNAPSHOT_GRAPH = `${DKG}publicSnapshotGraph`;
+const DKG_PUBLIC_QUADS_COUNT = `${DKG}publicQuadsCount`;
 const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
 const DKG_KA_UAL = `${DKG}kaUal`;
 const DKG_ASSERTION_VERSION = `${DKG}assertionVersion`;
@@ -89,11 +92,18 @@ export interface SubGraphNameMemo {
   }): Promise<readonly string[]>;
 }
 
-interface FreshSwmDataGraphPlanEntry {
-  graph: string;
-  roots: readonly string[];
-  rowCount: number;
-}
+type FreshSwmDataGraphPlanEntry =
+  | {
+    readonly kind: 'root-scoped';
+    readonly graph: string;
+    readonly roots: readonly string[];
+    readonly rowCount: number;
+  }
+  | {
+    readonly kind: 'graph-backed';
+    readonly graph: string;
+    readonly rowCount: number;
+  };
 
 interface FreshSwmDataGraphPlan {
   entries: readonly FreshSwmDataGraphPlanEntry[];
@@ -915,6 +925,8 @@ export async function readSwmDataPage(params: {
   refreshGeneration?: string;
   freshGraphPlanMemo?: FreshSwmDataGraphPlanMemo;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
+  /** Keep the immutable row snapshot until explicit empty-page EOF. */
+  releaseCacheOnShortPage?: boolean;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
@@ -927,6 +939,7 @@ export async function readSwmDataPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory data sync session snapshot expired before page completion',
     }
     : undefined;
@@ -948,6 +961,7 @@ export async function readSwmDataPage(params: {
   const loadStoreBoundedPage: StorePageLoader = async (offset, limit, signal) => {
     const loadPlan = () => buildFreshSwmDataGraphPlan(
       params.store,
+      params.contextGraphId,
       dataGraphs,
       graphSet,
       candidateGraphsFor,
@@ -3354,6 +3368,7 @@ function parseSparqlInteger(value: string | undefined): number {
  */
 async function buildFreshSwmDataGraphPlan(
   store: TripleStore,
+  contextGraphId: string,
   dataGraphs: readonly string[],
   graphSet: ReadonlySet<string>,
   candidateGraphsFor: (graph: string) => string[],
@@ -3373,7 +3388,6 @@ async function buildFreshSwmDataGraphPlan(
   const uniqueCandidates = [...new Map(
     candidates.map((candidate) => [candidate.graph, candidate]),
   ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
-  if (uniqueCandidates.length === 0) return { entries: [], totalRows: 0 };
 
   const rootsByGraph = new Map<string, Set<string>>();
   for (const chunk of chunkValues(uniqueCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
@@ -3436,13 +3450,143 @@ async function buildFreshSwmDataGraphPlan(
     }
   }
 
-  const entries = admitted
-    .map(({ graph, roots }) => ({ graph, roots, rowCount: countsByGraph.get(graph) ?? 0 }))
+  const entries: FreshSwmDataGraphPlanEntry[] = admitted
+    .map(({ graph, roots }) => ({
+      kind: 'root-scoped' as const,
+      graph,
+      roots,
+      rowCount: countsByGraph.get(graph) ?? 0,
+    }))
     .filter((entry) => entry.rowCount > 0);
+  const graphBackedEntries = await readFreshGraphBackedSwmSnapshotEntries(
+    store,
+    contextGraphId,
+    dataGraphs,
+    graphSet,
+    cutoffIso,
+    signal,
+  );
   return {
-    entries,
-    totalRows: entries.reduce((sum, entry) => sum + entry.rowCount, 0),
+    // Recent graph-backed KAs go first so a selected receiver can keep up with
+    // live publication while the same immutable plan continues through older
+    // root-scoped history. Completeness still requires the entire plan.
+    entries: [...graphBackedEntries, ...entries],
+    totalRows: [...graphBackedEntries, ...entries]
+      .reduce((sum, entry) => sum + entry.rowCount, 0),
   };
+}
+
+/**
+ * Discover fresh content-scope-v2 SWM snapshots from their authenticated
+ * operation metadata, then bind every planned graph to its actual row count.
+ *
+ * These graphs are siblings of `_shared_memory`, not descendants of it. The
+ * legacy root planner therefore cannot discover them through
+ * `isSharedMemoryBucketDescendantDataGraph`; omitting them leaves a cold
+ * receiver with verified heads but no payload. The requester independently
+ * verifies the advertised count and digest before materialization.
+ */
+async function readFreshGraphBackedSwmSnapshotEntries(
+  store: TripleStore,
+  contextGraphId: string,
+  dataGraphs: readonly string[],
+  graphSet: ReadonlySet<string>,
+  cutoffIso: string,
+  signal?: AbortSignal,
+): Promise<FreshSwmDataGraphPlanEntry[]> {
+  const discovered = new Map<string, { expectedCount: number; publishedAtMs: number }>();
+  for (const dataGraph of dataGraphs) {
+    const metaGraph = `${dataGraph}_meta`;
+    if (!graphSet.has(metaGraph)) continue;
+    const result = await store.query(`
+      SELECT DISTINCT ?snapshotGraph ?count ?ts WHERE {
+        GRAPH <${assertSafeIri(metaGraph)}> {
+          ?head <${DKG_SHARE_OPERATION_ID}> ?shareOperationId .
+          FILTER(STRENDS(STR(?head), "#dkg-swm-head"))
+          ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+              <${DKG_SHARE_OPERATION_ID}> ?shareOperationId ;
+              <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
+              <${DKG_PUBLIC_SNAPSHOT_GRAPH}> ?snapshotGraph ;
+              <${DKG_PUBLIC_QUADS_COUNT}> ?count ;
+              <${DKG_PUBLISHED_AT}> ?ts .
+          FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)
+        }
+      }
+      ORDER BY DESC(?ts) ?snapshotGraph
+    `, syncResponderStoreOptions(signal, 'sync.responder.readFreshGraphBackedSwmSnapshots'));
+    if (result.type !== 'bindings') continue;
+    for (const row of result.bindings) {
+      const graph = row['snapshotGraph'];
+      const expectedCount = parseSparqlInteger(row['count']);
+      const publishedAtMs = Date.parse(stripLiteral(row['ts']));
+      if (
+        !graph
+        || !isGraphBackedSwmSnapshotGraph(graph, contextGraphId, dataGraph)
+        || !graphSet.has(graph)
+        || expectedCount <= 0
+        || !Number.isFinite(publishedAtMs)
+      ) continue;
+      const previous = discovered.get(graph);
+      if (previous && previous.expectedCount !== expectedCount) {
+        throw new Error(`Conflicting graph-backed SWM snapshot counts for ${graph}`);
+      }
+      if (!previous || publishedAtMs > previous.publishedAtMs) {
+        discovered.set(graph, { expectedCount, publishedAtMs });
+      }
+    }
+  }
+  if (discovered.size === 0) return [];
+
+  const actualCounts = new Map<string, number>();
+  for (const graphs of chunkValues([...discovered.keys()], FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+    const unions = graphs.map((graph) => `
+      {
+        SELECT (<${assertSafeIri(graph)}> AS ?g) (COUNT(*) AS ?count) WHERE {
+          GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o }
+        }
+      }`);
+    const result = await store.query(`
+      SELECT ?g ?count WHERE {
+        ${unions.join('\n        UNION')}
+      }
+      ORDER BY ?g
+    `, syncResponderStoreOptions(signal, 'sync.responder.countFreshGraphBackedSwmSnapshotRows'));
+    if (result.type !== 'bindings') continue;
+    for (const row of result.bindings) {
+      const graph = row['g'];
+      if (graph) actualCounts.set(graph, parseSparqlInteger(row['count']));
+    }
+  }
+
+  return [...discovered.entries()]
+    .map(([graph, evidence]) => {
+      const actualCount = actualCounts.get(graph) ?? 0;
+      if (actualCount !== evidence.expectedCount) {
+        throw new Error(
+          `Graph-backed SWM snapshot ${graph} count mismatch: `
+          + `metadata=${evidence.expectedCount}, store=${actualCount}`,
+        );
+      }
+      return { kind: 'graph-backed' as const, graph, rowCount: actualCount, publishedAtMs: evidence.publishedAtMs };
+    })
+    .sort((left, right) => right.publishedAtMs - left.publishedAtMs
+      || compareCodePoint(left.graph, right.graph))
+    .map(({ kind, graph, rowCount }) => ({ kind, graph, rowCount }));
+}
+
+function isGraphBackedSwmSnapshotGraph(
+  graph: string,
+  contextGraphId: string,
+  dataGraph: string,
+): boolean {
+  const identity = parseGraphBackedSwmSnapshotGraph(graph);
+  if (!identity || identity.contextGraphId !== contextGraphId) return false;
+  const suffix = '/_shared_memory';
+  const base = dataGraph.endsWith(suffix) ? dataGraph.slice(0, -suffix.length) : dataGraph;
+  const contextBase = `did:dkg:context-graph:${contextGraphId}`;
+  if (base === contextBase) return identity.subGraphName === undefined;
+  if (!base.startsWith(`${contextBase}/`)) return false;
+  return identity.subGraphName === base.slice(contextBase.length + 1);
 }
 
 async function readFreshSwmDataRowsPageFromPlan(
@@ -3461,11 +3605,15 @@ async function readFreshSwmDataRowsPageFromPlan(
       skip -= entry.rowCount;
       continue;
     }
+    const selection = entry.kind === 'graph-backed'
+      ? `GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }`
+      : `VALUES ?root { ${graphValues(entry.roots)} }
+        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
+        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))`;
+    // sparql-scan-allow: R3 -- the session plan maps the corpus cursor to one pre-counted concrete graph; graph-backed entries are immutable per-KA graphs and the root-scoped branch retains its existing bounded-plan pagination
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
-        VALUES ?root { ${graphValues(entry.roots)} }
-        GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
-        FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))
+        ${selection}
       }
       ORDER BY ?s ?p ?o
       OFFSET ${skip}
