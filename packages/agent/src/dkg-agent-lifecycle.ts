@@ -4189,6 +4189,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.lastSyncDisconnectedAt.delete(remotePeer);
     this.lastSuccessfulSyncAt.delete(remotePeer);
     this.lastSyncProgressAt.delete(remotePeer);
+    this.lastSelectedSwmSyncAt.delete(remotePeer);
     this.selectedSwmBootstrapAdmission.clear(remotePeer);
     this.syncReconcilerBackoff.delete(remotePeer);
     this.warmedCores.delete(remotePeer);
@@ -4668,6 +4669,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         if (outcome?.progress) {
           this.lastSyncProgressAt.set(peerId, progressAt);
         }
+        if (outcome?.fresh) {
+          this.lastSelectedSwmSyncAt.set(peerId, progressAt);
+        }
         // A selected-only retry never stamps the whole peer fresh; durable and
         // unrelated CG lanes were deliberately outside this invocation.
         this.skippedNoSyncPeers.delete(peerId);
@@ -4924,7 +4928,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
    */
   async reconcileSyncFromConnectedPeers(this: DKGAgent): Promise<void> {
     if (!this.started) return;
-    if (!syncReconcilerEnabled(this.config) || !syncOnConnectEnabled(this.config)) return;
+    if (!syncReconcilerEnabled(this.config)) return;
+    const broadSyncEnabled = syncOnConnectEnabled(this.config);
     const now = Date.now();
     const ctx = createOperationContext('sync');
     this.pruneSyncReconcilerState(now);
@@ -4936,10 +4941,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const lastDisconnected = this.syncOnConnectDisconnectBoundary(peerId, now);
       const lastProgress = this.lastSyncProgressAt.get(peerId);
       const lastSyncCooldown = Math.max(lastOk ?? 0, lastProgress ?? 0);
-      const stale = lastSyncCooldown === 0
+      const broadSyncStale = broadSyncEnabled && (lastSyncCooldown === 0
         || lastSyncCooldown <= lastDisconnected
-        || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS;
-      if (!stale) continue;
+        || (now - lastSyncCooldown) >= SYNC_STALENESS_THRESHOLD_MS);
+      const selectedContextGraphIds = this.selectedSwmBootstrapContextGraphIdsForPeer(peerId);
+      const lastSelectedSwmSync = this.lastSelectedSwmSyncAt.get(peerId);
+      const selectedSwmStale = selectedContextGraphIds.length > 0 && (
+        lastSelectedSwmSync == null
+        || lastSelectedSwmSync <= lastDisconnected
+        || (now - lastSelectedSwmSync) >= SYNC_STALENESS_THRESHOLD_MS
+      );
+      if (!broadSyncStale && !selectedSwmStale) continue;
       // Per-peer exponential backoff: a peer that can never be synced
       // (dead / NAT-stuck / persistently stream-resetting) never stamps
       // `lastSuccessfulSyncAt`, so it reads as perpetually stale. Without
@@ -4957,8 +4969,24 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (!(await this.ensurePeerAdmittedForRecovery(peerId, ctx, 'Sync reconciler'))) continue;
       const shortPeer = peerId.slice(-8);
-      this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
-      this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile')
+      if (selectedSwmStale && !broadSyncStale) {
+        // Terminal means complete at the last observed head, not never refresh
+        // this selected graph again. Re-open only this peer/scope after the
+        // bounded freshness window; the broad sync kill switch and unselected
+        // graphs remain untouched.
+        this.selectedSwmBootstrapAdmission.clear(peerId);
+        this.selectedSwmBootstrapAdmission.request(peerId, selectedContextGraphIds);
+        this.log.info(
+          ctx,
+          `Sync reconciler refreshing ${selectedContextGraphIds.length} selected shared-memory Context Graph(s) from ${shortPeer}`,
+        );
+      } else {
+        this.log.info(ctx, `Sync reconciler retrying ${shortPeer} (last success: ${lastOk == null ? 'never' : `${Math.round((now - lastOk) / 1000)}s ago`}${backoff ? `, prior failures: ${backoff.failures}` : ''})`);
+      }
+      const attempt = selectedSwmStale && !broadSyncStale
+        ? this.attemptSelectedSwmRetryWithReconcilerAccounting(peerId, probe, 'reconcile')
+        : this.attemptSyncFromPeerWithReconcilerAccounting(peerId, probe, 'reconcile');
+      attempt
         .then(() => undefined)
         .catch((err: unknown) => {
           const message = err instanceof Error ? err.message : String(err);
@@ -4993,6 +5021,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const [peerId, ts] of this.lastSyncProgressAt) {
       if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
         this.lastSyncProgressAt.delete(peerId);
+      }
+    }
+    for (const [peerId, ts] of this.lastSelectedSwmSyncAt) {
+      if (!connected.has(peerId) && now - ts >= SYNC_STALENESS_THRESHOLD_MS) {
+        this.lastSelectedSwmSyncAt.delete(peerId);
       }
     }
     for (const [peerId, backoff] of this.syncReconcilerBackoff) {
@@ -7247,6 +7280,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         && continuationExecution.incompleteContextGraphIds.length === 0;
       if (selectedScopeComplete) {
         this.selectedSwmBootstrapAdmission.markTransferTerminal(selectedBootstrapOwner!);
+        this.lastSelectedSwmSyncAt.set(remotePeerId, Date.now());
       }
       // Preserve the raw historical yield/failure counters for diagnostics;
       // the canonical freshness helper bounds the selected continuation's
