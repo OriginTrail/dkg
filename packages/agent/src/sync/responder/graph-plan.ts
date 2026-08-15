@@ -3595,6 +3595,7 @@ async function readFreshSwmDataRowsPageFromPlan(
       : `VALUES ?root { ${graphValues(entry.roots)} }
         GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
         FILTER(?s = ?root || STRSTARTS(STR(?s), CONCAT(STR(?root), "/.well-known/genid/")))`;
+    // sparql-scan-allow: R3 -- the session plan maps the corpus cursor to one pre-counted concrete graph; graph-backed entries are immutable per-KA graphs and the root-scoped branch retains its existing bounded-plan pagination
     const result = await store.query(`
       SELECT DISTINCT ?s ?p ?o WHERE {
         ${selection}
