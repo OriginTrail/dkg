@@ -4,32 +4,33 @@ import {
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 
-export type DurableDataCacheMode = 'session-snapshot' | 'page-only';
+export type DataRequestCacheMode = 'session-snapshot' | 'page-only';
 export type ExactGraphReadMode = 'snapshot-or-page' | 'page-only';
 
-export interface DurableDataRequestPolicy {
+export interface DataRequestPolicy {
   usesByteBudgetPage: boolean;
   limit: number;
-  cacheMode: DurableDataCacheMode;
+  cacheMode: DataRequestCacheMode;
   exactGraphReadMode: ExactGraphReadMode;
 }
 
 /**
  * Resolve responder resource policy from authenticated request semantics only.
  *
- * Signature fields are deliberately absent: public-graph authorization may
- * accept a request before validating them, so their presence is not proof that
- * a caller is authenticated. Every negotiated exact-asset read therefore uses
- * the conservative store-page path and 64-row floor.
+ * This boundary is shared by durable and SWM DATA. Signature fields are
+ * deliberately absent: public-graph authorization may accept a request before
+ * validating them, so their presence is not proof that a caller is
+ * authenticated. Negotiated exact-asset reads therefore use the conservative
+ * store-page path and 64-row floor.
  */
-export function resolveDurableDataRequestPolicy(params: {
+export function resolveDataRequestPolicy(params: {
   legacyLimit: number;
   includeSharedMemory: boolean;
   phase: string;
   pageMode?: string;
   pageRowsHint?: number;
   hasExactAssetFilter: boolean;
-}): DurableDataRequestPolicy {
+}): DataRequestPolicy {
   const hintedPageRows = typeof params.pageRowsHint === 'number' &&
     Number.isSafeInteger(params.pageRowsHint)
     ? Math.max(1, Math.min(params.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))

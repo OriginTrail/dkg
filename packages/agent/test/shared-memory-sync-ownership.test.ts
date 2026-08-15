@@ -284,6 +284,13 @@ describe('runSharedMemorySync ownership hydration', () => {
       expect(workspace.quads).toHaveLength(1);
       expect(workspace.quads[0]?.graph).toBe(snapshotGraph);
 
+      const malformed = await worker.parseAndFilter(
+        '<urn:s> <urn:p> "value" <did:dkg:context-graph:0x1111111111111111111111111111111111111111%2Fpublic-cg/_shared_memory_snapshots/_/operation/extra/ka> .',
+        workspaceGraph,
+        contextGraphId,
+      );
+      expect(malformed.quads).toHaveLength(0);
+
       const durable = await worker.parseAndFilter(
         nquads,
         `did:dkg:context-graph:${contextGraphId}`,

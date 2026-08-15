@@ -35,7 +35,8 @@ import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/w
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
 import { isIriTerm } from '../iri-term.js';
-import type { ExactGraphReadMode } from './durable-data-request-policy.js';
+import type { ExactGraphReadMode } from './data-request-policy.js';
+import { parseGraphBackedSwmSnapshotGraph } from '../graph-scoped-swm-recovery.js';
 
 export {
   createResponderSyncRowListMemo,
@@ -91,12 +92,18 @@ export interface SubGraphNameMemo {
   }): Promise<readonly string[]>;
 }
 
-interface FreshSwmDataGraphPlanEntry {
-  graph: string;
-  /** Empty for an immutable graph-backed KA snapshot, whose whole graph is served. */
-  roots: readonly string[];
-  rowCount: number;
-}
+type FreshSwmDataGraphPlanEntry =
+  | {
+    readonly kind: 'root-scoped';
+    readonly graph: string;
+    readonly roots: readonly string[];
+    readonly rowCount: number;
+  }
+  | {
+    readonly kind: 'graph-backed';
+    readonly graph: string;
+    readonly rowCount: number;
+  };
 
 interface FreshSwmDataGraphPlan {
   entries: readonly FreshSwmDataGraphPlanEntry[];
@@ -918,6 +925,8 @@ export async function readSwmDataPage(params: {
   refreshGeneration?: string;
   freshGraphPlanMemo?: FreshSwmDataGraphPlanMemo;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
+  /** Keep the immutable row snapshot until explicit empty-page EOF. */
+  releaseCacheOnShortPage?: boolean;
 }): Promise<SyncRow[]> {
   const dataGraphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, false);
   const graphSet = new Set(params.graphList);
@@ -930,6 +939,7 @@ export async function readSwmDataPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory data sync session snapshot expired before page completion',
     }
     : undefined;
@@ -3440,8 +3450,13 @@ async function buildFreshSwmDataGraphPlan(
     }
   }
 
-  const entries = admitted
-    .map(({ graph, roots }) => ({ graph, roots, rowCount: countsByGraph.get(graph) ?? 0 }))
+  const entries: FreshSwmDataGraphPlanEntry[] = admitted
+    .map(({ graph, roots }) => ({
+      kind: 'root-scoped' as const,
+      graph,
+      roots,
+      rowCount: countsByGraph.get(graph) ?? 0,
+    }))
     .filter((entry) => entry.rowCount > 0);
   const graphBackedEntries = await readFreshGraphBackedSwmSnapshotEntries(
     store,
@@ -3486,7 +3501,10 @@ async function readFreshGraphBackedSwmSnapshotEntries(
     const result = await store.query(`
       SELECT DISTINCT ?snapshotGraph ?count ?ts WHERE {
         GRAPH <${assertSafeIri(metaGraph)}> {
+          ?head <${DKG_SHARE_OPERATION_ID}> ?shareOperationId .
+          FILTER(STRENDS(STR(?head), "#dkg-swm-head"))
           ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+              <${DKG_SHARE_OPERATION_ID}> ?shareOperationId ;
               <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
               <${DKG_PUBLIC_SNAPSHOT_GRAPH}> ?snapshotGraph ;
               <${DKG_PUBLIC_QUADS_COUNT}> ?count ;
@@ -3549,11 +3567,11 @@ async function readFreshGraphBackedSwmSnapshotEntries(
           + `metadata=${evidence.expectedCount}, store=${actualCount}`,
         );
       }
-      return { graph, roots: [], rowCount: actualCount, publishedAtMs: evidence.publishedAtMs };
+      return { kind: 'graph-backed' as const, graph, rowCount: actualCount, publishedAtMs: evidence.publishedAtMs };
     })
     .sort((left, right) => right.publishedAtMs - left.publishedAtMs
       || compareCodePoint(left.graph, right.graph))
-    .map(({ graph, roots, rowCount }) => ({ graph, roots, rowCount }));
+    .map(({ kind, graph, rowCount }) => ({ kind, graph, rowCount }));
 }
 
 function isGraphBackedSwmSnapshotGraph(
@@ -3561,17 +3579,14 @@ function isGraphBackedSwmSnapshotGraph(
   contextGraphId: string,
   dataGraph: string,
 ): boolean {
+  const identity = parseGraphBackedSwmSnapshotGraph(graph);
+  if (!identity || identity.contextGraphId !== contextGraphId) return false;
   const suffix = '/_shared_memory';
   const base = dataGraph.endsWith(suffix) ? dataGraph.slice(0, -suffix.length) : dataGraph;
-  const contextPrefix = 'did:dkg:context-graph:';
-  const contextBase = `${contextPrefix}${contextGraphId}`;
-  if (base !== contextBase && !base.startsWith(`${contextBase}/`)) return false;
-  const subGraphName = base === contextBase ? '_' : base.slice(contextBase.length + 1);
-  if (subGraphName !== '_' && !validateSubGraphName(subGraphName).valid) return false;
-  const prefix = `${contextPrefix}${encodeURIComponent(contextGraphId)}/_shared_memory_snapshots/`
-    + `${encodeURIComponent(subGraphName)}/`;
-  const tail = graph.startsWith(prefix) ? graph.slice(prefix.length) : '';
-  return tail.endsWith('/ka') && tail.slice(0, -3).length > 0 && !tail.slice(0, -3).includes('/');
+  const contextBase = `did:dkg:context-graph:${contextGraphId}`;
+  if (base === contextBase) return identity.subGraphName === undefined;
+  if (!base.startsWith(`${contextBase}/`)) return false;
+  return identity.subGraphName === base.slice(contextBase.length + 1);
 }
 
 async function readFreshSwmDataRowsPageFromPlan(
@@ -3590,7 +3605,7 @@ async function readFreshSwmDataRowsPageFromPlan(
       skip -= entry.rowCount;
       continue;
     }
-    const selection = entry.roots.length === 0
+    const selection = entry.kind === 'graph-backed'
       ? `GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }`
       : `VALUES ?root { ${graphValues(entry.roots)} }
         GRAPH <${assertSafeIri(entry.graph)}> { ?s ?p ?o }
