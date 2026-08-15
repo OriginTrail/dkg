@@ -35,6 +35,7 @@ export const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 export function snapshotManifest(contextGraphId: string, count: number): {
   meta: Quad[];
   payloadByRef: Map<string, Quad[]>;
+  dataQuads: Quad[];
 } {
   const metaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
   const meta: Quad[] = [];
@@ -64,7 +65,7 @@ export function snapshotManifest(contextGraphId: string, count: number): {
     );
     payloadByRef.set(digest, payload);
   }
-  return { meta, payloadByRef };
+  return { meta, payloadByRef, dataQuads: [] };
 }
 
 export function graphBackedManifest(contextGraphId: string): ReturnType<typeof snapshotManifest> {
@@ -132,7 +133,11 @@ export function graphBackedManifest(contextGraphId: string): ReturnType<typeof s
       graph: metaGraph,
     },
   ];
-  return { meta, payloadByRef: new Map() };
+  return {
+    meta,
+    payloadByRef: new Map(),
+    dataQuads: payload.map((quad) => ({ ...quad, graph: snapshotGraph })),
+  };
 }
 
 export function cleanDurableResult(): SharedMemorySyncResult {
@@ -656,6 +661,8 @@ export function createSelectedSwmLifecycleHarness(
       }
       const quads = phase === 'meta' && contextGraphId === options.contextGraphs.public
         ? options.manifest.meta
+        : phase === 'data' && contextGraphId === options.contextGraphs.public
+          ? options.manifest.dataQuads
         : [];
       return {
         quads,

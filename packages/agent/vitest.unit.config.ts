@@ -79,6 +79,8 @@ export default defineConfig({
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-swm-meta-ceiling.test.ts",
       "test/sync-responder-large-graph-stack-overflow.test.ts",
+      "test/sync-responder-graph-backed-swm.test.ts",
+      "test/graph-backed-swm-page-boundary.test.ts",
       "test/sync-page-frame-budget.test.ts",
       "test/sync-byte-budget-pages.test.ts",
       "test/sync-append-in-place.test.ts",
@@ -175,6 +177,7 @@ export default defineConfig({
       "test/workspace-crypto-delegatee-filter.test.ts",
       "test/swm-public-snapshot-materialization.test.ts",
       "test/swm-public-cg-plaintext.test.ts",
+      "test/shared-memory-sync-ownership.test.ts",
       "test/swm-snapshot-materializer.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an

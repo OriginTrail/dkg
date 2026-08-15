@@ -735,7 +735,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: durableDataPolicy.limit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
@@ -746,7 +746,9 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = usesByteBudgetPage
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM data for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
