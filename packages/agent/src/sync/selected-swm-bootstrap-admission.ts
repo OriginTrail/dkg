@@ -5,6 +5,7 @@ export type SelectedSwmBootstrapPhase = 'retry-required' | 'terminal';
 export interface SelectedSwmBootstrapAdmissionSnapshot {
   readonly contextGraphIds: readonly string[];
   readonly phase: SelectedSwmBootstrapPhase;
+  readonly freshAtMs: number | null;
 }
 
 export interface SelectedSwmBootstrapTransferOwner {
@@ -21,6 +22,13 @@ export interface SelectedSwmBootstrapContextGraphSummary {
 
 interface SelectedSwmBootstrapAdmissionState extends SelectedSwmBootstrapAdmissionSnapshot {
   readonly generation: number;
+  readonly updatedAtMs: number;
+}
+
+export interface SelectedSwmRefreshOptions {
+  readonly now: number;
+  readonly disconnectBoundary: number;
+  readonly staleAfterMs: number;
 }
 
 function canonicalScope(contextGraphIds: readonly string[]): readonly string[] {
@@ -47,11 +55,15 @@ export class SelectedSwmBootstrapAdmission {
     remotePeer: string,
     contextGraphIds: readonly string[],
     phase: SelectedSwmBootstrapPhase,
+    freshAtMs: number | null = null,
+    updatedAtMs = Date.now(),
   ): SelectedSwmBootstrapAdmissionState {
     const state = Object.freeze({
       contextGraphIds: canonicalScope(contextGraphIds),
       phase,
+      freshAtMs,
       generation: this.#nextGeneration += 1,
+      updatedAtMs,
     });
     this.#byPeer.set(remotePeer, state);
     return state;
@@ -96,7 +108,10 @@ export class SelectedSwmBootstrapAdmission {
     });
   }
 
-  markTransferTerminal(owner: SelectedSwmBootstrapTransferOwner): boolean {
+  markTransferTerminal(
+    owner: SelectedSwmBootstrapTransferOwner,
+    freshAtMs = Date.now(),
+  ): boolean {
     const current = this.#byPeer.get(owner.remotePeer);
     if (
       current === undefined
@@ -106,7 +121,32 @@ export class SelectedSwmBootstrapAdmission {
     this.#byPeer.set(owner.remotePeer, Object.freeze({
       ...current,
       phase: 'terminal',
+      freshAtMs,
+      updatedAtMs: freshAtMs,
     }));
+    return true;
+  }
+
+  shouldRefresh(
+    remotePeer: string,
+    contextGraphIds: readonly string[],
+    options: SelectedSwmRefreshOptions,
+  ): boolean {
+    const scope = canonicalScope(contextGraphIds);
+    if (scope.length === 0) return false;
+    const current = this.#byPeer.get(remotePeer);
+    if (current === undefined || !sameScope(current.contextGraphIds, scope)) return true;
+    if (current.phase === 'retry-required') return true;
+    const freshAtMs = current.freshAtMs;
+    return freshAtMs === null
+      || freshAtMs <= options.disconnectBoundary
+      || options.now - freshAtMs >= options.staleAfterMs;
+  }
+
+  requestRefresh(remotePeer: string, contextGraphIds: readonly string[]): boolean {
+    const scope = canonicalScope(contextGraphIds);
+    if (scope.length === 0) return false;
+    this.#replace(remotePeer, scope, 'retry-required');
     return true;
   }
 
@@ -120,6 +160,7 @@ export class SelectedSwmBootstrapAdmission {
     return Object.freeze({
       contextGraphIds: state.contextGraphIds,
       phase: state.phase,
+      freshAtMs: state.freshAtMs,
     });
   }
 
@@ -142,6 +183,18 @@ export class SelectedSwmBootstrapAdmission {
       else terminalProviders += 1;
     }
     return Object.freeze({ retryRequiredProviders, terminalProviders });
+  }
+
+  pruneDisconnected(
+    connectedPeers: ReadonlySet<string>,
+    now: number,
+    staleAfterMs: number,
+  ): void {
+    for (const [remotePeer, state] of this.#byPeer) {
+      if (!connectedPeers.has(remotePeer) && now - state.updatedAtMs >= staleAfterMs) {
+        this.#byPeer.delete(remotePeer);
+      }
+    }
   }
 
   clear(remotePeer: string): void {

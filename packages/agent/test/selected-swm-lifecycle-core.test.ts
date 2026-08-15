@@ -137,6 +137,11 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       expect(summary.continuationPasses).toBe(0);
       expect(harness.probes.publicAdmissions()).toBe(1);
       expect(harness.agent.selectedSwmBootstrapAdmission.isRetryRequired(PEER)).toBe(false);
+      expect(harness.agent.selectedSwmBootstrapAdmission.snapshot(PEER)).toMatchObject({
+        contextGraphIds: [publicCg],
+        phase: 'terminal',
+        freshAtMs: expect.any(Number),
+      });
     } finally {
       await harness.close();
     }

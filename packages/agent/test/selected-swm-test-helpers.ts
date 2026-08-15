@@ -381,7 +381,6 @@ export interface SelectedSwmLifecycleAgentFixture {
     };
   };
   selectedSwmBootstrapAdmission: SelectedSwmBootstrapAdmission;
-  lastSelectedSwmSyncAt: Map<string, number>;
   store: OxigraphStore;
   writeLocks: Map<string, Promise<void>>;
   publicSnapshotStore: {
@@ -552,7 +551,6 @@ export function createSelectedSwmLifecycleHarness(
         : {}),
     },
     selectedSwmBootstrapAdmission: new SelectedSwmBootstrapAdmission(),
-    lastSelectedSwmSyncAt: new Map(),
     store,
     writeLocks: new Map(),
     publicSnapshotStore: {
