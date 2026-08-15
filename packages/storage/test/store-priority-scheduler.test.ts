@@ -3,11 +3,24 @@ import {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
 } from '../src/store-priority-scheduler.js';
+import { availableParallelism } from 'node:os';
 import type { StoreWorkPriority } from '../src/triple-store.js';
 
 const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 
 describe('StorePriorityScheduler', () => {
+  it('caps process-level concurrency at the host logical CPU count', () => {
+    const previous = process.env.DKG_STORE_MAX_CONCURRENT;
+    process.env.DKG_STORE_MAX_CONCURRENT = '1000000';
+    try {
+      const scheduler = new StorePriorityScheduler();
+      expect(scheduler.snapshot.maxConcurrent).toBe(availableParallelism());
+    } finally {
+      if (previous === undefined) delete process.env.DKG_STORE_MAX_CONCURRENT;
+      else process.env.DKG_STORE_MAX_CONCURRENT = previous;
+    }
+  });
+
   for (const priority of ['ack', 'health', 'normal', 'background'] as const satisfies readonly StoreWorkPriority[]) {
     it(`bounds the ${priority} queue and returns a typed retryable rejection`, async () => {
       const scheduler = new StorePriorityScheduler({

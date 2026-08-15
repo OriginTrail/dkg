@@ -1,4 +1,5 @@
 import { performance } from 'node:perf_hooks';
+import { availableParallelism } from 'node:os';
 import {
   backpressureRegistry,
   getMetrics,
@@ -121,6 +122,20 @@ function parseNonNegativeIntegerEnv(name: string, fallback: number): number {
   if (!raw) return fallback;
   const parsed = Number(raw);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function resolveMaxConcurrentFromEnv(): number {
+  const configured = parsePositiveIntegerEnv(
+    'DKG_STORE_MAX_CONCURRENT',
+    DEFAULT_MAX_CONCURRENT,
+  );
+  // One admitted SPARQL request can use several Oxigraph/Rayon worker threads.
+  // Letting an operator's stale tuning admit more store jobs than the host has
+  // logical CPUs multiplies runnable work and can starve the reserved ACK lane
+  // even while the JS scheduler reports empty queues. Keep explicit constructor
+  // options available to tests/embedded callers, but make the process-level
+  // environment setting a hardware-aware ceiling.
+  return Math.min(configured, Math.max(1, availableParallelism()));
 }
 
 function resolveQueueLimitsFromEnv(): StorePriorityQueueLimits {
@@ -277,8 +292,7 @@ export class StorePriorityScheduler extends ObservableScheduler {
         stalledActiveAgeMs: 30_000,
       },
     });
-    this.maxConcurrent = options.maxConcurrent
-      ?? parsePositiveIntegerEnv('DKG_STORE_MAX_CONCURRENT', DEFAULT_MAX_CONCURRENT);
+    this.maxConcurrent = options.maxConcurrent ?? resolveMaxConcurrentFromEnv();
     const requestedAckReservedSlots = options.ackReservedSlots
       ?? parsePositiveIntegerEnv('DKG_STORE_ACK_RESERVED_SLOTS', DEFAULT_ACK_RESERVED_SLOTS);
     this.ackReservedSlots = Math.min(
