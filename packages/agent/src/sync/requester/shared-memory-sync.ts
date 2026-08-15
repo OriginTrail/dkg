@@ -9,7 +9,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SwmSnapshotCoverage } from '../../dkg-agent-types.js';
 import { workspacePublicQuadsDigest, type WorkspacePublicSnapshotStore } from '@origintrail-official/dkg-publisher';
 import type { SyncPhase } from '../auth/request-build.js';
-import type { SyncCheckpointScope } from '../checkpoint/state.js';
+import type { SelectedSwmDataCheckpointScope } from '../checkpoint/state.js';
 import { didSyncPeerRespond, isSyncBackoffWorthyError, isSyncPermanentRejection, isSyncTransportFailure } from '../error-tags.js';
 import { isSharedMemoryBucketDescendantDataGraph } from '../shared-memory-graphs.js';
 import {
@@ -19,10 +19,16 @@ import {
 import {
   canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
+  parseGraphBackedSwmSnapshotGraph,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
+import {
+  collectAdvertisedGraphBackedSnapshotGraphs,
+  indexGraphBackedSwmDataPage,
+  planBoundedGraphBackedSwmDataPage,
+} from './graph-backed-swm-data-replay.js';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -389,7 +395,7 @@ interface SharedMemorySyncContext {
    */
   snapshotRecoveryOrder?: 'manifest' | 'recent-balanced';
   /** Versioned cursor namespace for callers that own selected SWM DATA replay. */
-  dataRequesterScope?: SyncCheckpointScope;
+  dataRequesterScope?: SelectedSwmDataCheckpointScope;
   deleteCheckpoint: (key: string) => void;
   setCheckpoint: (key: string, offset: number, responderSessionOffset?: number) => void;
   ensureOwnedMap: (ownershipKey: string) => Map<string, string>;
@@ -411,106 +417,6 @@ function storedVersionOutranksDescriptor(stored: string, descriptorVersion: stri
   } catch {
     return true;
   }
-}
-
-export interface BoundedGraphBackedSwmDataPage {
-  readonly completeGraphs: ReadonlySet<string>;
-  readonly safeNextOffset: number;
-  readonly safeRawNextOffset: number;
-  readonly rewound: boolean;
-}
-
-/**
- * Project a possibly interrupted aggregate SWM DATA response onto whole
- * immutable snapshot graphs. The responder emits graph-backed snapshots as
- * contiguous graph groups before legacy root data; only a full count-bound
- * group may be materialized or skipped by the next requester cursor.
- */
-export function planBoundedGraphBackedSwmDataPage(params: {
-  readonly quads: readonly Quad[];
-  readonly descriptors: readonly GraphScopedSwmRecoveryDescriptor[];
-  readonly resumedFromOffset: number;
-  readonly rawResumedFromOffset?: number;
-  readonly nextOffset: number;
-  readonly rawNextOffset?: number;
-  readonly quadRawOffsets?: readonly number[];
-  readonly completed: boolean;
-}): BoundedGraphBackedSwmDataPage | null {
-  const expectedByGraph = new Map<string, number>();
-  for (const descriptor of params.descriptors) {
-    const graph = descriptor.publicSnapshotGraph;
-    if (!graph) continue;
-    const existing = expectedByGraph.get(graph);
-    if (existing !== undefined && existing !== descriptor.publicQuadsCount) return null;
-    expectedByGraph.set(graph, descriptor.publicQuadsCount);
-  }
-  const rawResumed = params.rawResumedFromOffset ?? params.resumedFromOffset;
-  const rawNext = params.rawNextOffset ?? params.nextOffset;
-  if (expectedByGraph.size === 0) {
-    return {
-      completeGraphs: new Set(),
-      safeNextOffset: params.nextOffset,
-      safeRawNextOffset: rawNext,
-      rewound: false,
-    };
-  }
-  const rawOffsets = params.quadRawOffsets === undefined
-    ? rawNext - rawResumed === params.quads.length
-      ? params.quads.map((_, index) => rawResumed + index)
-      : null
-    : [...params.quadRawOffsets];
-  if (
-    rawOffsets === null
-    || rawOffsets.length !== params.quads.length
-    || rawOffsets.some((offset, index) => !Number.isSafeInteger(offset)
-      || offset < rawResumed
-      || offset >= rawNext
-      || (index > 0 && offset <= rawOffsets[index - 1]!))
-  ) return null;
-
-  const completeGraphs = new Set<string>();
-  const seenGraphs = new Set<string>();
-  let index = 0;
-  let sawLegacyRows = false;
-  while (index < params.quads.length) {
-    const graph = params.quads[index]!.graph;
-    const expected = expectedByGraph.get(graph);
-    if (expected === undefined) {
-      sawLegacyRows = true;
-      index += 1;
-      continue;
-    }
-    // Graph-backed groups precede legacy root rows and are contiguous. A graph
-    // after legacy data, or the same graph in two groups, is not safely
-    // checkpointable against this responder generation.
-    if (sawLegacyRows || seenGraphs.has(graph)) return null;
-    seenGraphs.add(graph);
-    const groupStart = index;
-    while (index < params.quads.length && params.quads[index]!.graph === graph) index += 1;
-    const observed = index - groupStart;
-    if (observed > expected) return null;
-    if (observed === expected) {
-      completeGraphs.add(graph);
-      continue;
-    }
-    // A short immutable graph is only a valid timeout prefix when it is the
-    // final group returned. Rewind both verified and responder coordinates to
-    // its first row so the next pass reconstructs the whole graph.
-    if (params.completed || index !== params.quads.length) return null;
-    const safeRawNextOffset = rawOffsets[groupStart]!;
-    return {
-      completeGraphs,
-      safeNextOffset: safeRawNextOffset,
-      safeRawNextOffset,
-      rewound: safeRawNextOffset < rawNext,
-    };
-  }
-  return {
-    completeGraphs,
-    safeNextOffset: params.nextOffset,
-    safeRawNextOffset: rawNext,
-    rewound: false,
-  };
 }
 
 export async function runSharedMemorySync(context: SharedMemorySyncContext): Promise<SharedMemorySyncSummary> {
@@ -748,7 +654,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // This prefilter uses raw metadata only to REMOVE data from the permissive
       // legacy path; verified metadata remains the sole authority for adding or
       // completing anything.
-      const rawAdvertisedGraphBackedSnapshots = collectAdvertisedGraphBackedSnapshots(
+      const rawAdvertisedGraphBackedSnapshots = collectAdvertisedGraphBackedSnapshotGraphs(
         wsMetaResult.quads,
       );
       const processed = await processSharedMemoryBatch(
@@ -848,28 +754,27 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // queryable as ordinary SWM data or inflate insertion counters. The
       // parser remains the authority for which of these advertisements can be
       // materialized and counted toward terminal coverage.
-      const advertisedGraphBackedSnapshotGraphs = collectAdvertisedGraphBackedSnapshots(
+      const advertisedGraphBackedSnapshotGraphs = collectAdvertisedGraphBackedSnapshotGraphs(
         processed.verifiedMeta,
       );
+      // Preserve the advertised denominator independently of descriptor
+      // parsing. A malformed graph-backed operation must remain incomplete;
+      // clearing the materializable set below must never turn it into vacuous
+      // 0/0 completion.
+      graphBackedTotalForCg = advertisedGraphBackedSnapshotGraphs.size;
       // Index the aggregate page once. Filtering the complete 250k-quad page
       // once per KA would make recovery O(KAs * quads); the per-graph buckets
       // keep verification linear while retaining the materializer's own exact
       // graph/count/digest checks.
-      const graphBackedDataByGraph = new Map<string, Quad[]>();
-      const graphBackedRawStartByGraph = new Map<string, number>();
-      for (const [quadIndex, quad] of wsDataResult.quads.entries()) {
-        if (!advertisedGraphBackedSnapshotGraphs.has(quad.graph)) continue;
-        if (!graphBackedRawStartByGraph.has(quad.graph)) {
-          graphBackedRawStartByGraph.set(
-            quad.graph,
-            wsDataResult.quadRawOffsets?.[quadIndex]
-              ?? (wsDataResult.rawResumedFromOffset ?? wsDataResult.resumedFromOffset) + quadIndex,
-          );
-        }
-        const rows = graphBackedDataByGraph.get(quad.graph);
-        if (rows) rows.push(quad);
-        else graphBackedDataByGraph.set(quad.graph, [quad]);
-      }
+      const graphBackedDataPage = indexGraphBackedSwmDataPage({
+        quads: wsDataResult.quads,
+        advertisedGraphs: advertisedGraphBackedSnapshotGraphs,
+        resumedFromOffset: wsDataResult.resumedFromOffset,
+        rawResumedFromOffset: wsDataResult.rawResumedFromOffset,
+        quadRawOffsets: wsDataResult.quadRawOffsets,
+      });
+      const graphBackedDataByGraph = graphBackedDataPage.dataByGraph;
+      const graphBackedRawStartByGraph = graphBackedDataPage.rawStartByGraph;
       validWsQuads = validWsQuads.filter(
         (quad) => !advertisedGraphBackedSnapshotGraphs.has(quad.graph),
       );
@@ -938,11 +843,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
               rawNextOffset: boundedGraphBackedPage.safeRawNextOffset,
               completed: false,
             };
-            for (const graph of [...graphBackedDataByGraph.keys()]) {
-              if (!boundedGraphBackedPage.completeGraphs.has(graph)) {
-                graphBackedDataByGraph.delete(graph);
-              }
+          for (const graph of [...graphBackedDataByGraph.keys()]) {
+            if (!boundedGraphBackedPage.completeGraphs.has(graph)) {
+              graphBackedDataByGraph.delete(graph);
             }
+          }
             if (boundedGraphBackedPage.safeNextOffset === 0) {
               // setCheckpoint(0) would retain page-fetch's process-local token
               // at the raw end of the discarded suffix. Delete both halves so
@@ -1338,7 +1243,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // rather than a decision input.
       recordSnapshotCoverage(
         snapshotSync,
-        graphBackedSnapshotGraphs.size,
+        graphBackedTotalForCg,
         wsMetaResult.completed,
         descriptorsAuthoritativeForCg,
         materializationFailures,
@@ -1380,16 +1285,16 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const snapshotEvidenceAccepted = snapshotEvidencePolicy?.accepts({
         verifiedMetadataTriples: processed.verifiedMeta.length,
         snapshotReferences: snapshotSync.totalSnapshots,
-        graphBackedOperations: countGraphBackedSnapshotOperations(processed.verifiedMeta),
+        graphBackedOperations: countGraphBackedSnapshotOperations(processed.verifiedMeta, pid),
       }) ?? true;
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
         && (
           descriptorsAuthoritativeForCg
-          || snapshotSync.totalSnapshots + graphBackedSnapshotGraphs.size === 0
+          || snapshotSync.totalSnapshots + graphBackedTotalForCg === 0
         )
         && materializedRefs.size
-          === snapshotSync.totalSnapshots + graphBackedSnapshotGraphs.size
+          === snapshotSync.totalSnapshots + graphBackedTotalForCg
         && snapshotEvidenceAccepted;
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
@@ -1415,11 +1320,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
           await storeInsert(validWsQuads);
           summary.insertedTriples += validWsQuads.length;
           summary.insertedDataTriples += validWsQuads.length;
-          recordPhaseOutcome(effectiveWsDataResult, {
-            updateCheckpoint: !suppressDataCheckpointUpdate,
-          });
           hydrateOwnership();
         }
+        // Graph-backed DATA can be the entire response. Its safe rewind cursor
+        // is still evidence even when there are no legacy rows to insert; tying
+        // checkpoint persistence to `validWsQuads.length` discarded that cursor
+        // and restarted every failed immutable graph from an unrelated offset.
+        recordPhaseOutcome(effectiveWsDataResult, {
+          updateCheckpoint: !suppressDataCheckpointUpdate,
+        });
         if (snapshotSync.timedOutPhases > 0 && shouldStopAfterBackoffWorthyFailure(pid, 'snapshot timeout')) {
           break;
         }
@@ -1954,19 +1863,23 @@ export function orderPublicSnapshotsForBalancedRecency(
  * deliberately excluded: the selected lane then sees no supported immutable
  * commitment and remains incomplete instead of falsely treating them as KAs.
  */
-function countGraphBackedSnapshotOperations(metaQuads: readonly Quad[]): number {
+function countGraphBackedSnapshotOperations(
+  metaQuads: readonly Quad[],
+  contextGraphId: string,
+): number {
   const bySubject = new Map<string, {
-    hasSnapshotGraph: boolean;
+    snapshotGraph?: string;
     isWorkspaceOperation: boolean;
     graphScoped: boolean;
   }>();
   for (const quad of metaQuads) {
     const entry = bySubject.get(quad.subject) ?? {
-      hasSnapshotGraph: false,
       isWorkspaceOperation: false,
       graphScoped: false,
     };
-    if (quad.predicate === `${DKG}publicSnapshotGraph`) entry.hasSnapshotGraph = true;
+    if (quad.predicate === `${DKG}publicSnapshotGraph`) {
+      entry.snapshotGraph = stripLiteral(quad.object)?.trim();
+    }
     if (
       quad.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
       && quad.object === `${DKG}WorkspaceOperation`
@@ -1978,17 +1891,11 @@ function countGraphBackedSnapshotOperations(metaQuads: readonly Quad[]): number 
     bySubject.set(quad.subject, entry);
   }
   return [...bySubject.values()].filter((entry) => (
-    entry.hasSnapshotGraph && entry.isWorkspaceOperation && entry.graphScoped
+    entry.snapshotGraph !== undefined
+    && parseGraphBackedSwmSnapshotGraph(entry.snapshotGraph)?.contextGraphId === contextGraphId
+    && entry.isWorkspaceOperation
+    && entry.graphScoped
   )).length;
-}
-
-function collectAdvertisedGraphBackedSnapshots(metaQuads: readonly Quad[]): Set<string> {
-  return new Set(
-    metaQuads
-      .filter((quad) => quad.predicate === `${DKG}publicSnapshotGraph`)
-      .map((quad) => stripLiteral(quad.object)?.trim())
-      .filter((graph): graph is string => Boolean(graph)),
-  );
 }
 
 async function hasValidSnapshot(

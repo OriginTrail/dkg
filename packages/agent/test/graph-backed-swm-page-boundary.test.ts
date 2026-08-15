@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
-import { planBoundedGraphBackedSwmDataPage } from '../src/sync/requester/shared-memory-sync.js';
+import { planBoundedGraphBackedSwmDataPage } from '../src/sync/requester/graph-backed-swm-data-replay.js';
 
 const quad = (graph: string, index: number): Quad => ({
   subject: `urn:subject:${index}`,

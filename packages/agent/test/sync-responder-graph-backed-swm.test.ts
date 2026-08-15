@@ -88,12 +88,29 @@ describe('graph-backed shared-memory responder planning', () => {
   it('executes the graph-backed discovery and count plan against Oxigraph', async () => {
     const store = new OxigraphStore();
     const operation = 'urn:dkg:share:graph-backed-real-store';
+    const head = 'did:dkg:test/graph-backed/1#dkg-swm-head';
+    const shareOperationId = 'share-op-1';
+    const staleOperation = 'urn:dkg:share:graph-backed-stale';
+    const staleSnapshotGraph = `did:dkg:context-graph:${encodeURIComponent(contextGraphId)}`
+      + '/_shared_memory_snapshots/_/stale-share-op/ka';
     await store.insert([
+      {
+        graph: metaGraph,
+        subject: head,
+        predicate: 'http://dkg.io/ontology/shareOperationId',
+        object: `"${shareOperationId}"`,
+      },
       {
         graph: metaGraph,
         subject: operation,
         predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
         object: 'http://dkg.io/ontology/WorkspaceOperation',
+      },
+      {
+        graph: metaGraph,
+        subject: operation,
+        predicate: 'http://dkg.io/ontology/shareOperationId',
+        object: `"${shareOperationId}"`,
       },
       {
         graph: metaGraph,
@@ -119,6 +136,45 @@ describe('graph-backed shared-memory responder planning', () => {
         predicate: 'http://dkg.io/ontology/publishedAt',
         object: '"2026-08-15T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
       },
+      // Superseded operations remain in metadata history. This intentionally
+      // advertises a missing graph/count mismatch and must be ignored because
+      // no canonical head references its shareOperationId.
+      {
+        graph: metaGraph,
+        subject: staleOperation,
+        predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+        object: 'http://dkg.io/ontology/WorkspaceOperation',
+      },
+      {
+        graph: metaGraph,
+        subject: staleOperation,
+        predicate: 'http://dkg.io/ontology/shareOperationId',
+        object: '"stale-share-op"',
+      },
+      {
+        graph: metaGraph,
+        subject: staleOperation,
+        predicate: 'http://dkg.io/ontology/contentScopeVersion',
+        object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph: metaGraph,
+        subject: staleOperation,
+        predicate: 'http://dkg.io/ontology/publicSnapshotGraph',
+        object: staleSnapshotGraph,
+      },
+      {
+        graph: metaGraph,
+        subject: staleOperation,
+        predicate: 'http://dkg.io/ontology/publicQuadsCount',
+        object: '"999"^^<http://www.w3.org/2001/XMLSchema#integer>',
+      },
+      {
+        graph: metaGraph,
+        subject: staleOperation,
+        predicate: 'http://dkg.io/ontology/publishedAt',
+        object: '"2026-08-15T00:01:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>',
+      },
       ...rows.map((row) => ({
         graph: row.g,
         subject: row.s,
@@ -138,6 +194,56 @@ describe('graph-backed shared-memory responder planning', () => {
     });
 
     expect(actual).toEqual(rows);
+    await store.close();
+  });
+
+  it('emits graph-backed groups before legacy root-scoped rows across pages', async () => {
+    const store = new OxigraphStore();
+    const operation = 'urn:dkg:share:graph-backed-mixed';
+    const head = 'did:dkg:test/graph-backed/mixed#dkg-swm-head';
+    const legacyOperation = 'urn:dkg:share:legacy-mixed';
+    const legacyRoot = 'urn:legacy:root';
+    const legacyRows = [
+      { subject: legacyRoot, predicate: 'http://schema.org/name', object: '"root"' },
+      { subject: `${legacyRoot}/.well-known/genid/1`, predicate: 'http://schema.org/value', object: '"child"' },
+    ];
+    await store.insert([
+      { graph: metaGraph, subject: head, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-op-1"' },
+      { graph: metaGraph, subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+      { graph: metaGraph, subject: operation, predicate: 'http://dkg.io/ontology/shareOperationId', object: '"share-op-1"' },
+      { graph: metaGraph, subject: operation, predicate: 'http://dkg.io/ontology/contentScopeVersion', object: '"2"^^<http://www.w3.org/2001/XMLSchema#integer>' },
+      { graph: metaGraph, subject: operation, predicate: 'http://dkg.io/ontology/publicSnapshotGraph', object: snapshotGraph },
+      { graph: metaGraph, subject: operation, predicate: 'http://dkg.io/ontology/publicQuadsCount', object: `"${rows.length}"^^<http://www.w3.org/2001/XMLSchema#integer>` },
+      { graph: metaGraph, subject: operation, predicate: 'http://dkg.io/ontology/publishedAt', object: '"2026-08-15T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+      { graph: metaGraph, subject: legacyOperation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/WorkspaceOperation' },
+      { graph: metaGraph, subject: legacyOperation, predicate: 'http://dkg.io/ontology/rootEntity', object: legacyRoot },
+      { graph: metaGraph, subject: legacyOperation, predicate: 'http://dkg.io/ontology/publishedAt', object: '"2026-08-15T00:00:00.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>' },
+      ...rows.map((row) => ({ graph: row.g, subject: row.s, predicate: row.p, object: row.o })),
+      ...legacyRows.map((row) => ({ graph: dataGraph, ...row })),
+    ]);
+
+    const page1 = await readSwmDataPage({
+      store,
+      graphList: [dataGraph, metaGraph, snapshotGraph],
+      registeredSubGraphNames: [],
+      contextGraphId,
+      cutoffIso: '2026-08-14T00:00:00.000Z',
+      offset: 0,
+      limit: 4,
+    });
+    const page2 = await readSwmDataPage({
+      store,
+      graphList: [dataGraph, metaGraph, snapshotGraph],
+      registeredSubGraphNames: [],
+      contextGraphId,
+      cutoffIso: '2026-08-14T00:00:00.000Z',
+      offset: 4,
+      limit: 4,
+    });
+    const actual = [...page1, ...page2];
+    expect(actual.slice(0, rows.length).every((row) => row.g === snapshotGraph)).toBe(true);
+    expect(actual.slice(rows.length).every((row) => row.g === dataGraph)).toBe(true);
+    expect(actual).toHaveLength(rows.length + legacyRows.length);
     await store.close();
   });
 });

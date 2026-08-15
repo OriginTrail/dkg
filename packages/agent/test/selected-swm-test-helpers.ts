@@ -374,6 +374,11 @@ export interface SelectedSwmLifecycleHarnessOptions {
     readonly quads?: readonly Quad[];
     readonly completed: boolean;
     readonly timedOut: boolean;
+    readonly resumedFromOffset?: number;
+    readonly nextOffset?: number;
+    readonly rawResumedFromOffset?: number;
+    readonly rawNextOffset?: number;
+    readonly quadRawOffsets?: readonly number[];
   };
 }
 
@@ -454,6 +459,7 @@ export interface SelectedSwmLifecycleHarness {
     readonly processedMetaBatches: readonly Quad[][];
     readonly dataFetches: () => number;
     readonly metaRequesterScopes: readonly (string | undefined)[];
+    readonly dataRequesterScopes: readonly (string | undefined)[];
     readonly metaSinceBatchIds: readonly (string | undefined)[];
     readonly metaReturnAcceptedPrefixOnRetryableTransportFailure: readonly boolean[];
     readonly maxActiveAdmissions: () => number;
@@ -526,6 +532,7 @@ export function createSelectedSwmLifecycleHarness(
   let metaFetches = 0;
   let dataFetches = 0;
   const metaRequesterScopes: Array<string | undefined> = [];
+  const dataRequesterScopes: Array<string | undefined> = [];
   const metaSinceBatchIds: Array<string | undefined> = [];
   const metaReturnAcceptedPrefixOnRetryableTransportFailure: boolean[] = [];
   const processedMetaBatches: Quad[][] = [];
@@ -644,15 +651,28 @@ export function createSelectedSwmLifecycleHarness(
       }
       if (phase === 'data') {
         dataFetches += 1;
+        dataRequesterScopes.push(requesterScope);
         if (dataFetches <= (options.dataFailuresBeforeSuccess ?? 0)) {
           throw new Error('simulated aggregate-data transport failure');
         }
         if (options.dataPage) {
+          const resumedFromOffset = options.dataPage.resumedFromOffset ?? 0;
+          const nextOffset = options.dataPage.nextOffset
+            ?? resumedFromOffset + (options.dataPage.quads?.length ?? 0);
           return {
             quads: [...(options.dataPage.quads ?? [])],
             bytesReceived: options.dataPage.quads?.length ?? 0,
-            resumedFromOffset: 0,
-            nextOffset: options.dataPage.quads?.length ?? 0,
+            resumedFromOffset,
+            nextOffset,
+            ...(options.dataPage.rawResumedFromOffset !== undefined
+              ? { rawResumedFromOffset: options.dataPage.rawResumedFromOffset }
+              : {}),
+            ...(options.dataPage.rawNextOffset !== undefined
+              ? { rawNextOffset: options.dataPage.rawNextOffset }
+              : {}),
+            ...(options.dataPage.quadRawOffsets !== undefined
+              ? { quadRawOffsets: [...options.dataPage.quadRawOffsets] }
+              : {}),
             checkpointKey: `${contextGraphId}:${phase}`,
             completed: options.dataPage.completed,
             timedOut: options.dataPage.timedOut,
@@ -752,6 +772,7 @@ export function createSelectedSwmLifecycleHarness(
       processedMetaBatches,
       dataFetches: () => dataFetches,
       metaRequesterScopes,
+      dataRequesterScopes,
       metaSinceBatchIds,
       metaReturnAcceptedPrefixOnRetryableTransportFailure,
       maxActiveAdmissions: () => maxActiveAdmissions,

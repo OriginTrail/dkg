@@ -1,6 +1,7 @@
 import { parentPort } from 'node:worker_threads';
 import { validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import { parseGraphBackedSwmSnapshotGraph } from './sync/graph-scoped-swm-recovery.js';
 import type { SyncVerifyResult, SyncVerifyLogEntry, SyncParseResult, SharedMemoryProcessResult, DurableBatchProcessResult, DurableBatchProcessWireResult, DurableBatchVerificationMode, SharedMemoryBatchProcessResult } from './sync-verify-worker.js';
 import { isSharedMemoryBucketDescendantDataGraph } from './sync/shared-memory-graphs.js';
 import {
@@ -101,8 +102,6 @@ function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: st
   // graph starts with `contract%2Fname` and does NOT match cgUriPrefix above.
   // Admit that sibling family only for a shared-memory DATA request; descriptor
   // validation later binds the exact graph, count and digest before storage.
-  const graphBackedSwmPrefix = `did:dkg:context-graph:${encodeURIComponent(contextGraphId)}`
-    + '/_shared_memory_snapshots/';
   const acceptsGraphBackedSwm = graphUri.endsWith('/_shared_memory');
   const quads: Quad[] = [];
   const sourceIndexes: number[] = [];
@@ -110,7 +109,10 @@ function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: st
     if (
       quad.graph !== graphUri
       && !quad.graph.startsWith(cgUriPrefix)
-      && !(acceptsGraphBackedSwm && quad.graph.startsWith(graphBackedSwmPrefix))
+      && !(
+        acceptsGraphBackedSwm
+        && parseGraphBackedSwmSnapshotGraph(quad.graph)?.contextGraphId === contextGraphId
+      )
     ) continue;
     quads.push(quad);
     sourceIndexes.push(index);
