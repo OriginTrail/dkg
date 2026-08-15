@@ -1279,12 +1279,14 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = recorder(
         () => ['selected-public-cg'],
       );
-      (agent as any).lastSelectedSwmSyncAt.set(peerA, Date.now() - 20 * 60_000);
       const owner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
         peerA,
         ['selected-public-cg'],
       );
-      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(owner);
+      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(
+        owner,
+        Date.now() - 20 * 60_000,
+      );
 
       const selectedCalls: string[] = [];
       (agent as any).trySelectedSwmRetryFromPeer = async (
@@ -1326,7 +1328,11 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       (agent as any).selectedSwmBootstrapContextGraphIdsForPeer = recorder(
         () => ['selected-public-cg'],
       );
-      (agent as any).lastSelectedSwmSyncAt.set(peerA, Date.now());
+      const owner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+        peerA,
+        ['selected-public-cg'],
+      );
+      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(owner, Date.now());
       const selectedRetry = recorder(async () => 'synced');
       (agent as any).trySelectedSwmRetryFromPeer = selectedRetry;
 
@@ -2006,6 +2012,14 @@ describe('DKGAgent sync state lifecycle', () => {
         nextRetryAt: now - 20 * 60_000,
       });
       (agent as any).lastSyncDisconnectedAt.set(remotePeer, now - 20 * 60_000);
+      const selectedOwner = (agent as any).selectedSwmBootstrapAdmission.beginTransfer(
+        remotePeer,
+        ['selected-public-cg'],
+      );
+      (agent as any).selectedSwmBootstrapAdmission.markTransferTerminal(
+        selectedOwner,
+        now - 20 * 60_000,
+      );
       (agent.node.libp2p as any).getPeers = recorder(() => []);
 
       (agent as any).pruneSyncReconcilerState(now);
@@ -2015,6 +2029,7 @@ describe('DKGAgent sync state lifecycle', () => {
       expect((agent as any).lastSyncProgressAt.has(remotePeer)).toBe(false);
       expect((agent as any).syncReconcilerBackoff.has(remotePeer)).toBe(false);
       expect((agent as any).lastSyncDisconnectedAt.has(remotePeer)).toBe(false);
+      expect((agent as any).selectedSwmBootstrapAdmission.snapshot(remotePeer)).toBeNull();
     } finally {
       await agent.stop().catch(() => {});
     }

@@ -6,9 +6,10 @@ const PEER = '12D3KooWScopeAwareSelectedSwmProvider';
 function completeScope(
   admission: SelectedSwmBootstrapAdmission,
   contextGraphIds: readonly string[],
+  freshAtMs = 1_000,
 ): void {
   const owner = admission.beginTransfer(PEER, contextGraphIds);
-  expect(admission.markTransferTerminal(owner)).toBe(true);
+  expect(admission.markTransferTerminal(owner, freshAtMs)).toBe(true);
 }
 
 describe('SelectedSwmBootstrapAdmission', () => {
@@ -22,6 +23,7 @@ describe('SelectedSwmBootstrapAdmission', () => {
     expect(admission.snapshot(PEER)).toEqual({
       contextGraphIds: ['cg-a', 'cg-b'],
       phase: 'terminal',
+      freshAtMs: 1_000,
     });
   });
 
@@ -35,6 +37,7 @@ describe('SelectedSwmBootstrapAdmission', () => {
     expect(admission.snapshot(PEER)).toEqual({
       contextGraphIds: ['cg-a', 'cg-b'],
       phase: 'retry-required',
+      freshAtMs: null,
     });
   });
 
@@ -48,6 +51,7 @@ describe('SelectedSwmBootstrapAdmission', () => {
     expect(admission.snapshot(PEER)).toEqual({
       contextGraphIds: ['cg-a', 'cg-b'],
       phase: 'retry-required',
+      freshAtMs: null,
     });
   });
 
@@ -69,6 +73,38 @@ describe('SelectedSwmBootstrapAdmission', () => {
     expect(admission.snapshot(PEER)).toEqual({
       contextGraphIds: [],
       phase: 'terminal',
+      freshAtMs: null,
+    });
+  });
+
+  it('plans refreshes from peer, scope, completion, and disconnect freshness', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    const now = 20_000;
+    const options = { now, disconnectBoundary: 0, staleAfterMs: 5_000 };
+
+    expect(admission.shouldRefresh(PEER, ['cg-a'], options)).toBe(true);
+    completeScope(admission, ['cg-a'], 18_000);
+    expect(admission.shouldRefresh(PEER, ['cg-a'], options)).toBe(false);
+    expect(admission.shouldRefresh(PEER, ['cg-b'], options)).toBe(true);
+    expect(admission.shouldRefresh(PEER, ['cg-a'], {
+      ...options,
+      disconnectBoundary: 19_000,
+    })).toBe(true);
+    expect(admission.shouldRefresh(PEER, ['cg-a'], {
+      ...options,
+      now: 23_000,
+    })).toBe(true);
+  });
+
+  it('reopens a stale terminal scope without lifecycle-owned timestamp state', () => {
+    const admission = new SelectedSwmBootstrapAdmission();
+    completeScope(admission, ['cg-a'], 1_000);
+
+    expect(admission.requestRefresh(PEER, ['cg-a'])).toBe(true);
+    expect(admission.snapshot(PEER)).toEqual({
+      contextGraphIds: ['cg-a'],
+      phase: 'retry-required',
+      freshAtMs: null,
     });
   });
 });

@@ -1608,13 +1608,7 @@ export class DKGAgentBase {
    * so denied peers must remain eligible on the next reconciler cadence.
    */
   protected readonly lastSyncProgressAt = new Map<string, number>();
-  /**
-   * Per-peer timestamp of the most recent graph-complete selected-SWM pass.
-   * Kept separate from `lastSuccessfulSyncAt` because selected refresh proves
-   * neither durable state nor unrelated Context Graphs on the same peer.
-   */
-  protected readonly lastSelectedSwmSyncAt = new Map<string, number>();
-  /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
+  /** Peer + selected-CG scoped seed/retry/terminal/freshness state for RFC-64 SWM. */
   protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   /**
    * Per-peer sync-reconciler backoff. `failures` is the count of

@@ -1192,6 +1192,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect((receiver as any).selectedSwmBootstrapAdmission.snapshot(providerPeerId)).toEqual({
       contextGraphIds: [CONTEXT_GRAPH_ID, secondContextGraphId].sort(),
       phase: 'retry-required',
+      freshAtMs: null,
     });
   });
 
