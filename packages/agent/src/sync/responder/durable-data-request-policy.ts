@@ -34,12 +34,13 @@ export function resolveDurableDataRequestPolicy(params: {
     Number.isSafeInteger(params.pageRowsHint)
     ? Math.max(1, Math.min(params.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
     : 0;
-  const usesByteBudgetPage = !params.includeSharedMemory &&
-    params.phase === 'data' &&
+  const usesByteBudgetPage = params.phase === 'data' &&
     params.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE &&
     hintedPageRows > 0 &&
     (hintedPageRows > params.legacyLimit || params.hasExactAssetFilter);
-  const pageOnlyExactFetch = usesByteBudgetPage && params.hasExactAssetFilter;
+  const pageOnlyExactFetch = usesByteBudgetPage
+    && !params.includeSharedMemory
+    && params.hasExactAssetFilter;
 
   return {
     usesByteBudgetPage,

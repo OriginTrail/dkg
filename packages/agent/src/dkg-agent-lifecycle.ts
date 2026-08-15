@@ -7014,23 +7014,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           stopOnBackoffWorthyFailure,
           snapshotEvidencePolicy: selectedSwmEnabled
             ? {
-              // Any graph-backed operation sits outside the immutable snapshot
-              // walk, including when other operations in the same manifest do
-              // have store-backed refs. Until this requester has count/digest-
-              // bound transport evidence for every such operation, the selected
-              // lane must fail closed.
+              // A selected non-empty scope is complete only when it exposes at
+              // least one immutable content commitment. Store-backed refs use
+              // the snapshot protocol; graph-backed operations use the batched
+              // aggregate data plan and the same count/digest materializer.
               accepts: ({
                 verifiedMetadataTriples,
                 snapshotReferences,
                 graphBackedOperations,
               }) => (
                 verifiedMetadataTriples === 0
-                || (snapshotReferences > 0 && graphBackedOperations === 0)
+                || snapshotReferences + graphBackedOperations > 0
               ),
             }
             : undefined,
           metadataFetcher: selectedMetaFetcher?.strategy,
           snapshotRecoveryOrder: selectedSwmEnabled ? 'recent-balanced' : 'manifest',
+          dataRequesterScope: selectedSwmEnabled ? 'selected-swm-data:graph-v1' : undefined,
           ensureContextGraph: async (contextGraphId) => {
             const graphManager = new GraphManager(this.store);
             await graphManager.ensureContextGraph(contextGraphId);
@@ -7090,7 +7090,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           },
           publicSnapshotStore: this.publicSnapshotStore,
           deleteCheckpoint: (key) => deleteSyncPageCheckpoint(this.syncCheckpoints, key),
-          setCheckpoint: (key, offset) => this.syncCheckpoints.set(key, offset),
+          setCheckpoint: (key, offset, responderSessionOffset) => this.syncCheckpoints.set(
+            key,
+            offset,
+            Date.now(),
+            responderSessionOffset,
+          ),
           ensureOwnedMap: (contextGraphId) => {
             if (!this.workspaceOwnedEntities.has(contextGraphId)) {
               this.workspaceOwnedEntities.set(contextGraphId, new Map());
