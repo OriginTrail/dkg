@@ -888,6 +888,23 @@ describe('rootless graph-scoped KA lifecycle', () => {
       code: 'KA_OPERATION_PUBLIC_SNAPSHOT_NOT_FOUND',
     });
 
+    const wrongVmRows = recoveryVmRows.quads.map((quad, index) => ({
+      ...quad,
+      ...(index === 0 ? { object: '"tampered-recovery-vm"' } : {}),
+      graph: recoveryVmGraph,
+    }));
+    await store.insert(wrongVmRows);
+    await expect(agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish({
+      ...recoveryInput,
+      request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
+    } as any)).rejects.toMatchObject({ code: 'KA_VM_RECOVERY_INCONSISTENT' });
+    expect((await agent.assertion.history(CG_ID, name))?.state).toBe('promoted');
+    const rejectedCandidateReceipt = await store.query(`ASK { GRAPH <${metaGraph}> {
+      <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> ?tx .
+    } }`);
+    expect(rejectedCandidateReceipt).toMatchObject({ type: 'boolean', value: false });
+
+    await store.deleteByPattern({ graph: recoveryVmGraph });
     await store.insert(recoveryVmRows.quads.map((quad) => ({
       ...quad,
       graph: recoveryVmGraph,

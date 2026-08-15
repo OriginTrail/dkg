@@ -1373,6 +1373,51 @@ export class FinalizationHandler {
     return outcome;
   }
 
+  /**
+   * Admit snapshot-retirement recovery only through the canonical exact-layer
+   * verifier. A missing/wrong-count VM graph is not a recovery candidate; a
+   * count-complete but byte-different graph is an inconsistent confirmed state
+   * and must fail closed instead of being mistaken for an absent snapshot.
+   */
+  async verifyRecoveredGraphScopedVmCandidate(input: {
+    contextGraphId: string;
+    ual: string;
+    assertionVersion: string;
+    publicTripleCount: number;
+    privateMerkleRoot?: string;
+    expectedMerkleRoot: Uint8Array;
+    subGraphName?: string;
+  }): Promise<boolean> {
+    let privateMerkleRoot: Uint8Array | undefined;
+    try {
+      privateMerkleRoot = input.privateMerkleRoot
+        ? ethers.getBytes(input.privateMerkleRoot)
+        : undefined;
+    } catch {
+      throw Object.assign(
+        new Error(`Invalid private commitment for recovered graph-scoped KA ${input.ual}`),
+        { code: 'KA_VM_RECOVERY_INCONSISTENT' },
+      );
+    }
+    const verification = await this.verifyExactGraphScopedLayer({
+      contextGraphId: input.contextGraphId,
+      scope: createGraphKnowledgeAssetScope(input.ual, input.assertionVersion),
+      layer: MemoryLayer.VerifiableMemory,
+      publicTripleCount: input.publicTripleCount,
+      expectedMerkleRoot: input.expectedMerkleRoot,
+      ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+      ...(input.subGraphName ? { subGraphName: input.subGraphName } : {}),
+    });
+    if (verification.status === 'verified') return true;
+    if (verification.status === 'count-mismatch') return false;
+    throw Object.assign(
+      new Error(
+        `Recovered exact VM candidate for ${input.ual} failed ${verification.status}`,
+      ),
+      { code: 'KA_VM_RECOVERY_INCONSISTENT' },
+    );
+  }
+
   /** Load and verify one exact graph-scoped layer using the shared count/root rules. */
   private async verifyExactGraphScopedLayer(input: {
     contextGraphId: string;
