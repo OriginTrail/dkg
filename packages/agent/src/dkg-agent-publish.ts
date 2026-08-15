@@ -5013,32 +5013,28 @@ export class PublishMethods extends DKGAgentBase {
         // retire the byte-identical SWM twin before the async publisher records
         // its own receipt. In that race the operation snapshot is intentionally
         // gone even when the original request did not ask for cleanup. Admit
-        // only a public, count-complete VM candidate here; handleChainReconciledKC
-        // below still recomputes and verifies its Merkle root against the chain
-        // before any receipt or lifecycle state is repaired.
+        // only an exact public VM candidate here, through the finalization
+        // layer's canonical count/root verifier. handleChainReconciledKC below
+        // re-verifies it at the mutation boundary before any receipt or
+        // lifecycle state is repaired.
         let recoveredVmCandidate = false;
         if (
           request.clearSharedMemoryAfter !== true
           && request.accessPolicy === 'public'
           && request.publicTripleCount > 0
         ) {
-          const scope = createGraphKnowledgeAssetScope(
-            request.kaUal,
-            request.assertionVersion,
-          );
-          const vmGraph = contextGraphLayerUri(
-            request.contextGraphId,
-            MemoryLayer.VerifiableMemory,
-            scope.agentAddress,
-            BigInt(scope.kaNumber),
-            request.subGraphName,
-          );
-          const candidate = await this.store.query(
-            `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } }`,
-            { source: 'agent.asyncVmPublish.recoveredVmCandidate' },
-          );
-          recoveredVmCandidate = candidate.type === 'quads'
-            && candidate.quads.length === request.publicTripleCount;
+          recoveredVmCandidate = await this.getOrCreateFinalizationHandler()
+            .verifyRecoveredGraphScopedVmCandidate({
+              contextGraphId: request.contextGraphId,
+              ual: request.kaUal,
+              assertionVersion: request.assertionVersion,
+              publicTripleCount: request.publicTripleCount,
+              expectedMerkleRoot: ethers.getBytes(recovered.materialization.merkleRoot),
+              ...(request.privateMerkleRoot
+                ? { privateMerkleRoot: request.privateMerkleRoot }
+                : {}),
+              ...(request.subGraphName ? { subGraphName: request.subGraphName } : {}),
+            });
         }
         if (request.clearSharedMemoryAfter !== true && !recoveredVmCandidate) {
           throw error;
