@@ -207,6 +207,45 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return raw !== '0' && raw.toLowerCase() !== 'false';
   })();
 
+  /**
+   * The ONE discovery of which operation subjects a head references AND this
+   * KA owns — the most delicate half of every head cleanup. Both the plain
+   * replacement and the identity-preserving repair consume it, so the
+   * subject format, the ownership ASK and any future deletion guard cannot
+   * drift between the two paths. `excludeShareOperationId` spares a
+   * preserved winner; `seed` pre-admits subjects the caller already owns
+   * (the descriptor's own operation).
+   */
+  const collectOwnedHeadOperationSubjects = async (
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+    options: { seed?: readonly string[]; excludeShareOperationId?: string },
+  ): Promise<Set<string>> => {
+    const shareIds = await deps.store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.findOperations' },
+    );
+    const subjects = new Set<string>(options.seed ?? []);
+    if (shareIds.type === 'bindings') {
+      for (const row of shareIds.bindings) {
+        const shareId = literalValue(row?.['op']);
+        if (!shareId || shareId === options.excludeShareOperationId) continue;
+        const candidate = `urn:dkg:share:${contextGraphId}:${shareId}`;
+        if (subjects.has(candidate)) continue;
+        const ownedByThisKa = await deps.store.query(
+          `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+          + `<${assertSafeIri(candidate)}> <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> } }`,
+          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkOperation' },
+        );
+        if (ownedByThisKa.type === 'boolean' && ownedByThisKa.value) {
+          subjects.add(candidate);
+        }
+      }
+    }
+    return subjects;
+  };
+
   return {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
       withKeyedLocks(deps.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
@@ -361,33 +400,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     replaceHeadMetadata: async (contextGraphId, descriptor) => {
-      // Collect every share operation the head currently references — via the
-      // BOUND head subject, then per-candidate bound-subject ASKs, so no query
-      // scans the meta bucket. The kaUal guard mirrors the recovery lane's
-      // `replaceMetaForGraphAssets` join: a head row pointing at another KA's
-      // operation must not delete that KA's metadata.
-      const shareIds = await deps.store.query(
-        `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-        + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.findOperations' },
-      );
-      const operationSubjects = new Set<string>([descriptor.operationSubject]);
-      if (shareIds.type === 'bindings') {
-        for (const row of shareIds.bindings) {
-          const shareId = literalValue(row?.['op']);
-          if (!shareId) continue;
-          const candidate = `urn:dkg:share:${contextGraphId}:${shareId}`;
-          if (operationSubjects.has(candidate)) continue;
-          const ownedByThisKa = await deps.store.query(
-            `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-            + `<${assertSafeIri(candidate)}> <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> } }`,
-            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkOperation' },
-          );
-          if (ownedByThisKa.type === 'boolean' && ownedByThisKa.value) {
-            operationSubjects.add(candidate);
-          }
-        }
-      }
+      const operationSubjects = await collectOwnedHeadOperationSubjects(contextGraphId, descriptor, {
+        seed: [descriptor.operationSubject],
+      });
       await deps.store.deleteByPattern(
         { graph: descriptor.metaGraph, subject: descriptor.headSubject },
         { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
@@ -465,31 +480,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
-      const shareIds = await deps.store.query(
-        `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-        + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.findOperations' },
-      );
-      const loserSubjects = new Set<string>();
-      if (descriptor.shareOperationId !== winnerShareOperationId) {
-        loserSubjects.add(descriptor.operationSubject);
-      }
-      if (shareIds.type === 'bindings') {
-        for (const row of shareIds.bindings) {
-          const shareId = literalValue(row?.['op']);
-          if (!shareId || shareId === winnerShareOperationId) continue;
-          const candidate = `urn:dkg:share:${contextGraphId}:${shareId}`;
-          if (loserSubjects.has(candidate)) continue;
-          const ownedByThisKa = await deps.store.query(
-            `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-            + `<${assertSafeIri(candidate)}> <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> } }`,
-            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkOperation' },
-          );
-          if (ownedByThisKa.type === 'boolean' && ownedByThisKa.value) {
-            loserSubjects.add(candidate);
-          }
-        }
-      }
+      const loserSubjects = await collectOwnedHeadOperationSubjects(contextGraphId, descriptor, {
+        seed: descriptor.shareOperationId !== winnerShareOperationId
+          ? [descriptor.operationSubject]
+          : [],
+        excludeShareOperationId: winnerShareOperationId,
+      });
       // ORDER MATTERS: rewrite the head FIRST, delete the losers AFTER. A
       // crash between the two then leaves a HEALTHY single-valued head plus
       // stale loser operation subjects — benign residue (they are

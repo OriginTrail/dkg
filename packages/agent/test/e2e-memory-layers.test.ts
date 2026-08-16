@@ -33,9 +33,7 @@ import {
   knowledgeAssetLayerGraphUri,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 
 const agents: DKGAgent[] = [];
 
@@ -1151,53 +1149,13 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const contentQuads = contentResult.bindings.map((row: Record<string, string>) => ({
       subject: String(row['s'] ?? ''), predicate: String(row['p'] ?? ''), object: String(row['o'] ?? ''), graph: '',
     }));
-    const snapshots = new Map<string, typeof contentQuads>([[digest, contentQuads]]);
 
-    const materializer = createSharedMemorySnapshotMaterializer({
-      store,
-      writeLocks: new Map<string, Promise<void>>(),
-      invalidateListContextGraphsCache: () => {},
-    });
-    const summary = await runSharedMemorySync({
+    const summary = await makeSwmSyncHarness({
       ctx: createOperationContext('sync'),
-      remotePeerId: 'peer-ack-core',
-      contextGraphIds: [CG_ID],
-      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (_c: unknown, _p: unknown, _cg: unknown, _inc: unknown, phase: string): Promise<SyncPageResult> => ({
-        quads: phase === 'meta' ? [...peerMeta] : [],
-        bytesReceived: 0,
-        resumedFromOffset: 0,
-        nextOffset: phase === 'meta' ? peerMeta.length : 0,
-        checkpointKey: 'k',
-        completed: true,
-        timedOut: false,
-      }),
-      processSharedMemoryBatch: async (wsDataQuads: unknown[], wsMetaQuads: unknown[]) => ({
-        verifiedData: wsDataQuads,
-        verifiedMeta: wsMetaQuads,
-        totalFetchedDataQuads: wsDataQuads.length,
-        totalFetchedMetaQuads: wsMetaQuads.length,
-        droppedDataTriples: 0,
-        emptyResponses: 0,
-        entityCreators: [],
-      }),
-      ensureContextGraph: async () => {},
-      storeInsert: async (quads: unknown[]) => { await store.insert(quads); },
-      snapshotMaterializer: materializer,
-      publicSnapshotStore: {
-        putSnapshot: async (input: { digest: string; quads: unknown[] }) => {
-          snapshots.set(input.digest, input.quads as typeof contentQuads);
-          return { ref: input.digest, byteLength: 0 };
-        },
-        getSnapshot: async (ref: string) => snapshots.get(ref) ?? null,
-      },
-      deleteCheckpoint: () => {},
-      setCheckpoint: () => {},
-      ensureOwnedMap: () => new Map(),
-      logInfo: () => {},
-      logWarn: () => {},
-      logDebug: () => {},
-    } as never);
+      contextGraphId: CG_ID,
+      store,
+      served: { digest, payload: contentQuads, meta: peerMeta },
+    }).run();
     // Anti-vacuity: the round must actually have processed the descriptor —
     // the remote operation subject lands as immutable history. A parse-time
     // rejection would leave zero meta writes and prove nothing.

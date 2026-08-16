@@ -371,6 +371,33 @@ describe('operation identity preservation (GH#2273)', () => {
       .toEqual(['"op-v1"']);
   });
 
+  it('does not suppress a same-digest descriptor whose envelope differs (sync-level polarity)', async () => {
+    // The negative half of the healthy-skip branch, exercised through the
+    // REAL sync loop rather than the decision API: same content digest, but
+    // the peer's operation adds an allowList envelope. The decision must
+    // refuse preservation and — critically for the LEDGER — must NOT
+    // suppress the descriptor's head-id row: the union lands it beside the
+    // local id, and the next round's repair converges to remote authority,
+    // exactly today's behavior for a genuine policy change. A regression
+    // that suppresses whenever ids differ would pass every decision-level
+    // row and mask the policy change here.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    const envelopeMeta = [
+      ...remoteEquivalent.meta,
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
+    ];
+    await makeSwmSyncHarness({
+      ctx,
+      contextGraphId: CG,
+      store,
+      served: { digest: remoteEquivalent.digest, payload: remoteEquivalent.payload, meta: envelopeMeta },
+    }).run();
+    expect((await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`)).length).toBe(2);
+  });
+
   it('a genuinely changed share still adopts the remote identity (discriminator polarity)', async () => {
     // Same version, different digest: the materialized guard sees foreign
     // content, the graph is replaced from the peer snapshot, and the repair
