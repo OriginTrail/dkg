@@ -7464,13 +7464,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // behavior; the periodic/trailing owner continues durable progress.
       if (this.vmReconcileDispatcher?.isInFlight(contextGraphId)) {
         const result = createIncompleteDurableSyncResult();
-        const peerId = options.candidatePeerIds?.[0];
         return {
           outcome: 'no-progress',
           result,
-          peerResults: peerId ? [{ peerId, result }] : [],
+          // No physical peer attempt happened in this trigger. Keeping the
+          // list empty prevents outer catch-up accounting from mistaking a
+          // skipped self-reentry for a successful peer response.
+          peerResults: [],
           slices: 0,
-          ...(peerId ? { peerId } : {}),
           safeOffset: 0,
         };
       }

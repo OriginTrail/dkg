@@ -260,14 +260,50 @@ describe('exact VM recovery lifecycle', () => {
       expect(result).toMatchObject({
         outcome: 'no-progress',
         slices: 0,
-        peerId: PEER_A,
         safeOffset: 0,
         result: { complete: false },
+        peerResults: [],
       });
+      expect(result.peerId).toBeUndefined();
       expect(reconcile).not.toHaveBeenCalled();
     } finally {
       // The minimal dispatcher above is intentionally not a production queue;
       // clear it before stop() attempts the normal dispatcher drain.
+      (agent as any).vmReconcileDispatcher = null;
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not count a skipped selected-public VM self-reentry as peer success', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-active-catchup';
+    const remotePeer = { toString: () => PEER_A };
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).vmReconcileDispatcher = {
+        isInFlight: (key: string) => key === contextGraphId,
+      };
+      (agent as any).waitForSyncProtocol = async () => true;
+
+      const result = await (agent as any).runCatchupOverPeers(
+        contextGraphId,
+        false,
+        [remotePeer],
+      );
+
+      expect(result.peersTried).toBe(0);
+      expect(result.peersResponded).toBe(0);
+      expect(result.peersSucceeded).toBe(0);
+      expect(result.dataSynced).toBe(0);
+    } finally {
       (agent as any).vmReconcileDispatcher = null;
       await agent.stop().catch(() => {});
     }
