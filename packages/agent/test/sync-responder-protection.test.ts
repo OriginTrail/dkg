@@ -357,7 +357,7 @@ describe('sync responder protection', () => {
     expect(served).toBe(1);
   });
 
-  it('caps durable page computation at three globally and one per peer', async () => {
+  it('caps durable page computation at three globally and one per peer per plane', async () => {
     const releases: Array<() => void> = [];
     let completed = 0;
     let inFlight = 0;
@@ -404,6 +404,36 @@ describe('sync responder protection', () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
     await Promise.all(requests);
+  });
+
+  it('admits SWM and VM together from one peer while serializing each plane', async () => {
+    const authGates: Array<ReturnType<typeof deferred<boolean>>> = [];
+    const startedPlanes: string[] = [];
+    const cap = captureHandler(baseStore(), {
+      authorizeSyncRequest: async (request) => {
+        startedPlanes.push(request.includeSharedMemory ? 'swm' : 'vm');
+        const gate = deferred<boolean>();
+        authGates.push(gate);
+        return gate.promise;
+      },
+    });
+
+    const firstVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    const swm = cap.invoke({ ...makeEnvelope(), includeSharedMemory: true }, REMOTE_A);
+    const secondVm = cap.invoke(makeEnvelope(), REMOTE_A);
+    while (startedPlanes.length < 2) await new Promise((resolve) => setTimeout(resolve, 0));
+    for (let i = 0; i < 3; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(startedPlanes).toEqual(['vm', 'swm']);
+
+    authGates[0]?.resolve(false);
+    await firstVm;
+    while (startedPlanes.length < 3) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(startedPlanes).toEqual(['vm', 'swm', 'vm']);
+
+    authGates[1]?.resolve(false);
+    authGates[2]?.resolve(false);
+    await Promise.all([swm, secondVm]);
   });
 
   it('applies per-peer backpressure before authorization work starts', async () => {

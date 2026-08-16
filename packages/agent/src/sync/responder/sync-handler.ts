@@ -121,10 +121,19 @@ interface RegisterSyncHandlerParams {
 }
 
 const SYNC_RESPONDER_GLOBAL_CONCURRENCY = 3;
-const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 1;
+// A selected public CG may recover SWM and VM from the same provider at the
+// same time. Reserve one bounded slot for each plane so a long SWM graph-plan
+// query cannot make the VM request (or vice versa) expire in the responder
+// queue. Each individual plane remains serialized per peer, and the global
+// limit still leaves capacity for another peer.
+const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 2;
+const SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
 export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
-const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
+// Store-backed graph planning routinely takes tens of seconds for large CGs.
+// Keep bounded admission, but do not reject a healthy queued page before one
+// legitimate predecessor can finish. Request aborts still remove stale work.
+const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 60_000;
 export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
 export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
 export const SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT = 64;
@@ -246,10 +255,12 @@ class SyncResponderBusyError extends Error {
 
 interface SyncResponderQueuePayload {
   peerId: string;
+  plane: 'shared_memory' | 'durable';
   contextGraphId?: string;
 }
 
 type SyncResponderScheduling = {
+  plane: 'shared_memory' | 'durable';
   contextGraphId?: string;
   lane: Extract<SyncSchedulerLane, 'pre_authorization' | 'responder'>;
   priority: number;
@@ -259,20 +270,32 @@ type SyncResponderScheduling = {
 function createSyncResponderLimiter() {
   let running = 0;
   const runningByPeer = new Map<string, number>();
+  const runningByPeerPlane = new Map<string, number>();
+  const peerPlaneKey = (peerId: string, plane: SyncResponderQueuePayload['plane']) => (
+    `${peerId}\u0000${plane}`
+  );
   const queue = new PriorityAdmissionQueue<SyncResponderQueuePayload>({
-    canRun: (entry) => (
-      running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
-      && (runningByPeer.get(entry.payload.peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
-    ),
+    canRun: (entry) => {
+      const { peerId, plane } = entry.payload;
+      return running < SYNC_RESPONDER_GLOBAL_CONCURRENCY
+        && (runningByPeer.get(peerId) ?? 0) < SYNC_RESPONDER_PER_PEER_CONCURRENCY
+        && (runningByPeerPlane.get(peerPlaneKey(peerId, plane)) ?? 0)
+          < SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY;
+    },
     onStart: (entry) => {
-      const { peerId } = entry.payload;
+      const { peerId, plane } = entry.payload;
+      const planeKey = peerPlaneKey(peerId, plane);
       running += 1;
       runningByPeer.set(peerId, (runningByPeer.get(peerId) ?? 0) + 1);
+      runningByPeerPlane.set(planeKey, (runningByPeerPlane.get(planeKey) ?? 0) + 1);
       return () => {
         running = Math.max(0, running - 1);
         const peerRunning = (runningByPeer.get(peerId) ?? 1) - 1;
         if (peerRunning <= 0) runningByPeer.delete(peerId);
         else runningByPeer.set(peerId, peerRunning);
+        const peerPlaneRunning = (runningByPeerPlane.get(planeKey) ?? 1) - 1;
+        if (peerPlaneRunning <= 0) runningByPeerPlane.delete(planeKey);
+        else runningByPeerPlane.set(planeKey, peerPlaneRunning);
       };
     },
   });
@@ -282,7 +305,11 @@ function createSyncResponderLimiter() {
     scheduling: SyncResponderScheduling,
     signal?: AbortSignal,
   ) => ({
-    payload: { peerId, contextGraphId: scheduling.contextGraphId },
+    payload: {
+      peerId,
+      plane: scheduling.plane,
+      contextGraphId: scheduling.contextGraphId,
+    },
     lane: scheduling.lane,
     priority: scheduling.priority,
     priorityClass: scheduling.priorityClass,
@@ -893,6 +920,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
     };
 
     const preAuthorizationScheduling: SyncResponderScheduling = {
+      plane: isWorkspace ? 'shared_memory' : 'durable',
       lane: 'pre_authorization',
       priority: 0,
       priorityClass: 'default',
@@ -908,6 +936,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             const priority = contextGraphPriority(contextGraphPriorities, contextGraphId);
             return {
               scheduling: {
+                plane: isWorkspace ? 'shared_memory' : 'durable',
                 contextGraphId,
                 lane: 'responder' as const,
                 priority,
@@ -924,7 +953,13 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       : limiter.run(
           peerId,
           signal,
-          { contextGraphId, lane: 'responder', priority: 0, priorityClass: 'default' },
+          {
+            plane: isWorkspace ? 'shared_memory' : 'durable',
+            contextGraphId,
+            lane: 'responder',
+            priority: 0,
+            priorityClass: 'default',
+          },
           async () => {
             const prepared = await prepareResponderStage();
             return prepared.kind === 'respond'
