@@ -65,13 +65,14 @@ export const SYNC_REQUEST_INITIAL_PAGE_SIZE = 512;
  * Maximum store rows loaded by one negotiated exact-VM page.
  *
  * Exact reads stay page-only, so this is also their responder working-set
- * bound. 256 worst-case 64 KiB literal rows are about 16 MiB before normal
+ * bound. 512 worst-case 64 KiB literal rows are about 32 MiB before normal
  * JS/store overhead; the responder's existing global concurrency of three
  * keeps that bounded while the 4 MiB serializer cap still owns wire bytes.
- * This is deliberately below the requester's 512-row cold-path hint and far
- * below the 8,192-row retained-snapshot lane.
+ * Matching the requester's cold-path hint lets an ordinary 100-750 triple KA
+ * cross in one or two streams while remaining far below the 8,192-row retained-
+ * snapshot lane.
  */
-export const SYNC_EXACT_PAGE_READ_MAX_ROWS = 256;
+export const SYNC_EXACT_PAGE_READ_MAX_ROWS = 512;
 /** Target serialized body. Six MiB of the 10 MiB router cap remains as headroom. */
 export const SYNC_BYTE_BUDGET_RESPONSE_BYTES = DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES;
 /** Maximum throughput-oriented row hint; the signed legacy limit remains 500. */
