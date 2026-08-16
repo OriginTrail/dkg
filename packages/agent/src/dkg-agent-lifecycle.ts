@@ -620,7 +620,10 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
+import {
+  VmReconcileShutdownTimeoutError,
+  type ContextGraphReconcileResult,
+} from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
@@ -1388,6 +1391,35 @@ type PhysicalDurableSyncResult = {
   readonly result: DurableSyncResult;
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
 };
+
+/**
+ * Adapt one chain-inventory reconciliation slice to the legacy durable-sync
+ * accounting shape consumed by reconnect and catch-up orchestration.
+ *
+ * RFC-64 catalogs are authoritative for SWM only. For an explicitly selected
+ * public CG, finalized VM completeness comes from the chain reconciler, so a
+ * legacy whole-graph transfer must not run beside it. The adapter reports
+ * bounded cursor/materialization progress without inventing transferred triple
+ * counts, and reaches the durable terminal boundary only when the chain lane is
+ * actually current with no unresolved ordinals.
+ */
+function vmReconcileSliceAsDurableResult(
+  result: ContextGraphReconcileResult,
+): DurableSyncResult {
+  const accumulator = createDurableSyncAccumulator();
+  if (
+    result.reconciledOrdinals > 0
+    || result.watermarkAfter > result.watermarkBefore
+  ) {
+    recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
+  }
+  markDurableTerminalBoundary(
+    accumulator,
+    result.status === 'current' && result.unresolvedOrdinals === 0,
+    { countCompletedPhase: true },
+  );
+  return finalizeDurableSyncCompletion(accumulator);
+}
 
 type LegacyDurableContextGraphOptions = {
   onPhase?: PhaseCallback;
@@ -7409,6 +7441,49 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } = {},
   ): Promise<DurableRecoveryExecution> {
     const ctx = createOperationContext('sync');
+
+    // Selected public RFC-64 CGs have two deliberately separate inventories:
+    // the accepted RFC-64 catalog is authoritative for SWM, while finalized VM
+    // membership is authoritative on chain. Sending these graphs through the
+    // legacy whole-CG durable runner duplicates the chain reconciler, downloads
+    // every historical graph, and can monopolise the store long enough to
+    // invalidate the exact recovery lifecycle. Keep the existing method as the
+    // orchestration seam, but delegate its VM work to one bounded exact slice.
+    if (this.isRfc64SelectedVmReconcileContextGraph(contextGraphId)) {
+      let durableResult: DurableSyncResult;
+      let outcome: DurableRecoveryExecution['outcome'] = 'no-progress';
+      let safeOffset = 0;
+      try {
+        const reconcile = await this.runVmReconcileForCg(contextGraphId, 'manual');
+        durableResult = vmReconcileSliceAsDurableResult(reconcile);
+        safeOffset = reconcile.watermarkAfter;
+        outcome = durableResult.complete
+          ? 'terminal'
+          : (durableResult.checkpointAdvances ?? 0) > 0
+            ? 'partial-progress'
+            : 'no-progress';
+      } catch (error) {
+        durableResult = createIncompleteDurableSyncResult();
+        this.log.warn(
+          ctx,
+          `Chain-inventory VM recovery for selected public CG "${contextGraphId}" `
+            + `did not complete this slice: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      // The candidate is the trigger/accounting peer, not an assertion that it
+      // served VM bytes. Exact recovery owns provider selection internally and
+      // verifies every returned UAL against the chain before materialization.
+      const peerId = options.candidatePeerIds?.[0];
+      return {
+        outcome,
+        result: durableResult,
+        peerResults: peerId ? [{ peerId, result: durableResult }] : [],
+        slices: 1,
+        ...(peerId ? { peerId } : {}),
+        safeOffset,
+      };
+    }
+
     return durableRecoveryRunnerFor(this).run({
       contextGraphId,
       options,

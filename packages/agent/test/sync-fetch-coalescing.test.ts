@@ -155,6 +155,79 @@ async function createAgentWithSend(
 }
 
 describe('exact VM recovery lifecycle', () => {
+  it('routes selected public VM catch-up through chain inventory without a broad durable pull', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-chain-inventory';
+    const broadDurableSync = vi.fn(async () => cleanDurableSyncResult());
+    const reconcile = vi.fn()
+      .mockResolvedValueOnce({
+        contextGraphId,
+        onChainId: '77',
+        source: 'manual',
+        status: 'progress',
+        attempted: true,
+        headOrdinal: 500,
+        watermarkBefore: 100,
+        watermarkAfter: 110,
+        reconciledOrdinals: 8,
+        unresolvedOrdinals: 2,
+      })
+      .mockResolvedValueOnce({
+        contextGraphId,
+        onChainId: '77',
+        source: 'manual',
+        status: 'current',
+        attempted: true,
+        headOrdinal: 500,
+        watermarkBefore: 490,
+        watermarkAfter: 500,
+        reconciledOrdinals: 10,
+        unresolvedOrdinals: 0,
+      });
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).runVmReconcileForCg = reconcile;
+      (agent as any).syncFromPeerDetailed = broadDurableSync;
+
+      const progress = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+      expect(progress).toMatchObject({
+        outcome: 'partial-progress',
+        slices: 1,
+        peerId: PEER_A,
+        safeOffset: 110,
+        result: { complete: false, checkpointAdvances: 1 },
+      });
+
+      const current = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+      expect(current).toMatchObject({
+        outcome: 'terminal',
+        slices: 1,
+        peerId: PEER_A,
+        safeOffset: 500,
+        result: { complete: true, completedPhases: 1, checkpointAdvances: 1 },
+      });
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(reconcile).toHaveBeenNthCalledWith(1, contextGraphId, 'manual');
+      expect(broadDurableSync).not.toHaveBeenCalled();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('reopens reconcile and membership persistence admission on same-object restart', async () => {
     const membershipUpsert = vi.fn(async () => undefined);
     const agent = await createAgentWithSend(
