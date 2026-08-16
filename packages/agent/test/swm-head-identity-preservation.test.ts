@@ -522,6 +522,28 @@ describe('operation identity preservation (GH#2273)', () => {
       expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
     }
 
+    // (c2) MALFORMED graph locator (a literal, not an IRI term — the shape a
+    // store can actually hold: Oxigraph refuses schemeless IRI terms at
+    // insert) => refuse WITHOUT throwing.
+    // `resolveKnowledgeAssetOperationPublicQuads` only follows locators that
+    // pass `isSafeIri`, so readers would reject this winner — and pre-fix the
+    // gate THREW out of `assertSafeIri` on the malformed value, stalling the
+    // sync round on exactly the corrupt rows descriptor-wins repair exists
+    // for. The decision must be a clean null.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(localWithLocator([]).map((quad) =>
+        quad.predicate === `${DKG}publicSnapshotGraph`
+          ? { ...quad, object: '"snapshot-local"' }
+          : quad));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      await expect(materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+        .resolves.toBeNull();
+    }
+
     // (d) REF-form locator that is NOT the committed digest => refuse.
     // The resolver's read-both rule makes an explicit publicSnapshotRef row
     // WIN over the digest fallback, so preserving this winner would leave a

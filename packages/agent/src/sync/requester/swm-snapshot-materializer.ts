@@ -13,7 +13,7 @@
  * subject, the operation subject, or the KA's own assertion graph), so each
  * query is bounded by one KA's size — never by context-graph or fleet growth.
  */
-import { assertSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, isSafeIri } from '@origintrail-official/dkg-core';
 import {
   swmKaWriteLockKey,
   withKeyedLocks,
@@ -284,10 +284,24 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       return snapshotRefs.length === 0 || snapshotRefs[0] === descriptor.publicQuadsDigest;
     }
     if (snapshotRefs.length > 0) return false;
-    const snapshotContent = await deps.store.query(
-      `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
-      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkWinnerSnapshot' },
-    );
+    // The READER's locator rule, not just SPARQL-injection safety: the public
+    // snapshot resolver only follows graph locators that pass `isSafeIri`
+    // (absolute, scheme-prefixed). A locator readers would reject must not
+    // certify a preserved winner — and a malformed stored value must rank as
+    // non-serveable rather than THROW out of the preservation check, which
+    // would stall descriptor-wins repair on exactly the corrupt rows repair
+    // exists for.
+    const graphLocator = snapshotGraphs[0]!;
+    if (!isSafeIri(graphLocator)) return false;
+    let snapshotContent;
+    try {
+      snapshotContent = await deps.store.query(
+        `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(graphLocator)}> { ?s ?p ?o } }`,
+        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkWinnerSnapshot' },
+      );
+    } catch {
+      return false;
+    }
     if (snapshotContent.type !== 'bindings') return false;
     if (snapshotContent.bindings.length !== descriptor.publicQuadsCount) return false;
     const digest = workspacePublicQuadsDigest(snapshotContent.bindings.map((row) => ({
