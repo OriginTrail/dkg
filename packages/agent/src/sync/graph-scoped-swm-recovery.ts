@@ -246,7 +246,14 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: {
       ...(subGraphName ? { subGraphName } : {}),
       metadataQuads: [
         ...headRows.filter((row) => row.predicate !== SHARE_OPERATION_ID),
-        operation.headShareOperationRow,
+        // EVERY lexical form of the selected id, not just the one selected
+        // row: RDF 1.1 admits the same value as a plain and an
+        // xsd:string-typed literal, and downstream withhold plans are built
+        // from these rows BYTE-keyed — a variant left out here passes the
+        // value-based insert canonicalization and re-stacks the losing id
+        // beside a just-preserved head.
+        ...headRows.filter((row) => row.predicate === SHARE_OPERATION_ID
+          && stripLiteral(row.object).trim() === shareOperationId),
         ...operationRows,
       ],
     });
@@ -431,7 +438,6 @@ interface ResolvedHeadOperation {
   readonly shareOperationId: string;
   readonly operationSubject: string;
   readonly operationRows: readonly Quad[];
-  readonly headShareOperationRow: Quad;
 }
 
 /**
@@ -501,8 +507,7 @@ function resolveEquivalentHeadOperation(params: {
       .join('\u0001');
     const headShareOperationRow = params.headRows
       .filter((row) => row.predicate === SHARE_OPERATION_ID)
-      .filter((row) => stripLiteral(row.object).trim() === shareOperationId)
-      .sort((left, right) => left.object.localeCompare(right.object))[0];
+      .find((row) => stripLiteral(row.object).trim() === shareOperationId);
     if (!headShareOperationRow) {
       throw new Error(`Graph-scoped SWM head ${params.headSubject} is missing shareOperationId`);
     }
@@ -510,7 +515,6 @@ function resolveEquivalentHeadOperation(params: {
       shareOperationId,
       operationSubject,
       operationRows,
-      headShareOperationRow,
       publishedAtMs,
       samePayloadByteEquivalenceKey,
     };

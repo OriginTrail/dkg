@@ -377,6 +377,33 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(head?.shareOperationId).toBe('op-v1');
   });
 
+  it('withholds EVERY lexical form of the losing descriptor id (value-complete plan)', async () => {
+    // RDF 1.1 lets the same id arrive as a plain literal AND an
+    // xsd:string-typed literal. The parser collapses them to one descriptor
+    // id, but a withhold plan built from a single selected row misses the
+    // variant — it passes the value-based insert canonicalization and
+    // re-stacks the losing id beside the just-preserved winner.
+    const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+    const typedVariant: Quad = {
+      subject: remoteEquivalent.headSubject,
+      predicate: `${DKG}shareOperationId`,
+      object: `"storage-ack-2273b"^^<${XSD_STRING}>`,
+      graph: WS_META,
+    };
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await makeSwmSyncHarness({
+      ctx,
+      contextGraphId: CG,
+      store,
+      served: remoteEquivalent,
+      servedMeta: [...remoteEquivalent.meta, typedVariant],
+    }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+  });
+
   it('allowedPeer rows participate in identity independently of the policy row', async () => {
     // Two allowList operations with the SAME policy but different peer sets
     // are DIFFERENT envelopes — preserving across an allow-list change would
