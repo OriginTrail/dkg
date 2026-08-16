@@ -6,6 +6,7 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  tryResolveKnowledgeAssetWorkspaceHead,
 } from '../src/index.js';
 
 // GH#2273: SWM catch-up union-inserts a peer's head `shareOperationId` row
@@ -132,6 +133,76 @@ describe('isKnowledgeAssetWorkspaceHeadCorruptError boundary predicate', () => {
       get() { throw new Error('inspection trap'); },
     });
     expect(isKnowledgeAssetWorkspaceHeadCorruptError(hostile)).toBe(false);
+  });
+});
+
+describe('tryResolveKnowledgeAssetWorkspaceHead typed boundary', () => {
+  it('maps missing, resolved and corrupt onto the discriminated result', async () => {
+    const h = makeHarness();
+    expect(await tryResolveKnowledgeAssetWorkspaceHead({
+      store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    })).toEqual({ status: 'missing' });
+    await seedHealthyHead(h);
+    const resolved = await tryResolveKnowledgeAssetWorkspaceHead({
+      store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    });
+    expect(resolved.status).toBe('resolved');
+    if (resolved.status !== 'resolved') throw new Error('unreachable');
+    expect(resolved.head.shareOperationId).toBe(LOCAL_OP);
+    await unionInsertSecondHeadId(h);
+    const corrupt = await tryResolveKnowledgeAssetWorkspaceHead({
+      store: h.store, graphManager: h.graphManager, contextGraphId: CONTEXT_GRAPH, kaUal: UAL,
+    });
+    expect(corrupt.status).toBe('corrupt');
+    if (corrupt.status !== 'corrupt') throw new Error('unreachable');
+    expect(corrupt.error).toBeInstanceOf(KnowledgeAssetWorkspaceHeadCorruptError);
+  });
+
+  it('recognizes a code-preserving wrapped error the same way the boolean predicate does', async () => {
+    // ONE recognition rule across both boundary APIs: a store decorator that
+    // re-wraps the corrupt error preserving `.code` but losing class identity
+    // must land on the corrupt result, coerced into the concrete class the
+    // result type promises — not rethrown while the boolean predicate would
+    // have said corrupt. Non-corrupt store failures must still throw.
+    const h = makeHarness();
+    const throwingStore = new Proxy(h.store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => {
+            throw Object.assign(
+              new Error('re-wrapped by a store decorator'),
+              { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+            );
+          };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const outcome = await tryResolveKnowledgeAssetWorkspaceHead({
+      store: throwingStore as never,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    });
+    expect(outcome.status).toBe('corrupt');
+    if (outcome.status !== 'corrupt') throw new Error('unreachable');
+    expect(outcome.error).toBeInstanceOf(KnowledgeAssetWorkspaceHeadCorruptError);
+    expect(outcome.error.message).toContain('re-wrapped');
+
+    const failingStore = new Proxy(h.store, {
+      get(target, prop, receiver) {
+        if (prop === 'query') {
+          return async () => { throw new Error('store outage'); };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    await expect(tryResolveKnowledgeAssetWorkspaceHead({
+      store: failingStore as never,
+      graphManager: h.graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    })).rejects.toThrow('store outage');
   });
 });
 

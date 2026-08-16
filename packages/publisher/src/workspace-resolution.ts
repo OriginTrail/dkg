@@ -134,8 +134,19 @@ export async function tryResolveKnowledgeAssetWorkspaceHead(
     const head = await resolveKnowledgeAssetWorkspaceHead(params);
     return head === undefined ? { status: 'missing' } : { status: 'resolved', head };
   } catch (error) {
-    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) {
-      return { status: 'corrupt', error };
+    // Same recognition rule as the boolean predicate — the resolver itself only
+    // throws the local class, but a store decorator or wrapper that preserved
+    // `.code` while losing class identity must land on the SAME corrupt path in
+    // both APIs, coerced into the concrete class the result type promises.
+    if (isKnowledgeAssetWorkspaceHeadCorruptError(error)) {
+      return {
+        status: 'corrupt',
+        error: error instanceof KnowledgeAssetWorkspaceHeadCorruptError
+          ? error
+          : new KnowledgeAssetWorkspaceHeadCorruptError(
+            error instanceof Error ? error.message : String(error),
+          ),
+      };
     }
     throw error;
   }
@@ -343,11 +354,6 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   }
   const operationValues = collectSubjectValues(operationResult.bindings);
   const operation = makeSingletonReader(operationValues, scope.ual, 'operation');
-  const singletonOperationValue = (
-    predicate: string,
-    label: string,
-    required: boolean,
-  ): string | undefined => (required ? operation.required(predicate, label) : operation.optional(predicate, label));
   // Id echo — the operation must itself carry the head's id (mirrors the
   // previous join). Multiple id rows on the operation subject were tolerated
   // by the join (only the matching one bound) and remain tolerated here.
@@ -358,13 +364,13 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
     );
   }
-  const publicQuadsDigest = stripLiteral(singletonOperationValue(`${DKG}publicQuadsDigest`, 'publicQuadsDigest', true))?.trim() ?? '';
-  const publicTripleCount = parseIntegerLiteral(singletonOperationValue(`${DKG}publicQuadsCount`, 'publicQuadsCount', true));
-  const privateTripleCount = parseIntegerLiteral(singletonOperationValue(`${DKG}privateTripleCount`, 'privateTripleCount', true));
-  const publisherPeerId = stripLiteral(singletonOperationValue(`${DKG}publisherPeerId`, 'publisherPeerId', true))?.trim() ?? '';
-  const operationUal = singletonOperationValue(`${DKG}kaUal`, 'kaUal', true) ?? '';
-  const privateMerkleRoot = stripLiteral(singletonOperationValue(`${DKG}privateMerkleRoot`, 'privateMerkleRoot', false))?.trim();
-  const rawAccessPolicy = stripLiteral(singletonOperationValue(`${DKG}accessPolicy`, 'accessPolicy', false))?.trim();
+  const publicQuadsDigest = stripLiteral(operation.required(`${DKG}publicQuadsDigest`, 'publicQuadsDigest'))?.trim() ?? '';
+  const publicTripleCount = parseIntegerLiteral(operation.required(`${DKG}publicQuadsCount`, 'publicQuadsCount'));
+  const privateTripleCount = parseIntegerLiteral(operation.required(`${DKG}privateTripleCount`, 'privateTripleCount'));
+  const publisherPeerId = stripLiteral(operation.required(`${DKG}publisherPeerId`, 'publisherPeerId'))?.trim() ?? '';
+  const operationUal = operation.required(`${DKG}kaUal`, 'kaUal') ?? '';
+  const privateMerkleRoot = stripLiteral(operation.optional(`${DKG}privateMerkleRoot`, 'privateMerkleRoot'))?.trim();
+  const rawAccessPolicy = stripLiteral(operation.optional(`${DKG}accessPolicy`, 'accessPolicy'))?.trim();
   const accessPolicy = rawAccessPolicy === 'public'
     || rawAccessPolicy === 'ownerOnly'
     || rawAccessPolicy === 'allowList'
@@ -380,7 +386,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     : publishedAtStamps.reduce((min, stamp) => Math.min(min, stamp.ms), Number.POSITIVE_INFINITY);
   let operationVersion: bigint;
   try {
-    operationVersion = parsePositiveBigIntLiteral(singletonOperationValue(`${DKG}assertionVersion`, 'assertionVersion', true));
+    operationVersion = parsePositiveBigIntLiteral(operation.required(`${DKG}assertionVersion`, 'assertionVersion'));
   } catch (error) {
     if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
     throw new KnowledgeAssetWorkspaceHeadCorruptError(

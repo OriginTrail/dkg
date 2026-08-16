@@ -560,20 +560,22 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       graph: metaGraph,
     }]);
 
-    // The monotonicity gate cannot read a multi-valued head, and the corruption is
-    // LOCAL: identical bytes redelivered by the sender can never fix it, so the
-    // rejection must be PERMANENT (retryable: false). A retryable outcome here would
-    // put the sender's substrate outbox into an infinite redelivery loop. Pre-fix the
-    // resolver answered arbitrarily and this share was applied on top of the corrupt
-    // head; the sync lane's identity-preserving repair is the sanctioned healer.
-    const outcome = await handler.handle(v2Request({
+    // The monotonicity gate cannot read a multi-valued head, so NOTHING is written
+    // (fail closed) — but the rejection is TRANSIENT: the corruption is local state
+    // the sync lane's identity-preserving repair heals, and the sender's outbox
+    // retries are budget-bounded, so a permanent drop would lose a valid newer
+    // share that becomes applicable the moment the head converges. Pre-fix the
+    // resolver answered arbitrarily and this share was applied on top of the
+    // corrupt head.
+    const inbound = v2Request({
       nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
       shareOperationId: 'rootless-op-2',
       assertionVersion: '2',
-    }), PEER_ID);
+    });
+    const outcome = await handler.handle(inbound, PEER_ID);
     expect(outcome.applied).toBe(false);
     if (outcome.applied) throw new Error('unreachable');
-    expect(outcome.retryable).toBe(false);
+    expect(outcome.retryable).toBe(true);
     expect(outcome.reason).toContain('CORRUPT_SWM_HEAD');
 
     // The corrupt head must be left byte-untouched for the repair lane: still exactly
@@ -600,5 +602,18 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(contentRows.type).toBe('bindings');
     if (contentRows.type !== 'bindings') throw new Error('expected bindings');
     expect(contentRows.bindings).toEqual([{ s: 'urn:entity:1', o: '"one"' }]);
+
+    // The transient contract's second half: after the head is repaired (here by
+    // removing the union residue the way the sync lane's identity-preserving
+    // repair does), the SAME deferred payload applies cleanly — proving the
+    // sender's kept-queued delivery was worth keeping.
+    await store.delete([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-2273"',
+      graph: metaGraph,
+    }]);
+    const replay = await handler.handle(inbound, PEER_ID);
+    expect(replay.applied).toBe(true);
   });
 });

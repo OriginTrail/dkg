@@ -969,7 +969,7 @@ export class SharedMemoryHandler {
     // writes arrive out of order). Hoisted here so the closure
     // can signal which branch fired; the post-closure code
     // maps `cas` → retryable and `validation` → permanent.
-    let withWriteLocksRejection: 'validation' | 'cas' | undefined;
+    let withWriteLocksRejection: 'validation' | 'cas' | 'corrupt-head' | undefined;
     let validationRejectionReason: string | undefined;
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
@@ -1435,13 +1435,14 @@ export class SharedMemoryHandler {
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
           : undefined;
         // GH#2273 — the resolver fails closed on a multi-valued head (catch-up union
-        // residue). That corruption lives in OUR meta graph, so it must be a PERMANENT
-        // rejection: the outer catch classifies as `retryable: true`, and a retryable
-        // outcome would put the sender's substrate outbox into an infinite redelivery loop
-        // against local state identical bytes can never fix. The sync lane's
-        // identity-preserving repair is the sanctioned healer; this path deliberately
-        // forgoes its own delete-then-insert head rewrite, which would otherwise adopt
-        // whatever the inbound share claims over a head we cannot even read.
+        // residue). The monotonicity gate cannot read such a head, so NOTHING is written
+        // (fail closed), and this path deliberately forgoes its own delete-then-insert
+        // head rewrite, which would otherwise adopt whatever the inbound share claims
+        // over a head we cannot even read. The rejection is TRANSIENT ('corrupt-head'
+        // channel below): the corruption is local state the sync lane's
+        // identity-preserving repair heals, so the sender's budget-bounded outbox must
+        // keep the payload queued — a permanent drop would lose a valid newer share
+        // that becomes applicable the moment the head converges.
         const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
           store: this.store,
           graphManager: this.graphManager,
@@ -1451,8 +1452,8 @@ export class SharedMemoryHandler {
         });
         if (headResolution.status === 'corrupt') {
           validationRejectionReason = `CORRUPT_SWM_HEAD: ${headResolution.error.message}`;
-          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-          withWriteLocksRejection = 'validation';
+          this.log.warn(ctx, `SWM share deferred: ${validationRejectionReason}`);
+          withWriteLocksRejection = 'corrupt-head';
           return false;
         }
         const currentHead = headResolution.status === 'resolved' ? headResolution.head : undefined;
@@ -1634,6 +1635,18 @@ export class SharedMemoryHandler {
       // condition would pass. Keep retrying so the sender's
       // outbox doesn't drop a payload that would apply after
       // out-of-order delivery converges.
+      // GH#2273 — same shape as the CAS case below: the blocking condition is
+      // LOCAL and convergent (sync repair collapses the multi-valued head), so
+      // the sender's outbox must keep retrying rather than record a terminal
+      // drop of a payload that will apply once the head heals.
+      if (withWriteLocksRejection === 'corrupt-head') {
+        return rejectedSharedMemoryOutcome(
+          verifiedFields,
+          `${validationRejectionReason ?? 'CORRUPT_SWM_HEAD'} (transient: may apply after sync repair converges the head)`,
+          true,
+          true,
+        );
+      }
       if (withWriteLocksRejection === 'cas') {
         return rejectedSharedMemoryOutcome(
           verifiedFields,
