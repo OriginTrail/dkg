@@ -702,21 +702,24 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             request.syncSessionId,
             offset,
           );
-          const rows = await readSwmMetaPage({
-            store,
-            graphList: await graphListMemo.get({
+          const registeredSubGraphNames = await swmAdmissionMemo.get(
+            contextGraphId,
+            {
               refresh: session?.refreshRowList ?? offset === 0,
               refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
               signal,
-            }),
-            registeredSubGraphNames: await swmAdmissionMemo.get(
-              contextGraphId,
-              {
+            },
+          );
+          const rows = await readSwmMetaPage({
+            store,
+            graphList: cutoff == null
+              ? await graphListMemo.get({
                 refresh: session?.refreshRowList ?? offset === 0,
                 refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
                 signal,
-              },
-            ),
+              })
+              : [],
+            registeredSubGraphNames,
             contextGraphId,
             cutoffIso: cutoff,
             offset,
@@ -748,21 +751,24 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             request.syncSessionId,
             offset,
           );
-          const rows = await readSwmDataPage({
-            store,
-            graphList: await graphListMemo.get({
+          const registeredSubGraphNames = await swmAdmissionMemo.get(
+            contextGraphId,
+            {
               refresh: session?.refreshRowList ?? offset === 0,
               refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
               signal,
-            }),
-            registeredSubGraphNames: await swmAdmissionMemo.get(
-              contextGraphId,
-              {
+            },
+          );
+          const rows = await readSwmDataPage({
+            store,
+            graphList: cutoff == null
+              ? await graphListMemo.get({
                 refresh: session?.refreshRowList ?? offset === 0,
                 refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
                 signal,
-              },
-            ),
+              })
+              : [],
+            registeredSubGraphNames,
             contextGraphId,
             cutoffIso: cutoff,
             offset,

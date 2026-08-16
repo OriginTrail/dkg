@@ -365,6 +365,7 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
 
       const querySources: string[] = [];
       const query = modernStore.query.bind(modernStore);
+      const listGraphs = vi.spyOn(modernStore, 'listGraphs');
       vi.spyOn(modernStore, 'query').mockImplementation(async (sparql, options) => {
         querySources.push(options?.source ?? 'unknown');
         return query(sparql, options);
@@ -395,6 +396,8 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(querySources).toContain('sync.responder.discoverFreshSwmMetaRoots');
       expect(querySources).not.toContain('sync.responder.planFreshSwmGraphRoots');
       expect(querySources).not.toContain('sync.responder.countFreshSwmGraphRows');
+      expect(querySources).not.toContain('sync.responder.listFreshSwmGraphs');
+      expect(listGraphs).not.toHaveBeenCalled();
       await modernStore.close();
     });
   });

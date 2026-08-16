@@ -812,7 +812,15 @@ export async function readSwmMetaPage(params: {
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
-  const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
+  // A TTL-filtered RFC-64 request already names every admissible metadata
+  // graph exactly. Querying a missing named graph is an empty, bounded read;
+  // enumerating the node's complete graph inventory first is not. Large edge
+  // stores can spend tens of seconds rebuilding that inventory after ordinary
+  // writes, resetting the transport before page zero. Keep the inventory
+  // membership guard only for the legacy, unfiltered compatibility lane.
+  const candidateGraphs = params.cutoffIso == null
+    ? graphs.filter((graph) => graphSet.has(graph))
+    : graphs;
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
@@ -3399,18 +3407,6 @@ async function buildFreshSwmDataGraphPlan(
 ): Promise<FreshSwmDataGraphPlan> {
   const cutoffFilter =
     `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
-  const candidates: FreshSwmCandidateGraph[] = [];
-  for (const graph of dataGraphs) {
-    const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
-    for (const candidate of candidateGraphsFor(graph)) {
-      candidates.push({ graph: candidate, metaGraph });
-    }
-  }
-  const uniqueCandidates = [...new Map(
-    candidates.map((candidate) => [candidate.graph, candidate]),
-  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
-
   // Modern content-scope-v2 SWM operations use detached snapshot references
   // (or immutable snapshot graphs) and intentionally do not carry
   // dkg:rootEntity. Probe the small metadata graphs once before constructing
@@ -3420,7 +3416,7 @@ async function buildFreshSwmDataGraphPlan(
   // result still follows the existing graph/root existence + exact-count path,
   // so no payload graph is admitted from metadata alone.
   const freshRootsByMetaGraph = new Map<string, Set<string>>();
-  const uniqueMetaGraphs = dedupeStrings(uniqueCandidates.map(({ metaGraph }) => metaGraph))
+  const uniqueMetaGraphs = dedupeStrings(dataGraphs.map((graph) => `${graph}_meta`))
     .sort(compareCodePoint);
   for (const chunk of chunkValues(uniqueMetaGraphs, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
     const values = graphValues(chunk);
@@ -3446,6 +3442,38 @@ async function buildFreshSwmDataGraphPlan(
       freshRootsByMetaGraph.set(metaGraph, roots);
     }
   }
+
+  // Do not enumerate payload graphs unless the small metadata preflight proved
+  // that this is a legacy root-scoped operation. Modern graph-scoped snapshot
+  // refs are transferred by the immutable snapshot phase, so their DATA page
+  // is intentionally empty. If a caller already supplied an inventory (unit
+  // callers and the legacy lane), reuse it; otherwise enumerate only the
+  // relevant data-graph prefixes rather than every named graph on the node.
+  const candidates: FreshSwmCandidateGraph[] = [];
+  for (const graph of dataGraphs) {
+    const metaGraph = `${graph}_meta`;
+    if ((freshRootsByMetaGraph.get(metaGraph)?.size ?? 0) === 0) continue;
+    const candidateGraphs = graphSet.size > 0
+      ? candidateGraphsFor(graph)
+      : store.listGraphsByPrefix
+        ? (await store.listGraphsByPrefix(
+          graph,
+          syncResponderStoreOptions(signal, 'sync.responder.listFreshSwmGraphPrefix'),
+        )).filter((candidate) => (
+          candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph)
+        ))
+        : (await store.listGraphs(
+          syncResponderStoreOptions(signal, 'sync.responder.listFreshSwmGraphs'),
+        )).filter((candidate) => (
+          candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph)
+        ));
+    for (const candidate of candidateGraphs.sort(compareCodePoint)) {
+      candidates.push({ graph: candidate, metaGraph });
+    }
+  }
+  const uniqueCandidates = [...new Map(
+    candidates.map((candidate) => [candidate.graph, candidate]),
+  ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
 
   const rootScopedCandidates = uniqueCandidates.filter(
     ({ metaGraph }) => (freshRootsByMetaGraph.get(metaGraph)?.size ?? 0) > 0,
