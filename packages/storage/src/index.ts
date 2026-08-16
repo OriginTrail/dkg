@@ -53,6 +53,8 @@ export {
   type StorePrioritySchedulerOptions,
   type StorePriorityQueueLimits,
   type StoreSchedulerBusyReason,
+  type StoreSchedulerOperationMetadata,
+  type StoreSchedulerBusyErrorOptions,
 } from './store-priority-scheduler.js';
 export {
   STORE_OPERATION_TIMEOUT_CODE,
@@ -60,8 +62,17 @@ export {
   isStoreOperationTimeoutError,
   type StoreOperationTimeoutErrorOptions,
   type StoreOperationTimeoutErrorLike,
-  type StoreOperationOutcome,
 } from './store-operation-timeout.js';
+export {
+  STORE_OPERATION_OUTCOME_TAG,
+  STORE_OPERATIONS,
+  hasStoreOperationOutcome,
+  isStoreOperation,
+  type StoreOperation,
+  type StoreOperationOutcome,
+  type StoreOperationOutcomeTagged,
+  type StoreOperationOutcomeErrorLike,
+} from './store-operation-outcome.js';
 export {
   EXTERNAL_LITERAL_REF_DATATYPE,
   SHARED_MEMORY_GRAPH_SUFFIX,

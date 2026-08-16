@@ -438,7 +438,7 @@ describe('SparqlHttpStore (test server)', () => {
     }
   });
 
-  it('notifies managed Oxigraph recovery when the client query deadline fires', async () => {
+  it('uses the transport label for recovery while retaining the canonical helper operation', async () => {
     const originalFetch = globalThis.fetch;
     const timedOutOperations: string[] = [];
     globalThis.fetch = (async (_input: string | URL | Request, init?: RequestInit) =>
@@ -456,10 +456,11 @@ describe('SparqlHttpStore (test server)', () => {
         timeout: 5,
         onClientTimeout: (operation) => timedOutOperations.push(operation),
       });
-      await expect(store.query('SELECT ?s WHERE { ?s ?p ?o }')).rejects.toMatchObject({
+      await expect(store.hasGraph('urn:timed-out-graph')).rejects.toMatchObject({
         code: 'STORE_OPERATION_TIMEOUT',
         backend: 'oxigraph-server',
         operation: 'query',
+        storeOperation: 'hasGraph',
         timeoutMs: 5,
       });
       expect(timedOutOperations).toEqual(['query']);
