@@ -535,7 +535,6 @@ export async function recoverContextGraphSwm(
   // every other skipped state (absent, multi-valued, wrong-version,
   // non-equivalent) is still replaced, so the curator stays authoritative for
   // genuine changes and the #2050 G7 absent-head repair is untouched.
-  const preservedDescriptors: GraphScopedSwmRecoveryDescriptor[] = [];
   /** The materializer's withhold plans, consumed verbatim by the raw insert. */
   const preservedWithholdRows: Quad[] = [];
   const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
@@ -555,7 +554,6 @@ export async function recoverContextGraphSwm(
       .preserveStoredIdentityForSkippedAsset(deps.contextGraphId, descriptor);
     if (preservation.outcome === 'preserved') {
       preservedWithholdRows.push(...preservation.withholdRows);
-      preservedDescriptors.push(descriptor);
     } else {
       metaReplaceTargets.push(descriptor);
     }
