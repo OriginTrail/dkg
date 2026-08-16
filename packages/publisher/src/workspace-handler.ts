@@ -1636,7 +1636,8 @@ export class SharedMemoryHandler {
       // collapses the multi-valued head, and the sender's budget-bounded
       // outbox must keep the payload queued rather than record a terminal
       // drop of a share that will apply once the head heals).
-      switch (decision.kind) {
+      const rejectionKind = decision.kind;
+      switch (rejectionKind) {
         case 'corrupt-head':
           return rejectedSharedMemoryOutcome(
             verifiedFields,
@@ -1651,13 +1652,20 @@ export class SharedMemoryHandler {
             true,
             true,
           );
-        default:
+        case 'validation':
           return rejectedSharedMemoryOutcome(
             verifiedFields,
             decision.reason ?? 'validation rejected graph-scoped KA payload (permanent)',
             false,
             true,
           );
+        default: {
+          // Compile-time exhaustiveness: a future SwmWriteDecision kind fails
+          // HERE instead of silently inheriting the permanent validation
+          // policy.
+          const unreachable: never = rejectionKind;
+          return unreachable;
+        }
       }
     } catch (err) {
       // PR-C codex R3: classify the catch path as `retryable: true`.

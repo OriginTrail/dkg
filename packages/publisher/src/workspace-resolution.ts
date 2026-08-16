@@ -241,6 +241,184 @@ function makeSingletonReader(
   };
 }
 
+/** Everything the head subject's rows certify, decoded and validated. */
+interface DecodedWorkspaceHead {
+  readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  readonly assertionGraph: string;
+  readonly shareOperationId: string;
+  readonly operationSubject: string;
+}
+
+/**
+ * Focused decoder for the HEAD subject's rows. Every head predicate is a
+ * fail-closed singleton (`makeSingletonReader`); the decoded fields are
+ * validated against the expected scope so a mismatched UAL, scope version or
+ * derived assertion graph is corruption, never a silently different KA.
+ */
+function decodeWorkspaceHeadRows(input: {
+  readonly headValues: Map<string, string[]>;
+  readonly expectedUal: string;
+  readonly contextGraphId: string;
+  readonly subGraphName: string | undefined;
+}): DecodedWorkspaceHead {
+  const head = makeSingletonReader(input.headValues, input.expectedUal, 'head');
+  if (parseIntegerLiteral(head.required(`${DKG}contentScopeVersion`, 'contentScopeVersion'))
+    !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${input.expectedUal}: invalid scope version`,
+    );
+  }
+  const actualUal = head.required(`${DKG}kaUal`, 'kaUal');
+  let scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  try {
+    scope = createGraphKnowledgeAssetScope(
+      actualUal ?? '',
+      parsePositiveBigIntLiteral(head.required(`${DKG}assertionVersion`, 'assertionVersion')),
+    );
+  } catch (error) {
+    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${input.expectedUal}: invalid assertion identity ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (scope.ual !== input.expectedUal) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${input.expectedUal}: UAL mismatch`,
+    );
+  }
+  const assertionGraph = head.required(`${DKG}assertionGraph`, 'assertionGraph');
+  const expectedGraph = knowledgeAssetLayerGraphUri(
+    input.contextGraphId,
+    MemoryLayer.SharedWorkingMemory,
+    scope,
+    input.subGraphName,
+  );
+  if (assertionGraph !== expectedGraph) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${input.expectedUal}: assertion graph mismatch`,
+    );
+  }
+  const shareOperationId = stripLiteral(head.required(`${DKG}shareOperationId`, 'shareOperationId'))?.trim() ?? '';
+  if (!shareOperationId) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${input.expectedUal}: incomplete head or operation metadata`,
+    );
+  }
+  let operationSubject = '';
+  try {
+    operationSubject = workspaceOperationSubject(input.contextGraphId, shareOperationId);
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${input.expectedUal}: invalid share operation ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  return { scope, assertionGraph, shareOperationId, operationSubject };
+}
+
+/** The operation subject's commitment + access envelope, decoded and validated. */
+interface DecodedWorkspaceOperation {
+  readonly publicQuadsDigest: string;
+  readonly publicTripleCount: number;
+  readonly privateMerkleRoot: string | undefined;
+  readonly privateTripleCount: number;
+  readonly publisherPeerId: string;
+  readonly publishedAtMs: number | undefined;
+  readonly accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined;
+  readonly allowedPeers: string[];
+}
+
+/**
+ * Focused decoder for the OPERATION subject's rows. The cardinality model is
+ * exactly three rules: commitment/envelope predicates are fail-closed
+ * singletons; `allowedPeer` is set-valued; `publishedAt` tolerates duplicates
+ * (two cores ACKing the same content stamp their own clocks onto the same
+ * deterministic operation subject) and canonicalizes to the EARLIEST stamp,
+ * which stays stable when a later union adds more re-stamps (this timestamp
+ * orders RFC64 inventory). The operation must echo the head's id (mirrors the
+ * pre-refactor join); extra id rows on the operation stay tolerated.
+ */
+function decodeWorkspaceOperationRows(input: {
+  readonly operationValues: Map<string, string[]>;
+  readonly scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
+  readonly shareOperationId: string;
+}): DecodedWorkspaceOperation {
+  const ual = input.scope.ual;
+  const operation = makeSingletonReader(input.operationValues, ual, 'operation');
+  const echoedIds = (input.operationValues.get(`${DKG}shareOperationId`) ?? [])
+    .map((value) => stripLiteral(value)?.trim());
+  if (!echoedIds.includes(input.shareOperationId)) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${ual}: incomplete head or operation metadata`,
+    );
+  }
+  const publicQuadsDigest = stripLiteral(operation.required(`${DKG}publicQuadsDigest`, 'publicQuadsDigest'))?.trim() ?? '';
+  const publicTripleCount = parseIntegerLiteral(operation.required(`${DKG}publicQuadsCount`, 'publicQuadsCount'));
+  const privateTripleCount = parseIntegerLiteral(operation.required(`${DKG}privateTripleCount`, 'privateTripleCount'));
+  const publisherPeerId = stripLiteral(operation.required(`${DKG}publisherPeerId`, 'publisherPeerId'))?.trim() ?? '';
+  const operationUal = operation.required(`${DKG}kaUal`, 'kaUal') ?? '';
+  const privateMerkleRoot = stripLiteral(operation.optional(`${DKG}privateMerkleRoot`, 'privateMerkleRoot'))?.trim();
+  const rawAccessPolicy = stripLiteral(operation.optional(`${DKG}accessPolicy`, 'accessPolicy'))?.trim();
+  const accessPolicy = rawAccessPolicy === 'public'
+    || rawAccessPolicy === 'ownerOnly'
+    || rawAccessPolicy === 'allowList'
+    ? rawAccessPolicy
+    : undefined;
+  const publishedAtStamps = (input.operationValues.get(`${DKG}publishedAt`) ?? [])
+    .map((value) => Date.parse(stripLiteral(value)?.trim() ?? ''));
+  const publishedAtMs = publishedAtStamps.length === 0
+    ? undefined
+    : publishedAtStamps.reduce((min, ms) => Math.min(min, ms), Number.POSITIVE_INFINITY);
+  let operationVersion: bigint;
+  try {
+    operationVersion = parsePositiveBigIntLiteral(operation.required(`${DKG}assertionVersion`, 'assertionVersion'));
+  } catch (error) {
+    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${ual}: invalid operation version ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+  if (
+    !publicQuadsDigest ||
+    !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
+    !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
+    !publisherPeerId ||
+    publishedAtStamps.some((ms) => !Number.isSafeInteger(ms) || ms < 0) ||
+    operationUal !== ual ||
+    operationVersion.toString() !== input.scope.assertionVersion ||
+    (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
+    (privateTripleCount === 0 && privateMerkleRoot !== undefined)
+    || (rawAccessPolicy !== undefined && accessPolicy === undefined)
+  ) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${ual}: incomplete commitment metadata`,
+    );
+  }
+  const allowedPeers = [...new Set((input.operationValues.get(`${DKG}allowedPeer`) ?? [])
+    .map((value) => stripLiteral(value)?.trim())
+    .filter((peer): peer is string => Boolean(peer)))];
+  if (
+    (accessPolicy === 'allowList' && allowedPeers.length === 0)
+    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
+  ) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${ual}: invalid access envelope`,
+    );
+  }
+  return {
+    publicQuadsDigest,
+    publicTripleCount,
+    privateMerkleRoot,
+    privateTripleCount,
+    publisherPeerId,
+    publishedAtMs,
+    accessPolicy,
+    allowedPeers,
+  };
+}
+
 /**
  * Resolve the latest complete graph-scoped assertion accepted into SWM.
  * Missing means this node has not accepted this KA yet; malformed rows fail
@@ -292,154 +470,37 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   // the head subject this phase inspects.
   const headBindings = rowsBySubject.get(subject) ?? [];
   if (headBindings.length === 0) return undefined;
-  const headValues = collectSubjectValues(headBindings);
-  const head = makeSingletonReader(headValues, scope.ual, 'head');
-  const requiredHeadValue = head.required;
-  if (parseIntegerLiteral(requiredHeadValue(`${DKG}contentScopeVersion`, 'contentScopeVersion'))
-    !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid scope version`,
-    );
-  }
-  const actualUal = requiredHeadValue(`${DKG}kaUal`, 'kaUal');
-  let assertionVersion: bigint;
-  let actualScope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-  try {
-    assertionVersion = parsePositiveBigIntLiteral(requiredHeadValue(`${DKG}assertionVersion`, 'assertionVersion'));
-    actualScope = createGraphKnowledgeAssetScope(actualUal ?? '', assertionVersion);
-  } catch (error) {
-    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid assertion identity ` +
-      `(${error instanceof Error ? error.message : String(error)})`,
-    );
-  }
-  if (actualScope.ual !== scope.ual) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: UAL mismatch`,
-    );
-  }
-  const assertionGraph = requiredHeadValue(`${DKG}assertionGraph`, 'assertionGraph');
-  const expectedGraph = knowledgeAssetLayerGraphUri(
-    params.contextGraphId,
-    MemoryLayer.SharedWorkingMemory,
-    actualScope,
+  // Phase 1 — decode + validate the head subject's rows (fail-closed
+  // singletons; GH#2273: a multi-valued shareOperationId is the sync
+  // union-insert residue that previously made LIMIT-1 readers arbitrary).
+  const decodedHead = decodeWorkspaceHeadRows({
+    headValues: collectSubjectValues(headBindings),
+    expectedUal: scope.ual,
+    contextGraphId: params.contextGraphId,
     subGraphName,
-  );
-  if (assertionGraph !== expectedGraph) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: assertion graph mismatch`,
-    );
-  }
-  const shareOperationId = stripLiteral(requiredHeadValue(`${DKG}shareOperationId`, 'shareOperationId'))?.trim() ?? '';
-  if (!shareOperationId) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
-    );
-  }
-  let operationSubject = '';
-  try {
-    operationSubject = workspaceOperationSubject(params.contextGraphId, shareOperationId);
-  } catch (error) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid share operation ` +
-      `(${error instanceof Error ? error.message : String(error)})`,
-    );
-  }
-
-  // Phase 2 — the single validated operation, read as its OWN rows and
-  // normalized under DECLARED cardinality rules (no LIMIT-1 first-binding
-  // policy anywhere in the resolver): every commitment/envelope predicate must
-  // carry exactly one distinct value; `allowedPeer` is set-valued by design;
-  // `publishedAt` tolerates duplicates — two cores ACKing the same content
-  // stamp their own clocks onto the same deterministic operation subject —
-  // and canonicalizes to the EARLIEST stamp, which stays stable when a later
-  // union adds more re-stamps (this timestamp orders RFC64 inventory).
-  const operationValues = collectSubjectValues(rowsBySubject.get(operationSubject) ?? []);
-  const operation = makeSingletonReader(operationValues, scope.ual, 'operation');
-  // Id echo — the operation must itself carry the head's id (mirrors the
-  // previous join). Multiple id rows on the operation subject were tolerated
-  // by the join (only the matching one bound) and remain tolerated here.
-  const echoedIds = (operationValues.get(`${DKG}shareOperationId`) ?? [])
-    .map((value) => stripLiteral(value)?.trim());
-  if (!echoedIds.includes(shareOperationId)) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
-    );
-  }
-  const publicQuadsDigest = stripLiteral(operation.required(`${DKG}publicQuadsDigest`, 'publicQuadsDigest'))?.trim() ?? '';
-  const publicTripleCount = parseIntegerLiteral(operation.required(`${DKG}publicQuadsCount`, 'publicQuadsCount'));
-  const privateTripleCount = parseIntegerLiteral(operation.required(`${DKG}privateTripleCount`, 'privateTripleCount'));
-  const publisherPeerId = stripLiteral(operation.required(`${DKG}publisherPeerId`, 'publisherPeerId'))?.trim() ?? '';
-  const operationUal = operation.required(`${DKG}kaUal`, 'kaUal') ?? '';
-  const privateMerkleRoot = stripLiteral(operation.optional(`${DKG}privateMerkleRoot`, 'privateMerkleRoot'))?.trim();
-  const rawAccessPolicy = stripLiteral(operation.optional(`${DKG}accessPolicy`, 'accessPolicy'))?.trim();
-  const accessPolicy = rawAccessPolicy === 'public'
-    || rawAccessPolicy === 'ownerOnly'
-    || rawAccessPolicy === 'allowList'
-    ? rawAccessPolicy
-    : undefined;
-  const publishedAtStamps = (operationValues.get(`${DKG}publishedAt`) ?? [])
-    .map((value) => {
-      const lexical = stripLiteral(value)?.trim() ?? '';
-      return { lexical, ms: Date.parse(lexical) };
-    });
-  const publishedAtMs = publishedAtStamps.length === 0
-    ? undefined
-    : publishedAtStamps.reduce((min, stamp) => Math.min(min, stamp.ms), Number.POSITIVE_INFINITY);
-  let operationVersion: bigint;
-  try {
-    operationVersion = parsePositiveBigIntLiteral(operation.required(`${DKG}assertionVersion`, 'assertionVersion'));
-  } catch (error) {
-    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid operation version ` +
-      `(${error instanceof Error ? error.message : String(error)})`,
-    );
-  }
-  if (
-    !publicQuadsDigest ||
-    !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
-    !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
-    !publisherPeerId ||
-    publishedAtStamps.some((stamp) => !Number.isSafeInteger(stamp.ms) || stamp.ms < 0) ||
-    operationUal !== actualScope.ual ||
-    operationVersion.toString() !== actualScope.assertionVersion ||
-    (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
-    (privateTripleCount === 0 && privateMerkleRoot !== undefined)
-    || (rawAccessPolicy !== undefined && accessPolicy === undefined)
-  ) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete commitment metadata`,
-    );
-  }
-
-  const allowedPeers = [...new Set((operationValues.get(`${DKG}allowedPeer`) ?? [])
-    .map((value) => stripLiteral(value)?.trim())
-    .filter((peer): peer is string => Boolean(peer)))];
-  if (
-    (accessPolicy === 'allowList' && allowedPeers.length === 0)
-    || (accessPolicy !== 'allowList' && allowedPeers.length > 0)
-  ) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid access envelope`,
-    );
-  }
+  });
+  // Phase 2 — decode + validate the single referenced operation's rows from
+  // the same acquisition snapshot.
+  const decodedOperation = decodeWorkspaceOperationRows({
+    operationValues: collectSubjectValues(rowsBySubject.get(decodedHead.operationSubject) ?? []),
+    scope: decodedHead.scope,
+    shareOperationId: decodedHead.shareOperationId,
+  });
   return {
-    kaUal: actualScope.ual,
-    assertionVersion: actualScope.assertionVersion,
-    assertionGraph,
-    publicQuadsDigest,
-    publicTripleCount,
-    privateMerkleRoot,
-    privateTripleCount,
-    shareOperationId,
-    ...(publishedAtMs === undefined
+    kaUal: decodedHead.scope.ual,
+    assertionVersion: decodedHead.scope.assertionVersion,
+    assertionGraph: decodedHead.assertionGraph,
+    publicQuadsDigest: decodedOperation.publicQuadsDigest,
+    publicTripleCount: decodedOperation.publicTripleCount,
+    privateMerkleRoot: decodedOperation.privateMerkleRoot,
+    privateTripleCount: decodedOperation.privateTripleCount,
+    shareOperationId: decodedHead.shareOperationId,
+    ...(decodedOperation.publishedAtMs === undefined
       ? {}
-      : { publishedAt: publishedAtMs.toString() as TimestampMsV1 }),
-    publisherPeerId,
-    ...(accessPolicy ? { accessPolicy } : {}),
-    allowedPeers,
+      : { publishedAt: decodedOperation.publishedAtMs.toString() as TimestampMsV1 }),
+    publisherPeerId: decodedOperation.publisherPeerId,
+    ...(decodedOperation.accessPolicy ? { accessPolicy: decodedOperation.accessPolicy } : {}),
+    allowedPeers: decodedOperation.allowedPeers,
   };
 }
 
