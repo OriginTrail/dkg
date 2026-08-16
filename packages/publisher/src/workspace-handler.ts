@@ -967,10 +967,20 @@ export class SharedMemoryHandler {
     // reasons — validation rejection (deterministic, payload
     // can never apply) and CAS-not-met (TRANSIENT when SWM
     // writes arrive out of order). Hoisted here so the closure
-    // can signal which branch fired; the post-closure code
-    // maps `cas` → retryable and `validation` → permanent.
-    let withWriteLocksRejection: 'validation' | 'cas' | 'corrupt-head' | undefined;
-    let validationRejectionReason: string | undefined;
+    // can signal which branch fired; the post-closure code maps
+    // the kind to retryability in ONE place. Kind and reason are
+    // one object set by one call, so no rejection path can set
+    // half its state and silently fall into the wrong branch.
+    let withWriteLocksRejection:
+      | { readonly kind: 'validation' | 'cas' | 'corrupt-head'; readonly reason?: string }
+      | undefined;
+    const rejectWithinLocks = (
+      kind: 'validation' | 'cas' | 'corrupt-head',
+      reason?: string,
+    ): false => {
+      withWriteLocksRejection = { kind, ...(reason === undefined ? {} : { reason }) };
+      return false;
+    };
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
       const { envelope, signedPayload } = decoded;
@@ -1389,9 +1399,7 @@ export class SharedMemoryHandler {
             reason,
             validationErrorCount: validation.errors.length,
           }, 'warn');
-          withWriteLocksRejection = 'validation';
-          validationRejectionReason = reason;
-          return false;
+          return rejectWithinLocks('validation', reason);
         }
         this.logSwmLifecycleEvent(ctx, 'swm_validation_passed', {
           ...verifiedFields,
@@ -1407,10 +1415,9 @@ export class SharedMemoryHandler {
         );
         const operationTimestamp = new Date(Number(timestampMs));
         if (Number.isNaN(operationTimestamp.getTime())) {
-          validationRejectionReason = `invalid timestampMs ${String(timestampMs)}`;
-          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-          withWriteLocksRejection = 'validation';
-          return false;
+          const reason = `invalid timestampMs ${String(timestampMs)}`;
+          this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+          return rejectWithinLocks('validation', reason);
         }
         const persistLocallyTrustedControls = async (): Promise<void> => {
           const merkleRoot = computeFlatKCRootV10(
@@ -1451,21 +1458,19 @@ export class SharedMemoryHandler {
           subGraphName,
         });
         if (headResolution.status === 'corrupt') {
-          validationRejectionReason = `CORRUPT_SWM_HEAD: ${headResolution.error.message}`;
-          this.log.warn(ctx, `SWM share deferred: ${validationRejectionReason}`);
-          withWriteLocksRejection = 'corrupt-head';
-          return false;
+          const reason = `CORRUPT_SWM_HEAD: ${headResolution.error.message}`;
+          this.log.warn(ctx, `SWM share deferred: ${reason}`);
+          return rejectWithinLocks('corrupt-head', reason);
         }
         const currentHead = headResolution.status === 'resolved' ? headResolution.head : undefined;
         if (currentHead) {
           const incomingVersion = BigInt(contentScope.assertionVersion);
           const currentVersion = BigInt(currentHead.assertionVersion);
           if (incomingVersion < currentVersion) {
-            validationRejectionReason =
+            const reason =
               `STALE_KA_ASSERTION_VERSION: incoming=${incomingVersion}, current=${currentVersion}`;
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return rejectWithinLocks('validation', reason);
           }
           if (incomingVersion === currentVersion) {
             const sameAssertion =
@@ -1486,20 +1491,18 @@ export class SharedMemoryHandler {
               await persistLocallyTrustedControls();
               return true;
             }
-            validationRejectionReason =
+            const reason =
               `CONFLICTING_KA_ASSERTION_VERSION: ${contentScope.ual} version ${incomingVersion} ` +
               'is already bound to a different operation or content digest';
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return rejectWithinLocks('validation', reason);
           }
           if (currentHead.publisherPeerId !== publisherPeerId) {
-            validationRejectionReason =
+            const reason =
               `KA_PUBLISHER_MISMATCH: ${contentScope.ual} is owned in SWM by ` +
               `${currentHead.publisherPeerId}, not ${publisherPeerId}`;
-            this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
-            withWriteLocksRejection = 'validation';
-            return false;
+            this.log.warn(ctx, `SWM validation rejected: ${reason}`);
+            return rejectWithinLocks('validation', reason);
           }
         }
 
@@ -1512,8 +1515,7 @@ export class SharedMemoryHandler {
             // replays missed writes on reconnect, converging replicas eventually.
             // Accepting stale-CAS writes would silently corrupt local state.
             this.log.info(ctx, `Skipping SWM write ${shareOperationId} — remote CAS conditions not met`);
-            withWriteLocksRejection = 'cas';
-            return false;
+            return rejectWithinLocks('cas');
           }
         }
 
@@ -1627,40 +1629,38 @@ export class SharedMemoryHandler {
         });
         return appliedSharedMemoryOutcome(verifiedFields, quads.length);
       }
-      // `applied === false` from the withWriteLocks closure. PR-C
-      // codex R4: validation rejection is deterministic (retry
-      // produces the same outcome), but CAS-not-met is
-      // TRANSIENT — the missed write upstream might still arrive
-      // via gossip and bring local state up to where the CAS
-      // condition would pass. Keep retrying so the sender's
-      // outbox doesn't drop a payload that would apply after
-      // out-of-order delivery converges.
-      // GH#2273 — same shape as the CAS case below: the blocking condition is
-      // LOCAL and convergent (sync repair collapses the multi-valued head), so
-      // the sender's outbox must keep retrying rather than record a terminal
-      // drop of a payload that will apply once the head heals.
-      if (withWriteLocksRejection === 'corrupt-head') {
-        return rejectedSharedMemoryOutcome(
-          verifiedFields,
-          `${validationRejectionReason ?? 'CORRUPT_SWM_HEAD'} (transient: may apply after sync repair converges the head)`,
-          true,
-          true,
-        );
+      // `applied === false` from the withWriteLocks closure. The kind ->
+      // outcome policy lives HERE, in one table adjacent to the channels:
+      // 'validation' is deterministic (retry produces the same outcome, so
+      // permanent); 'cas' is TRANSIENT (PR-C codex R4 — the missed upstream
+      // write might still arrive and make the condition pass); 'corrupt-head'
+      // is TRANSIENT for the same convergent-local-state reason (GH#2273 —
+      // sync repair collapses the multi-valued head, and the sender's
+      // budget-bounded outbox must keep the payload queued rather than record
+      // a terminal drop of a share that will apply once the head heals).
+      switch (withWriteLocksRejection?.kind) {
+        case 'corrupt-head':
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            `${withWriteLocksRejection.reason ?? 'CORRUPT_SWM_HEAD'} (transient: may apply after sync repair converges the head)`,
+            true,
+            true,
+          );
+        case 'cas':
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
+            true,
+            true,
+          );
+        default:
+          return rejectedSharedMemoryOutcome(
+            verifiedFields,
+            withWriteLocksRejection?.reason ?? 'validation rejected graph-scoped KA payload (permanent)',
+            false,
+            true,
+          );
       }
-      if (withWriteLocksRejection === 'cas') {
-        return rejectedSharedMemoryOutcome(
-          verifiedFields,
-          'CAS pre-conditions not met against current SWM state (transient: may apply after upstream writes converge)',
-          true,
-          true,
-        );
-      }
-      return rejectedSharedMemoryOutcome(
-        verifiedFields,
-        validationRejectionReason ?? 'validation rejected graph-scoped KA payload (permanent)',
-        false,
-        true,
-      );
     } catch (err) {
       // PR-C codex R3: classify the catch path as `retryable: true`.
       // The dominant production case here is `workspaceSenderKeyDecryptor`

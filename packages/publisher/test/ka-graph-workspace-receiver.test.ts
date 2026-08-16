@@ -542,7 +542,7 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     }
   });
 
-  it('permanently rejects an inbound share while the local head is multi-valued (GH#2273)', async () => {
+  it('defers a retryable inbound share while the local head is multi-valued (GH#2273)', async () => {
     const store = new OxigraphStore();
     const graphManager = new GraphManager(store);
     const handler = new SharedMemoryHandler(store, new TypedEventBus());
