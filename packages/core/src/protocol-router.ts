@@ -1137,11 +1137,19 @@ export class ProtocolRouter {
     const tail = predecessor.then(() => gate);
     this.relaySingleUseTails.set(peerIdStr, tail);
 
-    const release = (): void => {
-      releaseGate();
+    // Keep the composed tail installed until every predecessor ahead of this
+    // turn has settled. A caller may abandon its queued turn before the
+    // predecessor finishes; deleting the map entry at that point would let a
+    // later send bypass the still-active predecessor and reopen the relay
+    // stream collision this admission queue is meant to prevent.
+    void tail.then(() => {
       if (this.relaySingleUseTails.get(peerIdStr) === tail) {
         this.relaySingleUseTails.delete(peerIdStr);
       }
+    });
+
+    const release = (): void => {
+      releaseGate();
     };
 
     try {

@@ -1101,6 +1101,70 @@ describe('ProtocolRouter', () => {
         new Uint8Array([3]),
         { timeoutMs: 5_000, payloadReuse: 'single-use' },
       );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(newStreamCalls).toBe(1);
+
+      firstRelease();
+      await expect(first).resolves.toEqual(new Uint8Array([1]));
+      await expect(third).resolves.toEqual(new Uint8Array([2]));
+      expect(newStreamCalls).toBe(2);
+    });
+
+    it('charges queued relay wait to the send timeout without poisoning the FIFO', async () => {
+      let firstRelease!: () => void;
+      const firstGate = new Promise<void>((resolve) => { firstRelease = resolve; });
+      let newStreamCalls = 0;
+      const relayedConn = makeConn({
+        remoteAddr: `/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${FAKE_PEER_ID}`,
+        limits: { bytes: 1024 * 1024 },
+        newStream: async () => {
+          newStreamCalls += 1;
+          const call = newStreamCalls;
+          return {
+            writeStatus: 'open' as const,
+            send: () => undefined,
+            close: async () => undefined,
+            abort: () => undefined,
+            async *[Symbol.asyncIterator]() {
+              if (call === 1) await firstGate;
+              yield new Uint8Array([call]);
+            },
+          } as any;
+        },
+      });
+      const router = makeRouterWithPool({
+        connections: () => [relayedConn],
+        poolSend: async () => {
+          throw new Error('pool must not be used for a relay-only peer');
+        },
+      });
+
+      const first = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([1]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const timedOut = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([2]),
+        { timeoutMs: 10, payloadReuse: 'single-use' },
+      );
+      await expect(timedOut).rejects.toMatchObject({ name: 'AbortError' });
+      expect(newStreamCalls).toBe(1);
+
+      const third = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(newStreamCalls).toBe(1);
+
       firstRelease();
       await expect(first).resolves.toEqual(new Uint8Array([1]));
       await expect(third).resolves.toEqual(new Uint8Array([2]));
