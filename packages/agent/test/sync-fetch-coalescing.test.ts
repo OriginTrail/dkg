@@ -155,6 +155,194 @@ async function createAgentWithSend(
 }
 
 describe('exact VM recovery lifecycle', () => {
+  it('routes selected public VM catch-up through chain inventory without a broad durable pull', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-chain-inventory';
+    const broadDurableSync = vi.fn(async () => cleanDurableSyncResult());
+    const reconcile = vi.fn()
+      .mockResolvedValueOnce({
+        contextGraphId,
+        onChainId: '77',
+        source: 'manual',
+        status: 'progress',
+        attempted: true,
+        headOrdinal: 500,
+        watermarkBefore: 100,
+        watermarkAfter: 110,
+        reconciledOrdinals: 8,
+        unresolvedOrdinals: 2,
+      })
+      .mockResolvedValueOnce({
+        contextGraphId,
+        onChainId: '77',
+        source: 'manual',
+        status: 'current',
+        attempted: true,
+        headOrdinal: 500,
+        watermarkBefore: 490,
+        watermarkAfter: 500,
+        reconciledOrdinals: 10,
+        unresolvedOrdinals: 0,
+      });
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).runVmReconcileForCg = reconcile;
+      (agent as any).syncFromPeerDetailed = broadDurableSync;
+
+      const progress = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+      expect(progress).toMatchObject({
+        outcome: 'partial-progress',
+        slices: 1,
+        peerId: PEER_A,
+        safeOffset: 110,
+        result: { complete: false, checkpointAdvances: 1 },
+      });
+
+      const current = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+      expect(current).toMatchObject({
+        outcome: 'terminal',
+        slices: 1,
+        peerId: PEER_A,
+        safeOffset: 500,
+        result: {
+          complete: true,
+          completedPhases: 1,
+          checkpointAdvances: 1,
+          selectedVmTerminalCompletions: 1,
+        },
+      });
+      expect(reconcile).toHaveBeenCalledTimes(2);
+      expect(reconcile).toHaveBeenNthCalledWith(1, contextGraphId, 'manual');
+      expect(broadDurableSync).not.toHaveBeenCalled();
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not re-enter an active selected-public VM reconcile from catch-up', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-active-reconcile';
+    const reconcile = vi.fn();
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).vmReconcileDispatcher = {
+        isInFlight: (key: string) => key === contextGraphId,
+      };
+      (agent as any).runVmReconcileForCg = reconcile;
+
+      const result = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+
+      expect(result).toMatchObject({
+        outcome: 'no-progress',
+        slices: 0,
+        safeOffset: 0,
+        result: { complete: false },
+        peerResults: [],
+      });
+      expect(result.peerId).toBeUndefined();
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      // The minimal dispatcher above is intentionally not a production queue;
+      // clear it before stop() attempts the normal dispatcher drain.
+      (agent as any).vmReconcileDispatcher = null;
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('does not count a skipped selected-public VM self-reentry as peer success', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-active-catchup';
+    const remotePeer = { toString: () => PEER_A };
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).vmReconcileDispatcher = {
+        isInFlight: (key: string) => key === contextGraphId,
+      };
+      (agent as any).waitForSyncProtocol = async () => true;
+
+      const result = await (agent as any).runCatchupOverPeers(
+        contextGraphId,
+        false,
+        [remotePeer],
+      );
+
+      expect(result.peersTried).toBe(0);
+      expect(result.peersResponded).toBe(0);
+      expect(result.peersSucceeded).toBe(0);
+      expect(result.dataSynced).toBe(0);
+    } finally {
+      (agent as any).vmReconcileDispatcher = null;
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('reports a selected-public VM reconcile exception as a failed peer attempt', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-reconcile-failure';
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).runVmReconcileForCg = vi.fn(async () => {
+        throw new Error('chain inventory unavailable');
+      });
+
+      const result = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+
+      expect(result).toMatchObject({
+        outcome: 'no-progress',
+        slices: 1,
+        peerId: PEER_A,
+        result: { complete: false, failedPeers: 1 },
+        peerResults: [{ peerId: PEER_A, result: { failedPeers: 1 } }],
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('reopens reconcile and membership persistence admission on same-object restart', async () => {
     const membershipUpsert = vi.fn(async () => undefined);
     const agent = await createAgentWithSend(
@@ -1201,6 +1389,46 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(result.peersResponded).toBe(1);
       expect(result.dataSynced).toBe(40_000);
       expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('promotes selected-public VM readiness from a clean chain-terminal result', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-terminal-readiness';
+    const remotePeer = { toString: () => PEER_A };
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph(contextGraphId);
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncDurableRecoveryContextGraph = async () => {
+        const result = {
+          ...cleanDurableSyncResult(),
+          selectedVmTerminalCompletions: 1,
+        };
+        return {
+          outcome: 'terminal',
+          result,
+          peerResults: [{ peerId: PEER_A, result }],
+          slices: 1,
+          peerId: PEER_A,
+          safeOffset: 500,
+        };
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        contextGraphId,
+        false,
+        [remotePeer],
+      );
+
+      expect(result.peersSucceeded).toBe(1);
+      expect(result.diagnostics.durable.selectedVmTerminalCompletions).toBe(1);
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.synced).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

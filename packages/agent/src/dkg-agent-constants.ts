@@ -61,8 +61,20 @@ export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
  * while bounding the first response.
  */
 export const SYNC_REQUEST_INITIAL_PAGE_SIZE = 512;
+/**
+ * Maximum store rows loaded by one negotiated exact-VM page.
+ *
+ * Exact reads stay page-only. Their store adapter separately caps the SPARQL
+ * response body, while the 4 MiB serializer cap owns wire bytes. A 4,096-row
+ * ceiling lets a catalog-sized multi-KA batch that is known to fit the wire
+ * cross in one stream without permitting the retained 8,192-row snapshot lane.
+ * Path failures still fall back to the conservative frame-safe floor.
+ */
+export const SYNC_EXACT_PAGE_READ_MAX_ROWS = 4_096;
 /** Target serialized body. Six MiB of the 10 MiB router cap remains as headroom. */
 export const SYNC_BYTE_BUDGET_RESPONSE_BYTES = DEFAULT_MAX_READ_BYTES - SYNC_RESPONSE_FRAME_HEADROOM_BYTES;
+/** Bound SPARQL JSON before parsing exact page-only payloads into JS objects. */
+export const SYNC_EXACT_PAGE_STORE_RESPONSE_MAX_BYTES = 2 * SYNC_BYTE_BUDGET_RESPONSE_BYTES;
 /** Maximum throughput-oriented row hint; the signed legacy limit remains 500. */
 export const SYNC_REQUEST_PAGE_SIZE = SYNC_BYTE_BUDGET_MAX_ROWS;
 /** Successful pages required before the requester doubles its learned size. */

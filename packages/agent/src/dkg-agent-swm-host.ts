@@ -372,6 +372,7 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
+  SYNC_EXACT_PAGE_READ_MAX_ROWS,
   SYNC_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
@@ -572,9 +573,9 @@ type VmReconcileOrdinalOptions = {
  */
 const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
 
-// Exact VM data responses are page-only and capped at 64 rows per page. Keep
-// one recovery microbatch near 64 non-empty pages so a single large graph does
-// not monopolize the global sync admission. This is a soft scheduling/fairness
+// Exact VM data responses are page-only and bounded independently of retained
+// snapshots. Keep one recovery microbatch near 4,096 leaves so a single large
+// graph does not monopolize the global sync admission. This is a soft scheduling/fairness
 // cap, not a wire or correctness limit: an individually larger KA is still
 // admitted alone and remains bounded by the exact executor's hard guards.
 const VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES = 4_096n;
@@ -3483,7 +3484,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && current.record.nameHash === target.nameHash;
     }
     const current = this.subscribedContextGraphs.get(localCgId);
-    return current === target.sub
+    // Subscription records are immutable snapshots and ordinary readiness
+    // updates replace the object in the map.  Object identity is therefore
+    // not a lifecycle fence: a concurrent SWM catch-up can set metaSynced or
+    // sharedMemorySynced without changing either membership or the VM binding.
+    // Keep the VM slice current across those harmless replacements, while the
+    // durable binding generation + cursor identity still fail closed on an
+    // unsubscribe, rebind, deletion, or cursor reset.
+    return (current?.subscribed === true || current?.coreHosted === true)
       && this.contextGraphBindingState.targetStillCurrent(localCgId, current, target)
       && this.reconcileCursors.get(localCgId) === expectedCursor;
   }
@@ -3653,8 +3661,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       return;
     }
+    // Readiness bookkeeping replaces immutable subscription snapshots. The
+    // binding-generation/cursor fence above, not object identity, determines
+    // whether this watermark still belongs to the active target.
     const sub = this.subscribedContextGraphs.get(localCgId);
-    if (!sub || sub !== target.sub) return;
+    if (!sub || !this.contextGraphBindingState.targetStillCurrent(localCgId, sub, target)) return;
     if (target.bindingKind === 'reverse-name-hash') {
       // Reverse-derived progress is valid only for this process-local,
       // revalidated target. The live cursor advances after this returns; never
@@ -3675,7 +3686,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isTargetCurrent,
     );
     if (!isTargetCurrent()) return;
-    sub.lastReconciledOrdinal = watermark;
+    // A second harmless readiness replacement may race the durable write.
+    // Apply the in-memory watermark to the latest same-binding snapshot.
+    const latest = this.subscribedContextGraphs.get(localCgId);
+    if (!latest || !this.contextGraphBindingState.targetStillCurrent(localCgId, latest, target)) return;
+    latest.lastReconciledOrdinal = watermark;
     this.emitReplication({
       contextGraphId: localCgId,
       onChainCgId: target.onChainId,
@@ -3789,12 +3804,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): Promise<RsHealPassResult> {
     try {
       const capturedOnChainId = target.onChainId;
+      const currentSubscription = () => (
+        this.subscribedContextGraphs instanceof Map
+          ? this.subscribedContextGraphs.get(localCgId)
+          : target.sub
+      );
       const canApply = () => isCurrent()
-        && (!(this.subscribedContextGraphs instanceof Map)
-          || this.subscribedContextGraphs.get(localCgId) === target.sub)
+        && (
+          currentSubscription()?.subscribed === true
+          || currentSubscription()?.coreHosted === true
+        )
         && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          target.sub,
+          currentSubscription(),
           target,
         );
       if (!canApply()) {
@@ -5194,6 +5216,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     attempts: readonly VmRecoveryBatchAttempt[];
     unavailablePeerIds: readonly string[];
     headBlock: number | undefined;
+    initialPageSizeHint?: number;
     signal?: AbortSignal;
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
@@ -5206,6 +5229,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       attempts,
       unavailablePeerIds,
       headBlock,
+      initialPageSizeHint,
       signal,
       isRecoveryCurrent,
       revalidateTarget,
@@ -5252,7 +5276,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         peerId,
         localCgId,
         attempts.map(({ entry }) => entry.target.ual),
-        { signal, isCurrent: isRecoveryCurrent },
+        { signal, isCurrent: isRecoveryCurrent, initialPageSizeHint },
       );
       const { result } = detailed;
       disposition = detailed.disposition;
@@ -5785,6 +5809,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         installedRecord,
         candidatePeerIds,
       }];
+      let batchInitialPageSizeHint: number | undefined;
 
       // The first exact request to a peer remains a single-KA probe. Once that
       // probe has proved the peer is a holder, pack a stable compatible prefix
@@ -5886,6 +5911,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
           continue;
         }
         batchAttempts = plan.targets.map(({ attempt }) => attempt);
+        batchInitialPageSizeHint = Number(
+          plan.estimatedLeaves > BigInt(SYNC_EXACT_PAGE_READ_MAX_ROWS)
+            ? BigInt(SYNC_EXACT_PAGE_READ_MAX_ROWS)
+            : plan.estimatedLeaves,
+        );
         this.log.info(
           ctx,
           `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
@@ -5902,6 +5932,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         attempts: batchAttempts,
         unavailablePeerIds: [...providerPolicy.unavailablePeerIds()],
         headBlock,
+        initialPageSizeHint: batchInitialPageSizeHint,
         signal,
         isRecoveryCurrent,
         revalidateTarget,

@@ -13,6 +13,7 @@ import { DKGAgent } from '../src/index.js';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_EXACT_PAGE_READ_MAX_ROWS,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_PAGE_SIZE,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
@@ -245,10 +246,12 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     const originalQuery = store.query.bind(store);
     const payloadReadLimits: number[] = [];
     let maxPayloadBindings = 0;
+    let manifestMarkerQueries = 0;
     store.query = (async (
       sparql: string,
       options?: Parameters<OxigraphStore['query']>[1],
     ) => {
+      if (sparql.includes('SELECT ?ual ?scopeVersion WHERE')) manifestMarkerQueries += 1;
       const result = await originalQuery(sparql, options);
       const isPagedPayloadRead = sparql.includes('ORDER BY ?s ?p ?o') &&
         payloadGraphs.some((graph) => sparql.includes(`<${graph}>`));
@@ -295,7 +298,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       const lines = linesFromNquads(response);
       expect(new TextEncoder().encode(response).byteLength)
         .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
-      expect(lines.length).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+      expect(lines.length).toBeLessThanOrEqual(SYNC_EXACT_PAGE_READ_MAX_ROWS);
       if (lines.length === 0) break;
       received.push(...lines);
       offset += lines.length;
@@ -311,16 +314,17 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       page.length === MAX_EXACT_SYNC_ASSETS
       && page.every((ual, index) => ual === canonicalAssetUals[index]))).toBe(true);
     const totalRows = MAX_EXACT_SYNC_ASSETS * rowsPerKa;
-    expect(requestedOffsets).toEqual([
-      ...Array.from(
-        { length: Math.ceil(totalRows / SYNC_REQUEST_SAFE_PAGE_SIZE) },
-        (_, index) => index * SYNC_REQUEST_SAFE_PAGE_SIZE,
-      ),
-      totalRows,
-    ]);
+    expect(requestedOffsets[0]).toBe(0);
+    expect(requestedOffsets.at(-1)).toBe(totalRows);
+    expect(requestedOffsets.every((value, index) =>
+      index === 0 || value > requestedOffsets[index - 1]!)).toBe(true);
     expect(payloadReadLimits.length).toBeGreaterThan(0);
-    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
-    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_EXACT_PAGE_READ_MAX_ROWS);
+    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_EXACT_PAGE_READ_MAX_ROWS);
+    // Page-only is a payload-retention policy, not a reason to rebuild the
+    // same bounded graph/count plan on every page request. One authenticated
+    // sync session reads its exact manifest once and reuses the scalar plan.
+    expect(manifestMarkerQueries).toBe(1);
 
     await store.close();
   }, 60_000);
@@ -386,7 +390,7 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     await store.close();
   });
 
-  it('keeps fake signature fields on the 64-row page-only exact-fetch policy', async () => {
+  it('keeps fake signature fields on the bounded page-only exact-fetch policy', async () => {
     const contextGraphId = 'fake-signature-public-exact';
     const store = new OxigraphStore();
     const metaGraph = contextGraphMetaGraphUri(contextGraphId);
@@ -455,12 +459,12 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
       requesterSignatureVS: 'attacker-controlled-vs',
     }));
 
-    expect(linesFromNquads(response)).toHaveLength(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(linesFromNquads(response)).toHaveLength(200);
     expect(new TextEncoder().encode(response).byteLength)
       .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
     expect(payloadReadLimits.length).toBeGreaterThan(0);
-    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
-    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_EXACT_PAGE_READ_MAX_ROWS);
+    expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_EXACT_PAGE_READ_MAX_ROWS);
     expect(payloadSnapshotQueries).toBe(0);
 
     await store.close();

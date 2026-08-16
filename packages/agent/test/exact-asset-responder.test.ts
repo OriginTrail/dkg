@@ -94,6 +94,9 @@ describe('exact asset responder', () => {
     expect(manifestQueries).not.toHaveLength(0);
     for (const query of manifestQueries) {
       expect(query).toContain(`VALUES ?ual { <${requested.ual}> }`);
+      expect(query).toMatch(new RegExp(
+        `GRAPH <${contextGraphMetaGraphUri(CG_ID)}> \\{\\s*VALUES \\?ual`,
+      ));
       expect(query).not.toContain(`<${alreadyPresent.ual}>`);
     }
   });

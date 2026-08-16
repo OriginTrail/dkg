@@ -90,6 +90,7 @@ const PROGRESS_COUNTERS = [
   'emptyResponses',
   'metaOnlyResponses',
   'verifiedPrivateOnlyResponses',
+  'selectedVmTerminalCompletions',
 ] as const satisfies readonly (keyof DurableSyncResult)[];
 
 type ProgressTotals = Record<typeof PROGRESS_COUNTERS[number], number>;

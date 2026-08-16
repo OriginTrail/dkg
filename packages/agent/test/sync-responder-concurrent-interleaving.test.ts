@@ -7,6 +7,7 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  createResponderExactGraphPagePlanMemo,
   createResponderGraphListMemo,
   createResponderSubGraphRegistrationMemo,
 } from '../src/sync/responder/graph-plan.js';
@@ -1545,5 +1546,46 @@ describe('sync responder pagination interleaving', () => {
       bindings: [{ sg: `${cgPrefix}/new`, name: '"new"' }],
     });
     await expect(newSubgraphSession).resolves.toEqual(['new']);
+  });
+
+  it('does not give a newer exact-plan session the superseded pending plan', async () => {
+    const oldPlan = deferred<any>();
+    const newPlan = deferred<any>();
+    const memo = createResponderExactGraphPagePlanMemo();
+    let loads = 0;
+    const load = () => {
+      loads++;
+      return loads === 1 ? oldPlan.promise : newPlan.promise;
+    };
+
+    const oldSession = memo.get('peer:cg:asset', load, {
+      refresh: true,
+      refreshGeneration: 'old-session',
+    });
+    const newSession = memo.get('peer:cg:asset', load, {
+      refresh: true,
+      refreshGeneration: 'new-session',
+    });
+    await Promise.resolve();
+    expect(loads).toBe(1);
+
+    oldPlan.resolve({
+      entries: [{ graph: 'urn:graph:old', rowCount: 1 }],
+      totalRows: 1,
+      pagedGraphs: new Set(),
+    });
+    await expect(oldSession).resolves.toMatchObject({
+      entries: [{ graph: 'urn:graph:old' }],
+    });
+    await vi.waitFor(() => expect(loads).toBe(2));
+
+    newPlan.resolve({
+      entries: [{ graph: 'urn:graph:new', rowCount: 2 }],
+      totalRows: 2,
+      pagedGraphs: new Set(),
+    });
+    await expect(newSession).resolves.toMatchObject({
+      entries: [{ graph: 'urn:graph:new' }],
+    });
   });
 });

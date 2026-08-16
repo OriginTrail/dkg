@@ -620,7 +620,10 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
+import {
+  VmReconcileShutdownTimeoutError,
+  type ContextGraphReconcileResult,
+} from './vm-reconcile-service.js';
 import { ContextGraphMembershipPersistShutdownTimeoutError } from './context-graph-membership-persist-scheduler.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
@@ -851,6 +854,7 @@ function syncPageFetchCoalescingKey(params: {
   forceFreshSession?: boolean;
   manifestDigest?: SyncPageFetchOptions['manifestDigest'];
   assetUals?: readonly string[];
+  initialPageSizeHint?: number;
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
@@ -868,6 +872,7 @@ function syncPageFetchCoalescingKey(params: {
     params.forceFreshSession === true,
     params.manifestDigest ?? null,
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
+    params.initialPageSizeHint ?? null,
     params.returnAcceptedPrefixOnRetryableTransportFailure === true,
     params.requesterScope ?? null,
     params.maxAcceptedQuads ?? null,
@@ -986,6 +991,7 @@ function durableSyncSingleFlightKey(params: {
   hasSignal: boolean;
   hasCurrentFence: boolean;
   exactAssetUals?: readonly string[];
+  exactInitialPageSizeHint?: number;
   settlementSliceTimeoutMs?: number;
   priority?: number;
 }): string | null {
@@ -1007,6 +1013,7 @@ function durableSyncSingleFlightKey(params: {
     authenticationTimeoutMs: params.authenticationTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
+    exactInitialPageSizeHint: params.exactInitialPageSizeHint ?? null,
     settlementSliceTimeoutMs: params.settlementSliceTimeoutMs ?? null,
     priority: params.priority ?? null,
   });
@@ -1360,6 +1367,8 @@ export type DurableSyncOptions = {
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
+  /** Verified catalog leaf estimate for the exact batch. */
+  exactInitialPageSizeHint?: number;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1389,6 +1398,39 @@ type PhysicalDurableSyncResult = {
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
 };
 
+/**
+ * Adapt one chain-inventory reconciliation slice to the legacy durable-sync
+ * accounting shape consumed by reconnect and catch-up orchestration.
+ *
+ * RFC-64 catalogs are authoritative for SWM only. For an explicitly selected
+ * public CG, finalized VM completeness comes from the chain reconciler, so a
+ * legacy whole-graph transfer must not run beside it. The adapter reports
+ * bounded cursor/materialization progress without inventing transferred triple
+ * counts, and reaches the durable terminal boundary only when the chain lane is
+ * actually current with no unresolved ordinals.
+ */
+function vmReconcileSliceAsDurableResult(
+  result: ContextGraphReconcileResult,
+): DurableSyncResult {
+  const accumulator = createDurableSyncAccumulator();
+  const terminal = result.status === 'current' && result.unresolvedOrdinals === 0;
+  if (
+    result.reconciledOrdinals > 0
+    || result.watermarkAfter > result.watermarkBefore
+  ) {
+    recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
+  }
+  if (terminal) {
+    recordDurableSyncDiagnostics(accumulator, { selectedVmTerminalCompletions: 1 });
+  }
+  markDurableTerminalBoundary(
+    accumulator,
+    terminal,
+    { countCompletedPhase: true },
+  );
+  return finalizeDurableSyncCompletion(accumulator);
+}
+
 type LegacyDurableContextGraphOptions = {
   onPhase?: PhaseCallback;
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
@@ -1398,6 +1440,7 @@ type LegacyDurableContextGraphOptions = {
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
   exactAssetUals?: string[];
+  exactInitialPageSizeHint?: number;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -5475,6 +5518,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
                 exactAssetUals,
+                exactInitialPageSizeHint: options?.exactInitialPageSizeHint,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5569,6 +5613,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
       exactAssetUals,
+      exactInitialPageSizeHint: options?.exactInitialPageSizeHint,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       priority: options?.priority,
     });
@@ -5599,7 +5644,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     requestedAssetUals: string[],
-    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+    options: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+      initialPageSizeHint?: number;
+    } = {},
   ): Promise<DurableSyncResult> {
     return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
@@ -5613,7 +5662,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     requestedAssetUals: string[],
-    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+    options: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+      initialPageSizeHint?: number;
+    } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const assetUals = requireExactAssetUals(requestedAssetUals);
     const ctx = createOperationContext('sync');
@@ -5626,6 +5679,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       {
         exactAssetUals: assetUals,
+        exactInitialPageSizeHint: options.initialPageSizeHint,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -5673,6 +5727,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetUals,
+      exactInitialPageSizeHint,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -5788,6 +5843,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             manifestPrefixDigestAtOffset,
             shouldStopAfterPage,
             assetUals: exactAssetUals,
+            initialPageSizeHint: phase === 'data'
+              ? exactInitialPageSizeHint
+              : undefined,
             returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope,
           },
@@ -6416,6 +6474,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
+      initialPageSizeHint,
       returnAcceptedPrefixOnRetryableTransportFailure,
       // Internal namespace for state whose retained prefix is unavailable to
       // ordinary coalesced callers.
@@ -6443,6 +6502,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshSession,
         manifestDigest,
         assetUals,
+        initialPageSizeHint,
         returnAcceptedPrefixOnRetryableTransportFailure,
         requesterScope,
         maxAcceptedQuads,
@@ -6494,6 +6554,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      initialPageSizeHint,
       returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope,
       maxAcceptedBytes: exactAccumulationLimits?.maxBytes,
@@ -7409,6 +7470,73 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } = {},
   ): Promise<DurableRecoveryExecution> {
     const ctx = createOperationContext('sync');
+
+    // Selected public RFC-64 CGs have two deliberately separate inventories:
+    // the accepted RFC-64 catalog is authoritative for SWM, while finalized VM
+    // membership is authoritative on chain. Sending these graphs through the
+    // legacy whole-CG durable runner duplicates the chain reconciler, downloads
+    // every historical graph, and can monopolise the store long enough to
+    // invalidate the exact recovery lifecycle. Keep the existing method as the
+    // orchestration seam, but delegate its VM work to one bounded exact slice.
+    if (this.isRfc64SelectedVmReconcileContextGraph(contextGraphId)) {
+      // A reconcile slice can reach catch-up while repairing one missing
+      // ordinal. Re-entering the same keyed dispatcher from that catch-up
+      // would make the active promise await itself. Return a fail-closed
+      // no-progress durable result instead: runCatchupOverPeers still executes
+      // the independent SWM plane, while the active chain-inventory owner keeps
+      // responsibility for exact VM provider selection and materialization.
+      // External triggers racing an already-active slice use the same safe
+      // behavior; the periodic/trailing owner continues durable progress.
+      if (this.vmReconcileDispatcher?.isInFlight(contextGraphId)) {
+        const result = createIncompleteDurableSyncResult();
+        return {
+          outcome: 'no-progress',
+          result,
+          // No physical peer attempt happened in this trigger. Keeping the
+          // list empty prevents outer catch-up accounting from mistaking a
+          // skipped self-reentry for a successful peer response.
+          peerResults: [],
+          slices: 0,
+          safeOffset: 0,
+        };
+      }
+      let durableResult: DurableSyncResult;
+      let outcome: DurableRecoveryExecution['outcome'] = 'no-progress';
+      let safeOffset = 0;
+      try {
+        const reconcile = await this.runVmReconcileForCg(contextGraphId, 'manual');
+        durableResult = vmReconcileSliceAsDurableResult(reconcile);
+        safeOffset = reconcile.watermarkAfter;
+        outcome = durableResult.complete
+          ? 'terminal'
+          : (durableResult.checkpointAdvances ?? 0) > 0
+            ? 'partial-progress'
+            : 'no-progress';
+      } catch (error) {
+        // An exception is not an empty but otherwise healthy slice. Preserve
+        // the durable diagnostic contract so outer catch-up accounting cannot
+        // count the trigger peer as successful and suppress the next retry.
+        durableResult = createFailedPeerDurableSyncResult();
+        this.log.warn(
+          ctx,
+          `Chain-inventory VM recovery for selected public CG "${contextGraphId}" `
+            + `did not complete this slice: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      // The candidate is the trigger/accounting peer, not an assertion that it
+      // served VM bytes. Exact recovery owns provider selection internally and
+      // verifies every returned UAL against the chain before materialization.
+      const peerId = options.candidatePeerIds?.[0];
+      return {
+        outcome,
+        result: durableResult,
+        peerResults: peerId ? [{ peerId, result: durableResult }] : [],
+        slices: 1,
+        ...(peerId ? { peerId } : {}),
+        safeOffset,
+      };
+    }
+
     return durableRecoveryRunnerFor(this).run({
       contextGraphId,
       options,
@@ -7728,6 +7856,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         emptyResponses: 0,
         metaOnlyResponses: 0,
         verifiedPrivateOnlyResponses: 0,
+        selectedVmTerminalCompletions: 0,
         dataRejectedMissingMeta: 0,
         rejectedKcs: 0,
         failedPeers: 0,
@@ -7894,6 +8023,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const accessDeniedPeers = new Set<string>();
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
+    let cleanSelectedVmTerminalCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
     const peersSucceeded = new Set<string>();
     for (const [resultIndex, r] of results.entries()) {
@@ -7958,6 +8088,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
         cleanDurablePrivateOnlyCompletions +=
           durableProgress.hasVerifiedPrivateOnlyResponse ? 1 : 0;
+        cleanSelectedVmTerminalCompletions +=
+          durableProgress.hasSelectedVmTerminalCompletion ? 1 : 0;
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
@@ -7994,6 +8126,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.metaOnlyResponses += r.durable.metaOnlyResponses;
       diagnostics.durable.verifiedPrivateOnlyResponses +=
         r.durable.verifiedPrivateOnlyResponses;
+      diagnostics.durable.selectedVmTerminalCompletions =
+        (diagnostics.durable.selectedVmTerminalCompletions ?? 0)
+        + (r.durable.selectedVmTerminalCompletions ?? 0);
       diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
@@ -8192,7 +8327,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // promote readiness — and cannot erase a clean snapshot another peer did
     // deliver.
     const durableCompletedCleanly =
-      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
+      cleanDurableDataSynced > 0
+      || cleanDurablePrivateOnlyCompletions > 0
+      || cleanSelectedVmTerminalCompletions > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {

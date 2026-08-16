@@ -221,6 +221,18 @@ export class ProtocolRouter {
    * anyway.
    */
   private readonly peerWireVariant = new Map<string, Map<string, 'pooled' | 'one-shot'>>();
+  /**
+   * Relay circuits are reliable for bounded one-shot requests, but opening two
+   * authenticated sync streams to the same relay-only peer concurrently makes
+   * libp2p race the circuit's stream negotiation. The losing request commonly
+   * fails with `Remote closed connection during opening`, then rebuilds and
+   * retries the whole authenticated page.
+   *
+   * Keep one FIFO tail per peer for SINGLE-USE payloads only. Direct peers and
+   * reusable payloads retain their existing parallelism, and different relay
+   * peers never block one another.
+   */
+  private readonly relaySingleUseTails = new Map<string, Promise<void>>();
 
   constructor(node: DKGNode, options?: ProtocolRouterOptions) {
     this.node = node;
@@ -577,7 +589,12 @@ export class ProtocolRouter {
     try {
       const res = await withSpan(
         'protocol_router.send',
-        () => this.sendInner(peerIdStr, protocolId, data, timeoutMsOrOpts),
+        () => this.sendWithRelaySingleUseAdmission(
+          peerIdStr,
+          protocolId,
+          data,
+          timeoutMsOrOpts,
+        ),
         { attributes: { 'dkg.protocol_id': protocolId, 'dkg.peer': peerIdStr.slice(0, 8) } },
       );
       m.protocolSendTotal.add(1, { protocol_id: protocolId, outcome: 'ok' });
@@ -587,6 +604,50 @@ export class ProtocolRouter {
       throw err;
     } finally {
       m.protocolSendDuration.record(Date.now() - startedAt, { protocol_id: protocolId });
+    }
+  }
+
+  private async sendWithRelaySingleUseAdmission(
+    peerIdStr: string,
+    protocolId: string,
+    data: Uint8Array,
+    timeoutMsOrOpts: number | SendOptions,
+  ): Promise<Uint8Array> {
+    const opts: SendOptions = typeof timeoutMsOrOpts === 'number'
+      ? { timeoutMs: timeoutMsOrOpts }
+      : timeoutMsOrOpts;
+    if (
+      opts.payloadReuse !== 'single-use'
+      || !this.peerHasOnlyRelayedConnections(peerIdStr)
+    ) {
+      return this.sendInner(peerIdStr, protocolId, data, timeoutMsOrOpts);
+    }
+
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_SEND_TIMEOUT_MS;
+    const startedAt = Date.now();
+    const deadline = AbortSignal.timeout(timeoutMs);
+    const callerBudget = composeAbortSignalsScoped(deadline, opts.signal);
+    const queueBudget = composeAbortSignalsScoped(callerBudget.signal, this.node.stopSignal);
+    let release: (() => void) | undefined;
+    try {
+      release = await this.acquireRelaySingleUseTurn(
+        peerIdStr,
+        queueBudget.signal ?? deadline,
+      );
+      const remainingMs = Math.max(0, timeoutMs - (Date.now() - startedAt));
+      if (remainingMs === 0 || deadline.aborted) {
+        throw new Error(
+          `send timeout: relay single-use queue exhausted the ${timeoutMs}ms budget`,
+        );
+      }
+      return await this.sendInner(peerIdStr, protocolId, data, {
+        ...opts,
+        timeoutMs: remainingMs,
+      });
+    } finally {
+      release?.();
+      queueBudget.dispose();
+      callerBudget.dispose();
     }
   }
 
@@ -1056,6 +1117,48 @@ export class ProtocolRouter {
       }
     }
     throw lastErr;
+  }
+
+  /**
+   * Acquire one abortable FIFO turn for a single-use send to a relay-only peer.
+   * The caller's already-running overall deadline includes queue wait, so a
+   * stalled predecessor cannot silently extend the public send timeout.
+   */
+  private async acquireRelaySingleUseTurn(
+    peerIdStr: string,
+    signal: AbortSignal,
+  ): Promise<() => void> {
+    const predecessor = (this.relaySingleUseTails.get(peerIdStr) ?? Promise.resolve())
+      .catch(() => undefined);
+    let releaseGate!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    const tail = predecessor.then(() => gate);
+    this.relaySingleUseTails.set(peerIdStr, tail);
+
+    // Keep the composed tail installed until every predecessor ahead of this
+    // turn has settled. A caller may abandon its queued turn before the
+    // predecessor finishes; deleting the map entry at that point would let a
+    // later send bypass the still-active predecessor and reopen the relay
+    // stream collision this admission queue is meant to prevent.
+    void tail.then(() => {
+      if (this.relaySingleUseTails.get(peerIdStr) === tail) {
+        this.relaySingleUseTails.delete(peerIdStr);
+      }
+    });
+
+    const release = (): void => {
+      releaseGate();
+    };
+
+    try {
+      await waitForPromiseOrAbort(predecessor, signal);
+      return release;
+    } catch (error) {
+      release();
+      throw error;
+    }
   }
 
   /**
@@ -1645,6 +1748,31 @@ function composeAbortSignalsScoped(
     secondary.addEventListener('abort', forwardSecondary, { once: true });
   }
   return { signal: combined.signal, dispose: cleanup };
+}
+
+function waitForPromiseOrAbort(
+  promise: Promise<unknown>,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) return Promise.reject(asAbortError(signal.reason));
+  return new Promise<void>((resolve, reject) => {
+    const cleanup = (): void => signal.removeEventListener('abort', onAbort);
+    const onAbort = (): void => {
+      cleanup();
+      reject(asAbortError(signal.reason));
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      () => {
+        cleanup();
+        resolve();
+      },
+      (error) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
 }
 
 function abortStream(stream: AbortableByteStream, reason: unknown): void {
