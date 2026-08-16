@@ -130,7 +130,10 @@ const SYNC_RESPONDER_PER_PEER_CONCURRENCY = 2;
 const SYNC_RESPONDER_PER_PEER_PLANE_CONCURRENCY = 1;
 const SYNC_RESPONDER_QUEUE_LIMIT = 64;
 export const SYNC_RESPONDER_PER_PEER_QUEUE_LIMIT = 4;
-const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 10_000;
+// Store-backed graph planning routinely takes tens of seconds for large CGs.
+// Keep bounded admission, but do not reject a healthy queued page before one
+// legitimate predecessor can finish. Request aborts still remove stale work.
+const SYNC_RESPONDER_MAX_QUEUE_WAIT_MS = 60_000;
 export const SYNC_RESPONDER_DURABLE_DATA_SNAPSHOT_LIMIT = 128;
 export const SYNC_RESPONDER_DURABLE_META_SNAPSHOT_LIMIT = 64;
 export const SYNC_RESPONDER_SHARED_MEMORY_SNAPSHOT_LIMIT = 64;
