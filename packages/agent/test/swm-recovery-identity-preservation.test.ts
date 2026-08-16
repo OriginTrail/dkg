@@ -14,6 +14,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
+import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
@@ -268,6 +269,75 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     ];
     const result = await recoverContextGraphSwm(identityDeps(store, payload));
     expect(result.completed).toBe(true);
-    expect((await headIds(store)).length).toBe(1);
+    // The parser's selection rule (latest publishedAt, then DESCENDING id
+    // compare — fixtures share one timestamp) picks storage-ack-z; asserting
+    // the exact winner catches a canonicalizer that lands single-valued but
+    // keeps the NON-selected id.
+    expect(await headIds(store)).toEqual(['"storage-ack-z"']);
+  });
+
+  it('purges residue head rows when preserving (rewrite, not skip)', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store);
+    // An extra stale assertionGraph row on the head survives the health
+    // check (it models only version/id cardinality) and the marker-only
+    // skip ASK. A preserve that merely SKIPS replacement keeps it — readers
+    // requiring a single assertion graph then see an ambiguous head that the
+    // pre-fix bulk replacement would have repaired. Preserving must rewrite
+    // the head from the descriptor's rows instead.
+    const staleGraph = `${localShare.assertionGraph}-stale`;
+    await store.insert([{
+      subject: localShare.headSubject,
+      predicate: `${DKG}assertionGraph`,
+      object: staleGraph,
+      graph: WS_META,
+    }]);
+    const result = await recoverContextGraphSwm(identityDeps(store, [...curatorEquivalent.meta]));
+    expect(result.completed).toBe(true);
+    expect(await headIds(store)).toEqual(['"op-local"']);
+    const graphs = await store.query(
+      `SELECT ?g WHERE { GRAPH <${WS_META}> { <${localShare.headSubject}> <${DKG}assertionGraph> ?g } }`,
+    );
+    expect(graphs.type).toBe('bindings');
+    if (graphs.type === 'bindings') {
+      expect(graphs.bindings.map((row) => String(row['g']))).toEqual([localShare.assertionGraph]);
+    }
+  });
+
+  it('serializes the preserve decision behind the KA write lock', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store);
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const [descriptor] = parseGraphScopedSwmRecoveryDescriptors({
+      contextGraphId: CG,
+      metaQuads: [...curatorEquivalent.meta],
+    });
+    expect(descriptor).toBeDefined();
+    // Hold the exact KA lock through the materializer's own keying, start
+    // the decision, and prove it neither reads nor settles until release —
+    // outcome-only rows stay green if the method drops or re-keys the lock.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const holder = materializer.withKaWriteLock(
+      CG, descriptor!.subGraphName, descriptor!.kaUal, () => gate,
+    );
+    let settled = false;
+    const decision = materializer
+      .preserveStoredIdentityForSkippedAsset(CG, descriptor!)
+      .then((result) => { settled = true; return result; });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settled).toBe(false);
+    release();
+    await holder;
+    const result = await decision;
+    expect(settled).toBe(true);
+    expect(result.outcome).toBe('preserved');
+    expect(await headIds(store)).toEqual(['"op-local"']);
   });
 });

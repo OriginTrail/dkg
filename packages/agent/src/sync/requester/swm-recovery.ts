@@ -551,11 +551,13 @@ export async function recoverContextGraphSwm(
     }
     // The SAME preserve decision the public lane consults — ONE owner in the
     // materializer (lock + healthy head + version certification + the full
-    // reader-contract gate stack, id-equal case included), returning the
-    // exact rows this lane must withhold from the raw insert.
+    // reader-contract gate stack, id-equal case included). On 'preserved'
+    // the head is ALREADY converged (rewritten from descriptor rows with
+    // the winner id, under the same lock hold as the decision); this lane
+    // only owes the returned rows an exclusion from the raw insert.
     const preservation = await deps.graphAssetSkip.snapshotMaterializer
-      .evaluateStoredIdentityPreservation(deps.contextGraphId, descriptor);
-    if (preservation.outcome === 'preserve') {
+      .preserveStoredIdentityForSkippedAsset(deps.contextGraphId, descriptor);
+    if (preservation.outcome === 'preserved') {
       preservedWithholdRows.push(...preservation.withholdRows);
       preservedDescriptors.push(descriptor);
     } else {

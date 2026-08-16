@@ -213,23 +213,33 @@ export interface SharedMemorySnapshotMaterializer {
   ): Promise<void>;
   /**
    * GH#2273 — the ONE preserve decision for a skipped, already-materialized
-   * KA: takes the KA write lock itself, and preserves only when the stored
-   * head is healthy (single-valued), certifies the descriptor's version, and
-   * — for a FOREIGN stored id — `selectRepairIdentity` accepts a stored
-   * winner under the full reader-contract gate stack. An id-equal head goes
-   * through the SAME health + version conjuncts (an id-equal head with a
-   * stale version row must be replaced, not preserved). 'preserve' carries
-   * the winner and the exact descriptor rows every later write must
-   * withhold (empty for the id-equal case — the descriptor's id row is
-   * byte-identical); 'replace' ⇒ meta replacement / repair proceeds as
-   * today. Keeping the decision here is what stops the lanes from drifting
-   * on the same invariant.
+   * KA, and its enactment, under a SINGLE hold of the KA write lock (decide-
+   * then-write across two lock acquisitions would race live writes).
+   * Preserves only when the stored head is healthy (single-valued), certifies
+   * the descriptor's version, and — for a FOREIGN stored id —
+   * `selectRepairIdentity` accepts a stored winner under the full
+   * reader-contract gate stack. An id-equal head goes through the SAME
+   * health + version conjuncts (an id-equal head with a stale version row
+   * must be replaced, not preserved).
+   *
+   * On 'preserved' the head has ALREADY been converged via the same
+   * rewrite-first repair the public lane uses: the head subject is rewritten
+   * from the descriptor's rows with the id swapped to the preserved winner,
+   * purging any residue rows on the head subject that the health check does
+   * not model (a stale extra assertionGraph row, say) — the pre-fix bulk
+   * replacement deleted the whole head for every skipped KA, and preserving
+   * must not become a corruption keeper. The caller still owes the returned
+   * `withholdRows` an exclusion from any later raw insert (empty for the
+   * id-equal case — the descriptor's id row is byte-identical). 'replace' ⇒
+   * meta replacement / repair proceeds as today. Keeping decision AND
+   * enactment here is what stops the lanes from drifting on the same
+   * invariant.
    */
-  evaluateStoredIdentityPreservation(
+  preserveStoredIdentityForSkippedAsset(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<
-    | { outcome: 'preserve'; winnerShareOperationId: string; withholdRows: readonly Quad[] }
+    | { outcome: 'preserved'; withholdRows: readonly Quad[] }
     | { outcome: 'replace' }
   >;
 }
@@ -546,7 +556,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       }
     },
 
-    evaluateStoredIdentityPreservation: async (contextGraphId, descriptor) => {
+    preserveStoredIdentityForSkippedAsset: async (contextGraphId, descriptor) => {
       return withKeyedLocks(
         deps.writeLocks,
         [swmKaWriteLockKey(contextGraphId, descriptor.subGraphName, descriptor.kaUal)],
@@ -566,19 +576,32 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           } catch {
             return { outcome: 'replace' as const };
           }
+          let winnerShareOperationId: string;
+          let withholdRows: readonly Quad[];
           if (stored.shareOperationId === descriptor.shareOperationId) {
-            // Identical healthy identity: preserve as-is; the descriptor's
-            // id row is byte-identical, so there is nothing to withhold.
-            return {
-              outcome: 'preserve' as const,
-              winnerShareOperationId: stored.shareOperationId,
-              withholdRows: [],
-            };
+            // Identical healthy identity: the descriptor's id row is
+            // byte-identical, so there is nothing to withhold.
+            winnerShareOperationId = stored.shareOperationId;
+            withholdRows = [];
+          } else {
+            const selected = await materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
+            if (selected === null) return { outcome: 'replace' as const };
+            winnerShareOperationId = selected.winnerShareOperationId;
+            withholdRows = selected.withholdRows;
           }
-          const selected = await materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
-          return selected === null
-            ? { outcome: 'replace' as const }
-            : { outcome: 'preserve' as const, ...selected };
+          // ENACT while still holding the lock: rewrite the head from the
+          // descriptor's rows with the id swapped to the winner. The health
+          // check above models only version/id cardinality; the rewrite is
+          // what purges residue rows on the head subject (an extra stale
+          // assertionGraph row survives the check but not the rewrite) and
+          // what keeps 'preserved' at least as convergent as the bulk
+          // replacement it suppresses.
+          await materializerSelf.repairHeadPreservingIdentity(
+            contextGraphId,
+            descriptor,
+            winnerShareOperationId,
+          );
+          return { outcome: 'preserved' as const, withholdRows };
         },
       );
     },

@@ -20,9 +20,6 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
-import { swmFixtures } from './swm-descriptor-fixtures.js';
 import {
   collectPublicSnapshotMetadata,
   orderPublicSnapshotsForBalancedRecency,
