@@ -229,6 +229,26 @@ describe('byte-budget sync pagination', () => {
     expect(request.pageRowsHint).toBe(SYNC_REQUEST_PAGE_SIZE);
   });
 
+  it('advertises byte-budget paging for public shared-memory metadata', async () => {
+    const encoded = await buildSyncRequestEnvelope({
+      contextGraphId: CG_ID,
+      offset: 0,
+      limit: SYNC_REQUEST_PAGE_SIZE,
+      includeSharedMemory: true,
+      targetPeerId: REMOTE_PEER_ID,
+      requesterPeerId: LOCAL_PEER_ID,
+      phase: 'meta',
+      needsAuth: false,
+      computeSyncDigest: () => new Uint8Array(32),
+      getIdentityId: async () => 0n,
+    });
+
+    expect(new TextDecoder().decode(encoded)).toBe(
+      `workspace:${CG_ID}|0|${SYNC_REQUEST_PAGE_SIZE}|meta`
+      + `|page-mode|${SYNC_BYTE_BUDGET_PAGE_MODE}|page-rows|${SYNC_REQUEST_PAGE_SIZE}`,
+    );
+  });
+
   it('does not advertise byte-budget paging for a durable meta request at the legacy cap', async () => {
     const wallet = ethers.Wallet.createRandom();
     const encoded = await buildSyncRequestEnvelope({
@@ -653,6 +673,90 @@ describe('byte-budget sync pagination', () => {
     });
     expect(linesFromNquads(upgraded)).toHaveLength(1_200);
     expect(new TextEncoder().encode(upgraded).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+
+    await store.close();
+  });
+
+  it('honours the negotiated row hint for shared-memory meta while legacy meta remains capped', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'byte-budget-swm-meta-cg';
+    const graph = `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
+    await store.insert(Array.from({ length: 1_200 }, (_, i) => ({
+      graph,
+      subject: `urn:swm-meta-subject-${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: `"value-${i}"`,
+    })));
+    const legacyPageSize = 128;
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: legacyPageSize,
+      sharedMemoryTtlMs: 0,
+    });
+
+    const legacy = await cap.invoke({
+      contextGraphId,
+      offset: 0,
+      limit: legacyPageSize,
+      includeSharedMemory: true,
+      phase: 'meta',
+      syncSessionId: 'legacy-swm-meta-session',
+    });
+    expect(linesFromNquads(legacy)).toHaveLength(legacyPageSize);
+
+    const upgraded = await cap.invoke({
+      contextGraphId,
+      offset: 0,
+      limit: legacyPageSize,
+      includeSharedMemory: true,
+      phase: 'meta',
+      syncSessionId: 'byte-budget-swm-meta-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    });
+    expect(linesFromNquads(upgraded)).toHaveLength(1_200);
+    expect(new TextEncoder().encode(upgraded).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+
+    await store.close();
+  });
+
+  it('continues a byte-truncated shared-memory meta page from the same session snapshot', async () => {
+    const store = new OxigraphStore();
+    const contextGraphId = 'byte-budget-swm-meta-continuation-cg';
+    const graph = `did:dkg:context-graph:${contextGraphId}/_shared_memory_meta`;
+    const totalRows = 900;
+    await store.insert(Array.from({ length: totalRows }, (_, i) => ({
+      graph,
+      subject: `urn:swm-meta-large-${i.toString().padStart(4, '0')}`,
+      predicate: 'urn:predicate',
+      object: `"${'x'.repeat(6_000)}-${i}"`,
+    })));
+    const cap = registerTestSyncHandler(store, {
+      syncPageSize: 128,
+      sharedMemoryTtlMs: 0,
+    });
+    const request = {
+      contextGraphId,
+      limit: 128,
+      includeSharedMemory: true,
+      phase: 'meta' as const,
+      syncSessionId: 'byte-budget-swm-meta-continuation-session',
+      pageMode: SYNC_BYTE_BUDGET_PAGE_MODE,
+      pageRowsHint: SYNC_REQUEST_PAGE_SIZE,
+    };
+
+    const first = await cap.invoke({ ...request, offset: 0 });
+    const firstRows = linesFromNquads(first);
+    expect(firstRows.length).toBeGreaterThan(0);
+    expect(firstRows.length).toBeLessThan(totalRows);
+    expect(new TextEncoder().encode(first).byteLength)
+      .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
+
+    const second = await cap.invoke({ ...request, offset: firstRows.length });
+    const secondRows = linesFromNquads(second);
+    expect(secondRows.length).toBe(totalRows - firstRows.length);
+    expect(new TextEncoder().encode(second).byteLength)
       .toBeLessThanOrEqual(SYNC_BYTE_BUDGET_RESPONSE_BYTES);
 
     await store.close();

@@ -185,13 +185,16 @@ export async function buildSyncRequestEnvelope(params: BuildSyncRequestParams): 
     ? Math.max(1, Math.min(limit, SYNC_BYTE_BUDGET_MAX_ROWS))
     : SYNC_PAGE_SIZE;
   const assetUals = rawAssetUals === undefined ? undefined : requireExactAssetUals(rawAssetUals);
-  // Advertise byte-budget page mode for durable DATA and META (#1916/#1923).
+  // Advertise byte-budget page mode for DATA and META (#1916/#1923). SWM
+  // metadata uses the same additive hint so a retained RFC-64 manifest can
+  // grow beyond the legacy 500-row transport cap without changing its signed
+  // authorization boundary.
   // Additive/rolling-upgrade safe both directions: an OLD responder ignores the
   // meta pageMode (its meta path is not byte-budget-gated → serves legacy meta),
   // and a NEW responder treats a request WITHOUT meta pageMode as non-negotiated
   // (plain meta serializer). The signed `limit` still rides the 500-row legacy
   // cap below, so digests stay wire-compatible.
-  const useByteBudgetPage = (phase === 'data' || (!includeSharedMemory && phase === 'meta'))
+  const useByteBudgetPage = (phase === 'data' || phase === 'meta')
     && (
       requestedLimit > SYNC_PAGE_SIZE
       // Exact DATA must remain on the responder's bounded page-only path after

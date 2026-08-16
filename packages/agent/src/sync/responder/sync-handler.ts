@@ -592,19 +592,17 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
       hasExactAssetFilter: assetUals !== undefined,
     });
     const usesByteBudgetPage = dataRequestPolicy.usesByteBudgetPage;
-    // Durable meta negotiated its byte-budget page mode on the wire (#1916 /
-    // #1923). The subject-atomic byte-fit in readDurableMetaPage already bounds
-    // the page ≤ budget for BOTH modes, so this only selects the belt-and-
-    // suspenders response serializer and records the explicit contract.
-    const usesMetaByteBudget = !isWorkspace &&
-      phase === 'meta' &&
+    // META negotiates byte-budget paging on the wire (#1916/#1923). Durable
+    // meta is subject-atomic; SWM meta is reassembled and verified as one
+    // retained manifest. Both remain bounded by the common response serializer.
+    const usesMetaByteBudget = phase === 'meta' &&
       request.pageMode === SYNC_BYTE_BUDGET_PAGE_MODE;
     // The authenticated `limit` deliberately remains capped at the legacy
     // responder size for rolling-upgrade signature compatibility. Upgraded
     // META requesters carry the larger row target in the additive hint, just
-    // like DATA. Honour it here: readDurableMetaPage and the serializer below
-    // still enforce the response byte budget and whole-subject boundaries.
-    const durableMetaLimit = usesMetaByteBudget &&
+    // like DATA. Honour it here; the serializer below still enforces the
+    // response byte budget, while durable meta also keeps whole-subject bounds.
+    const metaLimit = usesMetaByteBudget &&
       typeof request.pageRowsHint === 'number' &&
       Number.isSafeInteger(request.pageRowsHint)
       ? Math.max(1, Math.min(request.pageRowsHint, SYNC_BYTE_BUDGET_MAX_ROWS))
@@ -704,35 +702,44 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             request.syncSessionId,
             offset,
           );
-          const rows = await readSwmMetaPage({
-            store,
-            graphList: await graphListMemo.get({
+          const registeredSubGraphNames = await swmAdmissionMemo.get(
+            contextGraphId,
+            {
               refresh: session?.refreshRowList ?? offset === 0,
               refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
               signal,
-            }),
-            registeredSubGraphNames: await swmAdmissionMemo.get(
-              contextGraphId,
-              {
+            },
+          );
+          const rows = await readSwmMetaPage({
+            store,
+            graphList: cutoff == null
+              ? await graphListMemo.get({
                 refresh: session?.refreshRowList ?? offset === 0,
                 refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
                 signal,
-              },
-            ),
+              })
+              : [],
+            registeredSubGraphNames,
             contextGraphId,
             cutoffIso: cutoff,
             offset,
-            limit,
+            limit: metaLimit,
             signal,
             rowListMemo: session ? swmRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,
             refreshRowList: session?.refreshRowList,
             refreshGeneration: session?.refreshGeneration,
             freshMetaPlanMemo: freshSwmMetaPlanMemo,
+            // The byte-budget serializer may return only a prefix even when
+            // the loaded row slice is shorter than pageRowsHint. Retain the
+            // immutable session snapshot until the requester asks for EOF.
+            releaseCacheOnShortPage: !usesMetaByteBudget,
           });
           const queryDurationMs = Date.now() - queryStartedAt;
           const serializeStartedAt = Date.now();
-          const serialized = serializeResponderRows(rows);
+          const serialized = usesMetaByteBudget
+            ? serializeResponderRowsWithinByteBudget(rows, SYNC_BYTE_BUDGET_RESPONSE_BYTES)
+            : serializeResponderRows(rows);
           if (serialized) nquads.push(serialized);
           const serializeDurationMs = Date.now() - serializeStartedAt;
           logFirstPageDetail(() => `Sync responder SWM meta for "${contextGraphId}": auth=${authDurationMs}ms query=${queryDurationMs}ms serialize=${serializeDurationMs}ms`);
@@ -744,21 +751,24 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
             request.syncSessionId,
             offset,
           );
-          const rows = await readSwmDataPage({
-            store,
-            graphList: await graphListMemo.get({
+          const registeredSubGraphNames = await swmAdmissionMemo.get(
+            contextGraphId,
+            {
               refresh: session?.refreshRowList ?? offset === 0,
               refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
               signal,
-            }),
-            registeredSubGraphNames: await swmAdmissionMemo.get(
-              contextGraphId,
-              {
+            },
+          );
+          const rows = await readSwmDataPage({
+            store,
+            graphList: cutoff == null
+              ? await graphListMemo.get({
                 refresh: session?.refreshRowList ?? offset === 0,
                 refreshGeneration: offset === 0 ? session?.refreshGeneration : undefined,
                 signal,
-              },
-            ),
+              })
+              : [],
+            registeredSubGraphNames,
             contextGraphId,
             cutoffIso: cutoff,
             offset,
@@ -824,7 +834,7 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
               },
             ),
             offset,
-            limit: durableMetaLimit,
+            limit: metaLimit,
             signal,
             rowListMemo: session ? durableMetaRowsMemo : undefined,
             rowListCacheKey: session?.rowListCacheKey,

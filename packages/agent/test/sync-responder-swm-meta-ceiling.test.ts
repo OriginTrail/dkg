@@ -136,6 +136,57 @@ function forbidSwmMetaSortOrOffsetQueries(store: OxigraphStore) {
 }
 
 describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', () => {
+  it('uses the bounded fresh-subject plan for an ordinary TTL-filtered manifest', async () => {
+    const cgId = 'meta-bounded-plan-path';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const store = new OxigraphStore();
+    const quads: Quad[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      quads.push(...workspaceOpQuads(cgId, `fresh-${index}`, `urn:fresh:root:${index}`, metaGraph, freshIso()));
+      quads.push(...workspaceOpQuads(cgId, `stale-${index}`, `urn:stale:root:${index}`, metaGraph, staleIso()));
+    }
+    await store.insert(quads);
+
+    const sources: string[] = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: unknown) => {
+      const source = (options as { source?: string } | undefined)?.source;
+      if (source) sources.push(source);
+      return originalQuery(sparql, options as never);
+    }) as OxigraphStore['query'];
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    const request = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta' as const,
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'bounded-plan-session',
+    };
+    const first = await cap.invoke(request);
+    expect(linesFromNquads(first)).toHaveLength(40 * 5);
+    expect(sources).not.toContain('sync.responder.readSwmMetaGraphSnapshot');
+    expect(sources).toContain('sync.responder.readFreshSwmMetaSubjects');
+    expect(sources).toContain('sync.responder.countFreshSwmMetaSubjectRows');
+    expect(sources).toContain('sync.responder.readFreshSwmMetaSubjectRows');
+
+    const subjectDiscoveryAfterFirst = sources.filter(
+      (source) => source === 'sync.responder.readFreshSwmMetaSubjects',
+    ).length;
+    const subjectCountAfterFirst = sources.filter(
+      (source) => source === 'sync.responder.countFreshSwmMetaSubjectRows',
+    ).length;
+    expect(await cap.invoke(request)).toBe(first);
+    expect(sources.filter(
+      (source) => source === 'sync.responder.readFreshSwmMetaSubjects',
+    )).toHaveLength(subjectDiscoveryAfterFirst);
+    expect(sources.filter(
+      (source) => source === 'sync.responder.countFreshSwmMetaSubjectRows',
+    )).toHaveLength(subjectCountAfterFirst);
+    await store.close();
+  });
+
   it('keeps plan-only ceilings pinned below the snapshot materialization caps', () => {
     expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS).toBe(64_000);
     expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
@@ -476,7 +527,7 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
     await store.close();
   });
 
-  it('degrades to plan paging when the STORE response byte cap fires during snapshot materialization (#1868 review: untyped escape)', async () => {
+  it('serves directly through bounded plan paging without attempting an oversized whole-subject snapshot', async () => {
     const cgId = 'meta-ceiling-storecap';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const fresh = freshIso();
@@ -507,7 +558,8 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
       return originalQuery(sparql, options as never);
     }) as OxigraphStore['query'];
 
-    // DEFAULT budgets: the snapshot lane is attempted first and must degrade.
+    // DEFAULT budgets: the bounded subject plan is now the primary TTL lane,
+    // so it must never attempt the old whole-subject snapshot query.
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 7 });
     const { lines } = await collectAllPages(
       cap,
@@ -515,7 +567,7 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
       7,
     );
     expect(lines.size).toBe(200);
-    expect(capThrows).toBeGreaterThan(0);
+    expect(capThrows).toBe(0);
     await store.close();
   });
 

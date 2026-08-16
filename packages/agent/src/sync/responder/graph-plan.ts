@@ -73,7 +73,13 @@ const PROV_USED = 'http://www.w3.org/ns/prov#used';
 const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
-  return { signal, priority: 'background', source };
+  // An admitted sync response is latency-sensitive work for a remote node,
+  // not local maintenance.  Keeping these reads in the background lane lets
+  // an unrelated finalization/repair backlog occupy every normal slot while
+  // the remote stream sits on a hard deadline.  The responder already has
+  // bounded global/per-peer admission, so route the store work through the
+  // normal lane and let that outer limiter remain the abuse boundary.
+  return { signal, priority: 'normal', source };
 }
 
 export interface GraphListMemo {
@@ -801,16 +807,27 @@ export async function readSwmMetaPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
+  /** Keep the immutable row snapshot until an explicit empty-page EOF. */
+  releaseCacheOnShortPage?: boolean;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
-  const candidateGraphs = graphs.filter((graph) => graphSet.has(graph));
+  // A TTL-filtered RFC-64 request already names every admissible metadata
+  // graph exactly. Querying a missing named graph is an empty, bounded read;
+  // enumerating the node's complete graph inventory first is not. Large edge
+  // stores can spend tens of seconds rebuilding that inventory after ordinary
+  // writes, resetting the transport before page zero. Keep the inventory
+  // membership guard only for the legacy, unfiltered compatibility lane.
+  const candidateGraphs = params.cutoffIso == null
+    ? graphs.filter((graph) => graphSet.has(graph))
+    : graphs;
   const cache = params.rowListMemo && params.rowListCacheKey
     ? {
       memo: params.rowListMemo,
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
     }
     : undefined;
@@ -885,28 +902,16 @@ export async function readSwmMetaPage(params: {
       budgetKey,
       signal,
     );
-  return readResponderRowsPage(
-    cache,
-    loadStoreBoundedPage,
+  // The verified subject plan is the immutable session boundary for TTL
+  // metadata. Page directly from it instead of materializing every admitted
+  // row before page zero: a few thousand ordinary graph-scoped operations are
+  // well below the snapshot memory ceiling but can still take longer than the
+  // transport deadline to serialize as one store response. The plan memo keeps
+  // offsets stable, and each page remains whole-subject verified.
+  return loadStoreBoundedPage(
     params.offset,
     params.limit,
     params.signal,
-    {
-      loadSnapshot: cache
-        ? async () => readBoundedFreshSwmMetaSnapshot(
-          params.store,
-          await getPlan(0, undefined),
-          cutoffIso,
-          cache,
-        )
-        : undefined,
-      // The per-snapshot budget fallback MUST stay enabled here (#1847): it
-      // degrades to the bounded plan-paged reader above, never to the deleted
-      // global-sort query. This policy used to be a positional boolean, and
-      // passing `params.cutoffIso == null` in that position is the exact defect
-      // that made every 64,000-row `_meta` CG permanently unsyncable on mainnet.
-      fallbackOnPerSnapshotBudget: true,
-    },
   );
 }
 
@@ -2789,6 +2794,10 @@ async function readSwmMetaRowsPage(
 }
 
 const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
+// Count rows return only two small scalar bindings per subject. A wider batch
+// avoids dozens of store round trips during plan construction without raising
+// the payload-window response ceiling used for actual metadata rows.
+const FRESH_SWM_META_PLAN_COUNT_SUBJECT_CHUNK = 1_000;
 
 /**
  * Ceiling for one subject row-group in the fresh-SWM plan lane. Whole-subject
@@ -2823,10 +2832,10 @@ function freshSwmMetaPlanResponseByteLimit(): number {
 export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
 
 /**
- * Discover the TTL-admitted subjects of one SWM meta graph with two
- * small-result queries (no payload rows, no sort, no OFFSET), each bounded by
- * construction: LIMIT (remaining subject allowance + 1 sentinel) and the fixed
- * plan response byte cap. Crossing either bound is a typed
+ * Discover the TTL-admitted subjects of one SWM meta graph with two bounded
+ * small-result queries (no payload rows, no sort, no OFFSET). Both carry a
+ * LIMIT (remaining subject allowance + 1 sentinel) and the fixed plan response
+ * byte cap. Crossing either bound is a typed
  * per-snapshot budget refusal — the plan lane's one remaining bounded refusal
  * besides the single-oversized-subject case.
  *
@@ -2834,10 +2843,11 @@ export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
  *     {@link readFreshSwmRoots} shape, an indexed predicate probe whose result
  *     is the fresh subset, not the graph;
  *  2. graph-scoped SWM heads. Heads are current-state pointers and
- *     intentionally have no independent publishedAt row; they are admitted via
- *     the timestamped WorkspaceOperation they select (same six-predicate join
- *     the TTL lane has always used), so TTL recovery receives the head plus its
- *     immutable commitment atomically.
+ *     intentionally have no independent publishedAt row. The timestamped
+ *     WorkspaceOperation carries the canonical KA UAL from which the head IRI
+ *     is derived. Reading the operation directly avoids the old quadratic
+ *     operation-to-head self-join; the subsequently paged head rows still have
+ *     to satisfy the receiver's exact workspace validation.
  *
  * SWM meta subjects are IRIs by contract (workspace writers skolemize blank
  * nodes before storage); non-IRI subjects cannot appear in a VALUES clause and
@@ -2855,7 +2865,11 @@ async function readFreshSwmMetaSubjects(
     `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
   const discoveryLimit = Math.max(1, Math.floor(maxSubjects)) + 1;
   const subjects = new Set<string>();
-  const runDiscovery = async (sparql: string, operation: string): Promise<void> => {
+  const runDiscovery = async (
+    sparql: string,
+    operation: string,
+    collect: (row: Record<string, string>) => string | undefined = (row) => row['s'],
+  ): Promise<void> => {
     let res;
     try {
       res = await store.query(sparql, {
@@ -2874,7 +2888,7 @@ async function readFreshSwmMetaSubjects(
     }
     if (res.type !== 'bindings') return;
     for (const row of res.bindings) {
-      const subject = row['s'];
+      const subject = collect(row);
       if (subject && isIriTerm(subject)) subjects.add(subject);
     }
     if (subjects.size > maxSubjects) {
@@ -2897,14 +2911,9 @@ async function readFreshSwmMetaSubjects(
     LIMIT ${discoveryLimit}
   `, 'sync.responder.readFreshSwmMetaSubjects');
   await runDiscovery(`
-    SELECT DISTINCT ?s WHERE {
+    SELECT DISTINCT ?s ?headUal WHERE {
       GRAPH <${assertSafeIri(graph)}> {
         ?s <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
-           <${DKG_KA_UAL}> ?headUal ;
-           <${DKG_ASSERTION_VERSION}> ?headVersion ;
-           <${DKG_SHARE_OPERATION_ID}> ?shareId .
-        ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-           <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
            <${DKG_KA_UAL}> ?headUal ;
            <${DKG_ASSERTION_VERSION}> ?headVersion ;
            <${DKG_SHARE_OPERATION_ID}> ?shareId ;
@@ -2913,7 +2922,10 @@ async function readFreshSwmMetaSubjects(
       }
     }
     LIMIT ${discoveryLimit}
-  `, 'sync.responder.readFreshSwmMetaHeadSubjects');
+  `, 'sync.responder.readFreshSwmMetaHeadSubjects', (row) => {
+    const headUal = row['headUal'];
+    return headUal && isIriTerm(headUal) ? `${headUal}#dkg-swm-head` : undefined;
+  });
   return subjects;
 }
 
@@ -2929,7 +2941,7 @@ async function countFreshSwmMetaSubjectRows(
   signal?: AbortSignal,
 ): Promise<FreshSwmMetaSubjectEntry[]> {
   const countsBySubject = new Map<string, number>();
-  for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_SUBJECT_CHUNK)) {
+  for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_COUNT_SUBJECT_CHUNK)) {
     let res;
     try {
       res = await store.query(`
@@ -3355,12 +3367,16 @@ function parseSparqlInteger(value: string | undefined): number {
  * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
  * page. This planner inverts the work with backend-neutral SPARQL 1.1:
  *
- *  1. Join each concrete graph to its fresh metadata roots by the root subject
+ *  1. Discover fresh legacy `rootEntity` metadata before touching any payload
+ *     graph. Modern graph-scoped snapshots deliberately have no root entity;
+ *     without this preflight the old UNION planner probes every immutable KA
+ *     graph merely to prove the root-scoped lane is empty.
+ *  2. Join each concrete graph to its fresh metadata roots by the root subject
  *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
  *     entity present in the shared payload).
- *  2. Count the exact root closures per concrete graph without returning their
+ *  3. Count the exact root closures per concrete graph without returning their
  *     large literal values.
- *  3. Cache only graph/root/count scalars for the responder session.
+ *  4. Cache only graph/root/count scalars for the responder session.
  *
  * Paging then touches one or two concrete graphs at a time with `VALUES ?root`,
  * preserving the exact root/skolem filter used by {@link readFreshSwmDataRows}
@@ -3377,11 +3393,72 @@ async function buildFreshSwmDataGraphPlan(
 ): Promise<FreshSwmDataGraphPlan> {
   const cutoffFilter =
     `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
+  // Modern content-scope-v2 SWM operations use detached snapshot references
+  // (or immutable snapshot graphs) and intentionally do not carry
+  // dkg:rootEntity. Probe the small metadata graphs once before constructing
+  // the graph-family UNION below. On a selected CG with hundreds of immutable
+  // KA graphs this turns the common rootless case from hundreds of expensive
+  // payload-graph probes into one bounded metadata lookup. A non-empty legacy
+  // result still follows the existing graph/root existence + exact-count path,
+  // so no payload graph is admitted from metadata alone.
+  const freshRootsByMetaGraph = new Map<string, Set<string>>();
+  const uniqueMetaGraphs = dedupeStrings(dataGraphs.map((graph) => `${graph}_meta`))
+    .sort(compareCodePoint);
+  for (const chunk of chunkValues(uniqueMetaGraphs, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+    // Keep every GRAPH operand concrete. Both Oxigraph and Blazegraph can turn
+    // `VALUES ?metaGraph { ... } GRAPH ?metaGraph` into a scan across all named
+    // graphs even when the VALUES set contains one IRI. A bounded UNION of the
+    // same literal-graph probes preserves batching while retaining the graph
+    // index lookup (0.1s rather than 10s+ on the 500-KA canary corpus).
+    const branches = chunk.map((metaGraph) => `{
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        ?op <${DKG_ROOT_ENTITY}> ?root ;
+            <${DKG_PUBLISHED_AT}> ?ts .
+        ${cutoffFilter}
+      }
+      BIND(<${assertSafeIri(metaGraph)}> AS ?metaGraph)
+    }`).join('\nUNION\n');
+    const rootResult = await store.query(`
+      SELECT ?metaGraph ?root WHERE {
+        ${branches}
+      }
+    `, syncResponderStoreOptions(signal, 'sync.responder.discoverFreshSwmMetaRoots'));
+    if (rootResult.type !== 'bindings') continue;
+    for (const row of rootResult.bindings) {
+      const metaGraph = row['metaGraph'];
+      const root = row['root'];
+      if (!metaGraph || !root) continue;
+      const roots = freshRootsByMetaGraph.get(metaGraph) ?? new Set<string>();
+      roots.add(root);
+      freshRootsByMetaGraph.set(metaGraph, roots);
+    }
+  }
+
+  // Do not enumerate payload graphs unless the small metadata preflight proved
+  // that this is a legacy root-scoped operation. Modern graph-scoped snapshot
+  // refs are transferred by the immutable snapshot phase, so their DATA page
+  // is intentionally empty. If a caller already supplied an inventory (unit
+  // callers and the legacy lane), reuse it; otherwise enumerate only the
+  // relevant data-graph prefixes rather than every named graph on the node.
   const candidates: FreshSwmCandidateGraph[] = [];
   for (const graph of dataGraphs) {
     const metaGraph = `${graph}_meta`;
-    if (!graphSet.has(metaGraph)) continue;
-    for (const candidate of candidateGraphsFor(graph)) {
+    if ((freshRootsByMetaGraph.get(metaGraph)?.size ?? 0) === 0) continue;
+    const candidateGraphs = graphSet.size > 0
+      ? candidateGraphsFor(graph)
+      : store.listGraphsByPrefix
+        ? (await store.listGraphsByPrefix(
+          graph,
+          syncResponderStoreOptions(signal, 'sync.responder.listFreshSwmGraphPrefix'),
+        )).filter((candidate) => (
+          candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph)
+        ))
+        : (await store.listGraphs(
+          syncResponderStoreOptions(signal, 'sync.responder.listFreshSwmGraphs'),
+        )).filter((candidate) => (
+          candidate === graph || isSharedMemoryBucketDescendantDataGraph(candidate, graph)
+        ));
+    for (const candidate of candidateGraphs.sort(compareCodePoint)) {
       candidates.push({ graph: candidate, metaGraph });
     }
   }
@@ -3389,17 +3466,16 @@ async function buildFreshSwmDataGraphPlan(
     candidates.map((candidate) => [candidate.graph, candidate]),
   ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
 
+  const rootScopedCandidates = uniqueCandidates.filter(
+    ({ metaGraph }) => (freshRootsByMetaGraph.get(metaGraph)?.size ?? 0) > 0,
+  );
+
   const rootsByGraph = new Map<string, Set<string>>();
-  for (const chunk of chunkValues(uniqueCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+  for (const chunk of chunkValues(rootScopedCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
     const unions = chunk.map(({ graph, metaGraph }) => `
       {
         SELECT (<${assertSafeIri(graph)}> AS ?g) ?root WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-                <${DKG_PUBLISHED_AT}> ?ts ;
-                <${DKG_ROOT_ENTITY}> ?root .
-            ${cutoffFilter}
-          }
+          VALUES ?root { ${graphValues([...(freshRootsByMetaGraph.get(metaGraph) ?? [])])} }
           GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
         }
       }`);
