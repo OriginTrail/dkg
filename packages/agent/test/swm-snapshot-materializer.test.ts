@@ -734,7 +734,7 @@ describe('operation identity preservation (GH#2273)', () => {
     await store.insert(opRowsOf(remoteEquivalent));
     const { materializer } = materializerFor(store);
     expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
-      .toEqual({ winnerShareOperationId: 'op-v1' });
+      .toMatchObject({ winnerShareOperationId: 'op-v1' });
     // Solo-removal for the equivalence conjunct: same shape, but the stored
     // operation genuinely differs from what the descriptor offers => the
     // decision MUST fall back to descriptor-wins (null), or a real content
@@ -810,6 +810,54 @@ describe('operation identity preservation (GH#2273)', () => {
       await store.insert(opRowsOf(remoteEquivalent));
       const { materializer } = materializerFor(store);
       expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (e) stored winner has NO publishedAt row at all — the plain resolver
+    // tolerates it, but the published-head wrapper (RFC64 inventory) fails it
+    // as corrupt and every production writer stamps one; descriptor-wins
+    // installs a canonically stamped operation instead of preserving the
+    // anomaly forever.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(v1.meta.filter((quad) =>
+        !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publishedAt`)));
+      await store.insert(remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(opRowsOf(remoteEquivalent));
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (f) private commitment differs: same PUBLIC digest and counts, but the
+    // stored operation carries a different privateMerkleRoot than the
+    // descriptor. The private commitment is inside the identity key — a
+    // regression that drops or mis-normalizes it would silently treat a
+    // private-content change as identity-equivalent.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      const privateRow = (subject: string, root: string): Quad[] => [
+        { subject, predicate: `${DKG}privateMerkleRoot`, object: `"${root}"`, graph: WS_META },
+      ];
+      const privatize = (meta: Quad[], subject: string, root: string): Quad[] => [
+        ...meta.map((quad) =>
+          quad.subject === subject && quad.predicate === `${DKG}privateTripleCount`
+            ? { ...quad, object: `"1"^^<${XSD_INTEGER}>` }
+            : quad),
+        ...privateRow(subject, root),
+      ];
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(privatize([...v1.meta], v1.operationSubject, `0x${'aa'.repeat(32)}`));
+      const remotePrivateMeta = privatize([...remoteEquivalent.meta], remoteEquivalent.operationSubject, `0x${'bb'.repeat(32)}`);
+      await store.insert(remotePrivateMeta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(remotePrivateMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
+      const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: remotePrivateMeta });
+      expect(descriptors).toHaveLength(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
     }
 
     // (c) stored winner is key-equal but missing publisherPeerId — the key

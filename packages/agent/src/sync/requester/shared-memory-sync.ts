@@ -876,7 +876,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       ): Promise<string | null> => {
         const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
         if (!preserved) return null;
-        snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
+        // The materializer returns the complete plan: winner + the exact rows
+        // to withhold. Suppression consumes that plan, not a re-derivation.
+        snapshotCommit.suppressRows(preserved.withholdRows);
         logInfo(ctx, `SWM sync for "${pid}": ${how} for ${descriptor.kaUal} preserving `
           + `stored operation identity ${preserved.winnerShareOperationId} `
           + `(descriptor offered equivalent ${descriptor.shareOperationId})`);

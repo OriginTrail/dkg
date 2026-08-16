@@ -134,7 +134,16 @@ export interface SharedMemorySnapshotMaterializer {
   selectRepairIdentity(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<{ winnerShareOperationId: string } | null>;
+  ): Promise<{
+    winnerShareOperationId: string;
+    /**
+     * The descriptor rows every later write this round must withhold (the
+     * losing head-id row). Returned WITH the decision so a caller holds the
+     * complete plan in one value — deciding and withholding cannot be
+     * separated by a forgotten second lookup.
+     */
+    withholdRows: readonly Quad[];
+  } | null>;
   /**
    * GH#2273 — repair a (possibly multi-valued) head to certify the WINNER
    * identity chosen by `selectRepairIdentity`, deleting every other operation
@@ -453,9 +462,21 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         const stamps = storedRows
           .filter((row) => row.predicate === `${DKG}publishedAt`)
           .map((row) => Date.parse(literalValue(row.object)?.trim() ?? ''));
+        // ABSENT is refused alongside malformed: the plain resolver tolerates
+        // a missing publishedAt, but the published-head wrapper (RFC64
+        // inventory ordering) fails it as corrupt — and every production
+        // writer stamps one, so a stampless stored operation is already an
+        // anomaly. Descriptor-wins installs a canonically stamped operation
+        // instead of preserving the anomaly forever.
+        if (stamps.length === 0) return null;
         if (stamps.some((ms) => !Number.isSafeInteger(ms) || ms < 0)) return null;
       }
-      return { winnerShareOperationId: foreignIds[0]! };
+      return {
+        winnerShareOperationId: foreignIds[0]!,
+        withholdRows: descriptor.metadataQuads.filter((quad) =>
+          quad.subject === descriptor.headSubject
+          && quad.predicate === `${DKG}shareOperationId`),
+      };
     },
 
     repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
