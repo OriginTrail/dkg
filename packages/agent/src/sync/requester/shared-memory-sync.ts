@@ -835,11 +835,6 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
       };
-      /** The descriptor's head-subject `shareOperationId` row(s), for row-level suppression. */
-      const descriptorHeadIdRows = (
-        descriptor: GraphScopedSwmRecoveryDescriptor,
-      ): Quad[] => descriptor.metadataQuads.filter((quad) =>
-        quad.subject === descriptor.headSubject && quad.predicate === `${DKG}shareOperationId`);
       /**
        * GH#2273 — every head rewrite on this lane goes through ONE decision:
        * when the stored operations the head references are identity-equivalent
