@@ -854,6 +854,7 @@ function syncPageFetchCoalescingKey(params: {
   forceFreshSession?: boolean;
   manifestDigest?: SyncPageFetchOptions['manifestDigest'];
   assetUals?: readonly string[];
+  initialPageSizeHint?: number;
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   requesterScope?: SyncCheckpointScope;
   maxAcceptedQuads?: number;
@@ -871,6 +872,7 @@ function syncPageFetchCoalescingKey(params: {
     params.forceFreshSession === true,
     params.manifestDigest ?? null,
     params.assetUals === undefined ? null : exactAssetFilterKey(params.assetUals),
+    params.initialPageSizeHint ?? null,
     params.returnAcceptedPrefixOnRetryableTransportFailure === true,
     params.requesterScope ?? null,
     params.maxAcceptedQuads ?? null,
@@ -989,6 +991,7 @@ function durableSyncSingleFlightKey(params: {
   hasSignal: boolean;
   hasCurrentFence: boolean;
   exactAssetUals?: readonly string[];
+  exactInitialPageSizeHint?: number;
   settlementSliceTimeoutMs?: number;
   priority?: number;
 }): string | null {
@@ -1010,6 +1013,7 @@ function durableSyncSingleFlightKey(params: {
     authenticationTimeoutMs: params.authenticationTimeoutMs,
     syncAgentsMeta: params.syncAgentsMeta,
     exactAssetUals: params.exactAssetUals ?? null,
+    exactInitialPageSizeHint: params.exactInitialPageSizeHint ?? null,
     settlementSliceTimeoutMs: params.settlementSliceTimeoutMs ?? null,
     priority: params.priority ?? null,
   });
@@ -1363,6 +1367,8 @@ export type DurableSyncOptions = {
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   /** Internal VM-recovery filter; only these locally-missing KAs are stored. */
   exactAssetUals?: string[];
+  /** Verified catalog leaf estimate for the exact batch. */
+  exactInitialPageSizeHint?: number;
   /** Owner-private retained META prefix for bounded durable recovery. */
   durableMetaContinuation?: DurableMetaContinuation;
   /** Admission override for foreground VM recovery. */
@@ -1434,6 +1440,7 @@ type LegacyDurableContextGraphOptions = {
   onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
   exactAssetUals?: string[];
+  exactInitialPageSizeHint?: number;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
@@ -5511,6 +5518,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 stopOnBackoffWorthyFailure,
                 fetchTimeoutMs,
                 exactAssetUals,
+                exactInitialPageSizeHint: options?.exactInitialPageSizeHint,
                 authenticationTimeoutMs,
                 operationFetchDeadline: operationBoundary.fetchDeadline,
                 operationDeadline: operationBoundary.deadline,
@@ -5605,6 +5613,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       hasSignal: Boolean(operationBoundary.signal),
       hasCurrentFence: Boolean(options?.isCurrent),
       exactAssetUals,
+      exactInitialPageSizeHint: options?.exactInitialPageSizeHint,
       settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
       priority: options?.priority,
     });
@@ -5635,7 +5644,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     requestedAssetUals: string[],
-    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+    options: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+      initialPageSizeHint?: number;
+    } = {},
   ): Promise<DurableSyncResult> {
     return (await this.syncExactKnowledgeAssetsFromPeerDetailed(
       remotePeerId,
@@ -5649,7 +5662,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     remotePeerId: string,
     contextGraphId: string,
     requestedAssetUals: string[],
-    options: { signal?: AbortSignal; isCurrent?: () => boolean } = {},
+    options: {
+      signal?: AbortSignal;
+      isCurrent?: () => boolean;
+      initialPageSizeHint?: number;
+    } = {},
   ): Promise<ExactKnowledgeAssetSyncResult> {
     const assetUals = requireExactAssetUals(requestedAssetUals);
     const ctx = createOperationContext('sync');
@@ -5662,6 +5679,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       undefined,
       {
         exactAssetUals: assetUals,
+        exactInitialPageSizeHint: options.initialPageSizeHint,
         stopOnBackoffWorthyFailure: true,
         priority: 1_000,
         source: 'vm-recovery',
@@ -5709,6 +5727,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       onVerifiedFullSnapshot,
       fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
       exactAssetUals,
+      exactInitialPageSizeHint,
       authenticationTimeoutMs = fetchTimeoutMs,
       operationFetchDeadline,
       operationDeadline,
@@ -5824,6 +5843,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             manifestPrefixDigestAtOffset,
             shouldStopAfterPage,
             assetUals: exactAssetUals,
+            initialPageSizeHint: phase === 'data'
+              ? exactInitialPageSizeHint
+              : undefined,
             returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope,
           },
@@ -6452,6 +6474,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
       // responder-session identities so offsets never cross asset batches.
       assetUals,
+      initialPageSizeHint,
       returnAcceptedPrefixOnRetryableTransportFailure,
       // Internal namespace for state whose retained prefix is unavailable to
       // ordinary coalesced callers.
@@ -6479,6 +6502,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         forceFreshSession,
         manifestDigest,
         assetUals,
+        initialPageSizeHint,
         returnAcceptedPrefixOnRetryableTransportFailure,
         requesterScope,
         maxAcceptedQuads,
@@ -6530,6 +6554,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       snapshotRef,
       sinceBatchId,
       assetUals,
+      initialPageSizeHint,
       returnAcceptedPrefixOnRetryableTransportFailure,
       requesterScope,
       maxAcceptedBytes: exactAccumulationLimits?.maxBytes,

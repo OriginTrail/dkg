@@ -372,6 +372,7 @@ import {
 } from './dkg-agent-utils.js';
 import {
   PRIVATE_DATA_ANCHOR,
+  SYNC_EXACT_PAGE_READ_MAX_ROWS,
   SYNC_PAGE_SIZE,
   SYNC_PAGE_RETRY_ATTEMPTS,
   SYNC_TOTAL_TIMEOUT_MS,
@@ -5215,6 +5216,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     attempts: readonly VmRecoveryBatchAttempt[];
     unavailablePeerIds: readonly string[];
     headBlock: number | undefined;
+    initialPageSizeHint?: number;
     signal?: AbortSignal;
     isRecoveryCurrent: () => boolean;
     revalidateTarget?: () => Promise<boolean>;
@@ -5227,6 +5229,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       attempts,
       unavailablePeerIds,
       headBlock,
+      initialPageSizeHint,
       signal,
       isRecoveryCurrent,
       revalidateTarget,
@@ -5273,7 +5276,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         peerId,
         localCgId,
         attempts.map(({ entry }) => entry.target.ual),
-        { signal, isCurrent: isRecoveryCurrent },
+        { signal, isCurrent: isRecoveryCurrent, initialPageSizeHint },
       );
       const { result } = detailed;
       disposition = detailed.disposition;
@@ -5806,6 +5809,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         installedRecord,
         candidatePeerIds,
       }];
+      let batchInitialPageSizeHint: number | undefined;
 
       // The first exact request to a peer remains a single-KA probe. Once that
       // probe has proved the peer is a holder, pack a stable compatible prefix
@@ -5907,6 +5911,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
           continue;
         }
         batchAttempts = plan.targets.map(({ attempt }) => attempt);
+        batchInitialPageSizeHint = Number(
+          plan.estimatedLeaves > BigInt(SYNC_EXACT_PAGE_READ_MAX_ROWS)
+            ? BigInt(SYNC_EXACT_PAGE_READ_MAX_ROWS)
+            : plan.estimatedLeaves,
+        );
         this.log.info(
           ctx,
           `VM exact recovery plan for "${localCgId}" from ${peerId.slice(-8)}: `
@@ -5923,6 +5932,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         attempts: batchAttempts,
         unavailablePeerIds: [...providerPolicy.unavailablePeerIds()],
         headBlock,
+        initialPageSizeHint: batchInitialPageSizeHint,
         signal,
         isRecoveryCurrent,
         revalidateTarget,

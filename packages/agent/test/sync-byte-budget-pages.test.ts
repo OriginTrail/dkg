@@ -414,6 +414,30 @@ describe('byte-budget sync pagination', () => {
     expect(requestedSizes.at(-1)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
   });
 
+  it('lets a verified exact-batch hint escape a stale low page profile', async () => {
+    const requestedSizes: number[] = [];
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const scope = pageSizeScope(REMOTE_PEER_ID, 'data', false);
+    pageSizeProfileCache.remember(scope, SYNC_REQUEST_SAFE_PAGE_SIZE);
+
+    await expect(fetchSyncPages(pageFetchParams({
+      includeSharedMemory: false,
+      phase: 'data',
+      graphUri: `did:dkg:context-graph:${CG_ID}`,
+      assetUals: ['did:dkg:base:84532/0x1234/1'],
+      initialPageSizeHint: 3_508,
+      pageSizeProfileCache,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => new Uint8Array(),
+    }))).resolves.toMatchObject({ completed: true, nextOffset: 0 });
+
+    expect(requestedSizes).toEqual([3_508]);
+  });
+
   it('does not collapse page capacity for a failure before response opening', async () => {
     const requestedSizes: number[] = [];
     const pageSizeProfileCache = new SyncPageSizeProfileCache();

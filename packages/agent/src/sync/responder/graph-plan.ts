@@ -30,7 +30,10 @@ import {
   type SyncResponderSnapshotBudget,
 } from './snapshot-budget.js';
 import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
-import { SYNC_BYTE_BUDGET_RESPONSE_BYTES } from '../../dkg-agent-constants.js';
+import {
+  SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_EXACT_PAGE_STORE_RESPONSE_MAX_BYTES,
+} from '../../dkg-agent-constants.js';
 import type { ChangelogSyncResponse, ChangelogDeltaRecord } from '../changelog/wire.js';
 import { durableMetaDelegationSubjectAdmissionExpression } from './durable-meta-admission.js';
 import { exactAssetFilterKey } from '../exact-assets.js';
@@ -2143,7 +2146,13 @@ async function readRowsPageFromExactGraphPlan(
         LIMIT ${expectedRows + (isFinalGraphPage ? 1 : 0)}
       `, {
         ...syncResponderStoreOptions(signal, 'sync.responder.readExactGraphRowsPage'),
-        maxResponseBytes: snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
+        // Page-only exact recovery may request thousands of compact rows at
+        // once, but it must not parse an unbounded SPARQL JSON body before the
+        // common 4 MiB N-Quads serializer gets a chance to frame it.
+        maxResponseBytes: Math.min(
+          snapshotResponseByteLimit(snapshotLimits.maxBytesEstimate),
+          SYNC_EXACT_PAGE_STORE_RESPONSE_MAX_BYTES,
+        ),
       });
       if (result.type === 'bindings') {
         for (const row of result.bindings) {

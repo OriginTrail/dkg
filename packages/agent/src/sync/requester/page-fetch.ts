@@ -305,12 +305,24 @@ class AdaptiveSyncPageSizer {
     private readonly usesByteBudgetPagination: boolean,
     preferredPageSize?: number,
     private readonly rememberPreferredPageSize?: (pageSize: number) => void,
+    initialPageSizeHint?: number,
   ) {
     this.safePageSize = Math.min(syncPageSize, SYNC_REQUEST_SAFE_PAGE_SIZE);
-    const initialPageSize = Math.min(syncPageSize, SYNC_REQUEST_INITIAL_PAGE_SIZE);
-    this.activePageSize = Number.isSafeInteger(preferredPageSize)
-      ? Math.max(this.safePageSize, Math.min(syncPageSize, preferredPageSize!))
-      : Math.max(this.safePageSize, initialPageSize);
+    const defaultInitialPageSize = Math.min(syncPageSize, SYNC_REQUEST_INITIAL_PAGE_SIZE);
+    const learnedPageSize = Number.isSafeInteger(preferredPageSize)
+      ? Math.max(1, Math.min(syncPageSize, preferredPageSize!))
+      : defaultInitialPageSize;
+    const hintedInitialPageSize = Number.isSafeInteger(initialPageSizeHint)
+      ? Math.max(1, Math.min(syncPageSize, initialPageSizeHint!))
+      : learnedPageSize;
+    // A chain/catalog-bound exact batch has a transfer-specific size proof.
+    // Let it escape a stale low profile learned by an unrelated whole-CG page;
+    // any real path failure still reduces this fetch to the safe floor.
+    this.activePageSize = Math.max(
+      this.safePageSize,
+      learnedPageSize,
+      hintedInitialPageSize,
+    );
   }
 
   current(): number {
@@ -391,6 +403,8 @@ export interface SyncPageFetchOptions {
     offset: number,
   ) => DurableManifestPrefixDigest | undefined;
   readonly assetUals?: string[];
+  /** Verified catalog row estimate for a bounded exact-VM batch. */
+  readonly initialPageSizeHint?: number;
   /**
    * Permit the selected-SWM transfer owner to retain a validated metadata
    * prefix after a retryable transport interruption. Checkpoint identity is
@@ -484,6 +498,8 @@ interface FetchSyncPagesParams {
   sinceBatchId?: string;
   /** Exact KAs requested by VM recovery. Undefined retains ordinary full sync. */
   assetUals?: string[];
+  /** Verified catalog row estimate for a bounded exact-VM batch. */
+  initialPageSizeHint?: number;
   /** Selected-SWM-only policy for returning a validated incomplete prefix. */
   returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
   /** Isolates an internal requester whose retained prefix is not shareable. */
@@ -596,6 +612,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     buildSyncRequest,
     sinceBatchId,
     assetUals,
+    initialPageSizeHint,
     returnAcceptedPrefixOnRetryableTransportFailure,
     requesterScope,
     maxAcceptedBytes,
@@ -759,6 +776,7 @@ export async function fetchSyncPages(params: FetchSyncPagesParams): Promise<Sync
     pageSizeProfileCache
       ? (pageSize) => pageSizeProfileCache.remember(pageSizeProfileScope, pageSize)
       : undefined,
+    initialPageSizeHint,
   );
   let successfulPageSize = adaptivePageSizer.current();
   const syncSessionId = usesPageSession
