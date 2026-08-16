@@ -100,7 +100,15 @@ export function isKnowledgeAssetWorkspaceHeadCorruptError(
   error: unknown,
 ): boolean {
   if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) return true;
-  return (error as { code?: unknown } | null | undefined)?.code === 'KA_WORKSPACE_HEAD_CORRUPT';
+  // Throw-safe by contract: this predicate runs inside catch/failure-recording
+  // paths against arbitrary cross-package thrown values, so inspecting the
+  // value must never itself throw (a Proxy or a throwing `code` getter would
+  // otherwise detonate mid-classification and mask the original failure).
+  try {
+    return (error as { code?: unknown } | null | undefined)?.code === 'KA_WORKSPACE_HEAD_CORRUPT';
+  } catch {
+    return false;
+  }
 }
 
 /** Durable last-applied state for one graph-scoped KA in SWM. */

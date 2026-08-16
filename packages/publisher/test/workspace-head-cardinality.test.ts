@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
   KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -107,6 +108,32 @@ function resolveHead(h: Harness) {
     kaUal: UAL,
   });
 }
+
+describe('isKnowledgeAssetWorkspaceHeadCorruptError boundary predicate', () => {
+  it('recognizes the class, a code-preserving re-wrap, and survives hostile inspection', () => {
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(
+      new KnowledgeAssetWorkspaceHeadCorruptError('x'),
+    )).toBe(true);
+    // A re-wrap that kept the code but lost class identity (the dual-package /
+    // wrapper case the predicate exists for).
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(
+      Object.assign(new Error('wrapped'), { code: 'KA_WORKSPACE_HEAD_CORRUPT' }),
+    )).toBe(true);
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(
+      Object.assign(new Error('other'), { code: 'PUBLISH_INTENT_STALE' }),
+    )).toBe(false);
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(null)).toBe(false);
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(undefined)).toBe(false);
+    // The predicate runs inside catch paths against arbitrary thrown values;
+    // inspecting the value must never itself throw and mask the original
+    // failure — a throwing `code` getter is the hostile shape.
+    const hostile = {};
+    Object.defineProperty(hostile, 'code', {
+      get() { throw new Error('inspection trap'); },
+    });
+    expect(isKnowledgeAssetWorkspaceHeadCorruptError(hostile)).toBe(false);
+  });
+});
 
 describe('graph-scoped SWM head shareOperationId cardinality', () => {
   it('resolves a healthy single-operation head (guard polarity control)', async () => {
