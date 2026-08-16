@@ -208,5 +208,26 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     }]);
     const head = await resolveHead(h);
     expect(head?.shareOperationId).toBe(LOCAL_OP);
+    // The tolerated duplicate canonicalizes to the EARLIEST stamp — stable
+    // under later re-stamp unions (this timestamp orders RFC64 inventory), and
+    // an explicit rule rather than whichever binding the store returned first.
+    expect(head?.publishedAt).toBe(Date.parse('2026-08-16T00:00:00.000Z').toString());
+  });
+
+  it('fails closed when the operation carries duplicate singleton metadata (accessPolicy)', async () => {
+    // The envelope predicates are declared SINGLETON: two accessPolicy rows on
+    // one operation are the same union-residue corruption class as two head
+    // ids, and an arbitrary pick here would drive an ACCESS decision. Only
+    // publishedAt (canonicalized) and allowedPeer (set-valued) tolerate
+    // duplicates.
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    const operationSubject = `urn:dkg:share:${CONTEXT_GRAPH}:${LOCAL_OP}`;
+    await h.store.insert([
+      { subject: operationSubject, predicate: `${DKG}accessPolicy`, object: '"public"', graph: h.metaGraph },
+      { subject: operationSubject, predicate: `${DKG}accessPolicy`, object: '"ownerOnly"', graph: h.metaGraph },
+    ]);
+    await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
+    await expect(resolveHead(h)).rejects.toThrow(/accessPolicy/);
   });
 });

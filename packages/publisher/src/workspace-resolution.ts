@@ -257,57 +257,86 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     );
   }
 
-  // Phase 2 — the single validated operation, looked up by its OWN subject.
-  // The id echo pattern mirrors the previous join (the operation must itself
-  // carry the head's id); LIMIT 1 here only collapses duplicate OPTIONAL rows
-  // on one already-identified subject, never a choice between operations.
-  const result = await params.store.query(
-    `SELECT ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?publishedAt ?accessPolicy WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(operationSubject)}> <${DKG}shareOperationId> ${JSON.stringify(shareOperationId)} ;
-          <${DKG}kaUal> ?operationUal ;
-          <${DKG}assertionVersion> ?operationVersion ;
-          <${DKG}publicQuadsDigest> ?digest ;
-          <${DKG}publicQuadsCount> ?publicCount ;
-          <${DKG}privateTripleCount> ?privateCount ;
-          <${DKG}publisherPeerId> ?publisherPeerId .
-        OPTIONAL { <${assertSafeIri(operationSubject)}> <${DKG}privateMerkleRoot> ?privateRoot }
-        OPTIONAL { <${assertSafeIri(operationSubject)}> <${DKG}publishedAt> ?publishedAt }
-        OPTIONAL { <${assertSafeIri(operationSubject)}> <${DKG}accessPolicy> ?accessPolicy }
-      }
-    } LIMIT 1`,
+  // Phase 2 — the single validated operation, read as its OWN rows and
+  // normalized under DECLARED cardinality rules (no LIMIT-1 first-binding
+  // policy anywhere in the resolver): every commitment/envelope predicate must
+  // carry exactly one distinct value; `allowedPeer` is set-valued by design;
+  // `publishedAt` tolerates duplicates — two cores ACKing the same content
+  // stamp their own clocks onto the same deterministic operation subject —
+  // and canonicalizes to the EARLIEST stamp, which stays stable when a later
+  // union adds more re-stamps (this timestamp orders RFC64 inventory).
+  const operationResult = await params.store.query(
+    `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+    `<${assertSafeIri(operationSubject)}> ?p ?o } }`,
   );
-  if (result.type !== 'bindings') {
+  if (operationResult.type !== 'bindings') {
     throw new Error(
-      `Unexpected graph-scoped SWM operation query result for ${scope.ual}: ${result.type}`,
+      `Unexpected graph-scoped SWM operation query result for ${scope.ual}: ${operationResult.type}`,
     );
   }
-  if (result.bindings.length === 0) {
+  const operationValues = new Map<string, string[]>();
+  for (const binding of operationResult.bindings) {
+    const predicate = binding['p'] ?? '';
+    const object = binding['o'] ?? '';
+    const values = operationValues.get(predicate) ?? [];
+    if (!values.includes(object)) values.push(object);
+    operationValues.set(predicate, values);
+  }
+  const singletonOperationValue = (
+    predicate: string,
+    label: string,
+    required: boolean,
+  ): string | undefined => {
+    const values = operationValues.get(predicate);
+    if (!values || values.length === 0) {
+      if (!required) return undefined;
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
+      );
+    }
+    if (values.length > 1) {
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${scope.ual}: operation carries ` +
+        `${values.length} ${label} values`,
+      );
+    }
+    return values[0];
+  };
+  // Id echo — the operation must itself carry the head's id (mirrors the
+  // previous join). Multiple id rows on the operation subject were tolerated
+  // by the join (only the matching one bound) and remain tolerated here.
+  const echoedIds = (operationValues.get(`${DKG}shareOperationId`) ?? [])
+    .map((value) => stripLiteral(value)?.trim());
+  if (!echoedIds.includes(shareOperationId)) {
     throw new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
     );
   }
-  const row = result.bindings[0];
-  const publicQuadsDigest = stripLiteral(row?.['digest'])?.trim() ?? '';
-  const publicTripleCount = parseIntegerLiteral(row?.['publicCount']);
-  const privateTripleCount = parseIntegerLiteral(row?.['privateCount']);
-  const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
-  const publisherPeerId = stripLiteral(row?.['publisherPeerId'])?.trim() ?? '';
-  const publishedAtLexical = stripLiteral(row?.['publishedAt'])?.trim();
-  const publishedAtMs = publishedAtLexical === undefined
-    ? undefined
-    : Date.parse(publishedAtLexical);
-  const rawAccessPolicy = stripLiteral(row?.['accessPolicy'])?.trim();
+  const publicQuadsDigest = stripLiteral(singletonOperationValue(`${DKG}publicQuadsDigest`, 'publicQuadsDigest', true))?.trim() ?? '';
+  const publicTripleCount = parseIntegerLiteral(singletonOperationValue(`${DKG}publicQuadsCount`, 'publicQuadsCount', true));
+  const privateTripleCount = parseIntegerLiteral(singletonOperationValue(`${DKG}privateTripleCount`, 'privateTripleCount', true));
+  const publisherPeerId = stripLiteral(singletonOperationValue(`${DKG}publisherPeerId`, 'publisherPeerId', true))?.trim() ?? '';
+  const operationUal = singletonOperationValue(`${DKG}kaUal`, 'kaUal', true) ?? '';
+  const privateMerkleRoot = stripLiteral(singletonOperationValue(`${DKG}privateMerkleRoot`, 'privateMerkleRoot', false))?.trim();
+  const rawAccessPolicy = stripLiteral(singletonOperationValue(`${DKG}accessPolicy`, 'accessPolicy', false))?.trim();
   const accessPolicy = rawAccessPolicy === 'public'
     || rawAccessPolicy === 'ownerOnly'
     || rawAccessPolicy === 'allowList'
     ? rawAccessPolicy
     : undefined;
-  const operationUal = row?.['operationUal'] ?? '';
+  const publishedAtStamps = (operationValues.get(`${DKG}publishedAt`) ?? [])
+    .map((value) => {
+      const lexical = stripLiteral(value)?.trim() ?? '';
+      return { lexical, ms: Date.parse(lexical) };
+    });
+  const publishedAtMs = publishedAtStamps.length === 0
+    ? undefined
+    : publishedAtStamps.reduce((min, stamp) => Math.min(min, stamp.ms), Number.POSITIVE_INFINITY);
   let operationVersion: bigint;
   try {
-    operationVersion = parsePositiveBigIntLiteral(row?.['operationVersion']);
+    operationVersion = parsePositiveBigIntLiteral(singletonOperationValue(`${DKG}assertionVersion`, 'assertionVersion', true));
   } catch (error) {
+    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
     throw new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${scope.ual}: invalid operation version ` +
       `(${error instanceof Error ? error.message : String(error)})`,
@@ -318,10 +347,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
     !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
     !publisherPeerId ||
-    (publishedAtLexical !== undefined && (
-      !Number.isSafeInteger(publishedAtMs)
-      || publishedAtMs! < 0
-    )) ||
+    publishedAtStamps.some((stamp) => !Number.isSafeInteger(stamp.ms) || stamp.ms < 0) ||
     operationUal !== actualScope.ual ||
     operationVersion.toString() !== actualScope.assertionVersion ||
     (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
@@ -333,17 +359,8 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     );
   }
 
-  const peersResult = await params.store.query(
-    `SELECT ?peer WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-      `<${assertSafeIri(operationSubject)}> <${DKG}allowedPeer> ?peer } }`,
-  );
-  if (peersResult.type !== 'bindings') {
-    throw new Error(
-      `Unexpected graph-scoped SWM access query result for ${scope.ual}: ${peersResult.type}`,
-    );
-  }
-  const allowedPeers = [...new Set(peersResult.bindings
-    .map((binding) => stripLiteral(binding['peer'])?.trim())
+  const allowedPeers = [...new Set((operationValues.get(`${DKG}allowedPeer`) ?? [])
+    .map((value) => stripLiteral(value)?.trim())
     .filter((peer): peer is string => Boolean(peer)))];
   if (
     (accessPolicy === 'allowList' && allowedPeers.length === 0)

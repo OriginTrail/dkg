@@ -577,12 +577,28 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
     expect(outcome.reason).toContain('CORRUPT_SWM_HEAD');
 
     // The corrupt head must be left byte-untouched for the repair lane: still exactly
-    // two shareOperationId rows, and the rejected share's graph write never happened.
+    // two shareOperationId rows.
     const headIds = await store.query(
       `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { <${UAL}#dkg-swm-head> <http://dkg.io/ontology/shareOperationId> ?op } }`,
     );
     expect(headIds.type).toBe('bindings');
     if (headIds.type !== 'bindings') throw new Error('expected bindings');
     expect(headIds.bindings).toHaveLength(2);
+
+    // And the rejected share must not have mutated SWM CONTENT either — the
+    // fail-closed decision fires BEFORE any graph write. A regression that
+    // replaced the assertion graph and then reported the rejection would pass
+    // the two assertions above while local data silently changed.
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const contentRows = await store.query(
+      `SELECT ?s ?o WHERE { GRAPH <${swmGraph}> { ?s <urn:predicate:value> ?o } }`,
+    );
+    expect(contentRows.type).toBe('bindings');
+    if (contentRows.type !== 'bindings') throw new Error('expected bindings');
+    expect(contentRows.bindings).toEqual([{ s: 'urn:entity:1', o: '"one"' }]);
   });
 });
