@@ -136,8 +136,8 @@ function forbidSwmMetaSortOrOffsetQueries(store: OxigraphStore) {
 }
 
 describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', () => {
-  it('uses the bounded raw-snapshot fast path for an ordinary TTL-filtered manifest', async () => {
-    const cgId = 'meta-bounded-fast-path';
+  it('uses the bounded fresh-subject plan for an ordinary TTL-filtered manifest', async () => {
+    const cgId = 'meta-bounded-plan-path';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const store = new OxigraphStore();
     const quads: Quad[] = [];
@@ -162,17 +162,28 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
       phase: 'meta' as const,
       offset: 0,
       limit: 500,
-      syncSessionId: 'bounded-fast-session',
+      syncSessionId: 'bounded-plan-session',
     };
     const first = await cap.invoke(request);
     expect(linesFromNquads(first)).toHaveLength(40 * 5);
-    expect(sources.filter((source) => source === 'sync.responder.readSwmMetaGraphSnapshot')).toHaveLength(1);
-    expect(sources).not.toContain('sync.responder.readFreshSwmMetaSubjects');
-    expect(sources).not.toContain('sync.responder.countFreshSwmMetaSubjectRows');
+    expect(sources).not.toContain('sync.responder.readSwmMetaGraphSnapshot');
+    expect(sources).toContain('sync.responder.readFreshSwmMetaSubjects');
+    expect(sources).toContain('sync.responder.countFreshSwmMetaSubjectRows');
+    expect(sources).toContain('sync.responder.readFreshSwmMetaSubjectRows');
 
-    const queriesAfterFirst = sources.length;
+    const subjectDiscoveryAfterFirst = sources.filter(
+      (source) => source === 'sync.responder.readFreshSwmMetaSubjects',
+    ).length;
+    const subjectCountAfterFirst = sources.filter(
+      (source) => source === 'sync.responder.countFreshSwmMetaSubjectRows',
+    ).length;
     expect(await cap.invoke(request)).toBe(first);
-    expect(sources).toHaveLength(queriesAfterFirst);
+    expect(sources.filter(
+      (source) => source === 'sync.responder.readFreshSwmMetaSubjects',
+    )).toHaveLength(subjectDiscoveryAfterFirst);
+    expect(sources.filter(
+      (source) => source === 'sync.responder.countFreshSwmMetaSubjectRows',
+    )).toHaveLength(subjectCountAfterFirst);
     await store.close();
   });
 

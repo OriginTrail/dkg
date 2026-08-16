@@ -902,37 +902,16 @@ export async function readSwmMetaPage(params: {
       budgetKey,
       signal,
     );
-  return readResponderRowsPage(
-    cache,
-    loadStoreBoundedPage,
+  // The verified subject plan is the immutable session boundary for TTL
+  // metadata. Page directly from it instead of materializing every admitted
+  // row before page zero: a few thousand ordinary graph-scoped operations are
+  // well below the snapshot memory ceiling but can still take longer than the
+  // transport deadline to serialize as one store response. The plan memo keeps
+  // offsets stable, and each page remains whole-subject verified.
+  return loadStoreBoundedPage(
     params.offset,
     params.limit,
     params.signal,
-    {
-      loadSnapshot: cache
-        ? async () => {
-          // Most selected-CG manifests fit comfortably inside the fixed
-          // snapshot ceiling. Reading that bounded graph once and applying the
-          // canonical TTL filter in process avoids paying the much more
-          // expensive subject-discovery/count plan before page zero. If the
-          // raw history is genuinely large, readResponderRowsPage translates
-          // the typed rows/bytes refusal into the existing bounded plan-paged
-          // lane below; the #1847 large-history guarantee is therefore kept.
-          const rawRows = await readBoundedSwmMetaSnapshot(
-            params.store,
-            candidateGraphs,
-            cache,
-          );
-          return filterSwmMetaSnapshotRows(rawRows, cutoffIso);
-        }
-        : undefined,
-      // The per-snapshot budget fallback MUST stay enabled here (#1847): it
-      // degrades to the bounded plan-paged reader above, never to the deleted
-      // global-sort query. This policy used to be a positional boolean, and
-      // passing `params.cutoffIso == null` in that position is the exact defect
-      // that made every 64,000-row `_meta` CG permanently unsyncable on mainnet.
-      fallbackOnPerSnapshotBudget: true,
-    },
   );
 }
 
