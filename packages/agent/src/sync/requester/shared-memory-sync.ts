@@ -853,6 +853,24 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
        * The loser id row is suppressed so neither the per-KA meta insert nor
        * the round's bulk append re-stacks it onto the repaired head.
        */
+      /**
+       * The ONE preserve step: withholding the losing descriptor id from
+       * every later write this round (per-KA meta insert AND the bulk append)
+       * is inseparable from the decision to preserve — a caller that decided
+       * without withholding would let the bulk append re-stack the rejected
+       * id onto the head it just protected. Both preserve paths below go
+       * through here.
+       */
+      const withholdDescriptorIdentity = (
+        descriptor: GraphScopedSwmRecoveryDescriptor,
+        winnerShareOperationId: string,
+        how: string,
+      ): void => {
+        snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
+        logInfo(ctx, `SWM sync for "${pid}": ${how} for ${descriptor.kaUal} preserving `
+          + `stored operation identity ${winnerShareOperationId} `
+          + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+      };
       const repairOrReplaceHead = async (
         descriptor: GraphScopedSwmRecoveryDescriptor,
       ): Promise<void> => {
@@ -863,10 +881,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
             descriptor,
             preserved.winnerShareOperationId,
           );
-          snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
-          logInfo(ctx, `SWM sync for "${pid}": repaired head for ${descriptor.kaUal} preserving `
-            + `stored operation identity ${preserved.winnerShareOperationId} `
-            + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+          withholdDescriptorIdentity(descriptor, preserved.winnerShareOperationId, 'repaired head');
         } else {
           await snapshotMaterializer!.replaceHeadMetadata(pid, descriptor);
         }
@@ -993,10 +1008,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     // suppression, today's convergence to remote authority.
                     const preserved = await snapshotMaterializer.selectRepairIdentity(pid, descriptor);
                     if (preserved) {
-                      snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
-                      logInfo(ctx, `SWM sync for "${pid}": preferring stored operation identity `
-                        + `${preserved.winnerShareOperationId} for ${descriptor.kaUal} `
-                        + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+                      withholdDescriptorIdentity(descriptor, preserved.winnerShareOperationId, 'kept head');
                     }
                   }
                   materializedKeys.add(graphKey);

@@ -743,6 +743,73 @@ describe('operation identity preservation (GH#2273)', () => {
       .toBeNull();
   });
 
+  it('refuses preservation for policy-envelope, author, and unresolvable-winner differences', async () => {
+    // The security-relevant HALF of the allow-list: same content digest, but
+    // the DESCRIPTOR carries a different access envelope or author. Treating
+    // those as identity-equivalent would preserve a stale local id across a
+    // real policy change — the exact protection the queued-publish preflight
+    // exists to give. And a winner that is key-equal but UNRESOLVABLE
+    // (missing publisherPeerId) must also refuse: preserving it would write a
+    // head the resolver permanently fails as corrupt, and the next round
+    // would preserve it again — a wedged KA.
+    const withRows = (base: typeof v1, extra: Quad[]): Quad[] => [...base.meta, ...extra];
+
+    // (a) descriptor adds an allowList envelope the stored operation lacks.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await seedMaterializedLocal(store);
+      const envelopeMeta = withRows(remoteEquivalent, [
+        { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+        { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
+      ]);
+      await store.insert(envelopeMeta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(envelopeMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
+      const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: envelopeMeta });
+      expect(descriptors).toHaveLength(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+    }
+
+    // (b) descriptor carries a different author (prov:wasAttributedTo).
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await seedMaterializedLocal(store);
+      const authorMeta = withRows(remoteEquivalent, [
+        {
+          subject: remoteEquivalent.operationSubject,
+          predicate: 'http://www.w3.org/ns/prov#wasAttributedTo',
+          object: 'did:dkg:agent:0x9999999999999999999999999999999999999999',
+          graph: WS_META,
+        },
+      ]);
+      await store.insert(authorMeta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(authorMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
+      const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: authorMeta });
+      expect(descriptors).toHaveLength(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+    }
+
+    // (c) stored winner is key-equal but missing publisherPeerId — the key
+    // excludes per-node rows, so ONLY the resolvability check can catch it.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(v1.meta.filter((quad) =>
+        !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publisherPeerId`)));
+      await store.insert(remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(opRowsOf(remoteEquivalent));
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+  });
+
   it('repairHeadPreservingIdentity heals a two-valued head to the stored identity', async () => {
     const store = new OxigraphStore();
     stores.push(store);
@@ -803,6 +870,32 @@ describe('operation identity preservation (GH#2273)', () => {
       kaUal: UAL,
     });
     expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('preserves the local identity when catch-up MATERIALIZES absent content (r26 state)', async () => {
+    // Head and local operation exist but the assertion graph is empty — the
+    // #2050 r26 residual. Catch-up must fill the graph from the equivalent
+    // peer snapshot AND keep certifying the local identity: this exercises
+    // the materialize-path repairOrReplaceHead call site through the real
+    // sync loop, which the direct repair rows above cannot reach. A
+    // regression that reverts that call site to replaceHeadMetadata leaves
+    // every other GH#2273 row green and only fails here.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([...v1.meta]);
+    await identityHarness(store, remoteEquivalent)();
+    // Content materialized from the peer snapshot...
+    const content = await store.query(
+      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${v1.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    expect(content.type).toBe('bindings');
+    if (content.type !== 'bindings') throw new Error('expected bindings');
+    expect(String(content.bindings[0]?.['c'] ?? '')).toContain('2');
+    // ...and the identity queued jobs reference survived the head rewrite.
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
   });
 
   it('a genuinely changed share still adopts the remote identity (discriminator polarity)', async () => {

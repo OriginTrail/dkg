@@ -427,6 +427,23 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         // — today's behavior, and the correct one for a GENUINE change.
         const storedKey = operationIdentityKey(storedRows);
         if (storedKey === null || storedKey !== descriptorKey) return null;
+        // Identity equivalence is NECESSARY but not SUFFICIENT to preserve: the
+        // key deliberately excludes per-node rows, so a stored operation can be
+        // key-equal yet unresolvable (missing publisherPeerId, or an id row
+        // that does not echo this id) — preserving such a winner would write a
+        // head the resolver permanently fails as corrupt, and the next round's
+        // prefer-stored decision would preserve it AGAIN, wedging the KA.
+        // Descriptor-wins is the safe fallback for any winner the resolver
+        // could not accept.
+        const echoes = storedRows
+          .filter((row) => row.predicate === `${DKG}shareOperationId`)
+          .map((row) => literalValue(row.object)?.trim());
+        if (!echoes.includes(foreignId)) return null;
+        const peerIds = [...new Set(storedRows
+          .filter((row) => row.predicate === `${DKG}publisherPeerId`)
+          .map((row) => literalValue(row.object)?.trim())
+          .filter((value): value is string => Boolean(value)))];
+        if (peerIds.length !== 1) return null;
       }
       return { winnerShareOperationId: foreignIds[0]! };
     },
@@ -457,12 +474,14 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           }
         }
       }
-      for (const operationSubject of loserSubjects) {
-        await deps.store.deleteByPattern(
-          { graph: descriptor.metaGraph, subject: operationSubject },
-          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
-        );
-      }
+      // ORDER MATTERS: rewrite the head FIRST, delete the losers AFTER. A
+      // crash between the two then leaves a HEALTHY single-valued head plus
+      // stale loser operation subjects — benign residue (they are
+      // identity-equivalent by the selection above, and nothing references
+      // them). The reverse order would leave a still-multi-valued head naming
+      // operations whose rows are already gone: readers fail closed on a
+      // state that is only half repaired.
+      //
       // Head rows: the descriptor's own four non-id rows are byte-identical to
       // what the winner's head must carry (identity equivalence pins kaUal and
       // assertionVersion; contentScopeVersion is constant; assertionGraph is
@@ -480,6 +499,12 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         priority: 'background',
         source: 'agent.sharedMemorySync.snapshotMaterializer.writePreservedHead',
       });
+      for (const operationSubject of loserSubjects) {
+        await deps.store.deleteByPattern(
+          { graph: descriptor.metaGraph, subject: operationSubject },
+          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
+        );
+      }
       deps.invalidateListContextGraphsCache();
     },
   };
