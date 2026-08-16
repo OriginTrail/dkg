@@ -902,6 +902,12 @@ export function registerSyncHandler(params: RegisterSyncHandlerParams): void {
           rowListCacheScope: session && dataRequestPolicy.cacheMode === 'session-snapshot'
             ? peerId
             : undefined,
+          // Exact public VM reads intentionally keep payloads page-only, but
+          // their tiny manifest plan is safe and essential to retain across
+          // the 64-row session pages. Otherwise every page repeats both V2
+          // manifest queries and turns a bounded ten-KA fetch into hundreds of
+          // redundant store scans.
+          exactGraphPlanCacheScope: session ? peerId : undefined,
           refreshRowList: session?.refreshRowList,
           refreshGeneration: session?.refreshGeneration,
           exactGraphPlanMemo: durableDataExactGraphPlanMemo,

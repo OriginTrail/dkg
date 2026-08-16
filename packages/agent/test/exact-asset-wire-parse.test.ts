@@ -245,10 +245,12 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     const originalQuery = store.query.bind(store);
     const payloadReadLimits: number[] = [];
     let maxPayloadBindings = 0;
+    let manifestMarkerQueries = 0;
     store.query = (async (
       sparql: string,
       options?: Parameters<OxigraphStore['query']>[1],
     ) => {
+      if (sparql.includes('SELECT ?ual ?scopeVersion WHERE')) manifestMarkerQueries += 1;
       const result = await originalQuery(sparql, options);
       const isPagedPayloadRead = sparql.includes('ORDER BY ?s ?p ?o') &&
         payloadGraphs.some((graph) => sparql.includes(`<${graph}>`));
@@ -321,6 +323,10 @@ describe('exact-asset wire parsing (parseSyncRequest)', () => {
     expect(payloadReadLimits.length).toBeGreaterThan(0);
     expect(Math.max(...payloadReadLimits)).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
     expect(maxPayloadBindings).toBeLessThanOrEqual(SYNC_REQUEST_SAFE_PAGE_SIZE);
+    // Page-only is a payload-retention policy, not a reason to rebuild the
+    // same bounded graph/count plan on every 64-row request. One authenticated
+    // sync session reads its exact manifest once and reuses the scalar plan.
+    expect(manifestMarkerQueries).toBe(1);
 
     await store.close();
   }, 60_000);

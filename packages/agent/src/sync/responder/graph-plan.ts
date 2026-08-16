@@ -1598,6 +1598,12 @@ export async function readDurableDataPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   exactGraphPlanMemo?: ExactGraphPagePlanMemo;
+  /**
+   * Scope a lightweight exact-graph manifest plan to an authenticated sync
+   * session even when payload rows deliberately remain in page-only mode.
+   * This retains only graph IRIs and committed row counts, never payload rows.
+   */
+  exactGraphPlanCacheScope?: string;
   /** Keep the immutable row snapshot until an explicit empty-page EOF. */
   releaseCacheOnShortPage?: boolean;
   assetUals?: readonly string[];
@@ -1608,15 +1614,16 @@ export async function readDurableDataPage(params: {
    */
   exactGraphReadMode?: ExactGraphReadMode;
 }): Promise<SyncRow[]> {
+  const durableCacheKey = durableDataRowListCacheKey(
+    params.rowListCacheScope ?? params.exactGraphPlanCacheScope ?? 'default',
+    params.contextGraphId,
+    params.sinceBatchId,
+    params.assetUals,
+  );
   const cache = params.rowListMemo
     ? {
       memo: params.rowListMemo,
-      key: durableDataRowListCacheKey(
-        params.rowListCacheScope ?? 'default',
-        params.contextGraphId,
-        params.sinceBatchId,
-        params.assetUals,
-      ),
+      key: durableCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
       releaseOnShortPage: params.releaseCacheOnShortPage,
@@ -1650,6 +1657,9 @@ export async function readDurableDataPage(params: {
           params.exactGraphReadMode,
         );
       },
+      params.exactGraphPlanCacheScope
+        ? { key: durableCacheKey, refresh: params.refreshRowList }
+        : undefined,
     );
   }
 
@@ -1808,6 +1818,7 @@ async function readPagedRowsFromExactGraphPlanLoader(
   signal: AbortSignal | undefined,
   planMemo: ExactGraphPagePlanMemo | undefined,
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
+  planCache?: { key: string; refresh?: boolean },
 ): Promise<SyncRow[]> {
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -1816,8 +1827,8 @@ async function readPagedRowsFromExactGraphPlanLoader(
   };
   const getPlan = createSessionPlanGetter(
     planMemo,
-    cache?.key,
-    cache?.refresh === true,
+    planCache?.key ?? cache?.key,
+    planCache?.refresh ?? cache?.refresh === true,
     (planSignal) => loadExactGraphPlan(planSignal),
     'Sync session exact-graph plan expired before page completion',
   );
