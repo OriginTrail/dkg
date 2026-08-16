@@ -470,6 +470,15 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           shareOperationId: foreignId,
           requirePublishedAt: true,
         })) return null;
+        // The sync responder's serving join additionally requires the
+        // operation's `rdf:type WorkspaceOperation` row (readFreshSwmMeta*
+        // and both legacy plans) — a predicate outside the identity key AND
+        // outside the head decoder. A typeless winner would resolve locally
+        // but be unservable to peers: same reader-contract family as the
+        // publishedAt and locator gates.
+        if (!storedRows.some((row) =>
+          row.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+          && row.object === `${DKG}WorkspaceOperation`)) return null;
         // Snapshot LOCATOR coherence — outside both the identity key (the
         // graph-form locator embeds the operation id) and the head decoder
         // (which never consumes snapshot pointers). A winner whose

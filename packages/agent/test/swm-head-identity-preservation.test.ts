@@ -431,6 +431,24 @@ describe('operation identity preservation (GH#2273)', () => {
       .toEqual(['"op-v2"']);
   });
 
+  it('refuses a stored winner missing its WorkspaceOperation type row (responder-join gate)', async () => {
+    // The sync responder's serving join requires rdf:type WorkspaceOperation
+    // on the operation subject — outside both the identity key and the head
+    // decoder. A typeless preserved winner would resolve locally but be
+    // unservable to peers.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    await store.insert(v1.meta.filter((quad) =>
+      !(quad.subject === v1.operationSubject
+        && quad.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type')));
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+  });
+
   it('refuses a stored winner whose snapshot-graph locator is stale, wrong or ambiguous', async () => {
     // The locator is outside the identity key (its graph form embeds the
     // operation id) and outside the head decoder (which never consumes
