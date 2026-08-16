@@ -52,8 +52,6 @@ export {
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   KnowledgeAssetWorkspaceHeadCorruptError,
   isKnowledgeAssetWorkspaceHeadCorruptError,
-  tryResolveKnowledgeAssetWorkspaceHead,
-  type KnowledgeAssetWorkspaceHeadResolution,
   type KnowledgeAssetWorkspaceHead,
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,

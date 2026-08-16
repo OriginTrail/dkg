@@ -6,8 +6,11 @@ import {
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
-  tryResolveKnowledgeAssetWorkspaceHead,
 } from '../src/index.js';
+// Deliberately imported from the MODULE, not the package barrel: the typed
+// resolution wrapper is intra-package API (each internal caller owns its own
+// corruption policy) and is not exported for external consumers.
+import { tryResolveKnowledgeAssetWorkspaceHead } from '../src/workspace-resolution.js';
 
 // GH#2273: SWM catch-up union-inserts a peer's head `shareOperationId` row
 // beside the local one (shared-memory-sync bulk insert holds no lock and
