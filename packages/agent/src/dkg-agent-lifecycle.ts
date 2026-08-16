@@ -7450,6 +7450,26 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // invalidate the exact recovery lifecycle. Keep the existing method as the
     // orchestration seam, but delegate its VM work to one bounded exact slice.
     if (this.isRfc64SelectedVmReconcileContextGraph(contextGraphId)) {
+      // A reconcile slice can reach catch-up while repairing one missing
+      // ordinal. Re-entering the same keyed dispatcher from that catch-up
+      // would make the active promise await itself. Return a fail-closed
+      // no-progress durable result instead: runCatchupOverPeers still executes
+      // the independent SWM plane, while the active chain-inventory owner keeps
+      // responsibility for exact VM provider selection and materialization.
+      // External triggers racing an already-active slice use the same safe
+      // behavior; the periodic/trailing owner continues durable progress.
+      if (this.vmReconcileDispatcher?.isInFlight(contextGraphId)) {
+        const result = createIncompleteDurableSyncResult();
+        const peerId = options.candidatePeerIds?.[0];
+        return {
+          outcome: 'no-progress',
+          result,
+          peerResults: peerId ? [{ peerId, result }] : [],
+          slices: 0,
+          ...(peerId ? { peerId } : {}),
+          safeOffset: 0,
+        };
+      }
       let durableResult: DurableSyncResult;
       let outcome: DurableRecoveryExecution['outcome'] = 'no-progress';
       let safeOffset = 0;
@@ -7463,7 +7483,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             ? 'partial-progress'
             : 'no-progress';
       } catch (error) {
-        durableResult = createIncompleteDurableSyncResult();
+        // An exception is not an empty but otherwise healthy slice. Preserve
+        // the durable diagnostic contract so outer catch-up accounting cannot
+        // count the trigger peer as successful and suppress the next retry.
+        durableResult = createFailedPeerDurableSyncResult();
         this.log.warn(
           ctx,
           `Chain-inventory VM recovery for selected public CG "${contextGraphId}" `

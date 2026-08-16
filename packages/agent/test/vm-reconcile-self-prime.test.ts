@@ -348,6 +348,60 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     )).toBe(false);
   });
 
+  it('persists a VM watermark across non-binding subscription readiness updates', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'VmReconcileWatermarkSnapshotRefresh',
+      chainAdapter: chain,
+      nodeRole: 'edge',
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const contextGraphId = 'vm-reconcile-watermark-refresh';
+    const initial = {
+      subscribed: true,
+      synced: false,
+      metaSynced: false,
+      sharedMemorySynced: false,
+      onChainId: '298',
+      lastReconciledOrdinal: 0,
+      syncMode: 'always-on' as const,
+    };
+    internals.subscribedContextGraphs.set(contextGraphId, initial);
+    const target = await (internals as any).resolveVmReconcileTarget(contextGraphId);
+
+    (internals as any).setContextGraphSubscription(
+      contextGraphId,
+      {
+        ...initial,
+        synced: true,
+        metaSynced: true,
+        sharedMemorySynced: true,
+      },
+      { persist: false },
+    );
+    const persisted = vi.fn(async (
+      _id: string,
+      candidate: { lastReconciledOrdinal?: number },
+      _signal: AbortSignal | undefined,
+      isCurrent: () => boolean,
+    ) => {
+      expect(candidate.lastReconciledOrdinal).toBe(17);
+      expect(isCurrent()).toBe(true);
+    });
+    (internals as any).persistContextGraphSubscriptionStrict = persisted;
+
+    await (internals as any).persistVmReconcileWatermark(contextGraphId, 17, target);
+
+    expect(persisted).toHaveBeenCalledOnce();
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).toMatchObject({
+      synced: true,
+      metaSynced: true,
+      sharedMemorySynced: true,
+      lastReconciledOrdinal: 17,
+    });
+  });
+
   it('preserves selected-only chain binding safety failures without creating cursor state', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'Rfc64SelectedVmAmbiguousBinding', chainAdapter: chain });

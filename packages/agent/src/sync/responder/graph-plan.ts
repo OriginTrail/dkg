@@ -232,7 +232,12 @@ export interface ExactGraphPagePlanMemo {
   get(
     key: string,
     load: () => Promise<ExactGraphPagePlan>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<ExactGraphPagePlan | null>;
 }
 
@@ -393,11 +398,24 @@ function createSessionPlanMemo<T>(
   get(
     key: string,
     load: () => Promise<T>,
-    options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+    options?: {
+      refresh?: boolean;
+      refreshGeneration?: string;
+      requireExisting?: boolean;
+      signal?: AbortSignal;
+    },
   ): Promise<T | null>;
 } {
-  const cached = new Map<string, { value: T; cachedAt: number; budgetEntryId?: symbol }>();
-  const inflight = new Map<string, Promise<T>>();
+  const cached = new Map<string, {
+    value: T;
+    cachedAt: number;
+    budgetEntryId?: symbol;
+    refreshGeneration?: string;
+  }>();
+  const inflight = new Map<string, {
+    promise: Promise<T>;
+    refreshGeneration?: string;
+  }>();
   const deleteEntry = (key: string, reason: 'expired' | 'released' | 'replaced') => {
     const entry = cached.get(key);
     if (!entry) return;
@@ -412,11 +430,34 @@ function createSessionPlanMemo<T>(
   return {
     async get(key, load, options) {
       throwIfAborted(options?.signal);
+      while (true) {
+        const pending = inflight.get(key);
+        if (!pending) break;
+        const supersedesPending = options?.refreshGeneration !== undefined
+          && options.refreshGeneration !== pending.refreshGeneration;
+        if (!supersedesPending) {
+          return raceAgainstAbort(pending.promise, options?.signal);
+        }
+        // A page-zero request from another server-derived session generation
+        // owns a new immutable plan boundary. Let the older load settle, then
+        // rebuild; never let the new session inherit its pending result.
+        try {
+          await raceAgainstAbort(pending.promise, options?.signal);
+        } catch {
+          throwIfAborted(options?.signal);
+        }
+      }
       const now = Date.now();
       prune(now);
-      const pending = inflight.get(key);
-      if (pending) return raceAgainstAbort(pending, options?.signal);
-      const existing = cached.get(key);
+      let existing = cached.get(key);
+      if (
+        existing
+        && options?.refreshGeneration !== undefined
+        && existing.refreshGeneration !== options.refreshGeneration
+      ) {
+        deleteEntry(key, 'replaced');
+        existing = undefined;
+      }
       if (!options?.refresh && existing) {
         cached.delete(key);
         cached.set(key, { ...existing, cachedAt: now });
@@ -456,11 +497,21 @@ function createSessionPlanMemo<T>(
             });
             accounting.budget.release(budgetEntryId);
           }
-          cached.set(key, { value, cachedAt: Date.now(), budgetEntryId });
+          cached.set(key, {
+            value,
+            cachedAt: Date.now(),
+            budgetEntryId,
+            refreshGeneration: options?.refreshGeneration,
+          });
           return value;
         })
-        .finally(() => inflight.delete(key));
-      inflight.set(key, pendingLoad);
+        .finally(() => {
+          if (inflight.get(key)?.promise === pendingLoad) inflight.delete(key);
+        });
+      inflight.set(key, {
+        promise: pendingLoad,
+        refreshGeneration: options?.refreshGeneration,
+      });
       return raceAgainstAbort(pendingLoad, options?.signal);
     },
   };
@@ -884,6 +935,7 @@ export async function readSwmMetaPage(params: {
     params.freshMetaPlanMemo,
     params.rowListCacheKey,
     params.refreshRowList === true,
+    params.refreshGeneration,
     (signal) => buildFreshSwmMetaPlan(
       params.store,
       candidateGraphs,
@@ -1658,7 +1710,11 @@ export async function readDurableDataPage(params: {
         );
       },
       params.exactGraphPlanCacheScope
-        ? { key: durableCacheKey, refresh: params.refreshRowList }
+        ? {
+          key: durableCacheKey,
+          refresh: params.refreshRowList,
+          refreshGeneration: params.refreshGeneration,
+        }
         : undefined,
     );
   }
@@ -1818,7 +1874,7 @@ async function readPagedRowsFromExactGraphPlanLoader(
   signal: AbortSignal | undefined,
   planMemo: ExactGraphPagePlanMemo | undefined,
   loadExactGraphPlan: (signal?: AbortSignal) => Promise<ExactGraphPagePlan>,
-  planCache?: { key: string; refresh?: boolean },
+  planCache?: { key: string; refresh?: boolean; refreshGeneration?: string },
 ): Promise<SyncRow[]> {
   const rowSnapshotLimits = cache?.memo.snapshotLoadLimits ?? {
     maxRows: SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS,
@@ -1829,6 +1885,7 @@ async function readPagedRowsFromExactGraphPlanLoader(
     planMemo,
     planCache?.key ?? cache?.key,
     planCache?.refresh ?? cache?.refresh === true,
+    planCache?.refreshGeneration ?? cache?.refreshGeneration,
     (planSignal) => loadExactGraphPlan(planSignal),
     'Sync session exact-graph plan expired before page completion',
   );
@@ -2186,11 +2243,17 @@ function createSessionPlanGetter<T>(
     get(
       key: string,
       load: () => Promise<T>,
-      options?: { refresh?: boolean; requireExisting?: boolean; signal?: AbortSignal },
+      options?: {
+        refresh?: boolean;
+        refreshGeneration?: string;
+        requireExisting?: boolean;
+        signal?: AbortSignal;
+      },
     ): Promise<T | null>;
   } | undefined,
   cacheKey: string | undefined,
   initialRefreshPending: boolean,
+  refreshGeneration: string | undefined,
   loadPlan: (signal?: AbortSignal) => Promise<T>,
   expiredMessage: string,
 ): (pageOffset: number, pageSignal: AbortSignal | undefined) => Promise<T> {
@@ -2201,6 +2264,7 @@ function createSessionPlanGetter<T>(
     const plan = memo && cacheKey
       ? await memo.get(cacheKey, () => loadPlan(pageSignal), {
         refresh: refreshPlan,
+        refreshGeneration,
         requireExisting: pageOffset > 0,
         signal: pageSignal,
       })

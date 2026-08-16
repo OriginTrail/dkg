@@ -228,6 +228,80 @@ describe('exact VM recovery lifecycle', () => {
     }
   });
 
+  it('does not re-enter an active selected-public VM reconcile from catch-up', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-active-reconcile';
+    const reconcile = vi.fn();
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).vmReconcileDispatcher = {
+        isInFlight: (key: string) => key === contextGraphId,
+      };
+      (agent as any).runVmReconcileForCg = reconcile;
+
+      const result = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+
+      expect(result).toMatchObject({
+        outcome: 'no-progress',
+        slices: 0,
+        peerId: PEER_A,
+        safeOffset: 0,
+        result: { complete: false },
+      });
+      expect(reconcile).not.toHaveBeenCalled();
+    } finally {
+      // The minimal dispatcher above is intentionally not a production queue;
+      // clear it before stop() attempts the normal dispatcher drain.
+      (agent as any).vmReconcileDispatcher = null;
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('reports a selected-public VM reconcile exception as a failed peer attempt', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-reconcile-failure';
+    try {
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).config.rfc64PublicCatalogBootstrap = {
+        acceptedPublicPolicies: [{
+          policyEnvelope: {
+            payload: { accessPolicy: 0, contextGraphId },
+          },
+          targets: [],
+        }],
+      };
+      (agent as any).runVmReconcileForCg = vi.fn(async () => {
+        throw new Error('chain inventory unavailable');
+      });
+
+      const result = await agent.syncDurableRecoveryContextGraph(contextGraphId, {
+        candidatePeerIds: [PEER_A],
+        candidatesAreSyncCapable: true,
+      });
+
+      expect(result).toMatchObject({
+        outcome: 'no-progress',
+        slices: 1,
+        peerId: PEER_A,
+        result: { complete: false, failedPeers: 1 },
+        peerResults: [{ peerId: PEER_A, result: { failedPeers: 1 } }],
+      });
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
   it('reopens reconcile and membership persistence admission on same-object restart', async () => {
     const membershipUpsert = vi.fn(async () => undefined);
     const agent = await createAgentWithSend(

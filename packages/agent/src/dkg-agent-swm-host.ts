@@ -3660,8 +3660,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       });
       return;
     }
+    // Readiness bookkeeping replaces immutable subscription snapshots. The
+    // binding-generation/cursor fence above, not object identity, determines
+    // whether this watermark still belongs to the active target.
     const sub = this.subscribedContextGraphs.get(localCgId);
-    if (!sub || sub !== target.sub) return;
+    if (!sub || !this.contextGraphBindingState.targetStillCurrent(localCgId, sub, target)) return;
     if (target.bindingKind === 'reverse-name-hash') {
       // Reverse-derived progress is valid only for this process-local,
       // revalidated target. The live cursor advances after this returns; never
@@ -3682,7 +3685,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isTargetCurrent,
     );
     if (!isTargetCurrent()) return;
-    sub.lastReconciledOrdinal = watermark;
+    // A second harmless readiness replacement may race the durable write.
+    // Apply the in-memory watermark to the latest same-binding snapshot.
+    const latest = this.subscribedContextGraphs.get(localCgId);
+    if (!latest || !this.contextGraphBindingState.targetStillCurrent(localCgId, latest, target)) return;
+    latest.lastReconciledOrdinal = watermark;
     this.emitReplication({
       contextGraphId: localCgId,
       onChainCgId: target.onChainId,
