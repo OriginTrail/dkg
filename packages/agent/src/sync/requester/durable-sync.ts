@@ -1550,8 +1550,10 @@ function partitionVerifiedGraphScopedAssets(
     // and receipt claim consumed by the chain authenticator below. ACLs,
     // status, timestamps, and local ordering are never accepted as trusted
     // controls from a peer.
-    const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
-      (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
+    const metadataQuads = canonicalizeLegacyReceiptConfirmationMetadata(
+      (metadataBySubject.get(ual) ?? []).filter(
+        (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
+      ),
     );
     const versions = new Set(
       metadataQuads
@@ -1626,6 +1628,41 @@ function partitionVerifiedGraphScopedAssets(
       ),
     ),
   };
+}
+
+/**
+ * Heal one legacy race shape without trusting the serving peer's choice of
+ * provenance lane. Older stores can contain both confirmation discriminators
+ * after a receiptless chain repair raced a later transaction receipt write.
+ * When that same envelope carries exactly one receipt hash, retain only the
+ * receipt-backed discriminator: the downstream authenticator still resolves
+ * that transaction on-chain and rejects a forged or mismatched receipt.
+ *
+ * Every other ambiguous shape remains fail-closed. In particular, dual kinds
+ * without one receipt, unknown kinds, or multiple receipt hashes are left
+ * untouched so the canonical parser rejects them.
+ */
+function canonicalizeLegacyReceiptConfirmationMetadata(metadataQuads: Quad[]): Quad[] {
+  const confirmationRows = metadataQuads.filter(
+    (quad) => quad.predicate === GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  );
+  if (confirmationRows.length !== 2) return metadataQuads;
+
+  const confirmationKinds = new Set(confirmationRows.map((quad) => stripLiteral(quad.object)));
+  const transactionHashes = metadataQuads.filter((quad) => quad.predicate === TRANSACTION_HASH);
+  if (
+    confirmationKinds.size !== 2
+    || !confirmationKinds.has('transaction')
+    || !confirmationKinds.has('finalized-materialization')
+    || transactionHashes.length !== 1
+  ) {
+    return metadataQuads;
+  }
+
+  return metadataQuads.filter((quad) => !(
+    quad.predicate === GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE
+    && stripLiteral(quad.object) === 'finalized-materialization'
+  ));
 }
 
 function stripLiteral(raw: string): string {
