@@ -523,6 +523,24 @@ describe('operation identity preservation (GH#2273)', () => {
     }
   });
 
+  it('integer lexical forms compare by numeric value in the identity key', async () => {
+    // The wire and store sides of the comparison may canonicalize integer
+    // lexical forms differently; the key must compare by VALUE or equivalent
+    // shares silently stop preserving. "02" vs "2" is the focused mismatch.
+    const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
+    const padded = opRowsOf(v1).map((quad) =>
+      quad.predicate === `${DKG}publicQuadsCount`
+        ? { ...quad, object: `"0${quad.object.replace(/^"|"\^\^.*$/g, '')}"^^<${XSD_INT}>` }
+        : quad);
+    expect(operationIdentityKey(padded)).toBe(operationIdentityKey(opRowsOf(v1)));
+    // And the value still discriminates: a genuinely different count differs.
+    const bumped = opRowsOf(v1).map((quad) =>
+      quad.predicate === `${DKG}publicQuadsCount`
+        ? { ...quad, object: `"7"^^<${XSD_INT}>` }
+        : quad);
+    expect(operationIdentityKey(bumped)).not.toBe(operationIdentityKey(opRowsOf(v1)));
+  });
+
   it('subGraphName participates in operation identity (key-level pin)', async () => {
     // Identity must not cross subgraph lanes: two otherwise byte-equivalent
     // operations in different lanes are DIFFERENT shares. Pinned at the key
