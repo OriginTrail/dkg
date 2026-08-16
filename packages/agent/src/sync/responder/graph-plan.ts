@@ -1203,6 +1203,9 @@ async function readGraphScopedVmManifest(
 ): Promise<GraphScopedVmManifest> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraph = contextGraphDataGraphUri(contextGraphId);
+  // Keep this restriction inside each named GRAPH block below. Oxigraph can
+  // otherwise plan the descriptor join as a graph-wide scan even when only one
+  // exact UAL was requested.
   const exactUalClause = assetUals === undefined
     ? ''
     : `VALUES ?ual { ${subjectValues(assetUals)} }`;
@@ -1248,8 +1251,8 @@ async function readGraphScopedVmManifest(
   // legacy compatibility lane.
   const markerBindings = await readBoundedBindings(`
     SELECT ?ual ?scopeVersion WHERE {
-      ${exactUalClause}
       GRAPH <${assertSafeIri(metaGraph)}> {
+        ${exactUalClause}
         ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion .
       }
     }
@@ -1292,8 +1295,8 @@ async function readGraphScopedVmManifest(
       SELECT ?ual ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph
              ?contextGraph ?publicTripleCount ?privateTripleCount ?status ?subGraphName
       WHERE {
-        ${exactUalClause}
         GRAPH <${assertSafeIri(metaGraph)}> {
+          ${exactUalClause}
           ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion ;
                <${DKG_KA_UAL}> ?kaUal ;
                <${DKG_ASSERTION_VERSION}> ?assertionVersion ;
