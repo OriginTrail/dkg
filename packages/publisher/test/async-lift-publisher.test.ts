@@ -759,6 +759,50 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.retryable).toBe(true);
   });
 
+  it('classifies a code-only precondition by its structured code, not its message text', async () => {
+    // Behavior-INVARIANCE pin for the consolidated precondition classifier:
+    // the code that routes a failure to the pre-send 'validated' state is the
+    // same decision that persists the failure code. The message here is
+    // deliberately keyword-free, so a regression back to message-keyed
+    // classification (which would still route the state via the code list)
+    // could not reproduce the expected pairing from the message alone.
+    let executorCalls = 0;
+    let preflightCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            preflightCalls += 1;
+            if (preflightCalls === 1) return undefined;
+            throw Object.assign(
+              new Error('zzz keyword-free precondition zzz'),
+              { code: 'CG_NOT_REGISTERED' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for an unregistered CG precondition');
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-code-only-precondition-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('validated');
+    // Preserves the pre-existing effective mapping for this code (the legacy
+    // chain never matched its real messages either); re-taxonomizing is #1974.
+    expect(processed?.failure?.code).toBe('canonicalization_failed');
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,

@@ -854,25 +854,33 @@ export class TripleStoreAsyncLiftPublisher
   private classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJobFailureCode | null {
     // GH#1786 — permanent author-capability refusal; no transaction was ever sent.
     if (isPermanentAuthorCapabilityFailure(error)) return 'authority_forbidden';
-    if ((error as { code?: unknown } | null | undefined)?.code === 'PUBLISH_INTENT_STALE') {
-      return 'publish_intent_stale';
+    let structuredCode: unknown;
+    try {
+      structuredCode = (error as { code?: unknown } | null | undefined)?.code;
+    } catch {
+      structuredCode = undefined;
     }
+    if (structuredCode === 'PUBLISH_INTENT_STALE') return 'publish_intent_stale';
     // GH#2273 — multi-valued SWM head: transient local corruption the sync
     // repair heals, NOT a stale intent; the queued request may still be
     // byte-identical to what the head certified at admission.
     if (isKnowledgeAssetWorkspaceHeadCorruptError(error)) return 'workspace_unavailable';
+    // Structured admission/registration preconditions. Their persisted code
+    // PRESERVES the pre-existing effective mapping: neither message ("is not
+    // registered on-chain", "not a complete full share") matches any keyword
+    // in the legacy chain, so both always fell through to
+    // `canonicalization_failed`. Re-taxonomizing them is #1974's call — what
+    // this helper guarantees is only that the code that ROUTES the failure to
+    // the pre-send state is also the code that decides what gets persisted.
+    if (structuredCode === 'PUBLISH_NOT_FULL_SHARE' || structuredCode === 'CG_NOT_REGISTERED') {
+      return 'canonicalization_failed';
+    }
     return null;
   }
 
   private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
     if (this.classifyKnowledgeAssetVmPublishPreconditionCode(error) !== null) return true;
     const anyError = error as { code?: unknown; message?: unknown };
-    if (
-      anyError?.code === 'PUBLISH_NOT_FULL_SHARE' ||
-      anyError?.code === 'CG_NOT_REGISTERED'
-    ) {
-      return true;
-    }
     const message = String(anyError?.message ?? error);
     return /is not finalized/i.test(message)
       || /No quads in shared memory/i.test(message)

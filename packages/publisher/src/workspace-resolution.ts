@@ -142,6 +142,67 @@ export interface ResolveKnowledgeAssetWorkspaceHeadParams {
 }
 
 /**
+ * Distinct object values per predicate for one subject's rows — the resolver's
+ * one row-collection shape, shared by the head and operation phases so their
+ * cardinality handling cannot drift apart.
+ */
+function collectSubjectValues(
+  bindings: readonly Record<string, string | undefined>[],
+): Map<string, string[]> {
+  const values = new Map<string, string[]>();
+  for (const binding of bindings) {
+    const predicate = binding['p'] ?? '';
+    const object = binding['o'] ?? '';
+    const list = values.get(predicate) ?? [];
+    if (!list.includes(object)) list.push(object);
+    values.set(predicate, list);
+  }
+  return values;
+}
+
+/**
+ * Declared-cardinality accessors over one subject's collected values. Every
+ * singleton predicate goes through `required`/`optional` — a duplicate is the
+ * union-residue corruption class and fails closed with the offending values
+ * named. Set-valued (`allowedPeer`) and canonicalized (`publishedAt`)
+ * predicates are read from the map directly by the resolver, which owns those
+ * two declared exceptions.
+ */
+function makeSingletonReader(
+  values: Map<string, string[]>,
+  ual: string,
+  subjectNoun: 'head' | 'operation',
+): {
+  required: (predicate: string, label: string) => string;
+  optional: (predicate: string, label: string) => string | undefined;
+} {
+  const read = (predicate: string, label: string, required: boolean): string | undefined => {
+    const list = values.get(predicate);
+    if (!list || list.length === 0) {
+      if (!required) return undefined;
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${ual}: incomplete head or operation metadata`,
+      );
+    }
+    if (list.length > 1) {
+      const rendered = list
+        .map((value) => stripLiteral(value)?.trim())
+        .filter((value): value is string => Boolean(value))
+        .sort();
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${ual}: ${subjectNoun} carries ` +
+        `${list.length} ${label} values (${rendered.join(', ')})`,
+      );
+    }
+    return list[0];
+  };
+  return {
+    required: (predicate, label) => read(predicate, label, true)!,
+    optional: (predicate, label) => read(predicate, label, false),
+  };
+}
+
+/**
  * Resolve the latest complete graph-scoped assertion accepted into SWM.
  * Missing means this node has not accepted this KA yet; malformed rows fail
  * closed so a corrupt head cannot allow an older assertion to overwrite data.
@@ -178,33 +239,9 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     );
   }
   if (headResult.bindings.length === 0) return undefined;
-  const headValues = new Map<string, string[]>();
-  for (const binding of headResult.bindings) {
-    const predicate = binding['p'] ?? '';
-    const object = binding['o'] ?? '';
-    const values = headValues.get(predicate) ?? [];
-    if (!values.includes(object)) values.push(object);
-    headValues.set(predicate, values);
-  }
-  const requiredHeadValue = (predicate: string, label: string): string => {
-    const values = headValues.get(predicate);
-    if (!values || values.length === 0) {
-      throw new KnowledgeAssetWorkspaceHeadCorruptError(
-        `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
-      );
-    }
-    if (values.length > 1) {
-      const rendered = values
-        .map((value) => stripLiteral(value)?.trim())
-        .filter((value): value is string => Boolean(value))
-        .sort();
-      throw new KnowledgeAssetWorkspaceHeadCorruptError(
-        `Corrupt graph-scoped SWM head for ${scope.ual}: head carries ` +
-        `${values.length} ${label} values (${rendered.join(', ')})`,
-      );
-    }
-    return values[0]!;
-  };
+  const headValues = collectSubjectValues(headResult.bindings);
+  const head = makeSingletonReader(headValues, scope.ual, 'head');
+  const requiredHeadValue = head.required;
   if (parseIntegerLiteral(requiredHeadValue(`${DKG}contentScopeVersion`, 'contentScopeVersion'))
     !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new KnowledgeAssetWorkspaceHeadCorruptError(
@@ -274,34 +311,13 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       `Unexpected graph-scoped SWM operation query result for ${scope.ual}: ${operationResult.type}`,
     );
   }
-  const operationValues = new Map<string, string[]>();
-  for (const binding of operationResult.bindings) {
-    const predicate = binding['p'] ?? '';
-    const object = binding['o'] ?? '';
-    const values = operationValues.get(predicate) ?? [];
-    if (!values.includes(object)) values.push(object);
-    operationValues.set(predicate, values);
-  }
+  const operationValues = collectSubjectValues(operationResult.bindings);
+  const operation = makeSingletonReader(operationValues, scope.ual, 'operation');
   const singletonOperationValue = (
     predicate: string,
     label: string,
     required: boolean,
-  ): string | undefined => {
-    const values = operationValues.get(predicate);
-    if (!values || values.length === 0) {
-      if (!required) return undefined;
-      throw new KnowledgeAssetWorkspaceHeadCorruptError(
-        `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
-      );
-    }
-    if (values.length > 1) {
-      throw new KnowledgeAssetWorkspaceHeadCorruptError(
-        `Corrupt graph-scoped SWM head for ${scope.ual}: operation carries ` +
-        `${values.length} ${label} values`,
-      );
-    }
-    return values[0];
-  };
+  ): string | undefined => (required ? operation.required(predicate, label) : operation.optional(predicate, label));
   // Id echo — the operation must itself carry the head's id (mirrors the
   // previous join). Multiple id rows on the operation subject were tolerated
   // by the join (only the matching one bound) and remain tolerated here.
