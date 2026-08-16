@@ -37,7 +37,7 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
@@ -164,14 +164,17 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
     it('is null/clean when no head exists', async () => {
       const store = new OxigraphStore();
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false });
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: null, needsRepair: false, shareOperationId: null });
     });
 
     it('reads a single-version head without flagging repair', async () => {
       const store = new OxigraphStore();
       await store.insert([...v1.meta]);
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false });
+      // GH#2273 — the single unambiguous id is exposed so catch-up can compare
+      // it against a descriptor's id before deciding whether the head may be
+      // rewritten at all.
+      expect(await materializer.readStoredHead(descriptorFor(v1))).toEqual({ version: '1', needsRepair: false, shareOperationId: 'op-v1' });
     });
 
     it('returns the NEWEST version (MAX) for union-insert residue and flags repair', async () => {
@@ -182,7 +185,10 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert([...v1.meta]);
       await store.insert([...v2.meta]);
       const { materializer } = materializerFor(store);
-      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true });
+      // GH#2273 — with residue on the head, ANY sampled id would be an
+      // arbitrary pick (the exact failure the field exists to prevent), so
+      // ambiguity reads as null and the decision routes through repair.
+      expect(await materializer.readStoredHead(descriptorFor(v2))).toEqual({ version: '2', needsRepair: true, shareOperationId: null });
     });
   });
 
@@ -602,5 +608,257 @@ describe('T9b — the already-materialized exit repairs an absent or stale head'
     // The stale operation subject must not survive alongside the fresh one.
     expect(await distinctObjects(store, WS_META, target.headSubject, `${DKG}shareOperationId`))
       .toEqual([`"${target.operationId}"`]);
+  });
+});
+
+/**
+ * GH#2273 — catch-up must not change the operation identity of a semantically
+ * identical head. The failure this block reproduces killed queued VM-publish
+ * jobs terminally: a job freezes the head's shareOperationId at admission; a
+ * peer (typically a storage-ACKing core) legitimately holds the SAME share
+ * under a DIFFERENT deterministic id; stage 1 — the round's bulk verified-meta
+ * union-insert stacked the peer's head-id row beside the local one; stage 2 —
+ * the next round's needsRepair deleted the head AND the local operation
+ * subject, re-inserting only the remote identity, after which the preflight's
+ * `liveHead.shareOperationId !== request.shareOperationId` failed the job as
+ * terminal `publish_intent_stale` for content that never changed.
+ */
+describe('operation identity preservation (GH#2273)', () => {
+  const stores: OxigraphStore[] = [];
+  afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
+
+  // The storage-ACK-shaped twin of `v1`: same marker => byte-identical payload,
+  // digest and operation rows (the fixture stamps a constant timestamp and
+  // publisherPeerId), differing ONLY in the operation id — the exact residue
+  // `resolveEquivalentHeadOperation`'s docstring names as legitimate.
+  const remoteEquivalent = share(1, 'storage-ack-2273b', 'version-one');
+  // Same version, different content => different digest => NOT equivalent.
+  const remoteChanged = share(1, 'storage-ack-2273c', 'version-one-changed');
+
+  function opRowsOf(fixture: typeof v1): Quad[] {
+    return fixture.meta.filter((quad) => quad.subject === fixture.operationSubject);
+  }
+
+  async function seedMaterializedLocal(store: OxigraphStore): Promise<void> {
+    // BOTH halves matter. Meta alone is the pre-fix broken state: without the
+    // assertion-graph content the per-KA path takes the MATERIALIZE branch and
+    // rewrites the head in round 1, so the two-stage shape under test would
+    // never form and the rows below would fail for the wrong reason.
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    await store.insert([...v1.meta]);
+  }
+
+  /** realHarness's shape (see the end-to-end describe) without the counters. */
+  function identityHarness(store: TripleStore, served: typeof v1) {
+    const snapshotStore = new MemorySnapshotStore();
+    const { materializer } = materializerFor(store);
+    return async () => {
+      await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
+      return runSharedMemorySync({
+        ctx,
+        remotePeerId: 'peer-source',
+        contextGraphIds: [CG],
+        createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+        fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
+          quads: phase === 'meta' ? [...served.meta] : [],
+          bytesReceived: 0,
+          resumedFromOffset: 0,
+          nextOffset: phase === 'meta' ? served.meta.length : 0,
+          checkpointKey: 'k',
+          completed: true,
+          timedOut: false,
+        }),
+        processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
+          verifiedData: wsDataQuads,
+          verifiedMeta: wsMetaQuads,
+          totalFetchedDataQuads: wsDataQuads.length,
+          totalFetchedMetaQuads: wsMetaQuads.length,
+          droppedDataTriples: 0,
+          emptyResponses: 0,
+          entityCreators: [],
+        }),
+        ensureContextGraph: async () => {},
+        storeInsert: async (quads) => { await store.insert(quads); },
+        snapshotMaterializer: materializer,
+        publicSnapshotStore: snapshotStore,
+        deleteCheckpoint: () => {},
+        setCheckpoint: () => {},
+        ensureOwnedMap: () => new Map(),
+        logInfo: () => {},
+        logWarn: () => {},
+        logDebug: () => {},
+      });
+    };
+  }
+
+  it('operationIdentityKey survives the Oxigraph round-trip (wire rows vs stored rows)', async () => {
+    // The prefer-local decision compares WIRE quads (descriptor metadata)
+    // against rows READ BACK from the store. If any allow-list object term
+    // re-serializes differently (typed integers, bare-IRI kaUal, datatype
+    // rendering), the keys never match, no suppression ever fires, and the
+    // whole fix silently degrades to a no-op in production while
+    // descriptor-vs-descriptor unit rows stay green. This row pins the
+    // round-trip byte-compatibility the comparison rests on.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([...v1.meta]);
+    const readBack = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${WS_META}> { <${v1.operationSubject}> ?p ?o } }`,
+    );
+    expect(readBack.type).toBe('bindings');
+    if (readBack.type !== 'bindings') throw new Error('expected bindings');
+    const storedRows: Quad[] = readBack.bindings.map((row) => ({
+      subject: v1.operationSubject,
+      predicate: String(row['p'] ?? ''),
+      object: String(row['o'] ?? ''),
+      graph: WS_META,
+    }));
+    const wireKey = operationIdentityKey(opRowsOf(v1));
+    const storedKey = operationIdentityKey(storedRows);
+    expect(wireKey).not.toBeNull();
+    expect(storedKey).toBe(wireKey);
+    // And the relation itself discriminates: the equivalent twin keys equal,
+    // the changed share keys different — on the WIRE side, so a false-positive
+    // in the normalizer cannot hide behind store canonicalization.
+    expect(operationIdentityKey(opRowsOf(remoteEquivalent))).toBe(wireKey);
+    expect(operationIdentityKey(opRowsOf(remoteChanged))).not.toBe(wireKey);
+  });
+
+  it('selectRepairIdentity prefers the stored equivalent id and refuses a changed share', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    // Stage-1 residue, fabricated the way sync produces it: bare union insert.
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+      .toEqual({ winnerShareOperationId: 'op-v1' });
+    // Solo-removal for the equivalence conjunct: same shape, but the stored
+    // operation genuinely differs from what the descriptor offers => the
+    // decision MUST fall back to descriptor-wins (null), or a real content
+    // change could be silently masked by identity preservation.
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteChanged)))
+      .toBeNull();
+  });
+
+  it('repairHeadPreservingIdentity heals a two-valued head to the stored identity', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-v1');
+    // Head certifies exactly the local identity again, the winner's operation
+    // rows were NEVER deleted (they may be the only durable copy a queued job
+    // references), and the loser's operation subject is gone.
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, remoteEquivalent.operationSubject, `${DKG}shareOperationId`))
+      .toEqual([]);
+    // The full production reader agrees end-to-end — the same resolver the
+    // queued-publish preflight consults.
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('catch-up preserves the local identity for identical content across both stages', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+
+    // Round 1 — pre-fix: the per-KA path skipped (content identical, head
+    // healthy) and the bulk insert unioned the peer's head-id row in, leaving
+    // TWO ids under a LIMIT-1-style reader.
+    await identityHarness(store, remoteEquivalent)();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    // The remote operation subject IS retained as immutable history — only the
+    // head-id row is suppressed. This also proves the bulk insert is not
+    // blanket-filtered (see the graph-backed row below for the head side).
+    expect(await distinctObjects(store, WS_META, remoteEquivalent.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"storage-ack-2273b"']);
+
+    // Round 2 — pre-fix: needsRepair fired on the two-valued head, deleted the
+    // head AND op-v1's subject, and re-inserted only the remote identity.
+    await identityHarness(store, remoteEquivalent)();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('a genuinely changed share still adopts the remote identity (discriminator polarity)', async () => {
+    // Same version, different digest: the materialized guard sees foreign
+    // content, the graph is replaced from the peer snapshot, and the repair
+    // decision must NOT preserve the local id — the share really changed, and
+    // the preflight rejecting a queued job against it is the CORRECT outcome
+    // (issue #2273's own negative acceptance test).
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await identityHarness(store, remoteChanged)();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"storage-ack-2273c"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual([]);
+  });
+
+  it('an older version\'s head rows never union onto the live head', async () => {
+    // The version-superseded exit used to return WITHOUT withholding the stale
+    // descriptor's head rows from the bulk append, so a peer still serving v1
+    // stacked a second assertionVersion (and operation id) onto a v2 head —
+    // the overwrite-with-older hazard arriving via the metadata side, and a
+    // state the phased resolver now fails closed on.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v2.payload, v2.assertionGraph));
+    await store.insert([...v2.meta]);
+    await identityHarness(store, v1)();
+    expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`))
+      .toEqual([`"2"^^<${XSD_INTEGER}>`]);
+    expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v2"']);
+  });
+
+  it('a graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
+    // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
+    // never enter the per-KA loop — the round's bulk insert is their ONLY head
+    // writer. A blanket head-row filter instead of decision-driven suppression
+    // would leave them permanently headless (the #2050 G7 invisibility class).
+    const store = new OxigraphStore();
+    stores.push(store);
+    const graphBacked = {
+      ...v1,
+      meta: [
+        ...v1.meta.filter((quad) => quad.predicate !== `${DKG}publicSnapshotRef`),
+        {
+          subject: v1.operationSubject,
+          predicate: `${DKG}publicSnapshotGraph`,
+          object: `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`,
+          graph: WS_META,
+        },
+      ],
+    };
+    await identityHarness(store, graphBacked as typeof v1)();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
   });
 });

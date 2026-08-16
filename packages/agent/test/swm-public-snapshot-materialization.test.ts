@@ -124,6 +124,7 @@ interface HarnessOverrides {
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
   reconcileImpl?: () => Promise<void>;
+  selectRepairIdentity?: () => { winnerShareOperationId: string } | null;
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
@@ -203,7 +204,7 @@ function harness(overrides: HarnessOverrides = {}) {
         },
         readStoredHead: async () => {
           events.push('version-read');
-          return overrides.storedHead?.() ?? { version: null, needsRepair: false };
+          return overrides.storedHead?.() ?? { version: null, needsRepair: false, shareOperationId: null };
         },
         replaceGraph: async (graphUri, quads) => {
           events.push('replaced');
@@ -213,6 +214,19 @@ function harness(overrides: HarnessOverrides = {}) {
         replaceHeadMetadata: async (contextGraphId, descriptor) => {
           events.push('head-swapped');
           headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+        },
+        // GH#2273 — this fake proves ORDERING, not store state; identity
+        // preservation never fires here (no stored foreign id), so the
+        // decision hook reports "descriptor wins" and the rewrite hook only
+        // records that it ran.
+        selectRepairIdentity: async () => {
+          events.push('repair-identity-selected');
+          return overrides.selectRepairIdentity?.() ?? null;
+        },
+        repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
+          events.push('head-repaired-preserving-identity');
+          headSwaps.push({ contextGraphId, headSubject: descriptor.headSubject });
+          void winnerShareOperationId;
         },
       },
       reconcileFinalizedTwin: async () => {
@@ -254,7 +268,7 @@ describe('public SWM snapshot materialization', () => {
     // head bug. Ordering matters both ways: graph before swap (a crash leaves
     // repairable content, never a head without content), swap before append
     // (the fresh rows land on a clean subject).
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => false });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }), contentPresent: () => false });
     await h.run();
     expect(h.events.indexOf('replaced')).toBeGreaterThan(-1);
     expect(h.events.indexOf('head-swapped')).toBeGreaterThan(h.events.indexOf('replaced'));
@@ -282,7 +296,7 @@ describe('public SWM snapshot materialization', () => {
   it('does not recreate SWM head metadata after retiring an already-materialized twin', async () => {
     const h = harness({
       contentPresent: () => true,
-      storedHead: () => ({ version: '1', needsRepair: false }),
+      storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }),
       reconcileDisposition: 'suppress-metadata',
     });
     const summary = await h.run();
@@ -343,7 +357,7 @@ describe('public SWM snapshot materialization', () => {
 
     const h = harness({
       lockMap,
-      storedHead: () => ({ version: storedVersion, needsRepair: false }),
+      storedHead: () => ({ version: storedVersion, needsRepair: false, shareOperationId: null }),
       onLockRequested: () => sawLockRequest(),
     });
 
@@ -379,14 +393,14 @@ describe('public SWM snapshot materialization', () => {
     // storedHead equals the descriptor (the marker exists) but the content
     // check reports absent — a marker-based guard would skip forever; the
     // content-based guard repairs.
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => false });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }), contentPresent: () => false });
     await h.run();
     expect(h.replaced).toHaveLength(1);
     expect(h.replaced[0]!.graphUri).toBe(h.fx.assertionGraph);
   });
 
   it('leaves an already-materialized asset alone', async () => {
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false }), contentPresent: () => true });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: false, shareOperationId: null }), contentPresent: () => true });
     const summary = await h.run();
     expect(h.events).toContain('content-checked');
     expect(h.events).not.toContain('replaced');
@@ -399,7 +413,7 @@ describe('public SWM snapshot materialization', () => {
     // several version/operation rows (e.g. a prior round failed between the
     // replace and the head swap). The skip must still swap the head, or the
     // ambiguity becomes permanent — every later round skips on content.
-    const h = harness({ storedHead: () => ({ version: '1', needsRepair: true }), contentPresent: () => true });
+    const h = harness({ storedHead: () => ({ version: '1', needsRepair: true, shareOperationId: null }), contentPresent: () => true });
     const summary = await h.run();
     expect(h.events).not.toContain('replaced');
     expect(h.events).toContain('head-swapped');

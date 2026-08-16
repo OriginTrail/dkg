@@ -92,6 +92,25 @@ class GraphScopedSnapshotCommitCoordinator {
     for (const quad of rows) this.#writtenKeys.add(metadataQuadKey(quad));
   }
 
+  /**
+   * GH#2273 — ROW-level suppression for identity-preserving decisions. Only
+   * the specific rows named here are withheld from this round's remaining
+   * writes (`insertVerifiedDescriptorMeta` and the bulk append both honour the
+   * same ledger). Deliberately NOT descriptor-level: after a head repair the
+   * head subject holds only what the repair re-inserted, and suppressing a
+   * descriptor's WHOLE metadata there would withhold the four required head
+   * rows too, leaving a head the resolver permanently fails closed on. The
+   * key identity with `verifiedMetaForInsert` holds because canonicalization
+   * only REMOVES rows — a canonicalizer that rewrites rows would silently
+   * break this ledger.
+   */
+  suppressRows(rows: readonly Quad[]): void {
+    for (const quad of rows) {
+      const key = metadataQuadKey(quad);
+      if (this.#verifiedKeys.has(key)) this.#suppressedKeys.add(key);
+    }
+  }
+
   #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
     for (const quad of descriptor.metadataQuads) {
       const key = metadataQuadKey(quad);
@@ -816,6 +835,43 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         summary.insertedTriples += rows.length;
         summary.insertedMetaTriples += rows.length;
       };
+      /** The descriptor's head-subject `shareOperationId` row(s), for row-level suppression. */
+      const descriptorHeadIdRows = (
+        descriptor: GraphScopedSwmRecoveryDescriptor,
+      ): Quad[] => descriptor.metadataQuads.filter((quad) =>
+        quad.subject === descriptor.headSubject && quad.predicate === `${DKG}shareOperationId`);
+      /**
+       * GH#2273 — every head rewrite on this lane goes through ONE decision:
+       * when the stored operations the head references are identity-equivalent
+       * to the descriptor's (same content commitment, envelope and author under
+       * a different operation id — the storage-ACK/originator residue), repair
+       * PRESERVES a stored identity instead of adopting the descriptor's,
+       * because a queued VM-publish job may have frozen that stored id at
+       * admission and rotating it kills the job terminally. Any genuine
+       * difference routes to `replaceHeadMetadata` — exactly today's behavior,
+       * which is the correct outcome for a real content or policy change.
+       * The loser id row is suppressed so neither the per-KA meta insert nor
+       * the round's bulk append re-stacks it onto the repaired head.
+       */
+      const repairOrReplaceHead = async (
+        descriptor: GraphScopedSwmRecoveryDescriptor,
+      ): Promise<void> => {
+        const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
+        if (preserved) {
+          await snapshotMaterializer!.repairHeadPreservingIdentity(
+            pid,
+            descriptor,
+            preserved.winnerShareOperationId,
+          );
+          snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
+          logInfo(ctx, `SWM sync for "${pid}": repaired head for ${descriptor.kaUal} preserving `
+            + `stored operation identity ${preserved.winnerShareOperationId} `
+            + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+        } else {
+          await snapshotMaterializer!.replaceHeadMetadata(pid, descriptor);
+        }
+        await insertVerifiedDescriptorMeta(descriptor);
+      };
       const materializeReadySnapshot = async (snapshotRef: string): Promise<void> => {
         const descriptors = snapshotDescriptorsByRef.get(snapshotRef);
         // Missing WIRING means nothing CAN be written, so the ref stays
@@ -880,6 +936,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                   storedHead.version !== null
                   && storedVersionOutranksDescriptor(storedHead.version, descriptor.assertionVersion)
                 ) {
+                  // GH#2273 — the skipped descriptor's HEAD rows must not reach
+                  // the round's bulk append either: an older version's rows
+                  // union-inserted onto the live head make it multi-VERSIONED,
+                  // which is the overwrite-with-older hazard above arriving via
+                  // the metadata side. Operation-subject rows may still land as
+                  // immutable history; only the head subject is withheld.
+                  snapshotCommit.suppressRows(descriptor.metadataQuads.filter(
+                    (quad) => quad.subject === descriptor.headSubject,
+                  ));
                   materializedKeys.add(graphKey);
                   logDebug(ctx, `SWM sync for "${pid}": snapshot ${snapshotRef} superseded by `
                     + `stored version ${storedHead.version} (descriptor ${descriptor.assertionVersion}); skipping`);
@@ -910,8 +975,29 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     storedHead.needsRepair
                     || !headCertifiesDescriptor(storedHead.version, descriptor.assertionVersion)
                   ) {
-                    await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
-                    await insertVerifiedDescriptorMeta(descriptor);
+                    await repairOrReplaceHead(descriptor);
+                  } else if (
+                    storedHead.shareOperationId !== null
+                    && storedHead.shareOperationId !== descriptor.shareOperationId
+                  ) {
+                    // GH#2273 stage 1 — content identical, head healthy, but the
+                    // peer references a DIFFERENT operation id. When the stored
+                    // operation is identity-equivalent (selectRepairIdentity
+                    // compares the full allow-list under the held lock), the
+                    // stored identity wins: suppress the descriptor's head-id
+                    // row so the bulk append cannot union it onto the head —
+                    // that union is what made the head multi-valued and, one
+                    // round later, rotated it to the remote id and terminally
+                    // killed any queued VM-publish job frozen on the local id.
+                    // Non-equivalent (genuine policy/author change): no
+                    // suppression, today's convergence to remote authority.
+                    const preserved = await snapshotMaterializer.selectRepairIdentity(pid, descriptor);
+                    if (preserved) {
+                      snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
+                      logInfo(ctx, `SWM sync for "${pid}": preferring stored operation identity `
+                        + `${preserved.winnerShareOperationId} for ${descriptor.kaUal} `
+                        + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+                    }
                   }
                   materializedKeys.add(graphKey);
                   return;
@@ -930,12 +1016,17 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                 // follows lands on a clean subject instead of stacking a second
                 // version onto it (LIMIT-1 head readers would otherwise see an
                 // arbitrary mix).
-                await snapshotMaterializer.replaceHeadMetadata(pid, descriptor);
-                // Immediately, and inside this KA's lock: the delete above is
-                // the whole of G7 without it. `storeInsert(processed.verifiedMeta)`
-                // is below the incomplete branch's `continue`, so on a partial
-                // round it never runs and this KA's head would stay deleted.
-                await insertVerifiedDescriptorMeta(descriptor);
+                // GH#2273 — this call site rotates identity too: a KA whose
+                // content was absent but whose head references a live local
+                // operation (the r26 head-present/graph-absent residual) must
+                // not lose that identity when the graph is filled from an
+                // equivalent peer snapshot. Same single decision as the
+                // repair exit above; the meta insert stays immediately after
+                // and inside this KA's lock — the delete inside is the whole
+                // of G7 without it, since `storeInsert(processed.verifiedMeta)`
+                // is below the incomplete branch's `continue` and never runs
+                // on a partial round.
+                await repairOrReplaceHead(descriptor);
                 materializedKeys.add(graphKey);
                 materializedGraphs += 1;
                 materializedQuads += asset.quads.length;

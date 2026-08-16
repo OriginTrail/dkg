@@ -281,6 +281,95 @@ export function canonicalizeGraphScopedSwmHeadRows(params: {
   });
 }
 
+const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
+const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+
+/**
+ * GH#2273 — the predicates over which two share operations for the same KA are
+ * compared for IDENTITY-preserving decisions ("is this the same share under a
+ * different operation id?"). An explicit ALLOW-LIST, not a deny-list: several
+ * operation rows embed the operation id in their VALUE (`publicSnapshotGraph`
+ * is `did:…/_shared_memory_snapshots/…/<shareOperationId>/ka`), and others are
+ * legitimately per-node (`publisherPeerId` names whichever node persisted the
+ * operation, `publishedAt` its clock) — a deny-list that misses any of those
+ * makes byte-identical shares compare unequal and silently disables every
+ * prefer-local decision built on it.
+ *
+ * `required` rows must be present on BOTH sides or the key is null (callers
+ * treat null as NOT equivalent — fail toward remote authority, never toward
+ * preserving unprovable equivalence). `compared` rows participate whenever
+ * present; a row present on one side only makes the keys differ, which is the
+ * correct outcome (e.g. an added accessPolicy or allowedPeer IS a change the
+ * stale-intent machinery must see).
+ */
+export const OPERATION_IDENTITY_PREDICATES = {
+  required: [
+    CONTEXT_GRAPH_ID,
+    CONTENT_SCOPE_VERSION,
+    KA_UAL,
+    ASSERTION_VERSION,
+    PUBLIC_QUADS_COUNT,
+    PUBLIC_QUADS_DIGEST,
+    PRIVATE_TRIPLE_COUNT,
+  ],
+  compared: [
+    PRIVATE_MERKLE_ROOT,
+    ACCESS_POLICY,
+    ALLOWED_PEER,
+    SUB_GRAPH_NAME,
+    PROV_WAS_ATTRIBUTED_TO,
+  ],
+} as const;
+
+/**
+ * One side of the comparison is WIRE quads (descriptor metadata) and the other
+ * is rows READ BACK from the triple store, so object terms are canonicalized
+ * before keying: RDF 1.1 makes a plain literal and `^^xsd:string` the same
+ * term, and `^^xsd:integer` values compare by numeric value so a store that
+ * canonicalizes the lexical form cannot break byte-equality of the key.
+ */
+function normalizeIdentityObject(object: string): string {
+  const literal = /^"([\s\S]*)"(?:\^\^<(.+)>)?$/.exec(object);
+  if (!literal) return `iri\u0000${object}`;
+  const value = literal[1] ?? '';
+  const datatype = literal[2] ?? '';
+  if (datatype === '' || datatype === XSD_STRING) return `lit\u0000${value}\u0000`;
+  if (datatype === XSD_INTEGER) {
+    try {
+      return `lit\u0000${BigInt(value).toString()}\u0000${XSD_INTEGER}`;
+    } catch {
+      return `lit\u0000${value}\u0000${XSD_INTEGER}`;
+    }
+  }
+  return `lit\u0000${value}\u0000${datatype}`;
+}
+
+/**
+ * Subject- and graph-independent identity key for one share operation's rows,
+ * or null when any required identity row is absent. Two operations with equal
+ * keys are the SAME share (same content commitment, same access envelope, same
+ * author) under different operation ids — the residue storage-ACK persistence
+ * and originator persistence legitimately produce for one share.
+ */
+export function operationIdentityKey(rows: readonly Quad[]): string | null {
+  const parts = new Set<string>();
+  const seenPredicates = new Set<string>();
+  const allowed = new Set<string>([
+    ...OPERATION_IDENTITY_PREDICATES.required,
+    ...OPERATION_IDENTITY_PREDICATES.compared,
+  ]);
+  for (const row of rows) {
+    if (!allowed.has(row.predicate)) continue;
+    seenPredicates.add(row.predicate);
+    parts.add(`${row.predicate}\u0000${normalizeIdentityObject(row.object)}`);
+  }
+  for (const predicate of OPERATION_IDENTITY_PREDICATES.required) {
+    if (!seenPredicates.has(predicate)) return null;
+  }
+  return [...parts].sort().join('\u0001');
+}
+
 interface ResolvedHeadOperation {
   readonly shareOperationId: string;
   readonly operationSubject: string;

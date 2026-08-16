@@ -30,8 +30,12 @@ import {
   ASSERTION_PUBLISH_RECEIPT_PREDICATES,
   createGraphKnowledgeAssetScope,
   createOperationContext,
+  knowledgeAssetLayerGraphUri,
   MemoryLayer,
 } from '@origintrail-official/dkg-core';
+import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 
 const agents: DKGAgent[] = [];
 
@@ -1061,6 +1065,154 @@ describe('rootless graph-scoped KA lifecycle', () => {
     expect(processed?.failure?.code).toBe('publish_intent_stale');
     expect(preflight).toHaveBeenCalled();
     expect(executor).not.toHaveBeenCalled();
+  }, 60_000);
+
+  it('queued async VM publish preflight survives catch-up offering an equivalent operation id (GH#2273)', async () => {
+    // GH#2273 end-to-end: a queued VM-publish intent freezes the SWM head's
+    // shareOperationId at admission; a restart-time catch-up round then offers
+    // the SAME share under a peer's deterministic storage-ACK-style id. Pre-fix
+    // the round's bulk meta union made the head two-valued and the next round's
+    // repair rotated it to the remote identity, after which THIS preflight
+    // failed the queued job terminally as publish_intent_stale for content that
+    // never changed. Post-fix the equivalent remote identity must neither
+    // rewrite nor stack onto the head, and the REAL preflight — the same call
+    // the async publisher's claim path makes — must still authorize execution.
+    const agent = await createAgent('QueuedAsyncVmCatchupIdentityBot');
+    await agent.createContextGraph({ id: CG_ID, name: 'Queued Async VM Catch-up Identity E2E' });
+    await agent.registerContextGraph(CG_ID);
+
+    const name = 'queued-async-catchup-identity';
+    const root = `${ENTITY_BASE}:queued-async-catchup-identity`;
+    await agent.assertion.create(CG_ID, name);
+    await agent.assertion.write(CG_ID, name, [
+      { subject: root, predicate: 'http://schema.org/name', object: '"Catch-up Identity"' },
+    ]);
+    const shared = await agent.assertion.promote(CG_ID, name);
+    expect(shared.publishReady).toBe(true);
+    const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG_ID, name);
+    const localOpId = intent.shareOperationId;
+
+    // Build the peer's batch by READING this node's own durable rows back and
+    // re-labeling them under a foreign operation id — byte-equivalence with the
+    // local operation is then guaranteed by construction, not by a parallel
+    // fixture that could drift from the real share flow.
+    const store = (agent as any).store;
+    const metaGraph = contextGraphSharedMemoryMetaUri(CG_ID);
+    const scope = createGraphKnowledgeAssetScope(intent.kaUal, intent.assertionVersion);
+    const headSubject = `${scope.ual}#dkg-swm-head`;
+    const localOpSubject = `urn:dkg:share:${CG_ID}:${localOpId}`;
+    const remoteOpId = `storage-ack-${'2273'.repeat(2)}`;
+    const remoteOpSubject = `urn:dkg:share:${CG_ID}:${remoteOpId}`;
+    const DKG_NS = 'http://dkg.io/ontology/';
+    const readRows = async (subject: string) => {
+      const result = await store.query(
+        `SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } }`,
+      );
+      if (result.type !== 'bindings') throw new Error('expected bindings');
+      return result.bindings.map((row: Record<string, string>) => ({
+        subject,
+        predicate: String(row['p'] ?? ''),
+        object: String(row['o'] ?? ''),
+        graph: metaGraph,
+      }));
+    };
+    const localOpRows = await readRows(localOpSubject);
+    const localHeadRows = await readRows(headSubject);
+    expect(localOpRows.length).toBeGreaterThan(0);
+    const digestRow = localOpRows.find((q: { predicate: string }) => q.predicate === `${DKG_NS}publicQuadsDigest`);
+    expect(digestRow).toBeDefined();
+    const digest = String(digestRow!.object).replace(/^"|"$/g, '');
+    // The real share flow persisted a node-local snapshot GRAPH whose IRI
+    // embeds the LOCAL operation id; carrying that row over verbatim would
+    // make the relabeled descriptor fail parsing (snapshot graph mismatch)
+    // and the whole round silently no-op — a vacuous pass. The peer shape for
+    // a snapshot-backed share is a publicSnapshotRef instead.
+    const remoteOpRows = localOpRows
+      .filter((q: { predicate: string }) => q.predicate !== `${DKG_NS}publicSnapshotGraph`
+        && q.predicate !== `${DKG_NS}publicSnapshotRef`)
+      .map((q: { predicate: string; object: string }) => ({
+        ...q,
+        subject: remoteOpSubject,
+        object: q.predicate === `${DKG_NS}shareOperationId` ? JSON.stringify(remoteOpId)
+          : q.predicate === `${DKG_NS}publishedAt` ? `"2026-08-16T23:59:59.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>`
+          : q.object,
+      }));
+    remoteOpRows.push({ subject: remoteOpSubject, predicate: `${DKG_NS}publicSnapshotRef`, object: `"${digest}"`, graph: metaGraph });
+    const remoteHeadRows = localHeadRows.map((q: { predicate: string; object: string }) => ({
+      ...q,
+      object: q.predicate === `${DKG_NS}shareOperationId` ? JSON.stringify(remoteOpId) : q.object,
+    }));
+    const peerMeta = [...remoteHeadRows, ...remoteOpRows];
+
+    const contentResult = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${knowledgeAssetLayerGraphUri(CG_ID, MemoryLayer.SharedWorkingMemory, scope)}> { ?s ?p ?o } }`,
+    );
+    if (contentResult.type !== 'bindings') throw new Error('expected content bindings');
+    const contentQuads = contentResult.bindings.map((row: Record<string, string>) => ({
+      subject: String(row['s'] ?? ''), predicate: String(row['p'] ?? ''), object: String(row['o'] ?? ''), graph: '',
+    }));
+    const snapshots = new Map<string, typeof contentQuads>([[digest, contentQuads]]);
+
+    const materializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
+    const summary = await runSharedMemorySync({
+      ctx: createOperationContext('sync'),
+      remotePeerId: 'peer-ack-core',
+      contextGraphIds: [CG_ID],
+      createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
+      fetchSyncPages: async (_c: unknown, _p: unknown, _cg: unknown, _inc: unknown, phase: string): Promise<SyncPageResult> => ({
+        quads: phase === 'meta' ? [...peerMeta] : [],
+        bytesReceived: 0,
+        resumedFromOffset: 0,
+        nextOffset: phase === 'meta' ? peerMeta.length : 0,
+        checkpointKey: 'k',
+        completed: true,
+        timedOut: false,
+      }),
+      processSharedMemoryBatch: async (wsDataQuads: unknown[], wsMetaQuads: unknown[]) => ({
+        verifiedData: wsDataQuads,
+        verifiedMeta: wsMetaQuads,
+        totalFetchedDataQuads: wsDataQuads.length,
+        totalFetchedMetaQuads: wsMetaQuads.length,
+        droppedDataTriples: 0,
+        emptyResponses: 0,
+        entityCreators: [],
+      }),
+      ensureContextGraph: async () => {},
+      storeInsert: async (quads: unknown[]) => { await store.insert(quads); },
+      snapshotMaterializer: materializer,
+      publicSnapshotStore: {
+        putSnapshot: async (input: { digest: string; quads: unknown[] }) => {
+          snapshots.set(input.digest, input.quads as typeof contentQuads);
+          return { ref: input.digest, byteLength: 0 };
+        },
+        getSnapshot: async (ref: string) => snapshots.get(ref) ?? null,
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      ensureOwnedMap: () => new Map(),
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    } as never);
+    // Anti-vacuity: the round must actually have processed the descriptor —
+    // the remote operation subject lands as immutable history. A parse-time
+    // rejection would leave zero meta writes and prove nothing.
+    expect(summary.insertedMetaTriples).toBeGreaterThan(0);
+
+    // The head still certifies the ADMISSION-TIME identity, single-valued.
+    const headIds = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { <${headSubject}> <${DKG_NS}shareOperationId> ?op } }`,
+    );
+    if (headIds.type !== 'bindings') throw new Error('expected bindings');
+    expect(headIds.bindings.map((row: Record<string, string>) => String(row['op']))).toEqual([`"${localOpId}"`]);
+
+    // And the REAL queued-execution preflight authorizes the same intent.
+    await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
+      .resolves.toMatchObject({ action: 'execute' });
   }, 60_000);
 
   it('queued async VM publish rejects chain-bound seal mismatches before publisher invocation', async () => {
