@@ -57,7 +57,7 @@ import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type Lift
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
-import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
+import { isKnowledgeAssetWorkspaceHeadCorruptError, resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -848,7 +848,7 @@ export class TripleStoreAsyncLiftPublisher
       // second classifier's message sniffing lands corrupt-head text containing 'mismatch'
       // on terminal `confirmation_mismatch`, and `workspace_unavailable` is not even
       // recordable there (allowed states exclude 'broadcast').
-      anyError?.code === 'KA_WORKSPACE_HEAD_CORRUPT'
+      isKnowledgeAssetWorkspaceHeadCorruptError(error)
     ) {
       return true;
     }
@@ -1512,11 +1512,12 @@ export class TripleStoreAsyncLiftPublisher
           ? 'publish_intent_stale'
         // GH#2273 — a multi-valued SWM head (catch-up union residue) is transient local
         // corruption that the sync repair heals, NOT a stale intent: the queued request may
-        // still be byte-identical to what the head certified at admission. Matched by CODE
-        // before the message chain below, whose keywords ('Corrupt graph-scoped SWM head…')
-        // would otherwise land on terminal `canonicalization_failed` and kill a job that a
-        // later retry could finalize unchanged.
-        : errorCode === 'KA_WORKSPACE_HEAD_CORRUPT'
+        // still be byte-identical to what the head certified at admission. Recognized by
+        // the shared boundary predicate before the message chain below, whose keywords
+        // ('Corrupt graph-scoped SWM head…') would otherwise land on terminal
+        // `canonicalization_failed` and kill a job that a later retry could finalize
+        // unchanged.
+        : isKnowledgeAssetWorkspaceHeadCorruptError(error)
           ? 'workspace_unavailable'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'

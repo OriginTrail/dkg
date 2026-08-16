@@ -88,6 +88,21 @@ export class KnowledgeAssetWorkspaceHeadCorruptError extends Error {
   }
 }
 
+/**
+ * The ONE way to recognize a corrupt-head outcome at any boundary. Matches by
+ * `code` as well as `instanceof` deliberately: the error crosses package
+ * boundaries (agent preflight -> publisher classifier -> CLI route), where a
+ * re-wrap or a dual package instance can preserve `.code` while losing class
+ * identity — and each consumer choosing its own raw check is how a single
+ * boundary contract drifts. Callers pick only their local response policy.
+ */
+export function isKnowledgeAssetWorkspaceHeadCorruptError(
+  error: unknown,
+): boolean {
+  if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) return true;
+  return (error as { code?: unknown } | null | undefined)?.code === 'KA_WORKSPACE_HEAD_CORRUPT';
+}
+
 /** Durable last-applied state for one graph-scoped KA in SWM. */
 export interface KnowledgeAssetWorkspaceHead {
   readonly kaUal: string;
@@ -133,97 +148,69 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     subGraphName,
   );
   const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
-  const result = await params.store.query(
-    `SELECT ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph ?shareOperationId ?operation ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?publishedAt ?accessPolicy WHERE {
-      GRAPH <${assertSafeIri(metaGraph)}> {
-        <${assertSafeIri(subject)}> <${DKG}contentScopeVersion> ?scopeVersion ;
-          <${DKG}kaUal> ?kaUal ;
-          <${DKG}assertionVersion> ?assertionVersion ;
-          <${DKG}assertionGraph> ?assertionGraph ;
-          <${DKG}shareOperationId> ?shareOperationId .
-        ?operation <${DKG}shareOperationId> ?shareOperationId ;
-          <${DKG}kaUal> ?operationUal ;
-          <${DKG}assertionVersion> ?operationVersion ;
-          <${DKG}publicQuadsDigest> ?digest ;
-          <${DKG}publicQuadsCount> ?publicCount ;
-          <${DKG}privateTripleCount> ?privateCount ;
-          <${DKG}publisherPeerId> ?publisherPeerId .
-        OPTIONAL { ?operation <${DKG}privateMerkleRoot> ?privateRoot }
-        OPTIONAL { ?operation <${DKG}publishedAt> ?publishedAt }
-        OPTIONAL { ?operation <${DKG}accessPolicy> ?accessPolicy }
-      }
-    } LIMIT 1`,
+  // Phase 1 — the head subject's OWN rows. GH#2273: sync's bulk verified-meta
+  // write is a bare set-union with no per-subject delete, so a peer's head row
+  // for the same KA can land BESIDE the local one; a joined LIMIT-1 read over
+  // that state handed every consumer (gossip monotonicity, finalization,
+  // access decisions, the queued VM-publish preflight) an arbitrary answer
+  // that could change between calls. Reading the head rows first makes the
+  // exactly-one invariant primary: each required head predicate must carry
+  // exactly ONE distinct value, and only a single validated operation id ever
+  // reaches the operation lookup below. Duplicate rows on the OPERATION
+  // subject (two cores ACKing the same content stamp their own clocks onto
+  // the same deterministic operation subject) stay healthy — they never touch
+  // the head subject this phase inspects.
+  const headResult = await params.store.query(
+    `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+    `<${assertSafeIri(subject)}> ?p ?o } }`,
   );
-  if (result.type !== 'bindings') {
+  if (headResult.type !== 'bindings') {
     throw new Error(
-      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${result.type}`,
+      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${headResult.type}`,
     );
   }
-  if (result.bindings.length === 0) {
-    const existence = await params.store.query(
-      `ASK { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-      `<${assertSafeIri(subject)}> ?predicate ?object } }`,
-    );
-    if (existence.type !== 'boolean') {
-      throw new Error(
-        `Unexpected graph-scoped SWM head existence result for ${scope.ual}: ${existence.type}`,
-      );
-    }
-    if (existence.value) {
+  if (headResult.bindings.length === 0) return undefined;
+  const headValues = new Map<string, string[]>();
+  for (const binding of headResult.bindings) {
+    const predicate = binding['p'] ?? '';
+    const object = binding['o'] ?? '';
+    const values = headValues.get(predicate) ?? [];
+    if (!values.includes(object)) values.push(object);
+    headValues.set(predicate, values);
+  }
+  const requiredHeadValue = (predicate: string, label: string): string => {
+    const values = headValues.get(predicate);
+    if (!values || values.length === 0) {
       throw new KnowledgeAssetWorkspaceHeadCorruptError(
         `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
       );
     }
-    return undefined;
-  }
-
-  // GH#2273 — a head subject must carry exactly ONE shareOperationId. Sync's
-  // bulk verified-meta write is a bare set-union with no per-subject delete,
-  // so a peer's head row for the same KA can land BESIDE the local one; under
-  // `LIMIT 1` every consumer (gossip monotonicity, finalization, access
-  // decisions, the queued VM-publish preflight) then received an arbitrary
-  // answer that could change between calls. Cardinality is measured on the
-  // HEAD ROWS, not as `result.bindings.length`: the main query's OPTIONALs
-  // multiply bindings when ONE operation subject carries duplicate
-  // publishedAt/accessPolicy rows (two cores ACKing the same content stamp
-  // their own clocks onto the same deterministic operation subject), and a
-  // dangling second id whose operation subject is absent contributes no
-  // binding at all — both polarities need the head-row count. Checked only
-  // when a binding exists: with zero bindings the existence branch above
-  // already fails closed on any partial head.
-  const headOperationIds = await params.store.query(
-    `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-    `<${assertSafeIri(subject)}> <${DKG}shareOperationId> ?op } }`,
-  );
-  if (headOperationIds.type !== 'bindings') {
-    throw new Error(
-      `Unexpected graph-scoped SWM head cardinality result for ${scope.ual}: ${headOperationIds.type}`,
-    );
-  }
-  if (headOperationIds.bindings.length > 1) {
-    const ids = headOperationIds.bindings
-      .map((binding) => stripLiteral(binding['op'])?.trim())
-      .filter((value): value is string => Boolean(value))
-      .sort();
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: head carries ` +
-      `${headOperationIds.bindings.length} shareOperationId values (${ids.join(', ')})`,
-    );
-  }
-
-  const row = result.bindings[0];
-  if (parseIntegerLiteral(row?.['scopeVersion']) !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    if (values.length > 1) {
+      const rendered = values
+        .map((value) => stripLiteral(value)?.trim())
+        .filter((value): value is string => Boolean(value))
+        .sort();
+      throw new KnowledgeAssetWorkspaceHeadCorruptError(
+        `Corrupt graph-scoped SWM head for ${scope.ual}: head carries ` +
+        `${values.length} ${label} values (${rendered.join(', ')})`,
+      );
+    }
+    return values[0]!;
+  };
+  if (parseIntegerLiteral(requiredHeadValue(`${DKG}contentScopeVersion`, 'contentScopeVersion'))
+    !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${scope.ual}: invalid scope version`,
     );
   }
-  const actualUal = row?.['kaUal'];
+  const actualUal = requiredHeadValue(`${DKG}kaUal`, 'kaUal');
   let assertionVersion: bigint;
   let actualScope: ReturnType<typeof createGraphKnowledgeAssetScope>;
   try {
-    assertionVersion = parsePositiveBigIntLiteral(row?.['assertionVersion']);
+    assertionVersion = parsePositiveBigIntLiteral(requiredHeadValue(`${DKG}assertionVersion`, 'assertionVersion'));
     actualScope = createGraphKnowledgeAssetScope(actualUal ?? '', assertionVersion);
   } catch (error) {
+    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) throw error;
     throw new KnowledgeAssetWorkspaceHeadCorruptError(
       `Corrupt graph-scoped SWM head for ${scope.ual}: invalid assertion identity ` +
       `(${error instanceof Error ? error.message : String(error)})`,
@@ -234,7 +221,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       `Corrupt graph-scoped SWM head for ${scope.ual}: UAL mismatch`,
     );
   }
-  const assertionGraph = row?.['assertionGraph'] ?? '';
+  const assertionGraph = requiredHeadValue(`${DKG}assertionGraph`, 'assertionGraph');
   const expectedGraph = knowledgeAssetLayerGraphUri(
     params.contextGraphId,
     MemoryLayer.SharedWorkingMemory,
@@ -246,11 +233,57 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       `Corrupt graph-scoped SWM head for ${scope.ual}: assertion graph mismatch`,
     );
   }
+  const shareOperationId = stripLiteral(requiredHeadValue(`${DKG}shareOperationId`, 'shareOperationId'))?.trim() ?? '';
+  if (!shareOperationId) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
+    );
+  }
+  let operationSubject = '';
+  try {
+    operationSubject = workspaceOperationSubject(params.contextGraphId, shareOperationId);
+  } catch (error) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid share operation ` +
+      `(${error instanceof Error ? error.message : String(error)})`,
+    );
+  }
+
+  // Phase 2 — the single validated operation, looked up by its OWN subject.
+  // The id echo pattern mirrors the previous join (the operation must itself
+  // carry the head's id); LIMIT 1 here only collapses duplicate OPTIONAL rows
+  // on one already-identified subject, never a choice between operations.
+  const result = await params.store.query(
+    `SELECT ?operationUal ?operationVersion ?digest ?publicCount ?privateRoot ?privateCount ?publisherPeerId ?publishedAt ?accessPolicy WHERE {
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        <${assertSafeIri(operationSubject)}> <${DKG}shareOperationId> ${JSON.stringify(shareOperationId)} ;
+          <${DKG}kaUal> ?operationUal ;
+          <${DKG}assertionVersion> ?operationVersion ;
+          <${DKG}publicQuadsDigest> ?digest ;
+          <${DKG}publicQuadsCount> ?publicCount ;
+          <${DKG}privateTripleCount> ?privateCount ;
+          <${DKG}publisherPeerId> ?publisherPeerId .
+        OPTIONAL { <${assertSafeIri(operationSubject)}> <${DKG}privateMerkleRoot> ?privateRoot }
+        OPTIONAL { <${assertSafeIri(operationSubject)}> <${DKG}publishedAt> ?publishedAt }
+        OPTIONAL { <${assertSafeIri(operationSubject)}> <${DKG}accessPolicy> ?accessPolicy }
+      }
+    } LIMIT 1`,
+  );
+  if (result.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM operation query result for ${scope.ual}: ${result.type}`,
+    );
+  }
+  if (result.bindings.length === 0) {
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete head or operation metadata`,
+    );
+  }
+  const row = result.bindings[0];
   const publicQuadsDigest = stripLiteral(row?.['digest'])?.trim() ?? '';
   const publicTripleCount = parseIntegerLiteral(row?.['publicCount']);
   const privateTripleCount = parseIntegerLiteral(row?.['privateCount']);
   const privateMerkleRoot = stripLiteral(row?.['privateRoot'])?.trim();
-  const shareOperationId = stripLiteral(row?.['shareOperationId'])?.trim() ?? '';
   const publisherPeerId = stripLiteral(row?.['publisherPeerId'])?.trim() ?? '';
   const publishedAtLexical = stripLiteral(row?.['publishedAt'])?.trim();
   const publishedAtMs = publishedAtLexical === undefined
@@ -262,17 +295,6 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     || rawAccessPolicy === 'allowList'
     ? rawAccessPolicy
     : undefined;
-  let expectedOperationSubject = '';
-  try {
-    expectedOperationSubject = shareOperationId
-      ? workspaceOperationSubject(params.contextGraphId, shareOperationId)
-      : '';
-  } catch (error) {
-    throw new KnowledgeAssetWorkspaceHeadCorruptError(
-      `Corrupt graph-scoped SWM head for ${scope.ual}: invalid share operation ` +
-      `(${error instanceof Error ? error.message : String(error)})`,
-    );
-  }
   const operationUal = row?.['operationUal'] ?? '';
   let operationVersion: bigint;
   try {
@@ -287,13 +309,11 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     !publicQuadsDigest ||
     !Number.isSafeInteger(publicTripleCount) || publicTripleCount < 0 ||
     !Number.isSafeInteger(privateTripleCount) || privateTripleCount < 0 ||
-    !shareOperationId ||
     !publisherPeerId ||
     (publishedAtLexical !== undefined && (
       !Number.isSafeInteger(publishedAtMs)
       || publishedAtMs! < 0
     )) ||
-    row?.['operation'] !== expectedOperationSubject ||
     operationUal !== actualScope.ual ||
     operationVersion.toString() !== actualScope.assertionVersion ||
     (privateTripleCount > 0 && !/^0x[0-9a-f]{64}$/i.test(privateMerkleRoot ?? '')) ||
@@ -304,9 +324,10 @@ export async function resolveKnowledgeAssetWorkspaceHead(
       `Corrupt graph-scoped SWM head for ${scope.ual}: incomplete commitment metadata`,
     );
   }
+
   const peersResult = await params.store.query(
     `SELECT ?peer WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-      `<${assertSafeIri(expectedOperationSubject)}> <${DKG}allowedPeer> ?peer } }`,
+      `<${assertSafeIri(operationSubject)}> <${DKG}allowedPeer> ?peer } }`,
   );
   if (peersResult.type !== 'bindings') {
     throw new Error(

@@ -67,7 +67,7 @@ import {
   type OnChainProvenance,
 } from './metadata.js';
 import {
-  KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -8982,10 +8982,10 @@ export class DKGPublisher implements Publisher {
             subGraphName,
           });
         } catch (err) {
-          if (!(err instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw err;
+          if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
           this.log.warn(
             createOperationContext('system'),
-            `assertionDiscard: SWM head for ${seal.kaUal} is corrupt; retaining recovery seal (${err.message})`,
+            `assertionDiscard: SWM head for ${seal.kaUal} is corrupt; retaining recovery seal (${err instanceof Error ? err.message : String(err)})`,
           );
           headCorrupt = true;
         }

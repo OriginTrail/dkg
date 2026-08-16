@@ -144,6 +144,25 @@ describe('graph-scoped SWM head shareOperationId cardinality', () => {
     await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
   });
 
+  it('fails closed when the head carries two assertionVersion values (same corruption class)', async () => {
+    const h = makeHarness();
+    await seedHealthyHead(h);
+    // Union residue can stack a second VERSION row just as it stacks a second
+    // operation id (the materializer's needsRepair flags versions > 1 for the
+    // same reason). Pre-refactor the joined LIMIT-1 read picked one version
+    // arbitrarily — the overwrite-with-older hazard for the gossip
+    // monotonicity gate. The phased resolver requires exactly one distinct
+    // value per REQUIRED head predicate, so this is the same corrupt outcome.
+    await h.store.insert([{
+      subject: HEAD_SUBJECT,
+      predicate: `${DKG}assertionVersion`,
+      object: `"2"^^<${XSD}integer>`,
+      graph: h.metaGraph,
+    }]);
+    await expect(resolveHead(h)).rejects.toThrow(KnowledgeAssetWorkspaceHeadCorruptError);
+    await expect(resolveHead(h)).rejects.toThrow(/assertionVersion/);
+  });
+
   it('still resolves when one operation subject carries duplicate optional rows (kills a bindings-length guard)', async () => {
     const h = makeHarness();
     await seedHealthyHead(h);

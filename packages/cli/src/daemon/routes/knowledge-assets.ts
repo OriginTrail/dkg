@@ -73,7 +73,7 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
@@ -1598,7 +1598,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // intent, so it must not read as the 409 above (the client would re-share for
         // nothing) or fall through to a generic 500: 503 + retryable tells the caller to
         // retry the same enqueue after catch-up converges the head.
-        if (err?.code === "KA_WORKSPACE_HEAD_CORRUPT") {
+        if (isKnowledgeAssetWorkspaceHeadCorruptError(err)) {
           return jsonResponse(res, 503, {
             code: err.code,
             error: err.message ?? String(err),

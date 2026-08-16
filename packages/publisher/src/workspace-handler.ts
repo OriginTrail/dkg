@@ -37,7 +37,7 @@ import {
 } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
-  KnowledgeAssetWorkspaceHeadCorruptError,
+  isKnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
@@ -1454,8 +1454,8 @@ export class SharedMemoryHandler {
             subGraphName,
           });
         } catch (err) {
-          if (!(err instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw err;
-          validationRejectionReason = `CORRUPT_SWM_HEAD: ${err.message}`;
+          if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
+          validationRejectionReason = `CORRUPT_SWM_HEAD: ${err instanceof Error ? err.message : String(err)}`;
           this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
           withWriteLocksRejection = 'validation';
           return false;
