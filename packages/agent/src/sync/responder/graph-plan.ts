@@ -73,7 +73,13 @@ const PROV_USED = 'http://www.w3.org/ns/prov#used';
 const DKG_JOIN_REQUEST_SUBJECT_PREFIX = 'did:dkg:join-request:';
 const COMPLETED_SYNC_RESPONDER_SESSION_GRACE_MS = 30_000;
 function syncResponderStoreOptions(signal: AbortSignal | undefined, source: string): QueryOptions {
-  return { signal, priority: 'background', source };
+  // An admitted sync response is latency-sensitive work for a remote node,
+  // not local maintenance.  Keeping these reads in the background lane lets
+  // an unrelated finalization/repair backlog occupy every normal slot while
+  // the remote stream sits on a hard deadline.  The responder already has
+  // bounded global/per-peer admission, so route the store work through the
+  // normal lane and let that outer limiter remain the abuse boundary.
+  return { signal, priority: 'normal', source };
 }
 
 export interface GraphListMemo {

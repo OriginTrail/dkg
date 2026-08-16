@@ -96,10 +96,15 @@ describe('sync responder snapshot budget defaults', () => {
     const contextGraphId = 'snapshot-cap-regression';
     const rawRowCount = 64_001;
     const querySources: string[] = [];
+    const queryPriorities: Array<string | undefined> = [];
     const store = {
-      query: vi.fn(async (_sparql: string, options?: { source?: string }) => {
+      query: vi.fn(async (
+        _sparql: string,
+        options?: { source?: string; priority?: string },
+      ) => {
         const source = options?.source ?? 'unknown';
         querySources.push(source);
+        queryPriorities.push(options?.priority);
         if (source === 'sync.responder.readDurableMetaGraphSnapshot') {
           return {
             type: 'bindings' as const,
@@ -135,6 +140,7 @@ describe('sync responder snapshot budget defaults', () => {
     await expect(readPage(0)).resolves.toHaveLength(500);
     await expect(readPage(500)).resolves.toHaveLength(500);
     expect(querySources).toEqual(['sync.responder.readDurableMetaGraphSnapshot']);
+    expect(queryPriorities).toEqual(['normal']);
   });
 
   it('allows operators to override every responder snapshot budget limit', () => {
