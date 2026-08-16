@@ -527,7 +527,7 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
     await store.close();
   });
 
-  it('degrades to plan paging when the STORE response byte cap fires during snapshot materialization (#1868 review: untyped escape)', async () => {
+  it('serves directly through bounded plan paging without attempting an oversized whole-subject snapshot', async () => {
     const cgId = 'meta-ceiling-storecap';
     const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
     const fresh = freshIso();
@@ -558,7 +558,8 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
       return originalQuery(sparql, options as never);
     }) as OxigraphStore['query'];
 
-    // DEFAULT budgets: the snapshot lane is attempted first and must degrade.
+    // DEFAULT budgets: the bounded subject plan is now the primary TTL lane,
+    // so it must never attempt the old whole-subject snapshot query.
     const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 7 });
     const { lines } = await collectAllPages(
       cap,
@@ -566,7 +567,7 @@ describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', (
       7,
     );
     expect(lines.size).toBe(200);
-    expect(capThrows).toBeGreaterThan(0);
+    expect(capThrows).toBe(0);
     await store.close();
   });
 

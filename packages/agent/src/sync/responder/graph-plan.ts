@@ -2794,6 +2794,10 @@ async function readSwmMetaRowsPage(
 }
 
 const FRESH_SWM_META_PLAN_SUBJECT_CHUNK = 100;
+// Count rows return only two small scalar bindings per subject. A wider batch
+// avoids dozens of store round trips during plan construction without raising
+// the payload-window response ceiling used for actual metadata rows.
+const FRESH_SWM_META_PLAN_COUNT_SUBJECT_CHUNK = 1_000;
 
 /**
  * Ceiling for one subject row-group in the fresh-SWM plan lane. Whole-subject
@@ -2828,10 +2832,10 @@ function freshSwmMetaPlanResponseByteLimit(): number {
 export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
 
 /**
- * Discover the TTL-admitted subjects of one SWM meta graph with two
- * small-result queries (no payload rows, no sort, no OFFSET), each bounded by
- * construction: LIMIT (remaining subject allowance + 1 sentinel) and the fixed
- * plan response byte cap. Crossing either bound is a typed
+ * Discover the TTL-admitted subjects of one SWM meta graph with two bounded
+ * small-result queries (no payload rows, no sort, no OFFSET). Both carry a
+ * LIMIT (remaining subject allowance + 1 sentinel) and the fixed plan response
+ * byte cap. Crossing either bound is a typed
  * per-snapshot budget refusal — the plan lane's one remaining bounded refusal
  * besides the single-oversized-subject case.
  *
@@ -2839,10 +2843,11 @@ export const FRESH_SWM_META_PLAN_MAX_SUBJECTS = 32_000;
  *     {@link readFreshSwmRoots} shape, an indexed predicate probe whose result
  *     is the fresh subset, not the graph;
  *  2. graph-scoped SWM heads. Heads are current-state pointers and
- *     intentionally have no independent publishedAt row; they are admitted via
- *     the timestamped WorkspaceOperation they select (same six-predicate join
- *     the TTL lane has always used), so TTL recovery receives the head plus its
- *     immutable commitment atomically.
+ *     intentionally have no independent publishedAt row. The timestamped
+ *     WorkspaceOperation carries the canonical KA UAL from which the head IRI
+ *     is derived. Reading the operation directly avoids the old quadratic
+ *     operation-to-head self-join; the subsequently paged head rows still have
+ *     to satisfy the receiver's exact workspace validation.
  *
  * SWM meta subjects are IRIs by contract (workspace writers skolemize blank
  * nodes before storage); non-IRI subjects cannot appear in a VALUES clause and
@@ -2860,7 +2865,11 @@ async function readFreshSwmMetaSubjects(
     `FILTER(?ts >= ${sparqlString(cutoffIso)}^^<http://www.w3.org/2001/XMLSchema#dateTime>)`;
   const discoveryLimit = Math.max(1, Math.floor(maxSubjects)) + 1;
   const subjects = new Set<string>();
-  const runDiscovery = async (sparql: string, operation: string): Promise<void> => {
+  const runDiscovery = async (
+    sparql: string,
+    operation: string,
+    collect: (row: Record<string, string>) => string | undefined = (row) => row['s'],
+  ): Promise<void> => {
     let res;
     try {
       res = await store.query(sparql, {
@@ -2879,7 +2888,7 @@ async function readFreshSwmMetaSubjects(
     }
     if (res.type !== 'bindings') return;
     for (const row of res.bindings) {
-      const subject = row['s'];
+      const subject = collect(row);
       if (subject && isIriTerm(subject)) subjects.add(subject);
     }
     if (subjects.size > maxSubjects) {
@@ -2902,14 +2911,9 @@ async function readFreshSwmMetaSubjects(
     LIMIT ${discoveryLimit}
   `, 'sync.responder.readFreshSwmMetaSubjects');
   await runDiscovery(`
-    SELECT DISTINCT ?s WHERE {
+    SELECT DISTINCT ?s ?headUal WHERE {
       GRAPH <${assertSafeIri(graph)}> {
         ?s <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
-           <${DKG_KA_UAL}> ?headUal ;
-           <${DKG_ASSERTION_VERSION}> ?headVersion ;
-           <${DKG_SHARE_OPERATION_ID}> ?shareId .
-        ?headOperation <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-           <${DKG_CONTENT_SCOPE_VERSION}> ${GRAPH_KA_CONTENT_SCOPE_VERSION} ;
            <${DKG_KA_UAL}> ?headUal ;
            <${DKG_ASSERTION_VERSION}> ?headVersion ;
            <${DKG_SHARE_OPERATION_ID}> ?shareId ;
@@ -2918,7 +2922,10 @@ async function readFreshSwmMetaSubjects(
       }
     }
     LIMIT ${discoveryLimit}
-  `, 'sync.responder.readFreshSwmMetaHeadSubjects');
+  `, 'sync.responder.readFreshSwmMetaHeadSubjects', (row) => {
+    const headUal = row['headUal'];
+    return headUal && isIriTerm(headUal) ? `${headUal}#dkg-swm-head` : undefined;
+  });
   return subjects;
 }
 
@@ -2934,7 +2941,7 @@ async function countFreshSwmMetaSubjectRows(
   signal?: AbortSignal,
 ): Promise<FreshSwmMetaSubjectEntry[]> {
   const countsBySubject = new Map<string, number>();
-  for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_SUBJECT_CHUNK)) {
+  for (const chunk of chunkValues(subjects, FRESH_SWM_META_PLAN_COUNT_SUBJECT_CHUNK)) {
     let res;
     try {
       res = await store.query(`
@@ -3398,18 +3405,23 @@ async function buildFreshSwmDataGraphPlan(
   const uniqueMetaGraphs = dedupeStrings(dataGraphs.map((graph) => `${graph}_meta`))
     .sort(compareCodePoint);
   for (const chunk of chunkValues(uniqueMetaGraphs, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
-    const values = graphValues(chunk);
-    const rootResult = await store.query(`
-      SELECT DISTINCT ?metaGraph ?root WHERE {
-        VALUES ?metaGraph { ${values} }
-        GRAPH ?metaGraph {
-          ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-              <${DKG_PUBLISHED_AT}> ?ts ;
-              <${DKG_ROOT_ENTITY}> ?root .
-          ${cutoffFilter}
-        }
+    // Keep every GRAPH operand concrete. Both Oxigraph and Blazegraph can turn
+    // `VALUES ?metaGraph { ... } GRAPH ?metaGraph` into a scan across all named
+    // graphs even when the VALUES set contains one IRI. A bounded UNION of the
+    // same literal-graph probes preserves batching while retaining the graph
+    // index lookup (0.1s rather than 10s+ on the 500-KA canary corpus).
+    const branches = chunk.map((metaGraph) => `{
+      GRAPH <${assertSafeIri(metaGraph)}> {
+        ?op <${DKG_ROOT_ENTITY}> ?root ;
+            <${DKG_PUBLISHED_AT}> ?ts .
+        ${cutoffFilter}
       }
-      ORDER BY ?metaGraph ?root
+      BIND(<${assertSafeIri(metaGraph)}> AS ?metaGraph)
+    }`).join('\nUNION\n');
+    const rootResult = await store.query(`
+      SELECT ?metaGraph ?root WHERE {
+        ${branches}
+      }
     `, syncResponderStoreOptions(signal, 'sync.responder.discoverFreshSwmMetaRoots'));
     if (rootResult.type !== 'bindings') continue;
     for (const row of rootResult.bindings) {

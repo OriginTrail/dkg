@@ -364,10 +364,14 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       ]);
 
       const querySources: string[] = [];
+      const rootDiscoveryQueries: string[] = [];
       const query = modernStore.query.bind(modernStore);
       const listGraphs = vi.spyOn(modernStore, 'listGraphs');
       vi.spyOn(modernStore, 'query').mockImplementation(async (sparql, options) => {
         querySources.push(options?.source ?? 'unknown');
+        if (options?.source === 'sync.responder.discoverFreshSwmMetaRoots') {
+          rootDiscoveryQueries.push(sparql.replace(/\s+/g, ' ').trim());
+        }
         return query(sparql, options);
       });
       registerSyncHandler({
@@ -397,6 +401,10 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       expect(querySources).not.toContain('sync.responder.planFreshSwmGraphRoots');
       expect(querySources).not.toContain('sync.responder.countFreshSwmGraphRows');
       expect(querySources).not.toContain('sync.responder.listFreshSwmGraphs');
+      expect(rootDiscoveryQueries).toHaveLength(1);
+      expect(rootDiscoveryQueries[0]).toContain(`${DKG_NS}rootEntity`);
+      expect(rootDiscoveryQueries[0]).not.toContain(`${DKG_NS}WorkspaceOperation`);
+      expect(rootDiscoveryQueries[0]).not.toContain('ORDER BY');
       expect(listGraphs).not.toHaveBeenCalled();
       await modernStore.close();
     });
