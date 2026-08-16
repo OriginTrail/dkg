@@ -67,10 +67,12 @@ import {
   type OnChainProvenance,
 } from './metadata.js';
 import {
+  KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
   storeWorkspaceOperationPublicQuads,
+  type KnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { ethers } from 'ethers';
@@ -8962,15 +8964,34 @@ export class DKGPublisher implements Publisher {
           || !seal.kaUal
           || !seal.assertionVersion
         ) continue;
-        const head = await resolveKnowledgeAssetWorkspaceHead({
-          store: this.store,
-          graphManager: this.graphManager,
-          contextGraphId,
-          kaUal: seal.kaUal,
-          subGraphName,
-        });
-        preserveSwmRecoverySeal = head?.kaUal === seal.kaUal
-          && head.assertionVersion === seal.assertionVersion;
+        // GH#2273 — the resolver fails closed on a multi-valued head. The head here feeds
+        // only the advisory keep-the-recovery-seal decision, and discard is a plausible
+        // operator remedy for a KA whose head is exactly in that corrupt state — so a throw
+        // must not abort the discard. On corruption we cannot prove the seal does NOT match
+        // the live SWM content, so fail toward RETENTION: archive the seal (benign extra
+        // storage) rather than risk destroying the only recovery artifact for content that
+        // is genuinely resident.
+        let head: KnowledgeAssetWorkspaceHead | undefined;
+        let headCorrupt = false;
+        try {
+          head = await resolveKnowledgeAssetWorkspaceHead({
+            store: this.store,
+            graphManager: this.graphManager,
+            contextGraphId,
+            kaUal: seal.kaUal,
+            subGraphName,
+          });
+        } catch (err) {
+          if (!(err instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw err;
+          this.log.warn(
+            createOperationContext('system'),
+            `assertionDiscard: SWM head for ${seal.kaUal} is corrupt; retaining recovery seal (${err.message})`,
+          );
+          headCorrupt = true;
+        }
+        preserveSwmRecoverySeal = headCorrupt
+          || (head?.kaUal === seal.kaUal
+            && head.assertionVersion === seal.assertionVersion);
         if (preserveSwmRecoverySeal) {
           await this.archiveAssertionSeal(
             contextGraphId,

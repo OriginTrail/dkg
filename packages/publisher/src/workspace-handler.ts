@@ -37,9 +37,11 @@ import {
 } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
+  KnowledgeAssetWorkspaceHeadCorruptError,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
+  type KnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
@@ -1434,13 +1436,30 @@ export class SharedMemoryHandler {
         const incomingPrivateRootHex = privateMerkleRoot?.length
           ? ethers.hexlify(privateMerkleRoot).toLowerCase()
           : undefined;
-        const currentHead = await resolveKnowledgeAssetWorkspaceHead({
-          store: this.store,
-          graphManager: this.graphManager,
-          contextGraphId,
-          kaUal: contentScope.ual,
-          subGraphName,
-        });
+        // GH#2273 — the resolver fails closed on a multi-valued head (catch-up union
+        // residue). That corruption lives in OUR meta graph, so it must be a PERMANENT
+        // rejection: the outer catch classifies as `retryable: true`, and a retryable
+        // outcome would put the sender's substrate outbox into an infinite redelivery loop
+        // against local state identical bytes can never fix. The sync lane's
+        // identity-preserving repair is the sanctioned healer; this path deliberately
+        // forgoes its own delete-then-insert head rewrite, which would otherwise adopt
+        // whatever the inbound share claims over a head we cannot even read.
+        let currentHead: KnowledgeAssetWorkspaceHead | undefined;
+        try {
+          currentHead = await resolveKnowledgeAssetWorkspaceHead({
+            store: this.store,
+            graphManager: this.graphManager,
+            contextGraphId,
+            kaUal: contentScope.ual,
+            subGraphName,
+          });
+        } catch (err) {
+          if (!(err instanceof KnowledgeAssetWorkspaceHeadCorruptError)) throw err;
+          validationRejectionReason = `CORRUPT_SWM_HEAD: ${err.message}`;
+          this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
+          withWriteLocksRejection = 'validation';
+          return false;
+        }
         if (currentHead) {
           const incomingVersion = BigInt(contentScope.assertionVersion);
           const currentVersion = BigInt(currentHead.assertionVersion);

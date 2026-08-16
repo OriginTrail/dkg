@@ -177,6 +177,40 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     return undefined;
   }
 
+  // GH#2273 — a head subject must carry exactly ONE shareOperationId. Sync's
+  // bulk verified-meta write is a bare set-union with no per-subject delete,
+  // so a peer's head row for the same KA can land BESIDE the local one; under
+  // `LIMIT 1` every consumer (gossip monotonicity, finalization, access
+  // decisions, the queued VM-publish preflight) then received an arbitrary
+  // answer that could change between calls. Cardinality is measured on the
+  // HEAD ROWS, not as `result.bindings.length`: the main query's OPTIONALs
+  // multiply bindings when ONE operation subject carries duplicate
+  // publishedAt/accessPolicy rows (two cores ACKing the same content stamp
+  // their own clocks onto the same deterministic operation subject), and a
+  // dangling second id whose operation subject is absent contributes no
+  // binding at all — both polarities need the head-row count. Checked only
+  // when a binding exists: with zero bindings the existence branch above
+  // already fails closed on any partial head.
+  const headOperationIds = await params.store.query(
+    `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+    `<${assertSafeIri(subject)}> <${DKG}shareOperationId> ?op } }`,
+  );
+  if (headOperationIds.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM head cardinality result for ${scope.ual}: ${headOperationIds.type}`,
+    );
+  }
+  if (headOperationIds.bindings.length > 1) {
+    const ids = headOperationIds.bindings
+      .map((binding) => stripLiteral(binding['op'])?.trim())
+      .filter((value): value is string => Boolean(value))
+      .sort();
+    throw new KnowledgeAssetWorkspaceHeadCorruptError(
+      `Corrupt graph-scoped SWM head for ${scope.ual}: head carries ` +
+      `${headOperationIds.bindings.length} shareOperationId values (${ids.join(', ')})`,
+    );
+  }
+
   const row = result.bindings[0];
   if (parseIntegerLiteral(row?.['scopeVersion']) !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
     throw new KnowledgeAssetWorkspaceHeadCorruptError(

@@ -675,6 +675,90 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(processed?.failure?.code).toBe('publish_intent_stale');
   });
 
+  it('fails a corrupt-head preflight as retryable workspace_unavailable, not a terminal code', async () => {
+    // GH#2273 — a multi-valued SWM head (catch-up union residue) is transient local
+    // corruption that sync repair heals; the queued request may still be byte-identical
+    // to what the head certified at admission. Pre-fix the corrupt-head message fell
+    // through the classification chain's keyword sniffing to terminal
+    // `canonicalization_failed`, killing a job a later retry could have finalized.
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            throw Object.assign(
+              new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+              { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run for corrupt-head preflight');
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-corrupt-head-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('claimed');
+    expect(processed?.failure?.code).toBe('workspace_unavailable');
+    expect(processed?.failure?.retryable).toBe(true);
+  });
+
+  it('classifies a corrupt head at the pre-execute preflight from validated, not broadcast', async () => {
+    // GH#2273 — the preflight runs TWICE per attempt: once on claim and once immediately
+    // before execute. The second invocation's throw lands in the broadcast-path catch,
+    // where the failed-from state is decided by `isKnowledgeAssetPublishPreconditionFailure`.
+    // Pre-fix that predicate did not recognize KA_WORKSPACE_HEAD_CORRUPT, so the job
+    // failed from 'broadcast' and the SECOND classifier defaulted the corrupt-head
+    // message to `rpc_unavailable` — this row pins the site-B path specifically, which
+    // the single-preflight row above cannot reach.
+    let preflightCalls = 0;
+    let executorCalls = 0;
+    const publisher = createPublisher({
+      config: {
+        knowledgeAssetVmPublishHandler: {
+          preflight: async () => {
+            preflightCalls += 1;
+            if (preflightCalls === 1) return undefined;
+            throw Object.assign(
+              new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+              { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+            );
+          },
+          execute: async () => {
+            executorCalls++;
+            throw new Error('executor should not run when the pre-execute preflight rejects');
+          },
+        },
+      },
+    });
+    const shareOperationId = 'rootless-corrupt-head-presend-op';
+    await stageRootlessSnapshot(shareOperationId);
+
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      shareOperationId,
+    }));
+    const processed = await publisher.processNext('wallet-1');
+
+    expect(preflightCalls).toBe(2);
+    expect(executorCalls).toBe(0);
+    expect(processed?.jobId).toBe(jobId);
+    expect(processed?.status).toBe('failed');
+    expect(processed?.failure?.failedFromState).toBe('validated');
+    expect(processed?.failure?.code).toBe('workspace_unavailable');
+    expect(processed?.failure?.retryable).toBe(true);
+  });
+
   it('exposes the SWM share operation contract', async () => {
     const publisherContract: Publisher = makeTestPublisher({
       store,

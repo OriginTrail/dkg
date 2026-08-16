@@ -841,7 +841,14 @@ export class TripleStoreAsyncLiftPublisher
     if (
       anyError?.code === 'PUBLISH_NOT_FULL_SHARE' ||
       anyError?.code === 'PUBLISH_INTENT_STALE' ||
-      anyError?.code === 'CG_NOT_REGISTERED'
+      anyError?.code === 'CG_NOT_REGISTERED' ||
+      // GH#2273 — the pre-execute preflight re-resolves the SWM head and the resolver now
+      // fails closed on a multi-valued head. Raised strictly before any transaction is
+      // built, so the job must fail from 'validated', not 'broadcast': from 'broadcast' the
+      // second classifier's message sniffing lands corrupt-head text containing 'mismatch'
+      // on terminal `confirmation_mismatch`, and `workspace_unavailable` is not even
+      // recordable there (allowed states exclude 'broadcast').
+      anyError?.code === 'KA_WORKSPACE_HEAD_CORRUPT'
     ) {
       return true;
     }
@@ -1503,6 +1510,14 @@ export class TripleStoreAsyncLiftPublisher
           ? 'authority_forbidden'
         : errorCode === 'PUBLISH_INTENT_STALE'
           ? 'publish_intent_stale'
+        // GH#2273 — a multi-valued SWM head (catch-up union residue) is transient local
+        // corruption that the sync repair heals, NOT a stale intent: the queued request may
+        // still be byte-identical to what the head certified at admission. Matched by CODE
+        // before the message chain below, whose keywords ('Corrupt graph-scoped SWM head…')
+        // would otherwise land on terminal `canonicalization_failed` and kill a job that a
+        // later retry could finalize unchanged.
+        : errorCode === 'KA_WORKSPACE_HEAD_CORRUPT'
+          ? 'workspace_unavailable'
           : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
           : lower.includes('authority')

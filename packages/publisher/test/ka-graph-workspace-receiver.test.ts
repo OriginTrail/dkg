@@ -541,4 +541,48 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       expect(outcome.reason, name).toContain(expectedReason);
     }
   });
+
+  it('permanently rejects an inbound share while the local head is multi-valued (GH#2273)', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+
+    const applied = await handler.handle(v2Request({}), PEER_ID);
+    expect(applied.applied).toBe(true);
+
+    // Fabricate the GH#2273 corruption exactly the way sync produces it: a bare
+    // set-union of a second shareOperationId row onto the head subject.
+    const metaGraph = graphManager.sharedMemoryMetaUri(CONTEXT_GRAPH);
+    await store.insert([{
+      subject: `${UAL}#dkg-swm-head`,
+      predicate: 'http://dkg.io/ontology/shareOperationId',
+      object: '"storage-ack-2273"',
+      graph: metaGraph,
+    }]);
+
+    // The monotonicity gate cannot read a multi-valued head, and the corruption is
+    // LOCAL: identical bytes redelivered by the sender can never fix it, so the
+    // rejection must be PERMANENT (retryable: false). A retryable outcome here would
+    // put the sender's substrate outbox into an infinite redelivery loop. Pre-fix the
+    // resolver answered arbitrarily and this share was applied on top of the corrupt
+    // head; the sync lane's identity-preserving repair is the sanctioned healer.
+    const outcome = await handler.handle(v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    }), PEER_ID);
+    expect(outcome.applied).toBe(false);
+    if (outcome.applied) throw new Error('unreachable');
+    expect(outcome.retryable).toBe(false);
+    expect(outcome.reason).toContain('CORRUPT_SWM_HEAD');
+
+    // The corrupt head must be left byte-untouched for the repair lane: still exactly
+    // two shareOperationId rows, and the rejected share's graph write never happened.
+    const headIds = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${metaGraph}> { <${UAL}#dkg-swm-head> <http://dkg.io/ontology/shareOperationId> ?op } }`,
+    );
+    expect(headIds.type).toBe('bindings');
+    if (headIds.type !== 'bindings') throw new Error('expected bindings');
+    expect(headIds.bindings).toHaveLength(2);
+  });
 });

@@ -447,6 +447,36 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls).toBe(0);
   });
 
+  it('vm/publish-async: KA_WORKSPACE_HEAD_CORRUPT → 503 { code, error, retryable }', async () => {
+    // GH#2273 — a multi-valued SWM head now fails closed in the resolver during the
+    // enqueue-time intent resolution. That is transient SERVER-side corruption the sync
+    // repair heals, not a stale client intent: a 409 would tell the caller to re-share
+    // for nothing, and pre-fix the code matched no catch branch and surfaced as a
+    // generic 500. The 503 + retryable tells the caller to retry the SAME enqueue after
+    // catch-up converges the head.
+    let enqueueCalls = 0;
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => {
+        throw Object.assign(
+          new Error('Corrupt graph-scoped SWM head for did:dkg:test/1: head carries 2 shareOperationId values (op-a, storage-ack-b)'),
+          { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
+        );
+      },
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        enqueueCalls += 1;
+        return 'job-should-not-exist';
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('KA_WORKSPACE_HEAD_CORRUPT');
+    expect(res.body.retryable).toBe(true);
+    expect(String(res.body.error)).toContain('shareOperationId');
+    expect(enqueueCalls).toBe(0);
+  });
+
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate
   // author list so UI/CLI consumers can pick an author.
   const AMBIGUOUS_AUTHORS = [

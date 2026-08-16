@@ -1593,6 +1593,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (err?.code === "PUBLISH_NOT_FULL_SHARE" || err?.code === "PUBLISH_INTENT_STALE") {
           return jsonResponse(res, 409, { code: err.code, error: err.message ?? String(err) });
         }
+        // GH#2273 — a multi-valued SWM head now fails closed in the resolver. That is
+        // transient SERVER-side corruption the sync repair heals, not a stale client
+        // intent, so it must not read as the 409 above (the client would re-share for
+        // nothing) or fall through to a generic 500: 503 + retryable tells the caller to
+        // retry the same enqueue after catch-up converges the head.
+        if (err?.code === "KA_WORKSPACE_HEAD_CORRUPT") {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: err.message ?? String(err),
+            retryable: true,
+          });
+        }
         // GH#1778 — several authors share this KA name; the caller must
         // disambiguate. Surface the candidate authors so the UI/CLI can pick.
         if (respondAmbiguousAssertionAuthor(res, err)) return;
