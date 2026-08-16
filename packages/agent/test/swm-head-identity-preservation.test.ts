@@ -347,6 +347,78 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(head?.shareOperationId).toBe('op-v1');
   });
 
+  it('kept-head preservation purges residue head rows (rewrite, not skip)', async () => {
+    // One clean version row + one clean id row is ALL the kept-head branch
+    // can see, but the resolver validates more: an extra stale assertionGraph
+    // row makes the head corrupt to readers while staying invisible to the
+    // cardinality check. A suppress-only preserve freezes that residue
+    // forever (every future round takes this same branch). Preserving must
+    // REWRITE the head from descriptor rows + the stored winner id.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert([{
+      subject: v1.headSubject,
+      predicate: `${DKG}assertionGraph`,
+      object: `${v1.assertionGraph}-stale`,
+      graph: WS_META,
+    }]);
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}assertionGraph`))
+      .toEqual([v1.assertionGraph]);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('allowedPeer rows participate in identity independently of the policy row', async () => {
+    // Two allowList operations with the SAME policy but different peer sets
+    // are DIFFERENT envelopes — preserving across an allow-list change would
+    // silently keep stale access state.
+    const base = opRowsOf(v1).filter((quad) => quad.predicate !== `${DKG}accessPolicy`);
+    const withPeers = (peers: string[]): Quad[] => [
+      ...base.map((quad) => ({ ...quad })),
+      { subject: v1.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+      ...peers.map((peer) => ({
+        subject: v1.operationSubject,
+        predicate: `${DKG}allowedPeer`,
+        object: `"${peer}"`,
+        graph: WS_META,
+      })),
+    ];
+    const keyA = operationIdentityKey(withPeers(['peer-1', 'peer-2']));
+    const keyB = operationIdentityKey(withPeers(['peer-1', 'peer-3']));
+    expect(keyA).not.toBeNull();
+    expect(keyB).not.toBeNull();
+    expect(keyA).not.toBe(keyB);
+    // Same peers => same key (set semantics, order-independent).
+    expect(operationIdentityKey(withPeers(['peer-2', 'peer-1']))).toBe(keyA);
+  });
+
+  it('private content defaults to ownerOnly: absent row equals explicit ownerOnly', async () => {
+    const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
+    const privateBase = opRowsOf(v1)
+      .filter((quad) => quad.predicate !== `${DKG}accessPolicy`)
+      .map((quad) => quad.predicate === `${DKG}privateTripleCount`
+        ? { ...quad, object: `"1"^^<${XSD_INT}>` }
+        : { ...quad });
+    const explicitOwnerOnly = [...privateBase.map((quad) => ({ ...quad })),
+      { subject: v1.operationSubject, predicate: `${DKG}accessPolicy`, object: '"ownerOnly"', graph: WS_META }];
+    const key = operationIdentityKey(privateBase);
+    expect(key).not.toBeNull();
+    expect(operationIdentityKey(explicitOwnerOnly)).toBe(key);
+    // Polarity: explicit "public" on private content is a DIFFERENT envelope.
+    const explicitPublic = [...privateBase.map((quad) => ({ ...quad })),
+      { subject: v1.operationSubject, predicate: `${DKG}accessPolicy`, object: '"public"', graph: WS_META }];
+    expect(operationIdentityKey(explicitPublic)).not.toBe(key);
+  });
+
   it('sync repairs a pre-dirtied two-valued head preserving the stored identity', async () => {
     // The pre-upgrade residue shape: a node that ran the OLD code already has
     // BOTH ids stacked on the head. This row drives the FULL sync lane (not a

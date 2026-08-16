@@ -1009,7 +1009,22 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     // killed any queued VM-publish job frozen on the local id.
                     // Non-equivalent (genuine policy/author change): no
                     // suppression, today's convergence to remote authority.
-                    await decideAndWithholdStoredIdentity(descriptor, 'kept head');
+                    //
+                    // Preserving is a REWRITE, not a skip: version/id
+                    // cardinality is all this branch checked, but the resolver
+                    // validates MORE head rows than that — a stale extra
+                    // assertionGraph/kaUal row is invisible here yet corrupt to
+                    // the reader, and suppressing the descriptor's id row would
+                    // otherwise freeze that residue in place round after round
+                    // (one clean version + one clean id = this same branch
+                    // forever). The preserving repair rewrites the head from
+                    // the descriptor's rows with the stored winner id, purging
+                    // anything the cardinality check cannot model — the same
+                    // decide-and-enact shape the private recovery lane uses.
+                    const winner = await decideAndWithholdStoredIdentity(descriptor, 'kept head');
+                    if (winner !== null) {
+                      await snapshotMaterializer.repairHeadPreservingIdentity(pid, descriptor, winner);
+                    }
                   }
                   materializedKeys.add(graphKey);
                   return;
