@@ -283,8 +283,27 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     const store = new OxigraphStore();
     stores.push(store);
     await seedLocal(store);
+    // Count every store access the materializer makes: the contract is that
+    // the DECISION'S READS wait for the lock, not merely that the returned
+    // promise does — a regression that read the head before acquiring and
+    // only awaited the lock to return would keep `settled` false yet race
+    // live writes.
+    let storeCalls = 0;
+    const countedStore = new Proxy(store, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value === 'function'
+          && (prop === 'query' || prop === 'insert' || prop === 'deleteByPattern')) {
+          return (...args: unknown[]) => {
+            storeCalls += 1;
+            return (value as (...a: unknown[]) => unknown).apply(target, args);
+          };
+        }
+        return value;
+      },
+    });
     const materializer = createSharedMemorySnapshotMaterializer({
-      store,
+      store: countedStore,
       writeLocks: new Map<string, Promise<void>>(),
       invalidateListContextGraphsCache: () => {},
     });
@@ -294,8 +313,9 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     });
     expect(descriptor).toBeDefined();
     // Hold the exact KA lock through the materializer's own keying, start
-    // the decision, and prove it neither reads nor settles until release —
-    // outcome-only rows stay green if the method drops or re-keys the lock.
+    // the decision, and prove it neither READS THE STORE nor settles until
+    // release — outcome-only rows stay green if the method drops or re-keys
+    // the lock, and settlement-only rows stay green if reads escape it.
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const holder = materializer.withKaWriteLock(
@@ -307,10 +327,12 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
       .then((result) => { settled = true; return result; });
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(settled).toBe(false);
+    expect(storeCalls).toBe(0);
     release();
     await holder;
     const result = await decision;
     expect(settled).toBe(true);
+    expect(storeCalls).toBeGreaterThan(0);
     expect(result.outcome).toBe('preserved');
     expect(await headIds(store)).toEqual(['"op-local"']);
   });

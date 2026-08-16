@@ -212,28 +212,18 @@ export interface SharedMemorySnapshotMaterializer {
     winnerShareOperationId: string,
   ): Promise<void>;
   /**
-   * GH#2273 — the ONE preserve decision for a skipped, already-materialized
-   * KA, and its enactment, under a SINGLE hold of the KA write lock (decide-
-   * then-write across two lock acquisitions would race live writes).
-   * Preserves only when the stored head is healthy (single-valued), certifies
-   * the descriptor's version, and — for a FOREIGN stored id —
-   * `selectRepairIdentity` accepts a stored winner under the full
-   * reader-contract gate stack. An id-equal head goes through the SAME
-   * health + version conjuncts (an id-equal head with a stale version row
-   * must be replaced, not preserved).
+   * The ONE preserve decision for a skipped, already-materialized KA, and
+   * its enactment, under a single hold of the KA write lock (GH#2273).
    *
-   * On 'preserved' the head has ALREADY been converged via the same
-   * rewrite-first repair the public lane uses: the head subject is rewritten
-   * from the descriptor's rows with the id swapped to the preserved winner,
-   * purging any residue rows on the head subject that the health check does
-   * not model (a stale extra assertionGraph row, say) — the pre-fix bulk
-   * replacement deleted the whole head for every skipped KA, and preserving
-   * must not become a corruption keeper. The caller still owes the returned
-   * `withholdRows` an exclusion from any later raw insert (empty for the
-   * id-equal case — the descriptor's id row is byte-identical). 'replace' ⇒
-   * meta replacement / repair proceeds as today. Keeping decision AND
-   * enactment here is what stops the lanes from drifting on the same
-   * invariant.
+   * Invariants: preserve only a healthy single-valued head that certifies
+   * the descriptor's version (id-equal included — a stale version row
+   * replaces); a foreign stored id must pass `selectRepairIdentity`'s
+   * reader-contract gates. On 'preserved' the head is ALREADY rewritten
+   * (descriptor rows + winner id — residue rows purged; preserving is a
+   * rewrite, never a skip), and the caller owes the returned `withholdRows`
+   * an exclusion from any later raw insert. 'replace' ⇒ today's meta
+   * replacement. Decision and enactment stay together here so the lanes
+   * cannot drift.
    */
   preserveStoredIdentityForSkippedAsset(
     contextGraphId: string,
