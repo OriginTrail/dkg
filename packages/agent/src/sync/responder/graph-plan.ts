@@ -807,6 +807,8 @@ export async function readSwmMetaPage(params: {
   refreshRowList?: boolean;
   refreshGeneration?: string;
   freshMetaPlanMemo?: FreshSwmMetaPlanMemo;
+  /** Keep the immutable row snapshot until an explicit empty-page EOF. */
+  releaseCacheOnShortPage?: boolean;
 }): Promise<SyncRow[]> {
   const graphs = swmGraphsForRegisteredSubGraphs(params.contextGraphId, params.registeredSubGraphNames, true);
   const graphSet = new Set(params.graphList);
@@ -817,6 +819,7 @@ export async function readSwmMetaPage(params: {
       key: params.rowListCacheKey,
       refresh: params.refreshRowList,
       refreshGeneration: params.refreshGeneration,
+      releaseOnShortPage: params.releaseCacheOnShortPage,
       expiredMessage: 'Shared-memory meta sync session snapshot expired before page completion',
     }
     : undefined;
