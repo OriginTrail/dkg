@@ -16,7 +16,7 @@ import { jsonResponse, readBody, SMALL_BODY_BYTES } from "../http-utils.js";
 import { createHash } from "node:crypto";
 import { loadMeterConfig, canonicalize } from "../metering/ledger.js";
 import { COEFFICIENTS_CANONICAL } from "../metering/read-meter.js";
-import { authoriseMeteredRead, settleMeteredRead, countersignLeg } from "../metering/metered-read.js";
+import { authoriseMeteredRead, settleMeteredRead, countersignLeg, withholdLeg } from "../metering/metered-read.js";
 import type { CapabilityState } from "../metering/capability.js";
 import { chainIdOf } from "./metering.js";
 
@@ -38,7 +38,7 @@ function capState(home: string, id: string): CapabilityState {
 
 export async function handleMeteredQueryRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path, agent } = ctx;
-  if (path !== "/api/metering/read" && path !== "/api/metering/countersign") return;
+  if (path !== "/api/metering/read" && path !== "/api/metering/countersign" && path !== "/api/metering/withhold") return;
   if (req.method !== "POST") return jsonResponse(res, 405, { error: "E_METHOD" });
 
   const home = meterHome();
@@ -60,6 +60,25 @@ export async function handleMeteredQueryRoutes(ctx: RequestContext): Promise<voi
     return jsonResponse(res, r.ok ? 200 : 403, {
       settleable: r.ok, code: r.code,
       note: r.ok ? "Leg is now admissible for settlement." : "Leg remains a provider claim, not a settled payment.",
+    });
+  }
+
+  // ── POST /api/metering/withhold ────────────────────────────────────────
+  // The buyer's authenticated ONE-per-epoch dispute (billed-run block fix):
+  // adjudicates a served leg as withheld — void from the provider claim,
+  // excluded from the envelope aggregate, and RELEASING gradual release so the
+  // run continues. Verified against the session key bound to the leg, under a
+  // domain distinct from countersign.
+  if (path === "/api/metering/withhold") {
+    if (!body.leg || !body.withholdSignature || !body.sessionPublicKeyPem) {
+      return jsonResponse(res, 400, { error: "E_MISSING_FIELD", required: ["leg", "withholdSignature", "sessionPublicKeyPem"] });
+    }
+    const r = withholdLeg({
+      home, leg: body.leg, withholdSignature: body.withholdSignature, sessionPublicKeyPem: body.sessionPublicKeyPem,
+    });
+    return jsonResponse(res, r.ok ? 200 : 403, {
+      withheld: r.ok, code: r.code,
+      note: r.ok ? "Leg adjudicated as withheld: void from the provider claim; the run may continue." : "Withhold refused; the leg's status is unchanged.",
     });
   }
 

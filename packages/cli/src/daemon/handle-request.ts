@@ -315,6 +315,7 @@ import { handleStatusRoutes } from './routes/status.js';
 import { handleMeteringRoutes } from './routes/metering.js';
 import { handleMeteredQueryRoutes } from './routes/metered-query.js';
 import { handleMeteredInferRoutes } from './routes/metered-infer.js';
+import { handleMeteredNettingRoutes } from './routes/metered-netting.js';
 import { handleSettlementRoutes } from './routes/settlement-routes.js';
 import { handleBackpressureRoutes } from './routes/backpressure.js';
 import { handleAgentChatRoutes } from './routes/agent-chat.js';
@@ -376,6 +377,11 @@ export async function handleRequest(input: HandleRequestInput): Promise<void> {
   // Capability-authenticated metered inference. Same placement rationale as the
   // read route: before the broad /api/metering/* default-deny.
   await handleMeteredInferRoutes(ctx);
+  if (ctx.res.writableEnded) return;
+
+  // P2 netting routes (close commit/rollover + read-only quantities/settle-gate).
+  // Verification lives inside the netting mutations; the adapter is thin.
+  await handleMeteredNettingRoutes(ctx);
   if (res.writableEnded) return;
 
   // Settlement: buyer-facing close (read-only) + operator-only withdrawal.

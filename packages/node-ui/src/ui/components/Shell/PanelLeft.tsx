@@ -291,6 +291,26 @@ export function PanelLeft() {
             <span>▦</span> Dashboard
           </div>
 
+          {/* Marketplace (Iteration 2 P1) — feature-flagged: visible only with
+              localStorage nsm.marketplace='1' or ?marketplace in the URL.
+              Deploy-only surface; every P1 data path is the viewer's own node. */}
+          {(() => {
+            try {
+              // Self-persisting flag: visiting ?marketplace=1 once records it,
+              // surviving the router's URL normalization and reloads.
+              if (new URLSearchParams(window.location.search).has('marketplace')) localStorage.setItem('nsm.marketplace', '1');
+              if (localStorage.getItem('nsm.marketplace') !== '1') return null;
+            } catch { return null; }
+            return (
+              <div
+                className={`v10-tree-dashboard ${activeTabId === 'marketplace' ? 'active' : ''}`}
+                onClick={() => { openTab({ id: 'marketplace', label: 'Marketplace', closable: true }); setActiveTab('marketplace'); setActiveProject(null); }}
+              >
+                <span>◈</span> Marketplace
+              </div>
+            );
+          })()}
+
           {/* Empty-state card hoisted ABOVE the collapsible sections so it
               stays visible if both sections are collapsed. */}
           {contextGraphs.length === 0 && stage <= 1 && (

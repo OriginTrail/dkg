@@ -87,6 +87,32 @@ interface TabState {
   epoch: number;                   // current tab lifecycle
   settlementHistory: Settlement[]; // prior epochs' settlements (immutable)
   creditedDeposits: Set<string>;   // canonical deposit ids already applied (Bo #2)
+  // The funded-run quote each epoch was opened under (Bo, deposit-stage block):
+  // a credit made under a quote records its digest + the run bounds it signed,
+  // so infer admission can enforce the exact envelope the buyer funded and a
+  // second deposit cannot land on an already-funded epoch.
+  fundedQuoteByEpoch: Map<number, QuoteBinding>;
+  // The run envelope, DERIVED from the authoritative debit journal — NOT a
+  // sidecar (Bo, funded-run block #3). Every funded inference debit carries its
+  // quoteDigest, so replaying the debit records reconstructs calls/aggregate
+  // exactly, and a crash between "debit" and "count" is impossible because they
+  // are the SAME durable record. Keyed by epoch.
+  fundedRunByEpoch: Map<number, FundedRunAccount>;
+}
+
+export interface QuoteBinding {
+  quoteDigest: string;
+  calls: number;                     // N — envelope call ceiling
+  aggregateCeilingMicroTrac: number; // the maximum accepted provider claim
+}
+
+// The per-epoch funded-run accounting, projected from the debit journal. legs
+// maps legId → cost so a dispute can subtract the exact amount; disputed is the
+// set of withheld legs (policy cap: 1). aggregate excludes disputed legs.
+interface FundedRunAccount {
+  quoteDigest: string;
+  legs: Map<string, number>;   // legId → costMicroTrac
+  disputed: Set<string>;       // withheld legs (excluded from claim + aggregate)
 }
 
 // State is keyed BY DKG_HOME. A module-global map leaks balances between
@@ -105,7 +131,7 @@ function homeTabs(home: string): Map<string, TabState> {
 
 function entry(home: string, principal: string): TabState {
   const m = homeTabs(home);
-  if (!m.has(principal)) m.set(principal, { balance: 0, sequence: 0, lastHash: "genesis", seen: new Set(), epoch: 0, settlementHistory: [], creditedDeposits: new Set() });
+  if (!m.has(principal)) m.set(principal, { balance: 0, sequence: 0, lastHash: "genesis", seen: new Set(), epoch: 0, settlementHistory: [], creditedDeposits: new Set(), fundedQuoteByEpoch: new Map(), fundedRunByEpoch: new Map() });
   return m.get(principal)!;
 }
 
@@ -132,6 +158,27 @@ export function canonicalDepositId(ev: Record<string, unknown> | undefined): str
   const token = ev.token ?? "";
   const log = ev.logIndex ?? ev.log ?? "0";
   return `${chain}:${token}:${String(tx).toLowerCase()}:${log}`;
+}
+
+/** Project a funded inference debit leg into the epoch's run account. Shared by
+ *  the live debit path and replay so in-memory and journal-derived envelope
+ *  state can never diverge (the same lesson as applyCredit). Idempotent by
+ *  legId. */
+function projectFundedLeg(t: TabState, epoch: number, quoteDigest: string, legId: string, cost: number): void {
+  let acct = t.fundedRunByEpoch.get(epoch);
+  if (!acct) { acct = { quoteDigest, legs: new Map(), disputed: new Set() }; t.fundedRunByEpoch.set(epoch, acct); }
+  if (!acct.legs.has(legId)) acct.legs.set(legId, Math.max(0, Math.round(cost)));
+}
+
+/** The live (non-disputed) call count + aggregate for an epoch's run account. */
+function fundedRunTotals(acct: FundedRunAccount | undefined): { calls: number; aggregateMicroTrac: number; disputed: number } {
+  if (!acct) return { calls: 0, aggregateMicroTrac: 0, disputed: 0 };
+  let calls = 0, agg = 0;
+  for (const [legId, cost] of acct.legs) {
+    calls += 1;                                    // a disputed leg still consumed a call slot
+    if (!acct.disputed.has(legId)) agg += cost;    // but is excluded from the provider claim
+  }
+  return { calls, aggregateMicroTrac: agg, disputed: acct.disputed.size };
 }
 
 /** Returns true if the credit was APPLIED, false if it was a duplicate no-op. */
@@ -165,7 +212,19 @@ function replay(home: string) {
     let rec: any;
     try { rec = JSON.parse(line); } catch { continue; }
     const t = entry(home, rec.principal);
-    if (rec.kind === "credit") { applyCredit(t, rec.amountMicroTrac, canonicalDepositId(rec.evidence)); continue; }
+    if (rec.kind === "credit") {
+      const applied = applyCredit(t, rec.amountMicroTrac, canonicalDepositId(rec.evidence));
+      // Restore the funded-quote binding for the epoch this credit opened, so the
+      // envelope enforced after a restart is the exact one the buyer funded.
+      if (applied && rec.fundedQuote?.quoteDigest) {
+        t.fundedQuoteByEpoch.set(t.epoch, {
+          quoteDigest: String(rec.fundedQuote.quoteDigest),
+          calls: Number(rec.fundedQuote.calls),
+          aggregateCeilingMicroTrac: Number(rec.fundedQuote.aggregateCeilingMicroTrac),
+        });
+      }
+      continue;
+    }
     // Buyer-found (Hermes/Bo, 2026-08-06), by insisting the post-restart balance
     // be verified through the API rather than read from the journal: replay
     // handled credits and debits but IGNORED refunds, so a refunded balance
@@ -186,7 +245,13 @@ function replay(home: string) {
     // a phantom residual claim and a double-refund risk if expiry ever sweeps.
     if (rec.kind === "settled") {
       t.balance = 0;
-      t.settled = { withdrawalId: String(rec.withdrawalId), txHash: String(rec.txHash), netPaidMicroTrac: Number(rec.netPaidMicroTrac), at: String(rec.at) };
+      t.settled = {
+        withdrawalId: String(rec.withdrawalId), txHash: String(rec.txHash), netPaidMicroTrac: Number(rec.netPaidMicroTrac), at: String(rec.at),
+        // additive P2 evidence — present only on digest-bound settlements;
+        // replay must carry them or the audit surface forgets after restart.
+        ...(typeof rec.economicsConfigDigest === "string" ? { economicsConfigDigest: rec.economicsConfigDigest } : {}),
+        ...(Array.isArray(rec.closes) ? { closes: rec.closes.map(String) } : {}),
+      };
       continue;
     }
     if (rec.kind === "debit") {
@@ -194,6 +259,19 @@ function replay(home: string) {
       t.sequence = rec.leg.sequence;
       t.lastHash = rec.hash;
       t.seen.add(rec.leg.legId);
+      // A funded inference debit carries its quoteDigest; project it into the
+      // epoch's run account. Because this is the SAME record as the balance
+      // debit, a crash cannot leave a charged leg uncounted (Bo, block #3).
+      const qd = rec.leg.quoteDigest as string | undefined;
+      if (qd) projectFundedLeg(t, Number(rec.epoch ?? rec.leg.tabEpoch ?? t.epoch), qd, String(rec.leg.legId), Number(rec.leg.pricing?.costMicroTrac ?? 0));
+      continue;
+    }
+    // An authenticated buyer withhold of exactly one leg (Bo, block #4). Durable
+    // and idempotent; excludes the leg from the provider claim + the aggregate.
+    if (rec.kind === "leg-dispute") {
+      const acct = t.fundedRunByEpoch.get(Number(rec.epoch));
+      if (acct && acct.legs.has(String(rec.legId))) acct.disputed.add(String(rec.legId));
+      continue;
     }
   }
 }
@@ -211,10 +289,15 @@ export function credit(home: string, principal: string, amountMicroTrac: number,
   const depositId = canonicalDepositId(evidence);
   // Dedup BEFORE append: a duplicate deposit must not even reach the journal, so
   // it is idempotent across restarts (Bo #2).
-  if (depositId !== null && entry(home, principal).creditedDeposits.has(depositId)) {
+  const t0 = entry(home, principal);
+  if (depositId !== null && t0.creditedDeposits.has(depositId)) {
     return { ...balance(home, principal), duplicate: true, depositId };
   }
-  durableAppend(home, { kind: "credit", principal, amountMicroTrac, evidence, at: new Date().toISOString() });
+  // Stamp the epoch this credit OPENS/FUNDS (buyer-found, billed-run block: the
+  // close statement must select the current lifecycle's deposit by epoch, not
+  // by journal position).
+  const creditEpoch = (t0.settled || t0.refunded) ? t0.epoch + 1 : t0.epoch;
+  durableAppend(home, { kind: "credit", principal, epoch: creditEpoch, amountMicroTrac, evidence, at: new Date().toISOString() });
   applyCredit(entry(home, principal), amountMicroTrac, depositId);
   return balance(home, principal);
 }
@@ -223,6 +306,104 @@ export function balance(home: string, principal: string) {
   replay(home);
   const t = entry(home, principal);
   return { balance: t.balance, sequence: t.sequence, lastHash: t.lastHash, epoch: t.epoch };
+}
+
+export type CreditFundedResult =
+  | { ok: true; balance: number; epoch: number; duplicate?: boolean }
+  | { ok: false; code: "E_CREDIT_EPOCH_MISMATCH" | "E_CREDIT_EPOCH_ALREADY_FUNDED"; detail: string };
+
+/**
+ * Credit a deposit made against a FUNDED-RUN quote, under an expected-epoch CAS
+ * (Bo, deposit-stage block). The quote named the exact FRESH epoch it opens; if
+ * the tab has since moved on — a racing credit already opened that epoch, or a
+ * prior tab was not actually terminal — the expected epoch no longer matches the
+ * epoch this credit would land on, and the credit fails CLOSED with no state
+ * change. This is what binds a deposit to the quote the buyer signed instead of
+ * to whatever lifecycle the tab happens to be in.
+ *
+ * The quote's run bounds (N, aggregate ceiling) are recorded durably alongside
+ * the credit, so infer admission enforces the envelope the buyer FUNDED — not a
+ * value re-supplied by the caller at call time.
+ */
+export function creditFunded(home: string, principal: string, amountMicroTrac: number, evidence: Record<string, unknown>, binding: {
+  expectedEpoch: number; quoteDigest: string; calls: number; aggregateCeilingMicroTrac: number;
+}): CreditFundedResult {
+  replay(home);
+  if (!Number.isSafeInteger(amountMicroTrac) || amountMicroTrac <= 0) throw new Error("E_BAD_CREDIT");
+  const t = entry(home, principal);
+  const depositId = canonicalDepositId(evidence);
+  // A duplicate of the exact same deposit is an idempotent no-op — not a race.
+  if (depositId !== null && t.creditedDeposits.has(depositId)) {
+    return { ok: true, balance: t.balance, epoch: t.epoch, duplicate: true };
+  }
+  // The epoch this credit WILL land on (current, or the next if the current tab
+  // is terminal). The CAS is against exactly this.
+  const target = (t.settled || t.refunded) ? t.epoch + 1 : t.epoch;
+  if (binding.expectedEpoch !== target) {
+    return { ok: false, code: "E_CREDIT_EPOCH_MISMATCH", detail: `quote bound epoch ${binding.expectedEpoch}, but a fresh credit now opens epoch ${target}` };
+  }
+  // One funded deposit per quote-epoch: if the target epoch is already funded
+  // under a quote, a second (different) deposit must not stack onto it.
+  if (t.fundedQuoteByEpoch.has(target)) {
+    return { ok: false, code: "E_CREDIT_EPOCH_ALREADY_FUNDED", detail: `epoch ${target} is already funded under a quote` };
+  }
+  durableAppend(home, {
+    kind: "credit", principal, epoch: target, amountMicroTrac, evidence,
+    fundedQuote: { quoteDigest: binding.quoteDigest, calls: binding.calls, aggregateCeilingMicroTrac: binding.aggregateCeilingMicroTrac },
+    at: new Date().toISOString(),
+  });
+  applyCredit(t, amountMicroTrac, depositId);
+  t.fundedQuoteByEpoch.set(t.epoch, { quoteDigest: binding.quoteDigest, calls: binding.calls, aggregateCeilingMicroTrac: binding.aggregateCeilingMicroTrac });
+  return { ok: true, balance: t.balance, epoch: t.epoch };
+}
+
+/** The funded-run quote binding the CURRENT epoch was opened under, or null.
+ *  Infer admission enforces the envelope against this, never a request value. */
+export function boundQuoteOf(home: string, principal: string): QuoteBinding | null {
+  replay(home);
+  const t = entry(home, principal);
+  const b = t.fundedQuoteByEpoch.get(t.epoch);
+  return b ? { ...b } : null;
+}
+
+/** The CURRENT epoch's run-envelope state, PROJECTED from the debit journal
+ *  (calls billed, aggregate accepted claim, disputed count). Read-only; the
+ *  authoritative enforcement is inside recordInferenceLeg. Used for the
+ *  pre-serve N check and the buyer-visible tab view. */
+export function envelopeStateOf(home: string, principal: string): { calls: number; aggregateMicroTrac: number; disputed: number } {
+  replay(home);
+  const t = entry(home, principal);
+  return fundedRunTotals(t.fundedRunByEpoch.get(t.epoch));
+}
+
+/** The withheld legs for the CURRENT epoch — the close statement excludes these
+ *  from the provider claim (Bo, block #4). */
+export function disputedLegsOf(home: string, principal: string): string[] {
+  replay(home);
+  const t = entry(home, principal);
+  const acct = t.fundedRunByEpoch.get(t.epoch);
+  return acct ? [...acct.disputed] : [];
+}
+
+/**
+ * Record an authenticated buyer withhold of exactly ONE leg (Bo, block #4). The
+ * disputed leg is durably journalled, excluded from the provider claim and the
+ * envelope aggregate, and a SECOND dispute for the same epoch is refused so the
+ * one-leg policy cannot silently become many. Idempotent: re-disputing the same
+ * leg is a no-op. The leg must be a funded leg of the current epoch.
+ */
+export function disputeLeg(home: string, principal: string, legId: string):
+  { ok: true; alreadyDisputed: boolean } | { ok: false; code: "E_NO_FUNDED_EPOCH" | "E_UNKNOWN_LEG" | "E_DISPUTE_EXHAUSTED" } {
+  replay(home);
+  const t = entry(home, principal);
+  const acct = t.fundedRunByEpoch.get(t.epoch);
+  if (!acct) return { ok: false, code: "E_NO_FUNDED_EPOCH" };
+  if (!acct.legs.has(legId)) return { ok: false, code: "E_UNKNOWN_LEG" };
+  if (acct.disputed.has(legId)) return { ok: true, alreadyDisputed: true };   // idempotent no-op
+  if (acct.disputed.size >= 1) return { ok: false, code: "E_DISPUTE_EXHAUSTED" };
+  durableAppend(home, { kind: "leg-dispute", principal, epoch: t.epoch, legId, at: new Date().toISOString() });
+  acct.disputed.add(legId);
+  return { ok: true, alreadyDisputed: false };
 }
 
 /**
@@ -345,6 +526,11 @@ export function recordInferenceLeg(home: string, args: {
   policyDigest: string;
   evidence: Record<string, unknown>;  // buildInferenceEvidence(...) output
   requesterKeyRef?: string;
+  /** the funded-run quote this call spends against. On a funded tab this is
+   *  REQUIRED and must equal the epoch's bound quote; the run envelope (N +
+   *  aggregate ceiling) is enforced here, ATOMICALLY with the balance debit and
+   *  the sequence CAS — one durable record, no gap to crash in (Bo, block #3). */
+  quoteDigest?: string;
 }) {
   replay(home);
   if (debitGate) {
@@ -353,6 +539,24 @@ export function recordInferenceLeg(home: string, args: {
   }
   const t = entry(home, args.principal);
   const cost = Math.max(0, Math.round(args.costMicroTrac));
+
+  // ── funded-run envelope, enforced in the SAME critical section as the debit ──
+  // The bound quote for the current epoch is authoritative; the caller cannot
+  // supply the run bounds. Because this check and the durable append below are
+  // one synchronous section with no await, a second concurrent commit cannot
+  // pass the same final slot/ceiling, and there is no separate envelope write to
+  // crash between (Bo, block #3). The envelope is a projection of the debit
+  // journal, reconstructed identically on replay.
+  const bound = t.fundedQuoteByEpoch.get(t.epoch);
+  const quoteDigest = args.quoteDigest;
+  if (bound) {
+    if (!quoteDigest) throw new Error("E_QUOTE_REQUIRED");
+    if (quoteDigest !== bound.quoteDigest) throw new Error("E_QUOTE_MISMATCH");
+    const totals = fundedRunTotals(t.fundedRunByEpoch.get(t.epoch));
+    if (totals.calls >= bound.calls) throw new Error("E_ENVELOPE_CALLS_EXCEEDED");
+    if (totals.aggregateMicroTrac + cost > bound.aggregateCeilingMicroTrac) throw new Error("E_ENVELOPE_AGGREGATE_EXCEEDED");
+  }
+
   const before = t.balance;
   const after = before - cost;
   if (after < 0) throw new Error("E_INSUFFICIENT_FUNDS");
@@ -368,6 +572,10 @@ export function recordInferenceLeg(home: string, args: {
     legId: sha256(`${args.principal}:${t.sequence + 1}:${evDigest}:${Date.now()}`).slice(0, 32),
     sequence: t.sequence + 1,
     previousLegHash: t.lastHash,
+    // The quote this leg spends against travels IN the signed leg, so the
+    // envelope projection and any dispute bind to it cryptographically. null on
+    // a non-funded (read-tab / shadow) inference leg.
+    quoteDigest: quoteDigest ?? null,
     counterparty: { providerKeyId: providerKeyId(home) },
     requester: { principal: args.principal, keyRef: args.requesterKeyRef ?? null },
     meter: {
@@ -391,7 +599,45 @@ export function recordInferenceLeg(home: string, args: {
 
   durableAppend(home, { kind: "debit", principal: args.principal, epoch: t.epoch, hash, leg: signed });
   t.balance = after; t.sequence = leg.sequence; t.lastHash = hash; t.seen.add(leg.legId);
+  // Project the funded leg into the epoch's run account — same in-memory update
+  // the replay path makes from this exact record.
+  if (quoteDigest) projectFundedLeg(t, t.epoch, quoteDigest, leg.legId, cost);
   return signed;
+}
+
+/** The full signed leg for (principal, sequence), read from the durable journal.
+ *
+ * The provider journal is the authoritative store of every signed leg (the
+ * `debit` records). A buyer that lost its own copy of a served leg — its bytes
+ * were not durably retained before a crash or a rejected first-verify — cannot
+ * countersign OR withhold, since both need the exact signed leg, not the close
+ * summary's hash/seq/cost (Bo, buyer seat, epoch-2 seq-1 recovery). This is the
+ * read side of that recovery: it returns exactly what was appended at serve
+ * time, so the retrieval endpoint hands back a byte-identical signed leg whose
+ * provider signature the buyer re-verifies under LEG_DOMAIN. Read-only; it never
+ * mutates the ledger and never re-signs. Returns null if no such leg exists.
+ */
+export function legBySequence(home: string, principal: string, sequence: number, epoch?: number): Record<string, unknown> | null {
+  const p = journalPath(home);
+  if (!existsSync(p)) return null;
+  const want = principal.toLowerCase();
+  let found: Record<string, unknown> | null = null;
+  for (const line of readFileSync(p, "utf8").split("\n")) {
+    if (!line.trim()) continue;
+    let rec: any;
+    try { rec = JSON.parse(line); } catch { continue; }
+    if (rec.kind !== "debit" || !rec.leg) continue;
+    if (String(rec.principal ?? "").toLowerCase() !== want) continue;
+    if (Number(rec.leg.sequence) !== sequence) continue;
+    // The per-leg `sequence` RESETS each epoch (it is the position within the
+    // epoch's run, not a per-principal monotonic id), so (principal, sequence)
+    // alone is ambiguous across epochs — e.g. epoch-1 seq-1 and epoch-2 seq-1
+    // both exist on the same tab. When an epoch is given it MUST match, so a
+    // buyer recovering "epoch 2, sequence 1" can never be handed epoch 1's leg.
+    if (epoch !== undefined && Number(rec.leg.tabEpoch) !== epoch) continue;
+    found = rec.leg as Record<string, unknown>;   // last matching wins (a leg is appended once)
+  }
+  return found;
 }
 
 /** Failed query: base fee only, receipt marked error (never debits in shadow). */
@@ -553,7 +799,7 @@ export function appendJournal(home: string, record: Record<string, unknown>): vo
  * as closed with no residual claim, and so expiry can never double-refund it.
  * Idempotent by withdrawalId: replaying or re-confirming appends nothing new.
  */
-export function settleTab(home: string, principal: string, info: { withdrawalId: string; txHash: string; netPaidMicroTrac: number; expectedEpoch?: number }): { ok: boolean; alreadySettled: boolean; code?: string } {
+export function settleTab(home: string, principal: string, info: { withdrawalId: string; txHash: string; netPaidMicroTrac: number; expectedEpoch?: number; economicsConfigDigest?: string; closes?: string[] }): { ok: boolean; alreadySettled: boolean; code?: string } {
   replay(home);
   const t = entry(home, principal);
   // Expected-epoch CAS (Bo #1): a withdrawal prepared against a PRIOR epoch must
@@ -570,6 +816,11 @@ export function settleTab(home: string, principal: string, info: { withdrawalId:
   durableAppend(home, {
     kind: "settled", principal, withdrawalId: info.withdrawalId, txHash: info.txHash,
     netPaidMicroTrac: info.netPaidMicroTrac, at,
+    // additive, replay-neutral evidence fields (P2 netting): the economics
+    // digest that AUTHORIZED this settlement + the closes it pays. Absent on
+    // Iteration-1 records; replay ignores them.
+    ...(info.economicsConfigDigest ? { economicsConfigDigest: info.economicsConfigDigest } : {}),
+    ...(info.closes ? { closes: info.closes } : {}),
   });
   t.balance = 0;
   t.settled = { ...info, at };
@@ -577,7 +828,7 @@ export function settleTab(home: string, principal: string, info: { withdrawalId:
 }
 
 /** The confirmed settlement for a principal, or null. Buyer-visible receipt. */
-export function settlementOf(home: string, principal: string): { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string } | null {
+export function settlementOf(home: string, principal: string): { withdrawalId: string; txHash: string; netPaidMicroTrac: number; at: string; economicsConfigDigest?: string; closes?: string[] } | null {
   replay(home);
   const st = entry(home, principal).settled;
   return st ? { ...st } : null;      // deep-enough copy: caller cannot mutate module state (Bo #4)

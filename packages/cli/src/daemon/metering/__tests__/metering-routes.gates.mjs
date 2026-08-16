@@ -342,6 +342,131 @@ ok("12 confirmations at safe head credits → 200", good.status === 200 && good.
 const funded = await get(`/api/metering/tab?principal=${BO}`);
 ok("balance reflects the credited deposit", funded.body?.balanceMicroTrac > 0, `balance=${funded.body?.balanceMicroTrac}`);
 
+// ── 6b. FUNDED opening + CAS credit, END-TO-END over HTTP ─────────────────
+// Buyer-found (Bo, pre-deposit STOP 2026-08-09): the http-core tab/open adapter
+// DROPPED body.funded, so a funded opening through the live HTTP route silently
+// registered as an ordinary unfunded opening and a later credit bypassed the
+// signed-opening + epoch/quote CAS. He stopped BEFORE broadcasting real money.
+// This section is the gate he required: the positive path, over real HTTP,
+// mirroring his exact live shape — a terminal epoch-0 tab whose fresh deposit
+// opens epoch 1 — proving the buyer readback carries epoch 1 plus the exact
+// quote/envelope before any real transfer ever occurs.
+console.log("\nFUNDED opening + epoch/quote CAS credit over HTTP (Bo's pre-deposit STOP):");
+{
+  const { writeFileSync } = await import("node:fs");
+  const L = await import(join(dist, "metering/ledger.js"));
+  const Q = await import(join(dist, "metering/inference-quote.js"));
+  const home = process.env.DKG_HOME;
+  const P2wallet = generateKeyPairSync("ed25519");
+  const P2session = generateKeyPairSync("ed25519");
+  const P2 = "0x8a87Ea7c00000000000000000000000000000002";
+
+  // registry: anchor BOTH principals (BO from earlier sections stays valid)
+  writeFileSync(join(home, "metering", "buyer-registry.json"), JSON.stringify({
+    principals: {
+      [BO]: { label: "hermes-bo", walletPublicKeyPem, approvedVia: "gate-fixture" },
+      [P2]: { label: "funded-p2", walletPublicKeyPem: pem(P2wallet.publicKey, "pub"), approvedVia: "gate-fixture" },
+    },
+  }));
+
+  // mirror Bo's live state: a PRIOR terminal (settled) epoch 0 for P2
+  L.credit(home, P2, 1_000_000, { chainId: 8453, token: TRAC, txHash: "0xP2OLD", logIndex: 0 });
+  L.settleTab(home, P2, { withdrawalId: "wd:p2-old", txHash: "0xp2settle", netPaidMicroTrac: 999_999, expectedEpoch: 0 });
+  ok("fixture: P2 has a terminal epoch-0 tab; a fresh deposit opens epoch 1", L.nextEpochFor(home, P2) === 1);
+
+  // the provider-SIGNED funded commitment (what /infer-terms hands the buyer)
+  const quote = Q.buildFundedRunQuote({ tabEpoch: 1, providerAddress: wallets.publisher.address, refundAddress: P2, scheduleDigest });
+  const commitment = {
+    quote,
+    signature: L.providerSign(home, Q.FUNDED_RUN_QUOTE_DOMAIN, quote.fundedRunTermsDigest),
+    providerKeyId: L.providerKeyId(home),
+  };
+
+  const mkDeleg2 = () => {
+    const d = {
+      domain: "odysseus-dkg:delegation:v1", capabilityId: "cap-funded-p2", tabPrincipal: P2,
+      sessionPublicKeyPem: pem(P2session.publicKey, "pub"), agentUrn: "urn:p2",
+      audience: { settlement: "settle-main", nodeClasses: ["dkg-edge-mainnet"] },
+      routes: ["POST /api/query"], bindings: { scheduleDigest, priceVectorDigest: priceDigest },
+      caps: { absoluteMicroTrac: 1_000_000, windowMicroTrac: 500_000, windowMs: 3_600_000 },
+      notBefore: new Date(Date.now() - 3600e3).toISOString(),
+      expiresAt: new Date(Date.now() + 3600e3).toISOString(), tier: "session-key",
+    };
+    return { ...d, walletSignature: edSign(null, delegationPreimage(d), createPrivateKey(pem(P2wallet.privateKey, "priv"))).toString("base64") };
+  };
+
+  // 1. open WITH the funded commitment — over HTTP
+  const fOpen = await post("/api/metering/tab/open", {
+    delegation: mkDeleg2(), refundAddress: P2, request: req1, revocationCheckpoint: freshCp,
+    funded: commitment,
+  });
+  ok("a FUNDED opening over HTTP → 200 opened", fOpen.status === 200 && fOpen.body?.opened === true, JSON.stringify(fOpen.body));
+  ok("the registered opening artifact CARRIES the signed commitment (the dropped-field regression)",
+    fOpen.body?.artifact?.funded?.quote?.fundedRunTermsDigest === quote.fundedRunTermsDigest
+    && typeof fOpen.body?.artifact?.funded?.signature === "string"
+    && fOpen.body?.artifact?.funded?.providerKeyId === L.providerKeyId(home),
+    JSON.stringify(fOpen.body?.artifact?.funded ?? null));
+
+  // 2. a tampered commitment must NOT open (signature verified before registration)
+  const tampered = { ...commitment, quote: { ...quote, envelope: { ...quote.envelope, maxAcceptedClaimMicroTrac: 1 } } };
+  const tOpen = await post("/api/metering/tab/open", {
+    delegation: mkDeleg2(), refundAddress: P2, request: req1, revocationCheckpoint: freshCp,
+    funded: tampered,
+  });
+  ok("a tampered funded commitment is refused at open (sig no longer covers fields)",
+    tOpen.body?.opened === false, JSON.stringify(tOpen.body));
+
+  // re-register the good opening (the tamper attempt must not have replaced it —
+  // it was refused before registerOpening; assert by re-opening cleanly)
+  const reOpen = await post("/api/metering/tab/open", {
+    delegation: mkDeleg2(), refundAddress: P2, request: req1, revocationCheckpoint: freshCp,
+    funded: commitment,
+  });
+  ok("the clean funded opening still opens after the refused tamper", reOpen.body?.opened === true);
+
+  // 3. credit over HTTP with the REAL chainId + logIndex → epoch/quote CAS path
+  const fCredit = await post("/api/metering/tab/credit", {
+    principal: P2,
+    transfer: { token: TRAC, from: P2, to: wallets.publisher.address, amountTrac: "1", txHash: "0xP2FUND", blockNumber: 100, safeHeadBlock: 111, chainId: 8453, logIndex: 4 },
+  });
+  ok("the funded deposit credits through the CAS path → 200, funded:true, epoch 1",
+    fCredit.status === 200 && fCredit.body?.credited === true && fCredit.body?.funded === true && fCredit.body?.epoch === 1,
+    JSON.stringify(fCredit.body));
+
+  // 4. THE readback Bo required: epoch 1 + the exact quote + the armed envelope
+  const fTab = await get(`/api/metering/tab?principal=${P2}`);
+  ok("buyer readback: epoch 1, balance 1,000,000", fTab.body?.epoch === 1 && fTab.body?.balanceMicroTrac === 1_000_000, JSON.stringify({ epoch: fTab.body?.epoch, bal: fTab.body?.balanceMicroTrac }));
+  ok("buyer readback carries the EXACT bound quote (digest + N + ceiling)",
+    fTab.body?.fundedQuote?.quoteDigest === quote.fundedRunTermsDigest
+    && fTab.body?.fundedQuote?.calls === 10
+    && fTab.body?.fundedQuote?.aggregateCeilingMicroTrac === 2340,
+    JSON.stringify(fTab.body?.fundedQuote ?? null));
+  ok("buyer readback shows the envelope armed and untouched (0 calls, 0 aggregate, 0 disputed)",
+    fTab.body?.envelope?.calls === 0 && fTab.body?.envelope?.aggregateMicroTrac === 0 && fTab.body?.envelope?.disputed === 0,
+    JSON.stringify(fTab.body?.envelope ?? null));
+
+  // 5. a second deposit onto the funded epoch is refused over HTTP (CAS holds)
+  const second = await post("/api/metering/tab/credit", {
+    principal: P2,
+    transfer: { token: TRAC, from: P2, to: wallets.publisher.address, amountTrac: "1", txHash: "0xP2SECOND", blockNumber: 120, safeHeadBlock: 140, chainId: 8453, logIndex: 2 },
+  });
+  ok("a second deposit onto the funded epoch is refused over HTTP",
+    second.body?.credited === false && second.body?.code === "E_CREDIT_EPOCH_ALREADY_FUNDED", JSON.stringify(second.body));
+}
+
+// ── 6c. the withhold route is WIRED (v2.2) ────────────────────────────────
+// The dispute path is module-gate-proven (funded-run suite); this asserts the
+// HTTP adapter actually mounts it — a correct core behind a missing route was
+// this file's founding defect.
+console.log("\nwithhold route wiring (v2.2):");
+{
+  const { readFileSync, existsSync } = await import("node:fs");
+  const mq = join(dist, "routes", "metered-query.js");
+  const src = existsSync(mq) ? readFileSync(mq, "utf8") : "";
+  ok("routes/metered-query.js mounts POST /api/metering/withhold", src.includes('"/api/metering/withhold"'));
+  ok("…and delegates to the signature-verified withholdLeg", /withholdLeg\s*\(/.test(src));
+}
+
 // ── 7. the property that matters most ─────────────────────────────────────
 console.log("\nthe endpoint grants no spending right:");
 ok("a funded tab still reports sequence 0 and a genesis chain — funding bills nothing",

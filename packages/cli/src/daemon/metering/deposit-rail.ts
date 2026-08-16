@@ -18,7 +18,18 @@
 // aggregate withdrawal. The journal remains the ledger.
 import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
-import { canonicalize, credit, balance, refundOnExpiry } from "./ledger.js";
+import { canonicalize, credit, creditFunded, balance, refundOnExpiry, providerPublicPem, providerKeyId, type CreditFundedResult } from "./ledger.js";
+import { verifyFundedRunQuote, type FundedRunQuote } from "./inference-quote.js";
+import { COEFFICIENTS_CANONICAL } from "./read-meter.js";
+
+/** The signed provider commitment carried in a funded opening (Bo, block #1):
+ *  the quote, the provider signature over its digest, and which provider key
+ *  signed it. The whole thing is inside the artifact the buyer countersigns. */
+export interface FundedQuoteCommitment {
+  quote: FundedRunQuote;
+  signature: string;      // provider signature over FUNDED_RUN_QUOTE_DOMAIN + digest
+  providerKeyId: string;  // the provider key that signed it (must be the node's)
+}
 
 export const TERMS_VERSION = "tab-terms/v1";
 
@@ -46,11 +57,19 @@ export interface OpeningArtifact {
   terms: TabTerms;
   termsDigest: string;
   refundAddressEcho: string;        // (4) echoed, must equal terms.refundAddress
+  // For a FUNDED INFERENCE RUN (Bo, deposit-stage + funded-run blocks): the
+  // signed funded-run quote — the quote, its provider SIGNATURE, and the signing
+  // key id — is embedded in the opening the buyer countersigns, so the deposit,
+  // the opening, the provider commitment, and the run envelope are ONE bound,
+  // countersigned object. The credit CAS binds to the quote's tabEpoch +
+  // fundedRunTermsDigest, and both openTab and credit verify the signature
+  // against the node's pinned provider key.
+  funded?: FundedQuoteCommitment;
   createdAt: string;
   expiresAt: string;
 }
 
-export function buildOpeningArtifact(tabPrincipal: string, terms: TabTerms, now = Date.now()): OpeningArtifact {
+export function buildOpeningArtifact(tabPrincipal: string, terms: TabTerms, now = Date.now(), funded?: FundedQuoteCommitment): OpeningArtifact {
   if (terms.rolloverPolicy !== "none") throw new Error("E_TERMS_ROLLOVER_NOT_ALLOWED");
   return {
     artifactType: "tab-opening",
@@ -58,9 +77,24 @@ export function buildOpeningArtifact(tabPrincipal: string, terms: TabTerms, now 
     terms,
     termsDigest: termsDigest(terms),
     refundAddressEcho: terms.refundAddress,
+    ...(funded ? { funded } : {}),
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + terms.expiryMs).toISOString(),
   };
+}
+
+/** Verify a funded quote commitment against the node's PINNED provider key
+ *  (Bo, block #1): the signing key id must be the node's own, and the signature
+ *  must verify — a self-signed or foreign-key quote is refused. Shared by
+ *  openTab (before registration) and creditFundedDeposit (before credit) so the
+ *  same authority check gates both. */
+export function verifyFundedCommitment(home: string, c: FundedQuoteCommitment | undefined):
+  { ok: true; quote: FundedRunQuote } | { ok: false; code: "E_NO_FUNDED_QUOTE" | "E_QUOTE_WRONG_PROVIDER_KEY" | "E_QUOTE_SIG_INVALID" | "E_OPENING_QUOTE_MISMATCH"; detail?: string } {
+  if (!c?.quote) return { ok: false, code: "E_NO_FUNDED_QUOTE" };
+  if (c.providerKeyId !== providerKeyId(home)) return { ok: false, code: "E_QUOTE_WRONG_PROVIDER_KEY", detail: "quote is not signed by this node's provider key" };
+  const v = verifyFundedRunQuote(c.quote, { providerPublicKeyPem: providerPublicPem(home), signature: c.signature });
+  if (!v.ok) return { ok: false, code: v.code === "E_QUOTE_SIG_INVALID" || v.code === "E_QUOTE_SIG_MISSING" ? "E_QUOTE_SIG_INVALID" : "E_OPENING_QUOTE_MISMATCH", detail: v.detail };
+  return { ok: true, quote: c.quote };
 }
 
 export type DepositVerdict =
@@ -75,6 +109,11 @@ export interface ObservedTransfer {
   amountTrac: string;        // decimal string as read from the chain
   blockNumber: number;
   safeHeadBlock: number;     // (1) the node's observed SAFE head, not latest
+  // The canonical deposit identity is chain:token:tx:log (Bo, block #2); the
+  // real chain id and receipt log index MUST travel with the transfer rather
+  // than being hard-coded, or two logs in one tx collapse to one identity.
+  chainId: number;
+  logIndex: number;
 }
 
 const toMicro = (trac: string) => {
@@ -117,6 +156,78 @@ export function creditDeposit(home: string, t: ObservedTransfer, artifact: Openi
     confirmations: t.safeHeadBlock - t.blockNumber + 1,
     termsDigest: artifact.termsDigest,
     refundAddress: artifact.terms.refundAddress,   // (4) travels with the credit
+  });
+}
+
+/**
+ * Credit a deposit made against a funded-run quote embedded in the opening
+ * (Bo, deposit-stage block). Unlike creditDeposit, this binds the credit to the
+ * quote's exact fresh epoch through the ledger CAS, and records the quote's run
+ * bounds durably so infer admission enforces the funded envelope. Two integrity
+ * checks precede the CAS:
+ *   * the opening MUST carry a funded quote, and
+ *   * that quote must be internally sound and its digest self-consistent — a
+ *     tampered opening whose stated quote digest no longer matches its fields is
+ *     refused (E_OPENING_QUOTE_MISMATCH) rather than credited to a foreign quote.
+ */
+export function creditFundedDeposit(home: string, t: ObservedTransfer, artifact: OpeningArtifact, verdict: Extract<DepositVerdict, { ok: true }>):
+  CreditFundedResult | { ok: false; code: "E_NO_FUNDED_QUOTE" | "E_QUOTE_WRONG_PROVIDER_KEY" | "E_QUOTE_SIG_INVALID" | "E_OPENING_QUOTE_MISMATCH" | "E_QUOTE_TERMS_MISMATCH" | "E_QUOTE_TRANSFER_MISMATCH"; detail?: string } {
+  // (1) The embedded quote must be signed by THIS node's provider key — a
+  //     self-signed or foreign quote never reaches credit (Bo, block #1).
+  const vc = verifyFundedCommitment(home, artifact.funded);
+  if (!vc.ok) return vc;
+  const q = vc.quote;
+
+  // (2) Exact quote ↔ opening-terms equality across every economically relevant
+  //     field (Bo, block #2). The signature proves the provider committed these
+  //     values; this proves the OPENING the buyer countersigned is about the
+  //     same deposit.
+  const terms = artifact.terms;
+  const schedHex = createHash("sha256").update(canonicalize(COEFFICIENTS_CANONICAL as unknown as Record<string, unknown>)).digest("hex");
+  const eq =
+    q.chain === terms.chain &&
+    q.tracContract.toLowerCase() === terms.tracContract.toLowerCase() &&
+    q.providerAddress.toLowerCase() === terms.providerAddress.toLowerCase() &&
+    q.refundAddress.toLowerCase() === terms.refundAddress.toLowerCase() &&
+    q.principalTrac === terms.minimumCreditTrac &&
+    q.confirmationDepth === terms.confirmationDepth &&
+    q.expiryMs === terms.expiryMs &&
+    q.rolloverPolicy === terms.rolloverPolicy &&
+    q.refundOnExpiry === terms.refundOnExpiry &&
+    q.scheduleDigest === schedHex;
+  if (!eq) return { ok: false, code: "E_QUOTE_TERMS_MISMATCH", detail: "funded quote does not match the opening terms field-for-field" };
+
+  // (3) Exact quote ↔ observed-transfer equality: the on-chain deposit must be
+  //     on the quoted chain, in the quoted token, to the quoted provider (Bo #2).
+  const transferOk =
+    q.chain === `eip155:${t.chainId}` &&
+    q.tracContract.toLowerCase() === t.token.toLowerCase() &&
+    q.providerAddress.toLowerCase() === t.to.toLowerCase() &&
+    q.refundAddress.toLowerCase() === t.from.toLowerCase();   // the depositing wallet IS the refund/tab identity
+  if (!transferOk) return { ok: false, code: "E_QUOTE_TRANSFER_MISMATCH", detail: "funded quote does not match the observed transfer" };
+
+  // (4) Credit under the epoch CAS, with the canonical deposit identity built
+  //     from the REAL chain id and receipt log index (Bo #2) — never hard-coded.
+  return creditFunded(home, artifact.tabPrincipal, verdict.creditMicroTrac, {
+    kind: "trac-deposit",
+    chainId: t.chainId,
+    logIndex: t.logIndex,
+    txHash: t.txHash,
+    from: t.from,
+    to: t.to,
+    token: t.token,
+    amountTrac: t.amountTrac,
+    blockNumber: t.blockNumber,
+    safeHeadBlock: t.safeHeadBlock,
+    confirmations: t.safeHeadBlock - t.blockNumber + 1,
+    termsDigest: artifact.termsDigest,
+    refundAddress: artifact.terms.refundAddress,
+    fundedRunTermsDigest: q.fundedRunTermsDigest,
+  }, {
+    expectedEpoch: q.tabEpoch,
+    quoteDigest: q.fundedRunTermsDigest,
+    calls: q.envelope.calls,
+    aggregateCeilingMicroTrac: q.envelope.maxAcceptedClaimMicroTrac,
   });
 }
 

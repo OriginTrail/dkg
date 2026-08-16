@@ -166,6 +166,13 @@ export async function handleMetering(req: MeteringRequest, io: MeteringIo): Prom
         scheduleVersion: SCHEDULE_VERSION,
         request: b.request,
         revocationCheckpoint: b.revocationCheckpoint ?? { observedAt: null, maxCheckpointAgeMs: 0 },
+        // FUNDED-RUN opening (buyer-found, Bo, pre-deposit STOP 2026-08-09): the
+        // adapter previously DROPPED body.funded, so a funded opening through the
+        // live HTTP route silently registered as an ordinary unfunded opening —
+        // fundedQuote null, credit routed through the generic path instead of the
+        // required signed-opening + epoch/quote CAS. Forward it verbatim;
+        // openTab verifies the provider signature against the pinned key.
+        funded: b.funded,
       });
       io.json(out.opened ? 200 : 403, out);
     } catch (e: unknown) {

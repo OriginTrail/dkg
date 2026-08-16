@@ -97,14 +97,21 @@ export function inferenceWiringStatus(): { configured: boolean; rejectedReason: 
 
 export async function handleMeteredInferRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path } = ctx;
-  if (path !== "/api/metering/infer" && path !== "/api/metering/build" && path !== "/api/metering/infer-terms") return;
+  if (path !== "/api/metering/infer" && path !== "/api/metering/build" && path !== "/api/metering/infer-terms" && path !== "/api/metering/leg/replay") return;
 
   const home = meterHome();
   tryWireBackendFromConfig(home);
 
   const rawQuery = (() => { try { return new URL(req.url ?? "", "http://x").search; } catch { return ""; } })();
+  // The provider identity a funded-run quote commits to is the node's CONFIGURED
+  // operational wallet (Bo #4) — resolved here, never from a caller query value.
+  const providerAddress = (() => {
+    const w = ctx.opWallets as unknown as { wallets?: Array<{ address?: string }> };
+    const a = w?.wallets?.[0]?.address;
+    return !a || /^0x0+$/i.test(a) ? null : a;
+  })();
   await handleInfer(
-    { method: req.method ?? "GET", path, chainId: chainIdOf(ctx), home, query: rawQuery },
+    { method: req.method ?? "GET", path, chainId: chainIdOf(ctx), home, query: rawQuery, providerAddress },
     {
       json: (status, body) => jsonResponse(res, status, body as Record<string, unknown>),
       readBody: () => readBody(req, SMALL_BODY_BYTES),

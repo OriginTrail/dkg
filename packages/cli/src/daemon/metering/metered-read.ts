@@ -14,9 +14,9 @@
 // itself, which is exactly what the front would have done. The principal debited
 // below is the tabPrincipal from a delegation whose signature was verified
 // against a key anchored to that address, never the caller's transport identity.
-import { createHash } from "node:crypto";
+import { createHash, createPublicKey, verify as edVerify } from "node:crypto";
 import { computeUnits, costMicroTrac, isExempt, SCHEDULE_VERSION, type MeterConfig } from "./read-meter.js";
-import { balance, recordReadLeg, recordShadowObservation, readJournal, appendJournal, tabEpoch } from "./ledger.js";
+import { balance, recordReadLeg, recordShadowObservation, readJournal, appendJournal, tabEpoch, canonicalize, disputeLeg as ledgerDisputeLeg, disputedLegsOf } from "./ledger.js";
 import { verifyCapability, admissibleForSettlement, type SignedDelegation, type CapabilityState } from "./capability.js";
 import { anchorWalletKey } from "./buyer-registry.js";
 import { activeOpening } from "./deposit-rail.js";
@@ -44,14 +44,42 @@ export function outstandingLegs(home: string, principal: string): number {
   // count, or an old unsigned leg would block a new tab (or a new leg inherit
   // an old signature). Debit and countersign records both carry `epoch`.
   const epoch = tabEpoch(home, principal);
-  let debits = 0, signed = 0;
+  // A leg the buyer has FORMALLY withheld through the authenticated dispute
+  // path is ADJUDICATED, not outstanding (buyer-found, billed-run block): the
+  // one-withhold policy voids the leg from the provider claim and the run is
+  // meant to CONTINUE — the prior behavior dead-locked the tab, because a
+  // disputed leg can never be countersigned and so blocked every later call.
+  // Silent non-signing still blocks (the anti-free-riding property is intact);
+  // only an explicit, signature-verified withhold — of which the ledger allows
+  // exactly ONE per epoch — releases the slot.
+  // Compute outstanding by LEG IDENTITY, never by aggregate subtraction
+  // (buyer-found, v2.2 block): `debits − signed` let a stale countersignature
+  // for a later-withheld leg cancel a DIFFERENT unsigned leg (countersign A →
+  // bill B unsigned → withhold A → A leaves the debit set but its signature was
+  // still subtracted, hiding B). The obligation is a SET operation: current-
+  // epoch billed legs, minus formally disputed ids, minus the ids that are
+  // themselves countersigned. Only a leg that is neither disputed nor signed
+  // is outstanding.
+  const disputed = new Set(disputedLegsOf(home, principal).map(String));
+  const billed = new Set<string>();
+  const signedIds = new Set<string>();
   for (const rec of readJournal(home)) {
     const recEpoch = Number((rec as any).epoch ?? (rec as any).leg?.tabEpoch ?? 0);
     if (recEpoch !== epoch) continue;
-    if (rec.kind === "debit" && String((rec.leg as any)?.requester?.principal ?? "").toLowerCase() === p) debits++;
-    if (rec.kind === "leg-countersigned" && String(rec.principal ?? "").toLowerCase() === p) signed++;
+    if (rec.kind === "debit" && String((rec.leg as any)?.requester?.principal ?? "").toLowerCase() === p) {
+      billed.add(String((rec.leg as any)?.legId ?? ""));
+    }
+    if (rec.kind === "leg-countersigned" && String(rec.principal ?? "").toLowerCase() === p) {
+      signedIds.add(String(rec.legId ?? ""));
+    }
   }
-  return Math.max(0, debits - signed);
+  let outstanding = 0;
+  for (const legId of billed) {
+    if (disputed.has(legId)) continue;      // adjudicated — not outstanding
+    if (signedIds.has(legId)) continue;     // countersigned THIS leg — not outstanding
+    outstanding++;                          // neither → a real provider claim awaiting the buyer
+  }
+  return outstanding;
 }
 
 export interface MeteredReadRequest {
@@ -328,4 +356,56 @@ export function countersignLeg(args: {
     }
   }
   return { ok: r.ok, code: r.code };
+}
+
+/** Domain-separated from the countersignature so a countersign can never be
+ *  replayed as a withhold, or vice-versa. */
+export const WITHHOLD_DOMAIN = "odysseus-dkg:leg-withhold:v1";
+
+/**
+ * An authenticated buyer WITHHOLD of exactly one funded leg (Bo, funded-run
+ * block #4). This is the protocol wiring that connects a dispute to the
+ * AUTHORITATIVE ledger and the close statement — not a sidecar subtraction.
+ *
+ * The withholder must be the buyer bound to the leg: their session key must hash
+ * to the leg's requester keyRef, and they must sign the leg digest under the
+ * withhold domain. The leg must actually have been served. On success the
+ * ledger records a durable, idempotent dispute (cap: one per epoch), which both
+ * excludes the leg from the envelope aggregate and marks it disputed for the
+ * close statement.
+ */
+export function withholdLeg(args: {
+  home: string;
+  leg: Record<string, any>;
+  withholdSignature: string;    // base64, over WITHHOLD_DOMAIN + "\n" + legDigest
+  sessionPublicKeyPem: string;
+}): { ok: boolean; code: string } {
+  const principal = String(args.leg?.requester?.principal ?? "");
+  const legId = String(args.leg?.legId ?? "");
+  if (!principal || !legId) return { ok: false, code: "E_MISSING_FIELD" };
+
+  // The leg must have been served by the provider (same non-fabrication check as
+  // countersign) AND be a funded leg (carry a quoteDigest).
+  const served = readJournal(args.home).find((rec) =>
+    rec.kind === "debit"
+    && String((rec.leg as any)?.legId ?? "") === legId
+    && String((rec.leg as any)?.requester?.principal ?? "").toLowerCase() === principal.toLowerCase());
+  if (!served) return { ok: false, code: "E_LEG_NOT_SERVED" };
+  if (!(served.leg as any)?.quoteDigest) return { ok: false, code: "E_NOT_FUNDED_LEG" };
+
+  // Only the buyer BOUND to the leg may withhold it: the session key must hash to
+  // the leg's requester keyRef.
+  const keyRef = String(args.leg?.requester?.keyRef ?? "");
+  if (keyRef && keyRef !== "sha256:" + sha256(args.sessionPublicKeyPem)) return { ok: false, code: "E_WITHHOLD_WRONG_KEY" };
+
+  const digest = "sha256:" + sha256(canonicalize(args.leg));
+  let ok = false;
+  try {
+    ok = edVerify(null, Buffer.concat([Buffer.from(WITHHOLD_DOMAIN + "\n"), Buffer.from(digest)]), createPublicKey(args.sessionPublicKeyPem), Buffer.from(args.withholdSignature, "base64"));
+  } catch { ok = false; }
+  if (!ok) return { ok: false, code: "E_WITHHOLD_BAD_SIGNATURE" };
+
+  const r = ledgerDisputeLeg(args.home, principal, legId);
+  if (!r.ok) return { ok: false, code: r.code };
+  return { ok: true, code: r.alreadyDisputed ? "OK_ALREADY_DISPUTED" : "OK" };
 }

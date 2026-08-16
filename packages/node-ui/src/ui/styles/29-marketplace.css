@@ -1,0 +1,28 @@
+/* ── Marketplace (P1, feature-flagged) — tokens + existing families only ── */
+.nsm-sec { margin-bottom: 16px; }
+.nsm-colhead, .nsm-row { display: grid; gap: 10px; align-items: center; padding: 7px 6px; }
+.nsm-colhead { font-size: 9.5px; letter-spacing: .1em; color: var(--text-tertiary); border-bottom: 1px solid var(--border-default); text-transform: uppercase; }
+.nsm-row { border-bottom: 1px solid var(--border-subtle); font-size: 12.5px; color: var(--text-secondary); cursor: pointer; }
+.nsm-row:hover { background: var(--bg-hover); border-radius: 6px; }
+.nsm-grid-m { grid-template-columns: 1fr 110px 150px 110px 120px; }
+.nsm-grid-k { grid-template-columns: 1fr 110px 110px 110px; }
+.nsm-name { color: var(--text-primary); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.nsm-dim { color: var(--text-tertiary); font-weight: 400; }
+.nsm-mono { font-family: var(--font-mono); font-size: 11.5px; font-variant-numeric: tabular-nums; }
+.nsm-empty { padding: 12px 6px; font-size: 12px; color: var(--text-tertiary); }
+.nsm-detail { background: var(--bg-elevated); border: 1px solid var(--border-default); border-radius: 8px; margin: 8px 0; padding: 14px 16px; cursor: default; }
+.nsm-dgrid { display: grid; grid-template-columns: 1.15fr .85fr; gap: 20px; }
+@media (max-width: 900px) { .nsm-dgrid { grid-template-columns: 1fr; } }
+.nsm-dh { font-size: 10px; letter-spacing: .1em; color: var(--text-tertiary); margin: 12px 0 6px; text-transform: uppercase; }
+.nsm-dh:first-child { margin-top: 0; }
+.nsm-dig { display: flex; justify-content: space-between; gap: 10px; padding: 3.5px 0; border-bottom: 1px solid var(--border-subtle); font-size: 11.5px; }
+.nsm-dig span { color: var(--text-tertiary); }
+.nsm-dig code { font-family: var(--font-mono); font-size: 10.5px; color: var(--text-secondary); }
+.nsm-anchor { color: var(--text-link) !important; }
+.nsm-calcrow { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 12px; color: var(--text-secondary); }
+.nsm-calcrow label { width: 100px; }
+.nsm-calcrow input { width: 84px; background: var(--bg-surface); border: 1px solid var(--border-default); border-radius: 6px; color: var(--text-primary); font-family: var(--font-mono); font-size: 11.5px; padding: 3px 8px; }
+.nsm-calcout { font-family: var(--font-mono); font-weight: 700; color: var(--text-success); font-size: 13px; margin: 4px 0 2px; }
+.nsm-btn { border: 1px solid var(--border-default); border-radius: 6px; padding: 5px 12px; font-size: 12px; background: var(--bg-surface); color: var(--text-primary); cursor: pointer; }
+.nsm-btn:hover { border-color: var(--border-strong); }
+.nsm-quote { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px 10px; font-size: 11px; color: var(--text-secondary); }

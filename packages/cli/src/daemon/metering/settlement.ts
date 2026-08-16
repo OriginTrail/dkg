@@ -22,7 +22,7 @@
 //      balance arithmetic.
 import { createHash } from "node:crypto";
 import {
-  canonicalize, providerPublicPem, providerSign, readJournal, appendJournal, settleTab, tabEpoch,
+  canonicalize, providerPublicPem, providerSign, readJournal, appendJournal, settleTab, tabEpoch, disputedLegsOf,
 } from "./ledger.js";
 import { createPublicKey, verify as edVerify } from "node:crypto";
 
@@ -65,6 +65,73 @@ export interface CloseStatement {
 }
 
 /** Build and provider-sign the close statement. Provider asserts; buyer checks. */
+/**
+ * Select the CURRENT EPOCH's legs, countersignatures, and deposit for a close
+ * statement — from the authoritative journal, epoch-filtered end to end.
+ *
+ * Buyer-found (Hermes/Bo, billed-run block 2026-08-09 22:06): the route-level
+ * predecessor selected every debit and every credit for the principal across
+ * ALL lifecycles — so a fresh epoch's close mixed a prior epoch's accepted and
+ * disputed legs with the current run's, produced duplicate sequence numbers
+ * (every epoch's chain starts at 1), and was unverifiable for completeness or
+ * epoch isolation. It also stuffed the opening's expiry TIMESTAMP into the
+ * close's tabEpoch field. This selector is the fix, in the audited metering
+ * core where the gates can hold it:
+ *   - debits: only records whose epoch (record- or leg-carried) equals the
+ *     principal's CURRENT epoch;
+ *   - countersignatures: only leg-countersigned records for that same epoch;
+ *   - a leg formally WITHHELD via the authenticated dispute path is marked
+ *     disputed even if a stale countersignature exists;
+ *   - deposit: the credit record stamped with the current epoch (fallback: the
+ *     last credit, for pre-stamp journals);
+ *   - epoch: returned as the NUMBER it is, for the close's tabEpoch field.
+ */
+export function legsForCloseEpoch(home: string, principal: string): {
+  epoch: number;
+  legs: CloseLeg[];
+  deposit: { txHash: string; blockNumber: number; amountMicroTrac: number } | null;
+} {
+  const p = principal.toLowerCase();
+  const epoch = tabEpoch(home, principal);
+  const withheld = new Set(disputedLegsOf(home, principal).map(String));
+  const signed = new Map<string, string>();
+  let deposit: { txHash: string; blockNumber: number; amountMicroTrac: number } | null = null;
+  let lastCredit: { txHash: string; blockNumber: number; amountMicroTrac: number } | null = null;
+  for (const rec of readJournal(home)) {
+    const r = rec as Record<string, any>;
+    if (r.kind === "leg-countersigned" && String(r.principal ?? "").toLowerCase() === p && Number(r.epoch ?? 0) === epoch) {
+      signed.set(String(r.legId), String(r.countersignature));
+    }
+    if (r.kind === "credit" && String(r.principal ?? "").toLowerCase() === p) {
+      const e = r.evidence as Record<string, unknown> | undefined;
+      if (e?.txHash) {
+        const d = { txHash: String(e.txHash), blockNumber: Number(e.blockNumber ?? 0), amountMicroTrac: Number(r.amountMicroTrac ?? 0) };
+        lastCredit = d;
+        if (Number(r.epoch ?? -1) === epoch) deposit = d;
+      }
+    }
+  }
+  const legs: CloseLeg[] = [];
+  for (const rec of readJournal(home)) {
+    const r = rec as Record<string, any>;
+    if (r.kind !== "debit") continue;
+    const leg = r.leg as Record<string, any>;
+    if (String(leg?.requester?.principal ?? "").toLowerCase() !== p) continue;
+    if (Number(r.epoch ?? leg?.tabEpoch ?? 0) !== epoch) continue;      // EPOCH ISOLATION
+    const legId = String(leg.legId);
+    const cs = withheld.has(legId) ? undefined : signed.get(legId);
+    legs.push({
+      legHash: String(r.hash),
+      sequence: Number(leg.sequence),
+      previousLegHash: String(leg.previousLegHash),
+      costMicroTrac: Number(leg.pricing?.costMicroTrac ?? 0),
+      status: cs ? "accepted" : "disputed",
+      ...(cs ? { countersignature: cs } : {}),
+    });
+  }
+  return { epoch, legs, deposit: deposit ?? lastCredit };
+}
+
 export function buildCloseStatement(home: string, args: {
   chain: string; tracContract: string; providerAddress: string;
   tabPrincipal: string; tabEpoch: string;

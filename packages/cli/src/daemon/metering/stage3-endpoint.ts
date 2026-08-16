@@ -15,10 +15,11 @@
 //  C.3  nothing here can bill: enforcement remains per-principal in the
 //       meter config, and shadow mode ignores all of it.
 import { createHash } from "node:crypto";
-import { canonicalize, balance, credit, settlementOf, nextEpochFor, tabTerminalState } from "./ledger.js";
+import { canonicalize, balance, credit, settlementOf, nextEpochFor, tabTerminalState, boundQuoteOf, envelopeStateOf, disputedLegsOf } from "./ledger.js";
 import {
   buildOpeningArtifact, registerOpening, activeOpening, evaluateDeposit,
-  creditDeposit, termsDigest, type TabTerms, type ObservedTransfer,
+  creditDeposit, creditFundedDeposit, verifyFundedCommitment, termsDigest,
+  type TabTerms, type ObservedTransfer, type FundedQuoteCommitment,
 } from "./deposit-rail.js";
 import { verifyCapability, zeroValuePreflight, type SignedDelegation, type CapabilityState } from "./capability.js";
 import { MAX_BINDING_LIFETIME_MS, BINDING_DOMAIN } from "./evm-binding.js";
@@ -168,6 +169,10 @@ export function openTab(home: string, body: {
   providerAddress: string; askMicroPer1k: number; scheduleVersion: string;
   request: { route: string; nodeClass: string; settlementId: string; scheduleDigest: string; priceVectorDigest: string };
   revocationCheckpoint: { observedAt: number | null; maxCheckpointAgeMs: number };
+  // For a funded inference run: the buyer opens the tab against the signed
+  // funded-run commitment (quote + provider signature + key id), embedded in the
+  // opening they countersign (Bo, funded-run block #1).
+  funded?: FundedQuoteCommitment;
 }) {
   // The delegation must verify before a tab exists at all.
   const state = capabilityState(home, body.delegation.capabilityId);
@@ -178,8 +183,25 @@ export function openTab(home: string, body: {
   });
   if (!v.ok) return { opened: false, code: v.code };
 
+  // A funded-run opening carries a provider-SIGNED quote. Verify the signature
+  // against the node's pinned provider key BEFORE registration (Bo, block #1) —
+  // an unsigned or foreign-key quote never opens a tab — and require the quote
+  // to be about THIS provider and refund address (Bo, block #2).
+  if (body.funded) {
+    const vc = verifyFundedCommitment(home, body.funded);
+    if (!vc.ok) return { opened: false, code: vc.code, detail: (vc as { detail?: string }).detail };
+    const q = vc.quote;
+    if (q.refundAddress.toLowerCase() !== body.refundAddress.toLowerCase()) return { opened: false, code: "E_QUOTE_REFUND_MISMATCH" };
+    if (q.providerAddress.toLowerCase() !== body.providerAddress.toLowerCase()) return { opened: false, code: "E_QUOTE_PROVIDER_MISMATCH" };
+  }
+
   const terms = stage3Terms(body.providerAddress, body.refundAddress, body.askMicroPer1k, body.scheduleVersion);
-  const artifact = buildOpeningArtifact(body.delegation.tabPrincipal, terms);
+  // A FUNDED opening adopts the quote's signed expiry window (24h funded-run
+  // policy), so the opening's expiry equals the quote's — read tabs keep the
+  // 30-minute default. Buyer-found (2026-08-10): a fixed 30-minute opening
+  // expired mid-audit before the run could settle.
+  if (body.funded) terms.expiryMs = body.funded.quote.expiryMs;
+  const artifact = buildOpeningArtifact(body.delegation.tabPrincipal, terms, Date.now(), body.funded);
   registerOpening(home, artifact);
   perHome(delegations, home).set(body.delegation.capabilityId, body.delegation);
   return {
@@ -200,8 +222,16 @@ export function creditObservedDeposit(home: string, principal: string, transfer:
   if (!artifact) return { credited: false, code: "E_NO_OPEN_TAB" };
   const verdict = evaluateDeposit(transfer, artifact);
   if (!verdict.ok) return { credited: false, code: verdict.code, detail: verdict.detail };
+  const confirmations = transfer.safeHeadBlock - transfer.blockNumber + 1;
+  // A funded-run tab credits through the epoch+quote CAS, so a stale/raced
+  // credit or a second deposit onto a funded epoch fails closed (Bo).
+  if (artifact.funded) {
+    const r = creditFundedDeposit(home, transfer, artifact, verdict);
+    if (!r.ok) return { credited: false, code: r.code, detail: (r as { detail?: string }).detail };
+    return { credited: true, balance: r.balance, epoch: r.epoch, confirmations, funded: true };
+  }
   const b = creditDeposit(home, transfer, artifact, verdict);
-  return { credited: true, balance: b.balance, confirmations: transfer.safeHeadBlock - transfer.blockNumber + 1 };
+  return { credited: true, balance: b.balance, confirmations };
 }
 
 /** GET /api/metering/tab — what the buyer sees. */
@@ -221,6 +251,15 @@ export function tabView(home: string, principal: string, safeHeadBlock: number |
     epoch: b.epoch,
     nextEpoch: nextEpochFor(home, principal),   // the epoch a fresh deposit opens
     terminal: tabTerminalState(home, principal),
+    // The funded-run quote the CURRENT epoch was opened under (Bo, deposit-stage):
+    // its digest and run bounds, so a buyer sees exactly which quote governs the
+    // envelope this tab enforces, and the same identity it will present on infer.
+    fundedQuote: boundQuoteOf(home, principal),
+    // The run envelope, projected from the debit journal (Bo, funded-run block):
+    // calls billed, aggregate accepted claim, disputed count, and the withheld
+    // legs the close statement excludes. Buyer-visible so both seats can read the
+    // exact run state from the authoritative ledger, not a sidecar.
+    envelope: boundQuoteOf(home, principal) ? { ...envelopeStateOf(home, principal), disputedLegs: disputedLegsOf(home, principal) } : null,
     // Clean pre-credit state = the fresh epoch has no active opening and no
     // balance yet. A buyer verifies this before funding a new run.
     preCredit: !artifact && b.balance === 0,

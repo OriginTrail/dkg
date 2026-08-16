@@ -13,9 +13,9 @@
 import type { RequestContext } from "./context.js";
 import { jsonResponse, readBody, SMALL_BODY_BYTES } from "../http-utils.js";
 import { createHash } from "node:crypto";
-import { loadMeterConfig, readJournal, providerPublicPem, canonicalize } from "../metering/ledger.js";
+import { loadMeterConfig, readJournal, providerPublicPem, canonicalize, settlementOf } from "../metering/ledger.js";
 import {
-  buildCloseStatement, prepareWithdrawal, recordSignedWithdrawal, confirmWithdrawal,
+  buildCloseStatement, legsForCloseEpoch, prepareWithdrawal, recordSignedWithdrawal, confirmWithdrawal,
   replayWithdrawals, type CloseLeg,
 } from "../metering/settlement.js";
 import { activeOpening } from "../metering/deposit-rail.js";
@@ -30,43 +30,10 @@ function providerAddress(ctx: RequestContext): string | null {
   return !a || /^0x0+$/i.test(a) ? null : a;
 }
 
-/**
- * Reconstruct the tab's legs for a close statement from the journal. An
- * accepted leg is a debit with a matching leg-countersigned record; a debit
- * without one is disputed/unsettled (Q3) — its value is NOT charged. The
- * completeness boundary comes from the leg sequences themselves.
- */
-function legsForClose(home: string, principal: string): { legs: CloseLeg[]; deposit: { txHash: string; blockNumber: number; amountMicroTrac: number } | null } {
-  const p = principal.toLowerCase();
-  const signed = new Map<string, string>();
-  let deposit: { txHash: string; blockNumber: number; amountMicroTrac: number } | null = null;
-  for (const rec of readJournal(home)) {
-    if (rec.kind === "leg-countersigned" && String(rec.principal ?? "").toLowerCase() === p) {
-      signed.set(String(rec.legId), String(rec.countersignature));
-    }
-    if (rec.kind === "credit" && String(rec.principal ?? "").toLowerCase() === p) {
-      const e = rec.evidence as Record<string, unknown> | undefined;
-      if (e?.txHash) deposit = { txHash: String(e.txHash), blockNumber: Number(e.blockNumber ?? 0), amountMicroTrac: Number(rec.amountMicroTrac ?? 0) };
-    }
-  }
-  const legs: CloseLeg[] = [];
-  for (const rec of readJournal(home)) {
-    if (rec.kind !== "debit") continue;
-    const leg = rec.leg as Record<string, any>;
-    if (String(leg?.requester?.principal ?? "").toLowerCase() !== p) continue;
-    const legId = String(leg.legId);
-    const cs = signed.get(legId);
-    legs.push({
-      legHash: String(rec.hash),
-      sequence: Number(leg.sequence),
-      previousLegHash: String(leg.previousLegHash),
-      costMicroTrac: Number(leg.pricing?.costMicroTrac ?? 0),
-      status: cs ? "accepted" : "disputed",
-      ...(cs ? { countersignature: cs } : {}),
-    });
-  }
-  return { legs, deposit };
-}
+// Close-leg selection lives in the audited metering core now (buyer-found,
+// billed-run block: the route-level predecessor mixed lifecycles — see
+// settlement.legsForCloseEpoch). The route only adapts HTTP.
+const legsForClose = (home: string, principal: string) => legsForCloseEpoch(home, principal);
 
 export async function handleSettlementRoutes(ctx: RequestContext): Promise<void> {
   const { req, res, path } = ctx;
@@ -79,7 +46,7 @@ export async function handleSettlementRoutes(ctx: RequestContext): Promise<void>
     if (!principal) return jsonResponse(res, 400, { error: "E_NO_PRINCIPAL" });
     const provider = providerAddress(ctx);
     if (!provider) return jsonResponse(res, 503, { error: "E_NO_PROVIDER_WALLET" });
-    const { legs, deposit } = legsForClose(home, principal);
+    const { epoch, legs, deposit } = legsForClose(home, principal);
     if (!deposit) return jsonResponse(res, 404, { error: "E_NO_DEPOSIT", detail: "no credited deposit for this principal to close against" });
     const artifact = activeOpening(home, principal);
     const cfg = loadMeterConfig(home);
@@ -89,7 +56,9 @@ export async function handleSettlementRoutes(ctx: RequestContext): Promise<void>
       tracContract: "0xA81a52B4dda010896cDd386C7fBdc5CDc835ba23",
       providerAddress: provider,
       tabPrincipal: principal,
-      tabEpoch: artifact?.expiresAt ?? "closed",
+      // The NUMERIC lifecycle this close settles — buyer-found: the expiry
+      // TIMESTAMP was stuffed here, making epoch isolation unverifiable.
+      tabEpoch: String(epoch),
       priorDeposit: deposit,
       legs,
       destination: artifact?.terms?.refundAddress ?? principal,
@@ -100,6 +69,13 @@ export async function handleSettlementRoutes(ctx: RequestContext): Promise<void>
       providerSignature: built.providerSignature,
       providerPublicKeyPem: providerPublicPem(home),
       meterMode: cfg.mode,
+      // OUTSIDE the signed statement (additive; the statement's digest and
+      // signature are unchanged): the confirmed settlement for this tab, if
+      // any — including the economics digest that AUTHORIZED it and the closes
+      // it paid (OpenClaw wiring-v4 follow-up: config pinning visible where
+      // operators inspect closes, no journal spelunking). Journal-derived,
+      // read-only; null until settled.
+      settlement: settlementOf(home, principal),
       note: "Verify this yourself: recompute the sums, match the accepted set against your own countersigned legs, check the close-sequence boundary, then verify the provider signature. Do not trust these numbers — reproduce them.",
     });
   }

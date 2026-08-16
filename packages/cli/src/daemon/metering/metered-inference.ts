@@ -7,7 +7,7 @@
 // wires Odysseus via the Apache metered-proxy, preserving G1); this core stays
 // free of the model dependency and is fully gate-testable.
 import { authoriseMeteredRead, type MeteredReadRequest } from "./metered-read.js";
-import { recordInferenceLeg } from "./ledger.js";
+import { recordInferenceLeg, boundQuoteOf, envelopeStateOf, type QuoteBinding } from "./ledger.js";
 import {
   verifyInferenceRecount, buildInferenceEvidence, inferenceCostMicroTrac,
   inferencePolicyDigest, INFERENCE_POLICY_CANONICAL,
@@ -52,6 +52,25 @@ export type PreflightOutcome =
   | { ok: true; principal: string; bindingMode?: string };
 
 /**
+ * A funded tab is BOUND to exactly one funded-run quote (Bo, deposit-stage). A
+ * call against such a tab must name that quote; a call that names none, or a
+ * different one, is refused. A non-funded tab (a read tab) has no bound quote
+ * and this is a no-op. Returns the binding to enforce, or a refusal.
+ */
+function matchBoundQuote(home: string, principal: string, requestQuoteDigest: string | undefined):
+  { ok: true; bound: QuoteBinding | null } | { ok: false; status: number; code: string; detail: string } {
+  const bound = boundQuoteOf(home, principal);
+  if (!bound) return { ok: true, bound: null };
+  if (!requestQuoteDigest) {
+    return { ok: false, status: 400, code: "E_QUOTE_REQUIRED", detail: "this tab is funded under a quote; name it as quoteId/fundedRunTermsDigest" };
+  }
+  if (requestQuoteDigest !== bound.quoteDigest) {
+    return { ok: false, status: 409, code: "E_QUOTE_MISMATCH", detail: "named quote ≠ the quote this tab was funded under" };
+  }
+  return { ok: true, bound };
+}
+
+/**
  * PRE-SERVE gate: authorise, then validate the request against the supported
  * feature set and the policy bounds — all WITHOUT touching the model.
  *
@@ -80,6 +99,8 @@ export function preflightInference(args: {
   priceVectorDigest: string;
   nodeClass: string;
   settlementId: string;
+  /** the funded-run quote the buyer named on this call, if any. */
+  requestQuoteDigest?: string;
   now?: number;
 }): PreflightOutcome {
   // 1. Authorisation FIRST — a stranger gets no compute.
@@ -130,6 +151,19 @@ export function preflightInference(args: {
     return { ok: false, status: 413, code: "E_OVER_POLICY_LIMIT", detail: `request ${requestBytes}B > ${lim.maxEvidenceBytes}B` };
   }
 
+  // 4. Funded-run envelope, checked BEFORE serving. The call must name the quote
+  //    the tab was funded under, and the (N+1)-th call is refused here so the
+  //    model never runs for a call that could not be billed. This is a read of
+  //    the ledger's projection of the debit journal; the AUTHORITATIVE
+  //    enforcement is atomic inside recordInferenceLeg (Bo, funded-run block #3).
+  const qm = matchBoundQuote(args.home, auth.principal, args.requestQuoteDigest);
+  if (!qm.ok) return { ok: false, status: qm.status, code: qm.code, detail: qm.detail };
+  if (qm.bound) {
+    const env = envelopeStateOf(args.home, auth.principal);
+    if (env.calls >= qm.bound.calls) return { ok: false, status: 402, code: "E_ENVELOPE_CALLS_EXCEEDED", detail: `${env.calls}/${qm.bound.calls} calls already billed against this quote` };
+    if (env.aggregateMicroTrac >= qm.bound.aggregateCeilingMicroTrac) return { ok: false, status: 402, code: "E_ENVELOPE_AGGREGATE_EXCEEDED", detail: `aggregate ${env.aggregateMicroTrac} at ceiling ${qm.bound.aggregateCeilingMicroTrac}` };
+  }
+
   return { ok: true, principal: auth.principal, bindingMode: (auth as { bindingMode?: string }).bindingMode };
 }
 
@@ -154,6 +188,7 @@ export function meterInference(args: {
   priceVectorDigest: string;
   nodeClass: string;
   settlementId: string;
+  requestQuoteDigest?: string;
   model: ModelResult;
   tokenizer: RecountTokenizer;
   specialTokenIds: number[];
@@ -232,6 +267,15 @@ export function meterInference(args: {
     return { ok: false, status: 402, code: "E_OVER_BUYER_CEILING", detail: `inference prices at ${cost} µTRAC > ceiling ${args.request.maxMicroTrac}` };
   }
 
+  // 3b. Funded-run admission (Bo, funded-run block). A funded tab is bound to one
+  //     quote; this call must name it. The N + aggregate-ceiling enforcement is
+  //     NOT done here as a separate step — it is enforced ATOMICALLY inside
+  //     recordInferenceLeg, in the same durable record as the balance debit, so
+  //     there is no sidecar and no check→debit gap to crash in or race. This
+  //     early quote-match check just returns cleaner status codes before serving.
+  const boundQuote = matchBoundQuote(args.home, auth.principal, args.requestQuoteDigest);
+  if (!boundQuote.ok) return { ok: false, status: boundQuote.status, code: boundQuote.code, detail: boundQuote.detail };
+
   // 4. Shadow mode: return a receipt that does NOT masquerade as a billed leg.
   if (!billable) {
     return {
@@ -249,6 +293,10 @@ export function meterInference(args: {
   }
 
   // 5. Bill it — the same signed, hash-chained, settlement-pending leg as a read.
+  //    On a funded tab, recordInferenceLeg enforces the envelope (N + aggregate)
+  //    atomically with the debit and records the leg's quoteDigest, so the
+  //    envelope projection updates in the SAME durable record. A refusal throws
+  //    before any state change (zero tab mutation).
   let leg: Record<string, unknown>;
   try {
     leg = recordInferenceLeg(args.home, {
@@ -259,10 +307,16 @@ export function meterInference(args: {
       policyDigest: inferencePolicyDigest(),
       evidence: evidence as unknown as Record<string, unknown>,
       requesterKeyRef: args.requesterKeyRef,
+      quoteDigest: boundQuote.bound ? boundQuote.bound.quoteDigest : undefined,
     }) as unknown as Record<string, unknown>;
   } catch (e: unknown) {
     const m = String((e as Error)?.message ?? e);
-    return { ok: false, status: m.includes("INSUFFICIENT") || m.includes("EXPIRED") ? 402 : 500, code: m.slice(0, 64) };
+    // Envelope and quote refusals are 402/409 payment/conflict conditions, not
+    // server errors; funds/expiry are 402; everything else is a 500.
+    const status =
+      m.includes("ENVELOPE") || m.includes("INSUFFICIENT") || m.includes("EXPIRED") || m.includes("QUOTE_REQUIRED") ? 402 :
+      m.includes("QUOTE_MISMATCH") ? 409 : 500;
+    return { ok: false, status, code: m.slice(0, 64) };
   }
 
   const tab = leg.tab as { before: number; after: number };
