@@ -5,18 +5,26 @@ import {
 } from '../src/finalization-recovery-worker.js';
 
 describe('FinalizationRecoveryWorker', () => {
-  it('continues full batches immediately and uses the configured SQLite batch size', async () => {
+  it('yields between full batches and uses the configured SQLite batch size', async () => {
+    vi.useFakeTimers();
     const processDueBatch = vi.fn()
       .mockResolvedValueOnce(FINALIZATION_RECOVERY_WORKER_BATCH_SIZE)
       .mockResolvedValueOnce(0);
     const worker = new FinalizationRecoveryWorker(
       processDueBatch,
       { info: () => {}, warn: () => {} },
-      { pollIntervalMs: 60_000 },
+      { pollIntervalMs: 25 },
     );
     try {
       worker.start();
-      await vi.waitFor(() => expect(processDueBatch).toHaveBeenCalledTimes(2));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(processDueBatch).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(24);
+      expect(processDueBatch).toHaveBeenCalledOnce();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(processDueBatch).toHaveBeenCalledTimes(2);
       expect(processDueBatch).toHaveBeenNthCalledWith(
         1,
         FINALIZATION_RECOVERY_WORKER_BATCH_SIZE,
@@ -27,6 +35,7 @@ describe('FinalizationRecoveryWorker', () => {
       );
     } finally {
       await worker.stop();
+      vi.useRealTimers();
     }
   });
 
