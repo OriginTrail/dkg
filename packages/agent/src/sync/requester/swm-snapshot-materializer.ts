@@ -444,6 +444,16 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           .map((row) => literalValue(row.object)?.trim())
           .filter((value): value is string => Boolean(value)))];
         if (peerIds.length !== 1) return null;
+        // publishedAt is OUTSIDE the identity key (per-node clocks), so a
+        // corrupt stored timestamp would not break key equality — but the
+        // head resolver rejects an unparseable or negative publishedAt as
+        // corrupt metadata, and a preserved-but-unresolvable winner is the
+        // wedge shape again: preserved this round, corrupt to every reader,
+        // preserved again next round. Mirror the resolver's timestamp rule.
+        const stamps = storedRows
+          .filter((row) => row.predicate === `${DKG}publishedAt`)
+          .map((row) => Date.parse(literalValue(row.object)?.trim() ?? ''));
+        if (stamps.some((ms) => !Number.isSafeInteger(ms) || ms < 0)) return null;
       }
       return { winnerShareOperationId: foreignIds[0]! };
     },

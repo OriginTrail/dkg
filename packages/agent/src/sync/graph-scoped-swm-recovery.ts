@@ -10,6 +10,10 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
+import {
+  formatCanonicalRdfLiteralTerm,
+  parseRdfLiteralTerm,
+} from '@origintrail-official/dkg-rdf-utils';
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
@@ -282,7 +286,6 @@ export function canonicalizeGraphScopedSwmHeadRows(params: {
 }
 
 const PROV_WAS_ATTRIBUTED_TO = 'http://www.w3.org/ns/prov#wasAttributedTo';
-const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 
 /**
@@ -325,24 +328,30 @@ export const OPERATION_IDENTITY_PREDICATES = {
 /**
  * One side of the comparison is WIRE quads (descriptor metadata) and the other
  * is rows READ BACK from the triple store, so object terms are canonicalized
- * before keying: RDF 1.1 makes a plain literal and `^^xsd:string` the same
- * term, and `^^xsd:integer` values compare by numeric value so a store that
- * canonicalizes the lexical form cannot break byte-equality of the key.
+ * before keying. Term semantics (plain ≡ xsd:string, escaping, language tags,
+ * datatype brackets) are delegated to the shared RDF literal parser/formatter
+ * — the same rules the storage and hash paths recognize — with ONE narrower
+ * identity-specific rule layered on top: `^^xsd:integer` values compare by
+ * numeric value, so a store that canonicalizes the lexical form cannot break
+ * key equality. An unparseable literal keys on its raw form (both sides would
+ * have to be byte-identical to match — fail toward inequality).
  */
 function normalizeIdentityObject(object: string): string {
-  const literal = /^"([\s\S]*)"(?:\^\^<(.+)>)?$/.exec(object);
-  if (!literal) return `iri\u0000${object}`;
-  const value = literal[1] ?? '';
-  const datatype = literal[2] ?? '';
-  if (datatype === '' || datatype === XSD_STRING) return `lit\u0000${value}\u0000`;
-  if (datatype === XSD_INTEGER) {
+  if (!object.startsWith('"')) return `iri\u0000${object}`;
+  const literal = parseRdfLiteralTerm(object);
+  if (literal === null) return `raw\u0000${object}`;
+  if (literal.kind === 'typed' && literal.datatype === XSD_INTEGER) {
     try {
-      return `lit\u0000${BigInt(value).toString()}\u0000${XSD_INTEGER}`;
+      return `lit\u0000${formatCanonicalRdfLiteralTerm({
+        kind: 'typed',
+        value: BigInt(literal.value).toString(),
+        datatype: XSD_INTEGER,
+      })}`;
     } catch {
-      return `lit\u0000${value}\u0000${XSD_INTEGER}`;
+      // Non-numeric lexical form: fall through to the shared canonical form.
     }
   }
-  return `lit\u0000${value}\u0000${datatype}`;
+  return `lit\u0000${formatCanonicalRdfLiteralTerm(literal)}`;
 }
 
 /**

@@ -794,6 +794,24 @@ describe('operation identity preservation (GH#2273)', () => {
       expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
     }
 
+    // (d) stored winner carries a corrupt publishedAt — also outside the key
+    // (per-node clocks), also resolver-fatal; preserving it would wedge the
+    // KA in the same preserve/corrupt/preserve loop.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(v1.meta.map((quad) =>
+        quad.subject === v1.operationSubject && quad.predicate === `${DKG}publishedAt`
+          ? { ...quad, object: '"not-a-date"' }
+          : quad));
+      await store.insert(remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(opRowsOf(remoteEquivalent));
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
     // (c) stored winner is key-equal but missing publisherPeerId — the key
     // excludes per-node rows, so ONLY the resolvability check can catch it.
     {

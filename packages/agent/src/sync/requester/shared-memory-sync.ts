@@ -861,27 +861,33 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
        * id onto the head it just protected. Both preserve paths below go
        * through here.
        */
-      const withholdDescriptorIdentity = (
+      /**
+       * The ONE preserve operation: DECIDING is WITHHOLDING. When a stored
+       * identity wins, the losing descriptor id row is suppressed from every
+       * later write this round (per-KA meta insert AND the bulk append) in
+       * the same call that made the decision — no call site can select a
+       * winner and forget the ledger, which would let the bulk append
+       * re-stack the rejected id onto the head it just protected. Returns
+       * the winning stored id, or null when the descriptor wins.
+       */
+      const decideAndWithholdStoredIdentity = async (
         descriptor: GraphScopedSwmRecoveryDescriptor,
-        winnerShareOperationId: string,
         how: string,
-      ): void => {
+      ): Promise<string | null> => {
+        const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
+        if (!preserved) return null;
         snapshotCommit.suppressRows(descriptorHeadIdRows(descriptor));
         logInfo(ctx, `SWM sync for "${pid}": ${how} for ${descriptor.kaUal} preserving `
-          + `stored operation identity ${winnerShareOperationId} `
+          + `stored operation identity ${preserved.winnerShareOperationId} `
           + `(descriptor offered equivalent ${descriptor.shareOperationId})`);
+        return preserved.winnerShareOperationId;
       };
       const repairOrReplaceHead = async (
         descriptor: GraphScopedSwmRecoveryDescriptor,
       ): Promise<void> => {
-        const preserved = await snapshotMaterializer!.selectRepairIdentity(pid, descriptor);
-        if (preserved) {
-          await snapshotMaterializer!.repairHeadPreservingIdentity(
-            pid,
-            descriptor,
-            preserved.winnerShareOperationId,
-          );
-          withholdDescriptorIdentity(descriptor, preserved.winnerShareOperationId, 'repaired head');
+        const winner = await decideAndWithholdStoredIdentity(descriptor, 'repaired head');
+        if (winner !== null) {
+          await snapshotMaterializer!.repairHeadPreservingIdentity(pid, descriptor, winner);
         } else {
           await snapshotMaterializer!.replaceHeadMetadata(pid, descriptor);
         }
@@ -1006,10 +1012,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     // killed any queued VM-publish job frozen on the local id.
                     // Non-equivalent (genuine policy/author change): no
                     // suppression, today's convergence to remote authority.
-                    const preserved = await snapshotMaterializer.selectRepairIdentity(pid, descriptor);
-                    if (preserved) {
-                      withholdDescriptorIdentity(descriptor, preserved.winnerShareOperationId, 'kept head');
-                    }
+                    await decideAndWithholdStoredIdentity(descriptor, 'kept head');
                   }
                   materializedKeys.add(graphKey);
                   return;
