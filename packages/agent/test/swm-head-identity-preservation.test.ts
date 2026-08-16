@@ -431,6 +431,84 @@ describe('operation identity preservation (GH#2273)', () => {
       .toEqual(['"op-v2"']);
   });
 
+  it('refuses a stored winner whose snapshot-graph locator is stale, wrong or ambiguous', async () => {
+    // The locator is outside the identity key (its graph form embeds the
+    // operation id) and outside the head decoder (which never consumes
+    // snapshot pointers) — so ONLY this gate keeps a preserved head from
+    // advertising an id whose public quads the sync responder cannot serve.
+    const winnerSnapshotGraph = `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/op-v1/ka`;
+    const localWithLocator = (extra: Quad[]): Quad[] => [
+      ...v1.meta.filter((quad) =>
+        !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publicSnapshotRef`)),
+      { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotGraph`, object: winnerSnapshotGraph, graph: WS_META },
+      ...extra,
+    ];
+    const remoteRows = [
+      ...remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`),
+      ...opRowsOf(remoteEquivalent),
+    ];
+
+    // (a) graph-form locator whose snapshot graph is EMPTY => refuse.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(localWithLocator([]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (b) same locator with the snapshot graph fully populated => preserve.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(inGraph(v1.payload, winnerSnapshotGraph));
+      await store.insert(localWithLocator([]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+        .toMatchObject({ winnerShareOperationId: 'op-v1' });
+    }
+
+    // (c) BOTH locator forms on the stored winner => ambiguous => refuse.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(inGraph(v1.payload, winnerSnapshotGraph));
+      await store.insert(localWithLocator([
+        { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"${v1.digest}"`, graph: WS_META },
+      ]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+  });
+
+  it('subGraphName participates in operation identity (key-level pin)', async () => {
+    // Identity must not cross subgraph lanes: two otherwise byte-equivalent
+    // operations in different lanes are DIFFERENT shares. Pinned at the key
+    // level — the preservation machinery turns any key inequality into
+    // descriptor-wins, so this is the predicate-membership row the sync
+    // fixtures (default-lane) cannot express.
+    const alpha = opRowsOf(v1).concat([
+      { subject: v1.operationSubject, predicate: `${DKG}subGraphName`, object: '"alpha"', graph: WS_META },
+    ]);
+    const alphaTwin = opRowsOf(remoteEquivalent).concat([
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}subGraphName`, object: '"alpha"', graph: WS_META },
+    ]);
+    const beta = opRowsOf(remoteEquivalent).concat([
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}subGraphName`, object: '"beta"', graph: WS_META },
+    ]);
+    expect(operationIdentityKey(alpha)).toBe(operationIdentityKey(alphaTwin));
+    expect(operationIdentityKey(alpha)).not.toBe(operationIdentityKey(beta));
+    // And one-sided presence (lane row on one operation only) also differs.
+    expect(operationIdentityKey(alpha)).not.toBe(operationIdentityKey(opRowsOf(remoteEquivalent)));
+  });
+
   it('refuses a stored winner whose own id row does not echo the head reference (echo guard)', async () => {
     // The head references op-v1, the operation SUBJECT exists, but its own
     // shareOperationId row says something else — the resolver's id-echo rule

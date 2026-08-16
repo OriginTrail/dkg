@@ -470,6 +470,33 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           shareOperationId: foreignId,
           requirePublishedAt: true,
         })) return null;
+        // Snapshot LOCATOR coherence — outside both the identity key (the
+        // graph-form locator embeds the operation id) and the head decoder
+        // (which never consumes snapshot pointers). A winner whose
+        // node-local snapshot graph is stale or empty would leave the
+        // preserved head advertising an id whose public quads the sync
+        // responder cannot serve to peers. Rules mirror the descriptor
+        // parser's: at most one locator form, a graph-form locator must be
+        // the id-derived graph AND actually hold the operation's public
+        // quads. Ref-form (or absent) locators are content-addressed — no
+        // worse than the descriptor's own — and pass.
+        const snapshotGraphs = [...new Set(storedRows
+          .filter((row) => row.predicate === `${DKG}publicSnapshotGraph`)
+          .map((row) => row.object))];
+        if (snapshotGraphs.length > 1) return null;
+        if (snapshotGraphs.length === 1) {
+          const snapshotRefs = storedRows
+            .filter((row) => row.predicate === `${DKG}publicSnapshotRef`);
+          if (snapshotRefs.length > 0) return null;
+          const countResult = await deps.store.query(
+            `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
+            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkWinnerSnapshot' },
+          );
+          const count = countResult.type === 'bindings'
+            ? Number((literalValue(countResult.bindings[0]?.['c']) ?? '').replace(/\D+$/, ''))
+            : Number.NaN;
+          if (!Number.isSafeInteger(count) || count !== descriptor.publicQuadsCount) return null;
+        }
       }
       return {
         winnerShareOperationId: foreignIds[0]!,
