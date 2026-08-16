@@ -329,8 +329,10 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(await distinctObjects(store, WS_META, remoteEquivalent.operationSubject, `${DKG}shareOperationId`))
       .toEqual(['"storage-ack-2273b"']);
 
-    // Round 2 — pre-fix: needsRepair fired on the two-valued head, deleted the
-    // head AND op-v1's subject, and re-inserted only the remote identity.
+    // Round 2 — idempotent convergence: the post-fix round-1 head is already
+    // clean, so this round must simply hold the state (the DIRTY-head repair
+    // branch of the sync lane is exercised by the dedicated row below, which
+    // pre-seeds the two-valued residue).
     await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
@@ -343,6 +345,61 @@ describe('operation identity preservation (GH#2273)', () => {
       kaUal: UAL,
     });
     expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('sync repairs a pre-dirtied two-valued head preserving the stored identity', async () => {
+    // The pre-upgrade residue shape: a node that ran the OLD code already has
+    // BOTH ids stacked on the head. This row drives the FULL sync lane (not a
+    // direct materializer call) against that state, so a regression that
+    // bypasses identity preservation only inside the storedHead.needsRepair
+    // branch of runSharedMemorySync cannot stay green behind the clean-head
+    // rows above.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"', '"storage-ack-2273b"']);
+
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('an absent accessPolicy row and the explicit default are the SAME identity', async () => {
+    // The publisher's own effective-default rule: absent =>
+    // privateTripleCount > 0 ? ownerOnly : public. Older stored operations
+    // legitimately omit the row; a peer re-serving the same share stamps the
+    // explicit default. Key-level raw-presence comparison refused this pair
+    // and re-opened the stale-intent rotation for old-metadata interop.
+    const explicitDefault: Quad = {
+      subject: v1.operationSubject,
+      predicate: `${DKG}accessPolicy`,
+      object: '"public"',
+      graph: WS_META,
+    };
+    const localRows = opRowsOf(v1).filter((quad) => quad.predicate !== `${DKG}accessPolicy`);
+    expect(localRows.some((quad) => quad.predicate === `${DKG}accessPolicy`)).toBe(false);
+    const remoteRows = [...localRows.map((quad) => ({ ...quad })), explicitDefault];
+    const localKey = operationIdentityKey(localRows);
+    expect(localKey).not.toBeNull();
+    expect(operationIdentityKey(remoteRows)).toBe(localKey);
+    // Polarity: a NON-default explicit policy is still a genuine change.
+    const ownerOnly = [...localRows.map((quad) => ({ ...quad })),
+      { ...explicitDefault, object: '"ownerOnly"' }];
+    expect(operationIdentityKey(ownerOnly)).not.toBe(localKey);
   });
 
   it('preserves the local identity when catch-up MATERIALIZES absent content (r26 state)', async () => {

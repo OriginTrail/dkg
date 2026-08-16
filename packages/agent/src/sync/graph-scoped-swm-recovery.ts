@@ -380,12 +380,50 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
   ]);
   for (const row of rows) {
     if (!allowed.has(row.predicate)) continue;
+    // accessPolicy is keyed by its EFFECTIVE value below, not raw presence.
+    if (row.predicate === ACCESS_POLICY) continue;
     seenPredicates.add(row.predicate);
     parts.add(`${row.predicate}\u0000${normalizeIdentityObject(row.object)}`);
   }
   for (const predicate of OPERATION_IDENTITY_PREDICATES.required) {
     if (!seenPredicates.has(predicate)) return null;
   }
+  // EFFECTIVE access policy: an absent row and an explicit default row are
+  // the SAME policy under the publisher's own rule
+  // (`accessPolicy ?? (privateTripleCount > 0 ? 'ownerOnly' : 'public')` —
+  // async-lift-publish-options / dkg-publisher), and older stored operations
+  // legitimately omit the row. Keying raw presence made such pairs compare
+  // unequal, refusing preservation for a semantically identical share —
+  // reintroducing the stale-intent rotation for exactly the old-metadata
+  // interop case. Non-default and allowList changes still differ (the
+  // explicit value participates verbatim), and allowedPeer rows are keyed
+  // separately as before.
+  const explicitPolicies = new Set(rows
+    .filter((row) => row.predicate === ACCESS_POLICY)
+    .map((row) => stripLiteral(row.object).trim()));
+  let effectivePolicy: string;
+  if (explicitPolicies.size > 1) {
+    // Multi-valued policy rows: equivalence is unprovable — fail toward
+    // remote authority.
+    return null;
+  }
+  if (explicitPolicies.size === 1) {
+    effectivePolicy = [...explicitPolicies][0]!;
+  } else {
+    // Compare count VALUES, not lexical forms ("0" vs "00" is one count).
+    const privateCountValues = new Set<string>();
+    for (const row of rows) {
+      if (row.predicate !== PRIVATE_TRIPLE_COUNT) continue;
+      try {
+        privateCountValues.add(BigInt(stripLiteral(row.object).trim()).toString());
+      } catch {
+        return null;
+      }
+    }
+    if (privateCountValues.size !== 1) return null;
+    effectivePolicy = BigInt([...privateCountValues][0]!) > 0n ? 'ownerOnly' : 'public';
+  }
+  parts.add(`${ACCESS_POLICY}\u0000${effectivePolicy}`);
   return [...parts].sort().join('\u0001');
 }
 
