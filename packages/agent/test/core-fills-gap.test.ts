@@ -3387,6 +3387,65 @@ describe('Phase D — reconcile gate + core-fill telemetry', () => {
     expect(curatorResolutions).toBe(4);
   });
 
+  it('continues exact recovery past the per-pass peer cap to a later connected holder', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({ name: 'ExactVmLaterConnectedHolder', chainAdapter: chain });
+    const internals = agent as unknown as AgentInternals;
+    const peers = [
+      '12D3KooWLaterConnectedA',
+      '12D3KooWLaterConnectedB',
+      '12D3KooWLaterConnectedC',
+      '12D3KooWLaterConnectedHolder',
+    ];
+    const holderPeerId = peers[3]!;
+    const localCgId = '0x0000000000000000000000000000000000000001/later-holder';
+    const connected = peers.map((peerId) => ({ toString: () => peerId }));
+    (internals as any).node = {
+      peerId: '12D3KooWLaterConnectedLocal',
+      libp2p: { getConnections: () => connected.map((remotePeer) => ({ remotePeer })) },
+    };
+    (internals as any).resolveCuratorPeerIdsForCg = async () => ({
+      peerIds: [], curatorIsLocal: true, legacyTripleResolved: false, lookupFailed: false,
+    });
+    (internals as any).ensurePeerConnected = async () => undefined;
+    (internals as any).selectCatchupPeers = (ordered: Array<{ toString(): string }>) => ordered;
+    (internals as any).waitForSyncProtocol = async () => true;
+    (internals as any).ensurePeerAdmittedForRecovery = async () => true;
+    const attempts: string[] = [];
+    let lastPeerId: string | undefined;
+    (internals as any).syncExactKnowledgeAssetsFromPeerDetailed = async (peerId: string) => {
+      attempts.push(peerId);
+      lastPeerId = peerId;
+      const found = peerId === holderPeerId;
+      return {
+        result: {
+          fetchedDataTriples: found ? 1 : 0,
+          fetchedMetaTriples: found ? 8 : 0,
+          insertedTriples: found ? 9 : 0,
+          failedPeers: 0, failedPhases: 0, deferredBackpressure: 0,
+        },
+        disposition: found ? 'found' : 'clean-absent',
+      };
+    };
+    const target = vmRecoveryTarget(localCgId, 0, 'later-holder');
+    (internals as any).reconcileChainOrdinal = async () => (
+      lastPeerId === holderPeerId
+        ? { status: 'reconciled', blockNumber: 100 }
+        : { status: 'pending', recovery: target }
+    );
+
+    let result;
+    for (let pass = 0; pass < peers.length; pass += 1) {
+      result = await internals.recoverVmReconcileBatch(
+        localCgId, 1n, [target], 100, () => true,
+      );
+      (internals as any).vmReconcileFetchCooldowns.delete(localCgId);
+    }
+
+    expect(attempts).toEqual(peers);
+    expect(result?.outcomes.get(0)).toEqual({ status: 'reconciled', blockNumber: 100 });
+  });
+
   it('ranks a resolved structural curator ahead of an ordinary capped roster', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'ExactVmResolvedCuratorRoster', chainAdapter: chain });
