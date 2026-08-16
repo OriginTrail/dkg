@@ -242,6 +242,65 @@ export interface SharedMemorySnapshotMaterializer {
     | { outcome: 'preserved'; withholdRows: readonly Quad[] }
     | { outcome: 'replace' }
   >;
+  /**
+   * The private curator-recovery lane's skip predicate: a marker-only ASK on
+   * the head's assertionGraph row. Deliberately DIGEST-BLIND — upgrading it
+   * to the count+digest witness `isGraphAssetMaterialized` uses is the
+   * recorded F2 follow-up, out of scope for the identity fix. Living here
+   * (rather than as a caller-supplied closure) is what makes skip and
+   * preserve ONE capability over ONE store and lock map.
+   */
+  hasGraphAssetMarker(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
+}
+
+/**
+ * Canonical graph-asset meta replacement for the private curator-recovery
+ * lane: delete the head subject plus every kaUal-owned operation subject
+ * linked through the head's current shareOperationId(s), making room for the
+ * descriptor's rows in the subsequent raw insert. ONE implementation shared
+ * by the lifecycle wiring and the recovery suites — a test-local shadow copy
+ * could silently drift from the ownership guard or deletion set it claims to
+ * exercise.
+ */
+export async function replaceWorkspaceMetaForGraphAssets(
+  store: TripleStore,
+  assets: readonly GraphScopedSwmRecoveryDescriptor[],
+): Promise<void> {
+  for (const asset of assets) {
+    const linkedOperations = await store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+        `<${assertSafeIri(asset.headSubject)}> <${DKG}shareOperationId> ?shareId . ` +
+        `?op <${DKG}shareOperationId> ?shareId ; ` +
+        `<${DKG}kaUal> <${assertSafeIri(asset.kaUal)}> . } }`,
+      {
+        priority: 'background',
+        source: 'agent.swmRecovery.replaceMetaForGraphAssets.findOperations',
+      },
+    );
+    const operationSubjects = new Set<string>([asset.operationSubject]);
+    if (linkedOperations.type === 'bindings') {
+      for (const row of linkedOperations.bindings) {
+        const operation = row['op'];
+        if (operation) operationSubjects.add(operation);
+      }
+    }
+    await store.deleteByPattern(
+      { graph: asset.metaGraph, subject: asset.headSubject },
+      {
+        priority: 'background',
+        source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead',
+      },
+    );
+    for (const operationSubject of operationSubjects) {
+      await store.deleteByPattern(
+        { graph: asset.metaGraph, subject: operationSubject },
+        {
+          priority: 'background',
+          source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation',
+        },
+      );
+    }
+  }
 }
 
 /**
@@ -554,6 +613,20 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
         );
       }
+    },
+
+    hasGraphAssetMarker: async (descriptor) => {
+      const result = await deps.store.query(
+        `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { ` +
+          `<${assertSafeIri(descriptor.headSubject)}> ` +
+          `<${DKG}assertionGraph> ` +
+          `<${assertSafeIri(descriptor.assertionGraph)}> . } }`,
+        {
+          priority: 'background',
+          source: 'agent.swmRecovery.hasGraphAssetMarker',
+        },
+      );
+      return result.type === 'boolean' && result.value;
     },
 
     preserveStoredIdentityForSkippedAsset: async (contextGraphId, descriptor) => {

@@ -2,8 +2,8 @@
  * GH#2273 part 3 — identity-preservation rows for the PRIVATE curator-recovery
  * lane, split from `swm-recovery.test.ts` (which pins the lane's transport,
  * apply and progress behaviors) so each file stays scannable. Same real-store
- * methodology; the lifecycle-shaped meta-replacement helper is deliberately
- * local to this focused suite.
+ * methodology; meta replacement and the skip predicate are the CANONICAL
+ * production implementations imported from the materializer module.
  */
 import { afterEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -15,7 +15,10 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
-import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import {
+  createSharedMemorySnapshotMaterializer,
+  replaceWorkspaceMetaForGraphAssets,
+} from '../src/sync/requester/swm-snapshot-materializer.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
@@ -36,10 +39,11 @@ function page(quads: Quad[], completed = true): SyncPageResult {
  * member-author's head + operation subject and installed the curator's
  * identity for content that never changed — the single-step form of the
  * rotation that terminally kills queued VM-publish jobs frozen on the local
- * id. These rows wire the REAL meta-replacement implementation (the
- * lifecycle's shape: kaUal-guarded linked-operation deletes) and the real
- * materializer, both OPT-IN per row — the suites above deliberately run
- * without them and pin the lane's other behaviors unchanged.
+ * id. These rows wire the REAL meta replacement (shared
+ * `replaceWorkspaceMetaForGraphAssets`) and the real materializer (owner of
+ * both the marker-only skip predicate and the preserve decision), OPT-IN per
+ * row — the legacy suites deliberately run without them and pin the lane's
+ * other behaviors unchanged.
  */
 describe('recoverContextGraphSwm preserves operation identity for skipped KAs (GH#2273)', () => {
   const stores: OxigraphStore[] = [];
@@ -50,38 +54,6 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   const localShare = swmFx.share({ version: 1, operationId: 'op-local', marker: 'identity', ual: UAL3 });
   const curatorEquivalent = swmFx.share({ version: 1, operationId: 'storage-ack-x', marker: 'identity', ual: UAL3 });
   const curatorChanged = swmFx.share({ version: 1, operationId: 'storage-ack-y', marker: 'changed', ual: UAL3 });
-
-  /** The lifecycle implementation's shape: delete head + kaUal-owned linked operations. */
-  function realReplaceMetaForGraphAssets(store: OxigraphStore) {
-    return async (assets: readonly GraphScopedSwmRecoveryDescriptor[]) => {
-      for (const asset of assets) {
-        const linked = await store.query(
-          `SELECT DISTINCT ?op WHERE { GRAPH <${asset.metaGraph}> { ` +
-          `<${asset.headSubject}> <${DKG}shareOperationId> ?shareId . ` +
-          `?op <${DKG}shareOperationId> ?shareId ; <${DKG}kaUal> <${asset.kaUal}> . } }`,
-        );
-        const subjects = new Set<string>([asset.operationSubject]);
-        if (linked.type === 'bindings') {
-          for (const row of linked.bindings) if (row['op']) subjects.add(String(row['op']));
-        }
-        await store.deleteByPattern({ graph: asset.metaGraph, subject: asset.headSubject });
-        for (const subject of subjects) {
-          await store.deleteByPattern({ graph: asset.metaGraph, subject });
-        }
-      }
-    };
-  }
-
-  /** The production private-lane predicate: the marker-only assertionGraph ASK. */
-  function markerOnlyMaterialized(store: OxigraphStore) {
-    return async (asset: GraphScopedSwmRecoveryDescriptor) => {
-      const result = await store.query(
-        `ASK { GRAPH <${asset.metaGraph}> { <${asset.headSubject}> ` +
-        `<${DKG}assertionGraph> <${asset.assertionGraph}> . } }`,
-      );
-      return result.type === 'boolean' && result.value;
-    };
-  }
 
   function makeIdentityBaseDeps(store: OxigraphStore, curatorMeta: Quad[]) {
     return {
@@ -127,15 +99,17 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   function identityDeps(store: OxigraphStore, curatorMeta: Quad[]) {
     return {
       ...makeIdentityBaseDeps(store, curatorMeta),
-      replaceMetaForGraphAssets: realReplaceMetaForGraphAssets(store),
-      graphAssetSkip: {
-        isGraphAssetMaterialized: markerOnlyMaterialized(store),
-        snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-          store,
-          writeLocks: new Map<string, Promise<void>>(),
-          invalidateListContextGraphsCache: () => {},
-        }),
-      },
+      // The CANONICAL production implementations (shared with the lifecycle
+      // wiring): the meta replacement, and — via the materializer — both the
+      // marker-only skip predicate and the preserve decision. No test-local
+      // shadow copies to drift from the code this suite claims to exercise.
+      replaceMetaForGraphAssets: (assets: readonly GraphScopedSwmRecoveryDescriptor[]) =>
+        replaceWorkspaceMetaForGraphAssets(store, assets),
+      snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+        store,
+        writeLocks: new Map<string, Promise<void>>(),
+        invalidateListContextGraphsCache: () => {},
+      }),
     };
   }
 

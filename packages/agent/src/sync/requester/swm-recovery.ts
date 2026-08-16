@@ -106,19 +106,15 @@ export interface RecoverContextGraphSwmDeps {
   ) => Promise<void>;
   /**
    * GH#2273 — skipping an already-materialized KA and deciding whether its
-   * stored operation identity may be preserved are ONE capability: a config
-   * that can skip but cannot decide would silently run the pre-fix rotation
-   * path, so the pairing is unrepresentable — both members or no skipping.
-   * Absent => nothing is skipped (every KA's graph and meta are replaced —
-   * exactly the legacy shape the pre-existing suites pin).
+   * stored operation identity may be preserved are ONE capability, and the
+   * materializer OWNS both halves (`hasGraphAssetMarker` +
+   * `preserveStoredIdentityForSkippedAsset`) over one store and one lock
+   * map — a config that could skip but not decide, or pair a predicate from
+   * one store with a materializer over another, is unrepresentable. Absent
+   * => nothing is skipped (every KA's graph and meta are replaced — exactly
+   * the legacy shape the pre-existing suites pin).
    */
-  readonly graphAssetSkip?: {
-    /** True when this exact graph asset was already committed by an earlier round. */
-    readonly isGraphAssetMaterialized: (
-      asset: GraphScopedSwmRecoveryDescriptor,
-    ) => Promise<boolean>;
-    readonly snapshotMaterializer: SharedMemorySnapshotMaterializer;
-  };
+  readonly snapshotMaterializer?: SharedMemorySnapshotMaterializer;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -337,7 +333,7 @@ export async function recoverContextGraphSwm(
     for (const descriptor of snapshotDescriptorsByRef.get(snapshotRef) ?? []) {
       const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
       if (incrementallyReadyGraphs.has(graphKey)) continue;
-      if (await deps.graphAssetSkip?.isGraphAssetMaterialized(descriptor)) {
+      if (await deps.snapshotMaterializer?.hasGraphAssetMarker(descriptor)) {
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }
@@ -545,7 +541,7 @@ export async function recoverContextGraphSwm(
   const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
   for (const descriptor of graphScopedDescriptors) {
     const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
-    if (rewrittenGraphKeys.has(graphKey) || !deps.graphAssetSkip) {
+    if (rewrittenGraphKeys.has(graphKey) || !deps.snapshotMaterializer) {
       metaReplaceTargets.push(descriptor);
       continue;
     }
@@ -555,7 +551,7 @@ export async function recoverContextGraphSwm(
     // the head is ALREADY converged (rewritten from descriptor rows with
     // the winner id, under the same lock hold as the decision); this lane
     // only owes the returned rows an exclusion from the raw insert.
-    const preservation = await deps.graphAssetSkip.snapshotMaterializer
+    const preservation = await deps.snapshotMaterializer
       .preserveStoredIdentityForSkippedAsset(deps.contextGraphId, descriptor);
     if (preservation.outcome === 'preserved') {
       preservedWithholdRows.push(...preservation.withholdRows);
