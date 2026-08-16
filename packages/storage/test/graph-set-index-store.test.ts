@@ -6,11 +6,13 @@ import { describe, expect, it } from 'vitest';
 import {
   GraphSetIndexStore,
   OxigraphStore,
+  StoreSchedulerBusyError,
   StorePriorityScheduler,
   createTripleStore,
   registerTripleStoreAdapter,
   type GraphSetIndexStoreOptions,
   type GraphSetMutationEvent,
+  type Quad,
   type QueryOptions,
   type StoreWorkPriority,
 } from '../src/index.js';
@@ -28,6 +30,54 @@ class FailingMaintenanceStore extends CountingStore {
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
     if (this.failHasGraph) throw new Error('hasGraph failed');
     return super.hasGraph(graphUri, options);
+  }
+}
+
+class ScheduledAtomicReplaceStore extends CountingStore {
+  readonly started: string[] = [];
+
+  constructor(inner: OxigraphStore, private readonly scheduler: StorePriorityScheduler) {
+    super(inner);
+  }
+
+  replaceGraph(graphUri: string, quads: Quad[], options?: QueryOptions): Promise<void> {
+    return this.scheduler.run(options?.priority, 'sparql-http.replaceGraph', async () => {
+      this.started.push('replaceGraph');
+      await this.inner.replaceGraph?.(graphUri, quads, options);
+    });
+  }
+
+  async replaceGraphAndSubject(
+    graphUri: string,
+    graphQuads: Quad[],
+    metaGraphUri: string,
+    metadataSubject: string,
+    metadataQuads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    return this.scheduler.run(options?.priority, 'sparql-http.replaceGraphAndSubject', async () => {
+      this.started.push('replaceGraphAndSubject');
+      await this.inner.replaceGraphAndSubject?.(
+        graphUri,
+        graphQuads,
+        metaGraphUri,
+        metadataSubject,
+        metadataQuads,
+        options,
+      );
+    });
+  }
+
+  async replaceSubject(
+    graphUri: string,
+    subject: string,
+    quads: Quad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    return this.scheduler.run(options?.priority, 'sparql-http.replaceSubject', async () => {
+      this.started.push('replaceSubject');
+      await this.inner.replaceSubject?.(graphUri, subject, quads, options);
+    });
   }
 }
 
@@ -82,6 +132,57 @@ async function exhaustTouchedGraphProbeRetries(
 }
 
 describe('GraphSetIndexStore', () => {
+  it('does not dirty a warm index when scheduler admission rejects an atomic replace before execution', async () => {
+    const inner = new OxigraphStore();
+    await inner.insert([q('did:dkg:context-graph:existing')]);
+    const scheduler = new StorePriorityScheduler({
+      maxConcurrent: 1,
+      ackReservedSlots: 0,
+      healthReservedSlots: 0,
+      backgroundReservedSlots: 0,
+      queueLimits: 1,
+      queueWaitTimeoutMs: 10,
+    });
+    let releaseBlocker!: () => void;
+    let blockerStarted = false;
+    const blocker = scheduler.run('normal', 'test.atomic-replace-blocker', async () => {
+      blockerStarted = true;
+      await new Promise<void>((resolve) => { releaseBlocker = resolve; });
+    });
+    await Promise.resolve();
+    expect(blockerStarted).toBe(true);
+
+    const counting = new ScheduledAtomicReplaceStore(inner, scheduler);
+    const diagnostics: unknown[] = [];
+    const store = new GraphSetIndexStore(counting, {
+      revalidateMs: 100_000,
+      now: () => 1_000,
+      onDiagnostic: (event) => diagnostics.push(event),
+    } as GraphSetIndexStoreOptions);
+
+    try {
+      await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:existing']);
+      expect(counting.listGraphsCalls).toBe(1);
+
+      await expect(store.replaceGraph('urn:graph', [q('urn:graph')]))
+        .rejects.toBeInstanceOf(StoreSchedulerBusyError);
+      await expect(store.replaceGraphAndSubject(
+        'urn:graph', [q('urn:graph')], 'urn:meta', 'urn:subject', [q('urn:meta')],
+      )).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+      await expect(store.replaceSubject('urn:graph', 'urn:subject', [q('urn:graph')]))
+        .rejects.toBeInstanceOf(StoreSchedulerBusyError);
+
+      expect(counting.started).toEqual([]);
+
+      await expect(store.listGraphs()).resolves.toEqual(['did:dkg:context-graph:existing']);
+      expect(counting.listGraphsCalls).toBe(1);
+      expect(diagnostics).toEqual([]);
+    } finally {
+      releaseBlocker();
+      await blocker;
+    }
+  });
+
   it('seeds from one listGraphs scan and serves prefix lookups from memory', async () => {
     const inner = new OxigraphStore();
     await inner.insert([

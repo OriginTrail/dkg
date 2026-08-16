@@ -12,11 +12,9 @@ import type {
 import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 import {
   UnsupportedTripleStoreCapabilityError,
-  isReplaceGraphAndSubjectCapabilityRefusal,
-  isReplaceGraphCapabilityRefusal,
-  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 
 export const DEFAULT_GRAPH_SET_REVALIDATE_MS = 30_000;
 export const DEFAULT_GRAPH_SET_REVALIDATE_FAILURE_MAX_BACKOFF_MS = 5 * 60_000;
@@ -382,8 +380,10 @@ export class GraphSetIndexStore implements TripleStore {
       // complete new graph (or dropped the old one). Serving the cached graph
       // set would then hide a committed KA graph from enumeration, so mark the
       // index dirty for a lazy rebuild — unless this was a clean preflight
-      // capability refusal, where nothing was mutated.
-      if (!isReplaceGraphCapabilityRefusal(error)) {
+      // capability refusal or scheduler admission rejection. A
+      // StoreSchedulerBusyError is raised while the closure is still queued,
+      // so the store operation provably never started and cannot have mutated.
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraph')) {
         this.scheduleFullRefresh('replaceGraph');
       }
       throw error;
@@ -416,7 +416,7 @@ export class GraphSetIndexStore implements TripleStore {
         options,
       );
     } catch (error) {
-      if (!isReplaceGraphAndSubjectCapabilityRefusal(error)) {
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
         this.scheduleFullRefresh('replaceGraphAndSubject');
       }
       throw error;
@@ -449,7 +449,7 @@ export class GraphSetIndexStore implements TripleStore {
       // A committed subject replace could add/remove the graph's first/last row;
       // dirty the index so a lazy rebuild re-derives membership — unless this was
       // a clean preflight capability refusal, where nothing was mutated.
-      if (!isReplaceSubjectCapabilityRefusal(error)) {
+      if (!isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
         this.scheduleFullRefresh('replaceSubject');
       }
       throw error;

@@ -23,6 +23,7 @@ import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import { ChangelogStore, CHANGELOG_GRAPH, asChangelogReader, type ChangelogEraGuard } from '../src/changelog-store.js';
 import { createTripleStore } from '../src/triple-store.js';
 import type { Quad, QueryOptions, QueryResult, TripleStore, UpdateOptions } from '../src/triple-store.js';
+import { StoreSchedulerBusyError } from '../src/store-priority-scheduler.js';
 
 const G1 = 'http://ex.org/g1';
 const G2 = 'http://ex.org/g2';
@@ -61,6 +62,42 @@ class SpyStore implements TripleStore {
   countQuads(g?: string, options?: QueryOptions) { return this.inner.countQuads(g, options); }
   close() { return this.inner.close(); }
 }
+
+class BusyAtomicReplaceStore extends SpyStore {
+  async replaceGraph(): Promise<void> {
+    throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'test.replaceGraph');
+  }
+
+  async replaceGraphAndSubject(): Promise<void> {
+    throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'test.replaceGraphAndSubject');
+  }
+
+  async replaceSubject(): Promise<void> {
+    throw new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'test.replaceSubject');
+  }
+}
+
+describe('ChangelogStore — pre-execution atomic replace rejection', () => {
+  it('does not request reconciliation when scheduler admission proves no mutation started', async () => {
+    const base = new OxigraphStore();
+    const log = new ChangelogStore(new BusyAtomicReplaceStore(base));
+
+    await expect(log.replaceGraph(G1, [q('http://ex.org/a', G1)]))
+      .rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    await expect(log.replaceGraphAndSubject(
+      G1,
+      [q('http://ex.org/a', G1)],
+      G2,
+      'http://ex.org/meta',
+      [q('http://ex.org/meta', G2)],
+    )).rejects.toBeInstanceOf(StoreSchedulerBusyError);
+    await expect(log.replaceSubject(G1, 'http://ex.org/a', [q('http://ex.org/a', G1)]))
+      .rejects.toBeInstanceOf(StoreSchedulerBusyError);
+
+    expect(log.needsReconcile).toBe(false);
+    await base.close();
+  });
+});
 
 describe('ChangelogStore — upsert marker atomicity', () => {
   it('appends the marker in the SAME inner.insert() call as the data (one transaction)', async () => {

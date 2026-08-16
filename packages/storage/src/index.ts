@@ -41,6 +41,10 @@ export {
   type TripleStoreCapability,
 } from './unsupported-capability-error.js';
 export {
+  isAtomicReplaceOperationNotStarted,
+  type AtomicReplaceCapability,
+} from './atomic-replace-failure.js';
+export {
   StorePriorityScheduler,
   StoreSchedulerBusyError,
   externalStorePriorityScheduler,

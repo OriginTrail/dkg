@@ -10,11 +10,9 @@ import type {
 } from './triple-store.js';
 import {
   UnsupportedTripleStoreCapabilityError,
-  isReplaceGraphAndSubjectCapabilityRefusal,
-  isReplaceGraphCapabilityRefusal,
-  isReplaceSubjectCapabilityRefusal,
 } from './unsupported-capability-error.js';
 import { isAtomicGraphReplaceStagingGraph } from './atomic-graph-replace.js';
+import { isAtomicReplaceOperationNotStarted } from './atomic-replace-failure.js';
 
 /**
  * ChangelogStore — an append-only per-node change log maintained on the write
@@ -342,8 +340,8 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       try {
         await this.inner.replaceGraph!(graphUri, quads, options);
       } catch (err) {
-        if (isReplaceGraphCapabilityRefusal(err)) {
-          // A capability refusal is a clean preflight result: no mutation was
+        if (isAtomicReplaceOperationNotStarted(err, 'replaceGraph')) {
+          // A clean preflight or scheduler admission refusal means no mutation
           // started, so there is no gap to reconcile.
           throw err;
         }
@@ -398,7 +396,7 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
           options,
         );
       } catch (error) {
-        if (!isReplaceGraphAndSubjectCapabilityRefusal(error)) {
+        if (!isAtomicReplaceOperationNotStarted(error, 'replaceGraphAndSubject')) {
           this.flagReconcile('replaceGraphAndSubject(indeterminate-failure)');
         }
         throw error;
@@ -427,8 +425,8 @@ export class ChangelogStore implements TripleStore, ChangelogReader {
       try {
         await this.inner.replaceSubject!(graphUri, subject, quads, options);
       } catch (error) {
-        if (isReplaceSubjectCapabilityRefusal(error)) {
-          // Clean preflight refusal: no mutation started, nothing to reconcile.
+        if (isAtomicReplaceOperationNotStarted(error, 'replaceSubject')) {
+          // Clean preflight or scheduler refusal: no mutation started, nothing to reconcile.
           throw error;
         }
         this.flagReconcile('replaceSubject(indeterminate-failure)');
