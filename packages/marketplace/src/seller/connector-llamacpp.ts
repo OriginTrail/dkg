@@ -45,7 +45,10 @@ export async function connectLlamaCpp(cfg: LlamaCppConnectorConfig): Promise<Lla
   const res = await fetch(cfg.baseUrl.replace(/\/$/, "") + "/v1/models", { signal: AbortSignal.timeout(5000) });
   if (!res.ok) throw new Error(`E_CONNECTOR_UNHEALTHY: /v1/models → ${res.status}`);
   const body = (await res.json()) as { data?: Array<{ id?: string }> };
-  const modelId = body.data?.[0]?.id ?? "unknown";
+  // llama.cpp reports the model file path as the id — never leak local paths
+  // into the public quote; use the basename stem as the served model identity.
+  const rawId = body.data?.[0]?.id ?? "unknown";
+  const modelId = rawId.includes("/") ? (rawId.split("/").pop() ?? rawId).replace(/\.gguf$/i, "") : rawId;
 
   const files = readdirSync(cfg.tokenizerDir)
     .filter((f) => statSync(join(cfg.tokenizerDir, f)).isFile())

@@ -55,6 +55,7 @@ export interface FrontDeps {
   providerAddress: string;
   chainId: number;
   rpcUrl: string;
+  tracContract?: string;
   /** SPARQL executor injected by the plugin (daemon-owned capability). Returns
    *  serialized bindings + the returned-quad count the meter bills on. */
   queryExecutor: (sparql: string) => Promise<{ body: string; returnedQuads: number }>;
@@ -177,6 +178,7 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
     if (txHashConsumed(deps.home, parsed.txHash)) { send(res, 409, { error: "E_TXHASH_CONSUMED" }); return true; }
     const check = await verifyDepositOnchain({
       rpcUrl: deps.rpcUrl, txHash: parsed.txHash, providerAddress: deps.providerAddress,
+      tracContract: deps.tracContract,
     });
     if (!check.ok) { send(res, 402, { error: check.code, detail: check.detail }); return true; }
     const opened = openTab(deps.home, {

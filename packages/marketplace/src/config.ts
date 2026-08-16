@@ -53,6 +53,9 @@ export interface MarketplaceConfig {
   chainId?: number;
   /** Base RPC the SELLER uses to verify deposits — its own view, never the buyer's */
   rpcUrl?: string;
+  /** TRAC ERC-20 address on that chain. Defaults to the Base-mainnet contract;
+   *  MUST be set on test chains (the devnet deploys its own token). */
+  tracContract?: string;
 }
 
 const DEFAULTS: MarketplaceConfig = { enabled: false, offerings: [] };
@@ -73,6 +76,7 @@ export function loadMarketplaceConfig(dkgHome: string): MarketplaceConfig {
       offerings: Array.isArray(raw.offerings) ? (raw.offerings as OfferingConfig[]) : [],
       chainId: typeof raw.chainId === "number" ? raw.chainId : undefined,
       rpcUrl: typeof raw.rpcUrl === "string" ? raw.rpcUrl : undefined,
+      tracContract: typeof raw.tracContract === "string" ? raw.tracContract : undefined,
     };
   } catch {
     // malformed config ⇒ marketplace OFF, never a half-configured surface

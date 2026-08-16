@@ -751,7 +751,22 @@ const PUBLIC_HEAD_PATHS = new Set([
   '/.well-known/skill-importer.md',
 ]);
 
+// NSM v3 marketplace wire contract (route plugin, mount-point exemption): the
+// counterparty is a DIFFERENT node and holds no Bearer token — its auth is the
+// EIP-191 signed-request layer enforced inside the plugin for every post-tab
+// route, while `/terms` (bootstrap 402) and `/tab/open` (deposit-verified,
+// tx-hash-consumed) are public by contract. Operator/admin sub-surfaces under
+// this prefix re-check the node token or loopback themselves. With the
+// marketplace flag off the plugin never claims the path and the daemon 404s —
+// this exemption exposes nothing on a node that hasn't enabled the module.
+const PUBLIC_PLUGIN_PREFIXES = ['/marketplace/'];
+
 function isPublicPath(method: string, pathname: string): boolean {
+  if (method === 'GET' || method === 'POST') {
+    for (const prefix of PUBLIC_PLUGIN_PREFIXES) {
+      if (pathname.startsWith(prefix)) return true;
+    }
+  }
   if (method === 'GET') {
     if (PUBLIC_GET_PATHS.has(pathname)) return true;
     for (const prefix of PUBLIC_GET_PREFIXES) {

@@ -17,8 +17,16 @@ import { handleFront, type FrontDeps, type OfferingBinding } from "./seller/fron
 import { handleGateway, type GatewayDeps, type GatewayOffering } from "./gateway/router.js";
 import { BuyerClient } from "./buyer/client.js";
 import { hfEngine, tiktokenEngine } from "./buyer/bpe.js";
-import { readFileSync, existsSync } from "node:fs";
+import { readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
+
+// The buyer gateway mounts from `<home>/buyer.json`, which can appear or change
+// AFTER the daemon starts (a tab opens, a key is configured). Fold its presence
+// + mtime into the remount key so the gateway (re)mounts without a restart.
+function buyerCfgStamp(): string {
+  const p = join(marketplaceHome(dkgHome()), "buyer.json");
+  try { return existsSync(p) ? String(statSync(p).mtimeMs) : "none"; } catch { return "none"; }
+}
 
 const BASE = "/marketplace";
 const dkgHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
@@ -65,6 +73,7 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
       providerAddress,
       chainId: cfg.chainId ?? 8453,
       rpcUrl: cfg.rpcUrl ?? "",
+      tracContract: cfg.tracContract,
       // Metered queries execute against THIS node's own query surface over
       // loopback, with the node's own token — the plugin never embeds a
       // secret; it borrows the daemon's in-process token set.
@@ -132,7 +141,7 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
     }
   }
 
-  return { front, gateway, loadedAt: Date.now(), configDigestish: JSON.stringify([cfg.enabled, cfg.offerings.length, providerAddress]) };
+  return { front, gateway, loadedAt: Date.now(), configDigestish: JSON.stringify([cfg.enabled, cfg.offerings.length, providerAddress, buyerCfgStamp()]) };
 }
 
 export const plugin: RoutePlugin = {
@@ -145,7 +154,7 @@ export const plugin: RoutePlugin = {
     if (!path.startsWith(BASE + "/")) return;
 
     const log = (line: string) => console.log(`[marketplace] ${line}`);
-    const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null]);
+    const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null, buyerCfgStamp()]);
     if (!mounted || mounted.configDigestish !== digestish) {
       mounted = await mount(cfg, ctx, log);
     }
