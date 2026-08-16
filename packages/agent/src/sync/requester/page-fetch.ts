@@ -554,6 +554,16 @@ function shouldReducePageSize(error: unknown): boolean {
   // Request construction can fail before a byte leaves this node (wallet,
   // chain RPC, signing). Only a send failure or an explicit responder-capacity
   // rejection is evidence that a smaller page could help.
+  //
+  // libp2p's explicit "during opening" failure is also pre-response evidence:
+  // the peer closed while negotiating a fresh stream, before it could inspect
+  // or serialize the requested page. Treating that connection-churn signal as
+  // an oversized page permanently collapsed an otherwise healthy 512-row path
+  // to 64 rows and multiplied exact-VM stream opens by eight.
+  if (
+    error instanceof Error
+    && error.message.toLowerCase().includes('during opening')
+  ) return false;
   return isSyncTransportFailure(error) || (
     isSyncValidationRejection(error) && isSyncBackoffWorthyError(error)
   );

@@ -9,6 +9,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
   SYNC_BYTE_BUDGET_PAGE_MODE,
   SYNC_BYTE_BUDGET_RESPONSE_BYTES,
+  SYNC_EXACT_PAGE_READ_MAX_ROWS,
   SYNC_PAGE_GROWTH_SUCCESS_THRESHOLD,
   SYNC_PAGE_SIZE,
   SYNC_REQUEST_INITIAL_PAGE_SIZE,
@@ -411,6 +412,36 @@ describe('byte-budget sync pagination', () => {
     failFirstRound = false;
     await expect(run()).resolves.toMatchObject({ completed: true, nextOffset: 0 });
     expect(requestedSizes.at(-1)).toBe(SYNC_REQUEST_SAFE_PAGE_SIZE);
+  });
+
+  it('does not collapse page capacity for a failure before response opening', async () => {
+    const requestedSizes: number[] = [];
+    const pageSizeProfileCache = new SyncPageSizeProfileCache();
+    const scope = pageSizeScope(REMOTE_PEER_ID);
+    let sends = 0;
+    await expect(fetchSyncPages(pageFetchParams({
+      syncPageRetryAttempts: 2,
+      pageSizeProfileCache,
+      buildSyncRequest: async (_cg, _offset, limit) => {
+        requestedSizes.push(limit);
+        return new TextEncoder().encode('request');
+      },
+      parseAndFilter: async () => ({ quads: [], totalQuads: 0 }),
+      send: async () => {
+        sends += 1;
+        if (sends === 1) throw new Error('Remote closed connection during opening');
+        return new Uint8Array();
+      },
+    }))).resolves.toMatchObject({ completed: true, nextOffset: 0 });
+
+    expect(requestedSizes).toEqual([
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+      SYNC_REQUEST_INITIAL_PAGE_SIZE,
+    ]);
+    // An empty EOF page is not throughput evidence, so the shared profile is
+    // deliberately left untouched; the important invariant is that the retry
+    // itself kept the 512-row request.
+    expect(pageSizeProfileCache.preferred(scope)).toBeUndefined();
   });
 
   it('retains a terminal transport fallback when no retry callback runs', async () => {
@@ -842,7 +873,7 @@ describe('byte-budget sync pagination', () => {
       hasExactAssetFilter: true,
     })).toEqual({
       usesByteBudgetPage: true,
-      limit: SYNC_REQUEST_SAFE_PAGE_SIZE,
+      limit: SYNC_EXACT_PAGE_READ_MAX_ROWS,
       cacheMode: 'page-only',
       exactGraphReadMode: 'page-only',
     });

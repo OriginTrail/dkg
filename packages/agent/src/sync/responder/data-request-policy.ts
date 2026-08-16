@@ -1,6 +1,7 @@
 import {
   SYNC_BYTE_BUDGET_MAX_ROWS,
   SYNC_BYTE_BUDGET_PAGE_MODE,
+  SYNC_EXACT_PAGE_READ_MAX_ROWS,
   SYNC_REQUEST_SAFE_PAGE_SIZE,
 } from '../../dkg-agent-constants.js';
 
@@ -20,8 +21,9 @@ export interface DataRequestPolicy {
  * This boundary is shared by durable and SWM DATA. Signature fields are
  * deliberately absent: public-graph authorization may accept a request before
  * validating them, so their presence is not proof that a caller is
- * authenticated. Negotiated exact-asset reads therefore use the conservative
- * store-page path and 64-row floor.
+ * authenticated. Negotiated exact-asset reads therefore stay on the bounded
+ * store-page path; their independent row cap limits responder working memory
+ * even when the requester advertises the larger retained-snapshot ceiling.
  */
 export function resolveDataRequestPolicy(params: {
   legacyLimit: number;
@@ -49,7 +51,7 @@ export function resolveDataRequestPolicy(params: {
       ? Math.min(
         hintedPageRows,
         pageOnlyExactFetch
-          ? SYNC_REQUEST_SAFE_PAGE_SIZE
+          ? SYNC_EXACT_PAGE_READ_MAX_ROWS
           : SYNC_BYTE_BUDGET_MAX_ROWS,
       )
       : params.legacyLimit,

@@ -572,9 +572,9 @@ type VmReconcileOrdinalOptions = {
  */
 const HOST_MODE_PUBLISH_POLICY_MAX_CACHE_AGE_MS = 5_000;
 
-// Exact VM data responses are page-only and capped at 64 rows per page. Keep
-// one recovery microbatch near 64 non-empty pages so a single large graph does
-// not monopolize the global sync admission. This is a soft scheduling/fairness
+// Exact VM data responses are page-only and bounded independently of retained
+// snapshots. Keep one recovery microbatch near 4,096 leaves so a single large
+// graph does not monopolize the global sync admission. This is a soft scheduling/fairness
 // cap, not a wire or correctness limit: an individually larger KA is still
 // admitted alone and remains bounded by the exact executor's hard guards.
 const VM_EXACT_MICROBATCH_PAGE_FAIRNESS_LEAVES = 4_096n;
