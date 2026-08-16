@@ -420,6 +420,10 @@ function decodeWorkspaceOperationRows(input: {
 }
 
 /**
+ * INTERNAL cross-package plumbing for the agent's catch-up lanes (the same
+ * class as `swmKaWriteLockKey`/`withKeyedLocks`) — not SDK surface, and its
+ * shape may change with the resolver's decoder without compatibility notice.
+ *
  * GH#2273 — would the HEAD RESOLVER'S DECODER accept an operation made of
  * these rows? Deliberately scoped and named to what it answers: head-decoder
  * acceptance ONLY. It does NOT cover serving-side usability (snapshot
