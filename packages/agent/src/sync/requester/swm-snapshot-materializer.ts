@@ -30,6 +30,41 @@ import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
 import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
+const RDF_TYPE_IRI = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
+
+/**
+ * GH#2273 preservation validators — each names ONE invariant of the
+ * preserved-winner contract. `selectRepairIdentity` orchestrates them; the
+ * behavior of each is pinned by its own polarity row in
+ * swm-head-identity-preservation.test.ts.
+ */
+
+/** Same share under a different id: allow-list identity keys are equal. */
+function operationIdentityMatches(storedRows: readonly Quad[], descriptorKey: string): boolean {
+  const storedKey = operationIdentityKey(storedRows);
+  return storedKey !== null && storedKey === descriptorKey;
+}
+
+/** The head resolver's decoder accepts the rows (incl. the RFC64 stamp rule). */
+function storedWinnerIsDecodable(
+  storedRows: readonly Quad[],
+  descriptor: GraphScopedSwmRecoveryDescriptor,
+  foreignId: string,
+): boolean {
+  return isDecodableWorkspaceOperationRows(storedRows, {
+    kaUal: descriptor.kaUal,
+    assertionVersion: descriptor.assertionVersion,
+    shareOperationId: foreignId,
+    requirePublishedAt: true,
+  });
+}
+
+/** The sync responder's serving join requires the WorkspaceOperation type row. */
+function storedWinnerHasResponderType(storedRows: readonly Quad[]): boolean {
+  return storedRows.some((row) =>
+    row.predicate === RDF_TYPE_IRI && row.object === `${DKG}WorkspaceOperation`);
+}
+
 
 /** What the local store currently records on one KA's SWM head subject. */
 export interface StoredWorkspaceHeadState {
@@ -216,6 +251,43 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    * preserved winner; `seed` pre-admits subjects the caller already owns
    * (the descriptor's own operation).
    */
+  /**
+   * Snapshot LOCATOR coherence — outside both the identity key (the
+   * graph-form locator embeds the operation id) and the head decoder (which
+   * never consumes snapshot pointers). Count is only the cheap pre-gate: a
+   * stale same-size graph passes it, so the CONTENT digest must equal the
+   * committed public digest — the same count-then-digest ladder
+   * `isGraphAssetMaterialized` uses for the assertion graph. Ref-form (or
+   * absent) locators are content-addressed — no worse than the descriptor's
+   * own — and pass.
+   */
+  const snapshotLocatorIsServeable = async (
+    storedRows: readonly Quad[],
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean> => {
+    const snapshotGraphs = [...new Set(storedRows
+      .filter((row) => row.predicate === `${DKG}publicSnapshotGraph`)
+      .map((row) => row.object))];
+    if (snapshotGraphs.length > 1) return false;
+    if (snapshotGraphs.length === 0) return true;
+    const snapshotRefs = storedRows
+      .filter((row) => row.predicate === `${DKG}publicSnapshotRef`);
+    if (snapshotRefs.length > 0) return false;
+    const snapshotContent = await deps.store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkWinnerSnapshot' },
+    );
+    if (snapshotContent.type !== 'bindings') return false;
+    if (snapshotContent.bindings.length !== descriptor.publicQuadsCount) return false;
+    const digest = workspacePublicQuadsDigest(snapshotContent.bindings.map((row) => ({
+      subject: row['s'] ?? '',
+      predicate: row['p'] ?? '',
+      object: row['o'] ?? '',
+      graph: '',
+    })));
+    return digest === descriptor.publicQuadsDigest;
+  };
+
   const collectOwnedHeadOperationSubjects = async (
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
@@ -460,60 +532,19 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         const operationSubject = `urn:dkg:share:${contextGraphId}:${foreignId}`;
         const storedRows = rowsBySubject.get(operationSubject) ?? [];
         if (storedRows.length === 0) return null;
-        // A foreign KA's operation, a policy change, a different digest or a
-        // different author all surface here as a key mismatch (kaUal and the
-        // whole envelope are inside the key), which routes to descriptor-wins
-        // — today's behavior, and the correct one for a GENUINE change.
-        const storedKey = operationIdentityKey(storedRows);
-        if (storedKey === null || storedKey !== descriptorKey) return null;
-        // Identity equivalence is NECESSARY but not SUFFICIENT to preserve:
-        // the key deliberately excludes per-node rows, so a stored operation
-        // can be key-equal yet one the READER CONTRACT rejects. Preserving
-        // such a winner would write a head the resolver permanently fails as
-        // corrupt (and re-preserve it every round — the wedge shape), or one
-        // the sync responder cannot serve to peers. The gate is layered:
-        // the head resolver's own decoder (exported by the publisher, so it
-        // cannot drift), the published-head wrapper's stamp rule, the
-        // responder-join type row, and snapshot-locator coherence.
-        if (!isDecodableWorkspaceOperationRows(storedRows, {
-          kaUal: descriptor.kaUal,
-          assertionVersion: descriptor.assertionVersion,
-          shareOperationId: foreignId,
-          requirePublishedAt: true,
-        })) return null;
-        if (!storedRows.some((row) =>
-          row.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
-          && row.object === `${DKG}WorkspaceOperation`)) return null;
-        // Snapshot LOCATOR coherence — outside both the identity key (the
-        // graph-form locator embeds the operation id) and the head decoder
-        // (which never consumes snapshot pointers). Count is only the cheap
-        // pre-gate: a stale same-size graph passes it, so the CONTENT digest
-        // must equal the committed public digest — the same count-then-digest
-        // ladder `isGraphAssetMaterialized` uses for the assertion graph.
-        // Ref-form (or absent) locators are content-addressed — no worse
-        // than the descriptor's own — and pass.
-        const snapshotGraphs = [...new Set(storedRows
-          .filter((row) => row.predicate === `${DKG}publicSnapshotGraph`)
-          .map((row) => row.object))];
-        if (snapshotGraphs.length > 1) return null;
-        if (snapshotGraphs.length === 1) {
-          const snapshotRefs = storedRows
-            .filter((row) => row.predicate === `${DKG}publicSnapshotRef`);
-          if (snapshotRefs.length > 0) return null;
-          const snapshotContent = await deps.store.query(
-            `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
-            { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkWinnerSnapshot' },
-          );
-          if (snapshotContent.type !== 'bindings') return null;
-          if (snapshotContent.bindings.length !== descriptor.publicQuadsCount) return null;
-          const digest = workspacePublicQuadsDigest(snapshotContent.bindings.map((row) => ({
-            subject: row['s'] ?? '',
-            predicate: row['p'] ?? '',
-            object: row['o'] ?? '',
-            graph: '',
-          })));
-          if (digest !== descriptor.publicQuadsDigest) return null;
-        }
+        // The preserved-winner contract, as NAMED validators (each pinned by
+        // its own polarity row): identity-equivalent under the allow-list,
+        // acceptable to the head resolver's decoder + stamp rule, carries
+        // the responder-join type row, and its snapshot locator (if graph-
+        // form) actually serves the committed content. Any failure routes to
+        // descriptor-wins — today's behavior, and the correct one both for a
+        // GENUINE change and for a winner some reader would reject (a
+        // preserved-but-unreadable winner is the wedge shape: preserved this
+        // round, corrupt to a reader, preserved again next round).
+        if (!operationIdentityMatches(storedRows, descriptorKey)) return null;
+        if (!storedWinnerIsDecodable(storedRows, descriptor, foreignId)) return null;
+        if (!storedWinnerHasResponderType(storedRows)) return null;
+        if (!(await snapshotLocatorIsServeable(storedRows, descriptor))) return null;
       }
       return {
         winnerShareOperationId: foreignIds[0]!,
