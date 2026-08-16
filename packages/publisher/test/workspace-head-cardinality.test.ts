@@ -158,19 +158,22 @@ describe('tryResolveKnowledgeAssetWorkspaceHead typed boundary', () => {
     expect(corrupt.error).toBeInstanceOf(KnowledgeAssetWorkspaceHeadCorruptError);
   });
 
-  it('recognizes a code-preserving wrapped error the same way the boolean predicate does', async () => {
-    // ONE recognition rule across both boundary APIs: a store decorator that
-    // re-wraps the corrupt error preserving `.code` but losing class identity
-    // must land on the corrupt result, coerced into the concrete class the
-    // result type promises — not rethrown while the boolean predicate would
-    // have said corrupt. Non-corrupt store failures must still throw.
+  it('classifies only resolver-proven corruption; store failures propagate — even code-colliding ones', async () => {
+    // The typed wrapper is deliberately NARROWER than the exported boundary
+    // predicate: within this module the resolver is the sole authority on
+    // corruption and always throws the concrete class, so a lower storage
+    // layer that throws a code-colliding error BEFORE the resolver ever
+    // inspected head rows is a STORE failure and must keep propagating as
+    // one — treating it as domain corruption would misreport an outage as
+    // malformed workspace-head data. The loose `.code` predicate remains the
+    // recognition rule for boundaries the error crosses AFTER propagation.
     const h = makeHarness();
-    const throwingStore = new Proxy(h.store, {
+    const codeCollidingStore = new Proxy(h.store, {
       get(target, prop, receiver) {
         if (prop === 'query') {
           return async () => {
             throw Object.assign(
-              new Error('re-wrapped by a store decorator'),
+              new Error('storage layer failure that happens to collide on code'),
               { code: 'KA_WORKSPACE_HEAD_CORRUPT' },
             );
           };
@@ -178,16 +181,12 @@ describe('tryResolveKnowledgeAssetWorkspaceHead typed boundary', () => {
         return Reflect.get(target, prop, receiver);
       },
     });
-    const outcome = await tryResolveKnowledgeAssetWorkspaceHead({
-      store: throwingStore as never,
+    await expect(tryResolveKnowledgeAssetWorkspaceHead({
+      store: codeCollidingStore as never,
       graphManager: h.graphManager,
       contextGraphId: CONTEXT_GRAPH,
       kaUal: UAL,
-    });
-    expect(outcome.status).toBe('corrupt');
-    if (outcome.status !== 'corrupt') throw new Error('unreachable');
-    expect(outcome.error).toBeInstanceOf(KnowledgeAssetWorkspaceHeadCorruptError);
-    expect(outcome.error.message).toContain('re-wrapped');
+    })).rejects.toThrow('collide on code');
 
     const failingStore = new Proxy(h.store, {
       get(target, prop, receiver) {

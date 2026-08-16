@@ -966,21 +966,19 @@ export class SharedMemoryHandler {
     // try, `withWriteLocks` returns false for TWO distinct
     // reasons — validation rejection (deterministic, payload
     // can never apply) and CAS-not-met (TRANSIENT when SWM
-    // writes arrive out of order). Hoisted here so the closure
-    // can signal which branch fired; the post-closure code maps
-    // the kind to retryability in ONE place. Kind and reason are
-    // one object set by one call, so no rejection path can set
-    // half its state and silently fall into the wrong branch.
-    let withWriteLocksRejection:
-      | { readonly kind: 'validation' | 'cas' | 'corrupt-head'; readonly reason?: string }
-      | undefined;
+    // writes arrive out of order). The locked closure RETURNS its
+    // decision as data — applied, or rejected with a kind — so the
+    // impossible state "returned false with no rejection kind" is
+    // unrepresentable, and the kind -> retryability policy is one
+    // switch after the lock.
+    type SwmWriteDecision =
+      | { readonly applied: true }
+      | { readonly applied: false; readonly kind: 'validation' | 'cas' | 'corrupt-head'; readonly reason?: string };
+    const swmWriteApplied: SwmWriteDecision = { applied: true };
     const rejectWithinLocks = (
       kind: 'validation' | 'cas' | 'corrupt-head',
       reason?: string,
-    ): false => {
-      withWriteLocksRejection = { kind, ...(reason === undefined ? {} : { reason }) };
-      return false;
-    };
+    ): SwmWriteDecision => ({ applied: false, kind, ...(reason === undefined ? {} : { reason }) });
     let verifiedLifecycleFields: SharedMemoryLifecycleFields | undefined;
     try {
       const { envelope, signedPayload } = decoded;
@@ -1381,7 +1379,7 @@ export class SharedMemoryHandler {
       const lockKeys = [swmKaWriteLockKey(contextGraphId, subGraphName, contentScope.ual)];
 
       onPhase?.('store', 'start');
-      const applied = await this.withWriteLocks(lockKeys, async (): Promise<boolean> => {
+      const decision = await this.withWriteLocks(lockKeys, async (): Promise<SwmWriteDecision> => {
         onPhase?.('validate', 'start');
         const validation = validateCanonicalGraphScopedKnowledgeAssetPayload(
           quads,
@@ -1489,7 +1487,7 @@ export class SharedMemoryHandler {
               // graph or immutable operation snapshot. Refresh the local-only
               // controls too, so a retry completes a prior head/sidecar tear.
               await persistLocallyTrustedControls();
-              return true;
+              return swmWriteApplied;
             }
             const reason =
               `CONFLICTING_KA_ASSERTION_VERSION: ${contentScope.ual} version ${incomingVersion} ` +
@@ -1600,11 +1598,11 @@ export class SharedMemoryHandler {
         // head has committed. Receipt recovery must fail closed without them.
         await persistLocallyTrustedControls();
 
-        return true;
+        return swmWriteApplied;
       });
 
       onPhase?.('store', 'end');
-      if (applied) {
+      if (decision.applied) {
         // PR-A R1: only record the observation after the apply actually
         // succeeded — passing allowlist + sub-graph validation + CAS +
         // the durable store insert. Recording earlier would let
@@ -1629,20 +1627,20 @@ export class SharedMemoryHandler {
         });
         return appliedSharedMemoryOutcome(verifiedFields, quads.length);
       }
-      // `applied === false` from the withWriteLocks closure. The kind ->
-      // outcome policy lives HERE, in one table adjacent to the channels:
-      // 'validation' is deterministic (retry produces the same outcome, so
-      // permanent); 'cas' is TRANSIENT (PR-C codex R4 — the missed upstream
-      // write might still arrive and make the condition pass); 'corrupt-head'
-      // is TRANSIENT for the same convergent-local-state reason (GH#2273 —
-      // sync repair collapses the multi-valued head, and the sender's
-      // budget-bounded outbox must keep the payload queued rather than record
-      // a terminal drop of a share that will apply once the head heals).
-      switch (withWriteLocksRejection?.kind) {
+      // Rejected by the locked closure. The kind -> outcome policy lives
+      // HERE, in one switch adjacent to the channel docs: 'validation' is
+      // deterministic (retry produces the same outcome, so permanent); 'cas'
+      // is TRANSIENT (PR-C codex R4 — the missed upstream write might still
+      // arrive and make the condition pass); 'corrupt-head' is TRANSIENT for
+      // the same convergent-local-state reason (GH#2273 — sync repair
+      // collapses the multi-valued head, and the sender's budget-bounded
+      // outbox must keep the payload queued rather than record a terminal
+      // drop of a share that will apply once the head heals).
+      switch (decision.kind) {
         case 'corrupt-head':
           return rejectedSharedMemoryOutcome(
             verifiedFields,
-            `${withWriteLocksRejection.reason ?? 'CORRUPT_SWM_HEAD'} (transient: may apply after sync repair converges the head)`,
+            `${decision.reason ?? 'CORRUPT_SWM_HEAD'} (transient: may apply after sync repair converges the head)`,
             true,
             true,
           );
@@ -1656,7 +1654,7 @@ export class SharedMemoryHandler {
         default:
           return rejectedSharedMemoryOutcome(
             verifiedFields,
-            withWriteLocksRejection?.reason ?? 'validation rejected graph-scoped KA payload (permanent)',
+            decision.reason ?? 'validation rejected graph-scoped KA payload (permanent)',
             false,
             true,
           );

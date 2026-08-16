@@ -134,19 +134,17 @@ export async function tryResolveKnowledgeAssetWorkspaceHead(
     const head = await resolveKnowledgeAssetWorkspaceHead(params);
     return head === undefined ? { status: 'missing' } : { status: 'resolved', head };
   } catch (error) {
-    // Same recognition rule as the boolean predicate — the resolver itself only
-    // throws the local class, but a store decorator or wrapper that preserved
-    // `.code` while losing class identity must land on the SAME corrupt path in
-    // both APIs, coerced into the concrete class the result type promises.
-    if (isKnowledgeAssetWorkspaceHeadCorruptError(error)) {
-      return {
-        status: 'corrupt',
-        error: error instanceof KnowledgeAssetWorkspaceHeadCorruptError
-          ? error
-          : new KnowledgeAssetWorkspaceHeadCorruptError(
-            error instanceof Error ? error.message : String(error),
-          ),
-      };
+    // instanceof ONLY, deliberately narrower than the exported boundary
+    // predicate: within this module the resolver is the sole authority on
+    // corruption and always throws the concrete class, so anything else —
+    // including a lower storage layer that happens to throw a code-colliding
+    // error before the resolver ever inspected head rows — is a STORE failure
+    // and must keep propagating as one. The loose code-based predicate exists
+    // for boundaries the error crosses AFTER propagation, where class identity
+    // can be lost; no such boundary sits between the resolver and this
+    // wrapper.
+    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) {
+      return { status: 'corrupt', error };
     }
     throw error;
   }
@@ -258,6 +256,28 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     subGraphName,
   );
   const subject = workspaceKnowledgeAssetHeadSubject(scope.ual);
+  // ONE query acquires every row the resolver will normalize — the head
+  // subject's own rows plus the rows of every operation subject the head
+  // references — so both phases below read one store snapshot and no head
+  // swap between two reads can interleave a stale id with fresh metadata.
+  const acquisition = await params.store.query(
+    `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
+    `{ <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION ` +
+    `{ <${assertSafeIri(subject)}> <${DKG}shareOperationId> ?id . ` +
+    `?op <${DKG}shareOperationId> ?id ; ?p ?o . BIND(?op AS ?s) } } }`,
+  );
+  if (acquisition.type !== 'bindings') {
+    throw new Error(
+      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${acquisition.type}`,
+    );
+  }
+  const rowsBySubject = new Map<string, { p?: string; o?: string }[]>();
+  for (const binding of acquisition.bindings) {
+    const rowSubject = binding['s'] ?? '';
+    const rows = rowsBySubject.get(rowSubject) ?? [];
+    rows.push({ p: binding['p'], o: binding['o'] });
+    rowsBySubject.set(rowSubject, rows);
+  }
   // Phase 1 — the head subject's OWN rows. GH#2273: sync's bulk verified-meta
   // write is a bare set-union with no per-subject delete, so a peer's head row
   // for the same KA can land BESIDE the local one; a joined LIMIT-1 read over
@@ -270,17 +290,9 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   // subject (two cores ACKing the same content stamp their own clocks onto
   // the same deterministic operation subject) stay healthy — they never touch
   // the head subject this phase inspects.
-  const headResult = await params.store.query(
-    `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-    `<${assertSafeIri(subject)}> ?p ?o } }`,
-  );
-  if (headResult.type !== 'bindings') {
-    throw new Error(
-      `Unexpected graph-scoped SWM head query result for ${scope.ual}: ${headResult.type}`,
-    );
-  }
-  if (headResult.bindings.length === 0) return undefined;
-  const headValues = collectSubjectValues(headResult.bindings);
+  const headBindings = rowsBySubject.get(subject) ?? [];
+  if (headBindings.length === 0) return undefined;
+  const headValues = collectSubjectValues(headBindings);
   const head = makeSingletonReader(headValues, scope.ual, 'head');
   const requiredHeadValue = head.required;
   if (parseIntegerLiteral(requiredHeadValue(`${DKG}contentScopeVersion`, 'contentScopeVersion'))
@@ -343,16 +355,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
   // stamp their own clocks onto the same deterministic operation subject —
   // and canonicalizes to the EARLIEST stamp, which stays stable when a later
   // union adds more re-stamps (this timestamp orders RFC64 inventory).
-  const operationResult = await params.store.query(
-    `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(metaGraph)}> { ` +
-    `<${assertSafeIri(operationSubject)}> ?p ?o } }`,
-  );
-  if (operationResult.type !== 'bindings') {
-    throw new Error(
-      `Unexpected graph-scoped SWM operation query result for ${scope.ual}: ${operationResult.type}`,
-    );
-  }
-  const operationValues = collectSubjectValues(operationResult.bindings);
+  const operationValues = collectSubjectValues(rowsBySubject.get(operationSubject) ?? []);
   const operation = makeSingletonReader(operationValues, scope.ual, 'operation');
   // Id echo — the operation must itself carry the head's id (mirrors the
   // previous join). Multiple id rows on the operation subject were tolerated
