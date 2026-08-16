@@ -50,6 +50,20 @@ describe('exact asset responder', () => {
     const requested = asset(1);
     const alreadyPresent = asset(2);
     await store.insert([...requested.quads, ...alreadyPresent.quads]);
+    const originalQuery = store.query.bind(store);
+    const manifestQueries: string[] = [];
+    store.query = (async (
+      sparql: string,
+      options?: Parameters<OxigraphStore['query']>[1],
+    ) => {
+      if (
+        sparql.includes('<http://dkg.io/ontology/contentScopeVersion>') &&
+        sparql.includes(`GRAPH <${contextGraphMetaGraphUri(CG_ID)}>`)
+      ) {
+        manifestQueries.push(sparql);
+      }
+      return originalQuery(sparql, options);
+    }) as typeof store.query;
 
     const meta = await readDurableMetaPage({
       store,
@@ -77,5 +91,10 @@ describe('exact asset responder', () => {
       p: 'http://schema.org/name',
       o: '"asset-1"',
     }]);
+    expect(manifestQueries).not.toHaveLength(0);
+    for (const query of manifestQueries) {
+      expect(query).toContain(`VALUES ?ual { <${requested.ual}> }`);
+      expect(query).not.toContain(`<${alreadyPresent.ual}>`);
+    }
   });
 });
