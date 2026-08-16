@@ -559,6 +559,30 @@ describe('operation identity preservation (GH#2273)', () => {
     }
   });
 
+  it('selects the deterministic sorted winner among multiple equivalent stored ids', async () => {
+    // Repeated catch-up rounds can stack MORE than one equivalent stored id
+    // on a dirty head. The contract breaks ties lexicographically (sorted
+    // foreign ids, first wins) so every node converges on the SAME winner; a
+    // regression to insertion-order or an arbitrary store sample would keep
+    // single-id rows green while nodes diverge. Both stored twins are
+    // byte-identical shares, so the all-candidates-must-match gate passes and
+    // ONLY the tie-break decides.
+    const twinA = share(1, 'op-aa', 'version-one');
+    const twinB = share(1, 'op-ab', 'version-one');
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    // Insertion order deliberately REVERSED from the expected winner order.
+    await store.insert([...twinB.meta]);
+    await store.insert([...twinA.meta]);
+    const { materializer } = materializerFor(store);
+    const preserved = await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent));
+    expect(preserved).toMatchObject({ winnerShareOperationId: 'op-aa' });
+    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-aa');
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-aa"']);
+  });
+
   it('integer lexical forms compare by numeric value in the identity key', async () => {
     // The wire and store sides of the comparison may canonicalize integer
     // lexical forms differently; the key must compare by VALUE or equivalent

@@ -305,6 +305,16 @@ const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
  * present; a row present on one side only makes the keys differ, which is the
  * correct outcome (e.g. an added accessPolicy or allowedPeer IS a change the
  * stale-intent machinery must see).
+ *
+ * CROSS-STORE IDENTITY policy — deliberately NOT the same model as the
+ * parser's `samePayloadByteEquivalenceKey` (see the resolver above): that
+ * key byte-compares candidates from ONE payload and throws on ambiguity;
+ * this one compares wire rows against store read-backs and therefore
+ * normalizes lexical forms over an explicit allow-list. A new operation
+ * predicate is classified per policy: byte-safe rows join the parser key
+ * automatically (it is predicate-agnostic); it joins THIS key only if it is
+ * part of share identity under the allow-list rationale above. Unification
+ * into one policy module = follow-up F3.
  */
 export const OPERATION_IDENTITY_PREDICATES = {
   required: [
@@ -435,7 +445,18 @@ function resolveEquivalentHeadOperation(params: {
     if (!Number.isFinite(publishedAtMs)) {
       throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
     }
-    const equivalenceKey = operationRows
+    // SAME-PAYLOAD BYTE-EQUIVALENCE policy — deliberately NOT the same model
+    // as `operationIdentityKey`. This key compares candidate operations that
+    // arrived in ONE payload (one serializer, one canonicalization), so byte
+    // comparison over ALL rows minus id/publishedAt is exact, and its job is
+    // to THROW on genuine ambiguity. `operationIdentityKey` compares rows
+    // across INDEPENDENT stores (wire vs read-back), so it must normalize
+    // lexical forms and restrict itself to the identity allow-list. Folding
+    // either into the other loses a property: normalization here would merge
+    // candidates that genuinely differ on the wire; byte comparison there
+    // would break on store re-canonicalization. Unifying both behind one
+    // policy module with explicit knobs is recorded follow-up F3.
+    const samePayloadByteEquivalenceKey = operationRows
       .filter((row) => row.predicate !== SHARE_OPERATION_ID && row.predicate !== PUBLISHED_AT)
       .map((row) => `${row.predicate}\u0000${row.object}\u0000${row.graph}`)
       .sort()
@@ -453,11 +474,11 @@ function resolveEquivalentHeadOperation(params: {
       operationRows,
       headShareOperationRow,
       publishedAtMs,
-      equivalenceKey,
+      samePayloadByteEquivalenceKey,
     };
   });
 
-  if (new Set(candidates.map((candidate) => candidate.equivalenceKey)).size > 1) {
+  if (new Set(candidates.map((candidate) => candidate.samePayloadByteEquivalenceKey)).size > 1) {
     throw new Error(`ambiguous shareOperationId`);
   }
   candidates.sort((left, right) =>
