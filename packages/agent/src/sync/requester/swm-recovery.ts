@@ -15,11 +15,13 @@ import {
 } from './shared-memory-sync.js';
 import { appendInPlace } from '../append-in-place.js';
 import {
+  canonicalizeGraphScopedSwmHeadRows,
   discoverSwmRecoverySubGraphNames,
   materializeGraphScopedSwmRecoveryAsset,
   parseGraphScopedSwmRecoveryDescriptors,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
+import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
 
 /**
  * recovery entry point. Recovers a CG's
@@ -106,6 +108,18 @@ export interface RecoverContextGraphSwmDeps {
   readonly isGraphAssetMaterialized?: (
     asset: GraphScopedSwmRecoveryDescriptor,
   ) => Promise<boolean>;
+  /**
+   * GH#2273 — enables the preserve-local-identity decision for KAs this
+   * recovery SKIPPED as already materialized: when the local head is healthy,
+   * certifies the descriptor's version, and its operation is
+   * identity-equivalent to the curator's (same content commitment, envelope
+   * and author under a different operation id), the bulk meta replacement
+   * must not rotate the head to the curator's id — a queued VM-publish job
+   * may have frozen the local id at admission. Absent => every skipped KA is
+   * still meta-replaced (exactly today's behavior). Production callers SHOULD
+   * pass it.
+   */
+  readonly snapshotMaterializer?: SharedMemorySnapshotMaterializer;
   readonly ensureContextGraph: (contextGraphId: string) => Promise<void>;
   readonly setCheckpoint: (key: string, offset: number) => void;
   readonly deleteCheckpoint: (key: string) => void;
@@ -302,6 +316,8 @@ export async function recoverContextGraphSwm(
   );
   let snapshotProgress = { readySnapshots: 0, totalSnapshots: 0 };
   const incrementallyReadyGraphs = new Set<string>();
+  /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
+  const rewrittenGraphKeys = new Set<string>();
   let incrementallyReplacedGraphs = 0;
   let incrementallyInsertedDataQuads = 0;
   let incrementallyInsertedMetaQuads = 0;
@@ -356,6 +372,7 @@ export async function recoverContextGraphSwm(
         await deps.store.insert([...verifiedAssetMeta]);
       }
       incrementallyReadyGraphs.add(graphKey);
+      rewrittenGraphKeys.add(graphKey);
       incrementallyReplacedGraphs += 1;
       incrementallyInsertedDataQuads += asset.quads.length;
       incrementallyInsertedMetaQuads += verifiedAssetMeta.length;
@@ -499,6 +516,7 @@ export async function recoverContextGraphSwm(
     });
     await deps.store.replaceGraph(asset.assertionGraph, [...asset.quads]);
     await invalidateSwmMaterializationWitness(deps.store, asset.assertionGraph, { source: 'agent.swmRecovery.witnessInvalidate' }).catch(() => {}); // #2079: REPLACE, invisible to the count gate
+    rewrittenGraphKeys.add(graphKey);
     replacedGraphs += 1;
     insertedGraphQuads += asset.quads.length;
   }
@@ -511,11 +529,77 @@ export async function recoverContextGraphSwm(
     const metaGraphs = [...new Set(processed.verifiedMeta.map((q) => q.graph))];
     await deps.replaceMetaForRoots?.(processed.entityCreators, metaGraphs);
   }
-  if (graphScopedDescriptors.length > 0) {
-    await deps.replaceMetaForGraphAssets?.(graphScopedDescriptors);
+  // GH#2273 — the meta replacement is DECISION-DRIVEN, no longer the full
+  // descriptor list: a KA whose graph was skipped as already materialized used
+  // to have its head + operation subjects deleted and re-installed under the
+  // curator's operation id anyway, rotating the identity of content that never
+  // changed and terminally killing queued VM-publish jobs frozen on the local
+  // id. A skipped KA is PRESERVED only when the local head is healthy,
+  // certifies the descriptor's version, and its operation is
+  // identity-equivalent (allow-list comparison under the KA write lock) —
+  // every other skipped state (absent, multi-valued, wrong-version,
+  // non-equivalent) is still replaced, so the curator stays authoritative for
+  // genuine changes and the #2050 G7 absent-head repair is untouched.
+  const preservedDescriptors: GraphScopedSwmRecoveryDescriptor[] = [];
+  const metaReplaceTargets: GraphScopedSwmRecoveryDescriptor[] = [];
+  for (const descriptor of graphScopedDescriptors) {
+    const graphKey = `${descriptor.metaGraph}\u0000${descriptor.assertionGraph}`;
+    if (rewrittenGraphKeys.has(graphKey) || !deps.snapshotMaterializer) {
+      metaReplaceTargets.push(descriptor);
+      continue;
+    }
+    const materializer = deps.snapshotMaterializer;
+    const preserve = await materializer.withKaWriteLock(
+      deps.contextGraphId,
+      descriptor.subGraphName,
+      descriptor.kaUal,
+      async () => {
+        const stored = await materializer.readStoredHead(descriptor);
+        if (stored.needsRepair || stored.version === null || stored.shareOperationId === null) {
+          return false;
+        }
+        try {
+          if (BigInt(stored.version) !== BigInt(descriptor.assertionVersion)) return false;
+        } catch {
+          return false;
+        }
+        if (stored.shareOperationId === descriptor.shareOperationId) return true;
+        // Foreign id on identical-version content: preserve ONLY on proven
+        // identity equivalence; a genuine change (policy, digest, author)
+        // returns null here and the curator's identity wins as today.
+        return (await materializer.selectRepairIdentity(deps.contextGraphId, descriptor)) !== null;
+      },
+    );
+    if (preserve) preservedDescriptors.push(descriptor);
+    else metaReplaceTargets.push(descriptor);
+  }
+  if (metaReplaceTargets.length > 0) {
+    await deps.replaceMetaForGraphAssets?.(metaReplaceTargets);
   }
   if (processed.verifiedMeta.length > 0) {
-    await deps.store.insert([...processed.verifiedMeta]);
+    // The raw payload gets the same head-row canonicalization the public lane
+    // applies (the parser accepts equivalent two-id payloads, so an
+    // uncanonicalized insert could stack both ids), and each PRESERVED KA's
+    // head-id row is withheld so the union cannot re-stack the curator's id
+    // onto the preserved head. The curator's operation-subject rows still land
+    // as immutable history; the other head rows are byte-identical for
+    // identical content at the same version.
+    const preservedHeadIdRowKeys = new Set(
+      preservedDescriptors.flatMap((descriptor) => descriptor.metadataQuads
+        .filter((quad) => quad.subject === descriptor.headSubject
+          && quad.predicate === 'http://dkg.io/ontology/shareOperationId')
+        .map((quad) => quadKey(quad))),
+    );
+    const canonicalMeta = canonicalizeGraphScopedSwmHeadRows({
+      metaQuads: processed.verifiedMeta,
+      descriptors: graphScopedDescriptors,
+    });
+    const insertableMeta = preservedHeadIdRowKeys.size === 0
+      ? canonicalMeta
+      : canonicalMeta.filter((quad) => !preservedHeadIdRowKeys.has(quadKey(quad)));
+    if (insertableMeta.length > 0) {
+      await deps.store.insert([...insertableMeta]);
+    }
   }
 
   // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with

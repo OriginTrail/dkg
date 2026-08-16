@@ -1279,6 +1279,8 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   isGraphAssetMaterialized: NonNullable<RecoverContextGraphSwmOptions['isGraphAssetMaterialized']>;
+  /** GH#2273 — preserve-local-identity decisions for skipped KAs. */
+  snapshotMaterializer?: RecoverContextGraphSwmOptions['snapshotMaterializer'];
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -6745,6 +6747,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
+        snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+          store: this.store,
+          writeLocks: this.writeLocks,
+          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+        }),
         isGraphAssetMaterialized: async (asset) => {
           const result = await this.store.query(
             `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
@@ -7280,7 +7287,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,
-          isGraphAssetMaterialized: async (asset) => {
+          snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+          store: this.store,
+          writeLocks: this.writeLocks,
+          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+        }),
+        isGraphAssetMaterialized: async (asset) => {
             const result = await this.store.query(
               `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
                 `<${assertSafeIri(asset.headSubject)}> ` +
@@ -10061,6 +10073,7 @@ async function runRecoverContextGraphSwmFromPeer(
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
     publicSnapshotStore: dependencies.publicSnapshotStore,
     isGraphAssetMaterialized: dependencies.isGraphAssetMaterialized,
+    snapshotMaterializer: dependencies.snapshotMaterializer,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
