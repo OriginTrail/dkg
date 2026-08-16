@@ -3373,12 +3373,16 @@ function parseSparqlInteger(value: string | undefined): number {
  * graph; on a 1 GiB workspace that exceeded the 30s HTTP query timeout on every
  * page. This planner inverts the work with backend-neutral SPARQL 1.1:
  *
- *  1. Join each concrete graph to its fresh metadata roots by the root subject
+ *  1. Discover fresh legacy `rootEntity` metadata before touching any payload
+ *     graph. Modern graph-scoped snapshots deliberately have no root entity;
+ *     without this preflight the old UNION planner probes every immutable KA
+ *     graph merely to prove the root-scoped lane is empty.
+ *  2. Join each concrete graph to its fresh metadata roots by the root subject
  *     (an indexed lookup and a DKG workspace invariant: `rootEntity` names an
  *     entity present in the shared payload).
- *  2. Count the exact root closures per concrete graph without returning their
+ *  3. Count the exact root closures per concrete graph without returning their
  *     large literal values.
- *  3. Cache only graph/root/count scalars for the responder session.
+ *  4. Cache only graph/root/count scalars for the responder session.
  *
  * Paging then touches one or two concrete graphs at a time with `VALUES ?root`,
  * preserving the exact root/skolem filter used by {@link readFreshSwmDataRows}
@@ -3407,17 +3411,52 @@ async function buildFreshSwmDataGraphPlan(
     candidates.map((candidate) => [candidate.graph, candidate]),
   ).values()].sort((a, b) => compareCodePoint(a.graph, b.graph));
 
+  // Modern content-scope-v2 SWM operations use detached snapshot references
+  // (or immutable snapshot graphs) and intentionally do not carry
+  // dkg:rootEntity. Probe the small metadata graphs once before constructing
+  // the graph-family UNION below. On a selected CG with hundreds of immutable
+  // KA graphs this turns the common rootless case from hundreds of expensive
+  // payload-graph probes into one bounded metadata lookup. A non-empty legacy
+  // result still follows the existing graph/root existence + exact-count path,
+  // so no payload graph is admitted from metadata alone.
+  const freshRootsByMetaGraph = new Map<string, Set<string>>();
+  const uniqueMetaGraphs = dedupeStrings(uniqueCandidates.map(({ metaGraph }) => metaGraph))
+    .sort(compareCodePoint);
+  for (const chunk of chunkValues(uniqueMetaGraphs, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+    const values = graphValues(chunk);
+    const rootResult = await store.query(`
+      SELECT DISTINCT ?metaGraph ?root WHERE {
+        VALUES ?metaGraph { ${values} }
+        GRAPH ?metaGraph {
+          ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
+              <${DKG_PUBLISHED_AT}> ?ts ;
+              <${DKG_ROOT_ENTITY}> ?root .
+          ${cutoffFilter}
+        }
+      }
+      ORDER BY ?metaGraph ?root
+    `, syncResponderStoreOptions(signal, 'sync.responder.discoverFreshSwmMetaRoots'));
+    if (rootResult.type !== 'bindings') continue;
+    for (const row of rootResult.bindings) {
+      const metaGraph = row['metaGraph'];
+      const root = row['root'];
+      if (!metaGraph || !root) continue;
+      const roots = freshRootsByMetaGraph.get(metaGraph) ?? new Set<string>();
+      roots.add(root);
+      freshRootsByMetaGraph.set(metaGraph, roots);
+    }
+  }
+
+  const rootScopedCandidates = uniqueCandidates.filter(
+    ({ metaGraph }) => (freshRootsByMetaGraph.get(metaGraph)?.size ?? 0) > 0,
+  );
+
   const rootsByGraph = new Map<string, Set<string>>();
-  for (const chunk of chunkValues(uniqueCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
+  for (const chunk of chunkValues(rootScopedCandidates, FRESH_SWM_PLAN_QUERY_GRAPH_CHUNK)) {
     const unions = chunk.map(({ graph, metaGraph }) => `
       {
         SELECT (<${assertSafeIri(graph)}> AS ?g) ?root WHERE {
-          GRAPH <${assertSafeIri(metaGraph)}> {
-            ?op <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_WORKSPACE_OPERATION}> ;
-                <${DKG_PUBLISHED_AT}> ?ts ;
-                <${DKG_ROOT_ENTITY}> ?root .
-            ${cutoffFilter}
-          }
+          VALUES ?root { ${graphValues([...(freshRootsByMetaGraph.get(metaGraph) ?? [])])} }
           GRAPH <${assertSafeIri(graph)}> { ?root ?rootPredicate ?rootObject }
         }
       }`);

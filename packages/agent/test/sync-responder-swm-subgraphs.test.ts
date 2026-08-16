@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { registerSyncHandler } from '../src/sync/responder/sync-handler.js';
 import type { SyncRequestEnvelope } from '../src/sync/auth/request-build.js';
@@ -348,6 +348,54 @@ describe('sync responder workspace branch — sub-graph SWM coverage', () => {
       const graphs = lineGraphsFromNquads(out);
       expect(graphs.has(ROOT_SWM)).toBe(true);
       expect(graphs.has(SUB_SWM)).toBe(true);
+    });
+
+    it('does not probe every payload graph when fresh metadata has no legacy root entities', async () => {
+      const modernStore = new OxigraphStore();
+      const modernCap = captureHandler();
+      const publishedAt = new Date(Date.now() - 1_000).toISOString();
+      const operation = 'urn:dkg:share:devnet-test:modern-rootless';
+      const payloadGraph = `${ROOT_SWM}/0x00000000000000000000000000000000000000ab/7`;
+      await modernStore.insert([
+        { graph: ROOT_SWM_META, subject: operation, predicate: RDF_TYPE, object: `${DKG_NS}WorkspaceOperation` },
+        { graph: ROOT_SWM_META, subject: operation, predicate: `${DKG_NS}publishedAt`, object: `"${publishedAt}"^^<http://www.w3.org/2001/XMLSchema#dateTime>` },
+        { graph: ROOT_SWM_META, subject: operation, predicate: `${DKG_NS}kaUal`, object: 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ab/7' },
+        { graph: payloadGraph, subject: 'urn:modern:payload', predicate: 'http://schema.org/name', object: '"modern-rootless"' },
+      ]);
+
+      const querySources: string[] = [];
+      const query = modernStore.query.bind(modernStore);
+      vi.spyOn(modernStore, 'query').mockImplementation(async (sparql, options) => {
+        querySources.push(options?.source ?? 'unknown');
+        return query(sparql, options);
+      });
+      registerSyncHandler({
+        register: modernCap.register,
+        protocolSync: '/origintrail/dkg/sync/1.0.0',
+        syncDeniedResponse: 'sync-denied',
+        syncPageSize: 5000,
+        sharedMemoryTtlMs: 5_000,
+        store: modernStore,
+        peerId: 'self-peer',
+        parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+        authorizeSyncRequest: async () => true,
+        logWarn: noopLog,
+        logDebug: noopLog,
+      });
+
+      const out = await modernCap.invoke({
+        contextGraphId: CG_ID,
+        offset: 0,
+        limit: 5000,
+        includeSharedMemory: true,
+        phase: 'data',
+      });
+
+      expect(out).toBe('');
+      expect(querySources).toContain('sync.responder.discoverFreshSwmMetaRoots');
+      expect(querySources).not.toContain('sync.responder.planFreshSwmGraphRoots');
+      expect(querySources).not.toContain('sync.responder.countFreshSwmGraphRows');
+      await modernStore.close();
     });
   });
 

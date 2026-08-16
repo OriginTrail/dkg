@@ -78,6 +78,7 @@ export default defineConfig({
       "test/sync-responder-cursor.test.ts",
       "test/sync-responder-oversized-fallback.test.ts",
       "test/sync-responder-swm-meta-ceiling.test.ts",
+      "test/sync-responder-swm-subgraphs.test.ts",
       "test/sync-responder-large-graph-stack-overflow.test.ts",
       "test/sync-responder-graph-backed-swm.test.ts",
       "test/graph-backed-swm-page-boundary.test.ts",
