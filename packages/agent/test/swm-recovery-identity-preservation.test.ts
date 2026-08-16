@@ -127,12 +127,14 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     return {
       ...makeIdentityBaseDeps(store, curatorMeta),
       replaceMetaForGraphAssets: realReplaceMetaForGraphAssets(store),
-      isGraphAssetMaterialized: markerOnlyMaterialized(store),
-      snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-        store,
-        writeLocks: new Map<string, Promise<void>>(),
-        invalidateListContextGraphsCache: () => {},
-      }),
+      graphAssetSkip: {
+        isGraphAssetMaterialized: markerOnlyMaterialized(store),
+        snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+          store,
+          writeLocks: new Map<string, Promise<void>>(),
+          invalidateListContextGraphsCache: () => {},
+        }),
+      },
     };
   }
 
@@ -169,6 +171,41 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     // The curator's operation subject lands as immutable history (same
     // disposal as the public lane) — only its head-id row is withheld.
     expect(await opSubjectExists(store, curatorEquivalent.operationSubject)).toBe(true);
+  });
+
+  it('replaces a same-id head whose stored version row is stale (version certification)', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store);
+    // Same operation id as the curator's descriptor, but the stored head's
+    // version row has drifted to "2" while the descriptor certifies "1". An
+    // id-equal fast path that skips version certification preserves this
+    // head, and the raw insert then unions the descriptor's "1" row onto it
+    // — a multi-valued version row on a "preserved" head. The decision must
+    // treat an id-equal unhealthy head exactly like a foreign one: replace.
+    const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+    await store.deleteByPattern({
+      graph: WS_META,
+      subject: localShare.headSubject,
+      predicate: `${DKG}assertionVersion`,
+    });
+    await store.insert([{
+      subject: localShare.headSubject,
+      predicate: `${DKG}assertionVersion`,
+      object: `"2"^^<${XSD_INTEGER}>`,
+      graph: WS_META,
+    }]);
+    const sameId = swmFx.share({ version: 1, operationId: 'op-local', marker: 'identity', ual: UAL3 });
+    const result = await recoverContextGraphSwm(identityDeps(store, [...sameId.meta]));
+    expect(result.completed).toBe(true);
+    const versions = await store.query(
+      `SELECT ?v WHERE { GRAPH <${WS_META}> { <${localShare.headSubject}> <${DKG}assertionVersion> ?v } }`,
+    );
+    expect(versions.type).toBe('bindings');
+    if (versions.type === 'bindings') {
+      expect(versions.bindings.map((row) => String(row['v']))).toEqual([`"1"^^<${XSD_INTEGER}>`]);
+    }
+    expect(await headIds(store)).toEqual(['"op-local"']);
   });
 
   it('still adopts the curator identity for a genuinely changed share (discriminator polarity)', async () => {

@@ -212,20 +212,26 @@ export interface SharedMemorySnapshotMaterializer {
     winnerShareOperationId: string,
   ): Promise<void>;
   /**
-   * GH#2273 — the ONE preserve decision BOTH catch-up lanes consult for a
-   * skipped, already-materialized KA: takes the KA write lock itself, and
-   * preserves only when the stored head is healthy (single-valued), certifies
-   * the descriptor's version, and `selectRepairIdentity` accepts a stored
-   * winner under the full reader-contract gate stack. Returns the winner and
-   * the exact descriptor rows every later write must withhold, or null —
-   * meta replacement / repair proceeds as today. Keeping the decision here
-   * is what stops the public and private lanes from drifting on the same
-   * invariant.
+   * GH#2273 — the ONE preserve decision for a skipped, already-materialized
+   * KA: takes the KA write lock itself, and preserves only when the stored
+   * head is healthy (single-valued), certifies the descriptor's version, and
+   * — for a FOREIGN stored id — `selectRepairIdentity` accepts a stored
+   * winner under the full reader-contract gate stack. An id-equal head goes
+   * through the SAME health + version conjuncts (an id-equal head with a
+   * stale version row must be replaced, not preserved). 'preserve' carries
+   * the winner and the exact descriptor rows every later write must
+   * withhold (empty for the id-equal case — the descriptor's id row is
+   * byte-identical); 'replace' ⇒ meta replacement / repair proceeds as
+   * today. Keeping the decision here is what stops the lanes from drifting
+   * on the same invariant.
    */
   evaluateStoredIdentityPreservation(
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<{ winnerShareOperationId: string; withholdRows: readonly Quad[] } | null>;
+  ): Promise<
+    | { outcome: 'preserve'; winnerShareOperationId: string; withholdRows: readonly Quad[] }
+    | { outcome: 'replace' }
+  >;
 }
 
 /**
@@ -546,19 +552,33 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         [swmKaWriteLockKey(contextGraphId, descriptor.subGraphName, descriptor.kaUal)],
         async () => {
           const stored = await materializerSelf.readStoredHead(descriptor);
+          // Every conjunct applies to BOTH the same-id and foreign-id cases:
+          // an id-equal head with a stale or corrupt version row is NOT
+          // healthy, and preserving it would leave unrepaired metadata in
+          // place while withholding nothing the union could not re-stack.
           if (stored.needsRepair || stored.version === null || stored.shareOperationId === null) {
-            return null;
+            return { outcome: 'replace' as const };
           }
           try {
-            if (BigInt(stored.version) !== BigInt(descriptor.assertionVersion)) return null;
+            if (BigInt(stored.version) !== BigInt(descriptor.assertionVersion)) {
+              return { outcome: 'replace' as const };
+            }
           } catch {
-            return null;
+            return { outcome: 'replace' as const };
           }
           if (stored.shareOperationId === descriptor.shareOperationId) {
-            // Identical identity: nothing to preserve and nothing to withhold.
-            return null;
+            // Identical healthy identity: preserve as-is; the descriptor's
+            // id row is byte-identical, so there is nothing to withhold.
+            return {
+              outcome: 'preserve' as const,
+              winnerShareOperationId: stored.shareOperationId,
+              withholdRows: [],
+            };
           }
-          return materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
+          const selected = await materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
+          return selected === null
+            ? { outcome: 'replace' as const }
+            : { outcome: 'preserve' as const, ...selected };
         },
       );
     },

@@ -1278,15 +1278,12 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   fetchSyncPages: RecoverContextGraphSwmOptions['fetchSyncPages'];
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  isGraphAssetMaterialized: NonNullable<RecoverContextGraphSwmOptions['isGraphAssetMaterialized']>;
   /**
-   * GH#2273 — preserve-local-identity decisions for skipped KAs. REQUIRED at
-   * this production boundary (the low-level recovery dep stays optional for
-   * legacy-shape tests): removing a construction-site wiring is a COMPILE
-   * error here, and a skip-capable runtime config without it throws
-   * fail-fast inside recoverContextGraphSwm.
+   * GH#2273 — skip + preserve-identity as ONE capability, REQUIRED at this
+   * production boundary: removing a construction-site wiring is a COMPILE
+   * error, and the pairing is structurally unrepresentable as half-configured.
    */
-  snapshotMaterializer: NonNullable<RecoverContextGraphSwmOptions['snapshotMaterializer']>;
+  graphAssetSkip: NonNullable<RecoverContextGraphSwmOptions['graphAssetSkip']>;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;
@@ -6753,23 +6750,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
           this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
         publicSnapshotStore: this.publicSnapshotStore,
-        snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-          store: this.store,
-          writeLocks: this.writeLocks,
-          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        }),
-        isGraphAssetMaterialized: async (asset) => {
-          const result = await this.store.query(
-            `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-              `<${assertSafeIri(asset.headSubject)}> ` +
-              `<http://dkg.io/ontology/assertionGraph> ` +
-              `<${assertSafeIri(asset.assertionGraph)}> . } }`,
-            {
-              priority: 'background',
-              source: 'agent.swmRecovery.isGraphAssetMaterialized',
-            },
-          );
-          return result.type === 'boolean' && result.value;
+        graphAssetSkip: {
+          snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+            store: this.store,
+            writeLocks: this.writeLocks,
+            invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+          }),
+          isGraphAssetMaterialized: async (asset) => {
+            const result = await this.store.query(
+              `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+                `<${assertSafeIri(asset.headSubject)}> ` +
+                `<http://dkg.io/ontology/assertionGraph> ` +
+                `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+              {
+                priority: 'background',
+                source: 'agent.swmRecovery.isGraphAssetMaterialized',
+              },
+            );
+            return result.type === 'boolean' && result.value;
+          },
         },
         recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
         invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
@@ -7293,23 +7292,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           processSharedMemoryBatch: (data, meta, cgId, registered, excluded) =>
             this.getOrCreateSyncVerifyWorker().processSharedMemoryBatch(data, meta, cgId, registered, excluded),
           publicSnapshotStore: this.publicSnapshotStore,
-          snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-          store: this.store,
-          writeLocks: this.writeLocks,
-          invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
-        }),
-        isGraphAssetMaterialized: async (asset) => {
-            const result = await this.store.query(
-              `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-                `<${assertSafeIri(asset.headSubject)}> ` +
-                `<http://dkg.io/ontology/assertionGraph> ` +
-                `<${assertSafeIri(asset.assertionGraph)}> . } }`,
-              {
-                priority: 'background',
-                source: 'agent.swmRecovery.isGraphAssetMaterialized',
-              },
-            );
-            return result.type === 'boolean' && result.value;
+          graphAssetSkip: {
+            snapshotMaterializer: createSharedMemorySnapshotMaterializer({
+              store: this.store,
+              writeLocks: this.writeLocks,
+              invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
+            }),
+            isGraphAssetMaterialized: async (asset) => {
+              const result = await this.store.query(
+                `ASK { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
+                  `<${assertSafeIri(asset.headSubject)}> ` +
+                  `<http://dkg.io/ontology/assertionGraph> ` +
+                  `<${assertSafeIri(asset.assertionGraph)}> . } }`,
+                {
+                  priority: 'background',
+                  source: 'agent.swmRecovery.isGraphAssetMaterialized',
+                },
+              );
+              return result.type === 'boolean' && result.value;
+            },
           },
           recordDrops: (drops, seam) => this.oversizeTombstoneLog.record(drops, seam),
           invalidateListContextGraphsCache: () => this.invalidateListContextGraphsCache(),
@@ -10078,8 +10079,7 @@ async function runRecoverContextGraphSwmFromPeer(
     fetchSyncPages: dependencies.fetchSyncPages,
     processSharedMemoryBatch: dependencies.processSharedMemoryBatch,
     publicSnapshotStore: dependencies.publicSnapshotStore,
-    isGraphAssetMaterialized: dependencies.isGraphAssetMaterialized,
-    snapshotMaterializer: dependencies.snapshotMaterializer,
+    graphAssetSkip: dependencies.graphAssetSkip,
     // SwmRecoveryStore: invalidate the list cache + mark the meta projection
     // dirty on insert (parity with runSharedMemorySync's
     // insertSyncedQuadsAndInvalidateListCache); deletes pass through to the store.
