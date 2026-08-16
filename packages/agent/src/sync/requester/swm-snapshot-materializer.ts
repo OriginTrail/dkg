@@ -27,7 +27,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
-import { isResolvableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
+import { isDecodableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -432,20 +432,34 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
       );
       if (descriptorKey === null) return null;
+      // ONE bounded query loads every candidate operation's rows via the
+      // head join (mirrors the resolver's acquisition): candidate identity,
+      // ownership and rows are then validated over the in-memory model
+      // instead of a per-candidate ASK/read fan-out under the lock.
+      const candidateRows = await deps.store.query(
+        `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+        + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
+        + `?op <${DKG}shareOperationId> ?id ; ?p ?o } }`,
+        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates' },
+      );
+      if (candidateRows.type !== 'bindings') return null;
+      const rowsBySubject = new Map<string, Quad[]>();
+      for (const row of candidateRows.bindings) {
+        const subject = row['op'] ?? '';
+        if (!subject) continue;
+        const list = rowsBySubject.get(subject) ?? [];
+        list.push({
+          subject,
+          predicate: row['p'] ?? '',
+          object: row['o'] ?? '',
+          graph: descriptor.metaGraph,
+        });
+        rowsBySubject.set(subject, list);
+      }
       for (const foreignId of foreignIds) {
         const operationSubject = `urn:dkg:share:${contextGraphId}:${foreignId}`;
-        const rowsResult = await deps.store.query(
-          `SELECT ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-          + `<${assertSafeIri(operationSubject)}> ?p ?o } }`,
-          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readOperationRows' },
-        );
-        if (rowsResult.type !== 'bindings' || rowsResult.bindings.length === 0) return null;
-        const storedRows = rowsResult.bindings.map((row) => ({
-          subject: operationSubject,
-          predicate: String(row?.['p'] ?? ''),
-          object: String(row?.['o'] ?? ''),
-          graph: descriptor.metaGraph,
-        }));
+        const storedRows = rowsBySubject.get(operationSubject) ?? [];
+        if (storedRows.length === 0) return null;
         // A foreign KA's operation, a policy change, a different digest or a
         // different author all surface here as a key mismatch (kaUal and the
         // whole envelope are inside the key), which routes to descriptor-wins
@@ -454,41 +468,30 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         if (storedKey === null || storedKey !== descriptorKey) return null;
         // Identity equivalence is NECESSARY but not SUFFICIENT to preserve:
         // the key deliberately excludes per-node rows, so a stored operation
-        // can be key-equal yet one the READER CONTRACT rejects (missing
-        // publisherPeerId, an id row that does not echo this id, a corrupt or
-        // absent publishedAt, an inconsistent envelope…). Preserving such a
-        // winner would write a head the resolver permanently fails as
-        // corrupt, and the next round's prefer-stored decision would preserve
-        // it AGAIN, wedging the KA. The gate IS the resolver's own decoder
-        // (exported by the publisher), so it cannot drift from what readers
-        // actually accept; requirePublishedAt additionally enforces the
-        // published-head wrapper's rule, since every production writer stamps
-        // one and RFC64 inventory ordering needs it.
-        if (!isResolvableWorkspaceOperationRows(storedRows, {
+        // can be key-equal yet one the READER CONTRACT rejects. Preserving
+        // such a winner would write a head the resolver permanently fails as
+        // corrupt (and re-preserve it every round — the wedge shape), or one
+        // the sync responder cannot serve to peers. The gate is layered:
+        // the head resolver's own decoder (exported by the publisher, so it
+        // cannot drift), the published-head wrapper's stamp rule, the
+        // responder-join type row, and snapshot-locator coherence.
+        if (!isDecodableWorkspaceOperationRows(storedRows, {
           kaUal: descriptor.kaUal,
           assertionVersion: descriptor.assertionVersion,
           shareOperationId: foreignId,
           requirePublishedAt: true,
         })) return null;
-        // The sync responder's serving join additionally requires the
-        // operation's `rdf:type WorkspaceOperation` row (readFreshSwmMeta*
-        // and both legacy plans) — a predicate outside the identity key AND
-        // outside the head decoder. A typeless winner would resolve locally
-        // but be unservable to peers: same reader-contract family as the
-        // publishedAt and locator gates.
         if (!storedRows.some((row) =>
           row.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
           && row.object === `${DKG}WorkspaceOperation`)) return null;
         // Snapshot LOCATOR coherence — outside both the identity key (the
         // graph-form locator embeds the operation id) and the head decoder
-        // (which never consumes snapshot pointers). A winner whose
-        // node-local snapshot graph is stale or empty would leave the
-        // preserved head advertising an id whose public quads the sync
-        // responder cannot serve to peers. Rules mirror the descriptor
-        // parser's: at most one locator form, a graph-form locator must be
-        // the id-derived graph AND actually hold the operation's public
-        // quads. Ref-form (or absent) locators are content-addressed — no
-        // worse than the descriptor's own — and pass.
+        // (which never consumes snapshot pointers). Count is only the cheap
+        // pre-gate: a stale same-size graph passes it, so the CONTENT digest
+        // must equal the committed public digest — the same count-then-digest
+        // ladder `isGraphAssetMaterialized` uses for the assertion graph.
+        // Ref-form (or absent) locators are content-addressed — no worse
+        // than the descriptor's own — and pass.
         const snapshotGraphs = [...new Set(storedRows
           .filter((row) => row.predicate === `${DKG}publicSnapshotGraph`)
           .map((row) => row.object))];
@@ -497,14 +500,19 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           const snapshotRefs = storedRows
             .filter((row) => row.predicate === `${DKG}publicSnapshotRef`);
           if (snapshotRefs.length > 0) return null;
-          const countResult = await deps.store.query(
-            `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
+          const snapshotContent = await deps.store.query(
+            `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
             { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkWinnerSnapshot' },
           );
-          const count = countResult.type === 'bindings'
-            ? Number((literalValue(countResult.bindings[0]?.['c']) ?? '').replace(/\D+$/, ''))
-            : Number.NaN;
-          if (!Number.isSafeInteger(count) || count !== descriptor.publicQuadsCount) return null;
+          if (snapshotContent.type !== 'bindings') return null;
+          if (snapshotContent.bindings.length !== descriptor.publicQuadsCount) return null;
+          const digest = workspacePublicQuadsDigest(snapshotContent.bindings.map((row) => ({
+            subject: row['s'] ?? '',
+            predicate: row['p'] ?? '',
+            object: row['o'] ?? '',
+            graph: '',
+          })));
+          if (digest !== descriptor.publicQuadsDigest) return null;
         }
       }
       return {

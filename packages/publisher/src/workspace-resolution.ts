@@ -420,17 +420,17 @@ function decodeWorkspaceOperationRows(input: {
 }
 
 /**
- * GH#2273 — would the head resolver ACCEPT an operation made of these rows?
- * Exposed for catch-up's identity-preservation decision: a stored operation
- * may only be preserved if the resolver that every consumer (preflight,
- * gossip, finalization, access) ultimately reads through would accept it —
- * otherwise preservation writes a head that fails as corrupt forever. Built
- * ON the resolver's own decoder so the preservation gate cannot drift from
- * the reader contract; `requirePublishedAt` additionally enforces the
- * published-head wrapper's rule (RFC64 inventory ordering requires a stamp,
- * and every production writer emits one).
+ * GH#2273 — would the HEAD RESOLVER'S DECODER accept an operation made of
+ * these rows? Deliberately scoped and named to what it answers: head-decoder
+ * acceptance ONLY. It does NOT cover serving-side usability (snapshot
+ * locator coherence, responder-join type row) — callers needing those add
+ * their own gates, as the catch-up preservation decision does. Built ON the
+ * resolver's own decoder so this boundary cannot drift from the reader
+ * contract; `requirePublishedAt` layers the published-head wrapper's rule on
+ * top (RFC64 inventory ordering requires a stamp, and every production
+ * writer emits one).
  */
-export function isResolvableWorkspaceOperationRows(
+export function isDecodableWorkspaceOperationRows(
   rows: readonly Quad[],
   expected: {
     readonly kaUal: string;

@@ -491,6 +491,23 @@ describe('operation identity preservation (GH#2273)', () => {
         .toMatchObject({ winnerShareOperationId: 'op-v1' });
     }
 
+    // (b2) SAME-COUNT but WRONG content in the snapshot graph => refuse.
+    // Count equality is only the cheap pre-gate: a stale snapshot of equal
+    // size is the risky integrity shape, and only the content-digest
+    // comparison catches it (remoteChanged.payload deliberately has the same
+    // quad count as the committed content).
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      expect(remoteChanged.payload.length).toBe(v1.payload.length);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(inGraph(remoteChanged.payload, winnerSnapshotGraph));
+      await store.insert(localWithLocator([]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
     // (c) BOTH locator forms on the stored winner => ambiguous => refuse.
     {
       const store = new OxigraphStore();

@@ -52,7 +52,7 @@ export {
   KnowledgeAssetOperationPublicSnapshotNotFoundError,
   KnowledgeAssetWorkspaceHeadCorruptError,
   isKnowledgeAssetWorkspaceHeadCorruptError,
-  isResolvableWorkspaceOperationRows,
+  isDecodableWorkspaceOperationRows,
   type KnowledgeAssetWorkspaceHead,
   type PublishedKnowledgeAssetWorkspaceHead,
   type ResolveKnowledgeAssetWorkspaceHeadParams,
