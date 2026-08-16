@@ -918,6 +918,15 @@ importers:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.1)(@types/node@22.19.11)(happy-dom@20.8.9(bufferutil@4.1.0)(utf-8-validate@5.0.10))(jiti@2.7.0)(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/marketplace:
+    dependencies:
+      '@origintrail-official/dkg':
+        specifier: workspace:*
+        version: link:../cli
+      ethers:
+        specifier: ^6.13.0
+        version: 6.16.0(bufferutil@4.1.0)(utf-8-validate@5.0.10)
+
   packages/mcp-dkg:
     dependencies:
       '@modelcontextprotocol/sdk':

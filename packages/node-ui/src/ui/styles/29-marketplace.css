@@ -26,3 +26,11 @@
 .nsm-btn { border: 1px solid var(--border-default); border-radius: 6px; padding: 5px 12px; font-size: 12px; background: var(--bg-surface); color: var(--text-primary); cursor: pointer; }
 .nsm-btn:hover { border-color: var(--border-strong); }
 .nsm-quote { border: 1px solid var(--border-default); border-radius: 6px; padding: 8px 10px; font-size: 11px; color: var(--text-secondary); }
+
+/* ── NSM v3 Operate view ── */
+.nsm-grid-op-off { grid-template-columns: 1.4fr 150px 120px 130px 170px 90px; }
+.nsm-grid-op-tab { grid-template-columns: 150px 140px 100px 100px 100px 1fr; }
+.nsm-grid-op-leg { grid-template-columns: 130px 70px 46px 90px 1.2fr 70px; }
+.nsm-grid-op-key { grid-template-columns: 120px 110px 110px 60px 60px 90px; }
+.nsm-ok { color: var(--accent-success, #26796a); }
+.nsm-withheld { color: var(--accent-danger, #a34527); font-weight: 500; }

@@ -1,0 +1,33 @@
+{
+  "name": "@origintrail-official/marketplace",
+  "version": "0.1.0",
+  "description": "NSM v3 marketplace module \u2014 seller front, buyer services, gateway. Mounts as a route plugin; marketplace.enabled=false by default (routes absent).",
+  "type": "module",
+  "main": "dist/plugin.js",
+  "types": "dist/plugin.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/plugin.d.ts",
+      "import": "./dist/plugin.js",
+      "default": "./dist/plugin.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "node --test dist/__tests__/",
+    "gates": "node src/__tests__/run-gates.mjs",
+    "lint:boundary": "node scripts/lint-import-boundary.mjs",
+    "clean": "rm -rf dist tsconfig.tsbuildinfo"
+  },
+  "dependencies": {
+    "ethers": "^6.13.0",
+    "@origintrail-official/dkg": "workspace:*"
+  },
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/OriginTrail/dkg.git",
+    "directory": "packages/marketplace"
+  }
+}

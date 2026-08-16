@@ -302,12 +302,21 @@ export function PanelLeft() {
               if (localStorage.getItem('nsm.marketplace') !== '1') return null;
             } catch { return null; }
             return (
-              <div
-                className={`v10-tree-dashboard ${activeTabId === 'marketplace' ? 'active' : ''}`}
-                onClick={() => { openTab({ id: 'marketplace', label: 'Marketplace', closable: true }); setActiveTab('marketplace'); setActiveProject(null); }}
-              >
-                <span>◈</span> Marketplace
-              </div>
+              <>
+                <div
+                  className={`v10-tree-dashboard ${activeTabId === 'marketplace' ? 'active' : ''}`}
+                  onClick={() => { openTab({ id: 'marketplace', label: 'Marketplace', closable: true }); setActiveTab('marketplace'); setActiveProject(null); }}
+                >
+                  <span>◈</span> Marketplace
+                </div>
+                {/* NSM v3 — the operator surface (Offerings/Tabs/Access), same flag */}
+                <div
+                  className={`v10-tree-dashboard ${activeTabId === 'marketplace-operate' ? 'active' : ''}`}
+                  onClick={() => { openTab({ id: 'marketplace-operate', label: 'Operate', closable: true }); setActiveTab('marketplace-operate'); setActiveProject(null); }}
+                >
+                  <span>◉</span> Operate
+                </div>
+              </>
             );
           })()}
 

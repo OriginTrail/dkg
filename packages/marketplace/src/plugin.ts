@@ -1,0 +1,232 @@
+// @origintrail-official/marketplace — NSM v3 route plugin.
+//
+// Mounts the seller front and the buyer gateway under /marketplace on the
+// node's public API. Loaded via config `routePlugins`; the ONLY module this
+// package imports from the host is `plugin-api.js` (lint-enforced boundary).
+//
+// marketplace.enabled=false (the default, including a missing or malformed
+// config file) ⇒ handle() returns without touching the response ⇒ every
+// marketplace route is ABSENT from the surface — the daemon 404s them exactly
+// like any unknown path. Enabling is a config change + restart, never a code
+// change.
+import type { RoutePlugin, RequestContext } from "@origintrail-official/dkg/daemon/plugin-api";
+import { loadMarketplaceConfig, marketplaceHome, type MarketplaceConfig } from "./config.js";
+import { connectLlamaCpp, type LlamaCppBinding } from "./seller/connector-llamacpp.js";
+import { connectOpenAi, type OpenAiBinding } from "./seller/connector-openai.js";
+import { handleFront, type FrontDeps, type OfferingBinding } from "./seller/front.js";
+import { handleGateway, type GatewayDeps, type GatewayOffering } from "./gateway/router.js";
+import { BuyerClient } from "./buyer/client.js";
+import { hfEngine, tiktokenEngine } from "./buyer/bpe.js";
+import { readFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
+
+const BASE = "/marketplace";
+const dkgHome = () => process.env.DKG_HOME ?? `${process.env.HOME}/.dkg`;
+
+interface Mounted {
+  front: FrontDeps | null;
+  gateway: GatewayDeps | null;
+  loadedAt: number;
+  configDigestish: string;
+}
+let mounted: Mounted | null = null;
+
+async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: string) => void): Promise<Mounted> {
+  const home = marketplaceHome(dkgHome());
+  const offerings = new Map<string, OfferingBinding>();
+
+  for (const off of cfg.offerings) {
+    try {
+      if (off.connector.kind === "llamacpp") {
+        const binding: LlamaCppBinding = await connectLlamaCpp(off.connector);
+        const ob: OfferingBinding = { offering: off, binding, tokenizerBundleRef: binding.tokenizerBundleDigest };
+        offerings.set(off.id, ob);
+        offerings.set(binding.modelId, ob);
+        log(`offering ${off.id} ⛓ ${binding.modelId} gguf=${binding.ggufSha256.slice(0, 18)}… tok=${binding.tokenizerBundleDigest.slice(0, 18)}…`);
+      } else {
+        const binding: OpenAiBinding = connectOpenAi(off.connector);
+        const ob: OfferingBinding = { offering: off, binding, tokenizerBundleRef: "public:" + binding.tokenizerBundle };
+        offerings.set(off.id, ob);
+        offerings.set(binding.model, ob);
+        log(`offering ${off.id} ☁ ${binding.model} bundle=${binding.tokenizerBundle}`);
+      }
+    } catch (e) {
+      // an offering that cannot connect is NOT served — fail closed per offering
+      log(`offering ${off.id} NOT MOUNTED: ${String((e as Error).message).slice(0, 120)}`);
+    }
+  }
+
+  // seller side (only if a provider address is known)
+  let front: FrontDeps | null = null;
+  const providerAddress = cfg.providerAddress ?? null;
+  if (providerAddress && offerings.size > 0) {
+    front = {
+      home, cfg, offerings,
+      providerAddress,
+      chainId: cfg.chainId ?? 8453,
+      rpcUrl: cfg.rpcUrl ?? "",
+      // Metered queries execute against THIS node's own query surface over
+      // loopback, with the node's own token — the plugin never embeds a
+      // secret; it borrows the daemon's in-process token set.
+      queryExecutor: async (sparql: string) => {
+        const token = [...ctx.validTokens][0];
+        const res = await fetch(`http://127.0.0.1:${ctx.apiPortRef.value}/api/query`, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+          body: JSON.stringify({ sparql }),
+          signal: AbortSignal.timeout(60_000),
+        });
+        if (!res.ok) throw new Error(`query backend ${res.status}`);
+        const out = (await res.json()) as { result?: { bindings?: unknown[] } };
+        const bindings = out.result?.bindings ?? [];
+        return { body: JSON.stringify(out.result ?? {}), returnedQuads: bindings.length };
+      },
+      log,
+    };
+  }
+
+  // buyer side (only if this node holds a tab config)
+  let gateway: GatewayDeps | null = null;
+  const buyerCfgPath = join(home, "buyer.json");
+  if (existsSync(buyerCfgPath)) {
+    try {
+      const b = JSON.parse(readFileSync(buyerCfgPath, "utf8")) as {
+        sellerApiBase: string; walletEnvFile: string; tabId?: string;
+        offerings: Array<{
+          id: string; modelId: string; provenanceClass: "weights-pinned" | "upstream-claimed";
+          tokenizerBundleRef: string; providerPublicPem: string;
+          perInputTokenMicroTrac: number; perOutputTokenMicroTrac: number;
+          queryFlatMicroTrac: number; perReturnedQuadMicroTrac: number;
+          bundlePath: string;   // local copy of the tokenizer bundle (digest-verified at fetch time)
+          bundleKind: "hf" | "tiktoken";
+        }>;
+      };
+      const client = new BuyerClient(b.sellerApiBase, b.walletEnvFile, b.tabId ?? null);
+      const gos = new Map<string, GatewayOffering>();
+      for (const o of b.offerings) {
+        const raw = readFileSync(o.bundlePath, "utf8");
+        gos.set(o.modelId, {
+          id: o.id, modelId: o.modelId, provenanceClass: o.provenanceClass,
+          expectation: {
+            tokenizerBundleRef: o.tokenizerBundleRef,
+            providerPublicPem: o.providerPublicPem,
+            perInputTokenMicroTrac: o.perInputTokenMicroTrac,
+            perOutputTokenMicroTrac: o.perOutputTokenMicroTrac,
+            queryFlatMicroTrac: o.queryFlatMicroTrac,
+            perReturnedQuadMicroTrac: o.perReturnedQuadMicroTrac,
+          },
+          engine: o.bundleKind === "hf" ? hfEngine(raw) : tiktokenEngine(raw),
+        });
+      }
+      gateway = {
+        home, client, offerings: gos,
+        countQuads: (body: string) => {
+          try { return ((JSON.parse(body) as { bindings?: unknown[] }).bindings ?? []).length; }
+          catch { return -1; }
+        },
+        log,
+      };
+      log(`gateway mounted: ${gos.size} funded offering(s), seller=${b.sellerApiBase}`);
+    } catch (e) {
+      log(`gateway NOT MOUNTED: ${String((e as Error).message).slice(0, 120)}`);
+    }
+  }
+
+  return { front, gateway, loadedAt: Date.now(), configDigestish: JSON.stringify([cfg.enabled, cfg.offerings.length, providerAddress]) };
+}
+
+export const plugin: RoutePlugin = {
+  name: "nsm-marketplace-v3",
+  async handle(ctx: RequestContext): Promise<void> {
+    const cfg = loadMarketplaceConfig(dkgHome());
+    if (!cfg.enabled) return;                       // flag off ⇒ routes ABSENT
+
+    const path = ctx.path;
+    if (!path.startsWith(BASE + "/")) return;
+
+    const log = (line: string) => console.log(`[marketplace] ${line}`);
+    const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null]);
+    if (!mounted || mounted.configDigestish !== digestish) {
+      mounted = await mount(cfg, ctx, log);
+    }
+
+    const req = ctx.req as unknown as Parameters<typeof handleFront>[1];
+    const res = ctx.res as unknown as Parameters<typeof handleFront>[2];
+
+    // ── operator status (drives the node-UI Offerings/Tabs/Access views).
+    // Gated on the node's own Bearer token or loopback — never part of the
+    // public wire contract.
+    if (path === BASE + "/operate/status") {
+      const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const remote = ctx.req.socket.remoteAddress ?? "";
+      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+      if (!local && !ctx.validTokens.has(auth)) {
+        ctx.res.writeHead(401, { "content-type": "application/json" });
+        ctx.res.end('{"error":"E_TOKEN"}');
+        return;
+      }
+      const body = JSON.stringify(await operateStatus(cfg, mounted));
+      ctx.res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      ctx.res.end(body);
+      return;
+    }
+
+    if (mounted.gateway && (await handleGateway(mounted.gateway, req, res, path, BASE))) return;
+    if (mounted.front && (await handleFront(mounted.front, req, res, path, BASE))) return;
+    // no match ⇒ fall through ⇒ daemon 404 (withdraw/settle/credit/release land here)
+  },
+};
+
+// Threshold economics for the operate meter. Conservative Base-mainnet gas
+// estimate; ε from the frozen Iteration-2 cost contract.
+const SETTLE_GAS_MICROTRAC = 2941;   // ~gas cost of a settlement, µTRAC-denominated estimate
+const EPSILON = 0.001;
+
+async function operateStatus(cfg: MarketplaceConfig, m: Mounted): Promise<Record<string, unknown>> {
+  const home = marketplaceHome(dkgHome());
+  const { tabsAll, tabQuantities } = await import("./seller/tabs.js");
+  const { legStatus, providerMaySettleV3 } = await import("./seller/front.js");
+  const { listKeys, keySpent } = await import("./gateway/keys.js");
+  const { readFileSync: rf, existsSync: ex } = await import("node:fs");
+  const { join: j } = await import("node:path");
+
+  const tabs = tabsAll(home).map((t) => {
+    const q = tabQuantities(home, t.principal);
+    return { ...t, quantities: q };
+  });
+  const legs = ex(j(home, "legs.jsonl"))
+    ? rf(j(home, "legs.jsonl"), "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>)
+    : [];
+  const legRows = legs.filter((l) => l.type === "leg").map((l) => ({
+    legId: l.legId, legType: l.legType, tabId: l.tabId, offeringId: l.offeringId,
+    provenanceClass: l.provenanceClass, cost: (l.pricing as { costMicroTrac?: number })?.costMicroTrac,
+    status: legStatus(home, String(l.legId)),
+    at: l.at,
+  }));
+  const unsettledEarned = tabs.reduce((s, t) => s + t.quantities.billed - t.quantities.released, 0);
+  const election = providerMaySettleV3({ unsettledEarnedMicroTrac: unsettledEarned, gasMicroTrac: SETTLE_GAS_MICROTRAC, epsilon: EPSILON });
+
+  return {
+    enabled: cfg.enabled,
+    offerings: m.front ? [...m.front.offerings.values()]
+      .filter((v, i, a) => a.findIndex((x) => x.offering.id === v.offering.id) === i)
+      .map((ob) => ({
+        id: ob.offering.id,
+        provenanceClass: ob.offering.provenanceClass,
+        modelId: ob.binding.kind === "llamacpp" ? ob.binding.modelId : ob.binding.model,
+        tokenizerBundleRef: ob.tokenizerBundleRef,
+        pricing: {
+          perInputTokenMicroTrac: ob.offering.perInputTokenMicroTrac,
+          perOutputTokenMicroTrac: ob.offering.perOutputTokenMicroTrac,
+          queryFlatMicroTrac: ob.offering.queryFlatMicroTrac,
+          perReturnedQuadMicroTrac: ob.offering.perReturnedQuadMicroTrac,
+        },
+        offeringUal: ob.offeringUal ?? null,
+      })) : [],
+    tabs, legs: legRows,
+    threshold: { unsettledEarnedMicroTrac: unsettledEarned, ...election },
+    keys: listKeys(home).map((k) => ({ ...k, spentMicroTrac: keySpent(home, k.keyId) })),
+  };
+}
+
+export default plugin;
