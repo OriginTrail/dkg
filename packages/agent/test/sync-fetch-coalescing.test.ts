@@ -218,7 +218,12 @@ describe('exact VM recovery lifecycle', () => {
         slices: 1,
         peerId: PEER_A,
         safeOffset: 500,
-        result: { complete: true, completedPhases: 1, checkpointAdvances: 1 },
+        result: {
+          complete: true,
+          completedPhases: 1,
+          checkpointAdvances: 1,
+          selectedVmTerminalCompletions: 1,
+        },
       });
       expect(reconcile).toHaveBeenCalledTimes(2);
       expect(reconcile).toHaveBeenNthCalledWith(1, contextGraphId, 'manual');
@@ -1348,6 +1353,46 @@ describe('DKGAgent sync fetch coalescing', () => {
       expect(result.peersResponded).toBe(1);
       expect(result.dataSynced).toBe(40_000);
       expect(agent.getSubscribedContextGraphs().get('coalesced-cg')?.synced).not.toBe(true);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
+
+  it('promotes selected-public VM readiness from a clean chain-terminal result', async () => {
+    const agent = await createAgentWithSend(async () => new Uint8Array(0));
+    const contextGraphId = 'selected-public-terminal-readiness';
+    const remotePeer = { toString: () => PEER_A };
+
+    try {
+      await agent.start();
+      agent.subscribeToContextGraph(contextGraphId);
+      (agent as any).config.syncContextGraphs = [contextGraphId];
+      (agent as any).waitForSyncProtocol = async () => true;
+      (agent as any).refreshMetaSyncedFlags = async () => undefined;
+      (agent as any).syncDurableRecoveryContextGraph = async () => {
+        const result = {
+          ...cleanDurableSyncResult(),
+          selectedVmTerminalCompletions: 1,
+        };
+        return {
+          outcome: 'terminal',
+          result,
+          peerResults: [{ peerId: PEER_A, result }],
+          slices: 1,
+          peerId: PEER_A,
+          safeOffset: 500,
+        };
+      };
+
+      const result = await (agent as any).runCatchupOverPeers(
+        contextGraphId,
+        false,
+        [remotePeer],
+      );
+
+      expect(result.peersSucceeded).toBe(1);
+      expect(result.diagnostics.durable.selectedVmTerminalCompletions).toBe(1);
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.synced).toBe(true);
     } finally {
       await agent.stop().catch(() => {});
     }

@@ -1057,6 +1057,12 @@ export interface DurableSyncDiagnostics {
   metaOnlyResponses: number;
   /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
   verifiedPrivateOnlyResponses: number;
+  /**
+   * Chain-inventory VM lanes that reached their finalized on-chain head with
+   * no unresolved ordinals. This is terminal readiness evidence without peer
+   * payload bytes; only the selected-public VM reconciler may emit it.
+   */
+  selectedVmTerminalCompletions?: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;

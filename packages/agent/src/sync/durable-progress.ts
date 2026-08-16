@@ -11,6 +11,7 @@ export interface DurableProgressSummary {
   readonly insertedMetaTriples?: number;
   readonly metaOnlyResponses?: number;
   readonly verifiedPrivateOnlyResponses?: number;
+  readonly selectedVmTerminalCompletions?: number;
   readonly dataRejectedMissingMeta?: number;
   readonly rejectedKcs?: number;
   readonly resumedPhases?: number;
@@ -35,6 +36,7 @@ export interface DurableProgressClassification {
   readonly hasInsertedData: boolean;
   readonly hasMetadataEvidence: boolean;
   readonly hasVerifiedPrivateOnlyResponse: boolean;
+  readonly hasSelectedVmTerminalCompletion: boolean;
   readonly hasCleanVerifiedPrivateOnlyCompletion: boolean;
   readonly integrityRejected: boolean;
   readonly metadataOnly: boolean;
@@ -68,6 +70,7 @@ export function classifyDurableProgress(
   const checkpointAdvances = progress?.checkpointAdvances ?? 0;
   const resumedPhases = progress?.resumedPhases ?? 0;
   const verifiedPrivateOnlyResponses = progress?.verifiedPrivateOnlyResponses ?? 0;
+  const selectedVmTerminalCompletions = progress?.selectedVmTerminalCompletions ?? 0;
 
   const timedOut = (progress?.timedOutPhases ?? 0) > 0;
   const transportFailed = (progress?.failedPeers ?? 0) > 0;
@@ -77,6 +80,7 @@ export function classifyDurableProgress(
   const integrityRejected = (progress?.dataRejectedMissingMeta ?? 0) > 0
     || (progress?.rejectedKcs ?? 0) > 0;
   const hasVerifiedPrivateOnlyResponse = verifiedPrivateOnlyResponses > 0;
+  const hasSelectedVmTerminalCompletion = selectedVmTerminalCompletions > 0;
   const hasMetadataEvidence = insertedMetaTriples > 0 || metaOnlyResponses > 0;
   const hasBlockingFailure = timedOut
     || transportFailed
@@ -112,6 +116,7 @@ export function classifyDurableProgress(
   const madeReconnectProgress = !integrityRejected && (
     hasInsertedData
     || hasCleanVerifiedPrivateOnlyCompletion
+    || hasSelectedVmTerminalCompletion
     || (!metadataOnly && (completedPhases > 0 || checkpointAdvances > 0))
   );
 
@@ -120,6 +125,7 @@ export function classifyDurableProgress(
   // caller silently changes semantics during this consolidation.
   const madeReadinessProgress = (progress?.insertedDataTriples ?? insertedTriples) > 0
     || hasVerifiedPrivateOnlyResponse
+    || hasSelectedVmTerminalCompletion
     || checkpointAdvances > 0
     || (completedPhases > 0 && resumedPhases > 0);
 
@@ -133,6 +139,7 @@ export function classifyDurableProgress(
     hasInsertedData,
     hasMetadataEvidence,
     hasVerifiedPrivateOnlyResponse,
+    hasSelectedVmTerminalCompletion,
     hasCleanVerifiedPrivateOnlyCompletion,
     integrityRejected,
     metadataOnly,
@@ -149,7 +156,11 @@ export function classifyDurableProgress(
     madeReadinessProgress,
     completedWithoutFailure,
     completedReadinessCleanly: completedWithoutFailure
-      && (hasInsertedData || hasVerifiedPrivateOnlyResponse),
+      && (
+        hasInsertedData
+        || hasVerifiedPrivateOnlyResponse
+        || hasSelectedVmTerminalCompletion
+      ),
     cleanNonMetadataResponse: !transportFailed
       && !phaseFailed
       && !timedOut
@@ -201,6 +212,7 @@ const DURABLE_SYNC_COUNTER_REDUCERS = {
   emptyResponses: 'sum',
   metaOnlyResponses: 'sum',
   verifiedPrivateOnlyResponses: 'sum',
+  selectedVmTerminalCompletions: 'sum',
   dataRejectedMissingMeta: 'sum',
   rejectedKcs: 'sum',
   failedPeers: 'max',
@@ -402,7 +414,7 @@ export function finalizeDurableSyncCompletion(
 
 export type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
   DurableSyncResult,
-  'backoffWorthyFailures' | 'deferredBackpressure'
+  'backoffWorthyFailures' | 'deferredBackpressure' | 'selectedVmTerminalCompletions'
 >>;
 
 export type InitializedDurableSyncDiagnostics = Omit<InitializedDurableSyncResult, 'complete'>;

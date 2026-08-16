@@ -1407,15 +1407,19 @@ function vmReconcileSliceAsDurableResult(
   result: ContextGraphReconcileResult,
 ): DurableSyncResult {
   const accumulator = createDurableSyncAccumulator();
+  const terminal = result.status === 'current' && result.unresolvedOrdinals === 0;
   if (
     result.reconciledOrdinals > 0
     || result.watermarkAfter > result.watermarkBefore
   ) {
     recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
   }
+  if (terminal) {
+    recordDurableSyncDiagnostics(accumulator, { selectedVmTerminalCompletions: 1 });
+  }
   markDurableTerminalBoundary(
     accumulator,
-    result.status === 'current' && result.unresolvedOrdinals === 0,
+    terminal,
     { countCompletedPhase: true },
   );
   return finalizeDurableSyncCompletion(accumulator);
@@ -7826,6 +7830,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         emptyResponses: 0,
         metaOnlyResponses: 0,
         verifiedPrivateOnlyResponses: 0,
+        selectedVmTerminalCompletions: 0,
         dataRejectedMissingMeta: 0,
         rejectedKcs: 0,
         failedPeers: 0,
@@ -7992,6 +7997,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const accessDeniedPeers = new Set<string>();
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
+    let cleanSelectedVmTerminalCompletions = 0;
     let cleanSharedMemoryDataSynced = 0;
     const peersSucceeded = new Set<string>();
     for (const [resultIndex, r] of results.entries()) {
@@ -8056,6 +8062,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
         cleanDurablePrivateOnlyCompletions +=
           durableProgress.hasVerifiedPrivateOnlyResponse ? 1 : 0;
+        cleanSelectedVmTerminalCompletions +=
+          durableProgress.hasSelectedVmTerminalCompletion ? 1 : 0;
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
@@ -8092,6 +8100,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       diagnostics.durable.metaOnlyResponses += r.durable.metaOnlyResponses;
       diagnostics.durable.verifiedPrivateOnlyResponses +=
         r.durable.verifiedPrivateOnlyResponses;
+      diagnostics.durable.selectedVmTerminalCompletions =
+        (diagnostics.durable.selectedVmTerminalCompletions ?? 0)
+        + (r.durable.selectedVmTerminalCompletions ?? 0);
       diagnostics.durable.dataRejectedMissingMeta += r.durable.dataRejectedMissingMeta;
       diagnostics.durable.rejectedKcs += r.durable.rejectedKcs;
       diagnostics.durable.failedPeers += r.durable.failedPeers;
@@ -8290,7 +8301,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // promote readiness — and cannot erase a clean snapshot another peer did
     // deliver.
     const durableCompletedCleanly =
-      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
+      cleanDurableDataSynced > 0
+      || cleanDurablePrivateOnlyCompletions > 0
+      || cleanSelectedVmTerminalCompletions > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
