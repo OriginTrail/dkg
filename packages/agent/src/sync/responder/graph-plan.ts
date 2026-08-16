@@ -899,12 +899,21 @@ export async function readSwmMetaPage(params: {
     params.signal,
     {
       loadSnapshot: cache
-        ? async () => readBoundedFreshSwmMetaSnapshot(
-          params.store,
-          await getPlan(0, undefined),
-          cutoffIso,
-          cache,
-        )
+        ? async () => {
+          // Most selected-CG manifests fit comfortably inside the fixed
+          // snapshot ceiling. Reading that bounded graph once and applying the
+          // canonical TTL filter in process avoids paying the much more
+          // expensive subject-discovery/count plan before page zero. If the
+          // raw history is genuinely large, readResponderRowsPage translates
+          // the typed rows/bytes refusal into the existing bounded plan-paged
+          // lane below; the #1847 large-history guarantee is therefore kept.
+          const rawRows = await readBoundedSwmMetaSnapshot(
+            params.store,
+            candidateGraphs,
+            cache,
+          );
+          return filterSwmMetaSnapshotRows(rawRows, cutoffIso);
+        }
         : undefined,
       // The per-snapshot budget fallback MUST stay enabled here (#1847): it
       // degrades to the bounded plan-paged reader above, never to the deleted

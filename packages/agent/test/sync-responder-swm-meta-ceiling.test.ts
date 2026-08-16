@@ -136,6 +136,46 @@ function forbidSwmMetaSortOrOffsetQueries(store: OxigraphStore) {
 }
 
 describe('SWM meta lane above the legacy 64,000-row snapshot ceiling (#1847)', () => {
+  it('uses the bounded raw-snapshot fast path for an ordinary TTL-filtered manifest', async () => {
+    const cgId = 'meta-bounded-fast-path';
+    const metaGraph = `did:dkg:context-graph:${cgId}/_shared_memory_meta`;
+    const store = new OxigraphStore();
+    const quads: Quad[] = [];
+    for (let index = 0; index < 40; index += 1) {
+      quads.push(...workspaceOpQuads(cgId, `fresh-${index}`, `urn:fresh:root:${index}`, metaGraph, freshIso()));
+      quads.push(...workspaceOpQuads(cgId, `stale-${index}`, `urn:stale:root:${index}`, metaGraph, staleIso()));
+    }
+    await store.insert(quads);
+
+    const sources: string[] = [];
+    const originalQuery = store.query.bind(store);
+    store.query = (async (sparql: string, options?: unknown) => {
+      const source = (options as { source?: string } | undefined)?.source;
+      if (source) sources.push(source);
+      return originalQuery(sparql, options as never);
+    }) as OxigraphStore['query'];
+
+    const cap = registerTestSyncHandler(store, { sharedMemoryTtlMs: TTL_MS, syncPageSize: 500 });
+    const request = {
+      contextGraphId: cgId,
+      includeSharedMemory: true,
+      phase: 'meta' as const,
+      offset: 0,
+      limit: 500,
+      syncSessionId: 'bounded-fast-session',
+    };
+    const first = await cap.invoke(request);
+    expect(linesFromNquads(first)).toHaveLength(40 * 5);
+    expect(sources.filter((source) => source === 'sync.responder.readSwmMetaGraphSnapshot')).toHaveLength(1);
+    expect(sources).not.toContain('sync.responder.readFreshSwmMetaSubjects');
+    expect(sources).not.toContain('sync.responder.countFreshSwmMetaSubjectRows');
+
+    const queriesAfterFirst = sources.length;
+    expect(await cap.invoke(request)).toBe(first);
+    expect(sources).toHaveLength(queriesAfterFirst);
+    await store.close();
+  });
+
   it('keeps plan-only ceilings pinned below the snapshot materialization caps', () => {
     expect(FRESH_SWM_META_SUBJECT_WINDOW_MAX_ROWS).toBe(64_000);
     expect(FRESH_SWM_META_PLAN_MAX_BYTES_ESTIMATE).toBe(32 * 1024 * 1024);
