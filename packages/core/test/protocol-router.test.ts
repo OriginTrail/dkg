@@ -989,6 +989,181 @@ describe('ProtocolRouter', () => {
       expect(retired).toEqual([FAKE_PEER_ID]);
     });
 
+    it('serializes concurrent single-use sends over one relay circuit', async () => {
+      let firstRelease!: () => void;
+      let secondRelease!: () => void;
+      const firstGate = new Promise<void>((resolve) => { firstRelease = resolve; });
+      const secondGate = new Promise<void>((resolve) => { secondRelease = resolve; });
+      let newStreamCalls = 0;
+      const relayedConn = makeConn({
+        remoteAddr: `/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${FAKE_PEER_ID}`,
+        limits: { bytes: 1024 * 1024 },
+        newStream: async () => {
+          newStreamCalls += 1;
+          const call = newStreamCalls;
+          const gate = call === 1 ? firstGate : secondGate;
+          return {
+            writeStatus: 'open' as const,
+            send: () => undefined,
+            close: async () => undefined,
+            abort: () => undefined,
+            async *[Symbol.asyncIterator]() {
+              await gate;
+              yield new Uint8Array([call]);
+            },
+          } as any;
+        },
+      });
+      const router = makeRouterWithPool({
+        connections: () => [relayedConn],
+        poolSend: async () => {
+          throw new Error('pool must not be used for a relay-only peer');
+        },
+      });
+
+      const first = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([1]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(newStreamCalls).toBe(1);
+
+      const second = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([2]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(newStreamCalls).toBe(1);
+
+      firstRelease();
+      await expect(first).resolves.toEqual(new Uint8Array([1]));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(newStreamCalls).toBe(2);
+      secondRelease();
+      await expect(second).resolves.toEqual(new Uint8Array([2]));
+    });
+
+    it('removes an aborted queued relay send without poisoning the peer FIFO', async () => {
+      let firstRelease!: () => void;
+      const firstGate = new Promise<void>((resolve) => { firstRelease = resolve; });
+      let newStreamCalls = 0;
+      const relayedConn = makeConn({
+        remoteAddr: `/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${FAKE_PEER_ID}`,
+        limits: { bytes: 1024 * 1024 },
+        newStream: async () => {
+          newStreamCalls += 1;
+          const call = newStreamCalls;
+          return {
+            writeStatus: 'open' as const,
+            send: () => undefined,
+            close: async () => undefined,
+            abort: () => undefined,
+            async *[Symbol.asyncIterator]() {
+              if (call === 1) await firstGate;
+              yield new Uint8Array([call]);
+            },
+          } as any;
+        },
+      });
+      const router = makeRouterWithPool({
+        connections: () => [relayedConn],
+        poolSend: async () => {
+          throw new Error('pool must not be used for a relay-only peer');
+        },
+      });
+
+      const first = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([1]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      const abort = new AbortController();
+      const abandoned = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([2]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use', signal: abort.signal },
+      );
+      abort.abort(new Error('caller left the queue'));
+      await expect(abandoned).rejects.toMatchObject({ name: 'AbortError' });
+      expect(newStreamCalls).toBe(1);
+
+      const third = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([3]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      firstRelease();
+      await expect(first).resolves.toEqual(new Uint8Array([1]));
+      await expect(third).resolves.toEqual(new Uint8Array([2]));
+      expect(newStreamCalls).toBe(2);
+    });
+
+    it('keeps single-use relay sends parallel across different peers', async () => {
+      const otherPeerId = '12D3KooWPFB8ffBchKzMKNC1ntcfYhru7uY6XJSVsw5MuVZhbqfz';
+      let firstRelease!: () => void;
+      const firstGate = new Promise<void>((resolve) => { firstRelease = resolve; });
+      let firstPeerStreams = 0;
+      let otherPeerStreams = 0;
+      const firstConn = makeConn({
+        remoteAddr: `/ip4/9.9.9.9/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${FAKE_PEER_ID}`,
+        limits: { bytes: 1024 * 1024 },
+        newStream: async () => {
+          firstPeerStreams += 1;
+          return {
+            ...makeStubStream(new Uint8Array([1])),
+            async *[Symbol.asyncIterator]() {
+              await firstGate;
+              yield new Uint8Array([1]);
+            },
+          } as any;
+        },
+      });
+      const otherConn = makeConn({
+        remotePeerStr: otherPeerId,
+        remoteAddr: `/ip4/8.8.8.8/tcp/4001/p2p/QmRelay/p2p-circuit/p2p/${otherPeerId}`,
+        limits: { bytes: 1024 * 1024 },
+        newStream: async () => {
+          otherPeerStreams += 1;
+          return makeStubStream(new Uint8Array([2])) as any;
+        },
+      });
+      const router = makeRouterWithPool({
+        connections: () => [firstConn, otherConn],
+        poolSend: async () => {
+          throw new Error('pool must not be used for a relay-only peer');
+        },
+      });
+
+      const first = router.send(
+        FAKE_PEER_ID,
+        PROTOCOL_ID,
+        new Uint8Array([1]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const other = router.send(
+        otherPeerId,
+        PROTOCOL_ID,
+        new Uint8Array([2]),
+        { timeoutMs: 5_000, payloadReuse: 'single-use' },
+      );
+
+      await expect(other).resolves.toEqual(new Uint8Array([2]));
+      expect(firstPeerStreams).toBe(1);
+      expect(otherPeerStreams).toBe(1);
+      firstRelease();
+      await expect(first).resolves.toEqual(new Uint8Array([1]));
+    });
+
     it('keeps the pooled path when a direct connection is present alongside a relayed one', async () => {
       let poolSends = 0;
       let newStreamCalls = 0;
