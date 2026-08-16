@@ -59,6 +59,19 @@ function storedWinnerIsDecodable(
   });
 }
 
+/**
+ * The VM-publish preflight requires the LIVE head's accessPolicy to be
+ * DEFINED (`liveHead.accessPolicy === undefined` fails the queued intent as
+ * stale). The identity KEY deliberately treats an absent row as the effective
+ * default for equality, but preserving a policy-less winner would park the KA
+ * on an operation queued publishes cannot use — descriptor-wins instead
+ * converges to the peer's explicit-policy operation. Key equality and
+ * envelope USABILITY are separate concerns.
+ */
+function storedWinnerHasUsableAccessEnvelope(storedRows: readonly Quad[]): boolean {
+  return storedRows.some((row) => row.predicate === `${DKG}accessPolicy`);
+}
+
 /** The sync responder's serving join requires the WorkspaceOperation type row. */
 function storedWinnerHasResponderType(storedRows: readonly Quad[]): boolean {
   return storedRows.some((row) =>
@@ -569,6 +582,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         if (!operationIdentityMatches(storedRows, descriptorKey)) return null;
         if (!storedWinnerIsDecodable(storedRows, descriptor, foreignId)) return null;
         if (!storedWinnerHasResponderType(storedRows)) return null;
+        if (!storedWinnerHasUsableAccessEnvelope(storedRows)) return null;
         if (!(await snapshotLocatorIsServeable(storedRows, descriptor))) return null;
       }
       return {

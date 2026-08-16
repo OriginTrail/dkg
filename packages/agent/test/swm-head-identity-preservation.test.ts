@@ -166,10 +166,12 @@ describe('operation identity preservation (GH#2273)', () => {
       const store = new OxigraphStore();
       stores.push(store);
       await seedMaterializedLocal(store);
-      const envelopeMeta = withRows(remoteEquivalent, [
+      const envelopeMeta = [
+        ...remoteEquivalent.meta.filter((quad) =>
+          !(quad.subject === remoteEquivalent.operationSubject && quad.predicate === `${DKG}accessPolicy`)),
         { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
         { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
-      ]);
+      ];
       await store.insert(envelopeMeta.filter((quad) =>
         quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
       await store.insert(envelopeMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
@@ -428,6 +430,42 @@ describe('operation identity preservation (GH#2273)', () => {
     expect(operationIdentityKey(withPeers(['peer-2', 'peer-1']))).toBe(keyA);
   });
 
+  it('refuses to preserve a winner with NO explicit accessPolicy row (usable-envelope gate)', async () => {
+    // The identity KEY treats absent-vs-explicit-default as the same share
+    // (old-metadata interop), but the VM-publish preflight requires the LIVE
+    // head's accessPolicy to be defined — preserving a policy-less winner
+    // parks the KA on an operation queued publishes cannot use, where
+    // descriptor-wins would converge to the peer's explicit-policy op. The
+    // envelope gate keeps key-equality AND usability separate concerns.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    // Stored winner: v1's rows WITHOUT the accessPolicy row.
+    await store.insert(v1.meta.filter((quad) =>
+      !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}accessPolicy`)));
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+  });
+
+  it('string-valued identity rows compare across plain and xsd:string forms', async () => {
+    // RDF 1.1: a plain literal IS an xsd:string literal. Stores may
+    // reserialize either way; if the key compared lexical forms raw,
+    // preservation would silently disable for such stores.
+    const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+    const base = opRowsOf(v1);
+    const key = operationIdentityKey(base);
+    expect(key).not.toBeNull();
+    const typed = base.map((quad) =>
+      quad.predicate === `${DKG}publicQuadsDigest` || quad.predicate === `${DKG}contextGraphId`
+        ? { ...quad, object: `${quad.object}^^<${XSD_STRING}>` }
+        : { ...quad });
+    expect(typed.some((quad) => quad.object.endsWith(`^^<${XSD_STRING}>`))).toBe(true);
+    expect(operationIdentityKey(typed)).toBe(key);
+  });
+
   it('private content defaults to ownerOnly: absent row equals explicit ownerOnly', async () => {
     const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
     const privateBase = opRowsOf(v1)
@@ -541,7 +579,8 @@ describe('operation identity preservation (GH#2273)', () => {
     stores.push(store);
     await seedMaterializedLocal(store);
     const envelopeMeta = [
-      ...remoteEquivalent.meta,
+      ...remoteEquivalent.meta.filter((quad) =>
+        !(quad.subject === remoteEquivalent.operationSubject && quad.predicate === `${DKG}accessPolicy`)),
       { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
       { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
     ];
