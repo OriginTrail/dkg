@@ -291,6 +291,63 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     expect(deps.recentOrdinalsPerPass).toBe(0);
   });
 
+  it('keeps an active VM target current across non-binding subscription readiness updates', async () => {
+    const chain = new MockChainAdapter();
+    agent = await DKGAgent.create({
+      name: 'VmReconcileSubscriptionSnapshotRefresh',
+      chainAdapter: chain,
+      nodeRole: 'edge',
+    });
+    stubNode(agent);
+    const internals = agent as unknown as AgentInternals;
+    const contextGraphId = 'vm-reconcile-readiness-refresh';
+    const initial = {
+      subscribed: true,
+      synced: false,
+      metaSynced: false,
+      sharedMemorySynced: false,
+      onChainId: '298',
+      syncMode: 'always-on' as const,
+    };
+    internals.subscribedContextGraphs.set(contextGraphId, initial);
+
+    const target = await (internals as any).resolveVmReconcileTarget(contextGraphId);
+    const lifecycleGeneration = (internals as any).vmReconcileLifecycleGeneration;
+    expect((internals as any).isVmReconcileTargetCurrent(
+      contextGraphId,
+      target,
+      lifecycleGeneration,
+    )).toBe(true);
+
+    // SWM/catch-up readiness bookkeeping replaces the immutable subscription
+    // record but does not alter membership, the on-chain binding, or the VM
+    // cursor.  That must not abort an otherwise valid VM recovery slice.
+    (internals as any).setContextGraphSubscription(
+      contextGraphId,
+      {
+        ...initial,
+        synced: true,
+        metaSynced: true,
+        sharedMemorySynced: true,
+      },
+      { persist: false },
+    );
+    expect(internals.subscribedContextGraphs.get(contextGraphId)).not.toBe(initial);
+    expect((internals as any).isVmReconcileTargetCurrent(
+      contextGraphId,
+      target,
+      lifecycleGeneration,
+    )).toBe(true);
+
+    // A real ownership transition still clears the cursor and fails closed.
+    (internals as any).unsubscribeFromContextGraph(contextGraphId, { persist: false });
+    expect((internals as any).isVmReconcileTargetCurrent(
+      contextGraphId,
+      target,
+      lifecycleGeneration,
+    )).toBe(false);
+  });
+
   it('preserves selected-only chain binding safety failures without creating cursor state', async () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'Rfc64SelectedVmAmbiguousBinding', chainAdapter: chain });

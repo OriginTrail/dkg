@@ -3483,7 +3483,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         && current.record.nameHash === target.nameHash;
     }
     const current = this.subscribedContextGraphs.get(localCgId);
-    return current === target.sub
+    // Subscription records are immutable snapshots and ordinary readiness
+    // updates replace the object in the map.  Object identity is therefore
+    // not a lifecycle fence: a concurrent SWM catch-up can set metaSynced or
+    // sharedMemorySynced without changing either membership or the VM binding.
+    // Keep the VM slice current across those harmless replacements, while the
+    // durable binding generation + cursor identity still fail closed on an
+    // unsubscribe, rebind, deletion, or cursor reset.
+    return (current?.subscribed === true || current?.coreHosted === true)
       && this.contextGraphBindingState.targetStillCurrent(localCgId, current, target)
       && this.reconcileCursors.get(localCgId) === expectedCursor;
   }
@@ -3789,12 +3796,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): Promise<RsHealPassResult> {
     try {
       const capturedOnChainId = target.onChainId;
+      const currentSubscription = () => (
+        this.subscribedContextGraphs instanceof Map
+          ? this.subscribedContextGraphs.get(localCgId)
+          : target.sub
+      );
       const canApply = () => isCurrent()
-        && (!(this.subscribedContextGraphs instanceof Map)
-          || this.subscribedContextGraphs.get(localCgId) === target.sub)
+        && (
+          currentSubscription()?.subscribed === true
+          || currentSubscription()?.coreHosted === true
+        )
         && this.contextGraphBindingState.targetStillCurrent(
           localCgId,
-          target.sub,
+          currentSubscription(),
           target,
         );
       if (!canApply()) {
