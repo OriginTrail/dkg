@@ -295,6 +295,16 @@ export async function recoverContextGraphSwm(
     ]),
   ];
 
+  // GH#2273 fail-fast: a config that can SKIP already-materialized KAs but
+  // lacks the identity-preservation policy would silently run the pre-fix
+  // rotation path. Production always wires both; tests that want the legacy
+  // shape omit BOTH capabilities.
+  if (deps.isGraphAssetMaterialized && !deps.snapshotMaterializer) {
+    throw new Error(
+      'recoverContextGraphSwm: isGraphAssetMaterialized without snapshotMaterializer would ' +
+      'rotate preserved operation identities for skipped KAs (GH#2273); wire both or neither.',
+    );
+  }
   const graphScopedDescriptors = parseGraphScopedSwmRecoveryDescriptors({
     contextGraphId: deps.contextGraphId,
     metaQuads: meta.quads,
@@ -548,29 +558,22 @@ export async function recoverContextGraphSwm(
       metaReplaceTargets.push(descriptor);
       continue;
     }
-    const materializer = deps.snapshotMaterializer;
-    const preserve = await materializer.withKaWriteLock(
+    // The SAME preserve decision the public lane consults (one owner in the
+    // materializer): healthy head + version certified + reader-contract-gated
+    // equivalence. Identical stored id needs neither replacement nor
+    // withholding — it is separated from a null (replace) decision here.
+    const stored = await deps.snapshotMaterializer.readStoredHead(descriptor);
+    if (!stored.needsRepair
+      && stored.shareOperationId !== null
+      && stored.shareOperationId === descriptor.shareOperationId) {
+      preservedDescriptors.push(descriptor);
+      continue;
+    }
+    const preservation = await deps.snapshotMaterializer.evaluateStoredIdentityPreservation(
       deps.contextGraphId,
-      descriptor.subGraphName,
-      descriptor.kaUal,
-      async () => {
-        const stored = await materializer.readStoredHead(descriptor);
-        if (stored.needsRepair || stored.version === null || stored.shareOperationId === null) {
-          return false;
-        }
-        try {
-          if (BigInt(stored.version) !== BigInt(descriptor.assertionVersion)) return false;
-        } catch {
-          return false;
-        }
-        if (stored.shareOperationId === descriptor.shareOperationId) return true;
-        // Foreign id on identical-version content: preserve ONLY on proven
-        // identity equivalence; a genuine change (policy, digest, author)
-        // returns null here and the curator's identity wins as today.
-        return (await materializer.selectRepairIdentity(deps.contextGraphId, descriptor)) !== null;
-      },
+      descriptor,
     );
-    if (preserve) preservedDescriptors.push(descriptor);
+    if (preservation !== null) preservedDescriptors.push(descriptor);
     else metaReplaceTargets.push(descriptor);
   }
   if (metaReplaceTargets.length > 0) {

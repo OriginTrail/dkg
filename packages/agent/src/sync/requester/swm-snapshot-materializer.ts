@@ -211,6 +211,21 @@ export interface SharedMemorySnapshotMaterializer {
     descriptor: GraphScopedSwmRecoveryDescriptor,
     winnerShareOperationId: string,
   ): Promise<void>;
+  /**
+   * GH#2273 — the ONE preserve decision BOTH catch-up lanes consult for a
+   * skipped, already-materialized KA: takes the KA write lock itself, and
+   * preserves only when the stored head is healthy (single-valued), certifies
+   * the descriptor's version, and `selectRepairIdentity` accepts a stored
+   * winner under the full reader-contract gate stack. Returns the winner and
+   * the exact descriptor rows every later write must withhold, or null —
+   * meta replacement / repair proceeds as today. Keeping the decision here
+   * is what stops the public and private lanes from drifting on the same
+   * invariant.
+   */
+  evaluateStoredIdentityPreservation(
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<{ winnerShareOperationId: string; withholdRows: readonly Quad[] } | null>;
 }
 
 /**
@@ -356,7 +371,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return subjects;
   };
 
-  return {
+  const materializerSelf: SharedMemorySnapshotMaterializer = {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
       withKeyedLocks(deps.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
 
@@ -525,6 +540,29 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       }
     },
 
+    evaluateStoredIdentityPreservation: async (contextGraphId, descriptor) => {
+      return withKeyedLocks(
+        deps.writeLocks,
+        [swmKaWriteLockKey(contextGraphId, descriptor.subGraphName, descriptor.kaUal)],
+        async () => {
+          const stored = await materializerSelf.readStoredHead(descriptor);
+          if (stored.needsRepair || stored.version === null || stored.shareOperationId === null) {
+            return null;
+          }
+          try {
+            if (BigInt(stored.version) !== BigInt(descriptor.assertionVersion)) return null;
+          } catch {
+            return null;
+          }
+          if (stored.shareOperationId === descriptor.shareOperationId) {
+            // Identical identity: nothing to preserve and nothing to withhold.
+            return null;
+          }
+          return materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
+        },
+      );
+    },
+
     selectRepairIdentity: async (contextGraphId, descriptor) => {
       const shareIds = await deps.store.query(
         `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
@@ -634,6 +672,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       deps.invalidateListContextGraphsCache();
     },
   };
+  return materializerSelf;
 }
 
 /** Strip the lexical value out of an N-Triples-style literal binding. */

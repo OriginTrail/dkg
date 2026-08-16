@@ -1279,8 +1279,14 @@ interface RecoverContextGraphSwmFromPeerDependencies {
   processSharedMemoryBatch: RecoverContextGraphSwmOptions['processSharedMemoryBatch'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   isGraphAssetMaterialized: NonNullable<RecoverContextGraphSwmOptions['isGraphAssetMaterialized']>;
-  /** GH#2273 — preserve-local-identity decisions for skipped KAs. */
-  snapshotMaterializer?: RecoverContextGraphSwmOptions['snapshotMaterializer'];
+  /**
+   * GH#2273 — preserve-local-identity decisions for skipped KAs. REQUIRED at
+   * this production boundary (the low-level recovery dep stays optional for
+   * legacy-shape tests): removing a construction-site wiring is a COMPILE
+   * error here, and a skip-capable runtime config without it throws
+   * fail-fast inside recoverContextGraphSwm.
+   */
+  snapshotMaterializer: NonNullable<RecoverContextGraphSwmOptions['snapshotMaterializer']>;
   recordDrops: OversizeGuardHooks['recordDrops'];
   invalidateListContextGraphsCache: () => void;
   markMetaProjectionDirty: (quads: Quad[]) => void;

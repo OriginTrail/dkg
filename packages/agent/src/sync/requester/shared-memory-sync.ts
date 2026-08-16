@@ -998,6 +998,9 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
                     storedHead.shareOperationId !== null
                     && storedHead.shareOperationId !== descriptor.shareOperationId
                   ) {
+                    // Decision delegated to the materializer's single owner
+                    // (shared with the private recovery lane) via
+                    // decideAndWithholdStoredIdentity below.
                     // GH#2273 stage 1 — content identical, head healthy, but the
                     // peer references a DIFFERENT operation id. When the stored
                     // operation is identity-equivalent (selectRepairIdentity
