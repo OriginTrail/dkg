@@ -111,6 +111,36 @@ export function isKnowledgeAssetWorkspaceHeadCorruptError(
   }
 }
 
+/**
+ * Typed outcome boundary over `resolveKnowledgeAssetWorkspaceHead` for callers
+ * whose local POLICY on corruption differs (discard archives, gossip receive
+ * permanently rejects) — they switch on the result instead of each hand-rolling
+ * a try/catch + flag around the thrown resolver error. Non-corrupt errors
+ * (store failures etc.) still throw. Callers that consume the error AFTER
+ * cross-package propagation (the async classifier, the daemon route) stay on
+ * the thrown-error path deliberately: the throw is the carrier across those
+ * boundaries and `isKnowledgeAssetWorkspaceHeadCorruptError` is their
+ * recognition point.
+ */
+export type KnowledgeAssetWorkspaceHeadResolution =
+  | { readonly status: 'missing' }
+  | { readonly status: 'resolved'; readonly head: KnowledgeAssetWorkspaceHead }
+  | { readonly status: 'corrupt'; readonly error: KnowledgeAssetWorkspaceHeadCorruptError };
+
+export async function tryResolveKnowledgeAssetWorkspaceHead(
+  params: ResolveKnowledgeAssetWorkspaceHeadParams,
+): Promise<KnowledgeAssetWorkspaceHeadResolution> {
+  try {
+    const head = await resolveKnowledgeAssetWorkspaceHead(params);
+    return head === undefined ? { status: 'missing' } : { status: 'resolved', head };
+  } catch (error) {
+    if (error instanceof KnowledgeAssetWorkspaceHeadCorruptError) {
+      return { status: 'corrupt', error };
+    }
+    throw error;
+  }
+}
+
 /** Durable last-applied state for one graph-scoped KA in SWM. */
 export interface KnowledgeAssetWorkspaceHead {
   readonly kaUal: string;

@@ -37,11 +37,9 @@ import {
 } from './metadata.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
-  isKnowledgeAssetWorkspaceHeadCorruptError,
-  resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
   storeKnowledgeAssetWorkspaceHead,
-  type KnowledgeAssetWorkspaceHead,
+  tryResolveKnowledgeAssetWorkspaceHead,
 } from './workspace-resolution.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
@@ -1444,22 +1442,20 @@ export class SharedMemoryHandler {
         // identity-preserving repair is the sanctioned healer; this path deliberately
         // forgoes its own delete-then-insert head rewrite, which would otherwise adopt
         // whatever the inbound share claims over a head we cannot even read.
-        let currentHead: KnowledgeAssetWorkspaceHead | undefined;
-        try {
-          currentHead = await resolveKnowledgeAssetWorkspaceHead({
-            store: this.store,
-            graphManager: this.graphManager,
-            contextGraphId,
-            kaUal: contentScope.ual,
-            subGraphName,
-          });
-        } catch (err) {
-          if (!isKnowledgeAssetWorkspaceHeadCorruptError(err)) throw err;
-          validationRejectionReason = `CORRUPT_SWM_HEAD: ${err instanceof Error ? err.message : String(err)}`;
+        const headResolution = await tryResolveKnowledgeAssetWorkspaceHead({
+          store: this.store,
+          graphManager: this.graphManager,
+          contextGraphId,
+          kaUal: contentScope.ual,
+          subGraphName,
+        });
+        if (headResolution.status === 'corrupt') {
+          validationRejectionReason = `CORRUPT_SWM_HEAD: ${headResolution.error.message}`;
           this.log.warn(ctx, `SWM validation rejected: ${validationRejectionReason}`);
           withWriteLocksRejection = 'validation';
           return false;
         }
+        const currentHead = headResolution.status === 'resolved' ? headResolution.head : undefined;
         if (currentHead) {
           const incomingVersion = BigInt(contentScope.assertionVersion);
           const currentVersion = BigInt(currentHead.assertionVersion);
