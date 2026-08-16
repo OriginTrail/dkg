@@ -27,6 +27,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import { operationIdentityKey } from '../graph-scoped-swm-recovery.js';
+import { isResolvableWorkspaceOperationRows } from '@origintrail-official/dkg-publisher';
 
 const DKG = 'http://dkg.io/ontology/';
 
@@ -436,40 +437,24 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         // — today's behavior, and the correct one for a GENUINE change.
         const storedKey = operationIdentityKey(storedRows);
         if (storedKey === null || storedKey !== descriptorKey) return null;
-        // Identity equivalence is NECESSARY but not SUFFICIENT to preserve: the
-        // key deliberately excludes per-node rows, so a stored operation can be
-        // key-equal yet unresolvable (missing publisherPeerId, or an id row
-        // that does not echo this id) — preserving such a winner would write a
-        // head the resolver permanently fails as corrupt, and the next round's
-        // prefer-stored decision would preserve it AGAIN, wedging the KA.
-        // Descriptor-wins is the safe fallback for any winner the resolver
-        // could not accept.
-        const echoes = storedRows
-          .filter((row) => row.predicate === `${DKG}shareOperationId`)
-          .map((row) => literalValue(row.object)?.trim());
-        if (!echoes.includes(foreignId)) return null;
-        const peerIds = [...new Set(storedRows
-          .filter((row) => row.predicate === `${DKG}publisherPeerId`)
-          .map((row) => literalValue(row.object)?.trim())
-          .filter((value): value is string => Boolean(value)))];
-        if (peerIds.length !== 1) return null;
-        // publishedAt is OUTSIDE the identity key (per-node clocks), so a
-        // corrupt stored timestamp would not break key equality — but the
-        // head resolver rejects an unparseable or negative publishedAt as
-        // corrupt metadata, and a preserved-but-unresolvable winner is the
-        // wedge shape again: preserved this round, corrupt to every reader,
-        // preserved again next round. Mirror the resolver's timestamp rule.
-        const stamps = storedRows
-          .filter((row) => row.predicate === `${DKG}publishedAt`)
-          .map((row) => Date.parse(literalValue(row.object)?.trim() ?? ''));
-        // ABSENT is refused alongside malformed: the plain resolver tolerates
-        // a missing publishedAt, but the published-head wrapper (RFC64
-        // inventory ordering) fails it as corrupt — and every production
-        // writer stamps one, so a stampless stored operation is already an
-        // anomaly. Descriptor-wins installs a canonically stamped operation
-        // instead of preserving the anomaly forever.
-        if (stamps.length === 0) return null;
-        if (stamps.some((ms) => !Number.isSafeInteger(ms) || ms < 0)) return null;
+        // Identity equivalence is NECESSARY but not SUFFICIENT to preserve:
+        // the key deliberately excludes per-node rows, so a stored operation
+        // can be key-equal yet one the READER CONTRACT rejects (missing
+        // publisherPeerId, an id row that does not echo this id, a corrupt or
+        // absent publishedAt, an inconsistent envelope…). Preserving such a
+        // winner would write a head the resolver permanently fails as
+        // corrupt, and the next round's prefer-stored decision would preserve
+        // it AGAIN, wedging the KA. The gate IS the resolver's own decoder
+        // (exported by the publisher), so it cannot drift from what readers
+        // actually accept; requirePublishedAt additionally enforces the
+        // published-head wrapper's rule, since every production writer stamps
+        // one and RFC64 inventory ordering needs it.
+        if (!isResolvableWorkspaceOperationRows(storedRows, {
+          kaUal: descriptor.kaUal,
+          assertionVersion: descriptor.assertionVersion,
+          shareOperationId: foreignId,
+          requirePublishedAt: true,
+        })) return null;
       }
       return {
         winnerShareOperationId: foreignIds[0]!,

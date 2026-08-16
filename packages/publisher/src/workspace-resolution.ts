@@ -420,6 +420,46 @@ function decodeWorkspaceOperationRows(input: {
 }
 
 /**
+ * GH#2273 — would the head resolver ACCEPT an operation made of these rows?
+ * Exposed for catch-up's identity-preservation decision: a stored operation
+ * may only be preserved if the resolver that every consumer (preflight,
+ * gossip, finalization, access) ultimately reads through would accept it —
+ * otherwise preservation writes a head that fails as corrupt forever. Built
+ * ON the resolver's own decoder so the preservation gate cannot drift from
+ * the reader contract; `requirePublishedAt` additionally enforces the
+ * published-head wrapper's rule (RFC64 inventory ordering requires a stamp,
+ * and every production writer emits one).
+ */
+export function isResolvableWorkspaceOperationRows(
+  rows: readonly Quad[],
+  expected: {
+    readonly kaUal: string;
+    readonly assertionVersion: string | number | bigint;
+    readonly shareOperationId: string;
+    readonly requirePublishedAt?: boolean;
+  },
+): boolean {
+  try {
+    const scope = createGraphKnowledgeAssetScope(expected.kaUal, expected.assertionVersion);
+    const operationValues = new Map<string, string[]>();
+    for (const row of rows) {
+      const list = operationValues.get(row.predicate) ?? [];
+      if (!list.includes(row.object)) list.push(row.object);
+      operationValues.set(row.predicate, list);
+    }
+    const decoded = decodeWorkspaceOperationRows({
+      operationValues,
+      scope,
+      shareOperationId: expected.shareOperationId,
+    });
+    if (expected.requirePublishedAt && decoded.publishedAtMs === undefined) return false;
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Resolve the latest complete graph-scoped assertion accepted into SWM.
  * Missing means this node has not accepted this KA yet; malformed rows fail
  * closed so a corrupt head cannot allow an older assertion to overwrite data.

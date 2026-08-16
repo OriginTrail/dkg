@@ -10,15 +10,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import {
-  resolveKnowledgeAssetWorkspaceHead,
-  type WorkspacePublicSnapshotStore,
-} from '@origintrail-official/dkg-publisher';
+import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
 const CG = 'ws00-materializer-real-store';
@@ -65,17 +61,6 @@ async function distinctObjects(store: TripleStore, graph: string, subject: strin
   return result.bindings.map((row) => String(row['o'])).sort();
 }
 
-class MemorySnapshotStore implements WorkspacePublicSnapshotStore {
-  readonly snapshots = new Map<string, Quad[]>();
-  async putSnapshot(input: { readonly digest: string; readonly quads: readonly Quad[] }) {
-    this.snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-    return { ref: input.digest, byteLength: 0 };
-  }
-  async getSnapshot(ref: string): Promise<Quad[] | null> {
-    return this.snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null;
-  }
-}
-
 /**
  * GH#2273 — catch-up must not change the operation identity of a semantically
  * identical head. The failure this block reproduces killed queued VM-publish
@@ -111,49 +96,6 @@ describe('operation identity preservation (GH#2273)', () => {
     // never form and the rows below would fail for the wrong reason.
     await store.insert(inGraph(v1.payload, v1.assertionGraph));
     await store.insert([...v1.meta]);
-  }
-
-  /** realHarness's shape (see the end-to-end describe) without the counters. */
-  function identityHarness(store: TripleStore, served: typeof v1) {
-    const snapshotStore = new MemorySnapshotStore();
-    const { materializer } = materializerFor(store);
-    return async () => {
-      await snapshotStore.putSnapshot({ digest: served.digest, quads: served.payload });
-      return runSharedMemorySync({
-        ctx,
-        remotePeerId: 'peer-source',
-        contextGraphIds: [CG],
-        createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-        fetchSyncPages: async (_c, _p, _cg, _inc, phase): Promise<SyncPageResult> => ({
-          quads: phase === 'meta' ? [...served.meta] : [],
-          bytesReceived: 0,
-          resumedFromOffset: 0,
-          nextOffset: phase === 'meta' ? served.meta.length : 0,
-          checkpointKey: 'k',
-          completed: true,
-          timedOut: false,
-        }),
-        processSharedMemoryBatch: async (wsDataQuads, wsMetaQuads) => ({
-          verifiedData: wsDataQuads,
-          verifiedMeta: wsMetaQuads,
-          totalFetchedDataQuads: wsDataQuads.length,
-          totalFetchedMetaQuads: wsMetaQuads.length,
-          droppedDataTriples: 0,
-          emptyResponses: 0,
-          entityCreators: [],
-        }),
-        ensureContextGraph: async () => {},
-        storeInsert: async (quads) => { await store.insert(quads); },
-        snapshotMaterializer: materializer,
-        publicSnapshotStore: snapshotStore,
-        deleteCheckpoint: () => {},
-        setCheckpoint: () => {},
-        ensureOwnedMap: () => new Map(),
-        logInfo: () => {},
-        logWarn: () => {},
-        logDebug: () => {},
-      });
-    };
   }
 
   it('operationIdentityKey survives the Oxigraph round-trip (wire rows vs stored rows)', async () => {
@@ -378,7 +320,7 @@ describe('operation identity preservation (GH#2273)', () => {
     // Round 1 — pre-fix: the per-KA path skipped (content identical, head
     // healthy) and the bulk insert unioned the peer's head-id row in, leaving
     // TWO ids under a LIMIT-1-style reader.
-    await identityHarness(store, remoteEquivalent)();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
     // The remote operation subject IS retained as immutable history — only the
@@ -389,7 +331,7 @@ describe('operation identity preservation (GH#2273)', () => {
 
     // Round 2 — pre-fix: needsRepair fired on the two-valued head, deleted the
     // head AND op-v1's subject, and re-inserted only the remote identity.
-    await identityHarness(store, remoteEquivalent)();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
     expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
@@ -414,7 +356,7 @@ describe('operation identity preservation (GH#2273)', () => {
     const store = new OxigraphStore();
     stores.push(store);
     await store.insert([...v1.meta]);
-    await identityHarness(store, remoteEquivalent)();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
     // Content materialized from the peer snapshot...
     const content = await store.query(
       `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${v1.assertionGraph}> { ?s ?p ?o } }`,
@@ -438,7 +380,7 @@ describe('operation identity preservation (GH#2273)', () => {
     const store = new OxigraphStore();
     stores.push(store);
     await seedMaterializedLocal(store);
-    await identityHarness(store, remoteChanged)();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteChanged }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"storage-ack-2273c"']);
     expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
@@ -455,11 +397,31 @@ describe('operation identity preservation (GH#2273)', () => {
     stores.push(store);
     await store.insert(inGraph(v2.payload, v2.assertionGraph));
     await store.insert([...v2.meta]);
-    await identityHarness(store, v1)();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: v1 }).run();
     expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`))
       .toEqual([`"2"^^<${XSD_INTEGER}>`]);
     expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v2"']);
+  });
+
+  it('refuses a stored winner whose own id row does not echo the head reference (echo guard)', async () => {
+    // The head references op-v1, the operation SUBJECT exists, but its own
+    // shareOperationId row says something else — the resolver's id-echo rule
+    // rejects that operation, so preservation must refuse it too. This is the
+    // one resolvability conjunct the other unresolvable-winner sub-rows do
+    // not isolate.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    await store.insert(v1.meta.map((quad) =>
+      quad.subject === v1.operationSubject && quad.predicate === `${DKG}shareOperationId`
+        ? { ...quad, object: '"wrong-id"' }
+        : quad));
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
   });
 
   it('spares another KA\'s operation when repairing with a preserved winner (ownership guard)', async () => {
@@ -529,7 +491,7 @@ describe('operation identity preservation (GH#2273)', () => {
         },
       ],
     };
-    await identityHarness(store, graphBacked as typeof v1)();
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: graphBacked as typeof v1 }).run();
     expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
       .toEqual(['"op-v1"']);
   });
