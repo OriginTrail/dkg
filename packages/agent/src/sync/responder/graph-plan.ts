@@ -1041,6 +1041,7 @@ export async function readDurableMetaPage(params: {
       params.store,
       params.contextGraphId,
       params.signal,
+      params.assetUals,
     );
     const requested = new Set(params.assetUals);
     const confirmedUals = manifest.confirmedEntries
@@ -1146,9 +1147,13 @@ async function readGraphScopedVmManifest(
   store: TripleStore,
   contextGraphId: string,
   signal?: AbortSignal,
+  assetUals?: readonly string[],
 ): Promise<GraphScopedVmManifest> {
   const metaGraph = contextGraphMetaGraphUri(contextGraphId);
   const contextGraph = contextGraphDataGraphUri(contextGraphId);
+  const exactUalClause = assetUals === undefined
+    ? ''
+    : `VALUES ?ual { ${subjectValues(assetUals)} }`;
   const maxRows = SYNC_RESPONDER_SNAPSHOT_BUILD_MAX_ROWS;
   const readBoundedBindings = async (
     sparql: string,
@@ -1191,6 +1196,7 @@ async function readGraphScopedVmManifest(
   // legacy compatibility lane.
   const markerBindings = await readBoundedBindings(`
     SELECT ?ual ?scopeVersion WHERE {
+      ${exactUalClause}
       GRAPH <${assertSafeIri(metaGraph)}> {
         ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion .
       }
@@ -1234,6 +1240,7 @@ async function readGraphScopedVmManifest(
       SELECT ?ual ?scopeVersion ?kaUal ?assertionVersion ?assertionGraph
              ?contextGraph ?publicTripleCount ?privateTripleCount ?status ?subGraphName
       WHERE {
+        ${exactUalClause}
         GRAPH <${assertSafeIri(metaGraph)}> {
           ?ual <${DKG_CONTENT_SCOPE_VERSION}> ?scopeVersion ;
                <${DKG_KA_UAL}> ?kaUal ;
@@ -1631,6 +1638,7 @@ export async function readDurableDataPage(params: {
           params.store,
           params.contextGraphId,
           planSignal,
+          params.assetUals,
         );
         const entries = manifest.confirmedEntries.filter((entry) => requested.has(entry.ual));
         return buildExactGraphPagePlan(

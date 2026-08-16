@@ -93,7 +93,12 @@ export class FinalizationRecoveryWorker {
       );
     } finally {
       if (this.#running) {
-        this.schedule(selected >= this.#batchSize ? 0 : this.#pollIntervalMs);
+        // A full durable-inbox batch means that more historical work is
+        // probably ready, but it must not turn this maintenance worker into a
+        // zero-delay loop. Each item may perform several chain reads and store
+        // operations. Yielding for the normal poll interval preserves capacity
+        // for foreground publish, selected sync, and exact VM recovery work.
+        this.schedule(this.#pollIntervalMs);
       }
     }
   }

@@ -686,12 +686,91 @@ describe('durable graph-scoped KA materialization', () => {
     );
   });
 
-  it.each([
-    ['conflicting', ['"transaction"', '"finalized-materialization"']],
-    ['unsupported', ['"unsupported"']],
-  ])('rejects %s peer confirmation metadata before durable materialization', async (_label, kinds) => {
+  it('normalizes the legacy dual-kind receipt envelope before chain authentication', async () => {
     const v2Data = dataQuad(2);
     const v2Meta = metadata(2);
+    v2Meta.push(
+      {
+        subject: ual,
+        predicate: `${DKG}publicTripleCount`,
+        object: `"1"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      {
+        subject: ual,
+        predicate: `${DKG}privateTripleCount`,
+        object: `"0"^^<${XSD_INTEGER}>`,
+        graph: metaGraph,
+      },
+      ...['"transaction"', '"finalized-materialization"'].map((object) => ({
+        subject: ual,
+        predicate: `${DKG}confirmationKind`,
+        object,
+        graph: metaGraph,
+      })),
+    );
+    const materialized: VerifiedGraphScopedAsset[] = [];
+
+    const summary = await runDurableSync({
+      ctx,
+      remotePeerId: 'peer-legacy-dual-confirmation-kind',
+      contextGraphIds: [contextGraphId],
+      durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 10_000),
+      fetchSyncPages: async ({ phase }) => (
+        phase === 'data' ? page(phase, [v2Data]) : page(phase, v2Meta)
+      ),
+      processDurableBatchInWorker: async () => ({
+        verifiedData: [v2Data],
+        verifiedMeta: v2Meta,
+        verifiedGraphScopedDataGraphs: [assertionGraph],
+        totalFetchedDataQuads: 1,
+        totalFetchedMetaQuads: v2Meta.length,
+        rejectedKcs: 0,
+        emptyResponses: 0,
+        metaOnlyResponses: 0,
+        verifiedPrivateOnlyResponses: 0,
+        dataRejectedMissingMeta: 0,
+      }),
+      storeInsert: async () => {},
+      storeGraphScopedAsset: async ({ asset }) => {
+        materialized.push(asset);
+        return 'applied';
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      logInfo: () => {},
+      logWarn: () => {},
+      logDebug: () => {},
+    });
+
+    expect(summary.failedPhases).toBe(0);
+    expect(materialized).toHaveLength(1);
+    expect(readGraphKnowledgeAssetConfirmationKindV1(materialized[0]!.metadataQuads))
+      .toBe('transaction');
+    expect(materialized[0]!.metadataQuads.filter(
+      (quad) => quad.predicate === `${DKG}confirmationKind`,
+    )).toHaveLength(1);
+  });
+
+  it.each([
+    ['dual-kind without a receipt', ['"transaction"', '"finalized-materialization"']],
+    ['dual-kind with multiple receipts', ['"transaction"', '"finalized-materialization"']],
+    ['unsupported', ['"unsupported"']],
+  ])('rejects %s peer confirmation metadata before durable materialization', async (label, kinds) => {
+    const v2Data = dataQuad(2);
+    const v2Meta = metadata(2);
+    if (label === 'dual-kind without a receipt') {
+      const receiptIndex = v2Meta.findIndex((quad) => quad.predicate === `${DKG}transactionHash`);
+      v2Meta.splice(receiptIndex, 1);
+    }
+    if (label === 'dual-kind with multiple receipts') {
+      v2Meta.push({
+        subject: ual,
+        predicate: `${DKG}transactionHash`,
+        object: `"${transactionHash(3)}"`,
+        graph: metaGraph,
+      });
+    }
     v2Meta.push(
       {
         subject: ual,
