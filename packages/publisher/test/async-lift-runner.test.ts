@@ -15,25 +15,30 @@ async function waitFor(assertion: () => void, timeout = 5000): Promise<void> {
   }
 }
 
-function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLiftPublisher {
-  return {
-    lift: async () => {},
+const basePublisher = {
+    enqueueKnowledgeAssetVmPublish: async () => 'job-id',
     claimNext: async () => null,
     update: async () => {},
     getStatus: async () => null,
     list: async () => [],
+    inspectPreparedPayload: async () => null,
     processNext: async () => null,
-    recordPublishResult: async () => {},
-    recordPublishFailure: async () => {},
+    recordPublishResult: async () => ({} as LiftJob),
+    recordPublishFailure: async () => ({} as LiftJob),
     recover: async () => 0,
-    getStats: () => ({}),
-    pause: () => {},
-    resume: () => {},
+    getStats: async () => ({} as Awaited<ReturnType<AsyncLiftPublisher['getStats']>>),
+    pause: async () => {},
+    resume: async () => {},
     cancel: async () => {},
-    retry: async () => {},
-    clear: async () => {},
+    retry: async () => 0,
+    clear: async () => 0,
+} satisfies AsyncLiftPublisher;
+
+function createPublisher(overrides: Partial<AsyncLiftPublisher> = {}): AsyncLiftPublisher {
+  return {
+    ...basePublisher,
     ...overrides,
-  } as unknown as AsyncLiftPublisher;
+  };
 }
 
 describe('AsyncLiftRunner', () => {

@@ -1275,6 +1275,17 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ jobId: 'lift job 7' });
   });
 
+  it('publisherRetryJob serializes an exact job selection and rejects an empty id before HTTP', async () => {
+    const calls = track({ retried: 1 });
+    await client.publisherRetryJob('lift job 7');
+    expect(calls[0].url).toBe(`${base}/api/publisher/retry`);
+    expect(calls[0].opts.method).toBe('POST');
+    expect(JSON.parse(calls[0].opts.body as string)).toEqual({ status: 'failed', jobId: 'lift job 7' });
+
+    await expect(client.publisherRetryJob('')).rejects.toThrow('jobId must be a non-empty string');
+    expect(calls).toHaveLength(1);
+  });
+
   it('knowledgeAssetShareAsync rejects unsupported sync-only options before HTTP serialization', async () => {
     const calls = track({ jobId: 'should-not-reach', state: 'queued' });
     await expect(client.knowledgeAssetShareAsync('cg', 'f', {

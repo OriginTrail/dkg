@@ -13,6 +13,7 @@ export type {
   AsyncLiftPublisherRecoveryResult,
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
+  VmPublishFailedJobRetrier,
   VmPublishAdmissionJournalReader,
   VmPublishTerminalJobClearer,
   VmPublisherControl,

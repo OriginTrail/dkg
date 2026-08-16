@@ -1333,6 +1333,11 @@ export class ApiClient {
     return this.post('/api/publisher/retry', { status });
   }
 
+  async publisherRetryJob(jobId: string): Promise<{ retried: number }> {
+    if (!jobId) throw new Error('jobId must be a non-empty string');
+    return this.post('/api/publisher/retry', { status: 'failed', jobId });
+  }
+
   async publisherClear(status: 'failed' | 'finalized'): Promise<{ cleared: number; status: 'failed' | 'finalized' }> {
     return this.post('/api/publisher/clear', { status });
   }

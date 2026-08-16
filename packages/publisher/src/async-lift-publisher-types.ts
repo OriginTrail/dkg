@@ -148,6 +148,11 @@ export interface VmPublishIntentIndexBackfiller {
   ensureVmPublishIntentIndex(): Promise<number>;
 }
 
+/** Daemon/admin-only exact failed-job retry; intentionally absent from the base runtime queue contract. */
+export interface VmPublishFailedJobRetrier {
+  retryFailedJob(jobId: string): Promise<number>;
+}
+
 /**
  * #1889 — the composite VM-publisher control surface returned by the daemon factory
  * (`createPublisherControlFromStore`) and held by `RequestContext.publisherControl`. Names
@@ -160,7 +165,8 @@ export interface VmPublisherControl
   extends VmPublishIntentRecoveryPublisher,
     VmPublishIntentIndexBackfiller,
     VmPublishAdmissionJournalReader,
-    VmPublishTerminalJobClearer {}
+    VmPublishTerminalJobClearer,
+    VmPublishFailedJobRetrier {}
 
 export interface AsyncLiftPublisherRecoveryResult {
   inclusion: LiftJobInclusionMetadata;

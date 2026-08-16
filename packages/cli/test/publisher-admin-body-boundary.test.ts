@@ -15,6 +15,7 @@ describe('#1890 publisher admin POST body boundary', () => {
     return {
       cancel: async () => {},
       retry: async () => 3,
+      retryFailedJob: async (jobId) => jobId === 'j1' ? 1 : 0,
       clear: async () => 2,
       clearTerminalJob: async () => ({ outcome: 'already_absent' as const }),
     } as unknown as RequestContext['publisherControl'];
@@ -90,6 +91,15 @@ describe('#1890 publisher admin POST body boundary', () => {
     });
     it('unsupported status → 400', async () => {
       expect(await post('/api/publisher/retry', JSON.stringify({ status: 'queued' }))).toEqual({ status: 400, body: { error: 'Only status=failed is supported' } });
+    });
+    it('exact jobId → retries only the selected job', async () => {
+      expect(await post('/api/publisher/retry', JSON.stringify({ status: 'failed', jobId: 'j1' }))).toEqual({ status: 200, body: { retried: 1 } });
+    });
+    it('invalid jobId → 400', async () => {
+      expect(await post('/api/publisher/retry', JSON.stringify({ status: 'failed', jobId: 42 }))).toEqual({ status: 400, body: { error: 'jobId must be a non-empty string when supplied' } });
+    });
+    it('empty jobId → 400 without broadening to retry-all', async () => {
+      expect(await post('/api/publisher/retry', JSON.stringify({ status: 'failed', jobId: '' }))).toEqual({ status: 400, body: { error: 'jobId must be a non-empty string when supplied' } });
     });
     it('null body → 200 (hardened, not a 500)', async () => {
       expect(await post('/api/publisher/retry', 'null')).toEqual({ status: 200, body: { retried: 3 } });

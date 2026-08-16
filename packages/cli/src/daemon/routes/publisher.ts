@@ -536,7 +536,13 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
       });
-    const count = await publisherControl.retry({ status: "failed" });
+    const jobId = parsed.jobId;
+    if (jobId !== undefined && (typeof jobId !== "string" || jobId.length === 0)) {
+      return jsonResponse(res, 400, { error: "jobId must be a non-empty string when supplied" });
+    }
+    const count = typeof jobId === "string"
+      ? await publisherControl.retryFailedJob(jobId)
+      : await publisherControl.retry({ status: "failed" });
     return jsonResponse(res, 200, { retried: count });
   }
 

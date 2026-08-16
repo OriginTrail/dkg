@@ -426,4 +426,34 @@ describe('Async Lift Publisher Queue — Recovery', () => {
     const afterRetry = await pub.list({ status: 'accepted' });
     expect(afterRetry.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('retry can re-queue one exact failed job without touching other failures', async () => {
+    const pub = create();
+    const selectedJobId = await pub.seedLegacyRawLift(makeLiftRequest({
+      contextGraphId: 'selected-retry',
+    }));
+    const untouchedJobId = await pub.seedLegacyRawLift(makeLiftRequest({
+      contextGraphId: 'untouched-retry',
+    }));
+
+    for (const jobId of [selectedJobId, untouchedJobId]) {
+      await pub.claimNext('wallet-1');
+      await pub.update(jobId, 'failed', {
+        failure: {
+          failedFromState: 'claimed',
+          code: 'workspace_unavailable',
+          message: 'Store temporarily unavailable',
+          errorPayloadRef: `urn:error:${jobId}`,
+          phase: 'validation',
+          mode: 'retryable',
+          retryable: true,
+          resolution: 'reset_to_accepted',
+        },
+      } as any);
+    }
+
+    await expect(pub.retryFailedJob(selectedJobId)).resolves.toBe(1);
+    await expect(pub.getStatus(selectedJobId)).resolves.toMatchObject({ status: 'accepted' });
+    await expect(pub.getStatus(untouchedJobId)).resolves.toMatchObject({ status: 'failed' });
+  });
 });

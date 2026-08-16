@@ -39,6 +39,7 @@ import type {
   JournalReadResult,
   VmPublishIntentRecoveryPublisher,
   VmPublishIntentIndexBackfiller,
+  VmPublishFailedJobRetrier,
   VmPublishAdmissionJournalReader,
   VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
@@ -213,7 +214,7 @@ function resolveKnowledgeAssetVmPublishHandler(
 }
 
 export class TripleStoreAsyncLiftPublisher
-  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer {
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer, VmPublishFailedJobRetrier {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
   // read-modify-write seq allocation is atomic without touching the claim lock (lock
@@ -1035,7 +1036,16 @@ export class TripleStoreAsyncLiftPublisher
   async retry(filter: { status?: 'failed' } = {}): Promise<number> {
     await this.ensureGraph();
     if (filter.status && filter.status !== 'failed') return 0;
+    return this.retryFailedJobs();
+  }
 
+  async retryFailedJob(jobId: string): Promise<number> {
+    await this.ensureGraph();
+    if (!jobId) throw new Error('jobId must be a non-empty string');
+    return this.retryFailedJobs(jobId);
+  }
+
+  private async retryFailedJobs(jobId?: string): Promise<number> {
     // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
     // serialized with claimNext/enqueue AND with clearTerminalJob (which also runs under
     // withClaimLock) so a by-id clear that read a job as clearable-failed cannot be swept
@@ -1043,7 +1053,10 @@ export class TripleStoreAsyncLiftPublisher
     // swept" guarantee does not hold.
     return this.withClaimLock(async () => {
       let retried = 0;
-      for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      const failedJobs = (await this.list({ status: 'failed' }))
+        .filter(isFailedJob)
+        .filter((job) => jobId === undefined || job.jobId === jobId);
+      for (const job of failedJobs) {
         if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
         // Jobs that failed with a recovery-phase resolution must go through recover(),
         // not retry(), to avoid double-publishing if the original tx eventually lands.

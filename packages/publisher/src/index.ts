@@ -269,6 +269,7 @@ export {
   type AsyncLiftPublisherRecoveryResolver,
   type VmPublishIntentRecoveryPublisher,
   type VmPublishIntentIndexBackfiller,
+  type VmPublishFailedJobRetrier,
   type VmPublishAdmissionJournalReader,
   type VmPublishTerminalJobClearer,
   type VmPublisherControl,
