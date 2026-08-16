@@ -521,6 +521,42 @@ describe('operation identity preservation (GH#2273)', () => {
       const { materializer } = materializerFor(store);
       expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
     }
+
+    // (d) REF-form locator that is NOT the committed digest => refuse.
+    // The resolver's read-both rule makes an explicit publicSnapshotRef row
+    // WIN over the digest fallback, so preserving this winner would leave a
+    // head whose readers follow the stale ref to missing or wrong content —
+    // while the identity key (locators excluded) still matches. The default
+    // fixture rows (ref === digest, pinned preserving in the rows above) are
+    // the polarity partner.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([
+        ...v1.meta.filter((quad) =>
+          !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publicSnapshotRef`)),
+        { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"sha256:${'b'.repeat(64)}"`, graph: WS_META },
+      ]);
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (e) MULTI-VALUED ref rows (one canonical, one stale) => refuse: the
+    // reader picks one arbitrarily, so serveability cannot be certified.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([
+        ...v1.meta,
+        { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"sha256:${'b'.repeat(64)}"`, graph: WS_META },
+      ]);
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
   });
 
   it('integer lexical forms compare by numeric value in the identity key', async () => {

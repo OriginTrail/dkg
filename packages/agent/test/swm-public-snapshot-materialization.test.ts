@@ -51,7 +51,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
-import type { StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
+import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
 
 const CG = 'ws00-snapshot-materialization';
 const WS = contextGraphWorkspaceGraphUri(CG);
@@ -124,7 +124,8 @@ interface HarnessOverrides {
   /** Skip the snapshot-store preseed to force the network (phase='snapshot') fetch. */
   preseedSnapshot?: boolean;
   reconcileImpl?: () => Promise<void>;
-  selectRepairIdentity?: () => { winnerShareOperationId: string } | null;
+  selectRepairIdentity?: () =>
+    Awaited<ReturnType<SharedMemorySnapshotMaterializer['selectRepairIdentity']>>;
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];

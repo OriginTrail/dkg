@@ -257,21 +257,32 @@ export function createSharedMemorySnapshotMaterializer(deps: {
    * never consumes snapshot pointers). Count is only the cheap pre-gate: a
    * stale same-size graph passes it, so the CONTENT digest must equal the
    * committed public digest — the same count-then-digest ladder
-   * `isGraphAssetMaterialized` uses for the assertion graph. Ref-form (or
-   * absent) locators are content-addressed — no worse than the descriptor's
-   * own — and pass.
+   * `isGraphAssetMaterialized` uses for the assertion graph.
+   *
+   * REF-form locators are NOT free passes: the resolver's read-both rule
+   * (workspace-resolution: an explicit legacy `publicSnapshotRef` row WINS
+   * over the digest fallback) means a stale ref would be FOLLOWED by
+   * readers, not ignored. A ref is serveable only when it IS the committed
+   * public digest (`putSnapshot` returns `ref === digest`, so the canonical
+   * row is always digest-valued); multi-valued or mismatched refs refuse.
+   * ABSENT locators (no graph, no ref) fall back to the digest convention —
+   * content-addressed, no worse than the descriptor's own — and pass.
    */
   const snapshotLocatorIsServeable = async (
     storedRows: readonly Quad[],
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> => {
+    const snapshotRefs = [...new Set(storedRows
+      .filter((row) => row.predicate === `${DKG}publicSnapshotRef`)
+      .map((row) => literalValue(row.object) ?? row.object))];
+    if (snapshotRefs.length > 1) return false;
     const snapshotGraphs = [...new Set(storedRows
       .filter((row) => row.predicate === `${DKG}publicSnapshotGraph`)
       .map((row) => row.object))];
     if (snapshotGraphs.length > 1) return false;
-    if (snapshotGraphs.length === 0) return true;
-    const snapshotRefs = storedRows
-      .filter((row) => row.predicate === `${DKG}publicSnapshotRef`);
+    if (snapshotGraphs.length === 0) {
+      return snapshotRefs.length === 0 || snapshotRefs[0] === descriptor.publicQuadsDigest;
+    }
     if (snapshotRefs.length > 0) return false;
     const snapshotContent = await deps.store.query(
       `SELECT ?s ?p ?o WHERE { GRAPH <${assertSafeIri(snapshotGraphs[0]!)}> { ?s ?p ?o } }`,
