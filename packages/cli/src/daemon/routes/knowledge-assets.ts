@@ -73,7 +73,7 @@ import {
   isSameAgentAddress,
   scopedTokenPromoteLane,
 } from "./shared-assertion-helpers.js";
-import { AsyncLiftJobConflictError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
+import { AsyncLiftJobConflictError, LiftJobPendingChainProofError, PromoteJobConflictError, isKnowledgeAssetWorkspaceHeadCorruptError } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
 import {
   validateAssertionName,
@@ -1587,6 +1587,20 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
             error: err.message,
+            existingJobId: err.existingJobId,
+          });
+        }
+        // GH#2270 — admission refused to republish a failed job that may already have
+        // submitted a transaction. Deliberately NOT the 409 above: nothing is wrong with
+        // the client's request, the job KEEPS its lifecycle subject (`existingJobId`), and
+        // it becomes republishable once chain recovery resolves it. Same 503 + retryable
+        // shape as the #2273 corrupt-head case below; without this branch it would fall
+        // through to a generic 500 and read as a node bug.
+        if (err instanceof LiftJobPendingChainProofError) {
+          return jsonResponse(res, 503, {
+            code: err.code,
+            error: err.message,
+            retryable: true,
             existingJobId: err.existingJobId,
           });
         }

@@ -129,6 +129,11 @@ export default defineConfig({
           'test/publisher-retry-tuning-wiring-2270.test.ts',
           'test/publisher-retry-tuning-boot-validation-2270.test.ts',
           'test/publisher-enable-preserves-keys-2270.test.ts',
+          // #2270 — what the daemon TELLS an operator: the three retry counts on
+          // POST /api/publisher/retry, the derived `retryState` on the job-detail
+          // routes (real publisher control, no hardhat), and the CLI rendering.
+          'test/publisher-retry-surfacing-2270.test.ts',
+          'test/publisher-retry-command-output-2270.test.ts',
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
