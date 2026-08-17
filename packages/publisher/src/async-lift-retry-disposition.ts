@@ -1,17 +1,20 @@
 /**
- * GH#2270 — the ONE classifier for "what happens to this failed job, and why is it sitting
- * there". Both consumers read it: the operator retry pass (`retryDetailed` → its three counts)
- * and the read-only status projection (`describeJobRetryState` → `autoRetryEligible` +
- * `waitingReason`). They therefore report ONE partition of the failed set structurally, not by
- * two orderings a comment promises to keep in step.
+ * GH#2270 — what happens to a failed job, and why it is sitting there, decided ONCE.
+ *
+ * The split is the point. {@link classifyRetryAction} is the WRITE decision and takes the job
+ * alone: what a retry pass does with a job never depended on the operator's `autoRetryEnabled`
+ * knob, and now it cannot — the signature has nowhere to put it.
+ * {@link describeRetryProjection} is the READ view, derived from that same action plus the knob.
+ * So both consumers (`retryDetailed`'s counts, `describeJobRetryState`'s per-job answer) still
+ * share one source, and the type boundary shows which of them the switch may influence.
  *
  * A read model, deliberately outside `lift-job-types.ts`: nothing here is persisted, and the
  * persisted job shape stays free of derived fields.
  */
 import {
-  hasBroadcastEvidence,
   isAutomaticallyRetryableLiftJob,
   isFailedJob,
+  isHeldForChainProof,
   type PersistedFailedJob,
 } from './async-lift-publisher-utils.js';
 import type { LiftJob } from './lift-job.js';
@@ -44,55 +47,77 @@ export interface LiftJobRetryProjection {
 }
 
 /**
- * What a manual retry pass does with the job. Independent of `autoRetryEnabled` BY
- * CONSTRUCTION: the kill-switch only separates `backoff` from `operator` inside the
- * projection, and both of those are `reaccept` — an operator's retry never depends on whether
- * the automatic lane is switched on.
+ * What a retry pass does with a failed job. Finer-grained than the three counts it feeds, so the
+ * read view can name the reason without re-deriving it: both `blocked_*` actions count as
+ * `blockedPendingRecovery`, both `skip_*` as `skipped`.
  */
-export type FailedJobRetryAction = 'reaccept' | 'blocked_pending_recovery' | 'skip';
-
-export interface FailedJobRetryDisposition {
-  readonly action: FailedJobRetryAction;
-  readonly projection: LiftJobRetryProjection;
-}
+export type FailedJobRetryAction =
+  | 'reaccept'
+  | 'blocked_recovery'
+  | 'blocked_pending_chain_proof'
+  | 'skip_terminal'
+  | 'skip_exhausted';
 
 /**
- * The single precedence. Chain safety is decided before the budget, so a job that may have sent
- * a transaction can never be reported as merely waiting on a budget — or reaccepted because one
- * remained.
+ * The single precedence, over the job alone.
+ *
+ * Chain safety is decided before BOTH the terminal shortcut and the budget: a job whose
+ * transaction is unaccounted for is held whatever its code says (a terminal
+ * `confirmation_mismatch` is exactly such a job), and it can never be reaccepted because a
+ * budget happened to remain.
  */
-export function classifyFailedJobRetryDisposition(
+export function classifyRetryAction(job: PersistedFailedJob): FailedJobRetryAction {
+  if (job.failure.resolution === 'retry_recovery') return 'blocked_recovery';
+  if (isHeldForChainProof(job)) return 'blocked_pending_chain_proof';
+  // A terminal failure with nothing to account for is not WAITING for anything — no lane,
+  // operator action or fresh mandate re-arms it; only a clear removes it.
+  if (!job.failure.retryable) return 'skip_terminal';
+  if (job.retries.retryCount >= job.retries.maxRetries) return 'skip_exhausted';
+  return 'reaccept';
+}
+
+/** The read view of {@link classifyRetryAction}: the same action, plus the operator's knob. */
+export function describeRetryProjection(
   job: PersistedFailedJob,
   options: { readonly autoRetryEnabled: boolean },
-): FailedJobRetryDisposition {
+): LiftJobRetryProjection {
   const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options);
-  const blocked = (waitingReason: LiftJobRetryWaitingReason): FailedJobRetryDisposition => ({
-    action: 'blocked_pending_recovery',
-    projection: { autoRetryEligible, waitingReason },
-  });
+  return { autoRetryEligible, ...waitingReasonOf(classifyRetryAction(job), autoRetryEligible) };
+}
 
-  // A terminal failure is not WAITING for anything — no lane, operator action or fresh mandate
-  // re-arms it (only a clear removes it), so it carries no reason at all.
-  if (!job.failure.retryable) return { action: 'skip', projection: { autoRetryEligible } };
-  if (job.failure.resolution === 'retry_recovery') return blocked('recovery');
-  if (hasBroadcastEvidence(job)) return blocked('pending_chain_proof');
-  if (job.retries.retryCount >= job.retries.maxRetries) {
-    return { action: 'skip', projection: { autoRetryEligible, waitingReason: 'exhausted' } };
+function waitingReasonOf(
+  action: FailedJobRetryAction,
+  autoRetryEligible: boolean,
+): { waitingReason?: LiftJobRetryWaitingReason } {
+  switch (action) {
+    case 'blocked_recovery':
+      return { waitingReason: 'recovery' };
+    case 'blocked_pending_chain_proof':
+      return { waitingReason: 'pending_chain_proof' };
+    case 'skip_exhausted':
+      return { waitingReason: 'exhausted' };
+    case 'skip_terminal':
+      return {};
+    case 'reaccept':
+      // The ONE place the operator's kill-switch is allowed to matter: it separates a retry the
+      // node performs itself from one that waits for an operator or a client re-submit.
+      return { waitingReason: autoRetryEligible ? 'backoff' : 'operator' };
+    default: {
+      // A new action must decide its own reason here rather than inherit a silent default.
+      const unhandled: never = action;
+      return unhandled;
+    }
   }
-  return {
-    action: 'reaccept',
-    projection: { autoRetryEligible, waitingReason: autoRetryEligible ? 'backoff' : 'operator' },
-  };
 }
 
 /**
- * The projection half of {@link classifyFailedJobRetryDisposition}, for any job. A job that has
- * not failed has no retry projection: nothing is eligible, and it is not waiting on a retry.
+ * {@link describeRetryProjection} for any job. A job that has not failed has no retry
+ * projection: nothing is eligible, and it is not waiting on a retry.
  */
 export function deriveLiftJobRetryProjection(
   job: LiftJob,
   options: { readonly autoRetryEnabled: boolean },
 ): LiftJobRetryProjection {
   if (!isFailedJob(job)) return { autoRetryEligible: false };
-  return classifyFailedJobRetryDisposition(job, options).projection;
+  return describeRetryProjection(job, options);
 }

@@ -41,6 +41,11 @@ describe('#1828 async lift intent lookup', () => {
   // The facts a recovering client retains (never the jobId or intentKey).
   const facts = { contextGraphId: 'music-social', name: 'albums' };
 
+  /**
+   * A failed job whose transaction is UNACCOUNTED FOR: recovery could not reconcile the
+   * broadcast it had recorded (`recovery_state_inconsistent`). GH#2270 keeps such a job on its
+   * lifecycle subject even though the failure is terminal — pinned by its own row below.
+   */
   async function driveToFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
     const publisher = createPublisher({ recoveryLookupTimeoutMs: 10 });
     const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
@@ -49,6 +54,27 @@ describe('#1828 async lift intent lookup', () => {
     await publisher.update(jobId, 'broadcast', { broadcast: KA_VM_BROADCAST_TX });
     now += 20;
     await publisher.recover();
+    const job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('failed');
+    return jobId;
+  }
+
+  /**
+   * A terminal failure with NO transaction to account for — the publish reverted before any
+   * broadcast metadata was written. Nothing holds it, so it supersedes normally; this is the
+   * fixture for the "terminal → superseded" half of the partition, which a tx-bearing terminal
+   * job stopped being an example of when GH#2270 started holding those.
+   */
+  async function driveToTerminalFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.recordPublishFailure(jobId, {
+      error: new Error('execution reverted'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
     const job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('failed');
     return jobId;
@@ -190,7 +216,7 @@ describe('#1828 async lift intent lookup', () => {
   });
 
   it('finds the job after a restart and for terminal jobs (AC4)', async () => {
-    const jobId = await driveToFailed(kaVmPublishRequest());
+    const jobId = await driveToTerminalFailed(kaVmPublishRequest());
     // Fresh instance over the same durable store — models a daemon restart.
     const restarted = createPublisher();
     const result = await restarted.lookupKnowledgeAssetVmPublishJobByIntent(facts);
@@ -201,7 +227,7 @@ describe('#1828 async lift intent lookup', () => {
 
   it('returns the active job with terminal siblings as superseded', async () => {
     const request = kaVmPublishRequest();
-    const failedId = await driveToFailed(request);
+    const failedId = await driveToTerminalFailed(request);
     // Add an active job under the same lifecycle subject (a real re-admission
     // scenario after a terminal failure). Built from the stored request wrapper.
     const failed = (await createPublisher().getStatus(failedId))!;
@@ -263,6 +289,21 @@ describe('#1828 async lift intent lookup', () => {
     // Non-retryable failure → superseded even with retries nominally remaining.
     await insertFailed(false, 0);
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('superseded');
+  });
+
+  it('classifies a terminal failure with an unaccounted transaction as active (GH#2270)', async () => {
+    // A recovery that could not reconcile its own broadcast is terminal, but its transaction may
+    // be on chain. Reporting it as SUPERSEDED told a recovering client the subject was free —
+    // and admission agreed, minting a second job for the same KA. It now stays the live job,
+    // which is what makes the re-submit answer `LIFT_JOB_PENDING_CHAIN_PROOF`.
+    const jobId = await driveToFailed(kaVmPublishRequest());
+
+    const result = await createPublisher().lookupKnowledgeAssetVmPublishJobByIntent(facts);
+
+    expect(result.kind).toBe('active');
+    if (result.kind !== 'active') return;
+    expect([result.job.jobId, result.job.failure?.code, result.job.failure?.retryable])
+      .toEqual([jobId, 'recovery_state_inconsistent', false]);
   });
 
   it('partitions the recovery identity by subGraphName (Chunk 1)', async () => {

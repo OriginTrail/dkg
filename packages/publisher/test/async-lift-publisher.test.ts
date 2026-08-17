@@ -2017,7 +2017,12 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(lock.bindings.length).toBeGreaterThan(0);
   });
 
-  it('fails included knowledge asset VM publish jobs as clearable lifecycle recovery failures', async () => {
+  // GH#2270 — this row used to end with bulk clear DELETING the failure. The job is terminal, but
+  // it is a job that broadcast a transaction and whose recovery could not reconcile it: deleting
+  // that record hands the KA's lifecycle subject back to admission, which then mints a second job
+  // for a transaction nobody has accounted for. Bulk clear now leaves it; an operator removes it
+  // by exact id once the transaction's fate is known.
+  it('fails included knowledge asset VM publish jobs and holds them for chain proof', async () => {
     const publisher = createPublisher({
       config: {
         recoveryLookupTimeoutMs: 50,
@@ -2045,7 +2050,9 @@ describe('TripleStoreAsyncLiftPublisher', () => {
     expect(job?.failure?.code).toBe('recovery_state_inconsistent');
     expect(job?.failure?.resolution).toBe('fail_job');
 
-    expect(await publisher.clear('failed')).toBe(1);
+    expect(await publisher.clear('failed')).toBe(0);
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    expect(await publisher.clearTerminalJob(jobId)).toEqual({ outcome: 'cleared' });
     expect(await publisher.getStatus(jobId)).toBeNull();
   });
 

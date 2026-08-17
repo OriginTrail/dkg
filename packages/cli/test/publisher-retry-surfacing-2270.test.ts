@@ -94,8 +94,11 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     return jobId;
   }
 
-  /** Terminal: nothing re-arms a confirmation mismatch — not the lane, not an operator. */
-  async function failTerminally(control: Control, name = 'mismatch'): Promise<string> {
+  /**
+   * Terminal AND tx-bearing: a confirmation mismatch is a job whose transaction is unaccounted
+   * for, so GH#2270 holds it for chain proof rather than letting its subject fall vacant.
+   */
+  async function failTerminallyHeld(control: Control, name = 'mismatch'): Promise<string> {
     const jobId = await claimedAndValidated(control, name);
     await control.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: `wallet-${name}` } });
     await control.update(jobId, 'included', {
@@ -105,6 +108,21 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     await control.recordPublishFailure(jobId, {
       error: new Error('on-chain confirmation mismatch'),
       failedFromState: 'included',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
+    return jobId;
+  }
+
+  /**
+   * Terminal with NOTHING to account for: the publish reverted before any broadcast metadata was
+   * written, so no lane, operator action or fresh mandate re-arms it and it is not waiting on
+   * anything either.
+   */
+  async function failTerminallyWithoutEvidence(control: Control, name = 'reverted'): Promise<string> {
+    const jobId = await claimedAndValidated(control, name);
+    await control.recordPublishFailure(jobId, {
+      error: new Error('execution reverted'),
+      failedFromState: 'broadcast',
       errorPayloadRef: `urn:dkg:test:error:${jobId}`,
     });
     return jobId;
@@ -120,7 +138,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     const control = newControl();
     const quorumJobId = await failWithUnmetQuorum(control);
     const evidenceJobId = await failAfterRecordedTxHash(control);
-    const terminalJobId = await failTerminally(control);
+    const terminalJobId = await failTerminallyWithoutEvidence(control);
 
     const res = await request(control, 'POST', '/api/publisher/retry', JSON.stringify({ status: 'failed' }));
 
@@ -156,9 +174,10 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
 
   it('omits waitingReason for jobs that are not waiting on a retry at all', async () => {
     const control = newControl();
-    // A terminal failure: no lane, operator action or fresh mandate re-arms it, so
-    // "waiting" would be a lie — the field is ABSENT rather than reported as exhausted.
-    const terminalJobId = await failTerminally(control);
+    // A terminal failure with nothing to account for: no lane, operator action or fresh mandate
+    // re-arms it, so "waiting" would be a lie — the field is ABSENT rather than reported as
+    // exhausted. (A terminal failure that DID broadcast is a different case: see the row below.)
+    const terminalJobId = await failTerminallyWithoutEvidence(control);
     const terminal = await request(control, 'GET', `/api/publisher/job?id=${terminalJobId}`);
     expect(terminal.body.retryState).toEqual({ autoRetryEligible: false });
 
@@ -181,7 +200,22 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
   });
 
-  it('serves retryState on the job-payload and legacy job routes too', async () => {
+  it('reports a TERMINAL failure that broadcast a transaction as waiting on chain proof', async () => {
+    // The gap the retry surfacing hid: a `confirmation_mismatch` is terminal, so it read as
+    // "nothing is waiting on this" while its transaction was unaccounted for — and admission
+    // would hand the KA to a replacement job. It is now held on every surface.
+    const control = newControl();
+    const heldJobId = await failTerminallyHeld(control);
+
+    const res = await request(control, 'GET', `/api/publisher/job?id=${heldJobId}`);
+    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+
+    const retry = await request(control, 'POST', '/api/publisher/retry', JSON.stringify({ status: 'failed' }));
+    expect(retry.body).toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
+    expect((await statusOf(control, heldJobId)).status).toBe('failed');
+  });
+
+  it('serves retryState on the job-payload and both legacy job routes too', async () => {
     const control = newControl();
     const jobId = await failAfterRecordedTxHash(control);
     const job = JSON.parse(JSON.stringify(await statusOf(control, jobId)));
@@ -195,6 +229,11 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     // and `retryState` joins it there, exactly as `payload` already does.
     const legacy = await request(control, 'GET', `/api/publisher/jobs/${jobId}`);
     expect(legacy.body).toEqual({ ...job, retryState: expected });
+
+    // The FOURTH surface — the legacy payload variant — spreads the job the same way and must
+    // carry `retryState` beside `payload`; a named lifecycle job has no raw payload (null).
+    const legacyPayload = await request(control, 'GET', `/api/publisher/jobs/${jobId}/payload`);
+    expect(legacyPayload.body).toEqual({ ...job, payload: null, retryState: expected });
   });
 
   async function request(
