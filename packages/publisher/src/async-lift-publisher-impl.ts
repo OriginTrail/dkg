@@ -50,6 +50,11 @@ import { AsyncLiftJobConflictError, LiftJobPendingChainProofError } from './asyn
 import {
   classifyRetryAction,
   deriveLiftJobRetryProjection,
+  isAutomaticallyRetryableLiftJob,
+  isBulkClearableTerminalLiftJob,
+  isClearableTerminalLiftJob,
+  isHeldForChainProof,
+  isOccupyingLifecycleJob,
   type LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
@@ -93,13 +98,8 @@ import {
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
-  isAutomaticallyRetryableLiftJob,
-  isHeldForChainProof,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
-  isBulkClearableTerminalLiftJob,
-  isClearableTerminalLiftJob,
-  isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
   resetFailedLiftJobToAccepted,
   rawLiftRequestFromJobRequest,

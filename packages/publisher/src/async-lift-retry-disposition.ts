@@ -1,23 +1,157 @@
 /**
- * GH#2270 — what happens to a failed job, and why it is sitting there, decided ONCE.
+ * GH#2270 — the canonical owner of FAILED-JOB POLICY: what a failed lift job may still do, and
+ * why it is sitting where it is. Every predicate whose answer depends on another's lives here, in
+ * ONE documented precedence — spread across modules they were exactly the kind of helpers that
+ * drift apart, each reading the same job and each free to disagree about it.
  *
- * The split is the point. {@link classifyRetryAction} is the WRITE decision and takes the job
- * alone: what a retry pass does with a job never depended on the operator's `autoRetryEnabled`
- * knob, and now it cannot — the signature has nowhere to put it.
- * {@link describeRetryProjection} is the READ view, derived from that same action plus the knob.
- * So both consumers (`retryDetailed`'s counts, `describeJobRetryState`'s per-job answer) still
- * share one source, and the type boundary shows which of them the switch may influence.
+ * The precedence, read top to bottom:
+ *   1. {@link isProvenIneffectiveLiftFailure} — does the failure code PROVE the transaction had
+ *      no effect? Then nothing below needs to account for it.
+ *   2. {@link isHeldForChainProof} — otherwise, is a transaction unaccounted for? A held job is
+ *      never republished, keeps its lifecycle subject, and survives bulk cleanup.
+ *   3. {@link classifyRetryAction} — the WRITE decision for a retry pass, over the job alone.
+ *   4. {@link isOccupyingLifecycleJob} / {@link isBulkClearableTerminalLiftJob} — the admission
+ *      and cleanup consequences of 2.
+ *   5. {@link describeRetryProjection} — the READ view of 3, plus the operator's kill-switch.
  *
- * A read model, deliberately outside `lift-job-types.ts`: nothing here is persisted, and the
- * persisted job shape stays free of derived fields.
+ * `async-lift-publisher-utils.ts` keeps the STRUCTURAL helpers (is this job failed, what does it
+ * persist, how is it rebuilt). Nothing here is persisted, and the persisted job shape
+ * (`lift-job-types.ts`) stays free of derived fields.
  */
-import {
-  isAutomaticallyRetryableLiftJob,
-  isFailedJob,
-  isHeldForChainProof,
-  type PersistedFailedJob,
-} from './async-lift-publisher-utils.js';
-import type { LiftJob } from './lift-job.js';
+import { isFailedJob, type PersistedFailedJob } from './async-lift-publisher-utils.js';
+import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
+import type { LiftJob, LiftJobFailureCode } from './lift-job.js';
+
+/**
+ * Might a transaction have been submitted for this job? Keyed on persisted EVIDENCE, never on the
+ * failure code's `resolution`: `rpc_unavailable` is the broadcast-phase catch-all and carries
+ * `reset_to_accepted`, yet a transaction that LANDED and merely failed to record locally arrives
+ * under exactly that code — resolution cannot separate the two.
+ *
+ * Evidence is a persisted transaction hash from either carrier (the live `broadcast` metadata, or
+ * `recovery.txHashChecked`, which survives a reset that dropped the broadcast metadata), plus an
+ * `included` origin, which by definition had a transaction.
+ *
+ * It is deliberately NOT keyed on `failedFromState ∈ {broadcast, included}`: `quorum_unmet`'s only
+ * allowed state is 'broadcast' while its producer sits before the publish tx is signed (see the
+ * `autoRetry` qualification in lift-job-failures.ts), so a state-keyed predicate would classify
+ * every quorum failure as evidence-bearing and strand the GH#1620 lane. Pre-send-safe failures
+ * persist no txHash, and that is what makes them safe to re-run.
+ *
+ * Reading those fields is structural; treating them as EVIDENCE is policy, which is why this
+ * lives here rather than beside the field accessors.
+ */
+export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
+  return Boolean(job.broadcast?.txHash ?? job.recovery?.txHashChecked)
+    || job.failure.failedFromState === 'included';
+}
+
+/**
+ * The failure codes that PROVE the transaction had no effect, so the evidence such a job carries
+ * needs no further accounting. Deliberately NOT a field on the failure registry: this is the
+ * publisher's own safety reading of a code, not wire-visible policy.
+ *
+ *  - `tx_reverted` — assigned only for an actual revert, and a reverted transaction published
+ *    nothing (the receipt exists; its status is not success). Chain-proven ineffective.
+ *  - `insufficient_funds` — a DEFINITIVE pre-acceptance reject (see
+ *    `isDefinitivePreAcceptanceSendFailure`): the node refused the transaction before it entered
+ *    the mempool. The #1851 pre-send write-ahead may already have persisted a txHash for that
+ *    attempt, and this exception is exactly what lets an operator top the wallet up and re-submit
+ *    instead of being told to wait for proof that can never arrive.
+ *
+ * Everything else stays unproven — including the timeouts and `confirmation_mismatch`, whose whole
+ * meaning is that the local view and the chain disagree.
+ */
+export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolean {
+  return code === 'tx_reverted' || code === 'insufficient_funds';
+}
+
+/**
+ * A failed job that may have a transaction on chain, with no proof either way. ONE property behind
+ * four surfaces, so they cannot answer differently: admission keeps the job bound to its lifecycle
+ * subject (a re-submit gets `LiftJobPendingChainProofError` rather than a replacement job), the
+ * reaccept writer refuses it, a retry pass reports it as `blockedPendingRecovery`, and bulk clear
+ * leaves it alone.
+ *
+ * NOT limited to retryable failures. A TERMINAL diagnosis like `confirmation_mismatch` is precisely
+ * a job whose transaction is unaccounted for; letting its subject fall vacant is how the next
+ * re-submit publishes the same KA a second time.
+ */
+export function isHeldForChainProof(job: PersistedFailedJob): boolean {
+  return hasBroadcastEvidence(job) && !isProvenIneffectiveLiftFailure(job.failure.code);
+}
+
+/**
+ * The ONE gate of the automatic retry lane, shared by the scheduler (`scheduleRetryIfEligible`),
+ * the claim-time sweep (`reacceptDueFailedJobs`) and the read-only status projection, so what the
+ * projection reports and what the lane does cannot drift.
+ *
+ * `autoRetryEnabled` is the operator kill-switch; the rest is registry policy, the shared retry
+ * budget, and the hold — a job whose transaction is unaccounted for is never reaccepted
+ * automatically, whatever the registry says about its code.
+ */
+export function isAutomaticallyRetryableLiftJob(
+  job: PersistedFailedJob,
+  options: { readonly autoRetryEnabled: boolean },
+): boolean {
+  return options.autoRetryEnabled
+    && getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+    && job.failure.retryable
+    && job.failure.resolution === 'reset_to_accepted'
+    && job.retries.retryCount < job.retries.maxRetries
+    && !isHeldForChainProof(job);
+}
+
+/**
+ * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal state, or a failed
+ * job admission would still bind rather than replace. Admission dedup
+ * (findActiveKnowledgeAssetVmPublishJob) and the intent-recovery lookup MUST both partition on this
+ * so they cannot drift — an occupying job is the live one to bind; everything else (finalized, and
+ * a failed job that is neither retryable nor held) is superseded.
+ *
+ * GH#2270 — neither the retry BUDGET nor the retryable flag alone decides occupancy any more:
+ *  - a RETRYABLE failed job holds its subject even with the budget spent, because a fresh client
+ *    re-submit re-arms one budget on the SAME jobId (admission's fresh-mandate reaccept);
+ *  - a job {@link isHeldForChainProof} holds it whatever its code says, INCLUDING a terminal
+ *    diagnosis: admission must answer that re-submit with a retryable pending-chain-proof
+ *    rejection, and the alternative is minting a REPLACEMENT job for a lifecycle whose transaction
+ *    may already be on chain — the double publish GH#2270 exists to prevent.
+ * A failure that proves its transaction had no effect (reverted, refused pre-acceptance) is not
+ * held, so it supersedes normally and the KA can be published again.
+ */
+export function isOccupyingLifecycleJob(job: LiftJob): boolean {
+  if (!isTerminalLiftJobState(job.status)) return true;
+  return isFailedJob(job) && (job.failure.retryable || isHeldForChainProof(job));
+}
+
+/**
+ * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk, through
+ * {@link isBulkClearableTerminalLiftJob}) and `clearTerminalJob(jobId)` so they cannot drift. A job
+ * is clearable iff it is in a native terminal state (finalized|failed) AND is not a
+ * `retry_recovery`-failed job — those may still carry a pending on-chain tx that periodic recovery
+ * will finalize, so NEITHER clear lane removes them (they leave the queue when `recover()`
+ * finalizes them from chain). A `retry_recovery`-failed job is therefore treated as
+ * NONTERMINAL-for-cleanup.
+ */
+export function isClearableTerminalLiftJob(job: LiftJob): boolean {
+  return isTerminalLiftJobState(job.status)
+    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
+ * GH#2270 — what BULK `clear(status)` may delete: terminal-clearable, MINUS a job
+ * {@link isHeldForChainProof}. Deleting a held job is what turns admission's
+ * `LiftJobPendingChainProofError` back into a fresh job for the same KA, so bulk cleanup is safe by
+ * default; the by-jobId clear (`clearTerminalJob`) stays the operator's deliberate, targeted
+ * override — there the operator names the exact job and owns the consequence.
+ *
+ * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
+ * reverted and unfunded attempts keeps working. Nothing is lost by clearing either: the #1829
+ * journal is append-only and a clear never touches it, so the txHash outlives the job record.
+ */
+export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {
+  return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
+}
 
 /**
  * Why a job is not moving, when it is not moving:
@@ -49,7 +183,8 @@ export interface LiftJobRetryProjection {
 /**
  * What a retry pass does with a failed job. Finer-grained than the three counts it feeds, so the
  * read view can name the reason without re-deriving it: both `blocked_*` actions count as
- * `blockedPendingRecovery`, both `skip_*` as `skipped`.
+ * `blockedPendingRecovery`, both `skip_*` as `skipped`. INTERNAL vocabulary — the package's public
+ * surface exposes the counts and the projection, never these strings.
  */
 export type FailedJobRetryAction =
   | 'reaccept'
@@ -59,12 +194,13 @@ export type FailedJobRetryAction =
   | 'skip_exhausted';
 
 /**
- * The single precedence, over the job alone.
+ * The WRITE decision, over the job alone: what a retry pass does with it. The operator's
+ * `autoRetryEnabled` knob is not an input and the signature has nowhere to put it — a manual retry
+ * does the same thing whether the automatic lane is on or off.
  *
- * Chain safety is decided before BOTH the terminal shortcut and the budget: a job whose
- * transaction is unaccounted for is held whatever its code says (a terminal
- * `confirmation_mismatch` is exactly such a job), and it can never be reaccepted because a
- * budget happened to remain.
+ * Chain safety is decided before BOTH the terminal shortcut and the budget: a job whose transaction
+ * is unaccounted for is held whatever its code says (a terminal `confirmation_mismatch` is exactly
+ * such a job), and it can never be reaccepted because a budget happened to remain.
  */
 export function classifyRetryAction(job: PersistedFailedJob): FailedJobRetryAction {
   if (job.failure.resolution === 'retry_recovery') return 'blocked_recovery';
@@ -111,8 +247,8 @@ function waitingReasonOf(
 }
 
 /**
- * {@link describeRetryProjection} for any job. A job that has not failed has no retry
- * projection: nothing is eligible, and it is not waiting on a retry.
+ * {@link describeRetryProjection} for any job. A job that has not failed has no retry projection:
+ * nothing is eligible, and it is not waiting on a retry.
  */
 export function deriveLiftJobRetryProjection(
   job: LiftJob,
