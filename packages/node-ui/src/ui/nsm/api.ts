@@ -27,7 +27,7 @@ export interface NsmBuyerSummary {
 
 export interface NsmKeyRecord {
   keyId: string;
-  scopes: { budgetMicroTrac: number; expiresAt: string | null; modelAllowlist: string[] | null; allowQuery: boolean; rps: number };
+  scopes: { label?: string; budgetMicroTrac: number; expiresAt: string | null; modelAllowlist: string[] | null; allowQuery: boolean; rps: number };
   mintedAt: string;
   implicit?: boolean;
   revoked: boolean;

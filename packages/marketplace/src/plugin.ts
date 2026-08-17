@@ -260,7 +260,7 @@ export const plugin: RoutePlugin = {
       return;
     }
 
-    if (path === BASE + "/buyer/wallet" || path === BASE + "/buyer/fund" || path === BASE + "/buyer/fund/status") {
+    if (path === BASE + "/buyer/wallet" || path === BASE + "/buyer/fund" || path === BASE + "/buyer/fund/status" || path === BASE + "/buyer/treasury" || path === BASE + "/buyer/close") {
       const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
       const remote = ctx.req.socket.remoteAddress ?? "";
       const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
@@ -269,12 +269,14 @@ export const plugin: RoutePlugin = {
         ctx.res.end('{"error":"E_TOKEN"}');
         return;
       }
-      const { walletStatus, fundTab, fundStatus } = await import("./buyer/actions.js");
+      const { walletStatus, fundTab, fundStatus, treasuryStatus, closeTab } = await import("./buyer/actions.js");
       const home = marketplaceHome(dkgHome());
       const method = (ctx.req.method ?? "GET").toUpperCase();
       let out: Record<string, unknown>;
       try {
         if (path.endsWith("/buyer/wallet")) out = await walletStatus(home);
+        else if (path.endsWith("/buyer/treasury")) out = await treasuryStatus(home);
+        else if (path.endsWith("/buyer/close") && method === "POST") { out = await closeTab(home); log(`buyer-close ${JSON.stringify(out).slice(0, 120)}`); }
         else if (path.endsWith("/fund/status")) out = await fundStatus(home);
         else if (method === "POST") {
           const chunks: Buffer[] = [];
@@ -285,6 +287,43 @@ export const plugin: RoutePlugin = {
         } else out = { error: "E_METHOD" };
       } catch (e) {
         out = { error: "E_BUYER_ACTION", detail: String((e as Error).message).slice(0, 160) };
+      }
+      const body = JSON.stringify(out);
+      ctx.res.writeHead(out.error ? 400 : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      ctx.res.end(body);
+      return;
+    }
+
+    // ── operator publish (wizard final step): republishes an already-mounted
+    // offering (+ its canonical Model KA) to the market graph. Loopback/token.
+    if (path === BASE + "/operate/publish" && (ctx.req.method ?? "").toUpperCase() === "POST") {
+      const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const remote = ctx.req.socket.remoteAddress ?? "";
+      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+      if (!local && !ctx.validTokens.has(auth)) {
+        ctx.res.writeHead(401, { "content-type": "application/json" });
+        ctx.res.end('{"error":"E_TOKEN"}');
+        return;
+      }
+      let out: Record<string, unknown>;
+      try {
+        const chunks: Buffer[] = [];
+        for await (const c of ctx.req as unknown as AsyncIterable<Buffer>) chunks.push(c);
+        const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as { offeringId?: string; contextGraphId?: string };
+        const ob = parsed.offeringId ? mounted.front?.offerings.get(parsed.offeringId) : undefined;
+        if (!ob || !mounted.front) out = { error: "E_OFFERING_UNKNOWN" };
+        else {
+          const { publishOffering } = await import("./seller/offering.js");
+          const token = cfg.nodeToken ?? [...ctx.validTokens][0] ?? "";
+          out = await publishOffering(`http://127.0.0.1:${ctx.apiPortRef.value}`, token, ob, {
+            providerAddress: mounted.front.providerAddress,
+            chainId: mounted.front.chainId,
+            apiBase: cfg.apiBase ?? "",
+            contextGraphId: parsed.contextGraphId ?? cfg.laneContextGraphId ?? "nsm-live",
+          }) as unknown as Record<string, unknown>;
+        }
+      } catch (e) {
+        out = { error: "E_PUBLISH", detail: String((e as Error).message).slice(0, 160) };
       }
       const body = JSON.stringify(out);
       ctx.res.writeHead(out.error ? 400 : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
@@ -324,7 +363,8 @@ const EPSILON = 0.001;
 async function operateStatus(cfg: MarketplaceConfig, m: Mounted): Promise<Record<string, unknown>> {
   const home = marketplaceHome(dkgHome());
   const { tabsAll, tabQuantities } = await import("./seller/tabs.js");
-  const { legStatus, providerMaySettleV3 } = await import("./seller/front.js");
+  const { providerMaySettleV3 } = await import("./seller/front.js");
+  const { legState } = await import("./seller/lifecycle.js");
   const { listKeys, keySpent } = await import("./gateway/keys.js");
   const { readFileSync: rf, existsSync: ex } = await import("node:fs");
   const { join: j } = await import("node:path");
@@ -339,7 +379,9 @@ async function operateStatus(cfg: MarketplaceConfig, m: Mounted): Promise<Record
   const legRows = legs.filter((l) => l.type === "leg").map((l) => ({
     legId: l.legId, legType: l.legType, tabId: l.tabId, offeringId: l.offeringId,
     provenanceClass: l.provenanceClass, cost: (l.pricing as { costMicroTrac?: number })?.costMicroTrac,
-    status: legStatus(home, String(l.legId)),
+    // v3.5 lifecycle state (pending-delivery / delivered / countersigned /
+    // withheld / voided) + deadline for the operate countdown
+    status: legState(home, String(l.legId)),
     at: l.at,
   }));
   const unsettledEarned = tabs.reduce((s, t) => s + t.quantities.billed - t.quantities.released, 0);
@@ -396,6 +438,13 @@ async function operateStatus(cfg: MarketplaceConfig, m: Mounted): Promise<Record
     tabs, legs: legRows,
     threshold: { unsettledEarnedMicroTrac: unsettledEarned, ...election },
     keys: listKeys(home).map((k) => ({ ...k, spentMicroTrac: keySpent(home, k.keyId) })),
+    // per-key usage rows (capped) — drives the Access spend chart + the
+    // key-conservation readout without another endpoint
+    keyUsage: ex(j(home, "gateway-usage.jsonl"))
+      ? rf(j(home, "gateway-usage.jsonl"), "utf8").split("\n").filter(Boolean).slice(-500)
+          .map((l) => { try { return JSON.parse(l) as Record<string, unknown>; } catch { return null; } })
+          .filter(Boolean)
+      : [],
   };
 }
 

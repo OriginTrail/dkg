@@ -170,3 +170,41 @@ export async function fundStatus(home: string): Promise<Record<string, unknown>>
     return { state: "offline", txHash: last.txHash, detail: String((e as Error).message).slice(0, 120) };
   }
 }
+
+// ── v3.5 Surface 05: buyer-side treasury projection ──
+// The refundable balance is the BUYER'S OWN projection: funded (deposit
+// journal) minus countersigned spend (gateway sub-ledgers). The seller's
+// ledger is authoritative at close; this view never pretends otherwise —
+// tabs funded outside the UI (no journal row) show funded=null honestly.
+export async function treasuryStatus(home: string): Promise<Record<string, unknown>> {
+  const cfg = readBuyerCfg(home);
+  if (!cfg) return { configured: false };
+  const wallet = await walletStatus(home);
+  const { keySpent, listKeys } = await import("../gateway/keys.js");
+  const spent = listKeys(home).reduce((s, k) => s + keySpent(home, k.keyId), 0);
+  const rows = fundingRows(home);
+  const tabs: Array<Record<string, unknown>> = [];
+  const journalTab = rows.filter((r) => r.tabId).map((r) => r as FundingRecord & { tabId: string });
+  const knownTabId = cfg.tabId ?? journalTab[journalTab.length - 1]?.tabId ?? null;
+  if (knownTabId) {
+    const funded = journalTab.filter((r) => r.tabId === knownTabId).reduce((s, r) => s + r.amountMicroTrac, 0) || null;
+    tabs.push({
+      tabId: knownTabId,
+      provider: journalTab.find((r) => r.tabId === knownTabId)?.providerAddress ?? null,
+      fundedMicro: funded,
+      billedMicro: spent,
+      refundableMicro: funded != null ? funded - spent : null,
+    });
+  }
+  return { configured: true, wallet, tabs };
+}
+
+/** Signed close of the buyer's tab — the buyer's own move, human-gated in
+ *  the UI. Returns the seller's signed close statement verbatim. */
+export async function closeTab(home: string): Promise<Record<string, unknown>> {
+  const cfg = readBuyerCfg(home);
+  if (!cfg?.tabId) return { error: "E_NO_TAB" };
+  const client = new BuyerClient(cfg.sellerApiBase, cfg.walletEnvFile, cfg.tabId);
+  const res = await client.close();
+  return { status: res.status, ...res.body };
+}

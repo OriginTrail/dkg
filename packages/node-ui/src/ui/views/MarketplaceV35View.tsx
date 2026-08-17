@@ -7,6 +7,8 @@ import { OnboardingCard } from '../nsm/OnboardingCard.js';
 import { CatalogView } from '../nsm/CatalogView.js';
 import { ModelPageView } from '../nsm/ModelPageView.js';
 import { PlaygroundView } from '../nsm/PlaygroundView.js';
+import { TreasuryView } from '../nsm/TreasuryView.js';
+import { AccessView } from '../nsm/AccessView.js';
 import { fetchOperateStatus, type NsmOperateStatus } from '../nsm/api.js';
 import { useCatalog } from '../nsm/useCatalog.js';
 import { copy } from '../nsm/copy.generated.js';
@@ -14,11 +16,15 @@ import { copy } from '../nsm/copy.generated.js';
 type Pane =
   | { k: 'models' }
   | { k: 'model'; groupKey: string }
-  | { k: 'playground'; initialModel?: string };
+  | { k: 'playground'; initialModel?: string }
+  | { k: 'treasury' }
+  | { k: 'access' };
 
 const NAV: Array<{ label: string; pane: Pane }> = [
   { label: copy('nav.models'), pane: { k: 'models' } },
   { label: copy('nav.playground'), pane: { k: 'playground' } },
+  { label: copy('nav.treasury'), pane: { k: 'treasury' } },
+  { label: copy('nav.access'), pane: { k: 'access' } },
 ];
 
 export function MarketplaceV35View(): React.ReactElement {
@@ -54,6 +60,8 @@ export function MarketplaceV35View(): React.ReactElement {
         {pane.k === 'playground' && (
           <PlaygroundView cat={cat} initialModel={pane.initialModel} />
         )}
+        {pane.k === 'treasury' && <TreasuryView />}
+        {pane.k === 'access' && <AccessView status={status} refresh={refresh} />}
       </div>
     </div>
   );
