@@ -11,6 +11,7 @@ import {
   expectFailed,
   scheduledDelay,
 } from './_helpers/async-lift-2270-harness.js';
+import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.js';
 import type { LiftJob } from '../src/index.js';
 
@@ -230,5 +231,133 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
 
     expect(await publisher.clear('failed')).toBe(1);
     expect(await publisher.getStatus(proven.jobId)).toBeNull();
+  });
+
+  /**
+   * The store shape an UPGRADE leaves behind: under the pre-GH#2270 rules a failed job could stop
+   * occupying its subject and a successor was minted for the same lifecycle. Both records persist,
+   * and the widened occupancy makes the old one look live again — so admission, which scans
+   * oldest-first, must not bind it.
+   */
+  async function seedSuccessorFor(failed: PersistedFailedJob, acceptedAt: number): Promise<string> {
+    const successor = {
+      jobId: 'successor-1',
+      jobSlug: 'successor-1',
+      request: failed.request,
+      status: 'accepted',
+      timestamps: { acceptedAt, updatedAt: acceptedAt },
+      retries: { retryCount: 0, maxRetries: 10 },
+      controlPlane: { jobRef: jobSubject('successor-1') },
+    } as unknown as LiftJob;
+    await h.store.insert(serializeJob(successor, DEFAULT_CONTROL_GRAPH_URI));
+    return successor.jobId;
+  }
+
+  /** Rewrite the persisted job so its retry budget reads as spent (the pre-upgrade shape). */
+  async function persistWithSpentBudget(failed: PersistedFailedJob): Promise<void> {
+    const spent = { ...failed, retries: { retryCount: 1, maxRetries: 1 } } as unknown as LiftJob;
+    await h.store.deleteByPattern({ subject: jobSubject(failed.jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await h.store.insert(serializeJob(spent, DEFAULT_CONTROL_GRAPH_URI));
+  }
+
+  it('binds the newest record when an exhausted failed job has a newer sibling', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const old = await failWithUnmetQuorum(publisher, request);
+    await persistWithSpentBudget(old);
+    const successorId = await seedSuccessorFor(old, old.timestamps.acceptedAt + 1_000);
+
+    // (a) An identical re-submit binds the SUCCESSOR. Binding the old record instead would
+    // fresh-mandate re-arm a superseded job back to life beside its own successor — two live jobs
+    // for one KA.
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(successorId);
+    const resurrected = await publisher.getStatus(old.jobId);
+    expect([resurrected?.status, resurrected?.retries.retryCount]).toEqual(['failed', 1]);
+    const stats = await publisher.getStats();
+    expect([stats.accepted, stats.failed]).toEqual([1, 1]);
+
+    // (b) A DIFFERENT intent conflicts against the successor — the record a client must reconcile
+    // with — never against the superseded predecessor.
+    await expect(publisher.enqueueKnowledgeAssetVmPublish({
+      ...request,
+      shareOperationId: 'share-op-successor',
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    })).rejects.toMatchObject({
+      code: 'ASYNC_LIFT_JOB_CONFLICT',
+      existingJobId: successorId,
+    });
+  });
+
+  it('binds the newer of two LIVE records for one lifecycle', async () => {
+    // Two live jobs on one key is the broken invariant #1828 surfaces as a conflict, and the
+    // sibling rule deliberately does not demote either (both are still running). Admission must
+    // still answer deterministically, and the record it binds is the lifecycle's most recent one —
+    // binding the older would resume a job the node has already moved past.
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const first = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const second = {
+      ...(await publisher.getStatus(first))!,
+      jobId: 'live-successor',
+      jobSlug: 'live-successor',
+      timestamps: { acceptedAt: 9_000, updatedAt: 9_000 },
+      controlPlane: { jobRef: jobSubject('live-successor') },
+    } as LiftJob;
+    await h.store.insert(serializeJob(second, DEFAULT_CONTROL_GRAPH_URI));
+
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe('live-successor');
+    // Neither record was mutated, and no third job was minted.
+    expect((await publisher.getStatus(first))?.status).toBe('accepted');
+    expect((await publisher.getStats()).accepted).toBe(2);
+  });
+
+  it('publishes anew when the lifecycle already FINISHED behind a held job', async () => {
+    // The case that isolates the sibling rule from "bind the newest": the newest record is
+    // finalized, so it binds nothing, and only the sibling rule stops admission from falling back
+    // to the older failed record — resurrecting a superseded job, or answering 503 for a KA whose
+    // publish demonstrably completed.
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const held = await failAfterRecordedTxHash(publisher, request);
+    expect(isHeldForChainProof(held)).toBe(true);
+    const finished = {
+      jobId: 'finalized-1',
+      jobSlug: 'finalized-1',
+      request: held.request,
+      status: 'finalized',
+      timestamps: {
+        acceptedAt: held.timestamps.acceptedAt + 1_000,
+        updatedAt: held.timestamps.acceptedAt + 1_000,
+      },
+      retries: { retryCount: 0, maxRetries: 10 },
+      claim: { walletId: 'wallet-finalized' },
+      validation: KA_VM_VALIDATION,
+      finalization: { mode: 'local' },
+      controlPlane: { jobRef: jobSubject('finalized-1') },
+    } as unknown as LiftJob;
+    await h.store.insert(serializeJob(finished, DEFAULT_CONTROL_GRAPH_URI));
+
+    const minted = await publisher.enqueueKnowledgeAssetVmPublish(request);
+
+    expect([minted === held.jobId, minted === 'finalized-1']).toEqual([false, false]);
+    expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    expect((await publisher.getStatus(minted))?.status).toBe('accepted');
+  });
+
+  it('lets a newer sibling supersede even a job held for chain proof', async () => {
+    // The hold keeps a lifecycle's CURRENT record from being republished; it must not wedge a
+    // lifecycle that has already moved on. The held record is still never reaccepted itself — the
+    // writer guard owns that — but it no longer shadows the successor at admission.
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const held = await failAfterRecordedTxHash(publisher, request);
+    expect(isHeldForChainProof(held)).toBe(true);
+    const successorId = await seedSuccessorFor(held, held.timestamps.acceptedAt + 1_000);
+
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(successorId);
+    expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    // The hold is intact where it belongs: a retry pass still refuses to reaccept that record.
+    expect(await publisher.retryDetailed())
+      .toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
   });
 });

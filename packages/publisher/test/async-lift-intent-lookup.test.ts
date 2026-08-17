@@ -306,6 +306,35 @@ describe('#1828 async lift intent lookup', () => {
       .toEqual([jobId, 'recovery_state_inconsistent', false]);
   });
 
+  it('reports a failed job with a NEWER sibling as superseded, not as a second active job (GH#2270)', async () => {
+    // The upgrade shape: a pre-GH#2270 store let a failed job's subject fall vacant and minted a
+    // successor. Both records survive, and the widened occupancy makes the old one look live — so
+    // without sibling awareness this lookup answers `conflict` (two active jobs, the broken #1828
+    // invariant) for a lifecycle that is simply one job followed by another.
+    const failedId = await driveToFailed(kaVmPublishRequest());
+    const failed = (await createPublisher().getStatus(failedId))!;
+    const successor: LiftJob = {
+      jobId: 'successor-1',
+      jobSlug: 'successor-1',
+      request: failed.request,
+      status: 'accepted',
+      timestamps: {
+        acceptedAt: failed.timestamps.acceptedAt + 1_000,
+        updatedAt: failed.timestamps.acceptedAt + 1_000,
+      },
+      retries: { retryCount: 0, maxRetries: 10 },
+      controlPlane: { jobRef: jobSubject('successor-1') },
+    };
+    await store.insert(serializeJob(successor, DEFAULT_CONTROL_GRAPH_URI));
+
+    const result = await createPublisher().lookupKnowledgeAssetVmPublishJobByIntent(facts);
+
+    expect(result.kind).toBe('active');
+    if (result.kind !== 'active') return;
+    expect(result.job.jobId).toBe('successor-1');
+    expect(result.superseded.map((j) => j.jobId)).toEqual([failedId]);
+  });
+
   it('partitions the recovery identity by subGraphName (Chunk 1)', async () => {
     const publisher = createPublisher();
     const research = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ subGraphName: 'research' }));
