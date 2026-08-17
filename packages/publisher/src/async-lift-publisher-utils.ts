@@ -9,6 +9,7 @@ import type {
   LiftJob,
   LiftJobAccepted,
   LiftJobHex,
+  LiftJobResettableState,
   LiftJobRequest,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
@@ -112,9 +113,43 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
  * CONSTRUCTION — a reaccepted job carries no stale schedule for the sweep to re-fire on.
  */
 export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: number): LiftJobAccepted {
-  const recoveredFromStatus =
-    job.failure.failedFromState === 'accepted' ? undefined : job.failure.failedFromState;
+  return buildLiftJobAcceptedReset(job, {
+    now,
+    // 'accepted' is the one origin with no prior state to recover from. Stated as that exclusion
+    // rather than a list of the rest, so a new active state cannot silently go unrecorded — the
+    // compiler rejects one that is not a `LiftJobResettableState`.
+    recoveredFrom: job.failure.failedFromState === 'accepted' ? undefined : job.failure.failedFromState,
+    txHashChecked: getLiftJobTransactionEvidence(job),
+    // This is a RETRY of the job (sweep, `retry()`, re-submit), so the attempt is stamped.
+    stampRetriedAt: true,
+  });
+}
 
+/**
+ * GH#2270 — the ONE shape of a job reset back to 'accepted', for every path that rebuilds one: the
+ * failed-job reaccept above and the interrupted-recovery reset in the publisher. The two used to be
+ * separate literals that had already drifted once (the evidence carrier), which is the whole reason
+ * this exists; their remaining differences are the OPTIONS below rather than two copies to keep in
+ * step by eye.
+ *
+ * The job is rebuilt, never merged, so `nextRetryAt` is dropped BY CONSTRUCTION — a reaccepted job
+ * carries no stale schedule for the sweep to re-fire on — and so are the claim, validation and
+ * broadcast facts of the attempt that failed.
+ *
+ * `recoveredFrom` is the origin state the recovery record names; passing `undefined` records no
+ * recovery at all. It is what carries the transaction hash forward (`txHashChecked`), so which
+ * origins a caller records IS its evidence-preservation rule. `stampRetriedAt` separates a RETRY
+ * (an attempt was spent) from a recovery reset (the job was interrupted, not re-attempted).
+ */
+export function buildLiftJobAcceptedReset(
+  job: LiftJob,
+  options: {
+    readonly now: number;
+    readonly recoveredFrom: LiftJobResettableState | undefined;
+    readonly txHashChecked: LiftJobHex | undefined;
+    readonly stampRetriedAt: boolean;
+  },
+): LiftJobAccepted {
   return {
     jobId: job.jobId,
     jobSlug: job.jobSlug,
@@ -122,13 +157,17 @@ export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: numbe
     status: 'accepted',
     timestamps: {
       acceptedAt: job.timestamps.acceptedAt,
-      lastRecoveredAt: now,
-      updatedAt: now,
-      lastRetriedAt: now,
+      lastRecoveredAt: options.now,
+      updatedAt: options.now,
+      ...(options.stampRetriedAt ? { lastRetriedAt: options.now } : {}),
     },
     retries: job.retries,
-    recovery: recoveredFromStatus
-      ? { action: 'reset_to_accepted', recoveredFromStatus, txHashChecked: getLiftJobTransactionEvidence(job) }
+    recovery: options.recoveredFrom
+      ? {
+          action: 'reset_to_accepted',
+          recoveredFromStatus: options.recoveredFrom,
+          txHashChecked: options.txHashChecked,
+        }
       : undefined,
     controlPlane: job.controlPlane,
   };

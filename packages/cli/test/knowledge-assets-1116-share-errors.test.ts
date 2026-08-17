@@ -478,13 +478,15 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(enqueueCalls).toBe(0);
   });
 
-  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF → 503 { code, error, retryable, existingJobId }', async () => {
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF → 503 { code, error, retryable: false, existingJobId }', async () => {
     // GH#2270 — a re-submit of a job that failed after a transaction may have been sent is
     // refused by admission: republishing it could double-publish. That is neither a client
     // mistake (the 409 conflict above would tell them to re-share for nothing) nor a node
-    // bug — pre-fix this code matched no catch branch and surfaced as a generic 500. The
-    // 503 + retryable + existingJobId says: the SAME job is held for chain proof, retry the
-    // same enqueue later, do not spin up a new intent.
+    // bug — pre-fix this code matched no catch branch and surfaced as a generic 500.
+    //
+    // `retryable: false` is the honest half: NO lane in this build clears the hold by itself
+    // (the chain-recovery loop never re-checks a failed KA-VM publish job), so a client that
+    // kept retrying this enqueue would loop forever. The body says who can end it instead.
     await startWith({}, {
       resolveFinalizedAssertionVmPublishIntent: async () => ({
         contextGraphId: CG_ID,
@@ -517,9 +519,12 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     const res = await post('vm/publish-async', { contextGraphId: CG_ID });
     expect(res.status).toBe(503);
     expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
-    expect(res.body.retryable).toBe(true);
+    expect(res.body.retryable).toBe(false);
     expect(res.body.existingJobId).toBe('job-7');
+    // The message names both exits and the exact job to act on, since nothing else will.
     expect(String(res.body.error)).toContain('chain recovery');
+    expect(String(res.body.error)).toContain('/api/publisher/clear-job');
+    expect(String(res.body.error)).toContain('job-7');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate

@@ -215,6 +215,33 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(hasBroadcastEvidence(carriedInRecoveryOnly)).toBe(true);
   });
 
+  it('carries the transaction hash through an INTERRUPTED-recovery reset too', async () => {
+    // The other caller of the shared reset builder: `recover()` putting an interrupted job back on
+    // the queue. It must preserve evidence exactly like a reaccept does — a job that was reset
+    // once, re-claimed and then interrupted carries its hash only in the recovery record, and this
+    // is the path that used to read `broadcast` alone and drop it.
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const claimed = (await publisher.claimNext('wallet-1'))!;
+    // The shape a first reset leaves behind: no broadcast metadata, hash in the recovery record.
+    const carriedInRecoveryOnly = {
+      ...claimed,
+      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH },
+    } as unknown as LiftJob;
+    await h.store.deleteByPattern({ subject: jobSubject(jobId), graph: DEFAULT_CONTROL_GRAPH_URI });
+    await h.store.insert(serializeJob(carriedInRecoveryOnly, DEFAULT_CONTROL_GRAPH_URI));
+
+    expect(await publisher.recover()).toBe(1);
+
+    const reset = await publisher.getStatus(jobId);
+    expect(reset?.status).toBe('accepted');
+    expect(reset?.recovery).toEqual({
+      action: 'reset_to_accepted',
+      recoveredFromStatus: 'claimed',
+      txHashChecked: TX_HASH,
+    });
+  });
+
   it('drops the retry schedule by rebuilding the timestamps, never by clearing a field', async () => {
     const publisher = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -289,6 +316,46 @@ describe('GH#2270 failed-job retry disposition', () => {
     expect(enabled.describeConfiguredRetryState(failed)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
     expect(createCorruptHeadPublisher({ autoRetryEnabled: false }).describeConfiguredRetryState(failed))
       .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+  });
+
+  it('reports an allow-listed failure that was never SCHEDULED as operator work, not backoff', async () => {
+    // The reviewer's case. A `workspace_unavailable` recorded while the kill-switch was off gets no
+    // `nextRetryAt`, and the sweep only reaccepts jobs whose schedule is set and due (the row
+    // 'strands an already-scheduled due job while disabled and releases it once re-enabled' in the
+    // lane spec proves that from the other side). Turning the switch back on does not schedule it
+    // retroactively — so reporting `backoff` would promise a retry no sweep will ever run.
+    const disabled = createCorruptHeadPublisher({ autoRetryEnabled: false });
+    await disabled.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const unscheduled = await failWithCorruptHead(disabled, 'wallet-1');
+    expect(unscheduled.timestamps.nextRetryAt).toBeUndefined();
+
+    // Re-enabled publisher, same job: allow-listed, budget intact, and still not going anywhere.
+    const reEnabled = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
+    expect(reEnabled.describeConfiguredRetryState(unscheduled))
+      .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+
+    // 'operator' is exactly right: the manual path DOES move it, which is what the operator is
+    // being told to reach for.
+    expect(await reEnabled.retryDetailed())
+      .toEqual({ retried: 1, blockedPendingRecovery: 0, skipped: 0 });
+  });
+
+  it('reports the same failure as backoff once it carries a schedule', async () => {
+    // The polarity, differing only in the schedule: recorded with the lane ON, the identical
+    // failure gets a `nextRetryAt` and the sweep will pick it up — so `backoff` is a promise the
+    // node keeps.
+    const publisher = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const scheduled = await failWithCorruptHead(publisher, 'wallet-1');
+    expect(scheduled.timestamps.nextRetryAt).toBeDefined();
+
+    expect(publisher.describeConfiguredRetryState(scheduled))
+      .toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
+    // And the schedule is the ONLY difference: strip it and the same job reads as operator work.
+    expect(publisher.describeConfiguredRetryState({
+      ...scheduled,
+      timestamps: { ...scheduled.timestamps, nextRetryAt: undefined },
+    })).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
   });
 
   // The action IS the partition: both consumers read this one function, so a divergence between
