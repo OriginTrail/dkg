@@ -97,7 +97,7 @@ import {
   createKnowledgeAssetVmPublishJobRequest,
   createJobSlug,
   expectBindings,
-  getRecoveryTxHash,
+  getLiftJobTransactionEvidence,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
   normalizePersistedLiftJobRequest,
@@ -745,7 +745,7 @@ export class TripleStoreAsyncLiftPublisher
     if (!this.chainRecoveryResolver) {
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getRecoveryTxHash(job)), 'recover-reset');
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getLiftJobTransactionEvidence(job)), 'recover-reset');
         return true;
       }
       return false;
@@ -1043,7 +1043,7 @@ export class TripleStoreAsyncLiftPublisher
     for (const job of interrupted) {
       if (job.status === 'claimed' || job.status === 'validated') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getRecoveryTxHash(job)), 'recover-reset');
+        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getLiftJobTransactionEvidence(job)), 'recover-reset');
         recovered += 1;
         continue;
       }

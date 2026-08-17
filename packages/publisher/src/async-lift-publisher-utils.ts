@@ -67,11 +67,24 @@ export function compareAcceptedJobs(a: LiftJob, b: LiftJob): number {
   return a.jobId.localeCompare(b.jobId);
 }
 
-export function getRecoveryTxHash(job: LiftJob): LiftJobHex | undefined {
+/**
+ * GH#2270 — the ONE reader of a job's transaction hash, over BOTH carriers it can live in:
+ *  - `broadcast.txHash`, while the job still holds its broadcast metadata;
+ *  - `recovery.txHashChecked`, which is where a reset put it — that reset rebuilds the job without
+ *    broadcast metadata, so after one the recovery record is the ONLY carrier.
+ *
+ * Every consumer reads it here: the evidence predicate that decides whether a job is held, and the
+ * resets that must carry the hash into the job they rebuild. Reading only the first carrier is how
+ * a second reset silently dropped a hash the first one had preserved.
+ *
+ * Structural, not policy: this answers "what hash does this job carry", never "what does carrying
+ * it mean" — that is `hasBroadcastEvidence` in the disposition module.
+ */
+export function getLiftJobTransactionEvidence(job: LiftJob): LiftJobHex | undefined {
   if ('broadcast' in job && job.broadcast) {
     return job.broadcast.txHash;
   }
-  return undefined;
+  return job.recovery?.txHashChecked;
 }
 
 export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
@@ -90,6 +103,10 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
  * be excluded, which dropped the recovery record and the hash with it. The origin is recorded even
  * though every manual path refuses evidence-bearing jobs today: the reset must not be the step
  * that loses the evidence when the proof-first dispatcher lands.
+ *
+ * The hash itself comes from {@link getLiftJobTransactionEvidence}, i.e. from EITHER carrier: a job
+ * being reset a second time carries its hash in the recovery record left by the first reset, and
+ * reading only `broadcast` dropped it exactly there.
  *
  * Timestamps are rebuilt from scratch rather than merged, so `nextRetryAt` is dropped BY
  * CONSTRUCTION — a reaccepted job carries no stale schedule for the sweep to re-fire on.
@@ -111,7 +128,7 @@ export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: numbe
     },
     retries: job.retries,
     recovery: recoveredFromStatus
-      ? { action: 'reset_to_accepted', recoveredFromStatus, txHashChecked: getRecoveryTxHash(job) }
+      ? { action: 'reset_to_accepted', recoveredFromStatus, txHashChecked: getLiftJobTransactionEvidence(job) }
       : undefined,
     controlPlane: job.controlPlane,
   };
