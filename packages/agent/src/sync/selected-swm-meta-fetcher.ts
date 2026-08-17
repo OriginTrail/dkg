@@ -494,7 +494,7 @@ export function createSelectedSwmMetaFetcher(options: {
       const state = states.get(contextGraphId);
       if (!state?.completed) {
         return {
-          orderedManifest,
+          orderedManifestSnapshot: () => immutableManifestSnapshot(orderedManifest),
           isResolved: () => false,
           resolvedCount: () => 0,
           resolvedRefsSnapshot: () => [],
@@ -506,7 +506,7 @@ export function createSelectedSwmMetaFetcher(options: {
       const walk = retainedWalk && manifestsEqual(retainedWalk.orderedManifest, orderedManifest)
         ? retainedWalk
         : {
-          orderedManifest: [...orderedManifest],
+          orderedManifest: immutableManifestSnapshot(orderedManifest),
           resolvedRefs: new Set<string>(),
           suppressedMetadataRowsByRef: new Map<string, readonly Quad[]>(),
           expiresAtMs: 0,
@@ -517,7 +517,9 @@ export function createSelectedSwmMetaFetcher(options: {
         walk.expiresAtMs = now() + retentionTtlMs;
       }
       return {
-        orderedManifest: walk.orderedManifest,
+        orderedManifestSnapshot() {
+          return immutableManifestSnapshot(walk.orderedManifest);
+        },
         isResolved(ref: string) {
           return walk.resolvedRefs.has(ref);
         },
@@ -528,7 +530,7 @@ export function createSelectedSwmMetaFetcher(options: {
           return Object.freeze([...walk.resolvedRefs]);
         },
         suppressedMetadataRows(ref: string) {
-          return walk.suppressedMetadataRowsByRef.get(ref) ?? [];
+          return immutableQuadSnapshot(walk.suppressedMetadataRowsByRef.get(ref) ?? []);
         },
         markResolved(ref: string, suppressedMetadataRows: readonly Quad[] = []) {
           if (
@@ -539,7 +541,7 @@ export function createSelectedSwmMetaFetcher(options: {
           ) return;
           walk.suppressedMetadataRowsByRef.set(
             ref,
-            suppressedMetadataRows.map((quad) => ({ ...quad })),
+            immutableQuadSnapshot(suppressedMetadataRows),
           );
           walk.resolvedRefs.add(ref);
           if (walk.resolvedRefs.size < walk.orderedManifest.length) {
@@ -600,4 +602,14 @@ function manifestsEqual(
         && snapshot.digest === candidate.digest
         && snapshot.count === candidate.count;
     });
+}
+
+function immutableManifestSnapshot(
+  manifest: readonly PublicSnapshotMetadata[],
+): readonly PublicSnapshotMetadata[] {
+  return Object.freeze(manifest.map((snapshot) => Object.freeze({ ...snapshot })));
+}
+
+function immutableQuadSnapshot(quads: readonly Quad[]): readonly Quad[] {
+  return Object.freeze(quads.map((quad) => Object.freeze({ ...quad })));
 }

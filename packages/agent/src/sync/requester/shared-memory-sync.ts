@@ -282,8 +282,8 @@ export interface SharedMemoryMetadataFetchOutcome {
  * it, so a skipped ref can never outlive the evidence that justified the skip.
  */
 export interface SharedMemorySnapshotWalkContinuation {
-  /** Exact ordered manifest that owns every resolved ref below. */
-  readonly orderedManifest: readonly PublicSnapshotMetadata[];
+  /** Take an immutable copy of the exact ordered manifest owning the resolved refs below. */
+  orderedManifestSnapshot(): readonly PublicSnapshotMetadata[];
   /** Query live owner state without exposing its mutable backing collection. */
   isResolved(ref: string): boolean;
   resolvedCount(): number;
@@ -1558,7 +1558,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     ? []
     : collectPublicSnapshotMetadata(params.metaQuads);
   const snapshots = params.snapshotWalk
-    ? [...params.snapshotWalk.orderedManifest]
+    ? params.snapshotWalk.orderedManifestSnapshot()
     : params.recoveryOrder === 'recent-balanced'
       ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
       : manifestSnapshots;

@@ -130,7 +130,7 @@ describe('selected snapshot walk continuation', () => {
       contextGraphId: 'cg-resume-prefix',
       deadline: Date.now() + 60_000,
       snapshotWalk: {
-        orderedManifest: snapshots,
+        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
         isResolved: (ref) => ref === firstDigest,
         resolvedCount: () => 1,
         resolvedRefsSnapshot: () => [firstDigest],
@@ -166,6 +166,63 @@ describe('selected snapshot walk continuation', () => {
     expect(cacheReads).toEqual([secondDigest]);
     expect(fetchedRefs).toEqual([secondDigest]);
     expect(readyRefs).toEqual([secondDigest]);
+    expect(result).toMatchObject({
+      readySnapshots: 2,
+      totalSnapshots: 2,
+      completed: true,
+      missingCount: 0,
+    });
+  });
+
+  it('starts at the first snapshot when a changed manifest has no retained resolution', async () => {
+    const first = [quad('changed-manifest-first')].map((row) => ({ ...row, graph: '' }));
+    const second = [quad('changed-manifest-second')].map((row) => ({ ...row, graph: '' }));
+    const firstDigest = workspacePublicQuadsDigest(first);
+    const secondDigest = workspacePublicQuadsDigest(second);
+    const snapshots = [
+      { ref: firstDigest, digest: firstDigest, count: first.length },
+      { ref: secondDigest, digest: secondDigest, count: second.length },
+    ];
+    const fetchedRefs: string[] = [];
+
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-changed-manifest',
+      contextGraphId: 'cg-changed-manifest',
+      deadline: Date.now() + 60_000,
+      snapshotWalk: {
+        orderedManifestSnapshot: () => snapshots.map((snapshot) => ({ ...snapshot })),
+        isResolved: () => false,
+        resolvedCount: () => 0,
+        resolvedRefsSnapshot: () => [],
+        suppressedMetadataRows: () => [],
+        markResolved: () => {},
+      },
+      publicSnapshotStore: {
+        getSnapshot: async () => null,
+        putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 1 }),
+      },
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        contextGraphId,
+        _includeSharedMemory,
+        phase,
+        _graph,
+        _deadline,
+        options,
+      ) => {
+        const ref = options!.snapshotRef!;
+        fetchedRefs.push(ref);
+        return pageResult(contextGraphId, phase, {
+          quads: ref === firstDigest ? first : second,
+        });
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+    });
+
+    expect(fetchedRefs).toEqual([firstDigest, secondDigest]);
     expect(result).toMatchObject({
       readySnapshots: 2,
       totalSnapshots: 2,

@@ -4,7 +4,6 @@ import {
   createSelectedSwmMetaFetcher,
   SelectedSwmMetaTransferOwner,
 } from '../src/sync/selected-swm-meta-fetcher.js';
-import { syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
@@ -196,55 +195,23 @@ describe('selected SWM metadata transfer ownership', () => {
       changedDigest[1]!,
     ];
     const reordered = [changedCount[1]!, changedCount[0]!];
-    const requestedRefs: string[] = [];
-
     try {
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, original);
         walk.markResolved('ref-a');
         expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+        const exposed = walk.orderedManifestSnapshot();
+        expect(() => {
+          (exposed as unknown as Array<{ ref: string }>)[0]!.ref = 'mutated-ref';
+        }).toThrow();
+        expect(walk.orderedManifestSnapshot()).toEqual(original);
       });
 
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedDigest);
         expect(walk.resolvedRefsSnapshot()).toEqual([]);
-        await syncPublicSnapshotsForMeta({
-          ctx: testContext,
-          remotePeerId: peerId,
-          contextGraphId,
-          deadline: Date.now() + 1_000,
-          snapshotWalk: walk,
-          publicSnapshotStore: {
-            getSnapshot: async () => null,
-            putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 0 }),
-          },
-          fetchSyncPages: async (
-            _ctx,
-            _remotePeerId,
-            _contextGraphId,
-            _includeSharedMemory,
-            _phase,
-            _graphUri,
-            _deadline,
-            options,
-          ) => {
-            requestedRefs.push(options?.snapshotRef ?? '');
-            return {
-              quads: [],
-              bytesReceived: 0,
-              resumedFromOffset: 0,
-              nextOffset: 0,
-              checkpointKey: 'changed-manifest-snapshot',
-              completed: false,
-              timedOut: true,
-            };
-          },
-          deleteCheckpoint: () => {},
-          setCheckpoint: () => {},
-        });
-        expect(requestedRefs).toEqual(['ref-a']);
         walk.markResolved('ref-a');
       });
 

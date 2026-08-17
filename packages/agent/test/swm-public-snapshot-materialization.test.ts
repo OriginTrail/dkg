@@ -53,6 +53,7 @@ import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import {
   runSharedMemorySync,
   type SharedMemoryMetadataFetcher,
+  type SharedMemorySnapshotWalkContinuation,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
 
@@ -326,34 +327,57 @@ describe('public SWM snapshot materialization', () => {
     expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
   });
 
-  it('reapplies resolved-prefix suppression before a resumed round bulk-inserts metadata', async () => {
+  it('captures first-round suppression and reapplies it before a resumed bulk metadata insert', async () => {
     const fx = fixture();
-    const walk = {
-      orderedManifest: [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }],
-      isResolved: (ref) => ref === fx.digest,
-      resolvedCount: () => 1,
-      resolvedRefsSnapshot: () => [fx.digest],
-      suppressedMetadataRows: (ref: string) => ref === fx.digest ? fx.meta : [],
-      markResolved: () => {},
-    };
-    const h = harness({
-      metadataFetcher: {
-        fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
-        release: () => {},
-        snapshotWalk: () => walk,
+    const manifest = [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }];
+    const resolved = new Set<string>();
+    const suppressedByRef = new Map<string, readonly Quad[]>();
+    const walk: SharedMemorySnapshotWalkContinuation = {
+      orderedManifestSnapshot: () => manifest.map((snapshot) => ({ ...snapshot })),
+      isResolved: (ref) => resolved.has(ref),
+      resolvedCount: () => resolved.size,
+      resolvedRefsSnapshot: () => [...resolved],
+      suppressedMetadataRows: (ref) => suppressedByRef.get(ref) ?? [],
+      markResolved: (ref, suppressedRows = []) => {
+        suppressedByRef.set(ref, suppressedRows.map((quad) => ({ ...quad })));
+        resolved.add(ref);
       },
+    };
+    const metadataFetcher: SharedMemoryMetadataFetcher = {
+      fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+      release: () => {},
+      snapshotWalk: () => walk,
+    };
+    const first = harness({
+      reconcileDisposition: 'suppress-metadata',
+      metadataFetcher,
     });
 
-    const summary = await h.run();
+    const firstSummary = await first.run();
 
-    expect(summary.failedPhases).toBe(0);
-    expect(h.replaced).toHaveLength(0);
-    expect(h.events).not.toContain('finalized-twin-reconciled');
-    const suppressedSubjects = new Set([
+    expect(firstSummary.failedPhases).toBe(0);
+    expect(first.replaced).toHaveLength(1);
+    expect(resolved).toEqual(new Set([fx.digest]));
+    const retiredSubjects = new Set([
       `${UAL}#dkg-swm-head`,
       `urn:dkg:share:${CG}:snapshot-materialization-op`,
     ]);
-    expect(h.inserted.flat().filter((quad) => suppressedSubjects.has(quad.subject)))
+    const capturedRows = suppressedByRef.get(fx.digest) ?? [];
+    expect(capturedRows.filter((quad) => retiredSubjects.has(quad.subject)).length)
+      .toBeGreaterThan(0);
+
+    const resumed = harness({
+      metadataFetcher: {
+        ...metadataFetcher,
+      },
+    });
+
+    const resumedSummary = await resumed.run();
+
+    expect(resumedSummary.failedPhases).toBe(0);
+    expect(resumed.replaced).toHaveLength(0);
+    expect(resumed.events).not.toContain('finalized-twin-reconciled');
+    expect(resumed.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
       .toHaveLength(0);
   });
 
