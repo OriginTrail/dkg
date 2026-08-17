@@ -15,7 +15,11 @@ import type {
   DashboardDB,
   OperationTracker,
 } from '@origintrail-official/dkg-node-ui';
-import type { DkgConfig, loadNetworkConfig } from '../../config.js';
+import type {
+  DkgConfig,
+  ResolvedRfc64PublicCatalogActivationConfig,
+  loadNetworkConfig,
+} from '../../config.js';
 import type { VmPublisherControl } from '@origintrail-official/dkg-publisher';
 import type { PublisherState } from '../../publisher-runner.js';
 import type { ExtractionStatusRecord } from '../../extraction-status.js';
@@ -63,6 +67,8 @@ export interface RequestContext {
   /** Lifecycle-owned runtime and readiness as one correlated state. */
   publisherState: PublisherState;
   config: DkgConfig;
+  /** Immutable RFC-64 activation resolved once during daemon startup. */
+  rfc64PublicCatalog: ResolvedRfc64PublicCatalogActivationConfig;
   startedAt: number;
   dashDb: DashboardDB;
   opWallets: OpWalletsConfig;

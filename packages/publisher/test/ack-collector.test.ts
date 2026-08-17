@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { ACKCollector, type ACKCollectorDeps } from '../src/ack-collector.js';
+import { QuorumUnmetError } from '../src/ack-errors.js';
 import {
   decodePublishIntent,
   encodeStorageACK,
@@ -662,6 +663,58 @@ describe('ACKCollector', () => {
     // Bounded by the transport budget (MAX_RETRIES=3 in the source), no hang.
     for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
       expect(callsByPeer.get(peerId)).toBe(3);
+    }
+  });
+
+  it('does not retry a peer that cannot negotiate the required ACK protocol', async () => {
+    const callsByPeer = new Map<string, number>();
+    const deps: ACKCollectorDeps = {
+      gossipPublish: async () => {},
+      sleep: async () => {},
+      sendP2P: async (peerId, protocol) => {
+        callsByPeer.set(peerId, (callsByPeer.get(peerId) ?? 0) + 1);
+        throw new Error(`Protocol selection failed - could not negotiate ${protocol}`);
+      },
+      getConnectedCorePeers: () => ['peer-0', 'peer-1', 'peer-2'],
+      log: () => {},
+    };
+
+    const collector = new ACKCollector(deps);
+    let caught: QuorumUnmetError | undefined;
+    try {
+      await collector.collect({
+        merkleRoot,
+        contextGraphId: testCGId,
+        contextGraphIdStr: testCGIdStr,
+        publisherPeerId: 'publisher-0',
+        publicByteSize: 100n,
+        isPrivate: false,
+        kaCount: 1,
+        rootEntities: ['urn:a'],
+        chainId: TEST_CHAIN_ID,
+        kav10Address: TEST_KAV10_ADDR,
+        merkleLeafCount,
+        ackMode: { kind: 'public' },
+      });
+    } catch (err) {
+      caught = err as QuorumUnmetError;
+    }
+
+    expect(caught).toBeDefined();
+    expect(caught).toMatchObject({
+      peerOutcomes: expect.arrayContaining([
+        expect.objectContaining({
+          dialOk: true,
+          protocolSupported: false,
+          reason: 'PROTOCOL_UNSUPPORTED',
+        }),
+      ]),
+    });
+    expect(caught!.message).toContain('storage_ack_insufficient');
+    expect(caught!.message).toContain('PROTOCOL_UNSUPPORTED');
+
+    for (const peerId of ['peer-0', 'peer-1', 'peer-2']) {
+      expect(callsByPeer.get(peerId)).toBe(1);
     }
   });
 

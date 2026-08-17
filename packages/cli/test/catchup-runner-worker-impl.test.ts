@@ -14,12 +14,16 @@
 //     transfers one payload instead of one per peer. A non-authoritative peer's
 //     clean round settles nothing — it can neither stop the walk nor narrow a
 //     later peer to one plane.
+import {
+  durableCatchupResult as durableResult,
+  runWorkerCatchup,
+  sharedCatchupResult as sharedResult,
+} from './helpers/catchup-runner-worker-test-harness.js';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 import {
   CATCHUP_MAX_CONCURRENT_PEER_SYNCS,
   FOREGROUND_CATCHUP_SYNC_PRIORITY,
 } from '@origintrail-official/dkg-agent';
-import type { CatchupJobResult, CatchupRunRequest } from '../src/catchup-runner.js';
 
 // The foreground backpressure budget is wall-clock (default 180s). Shrink it
 // for this file so the persistently-deferred case settles quickly; the exact
@@ -48,109 +52,7 @@ afterAll(() => {
   else process.env.DKG_CATCHUP_BACKPRESSURE_MAX_WAIT_MS = previousCATCHUPBACKPRESSUREMAXWAITMS;
 });
 
-// The worker impl wires itself to `parentPort` at module load, so a
-// controllable port has to be in place BEFORE the module is imported.
-// Everything else from node:worker_threads stays real.
-const fakeParentPort = vi.hoisted(() => {
-  const messageListeners: Array<(message: any) => void> = [];
-  const port = {
-    on(event: string, listener: (message: any) => void) {
-      if (event === 'message') messageListeners.push(listener);
-    },
-    /** Set per run by `runWorkerCatchup`; receives what the impl posts back. */
-    onPosted: undefined as ((message: any) => void) | undefined,
-    postMessage(message: any) {
-      port.onPosted?.(message);
-    },
-    emitMessage(message: any) {
-      for (const listener of messageListeners) listener(message);
-    },
-  };
-  return port;
-});
-
-vi.mock('node:worker_threads', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('node:worker_threads')>()),
-  parentPort: fakeParentPort,
-}));
-
 const delay = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
-
-function durableResult() {
-  return {
-    insertedTriples: 1,
-    complete: true,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 1,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 1,
-    bytesReceived: 10,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 1,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    metaOnlyResponses: 0,
-    dataRejectedMissingMeta: 0,
-    rejectedKcs: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-  };
-}
-
-function sharedResult() {
-  return {
-    insertedTriples: 1,
-    fetchedMetaTriples: 0,
-    fetchedDataTriples: 1,
-    insertedMetaTriples: 0,
-    insertedDataTriples: 1,
-    bytesReceived: 10,
-    resumedPhases: 0,
-    timedOutPhases: 0,
-    completedPhases: 1,
-    checkpointAdvances: 0,
-    emptyResponses: 0,
-    droppedDataTriples: 0,
-    failedPeers: 0,
-    failedPhases: 0,
-    deniedPhases: 0,
-    deferredBackpressure: 0,
-  };
-}
-
-type InvokeHandler = (method: string, args: unknown[]) => Promise<unknown>;
-
-let nextRunId = 1;
-
-async function runWorkerCatchup(request: CatchupRunRequest, handler: InvokeHandler): Promise<CatchupJobResult> {
-  // The first call loads the module, which registers its message listener on
-  // the mocked parentPort; later calls reuse it (distinct runIds).
-  await import('../src/catchup-runner-worker-impl.js');
-  const runId = nextRunId++;
-  return new Promise<CatchupJobResult>((resolve, reject) => {
-    fakeParentPort.onPosted = (message: any) => {
-      if (message.type === 'invoke') {
-        handler(message.method, message.args).then(
-          (result) => fakeParentPort.emitMessage({ type: 'invoke-result', invokeId: message.invokeId, result }),
-          (error: unknown) => fakeParentPort.emitMessage({
-            type: 'invoke-result',
-            invokeId: message.invokeId,
-            error: error instanceof Error ? error.message : String(error),
-          }),
-        );
-        return;
-      }
-      if (message.type === 'run-result' && message.runId === runId) {
-        if (message.error) reject(new Error(message.error));
-        else resolve(message.result as CatchupJobResult);
-      }
-    };
-    fakeParentPort.emitMessage({ type: 'run', runId, request });
-  });
-}
 
 /**
  * SCOPE OF THESE TESTS — read before trusting a green run.
@@ -1763,5 +1665,523 @@ describe('catchup-runner-worker-impl bounded fan-out (sync-storm mitigation C-1)
       },
       sharedMemory: { verifiedDataPeers: 0, emptyPeers: peerIds.length, authorityEmptyPeers: 0 },
     });
+  });
+});
+
+/**
+ * #2050 — the COMPOSED continuation chain, executed rather than reasoned about.
+ *
+ * Every link in this chain is pinned individually elsewhere: the coverage record
+ * survives a throwing round (agent-side T14), the capability gate reads coverage
+ * and not failure counters, the high-water mark advances, and the pure stop rule
+ * decides correctly. What nothing executed was the SEAM — that a round which
+ * materialized some Knowledge Assets and then failed actually causes a **second
+ * pass to run**.
+ *
+ * That distinction is not pedantic. Both of the last two defects on this change
+ * survived precisely because each piece was individually correct: a coverage
+ * record that was fabricated-but-plausible, and a counter whose name outlived its
+ * meaning. A chain of correct links can still fail to be connected.
+ *
+ * The load-bearing assertion here is the **pass count**, not the terminal record.
+ * A test that only checks the final coverage passes whether the loop ran once or
+ * twice — the first pass's own record already carries the converged numbers if
+ * the second pass simply overwrites it.
+ */
+describe('#2050 continuation loop — a failed-but-productive pass earns another one', () => {
+  const CG = 'continuation-chain-cg';
+  const PEER = 'peer-continuation-0001';
+
+  /** A round that resolved some of its manifest and did NOT complete cleanly. */
+  /** Same shape but the manifest is a truncated prefix, so the peer is NOT capable. */
+  function truncatedSharedRound(resolved: number, total: number) {
+    const round = partialSharedRound(resolved, total);
+    return { ...round, swmCoverage: { ...round.swmCoverage, manifestComplete: false } };
+  }
+
+  function partialSharedRound(resolved: number, total: number) {
+    return {
+      ...sharedResult(),
+      // Not clean: without this the plane is proven by data and the loop stops at
+      // `plane-proven` before the capability gate is ever consulted — which would
+      // make this test pass for a reason that has nothing to do with the seam.
+      failedPhases: 1,
+      swmCoverage: {
+        contextGraphId: CG,
+        peerIdSuffix: PEER.slice(-8),
+        snapshotsResolved: resolved,
+        snapshotsTotal: total,
+        manifestComplete: true,
+        missingCount: total - resolved,
+        missingSample: resolved < total ? ['sha256:unresolved'] : [],
+        materializationFailures: 0,
+      },
+    };
+  }
+
+  it('runs a SECOND shared-memory pass, and only the shared-memory plane', async () => {
+    const sharedCalls: string[] = [];
+    const durableCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(String(args[0]));
+            return durableResult();
+          case 'syncSharedMemory': {
+            sharedCalls.push(String(args[0]));
+            // Pass 1 resolved 2 of 3 and did not finish; pass 2 finishes the
+            // manifest, which takes the peer out of the capable set.
+            return sharedCalls.length === 1
+              ? partialSharedRound(2, 3)
+              : partialSharedRound(3, 3);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+
+    // (5) THE seam: a second pass was actually dispatched. Asserted as a COUNT,
+    // because the terminal record below is identical whether the loop ran once
+    // or twice.
+    expect(sharedCalls).toEqual([PEER, PEER]);
+
+    // Continuation passes are shared-memory only — re-pulling durable would be
+    // amplification that nothing in the capability gate selects for.
+    expect(durableCalls).toEqual([PEER]);
+
+    // (2)-(4) The chain that produced it: the second pass's record replaced the
+    // first, coverage advanced, and the loop then stopped because the peer had
+    // nothing left rather than because it gave up.
+    expect(result.diagnostics?.sharedMemory?.swmCoverage).toMatchObject({
+      snapshotsResolved: 3,
+      snapshotsTotal: 3,
+      missingCount: 0,
+    });
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(1);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason).toBe('no-capable-peers');
+
+    // Distinct peers, not peer-passes. Pre-fix this counted rounds, which drove
+    // `peersNotAttempted` negative once a pass repeated.
+    expect(result.peersTried).toBe(1);
+    expect(result.peersNotAttempted).toBe(0);
+  });
+
+  it('still runs a selected SWM continuation after authority proof', async () => {
+    const CURATOR = 'peer-curator-0001';
+    const OTHER = 'peer-capable-0002';
+    const sharedCalls: string[] = [];
+    const durableCalls: string[] = [];
+    let otherSharedCalls = 0;
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        const peerId = String(args[0]);
+        switch (method) {
+          case 'prepareCatchup':
+            return {
+              authoritativePeerId: CURATOR,
+              isPrivateContextGraph: false,
+              // Same opening wave: the authority can prove SWM while the other
+              // peer reports the still-capable record the next pass must retry.
+              peerIds: [OTHER, CURATOR],
+              connectedPeers: 2,
+            };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            durableCalls.push(peerId);
+            return {
+              ...durableResult(),
+              complete: false,
+              insertedTriples: 0,
+              fetchedDataTriples: 0,
+              insertedDataTriples: 0,
+              failedPhases: 1,
+            };
+          case 'syncSharedMemory':
+            sharedCalls.push(peerId);
+            if (peerId === CURATOR) return sharedResult();
+            otherSharedCalls += 1;
+            return otherSharedCalls === 1
+              ? partialSharedRound(2, 3)
+              : partialSharedRound(3, 3);
+          default:
+            return null;
+        }
+      },
+    );
+
+    expect(sharedCalls.filter((peerId) => peerId === CURATOR)).toHaveLength(1);
+    expect(sharedCalls.filter((peerId) => peerId === OTHER)).toHaveLength(2);
+    expect(durableCalls.filter((peerId) => peerId === OTHER)).toHaveLength(1);
+    expect(result.diagnostics?.sharedMemory?.swmCoverage).toMatchObject({
+      snapshotsResolved: 3,
+      snapshotsTotal: 3,
+    });
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(1);
+  });
+
+  it('emits one per-pass log line carrying the coverage transition', async () => {
+    // The per-pass line is the only PER-PASS observability an operator gets:
+    // the terminal record reports the FINAL state, so without it a job that
+    // converged in four passes is indistinguishable from one that converged in
+    // one. It travels as a fire-and-forget RPC whose rejection is deliberately
+    // swallowed, so a line that stops being emitted fails completely silently
+    // — which is exactly the shape that needs a row rather than a reader.
+    const sharedCalls: string[] = [];
+    const passLines: string[] = [];
+
+    await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            sharedCalls.push(String(args[0]));
+            return sharedCalls.length === 1
+              ? partialSharedRound(2, 3)
+              : partialSharedRound(3, 3);
+          }
+          case 'logCatchupPass':
+            passLines.push(String(args[0]));
+            return null;
+          default:
+            return null;
+        }
+      },
+    );
+
+    // Two shared rounds ran, so exactly one CONTINUATION pass was logged —
+    // numbered 2, because the first round is not a continuation.
+    const continuationLines = passLines.filter((line) => line.startsWith('Catch-up SWM pass 2'));
+    expect(continuationLines).toHaveLength(1);
+
+    // The TRANSITION, not just the endpoint. A line reporting only the final
+    // `3` could not distinguish a pass that advanced coverage from one that ran
+    // and achieved nothing — which is the single fact this line exists to give
+    // an operator.
+    expect(continuationLines[0]).toContain('2 -> 3');
+    expect(continuationLines[0]).toContain(CG);
+  });
+
+  it('does NOT run a second pass when nothing was resolved AND nobody is capable', async () => {
+    // The negative half: without it, the row above would pass under an
+    // implementation that always ran a second pass.
+    //
+    // The peer here reports a TRUNCATED manifest, so it is not capable and there
+    // is nothing a repeat could collect. That distinction is the whole point.
+    // This row used to use a peer reporting `0/3` with a COMPLETE manifest and
+    // assert no repeat — but such a peer is capable by construction: it has just
+    // said it holds three refs we do not have. Stopping there reported
+    // "more passes would not help" on a graph three Knowledge Assets short. See
+    // the row below for the corrected behaviour.
+    const sharedCalls: string[] = [];
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory':
+            sharedCalls.push(String(args[0]));
+            return truncatedSharedRound(0, 3);
+          default:
+            return null;
+        }
+      },
+    );
+
+    expect(sharedCalls).toEqual([PEER]);
+    // `0`, not absent: the field is initialised on the diagnostics object and is
+    // overwritten only when a repeat actually ran. Asserting `undefined` here was
+    // my own error, and the comment stays because a reader who assumes absence
+    // means "no repeats" would write the same wrong assertion again.
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBe(0);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason).toBe('coverage-stalled');
+  });
+
+  it('DOES repeat for a capable peer whose first pass materialized nothing', async () => {
+    // The #2050 headline shape, end to end: a store fault failed every write, or
+    // the round deadline was spent by the metadata and aggregate phases before
+    // the snapshot walk began. Either way the peer reports `0/3` with a COMPLETE
+    // manifest — it holds three refs we lack, and on a warm cache a repeat costs
+    // no network bytes at all.
+    //
+    // Before the pass-1 suppression this stopped at `coverage-stalled` after one
+    // contact, rendering "more passes would not help" while the graph stayed
+    // three Knowledge Assets short. The peer advances by one per pass here, so a
+    // correct loop keeps going.
+    const sharedCalls: string[] = [];
+    let seen = 0;
+
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PEER], connectedPeers: 1 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            sharedCalls.push(String(args[0]));
+            const resolved = seen;
+            seen += 1;
+            return partialSharedRound(resolved, 3);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+
+    expect(sharedCalls.length).toBeGreaterThan(1);
+    expect(result.diagnostics?.sharedMemory?.continuationPasses).toBeGreaterThan(0);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason)
+      .not.toBe('coverage-stalled');
+  });
+});
+
+/**
+ * The two capability-gate clauses, each pinned by WHICH peers a second pass
+ * contacts rather than by whether one happens.
+ *
+ * That shape is deliberate. The obvious fixture — one peer, barren — cannot see
+ * either clause: with `snapshotsResolved: 0` the high-water mark has not advanced,
+ * so the loop stops at `coverage-stalled` before the gate is consulted, and the
+ * row passes whether the guard exists or not. It is the T14 fixture-collapse
+ * pattern exactly, and it is why these clauses were unpinned.
+ *
+ * Pairing a productive peer with the peer under test fixes it: the productive one
+ * advances coverage so the loop genuinely reaches the gate, and the assertion is
+ * the *membership* of the second pass.
+ */
+describe('#2050 capability gate — which peers earn a second pass', () => {
+  const CG = 'gate-cg';
+  const PRODUCTIVE = 'peer-productive-1111';
+
+  function round(peerId: string, resolved: number, total: number, manifestComplete = true) {
+    return {
+      ...sharedResult(),
+      failedPhases: 1,
+      swmCoverage: {
+        contextGraphId: CG,
+        peerIdSuffix: peerId.slice(-8),
+        snapshotsResolved: resolved,
+        snapshotsTotal: total,
+        manifestComplete,
+        missingCount: Math.max(0, total - resolved),
+        missingSample: [],
+        materializationFailures: 0,
+      },
+    };
+  }
+
+  /** Runs a walk over the productive peer plus one peer under test. */
+  async function walkWith(other: string, otherRound: () => ReturnType<typeof round>) {
+    const shared: string[] = [];
+    const result = await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [PRODUCTIVE, other], connectedPeers: 2 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            const peerId = String(args[0]);
+            shared.push(peerId);
+            if (peerId !== PRODUCTIVE) return otherRound();
+            // Advances coverage every pass, so the loop keeps reaching the gate
+            // instead of stopping at `coverage-stalled`.
+            const seen = shared.filter((p) => p === PRODUCTIVE).length;
+            return round(PRODUCTIVE, seen, 9);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+    return { shared, result };
+  }
+
+  it('does not re-contact a BARREN peer (snapshotsTotal === 0)', async () => {
+    const BARREN = 'peer-barren-2222';
+    const { shared } = await walkWith(BARREN, () => round(BARREN, 0, 0));
+
+    // Pass 1 contacts both; every later pass contacts only the productive peer.
+    expect(shared.slice(0, 2).sort()).toEqual([BARREN, PRODUCTIVE].sort());
+    expect(shared.filter((p) => p === BARREN)).toHaveLength(1);
+    expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(1);
+  });
+
+  it('keeps retrying a converging peer that a FINISHED peer would otherwise pin', async () => {
+    // The progress gate and the capability gate read different peer sets, and
+    // that is the whole bug: a peer at `400/400` is not capable, so it is never
+    // re-contacted and its record can never move — but a fleet-wide max over all
+    // retained records still counts it. The converging peer's entire manifest is
+    // 9 refs, so it can NEVER exceed 400 however well it does, and the loop
+    // stopped at `coverage-stalled` after exactly one continuation pass, which
+    // renders as "more passes would not help" — the opposite of true.
+    //
+    // Summing each peer's OWN high-water makes the reading move whenever any peer
+    // advances. Under the fleet-wide max this row sees exactly 2 contacts and
+    // `coverage-stalled`; the assertions below are chosen to fail in that case.
+    const PINNED = 'peer-finished-4444';
+    const { shared, result } = await walkWith(PINNED, () => round(PINNED, 400, 400));
+
+    expect(shared.filter((p) => p === PINNED)).toHaveLength(1);
+    expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(2);
+    expect(result.diagnostics?.sharedMemory?.continuationStopReason)
+      .not.toBe('coverage-stalled');
+  });
+
+  it('does not re-contact a peer whose MANIFEST was truncated', async () => {
+    // Resolved < total, so the resolved/total clause alone would call it capable.
+    // Only `manifestComplete` excludes it — and it must be excluded, because a
+    // truncated round advances `snapshotsResolved` while materializing nothing.
+    const TRUNCATED = 'peer-truncated-3333';
+    const { shared } = await walkWith(TRUNCATED, () => round(TRUNCATED, 1, 5, false));
+
+    expect(shared.slice(0, 2).sort()).toEqual([PRODUCTIVE, TRUNCATED].sort());
+    expect(shared.filter((p) => p === TRUNCATED)).toHaveLength(1);
+    expect(shared.filter((p) => p === PRODUCTIVE).length).toBeGreaterThan(1);
+  });
+});
+
+/**
+ * Retention of a peer's coverage across a FAILED round.
+ *
+ * The discriminator is which peers a LATER pass contacts, and finding it took
+ * ruling two others out. After a throwing pass the stop reason cannot tell
+ * retention from forgetting — retained leaves coverage equal to the high-water
+ * mark, forgotten makes the max over an empty map `0`, and both are `<=` the
+ * mark, so both report `coverage-stalled`. The terminal message cannot either:
+ * it renders `diagnostics.sharedMemory.swmCoverage`, which `accumulate` reduces
+ * independently of `lastCoverageByPeer`, so forgetting a peer there is invisible
+ * to it.
+ *
+ * A second, still-productive peer keeps the mark advancing so the loop runs a
+ * further pass at all — and then membership of that pass is the observable.
+ */
+describe('#2050 coverage retention across a failed round', () => {
+  const CG = 'retention-cg';
+  const STEADY = 'peer-steady-4444';
+  const OTHER = 'peer-other-5555';
+
+  function cov(peerId: string, resolved: number, total: number) {
+    return {
+      contextGraphId: CG,
+      peerIdSuffix: peerId.slice(-8),
+      snapshotsResolved: resolved,
+      snapshotsTotal: total,
+      manifestComplete: true,
+      missingCount: Math.max(0, total - resolved),
+      missingSample: [],
+      materializationFailures: 0,
+    };
+  }
+
+  /** `otherRound` decides what the peer under test returns on its Nth round. */
+  async function walk(otherRound: (nth: number) => unknown) {
+    const shared: string[] = [];
+    let steadySeen = 0;
+    let otherSeen = 0;
+    await runWorkerCatchup(
+      { contextGraphId: CG, includeSharedMemory: true },
+      async (method, args) => {
+        switch (method) {
+          case 'prepareCatchup':
+            return { isPrivateContextGraph: false, peerIds: [STEADY, OTHER], connectedPeers: 2 };
+          case 'waitForSyncProtocol':
+            return true;
+          case 'syncDurable':
+            return durableResult();
+          case 'syncSharedMemory': {
+            const peerId = String(args[0]);
+            shared.push(peerId);
+            if (peerId === STEADY) {
+              steadySeen += 1;
+              // Advances every pass so the loop keeps running and the row can
+              // actually reach the retention question.
+              //
+              // The WIDTH of the margin is no longer load-bearing. It was: the
+              // progress gate used to be a max over all peers, so at +1 per pass
+              // the peer under test — retained at 2 — held the max flat and the
+              // loop stopped at `coverage-stalled` before a third pass ran, and
+              // the row failed for a reason having nothing to do with retention.
+              // That fixture-shaped dodge was evidence of a real defect, and the
+              // gate is now a sum over each peer's OWN high-water
+              // (`totalPeerProgress`), which rises whenever ANY peer advances.
+              // The margin is kept as belt-and-braces, not as a workaround.
+              return {
+                ...sharedResult(),
+                failedPhases: 1,
+                swmCoverage: cov(STEADY, steadySeen * 10, 99),
+              };
+            }
+            otherSeen += 1;
+            return otherRound(otherSeen);
+          }
+          default:
+            return null;
+        }
+      },
+    );
+    return shared;
+  }
+
+  it('RETAINS coverage when a round fails, so the peer is contacted again', async () => {
+    // Round 1 reports real progress; round 2 throws, which `syncSharedMemory`
+    // turns into `emptyShared()` — truthy, and carrying no coverage.
+    const shared = await walk((nth) => {
+      if (nth === 1) return { ...sharedResult(), failedPhases: 1, swmCoverage: cov(OTHER, 2, 3) };
+      throw new Error('transport failure');
+    });
+    // Contacted in pass 1, again in pass 2 (where it threw), and STILL in pass 3
+    // — a throw is not evidence that the peer has nothing left.
+    expect(shared.filter((p) => p === OTHER).length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('FORGETS coverage when a CLEAN round reports none, so the peer is dropped', async () => {
+    // The other direction, and it is what stops "always retain" from satisfying
+    // the row above: a peer that cleanly says it has nothing must not be revisited.
+    const shared = await walk((nth) => (nth === 1
+      ? { ...sharedResult(), failedPhases: 1, swmCoverage: cov(OTHER, 2, 3) }
+      : {
+        ...sharedResult(),
+        // Clean — `completedPhases > 0`, no failures — so the record is
+        // legitimately forgotten. But carrying NO data, deliberately: a clean
+        // DATA-BEARING round proves the plane, and the loop then stops at
+        // `plane-proven` before the capability gate is ever consulted. With the
+        // default `sharedResult()` this row passed with the delete branch removed
+        // entirely, which is the collapse it exists to rule out.
+        insertedTriples: 0,
+        insertedDataTriples: 0,
+        completedPhases: 1,
+      }));
+    expect(shared.filter((p) => p === OTHER)).toHaveLength(2);
   });
 });

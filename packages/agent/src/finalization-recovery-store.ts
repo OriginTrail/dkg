@@ -57,6 +57,7 @@ export interface FinalizationRecoveryReceiveInput {
 export type FinalizationRecoveryReceiveResult =
   | { status: 'inserted'; entry: FinalizationRecoveryEntry }
   | { status: 'existing'; entry: FinalizationRecoveryEntry }
+  | { status: 'pending' }
   | { status: 'conflict' }
   | { status: 'capacity' }
   | { status: 'closed' };
@@ -81,8 +82,11 @@ export interface FinalizationRecoveryHealth {
   stateCounts: Partial<Record<FinalizationRecoveryState, number>>;
   livePayloadBytes: number;
   dueEntries: number;
+  deferredEntries?: number;
+  deferredPayloadBytes?: number;
   oldestDueAgeMs?: number;
   oldestPendingAgeMs?: number;
+  oldestDeferredAgeMs?: number;
 }
 
 export interface FinalizationRecoveryStore {
@@ -90,6 +94,13 @@ export interface FinalizationRecoveryStore {
   /** Reloads one entry after waiting on an in-process serialization boundary. */
   get(key: string): Promise<FinalizationRecoveryEntry | undefined>;
   receive(input: FinalizationRecoveryReceiveInput): Promise<FinalizationRecoveryReceiveResult>;
+  /** Moves a bounded oldest-first deferred snapshot into the live inbox. */
+  promotePending(limit: number): Promise<number>;
+  /** Monotonically records publisher authority validated while an envelope is deferred. */
+  recordPendingTrustedPublisher(
+    key: string,
+    publisherPeerId: string,
+  ): Promise<boolean>;
   recordTrustedPublisher(
     key: string,
     generation: number,

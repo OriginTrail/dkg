@@ -182,7 +182,7 @@ export function catchupSourceForMode(mode: CatchupMode): CatchupAdmissionSource 
  * duration rather than a point in time, so it must not follow a wall-clock
  * correction. Falls back to `Date.now` only if `performance` is unavailable.
  */
-const monotonicNow: () => number = typeof performance?.now === 'function'
+export const monotonicNow: () => number = typeof performance?.now === 'function'
   ? () => performance.now()
   : Date.now;
 

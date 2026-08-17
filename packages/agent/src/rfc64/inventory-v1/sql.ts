@@ -9,7 +9,8 @@ import {
 
 export const INVENTORY_V1_APPLICATION_ID = 0x444b3634;
 export const INVENTORY_V1_LEGACY_USER_VERSION = 1;
-export const INVENTORY_V1_USER_VERSION = 2;
+export const INVENTORY_V1_V2_USER_VERSION = 2;
+export const INVENTORY_V1_USER_VERSION = 3;
 export const INVENTORY_V1_RELATIVE_PATH =
   `${RFC64_PERSISTENCE_ROOT_RELATIVE_PATH_V1}/${RFC64_INVENTORY_DATABASE_FILENAME_V1}`;
 export const INVENTORY_V1_DIRECTORY_MODE = RFC64_SECURE_DIRECTORY_MODE_V1;
@@ -320,6 +321,108 @@ CREATE TABLE rfc64_applied_catalog_heads_v1 (
   PRIMARY KEY (catalog_scope_digest, author_address)
 ) WITHOUT ROWID, STRICT`;
 
+/** One restart-safe, author-signed shadow head per exact public SWM lane. */
+export const INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL = `
+CREATE TABLE rfc64_swm_author_inventory_heads_v1 (
+  inventory_scope_digest BLOB NOT NULL CHECK (
+    typeof(inventory_scope_digest) = 'blob' AND length(inventory_scope_digest) = 32
+  ),
+  author_address BLOB NOT NULL CHECK (
+    typeof(author_address) = 'blob' AND length(author_address) = 20
+    AND author_address <> zeroblob(20)
+  ),
+  current_head_digest BLOB NOT NULL CHECK (
+    typeof(current_head_digest) = 'blob' AND length(current_head_digest) = 32
+  ),
+  inventory_version_u64be BLOB NOT NULL CHECK (
+    typeof(inventory_version_u64be) = 'blob' AND length(inventory_version_u64be) = 8
+  ),
+  total_rows_u64be BLOB NOT NULL CHECK (
+    typeof(total_rows_u64be) = 'blob' AND length(total_rows_u64be) = 8
+  ),
+  rows_digest BLOB NOT NULL CHECK (
+    typeof(rows_digest) = 'blob' AND length(rows_digest) = 32
+  ),
+  signed_head_envelope BLOB NOT NULL CHECK (
+    typeof(signed_head_envelope) = 'blob'
+    AND length(signed_head_envelope) >= 1
+    AND length(signed_head_envelope) <= 4096
+  ),
+  expected_head_digest BLOB CHECK (
+    expected_head_digest IS NULL OR (
+      typeof(expected_head_digest) = 'blob' AND length(expected_head_digest) = 32
+    )
+  ),
+  replay_mutation_kind TEXT NOT NULL COLLATE BINARY CHECK (
+    replay_mutation_kind IN ('upsert', 'remove')
+  ),
+  replay_mutation_ka_ual TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(replay_mutation_ka_ual) = 'text'
+    AND length(replay_mutation_ka_ual) > 0
+    AND length(replay_mutation_ka_ual) <= 1024
+  ),
+  PRIMARY KEY (inventory_scope_digest, author_address)
+) WITHOUT ROWID, STRICT`;
+
+/**
+ * Current exact SWM-only row set committed by the corresponding signed head.
+ * P3.3 mutates one KA per publication and permits up to 100k rows / 8 MiB, so
+ * relational rows deliberately avoid rewriting the full inventory each time.
+ */
+export const INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL = `
+CREATE TABLE rfc64_swm_author_inventory_rows_v1 (
+  inventory_scope_digest BLOB NOT NULL CHECK (
+    typeof(inventory_scope_digest) = 'blob' AND length(inventory_scope_digest) = 32
+  ),
+  author_address BLOB NOT NULL CHECK (
+    typeof(author_address) = 'blob' AND length(author_address) = 20
+    AND author_address <> zeroblob(20)
+  ),
+  ka_ual TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(ka_ual) = 'text' AND length(ka_ual) > 0 AND length(ka_ual) <= 1024
+  ),
+  assertion_coordinate TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(assertion_coordinate) = 'text'
+    AND length(assertion_coordinate) > 0 AND length(assertion_coordinate) <= 256
+  ),
+  assertion_version_u64be BLOB NOT NULL CHECK (
+    typeof(assertion_version_u64be) = 'blob' AND length(assertion_version_u64be) = 8
+    AND assertion_version_u64be > zeroblob(8)
+  ),
+  share_operation_id TEXT NOT NULL COLLATE BINARY CHECK (
+    typeof(share_operation_id) = 'text'
+    AND length(share_operation_id) > 0 AND length(share_operation_id) <= 256
+  ),
+  projection_digest BLOB NOT NULL CHECK (
+    typeof(projection_digest) = 'blob' AND length(projection_digest) = 32
+  ),
+  public_triple_count_u64be BLOB NOT NULL CHECK (
+    typeof(public_triple_count_u64be) = 'blob' AND length(public_triple_count_u64be) = 8
+  ),
+  private_triple_count_u64be BLOB NOT NULL CHECK (
+    typeof(private_triple_count_u64be) = 'blob' AND length(private_triple_count_u64be) = 8
+  ),
+  seal_digest BLOB NOT NULL CHECK (
+    typeof(seal_digest) = 'blob' AND length(seal_digest) = 32
+  ),
+  shared_at_u64be BLOB NOT NULL CHECK (
+    typeof(shared_at_u64be) = 'blob' AND length(shared_at_u64be) = 8
+  ),
+  expires_at_u64be BLOB CHECK (
+    expires_at_u64be IS NULL OR (
+      typeof(expires_at_u64be) = 'blob' AND length(expires_at_u64be) = 8
+      AND expires_at_u64be > shared_at_u64be
+    )
+  ),
+  PRIMARY KEY (inventory_scope_digest, author_address, ka_ual),
+  UNIQUE (inventory_scope_digest, author_address, assertion_coordinate),
+  UNIQUE (inventory_scope_digest, author_address, share_operation_id),
+  FOREIGN KEY (inventory_scope_digest, author_address)
+  REFERENCES rfc64_swm_author_inventory_heads_v1 (
+    inventory_scope_digest, author_address
+  ) ON DELETE CASCADE
+) WITHOUT ROWID, STRICT`;
+
 export const INVENTORY_V1_LEGACY_DDL = [
   INVENTORY_V1_LOADS_TABLE_SQL,
   INVENTORY_V1_ROWS_TABLE_SQL,
@@ -328,6 +431,8 @@ export const INVENTORY_V1_LEGACY_DDL = [
 export const INVENTORY_V1_DDL = [
   INVENTORY_V1_LEGACY_DDL,
   INVENTORY_V1_APPLIED_HEADS_TABLE_SQL,
+  INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL,
+  INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL,
 ].join(';\n\n').concat(';');
 
 export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
@@ -335,15 +440,30 @@ export const INVENTORY_V1_LEGACY_USER_OBJECTS: Readonly<Record<string, string>> 
   rfc64_candidate_bucket_rows_v1: normalizeInventoryV1SchemaSql(INVENTORY_V1_ROWS_TABLE_SQL),
 });
 
-export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+export const INVENTORY_V1_V2_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
   ...INVENTORY_V1_LEGACY_USER_OBJECTS,
   rfc64_applied_catalog_heads_v1: normalizeInventoryV1SchemaSql(
     INVENTORY_V1_APPLIED_HEADS_TABLE_SQL,
   ),
 });
 
+export const INVENTORY_V1_USER_OBJECTS: Readonly<Record<string, string>> = Object.freeze({
+  ...INVENTORY_V1_V2_USER_OBJECTS,
+  rfc64_swm_author_inventory_heads_v1: normalizeInventoryV1SchemaSql(
+    INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL,
+  ),
+  rfc64_swm_author_inventory_rows_v1: normalizeInventoryV1SchemaSql(
+    INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL,
+  ),
+});
+
 export const INVENTORY_V1_MIGRATE_V1_TO_V2_SQL = `
 ${INVENTORY_V1_APPLIED_HEADS_TABLE_SQL};
+PRAGMA user_version = ${INVENTORY_V1_V2_USER_VERSION};`;
+
+export const INVENTORY_V1_MIGRATE_V2_TO_V3_SQL = `
+${INVENTORY_V1_SWM_AUTHOR_HEADS_TABLE_SQL};
+${INVENTORY_V1_SWM_AUTHOR_ROWS_TABLE_SQL};
 PRAGMA user_version = ${INVENTORY_V1_USER_VERSION};`;
 
 export function normalizeInventoryV1SchemaSql(sql: string): string {

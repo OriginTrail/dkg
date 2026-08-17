@@ -1051,7 +1051,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         const agent = {
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {},
+          subscribeToContextGraph: () => ({
+            subscribed: true,
+            synced: false,
+            syncMode: 'always-on' as const,
+          }),
           contextGraphHasLocalContent: async () => false,
           markContextGraphSubscriptionState: () => {
             throw new Error('timeout-only catchup must not mark subscription synced');
@@ -1166,7 +1170,11 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         const agent = {
           getContextGraphAllowedAgents: async () => [],
           getSubscribedContextGraphs: () => new Map(),
-          subscribeToContextGraph: () => {},
+          subscribeToContextGraph: () => ({
+            subscribed: true,
+            synced: false,
+            syncMode: 'always-on' as const,
+          }),
           contextGraphHasLocalContent: async () => true,
           markContextGraphSubscriptionState: () => { markedSynced = true; },
           resolveAgentByToken: () => undefined,
@@ -1229,6 +1237,136 @@ describe('CLI-7 — SPARQL endpoint 4xx matrix', () => {
         error: 'Sync deferred by local scheduler backpressure; retry when capacity is available.',
       });
       expect(markedSynced).toBe(false);
+    } finally {
+      daemonState.catchupRunner = previousCatchupRunner;
+      if (routeServer) {
+        await new Promise<void>((resolve, reject) => {
+          routeServer!.close((err) => (err ? reject(err) : resolve()));
+        });
+      }
+    }
+  });
+
+  it('applies syncMode through the legacy /api/subscribe alias and reports the agent-normalized mode', async () => {
+    const contextGraphId = 'legacy-subscribe-mode-' + Math.random().toString(36).slice(2, 8);
+    const catchupTracker = {
+      jobs: new Map<string, any>(),
+      latestByContextGraph: new Map<string, string>(),
+    };
+    let requestedMode: string | undefined;
+    let runnerCalls = 0;
+    const previousCatchupRunner = daemonState.catchupRunner;
+    daemonState.catchupRunner = {
+      run: async () => {
+        runnerCalls += 1;
+        return {
+          connectedPeers: 0,
+          syncCapablePeers: 0,
+          peersTried: 0,
+          peersResponded: 0,
+          peersSucceeded: 0,
+          deferredBackpressure: 1,
+          dataSynced: 0,
+          sharedMemorySynced: 0,
+          denied: false,
+          deniedPeers: 0,
+        };
+      },
+      close: async () => {},
+    } as any;
+    let routeServer: Server | null = null;
+
+    try {
+      routeServer = createServer(async (req, res) => {
+        const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+        const agent = {
+          getContextGraphAllowedAgents: async () => [],
+          getSubscribedContextGraphs: () => new Map(),
+          subscribeToContextGraph: (_id: string, opts: { syncMode: string }) => {
+            requestedMode = opts.syncMode;
+            return {
+              subscribed: true,
+              synced: false,
+              // The route must report the normalized mode returned by the
+              // agent, rather than independently reconstructing it.
+              syncMode: 'always-on' as const,
+            };
+          },
+          markContextGraphSubscriptionState: () => {},
+          resolveAgentByToken: () => undefined,
+          getDefaultAgentAddress: () => '0x0000000000000000000000000000000000000001',
+        };
+
+        await handleContextGraphRoutes({
+          req,
+          res,
+          agent,
+          publisherControl: {},
+          publisherRuntime: null,
+          config: {},
+          startedAt: Date.now(),
+          dashDb: {},
+          opWallets: {},
+          network: {},
+          tracker: {},
+          memoryManager: {},
+          bridgeAuthToken: undefined,
+          nodeVersion: 'test',
+          nodeCommit: 'test',
+          catchupTracker,
+          extractionRegistry: {},
+          fileStore: {},
+          extractionStatus: new Map(),
+          assertionImportLocks: new Map(),
+          vectorStore: {},
+          embeddingProvider: null,
+          validTokens: new Set(),
+          apiHost: '127.0.0.1',
+          apiPortRef: { value: 0 },
+          routePlugins: [],
+          url,
+          path: url.pathname,
+          requestToken: undefined,
+          requestAgentAddress: '0x0000000000000000000000000000000000000001',
+        } as any);
+        if (!res.writableEnded) {
+          res.statusCode = 404;
+          res.end();
+        }
+      });
+
+      await new Promise<void>((resolve) => routeServer!.listen(0, '127.0.0.1', resolve));
+      const address = routeServer.address();
+      if (!address || typeof address === 'string') {
+        throw new Error('legacy subscribe route test server did not bind to a TCP port');
+      }
+
+      const invalidResponse = await fetch(`http://127.0.0.1:${address.port}/api/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, syncMode: null }),
+      });
+      expect(invalidResponse.status).toBe(400);
+      expect(await invalidResponse.json()).toMatchObject({
+        error: 'Invalid "syncMode" (expected "on-demand" or "always-on")',
+      });
+      expect(requestedMode).toBeUndefined();
+      expect(runnerCalls).toBe(0);
+      expect(catchupTracker.jobs.size).toBe(0);
+      expect(catchupTracker.latestByContextGraph.size).toBe(0);
+
+      const response = await fetch(`http://127.0.0.1:${address.port}/api/subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId, syncMode: 'on-demand' }),
+      });
+      expect(response.status).toBe(200);
+      expect(requestedMode).toBe('on-demand');
+      expect(await response.json()).toMatchObject({
+        subscribed: contextGraphId,
+        syncMode: 'always-on',
+        catchup: { status: 'queued' },
+      });
     } finally {
       daemonState.catchupRunner = previousCatchupRunner;
       if (routeServer) {
@@ -2300,6 +2438,11 @@ describe('#1596 — subscribe allowlist gate respects explicit public accessPoli
           getSubscribedContextGraphs: () => new Map(),
           subscribeToContextGraph: () => {
             subscribeCalled = true;
+            return {
+              subscribed: true,
+              synced: false,
+              syncMode: 'always-on' as const,
+            };
           },
           contextGraphHasLocalContent: async () => false,
           markContextGraphSubscriptionState: () => {},

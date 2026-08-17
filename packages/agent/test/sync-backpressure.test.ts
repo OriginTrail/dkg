@@ -1271,4 +1271,164 @@ describe('sync global backpressure', () => {
       totals: { queued: 0, inflight: 0 },
     });
   });
+
+  it('reports every lane holding work as saturated the moment the shared queue fills', async () => {
+    // The clock is frozen for the whole test and the queue is filled to exactly
+    // its limit, never past it — so every age is 0 and nothing is ever
+    // rejected. Queue depth is the only signal left that can move a lane off
+    // `healthy`; without the freeze this would pass on `degradedQueueAgeMs` and
+    // prove nothing about the depth branch.
+    let running = 0;
+    const now = 1_000;
+    const queue = new PriorityAdmissionQueue<string>({
+      now: () => now,
+      canRun: () => running < 1,
+      onStart: () => {
+        running += 1;
+        return () => { running -= 1; };
+      },
+      observability: {
+        scheduler: 'test-shared-pool',
+        operation: (entry) => entry.payload,
+        inflightLimit: () => 1,
+      },
+    });
+    const options = (
+      payload: string,
+      lane: PriorityAdmissionAcquireOptions<string>['lane'],
+    ): PriorityAdmissionAcquireOptions<string> => ({
+      payload,
+      lane,
+      priority: 0,
+      priorityClass: 'default',
+      queueLimit: 2,
+      agingThresholdMs: 30_000,
+      createBusyError: () => new Error('full'),
+      createDisplacedError: () => new Error('displaced'),
+    });
+
+    // One admitted, then both queue slots taken by DIFFERENT lanes. The spread
+    // is the point: neither lane holds more than half the queue, so a lane
+    // judged on its own depth reads 1/2 and stays `healthy` while the pool it
+    // draws on is full and the next admission in either lane is rejected.
+    const admitted = queue.acquire(options('running', 'swm_recovery'));
+    const release = await admitted.release;
+    const queuedDurable = queue.acquire(options('durable-wait', 'durable'));
+    const queuedChangelog = queue.acquire(options('changelog-wait', 'changelog'));
+
+    try {
+      const snapshot = queue.getBackpressureSnapshot();
+      expect(snapshot).toMatchObject({
+        state: 'saturated',
+        totals: { queued: 2, queueLimit: 2, inflight: 1, inflightLimit: 1 },
+        lanes: [
+          // `queued` attributes the work; `pressureQueued` is the depth the
+          // state was judged against, so `pressureQueued / queueLimit` reads as
+          // utilization without a consumer having to know the model.
+          { lane: 'changelog', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 2, queueLimit: 2 },
+          { lane: 'durable', state: 'saturated', capacityModel: 'shared', queued: 1, pressureQueued: 2, queueLimit: 2 },
+          // Admitted work, nothing waiting: a full queue is not evidence that
+          // this lane is being held back, and it publishes no pressure depth
+          // either — a `healthy` lane must not read as 100% utilized.
+          {
+            lane: 'swm_recovery',
+            state: 'healthy',
+            capacityModel: 'shared',
+            queued: 0,
+            pressureQueued: 0,
+            inflight: 1,
+          },
+        ],
+      });
+      for (const lane of snapshot.lanes) {
+        expect(lane).toMatchObject({
+          oldestQueuedAgeMs: 0,
+          oldestActiveAgeMs: 0,
+          rejectedTotal: 0,
+          lastRejectedAgeMs: null,
+        });
+      }
+    } finally {
+      // Serially: only one may run at a time, so waiting on both releases at
+      // once would deadlock — the second cannot start until the first has been
+      // released, and the first is not released until the wait returns.
+      release();
+      (await queuedDurable.release)();
+      (await queuedChangelog.release)();
+    }
+  });
+
+  it('declares the shared pool from registration, before any admission', async () => {
+    // Every other snapshot in this file is taken post-acquire, so the model
+    // declared in the constructor was pinned by nothing: deleting it left the
+    // whole suite green while a freshly booted daemon advertised `partitioned`
+    // on the field documented as authoritative — permanently so with
+    // DKG_SYNC_GLOBAL_MAX_INFLIGHT=0, where no acquire ever runs.
+    const queue = new PriorityAdmissionQueue<string>({
+      canRun: () => true,
+      onStart: () => () => {},
+      observability: {
+        scheduler: 'test-pre-acquire',
+        operation: (entry) => entry.payload,
+      },
+    });
+
+    expect(queue.getBackpressureSnapshot()).toMatchObject({
+      capacityModel: 'shared',
+      // …and no ceiling is fabricated ahead of the first acquire, which is what
+      // actually carries the limits.
+      totals: { queueLimit: null, inflightLimit: null },
+    });
+  });
+
+  it('publishes the shared-pool capacity model from the production sync-global queue', async () => {
+    // The seam the core classifier cannot see. `sync-global` is a module
+    // singleton built in `backpressure.ts`, and the capacity IT publishes is
+    // what decides whether its lanes can be classified on depth at all.
+    // Asserting the published model rather than a resulting state keeps this
+    // witness independent of the rejection counters that earlier tests in this
+    // file leave behind on the shared singleton.
+    const ctx = createOperationContext('sync');
+    const policy = resolveSyncGlobalBackpressure({
+      syncGlobalMaxInflight: 1,
+      syncGlobalQueueLimit: 2,
+    });
+    let releaseRunning!: () => void;
+    const running = withGlobalSyncBackpressure(
+      { policy, ctx, label: 'durable:urn:cg:private:pool', source: 'catchup-foreground' },
+      async () => new Promise<void>((resolve) => { releaseRunning = resolve; }),
+    );
+    await tick();
+
+    try {
+      const snapshot = backpressureRegistry.capture().schedulers.find(
+        (scheduler) => scheduler.scheduler === 'sync-global',
+      );
+      // The scheduler-level ceilings are what a shared lane's ceiling resolves
+      // to, so dropping either one from the publish would silently take the
+      // depth branches back out of service.
+      expect(snapshot).toMatchObject({
+        capacityModel: 'shared',
+        totals: { queueLimit: 2, inflightLimit: 1 },
+      });
+      // Scoping this to one lane would be decorative: under `shared` every
+      // field below resolves from scheduler-level capacity, so it is identical
+      // on every row — and `this.lanes` is never pruned, so a `find` can match
+      // a stale row an earlier test left on the module singleton. Assert the
+      // property over ALL rows instead, plus the one genuinely lane-scoped
+      // fact: the admission just made is active in the lane it was sent to.
+      expect(snapshot!.lanes.length).toBeGreaterThan(0);
+      for (const lane of snapshot!.lanes) {
+        expect(lane).toMatchObject({ capacityModel: 'shared', queueLimit: 2, inflightLimit: 1 });
+      }
+      const durable = snapshot!.lanes.find((lane) => lane.lane === 'durable');
+      expect(durable).toMatchObject({
+        inflight: 1,
+        activeOperations: [expect.objectContaining({ operation: 'durable:catchup-foreground' })],
+      });
+    } finally {
+      releaseRunning();
+      await running;
+    }
+  });
 });
