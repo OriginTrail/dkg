@@ -4,6 +4,7 @@ import {
   createSelectedSwmMetaFetcher,
   SelectedSwmMetaTransferOwner,
 } from '../src/sync/selected-swm-meta-fetcher.js';
+import { syncPublicSnapshotsForMeta } from '../src/sync/requester/shared-memory-sync.js';
 import { SelectedSwmMetaTransferCoordinator } from '../src/sync/selected-swm-meta-transfer-coordinator.js';
 import { createSelectedSwmMetaRetentionBudget } from '../src/sync/selected-swm-meta-budget.js';
 
@@ -101,6 +102,150 @@ describe('selected SWM metadata transfer ownership', () => {
       });
       expect(fetchPage).toHaveBeenCalledTimes(2);
       expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('releases completed metadata when no snapshot walk remains active', async () => {
+    const peerId = 'peer-complete-without-walk';
+    const contextGraphId = 'cg-complete-without-walk';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:terminal-meta', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'terminal-meta-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:terminal-without-walk',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 1_000,
+    };
+
+    try {
+      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
+      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
+
+      // Terminal metadata without a post-metadata walk carries no resumable
+      // work into the next outer invocation.
+      expect(fetchPage).toHaveBeenCalledTimes(2);
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('invalidates resolved refs when the exact manifest changes digest or order', async () => {
+    const peerId = 'peer-manifest-invalidation';
+    const contextGraphId = 'cg-manifest-invalidation';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:manifest', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'manifest-invalidation-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:manifest-invalidation',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 1_000,
+    };
+    const original = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+    ];
+    const changedDigest = [
+      { ref: 'ref-a', digest: 'digest-a-v2', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+    ];
+    const reordered = [changedDigest[1]!, changedDigest[0]!];
+    const requestedRefs: string[] = [];
+
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, original);
+        walk.markResolved('ref-a');
+        expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedDigest);
+        expect([...walk.resolvedRefs]).toEqual([]);
+        await syncPublicSnapshotsForMeta({
+          ctx: testContext,
+          remotePeerId: peerId,
+          contextGraphId,
+          deadline: Date.now() + 1_000,
+          snapshotWalk: walk,
+          publicSnapshotStore: {
+            getSnapshot: async () => null,
+            putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 0 }),
+          },
+          fetchSyncPages: async (
+            _ctx,
+            _remotePeerId,
+            _contextGraphId,
+            _includeSharedMemory,
+            _phase,
+            _graphUri,
+            _deadline,
+            options,
+          ) => {
+            requestedRefs.push(options?.snapshotRef ?? '');
+            return {
+              quads: [],
+              bytesReceived: 0,
+              resumedFromOffset: 0,
+              nextOffset: 0,
+              checkpointKey: 'changed-manifest-snapshot',
+              completed: false,
+              timedOut: true,
+            };
+          },
+          deleteCheckpoint: () => {},
+          setCheckpoint: () => {},
+        });
+        expect(requestedRefs).toEqual(['ref-a']);
+        walk.markResolved('ref-a');
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, reordered);
+        expect([...walk.resolvedRefs]).toEqual([]);
+        walk.markResolved('ref-a');
+        walk.markResolved('ref-b');
+      });
+
+      expect(fetchPage).toHaveBeenCalledOnce();
+      expect(createFetcher).toHaveBeenCalledOnce();
     } finally {
       await coordinator.close();
     }

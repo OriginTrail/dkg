@@ -129,9 +129,11 @@ describe('selected snapshot walk continuation', () => {
       remotePeerId: 'peer-resume-prefix',
       contextGraphId: 'cg-resume-prefix',
       deadline: Date.now() + 60_000,
-      metaQuads: [],
-      orderedSnapshots: snapshots,
-      resolvedSnapshotRefs: new Set([firstDigest]),
+      snapshotWalk: {
+        orderedManifest: snapshots,
+        resolvedRefs: new Set([firstDigest]),
+        markResolved: () => {},
+      },
       publicSnapshotStore: {
         getSnapshot: async (ref) => {
           cacheReads.push(ref);
