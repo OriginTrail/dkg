@@ -1101,7 +1101,9 @@ export type PublisherRetryTuning = AsyncLiftRetryTuning;
  * configs that construct a publisher and the set that get validated cannot
  * drift (truthiness, matching the pre-existing runtime behavior).
  */
-export function isPublisherRuntimeEnabled(publisher?: DkgConfig['publisher'] | null): boolean {
+export function isPublisherRuntimeEnabled(
+  publisher?: DkgConfig['publisher'] | null,
+): publisher is NonNullable<DkgConfig['publisher']> {
   return Boolean(publisher?.enabled);
 }
 

@@ -94,6 +94,39 @@ describe('publisher retry-knob config→construction wiring (#2270)', () => {
     expect(config.maxRetries).toBe(3);
   });
 
+  it('forwards the retry knobs through the STANDALONE runtime path (dkg publisher run)', async () => {
+    // createPublisherRuntime is the second production construction path; a
+    // projection dropped only there would pass every daemon-path row.
+    const { createPublisherRuntime } = await import('../src/publisher-runner.js');
+    dataDir = await mkdtemp(join(tmpdir(), 'dkg-retry-tuning-standalone-'));
+    await addPublisherWallet(dataDir, ethers.Wallet.createRandom().privateKey);
+    runtime = await createPublisherRuntime({
+      dataDir,
+      config: {
+        name: 'retry-tuning-standalone-test',
+        apiPort: 0,
+        listenPort: 0,
+        nodeRole: 'edge',
+        networkConfig: 'mainnet-gnosis',
+        store: { backend: 'oxigraph' },
+        publisher: {
+          enabled: true,
+          pollIntervalMs: 600_000,
+          autoRetryEnabled: false,
+          retryJitterRatio: 0.4,
+          retryBackoffBaseMs: 2_222,
+          retryBackoffMaxMs: 3_333,
+        },
+      } as any,
+    });
+    expect(mocks.publisherConfigs).toHaveLength(1);
+    const config = mocks.publisherConfigs[0];
+    expect(config.autoRetryEnabled).toBe(false);
+    expect(config.retryJitterRatio).toBe(0.4);
+    expect(config.retryBackoffBaseMs).toBe(2_222);
+    expect(config.retryBackoffMaxMs).toBe(3_333);
+  });
+
   it('forwards autoRetryEnabled: true as an explicit value, not only the falsy case', async () => {
     const config = await capturePublisherConfig({ autoRetryEnabled: true });
 

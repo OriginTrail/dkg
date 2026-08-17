@@ -137,7 +137,7 @@ export interface LiftJobFailureMetadata {
  * decision explicitly — `autoRetry: false` is a policy statement, never an
  * omission.
  */
-type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & { readonly autoRetry: boolean };
+export type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & { readonly autoRetry: boolean };
 
 export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJobFailurePolicy> = {
   // autoRetry: pre-send by allowed-states (enforced), transient by cause (a
@@ -203,7 +203,7 @@ const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJ
   recovery_state_inconsistent: ['broadcast', 'included'],
 };
 
-export function getLiftJobFailurePolicy(code: LiftJobFailureCode): LiftJobFailurePolicy {
+export function getLiftJobFailurePolicy(code: LiftJobFailureCode): BuiltInLiftJobFailurePolicy {
   return LIFT_JOB_FAILURE_POLICIES[code];
 }
 

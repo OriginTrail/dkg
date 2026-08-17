@@ -1912,9 +1912,13 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
-   * Symmetric multiplicative jitter, applied BEFORE the cap so `retryBackoffMaxMs` stays a hard
-   * ceiling (jittering the capped value would exceed it). Rounded because `nextRetryAt` is
-   * persisted as an xsd:integer.
+   * Symmetric multiplicative jitter over the value the CALLER provides — the
+   * scheduler passes the already-capped exponential and clamps the result
+   * back under `retryBackoffMaxMs`, so deep retries spread across
+   * [max·(1−r), max] while the ceiling stays hard (see
+   * `scheduleRetryIfEligible` for the one composition). Rounded because
+   * `nextRetryAt` is persisted as an xsd:integer; floored at 1ms so extreme
+   * downward jitter can never schedule an immediate reaccept.
    */
   private jitteredBackoff(delay: number): number {
     // Floor of 1ms: a tiny configured base with strong downward jitter can
@@ -1925,12 +1929,9 @@ export class TripleStoreAsyncLiftPublisher
 
   private scheduleRetryIfEligible(job: LiftJob): LiftJob {
     if (!isFailedJob(job) || !this.isAutomaticallyRetryable(job)) return job;
-    // Jitter the CAPPED value (then clamp back under the ceiling): jittering
-    // before the cap made every deep retry collapse to exactly
-    // retryBackoffMaxMs once the exponential passed it — zero spread in the
-    // long-retry regime where de-synchronizing a herd matters most. This
-    // way capped retries spread across [max·(1−r), max] while the ceiling
-    // stays hard.
+    // The ONE composition (documented on jitteredBackoff): jitter the CAPPED
+    // exponential, clamp back under the ceiling — capped retries spread
+    // across [max·(1−r), max] instead of synchronizing at exactly the cap.
     const delay = Math.min(
       this.retryBackoffMaxMs,
       this.jitteredBackoff(
