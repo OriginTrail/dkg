@@ -250,52 +250,6 @@ export interface SharedMemorySnapshotMaterializer {
 }
 
 /**
- * Implementation of {@link SharedMemorySnapshotMaterializer.replaceMetaForGraphAssets}
- * — consume it through the materializer, which binds it to one store; the
- * bare-function form exists only for that binding.
- */
-async function replaceWorkspaceMetaForGraphAssets(
-  store: TripleStore,
-  assets: readonly GraphScopedSwmRecoveryDescriptor[],
-): Promise<void> {
-  for (const asset of assets) {
-    const linkedOperations = await store.query(
-      `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(asset.metaGraph)}> { ` +
-        `<${assertSafeIri(asset.headSubject)}> <${DKG}shareOperationId> ?shareId . ` +
-        `?op <${DKG}shareOperationId> ?shareId ; ` +
-        `<${DKG}kaUal> <${assertSafeIri(asset.kaUal)}> . } }`,
-      {
-        priority: 'background',
-        source: 'agent.swmRecovery.replaceMetaForGraphAssets.findOperations',
-      },
-    );
-    const operationSubjects = new Set<string>([asset.operationSubject]);
-    if (linkedOperations.type === 'bindings') {
-      for (const row of linkedOperations.bindings) {
-        const operation = row['op'];
-        if (operation) operationSubjects.add(operation);
-      }
-    }
-    await store.deleteByPattern(
-      { graph: asset.metaGraph, subject: asset.headSubject },
-      {
-        priority: 'background',
-        source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead',
-      },
-    );
-    for (const operationSubject of operationSubjects) {
-      await store.deleteByPattern(
-        { graph: asset.metaGraph, subject: operationSubject },
-        {
-          priority: 'background',
-          source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation',
-        },
-      );
-    }
-  }
-}
-
-/**
  * Build the production materializer over the agent's own store, lock map and
  * list-cache invalidation hook.
  */
@@ -408,31 +362,36 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return digest === descriptor.publicQuadsDigest;
   };
 
+  /**
+   * ONE deletion-set rule for graph-asset cleanup: the kaUal-owned operation
+   * subjects linked through the head's CURRENT shareOperationId rows (a
+   * head-join, so non-convention subjects are found too), optionally sparing
+   * one id's subject (the preserving repair's winner) and seeding extras.
+   * Both `repairHeadPreservingIdentity` and `replaceMetaForGraphAssets`
+   * consume this — the ownership guard cannot drift between them.
+   */
   const collectOwnedHeadOperationSubjects = async (
-    contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
     options: { seed?: readonly string[]; excludeShareOperationId?: string },
   ): Promise<Set<string>> => {
-    const shareIds = await deps.store.query(
-      `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
+    const linked = await deps.store.query(
+      `SELECT DISTINCT ?op ?shareId WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?shareId . `
+      + `?op <${DKG}shareOperationId> ?shareId ; `
+      + `<${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> . } }`,
       { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.findOperations' },
     );
     const subjects = new Set<string>(options.seed ?? []);
-    if (shareIds.type === 'bindings') {
-      for (const row of shareIds.bindings) {
-        const shareId = literalValue(row?.['op']);
-        if (!shareId || shareId === options.excludeShareOperationId) continue;
-        const candidate = `urn:dkg:share:${contextGraphId}:${shareId}`;
-        if (subjects.has(candidate)) continue;
-        const ownedByThisKa = await deps.store.query(
-          `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-          + `<${assertSafeIri(candidate)}> <${DKG}kaUal> <${assertSafeIri(descriptor.kaUal)}> } }`,
-          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.checkOperation' },
-        );
-        if (ownedByThisKa.type === 'boolean' && ownedByThisKa.value) {
-          subjects.add(candidate);
-        }
+    if (linked.type === 'bindings') {
+      for (const row of linked.bindings) {
+        const shareId = literalValue(row?.['shareId']);
+        const operationSubject = row?.['op'];
+        if (!operationSubject) continue;
+        // The head subject itself carries both joined predicates — it is the
+        // thing being REWRITTEN, never a deletable operation subject.
+        if (operationSubject === descriptor.headSubject) continue;
+        if (shareId !== undefined && shareId === options.excludeShareOperationId) continue;
+        subjects.add(operationSubject);
       }
     }
     return subjects;
@@ -592,7 +551,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     replaceHeadMetadata: async (contextGraphId, descriptor) => {
-      const operationSubjects = await collectOwnedHeadOperationSubjects(contextGraphId, descriptor, {
+      const operationSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
         seed: [descriptor.operationSubject],
       });
       await deps.store.deleteByPattern(
@@ -607,8 +566,27 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       }
     },
 
-    replaceMetaForGraphAssets: (assets) =>
-      replaceWorkspaceMetaForGraphAssets(deps.store, assets),
+    replaceMetaForGraphAssets: async (assets) => {
+      for (const asset of assets) {
+        // ONE deletion-set rule with the preserving repair: the kaUal-owned
+        // operation subjects linked through the head's current id rows (no
+        // exclusion — full replacement), seeded with the descriptor's own.
+        const operationSubjects = await collectOwnedHeadOperationSubjects(
+          asset,
+          { seed: [asset.operationSubject] },
+        );
+        await deps.store.deleteByPattern(
+          { graph: asset.metaGraph, subject: asset.headSubject },
+          { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteHead' },
+        );
+        for (const operationSubject of operationSubjects) {
+          await deps.store.deleteByPattern(
+            { graph: asset.metaGraph, subject: operationSubject },
+            { priority: 'background', source: 'agent.swmRecovery.replaceMetaForGraphAssets.deleteOperation' },
+          );
+        }
+      }
+    },
 
     hasGraphAssetMarker: async (descriptor) => {
       const result = await deps.store.query(
@@ -741,7 +719,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     },
 
     repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
-      const loserSubjects = await collectOwnedHeadOperationSubjects(contextGraphId, descriptor, {
+      const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
         seed: descriptor.shareOperationId !== winnerShareOperationId
           ? [descriptor.operationSubject]
           : [],
