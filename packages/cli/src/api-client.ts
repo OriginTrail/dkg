@@ -1658,7 +1658,16 @@ export class ApiClient {
     jobId: string;
     contextGraphId: string;
     includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'failed' | 'unreachable';
+    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'partial' | 'failed' | 'unreachable';
+    /** Absent only when a newer client is connected to a pre-field daemon. */
+    jobStatus?: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'partial' | 'failed' | 'unreachable';
+    graphSync?: {
+      mechanism: 'rfc64-selected-on-connect';
+      state: 'inactive' | 'waiting' | 'continuing' | 'converged';
+      configuredProviderCount: number;
+      retryRequiredProviderCount: number;
+      terminalProviderCount: number;
+    };
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;

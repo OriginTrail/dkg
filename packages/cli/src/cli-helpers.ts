@@ -201,7 +201,10 @@ type CatchupStatusCommandOptions = { watch?: boolean; interval?: string | number
 function printCatchupStatus(status: Awaited<ReturnType<ApiClient['catchupStatus']>>) {
   console.log(`Context Graph: ${status.contextGraphId}`);
   console.log(`Job:           ${status.jobId}`);
-  console.log(`Status:        ${status.status}`);
+  console.log(`Job Status:    ${status.jobStatus ?? status.status}`);
+  if (status.graphSync) {
+    console.log(`Graph Sync:    ${status.graphSync.state} (${status.graphSync.mechanism})`);
+  }
   console.log(`Shared Memory: ${status.includeWorkspace ? 'enabled' : 'disabled'}`);
   console.log(`Queued:        ${new Date(status.queuedAt).toISOString()}`);
   if (status.startedAt) console.log(`Started:       ${new Date(status.startedAt).toISOString()}`);
@@ -247,7 +250,14 @@ async function runCatchupStatusCommand(contextGraph: string, opts: CatchupStatus
   const client = await ApiClient.connect();
   const watch = !!opts.watch;
   const intervalSeconds = Math.max(1, Number(opts.interval ?? 2));
-  const terminalStates = new Set(['done', 'failed', 'denied', 'deferred', 'unreachable']);
+  const terminalStates = new Set([
+    'done',
+    'failed',
+    'denied',
+    'deferred',
+    'partial',
+    'unreachable',
+  ]);
 
   do {
     const status = await client.catchupStatus(contextGraph);

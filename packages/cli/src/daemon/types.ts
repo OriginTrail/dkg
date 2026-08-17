@@ -13,6 +13,11 @@ export type CatchupJobState =
   /** Local scheduler capacity was unavailable; retry is safe. */
   | "deferred"
   /**
+   * The bounded job inserted verified data but ended before every requested
+   * plane was complete. Graph-level synchronization may continue separately.
+   */
+  | "partial"
+  /**
    * Catchup completed but no peer could deliver the CG content within
    * the run — every per-peer sync round either failed or returned
    * nothing while no responder explicitly denied access. Distinct from
@@ -39,10 +44,24 @@ export interface CatchupTracker {
   latestByContextGraph: Map<string, string>;
 }
 
-export function toCatchupStatusResponse(job: CatchupJob) {
+export interface CatchupGraphSyncStatus {
+  mechanism: 'rfc64-selected-on-connect';
+  state: 'inactive' | 'waiting' | 'continuing' | 'converged';
+  configuredProviderCount: number;
+  retryRequiredProviderCount: number;
+  terminalProviderCount: number;
+}
+
+export function toCatchupStatusResponse(
+  job: CatchupJob,
+  graphSync?: CatchupGraphSyncStatus,
+) {
   return {
     ...job,
+    /** Explicit alias: `status` is retained for wire compatibility. */
+    jobStatus: job.status,
     contextGraphId: job.contextGraphId,
     includeSharedMemory: job.includeWorkspace,
+    ...(graphSync === undefined ? {} : { graphSync }),
   };
 }

@@ -227,6 +227,13 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       isPrivateContextGraph: async () => opts.isPrivate ?? false,
       resolveAgentByToken: () => undefined,
       getDefaultAgentAddress: () => opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
+      getRfc64SelectedSwmGraphSyncStatus: () => ({
+        mechanism: 'rfc64-selected-on-connect',
+        state: 'inactive',
+        configuredProviderCount: 0,
+        retryRequiredProviderCount: 0,
+        terminalProviderCount: 0,
+      }),
     };
 
     server = createServer(async (req, res) => {
@@ -590,6 +597,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     expect(result.statusResponse).toMatchObject({
       jobId: result.response.catchup.jobId,
       status: 'done',
+      jobStatus: 'done',
+      graphSync: {
+        state: 'inactive',
+      },
       result: {
         dataSynced: 3,
         sharedMemorySynced: 4,
@@ -814,8 +825,8 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
     });
 
     expect(result.job).toMatchObject({
-      status: 'unreachable',
-      error: expect.stringContaining('did not complete without a timeout'),
+      status: 'partial',
+      error: expect.stringContaining('bounded catch-up job ended'),
     });
     expect(result.state).toMatchObject({
       synced: false,
@@ -850,7 +861,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       },
     });
 
-    expect(result.job.status).toBe('unreachable');
+    expect(result.job.status).toBe('partial');
     expect(result.state).toMatchObject({
       synced: false,
       sharedMemorySynced: false,
@@ -944,7 +955,7 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
 
     expect(result.response.catchup.status).toBe('queued');
     expect(result.runCalls).toBe(1);
-    expect(result.job.status).toBe('unreachable');
+    expect(result.job.status).toBe('partial');
     expect(result.state).toMatchObject({
       synced: true,
       sharedMemorySynced: true,

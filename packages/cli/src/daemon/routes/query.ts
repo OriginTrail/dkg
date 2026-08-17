@@ -1033,7 +1033,10 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       });
     }
 
-    return jsonResponse(res, 200, toCatchupStatusResponse(job));
+    return jsonResponse(res, 200, toCatchupStatusResponse(
+      job,
+      agent.getRfc64SelectedSwmGraphSyncStatus(job.contextGraphId),
+    ));
   }
 
   // POST /api/verify

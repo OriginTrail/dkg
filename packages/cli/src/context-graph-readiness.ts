@@ -474,7 +474,7 @@ function catchupPlaneReadinessThisRun(input: {
 }
 
 export interface ContextGraphCatchupReadinessClassification {
-  jobStatus: 'done' | 'failed' | 'denied' | 'unreachable';
+  jobStatus: 'done' | 'failed' | 'denied' | 'partial' | 'unreachable';
   error?: string;
   statePatch?: ContextGraphSubscriptionStatePatch;
   readinessPatch?: ContextGraphReadinessPatch;
@@ -589,12 +589,11 @@ export function classifyContextGraphCatchupReadiness(input: {
     if (missingRequestedDurable || missingRequestedSharedMemory) {
       jobStatus = 'unreachable';
       if (madeIncompleteProgress) {
-        // The base sentence is byte-identical to what it has always been; the
-        // shortfall is APPENDED. This is the r26 terminal — "some verified data
-        // landed, the plane is still unready" — and it was the one message that
-        // could not say WHAT was missing even though the answer was computable
-        // in memory at the moment the round gave up.
-        error = 'Verified data was inserted, but catch-up did not complete without a timeout or failed phase. The incomplete plane remains unready; retry once the network is healthier.'
+        jobStatus = 'partial';
+        // This terminal describes only the bounded foreground job. Selected
+        // RFC-64 continuation has its own graph-level lifecycle and can keep
+        // advancing after this job exhausts its budget.
+        error = 'Verified data was inserted, but this bounded catch-up job ended before the requested plane was complete. The incomplete plane remains unready; graph-level synchronization may continue independently.'
           + swmShortfallClause(
             result.diagnostics?.sharedMemory?.swmCoverage,
             result.diagnostics?.sharedMemory?.continuationPasses,

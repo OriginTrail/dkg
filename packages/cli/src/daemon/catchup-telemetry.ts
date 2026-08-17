@@ -86,6 +86,7 @@ const TERMINAL_STATES: ReadonlySet<CatchupJobState> = new Set<CatchupJobState>([
   'failed',
   'denied',
   'deferred',
+  'partial',
   'unreachable',
 ]);
 

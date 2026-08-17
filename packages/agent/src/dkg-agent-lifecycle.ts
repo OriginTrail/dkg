@@ -4223,6 +4223,48 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     ).filter((contextGraphId) => selected.has(contextGraphId));
   }
 
+  /**
+   * Project the selected RFC-64 retry owner into a graph-scoped, identity-safe
+   * operator status. `continuing` means automatic continuation is still
+   * required; it deliberately does not claim a transfer is in flight at this
+   * exact instant.
+   */
+  getRfc64SelectedSwmGraphSyncStatus(
+    this: DKGAgent,
+    contextGraphId: string,
+  ): {
+    mechanism: 'rfc64-selected-on-connect';
+    state: 'inactive' | 'waiting' | 'continuing' | 'converged';
+    configuredProviderCount: number;
+    retryRequiredProviderCount: number;
+    terminalProviderCount: number;
+  } {
+    const selected = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
+    const providerPeerIds = [
+      ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
+    ];
+    const summary = this.selectedSwmBootstrapAdmission.summarizeContextGraph(
+      contextGraphId,
+      providerPeerIds,
+    );
+    const sharedMemorySynced =
+      this.subscribedContextGraphs.get(contextGraphId)?.sharedMemorySynced === true;
+    const state = !selected || providerPeerIds.length === 0
+      ? 'inactive'
+      : sharedMemorySynced || summary.terminalProviders > 0
+        ? 'converged'
+        : summary.retryRequiredProviders > 0
+          ? 'continuing'
+          : 'waiting';
+    return Object.freeze({
+      mechanism: 'rfc64-selected-on-connect',
+      state,
+      configuredProviderCount: providerPeerIds.length,
+      retryRequiredProviderCount: summary.retryRequiredProviders,
+      terminalProviderCount: summary.terminalProviders,
+    });
+  }
+
   queueSyncFromPeerOnConnect(
     this: DKGAgent,
     remotePeer: string,
