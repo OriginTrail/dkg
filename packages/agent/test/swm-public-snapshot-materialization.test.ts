@@ -330,7 +330,9 @@ describe('public SWM snapshot materialization', () => {
     const fx = fixture();
     const walk = {
       orderedManifest: [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }],
-      resolvedRefs: new Set([fx.digest]),
+      isResolved: (ref) => ref === fx.digest,
+      resolvedCount: () => 1,
+      resolvedRefsSnapshot: () => [fx.digest],
       suppressedMetadataRows: (ref: string) => ref === fx.digest ? fx.meta : [],
       markResolved: () => {},
     };

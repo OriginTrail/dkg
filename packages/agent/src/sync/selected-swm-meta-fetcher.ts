@@ -495,7 +495,9 @@ export function createSelectedSwmMetaFetcher(options: {
       if (!state?.completed) {
         return {
           orderedManifest,
-          resolvedRefs: new Set<string>(),
+          isResolved: () => false,
+          resolvedCount: () => 0,
+          resolvedRefsSnapshot: () => [],
           suppressedMetadataRows: () => [],
           markResolved: () => {},
         };
@@ -516,7 +518,15 @@ export function createSelectedSwmMetaFetcher(options: {
       }
       return {
         orderedManifest: walk.orderedManifest,
-        resolvedRefs: walk.resolvedRefs,
+        isResolved(ref: string) {
+          return walk.resolvedRefs.has(ref);
+        },
+        resolvedCount() {
+          return walk.resolvedRefs.size;
+        },
+        resolvedRefsSnapshot() {
+          return Object.freeze([...walk.resolvedRefs]);
+        },
         suppressedMetadataRows(ref: string) {
           return walk.suppressedMetadataRowsByRef.get(ref) ?? [];
         },

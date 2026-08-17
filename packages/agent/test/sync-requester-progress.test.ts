@@ -131,7 +131,9 @@ describe('selected snapshot walk continuation', () => {
       deadline: Date.now() + 60_000,
       snapshotWalk: {
         orderedManifest: snapshots,
-        resolvedRefs: new Set([firstDigest]),
+        isResolved: (ref) => ref === firstDigest,
+        resolvedCount: () => 1,
+        resolvedRefsSnapshot: () => [firstDigest],
         suppressedMetadataRows: () => [],
         markResolved: () => {},
       },

@@ -83,14 +83,16 @@ describe('selected SWM metadata transfer ownership', () => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
         walk.markResolved('ref-a', [suppressedRow]);
-        expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+        expect(walk.isResolved('ref-a')).toBe(true);
+        expect(walk.resolvedCount()).toBe(1);
       });
 
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         const cached = await fetcher.strategy.fetch(request);
         expect(cached.result.bytesReceived).toBe(0);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
-        expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
         expect(walk.suppressedMetadataRows('ref-a')).toEqual([suppressedRow]);
         walk.markResolved('ref-a');
         expect(walk.suppressedMetadataRows('ref-a')).toEqual([suppressedRow]);
@@ -201,13 +203,13 @@ describe('selected SWM metadata transfer ownership', () => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, original);
         walk.markResolved('ref-a');
-        expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
       });
 
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedDigest);
-        expect([...walk.resolvedRefs]).toEqual([]);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
         await syncPublicSnapshotsForMeta({
           ctx: testContext,
           remotePeerId: peerId,
@@ -249,14 +251,14 @@ describe('selected SWM metadata transfer ownership', () => {
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedCount);
-        expect([...walk.resolvedRefs]).toEqual([]);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
         walk.markResolved('ref-a');
       });
 
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, reordered);
-        expect([...walk.resolvedRefs]).toEqual([]);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
         walk.markResolved('ref-a');
         walk.markResolved('ref-b');
       });

@@ -284,7 +284,11 @@ export interface SharedMemoryMetadataFetchOutcome {
 export interface SharedMemorySnapshotWalkContinuation {
   /** Exact ordered manifest that owns every resolved ref below. */
   readonly orderedManifest: readonly PublicSnapshotMetadata[];
-  readonly resolvedRefs: ReadonlySet<string>;
+  /** Query live owner state without exposing its mutable backing collection. */
+  isResolved(ref: string): boolean;
+  resolvedCount(): number;
+  /** Take an immutable point-in-time view for reporting or batch setup. */
+  resolvedRefsSnapshot(): readonly string[];
   /** Exact verified metadata rows withheld when this ref was resolved. */
   suppressedMetadataRows(ref: string): readonly Quad[];
   markResolved(ref: string, suppressedMetadataRows?: readonly Quad[]): void;
@@ -822,7 +826,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       const snapshotWalk = metadataFetcher?.snapshotWalk?.(pid, orderedManifestSnapshots);
       const materializedKeys = new Set<string>();
       /** Snapshot refs whose every descriptor is locally present. */
-      const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefs ?? []);
+      const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefsSnapshot() ?? []);
       materializedRefsForCg = materializedRefs.size;
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
@@ -847,7 +851,7 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       // resolved ref so a later successful suffix cannot resurrect metadata
       // that the prefix deliberately withheld.
       if (snapshotWalk) {
-        for (const resolvedRef of snapshotWalk.resolvedRefs) {
+        for (const resolvedRef of snapshotWalk.resolvedRefsSnapshot()) {
           snapshotCommit.suppressRows(snapshotWalk.suppressedMetadataRows(resolvedRef));
         }
       }
@@ -1626,7 +1630,7 @@ export async function syncPublicSnapshotsForMeta(params: {
     // that O(prefix) replay eventually consumed the whole slice and fixed the
     // continuation at N/N+K forever. The owner is in-memory and resets on any
     // manifest change, expiry, release or process restart.
-    if (params.snapshotWalk?.resolvedRefs.has(snapshot.ref)) {
+    if (params.snapshotWalk?.isResolved(snapshot.ref)) {
       readySnapshots += 1;
       continue;
     }
