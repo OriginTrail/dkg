@@ -336,6 +336,30 @@ describe('planManagedOxigraph', () => {
     });
   });
 
+  it('preserves snapshot GC watermarks through the managed store rewrite', () => {
+    const gc = {
+      enabled: true,
+      intervalMs: 300_000,
+      triggerFreeBytes: 15 * 1024 ** 3,
+      targetFreeBytes: 25 * 1024 ** 3,
+      hardReserveBytes: 5 * 1024 ** 3,
+      minAgeMs: 7 * 24 * 60 * 60 * 1_000,
+    };
+    const plan = planManagedOxigraph(
+      {
+        store: { backend: MANAGED_OXIGRAPH_BACKEND },
+        sharedMemoryPublicSnapshotStorage: { enabled: true, gc },
+      },
+      '/data',
+    );
+
+    expect(plan!.sharedMemoryPublicSnapshotStorage).toEqual({
+      enabled: true,
+      directory: join('/data', 'swm-public-snapshots'),
+      gc,
+    });
+  });
+
   it('preserves graphSetIndex options through the managed store rewrite plan', () => {
     const plan = planManagedOxigraph(
       {

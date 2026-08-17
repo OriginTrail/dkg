@@ -363,6 +363,15 @@ export interface LargeLiteralStorageConfig {
 export interface SharedMemoryPublicSnapshotStorageConfig {
   enabled?: boolean;
   directory?: string;
+  gc?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    triggerFreeBytes?: number;
+    targetFreeBytes?: number;
+    hardReserveBytes?: number;
+    minAgeMs?: number;
+    staleTempAgeMs?: number;
+  };
 }
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
