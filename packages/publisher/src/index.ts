@@ -269,10 +269,10 @@ export {
 // GH#2270 — the DERIVED retry read model and its one classifier (never persisted; see the
 // module header for why it is not part of the lift-job shape).
 export {
-  classifyFailedJobRetryDisposition,
+  classifyRetryAction,
+  describeRetryProjection,
   deriveLiftJobRetryProjection,
   type FailedJobRetryAction,
-  type FailedJobRetryDisposition,
   type LiftJobRetryProjection,
   type LiftJobRetryWaitingReason,
 } from './async-lift-retry-disposition.js';

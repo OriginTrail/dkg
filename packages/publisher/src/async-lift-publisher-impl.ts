@@ -48,7 +48,7 @@ import type {
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError, LiftJobPendingChainProofError } from './async-lift-publisher-types.js';
 import {
-  classifyFailedJobRetryDisposition,
+  classifyRetryAction,
   deriveLiftJobRetryProjection,
   type LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
@@ -93,8 +93,8 @@ import {
   createJobSlug,
   expectBindings,
   getRecoveryTxHash,
-  hasBroadcastEvidence,
   isAutomaticallyRetryableLiftJob,
+  isHeldForChainProof,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
   isBulkClearableTerminalLiftJob,
@@ -870,7 +870,10 @@ export class TripleStoreAsyncLiftPublisher
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) {
       throw new Error(`LiftJob ${job.jobId} is not a knowledge asset VM publish job`);
     }
-    if (!job.failure.retryable) {
+    // Mirrors the occupancy contract that put this job in front of admission at all: retryable,
+    // or held for chain proof. A held job falls through to `reacceptFailedJob`, which refuses it
+    // with the typed pending-chain-proof error rather than this generic one.
+    if (!job.failure.retryable && !isHeldForChainProof(job)) {
       throw new Error(`Knowledge asset VM publish job ${job.jobId} is not retryable`);
     }
     return this.reacceptFailedJob(job, {
@@ -1115,9 +1118,9 @@ export class TripleStoreAsyncLiftPublisher
    * case arrives under `rpc_unavailable`, whose `reset_to_accepted` resolution used to be taken at
    * face value here and blind-republished.
    *
-   * The disposition comes from {@link classifyFailedJobRetryDisposition}, the same classifier
-   * {@link describeJobRetryState} projects, so the counts an operator gets and the reason shown
-   * per job are ONE partition rather than two orderings that must be kept in step by hand.
+   * The disposition comes from {@link classifyRetryAction}, the same action
+   * {@link describeJobRetryState} projects its reason from, so the counts an operator gets and
+   * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
   async retryDetailed(filter: { status?: 'failed' } = {}): Promise<AsyncLiftRetryOutcome> {
     await this.ensureGraph();
@@ -1135,17 +1138,17 @@ export class TripleStoreAsyncLiftPublisher
       let blockedPendingRecovery = 0;
       let skipped = 0;
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
-        const { action } = classifyFailedJobRetryDisposition(job, {
-          autoRetryEnabled: this.autoRetryEnabled,
-        });
-        // Reaccept is opted INTO explicitly: a disposition this build does not know falls through
-        // to `skipped`, which leaves the job exactly as it is rather than republishing it.
+        // The WRITE decision, taken over the job alone — the operator's kill-switch is not an
+        // input here and the signature cannot accept one.
+        const action = classifyRetryAction(job);
+        // Reaccept is opted INTO explicitly: an action this build does not know falls through to
+        // `skipped`, which leaves the job exactly as it is rather than republishing it.
         if (action === 'reaccept') {
           await this.reacceptFailedJob(job);
           retried += 1;
           continue;
         }
-        if (action === 'blocked_pending_recovery') {
+        if (action === 'blocked_recovery' || action === 'blocked_pending_chain_proof') {
           blockedPendingRecovery += 1;
           continue;
         }
@@ -1995,10 +1998,10 @@ export class TripleStoreAsyncLiftPublisher
 
   /**
    * The ONE writer that turns a failed job back into an accepted one (claim-time sweep,
-   * `retry()`, admission re-submit) — so GH#2270's evidence guard is enforced HERE rather than
-   * trusted to each caller: a job that may have submitted a transaction is never reaccepted, and
+   * `retry()`, admission re-submit) — so GH#2270's chain-proof hold is enforced HERE rather than
+   * trusted to each caller: a job whose transaction is unaccounted for is never reaccepted, and
    * a future caller cannot reintroduce the blind re-publish. Callers that report counts
-   * (`retryDetailed`) or skip silently (the sweep) ask `hasBroadcastEvidence` first; admission's
+   * (`retryDetailed`) or skip silently (the sweep) classify the job first; admission's
    * disposition IS this rejection, which the HTTP boundary maps to a retryable 503.
    *
    * `freshMandate` re-arms the shared retry budget instead of consuming it: a client re-submitting
@@ -2009,7 +2012,7 @@ export class TripleStoreAsyncLiftPublisher
     job: PersistedFailedJob,
     options: { readonly freshMandate?: boolean } = {},
   ): Promise<LiftJobAccepted> {
-    if (hasBroadcastEvidence(job)) {
+    if (isHeldForChainProof(job)) {
       throw new LiftJobPendingChainProofError(
         `LiftJob ${job.jobId} failed as ${job.failure.code} after a transaction may have been submitted; `
           + 'it cannot be republished until chain recovery proves the transaction absent',
