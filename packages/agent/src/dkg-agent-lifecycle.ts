@@ -360,6 +360,10 @@ import {
   type SelectedSwmContinuationUnit,
 } from './sync/selected-swm-continuation.js';
 import {
+  projectRfc64SelectedSwmGraphSyncStatus,
+  type Rfc64SelectedSwmGraphSyncStatus,
+} from './sync/selected-swm-graph-sync-status.js';
+import {
   applySelectedSwmFreshnessResolution,
   mergeSharedMemoryFreshnessDiagnostics,
 } from './sync/shared-memory-freshness.js';
@@ -4232,13 +4236,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   getRfc64SelectedSwmGraphSyncStatus(
     this: DKGAgent,
     contextGraphId: string,
-  ): {
-    mechanism: 'rfc64-selected-on-connect';
-    state: 'inactive' | 'waiting' | 'continuing' | 'converged';
-    configuredProviderCount: number;
-    retryRequiredProviderCount: number;
-    terminalProviderCount: number;
-  } {
+  ): Rfc64SelectedSwmGraphSyncStatus {
     const selected = (this.config.syncContextGraphs ?? []).includes(contextGraphId);
     const providerPeerIds = [
       ...new Set(this.resolveRfc64CompleteSwmProviderPeerIdsV1(contextGraphId)),
@@ -4249,19 +4247,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     );
     const sharedMemorySynced =
       this.subscribedContextGraphs.get(contextGraphId)?.sharedMemorySynced === true;
-    const state = !selected || providerPeerIds.length === 0
-      ? 'inactive'
-      : sharedMemorySynced || summary.terminalProviders > 0
-        ? 'converged'
-        : summary.retryRequiredProviders > 0
-          ? 'continuing'
-          : 'waiting';
-    return Object.freeze({
-      mechanism: 'rfc64-selected-on-connect',
-      state,
+    return projectRfc64SelectedSwmGraphSyncStatus({
+      selected,
       configuredProviderCount: providerPeerIds.length,
       retryRequiredProviderCount: summary.retryRequiredProviders,
       terminalProviderCount: summary.terminalProviders,
+      sharedMemorySynced,
     });
   }
 

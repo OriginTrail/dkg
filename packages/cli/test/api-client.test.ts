@@ -114,6 +114,37 @@ describe('ApiClient', () => {
       expect((calls[0].opts.headers as any).Authorization).toBeUndefined();
     });
 
+    it('normalizes catch-up jobStatus from a pre-field daemon response', async () => {
+      globalThis.fetch = mockFetchOk({
+        jobId: 'legacy-job',
+        contextGraphId: 'cg-legacy',
+        includeWorkspace: true,
+        status: 'unreachable',
+        queuedAt: 1,
+      });
+
+      const result = await client.catchupStatus('cg-legacy');
+
+      expect(result.status).toBe('unreachable');
+      expect(result.jobStatus).toBe('unreachable');
+    });
+
+    it('preserves the precise catch-up jobStatus from an upgraded daemon', async () => {
+      globalThis.fetch = mockFetchOk({
+        jobId: 'partial-job',
+        contextGraphId: 'cg-partial',
+        includeWorkspace: true,
+        status: 'unreachable',
+        jobStatus: 'partial',
+        queuedAt: 1,
+      });
+
+      const result = await client.catchupStatus('cg-partial');
+
+      expect(result.status).toBe('unreachable');
+      expect(result.jobStatus).toBe('partial');
+    });
+
     it('connect() gives DKG_AUTH_TOKEN precedence over the selected home token file', async () => {
       process.env.DKG_HOME = tempDir;
       process.env.DKG_API_PORT = String(PORT);

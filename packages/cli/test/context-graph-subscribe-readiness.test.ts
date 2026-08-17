@@ -828,6 +828,10 @@ describe('context graph subscribe readiness requires authoritative metadata', ()
       status: 'partial',
       error: expect.stringContaining('bounded catch-up job ended'),
     });
+    expect(result.statusResponse).toMatchObject({
+      status: 'unreachable',
+      jobStatus: 'partial',
+    });
     expect(result.state).toMatchObject({
       synced: false,
       sharedMemorySynced: false,

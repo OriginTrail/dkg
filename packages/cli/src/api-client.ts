@@ -4,6 +4,7 @@ import type {
   ContextGraphReconcileResult,
   ContextGraphSyncMode,
   RandomSamplingDisabledReason,
+  Rfc64SelectedSwmGraphSyncStatus,
 } from '@origintrail-official/dkg-agent';
 import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
@@ -14,6 +15,7 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
+import type { CatchupJobState, LegacyCatchupJobState } from './catchup-status.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -1654,20 +1656,15 @@ export class ApiClient {
     });
   }
 
-  async catchupStatus(contextGraphId: string): Promise<{
+  async catchupStatus(contextGraphId: string) {
+    const raw = await this.get<{
     jobId: string;
     contextGraphId: string;
     includeWorkspace: boolean;
-    status: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'partial' | 'failed' | 'unreachable';
+    status: LegacyCatchupJobState;
     /** Absent only when a newer client is connected to a pre-field daemon. */
-    jobStatus?: 'queued' | 'running' | 'done' | 'denied' | 'deferred' | 'partial' | 'failed' | 'unreachable';
-    graphSync?: {
-      mechanism: 'rfc64-selected-on-connect';
-      state: 'inactive' | 'waiting' | 'continuing' | 'converged';
-      configuredProviderCount: number;
-      retryRequiredProviderCount: number;
-      terminalProviderCount: number;
-    };
+    jobStatus?: CatchupJobState;
+    graphSync?: Rfc64SelectedSwmGraphSyncStatus;
     queuedAt: number;
     startedAt?: number;
     finishedAt?: number;
@@ -1726,8 +1723,12 @@ export class ApiClient {
       };
     };
     error?: string;
-  }> {
-    return this.get(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+    }>(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
+    return {
+      ...raw,
+      /** Normalize pre-field daemon responses at the API boundary. */
+      jobStatus: raw.jobStatus ?? raw.status,
+    };
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {

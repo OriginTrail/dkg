@@ -22,6 +22,7 @@
 
 import { getMetrics } from '@origintrail-official/dkg-core';
 import type { CatchupJob, CatchupJobState } from './types.js';
+import { isTerminalCatchupJobState } from '../catchup-status.js';
 
 /**
  * Grace period the shutdown drain gives in-flight walks to settle normally.
@@ -80,16 +81,6 @@ export interface CatchupJobLedgerEntry {
  */
 const ledger = new Map<string, CatchupJobLedgerEntry>();
 
-/** Terminal states a job can settle in; `queued`/`running` are not terminal. */
-const TERMINAL_STATES: ReadonlySet<CatchupJobState> = new Set<CatchupJobState>([
-  'done',
-  'failed',
-  'denied',
-  'deferred',
-  'partial',
-  'unreachable',
-]);
-
 /**
  * A job that never reached a terminal state is reported as `failed`.
  *
@@ -100,7 +91,7 @@ const TERMINAL_STATES: ReadonlySet<CatchupJobState> = new Set<CatchupJobState>([
  * closed vocabulary instead of leaking `running` into the series.
  */
 function terminalStatusFor(job: CatchupJob): CatchupJobState {
-  return TERMINAL_STATES.has(job.status) ? job.status : 'failed';
+  return isTerminalCatchupJobState(job.status) ? job.status : 'failed';
 }
 
 /** I7 — one point per subscribe-route return. Never throws. */
