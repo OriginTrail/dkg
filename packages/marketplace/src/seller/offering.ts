@@ -8,6 +8,7 @@
 // the safe, immediate registry; on-chain (VM) publication is a separate,
 // operator-gated money step and is NOT performed here.
 import type { OfferingBinding } from "./front.js";
+import { buildModelKaQuads, modelKaFromBinding } from "./model-ka.js";
 
 export const NSM = "https://w3id.org/neurosymbolic-marketplace/nsm#";
 const RDF = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
@@ -27,6 +28,12 @@ export function buildOfferingQuads(ob: OfferingBinding, a: {
 
   iri(OFFER, `${RDF}type`, `${NSM}ModelOffering`);
   lit(OFFER, `${NSM}modelId`, modelId);
+  // v3.5: offerings REFERENCE the canonical Model KA instead of each carrying
+  // loose model metadata; the catalog groups by this urn.
+  {
+    const mk = buildModelKaQuads(modelKaFromBinding(ob));
+    iri(OFFER, `${NSM}modelRef`, mk.urn);
+  }
   lit(OFFER, `${NSM}provenanceClass`, o.provenanceClass);
   lit(OFFER, `${NSM}perInputTokenMicroTrac`, o.perInputTokenMicroTrac);
   lit(OFFER, `${NSM}perOutputTokenMicroTrac`, o.perOutputTokenMicroTrac);
@@ -64,6 +71,7 @@ export async function publishOffering(nodeBase: string, token: string, ob: Offer
   providerAddress: string; apiBase: string; chainId: number; contextGraphId: string; subGraphName?: string;
 }): Promise<{ ka: string; ual: string }> {
   const { ka, quads } = buildOfferingQuads(ob, a);
+  const mk = buildModelKaQuads(modelKaFromBinding(ob));
   const sg = a.subGraphName ?? "registry";
   const call = async (path: string, body: Record<string, unknown>) => {
     const res = await fetch(nodeBase + path, {
@@ -77,6 +85,12 @@ export async function publishOffering(nodeBase: string, token: string, ob: Offer
   };
   // sub-graph may already exist — create is idempotent-by-refusal
   await call("/api/sub-graph/create", { contextGraphId: a.contextGraphId, subGraphName: sg }).catch(() => null);
+  // v3.5: publish the canonical Model KA first (shared by all offerings of the
+  // same model; a re-publish of an existing finalized KA fails harmlessly)
+  await call(`/api/knowledge-assets/${mk.ka}/wm/write`, { quads: mk.quads, contextGraphId: a.contextGraphId, subGraphName: sg })
+    .then(() => call(`/api/knowledge-assets/${mk.ka}/wm/finalize`, { contextGraphId: a.contextGraphId, subGraphName: sg }))
+    .then(() => call(`/api/knowledge-assets/${mk.ka}/swm/share`, { contextGraphId: a.contextGraphId, subGraphName: sg }))
+    .catch(() => null);
   await call(`/api/knowledge-assets/${ka}/wm/write`, { quads, contextGraphId: a.contextGraphId, subGraphName: sg });
   await call(`/api/knowledge-assets/${ka}/wm/finalize`, { contextGraphId: a.contextGraphId, subGraphName: sg });
   await call(`/api/knowledge-assets/${ka}/swm/share`, { contextGraphId: a.contextGraphId, subGraphName: sg });

@@ -8,6 +8,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { nodeCaller, pollLaneRequests, publishLaneMessage, type LaneRequest } from "./swm-lane.js";
+import { markDelivered, sweepExpiredDeliveries } from "../seller/lifecycle.js";
 
 export interface LaneExecutorOpts {
   home: string;                 // marketplace namespace (processed-id store)
@@ -47,7 +48,7 @@ export function startLaneExecutor(opts: LaneExecutorOpts): { stop: () => void } 
     const body = Buffer.from(req.bodyB64, "base64");
     const res = await fetch(opts.nodeBase + opts.basePath + req.path, {
       method: req.method,
-      headers: { "content-type": "application/json", ...req.headers },
+      headers: { "content-type": "application/json", "x-nsm-transport": "lane", ...req.headers },
       ...(req.method === "GET" ? {} : { body }),
       signal: AbortSignal.timeout(300_000),
     });
@@ -73,6 +74,13 @@ export function startLaneExecutor(opts: LaneExecutorOpts): { stop: () => void } 
       }
     }
     if (!published) throw new Error(`response publish exhausted retries (id ${req.id})`);
+    // v3.5 lifecycle: the response KA publish succeeding IS lane delivery —
+    // the exact step whose failure created v3's billed-but-undelivered leg.
+    try {
+      const parsed = JSON.parse(resBody.toString("utf8")) as { nsm?: { leg?: { legId?: string } } };
+      const legId = parsed?.nsm?.leg?.legId;
+      if (legId) markDelivered(opts.home, String(legId), "lane");
+    } catch { /* non-JSON responses carry no leg */ }
     opts.log(`lane served ${req.method} ${req.path} → ${res.status} (id ${req.id})`);
   };
 
@@ -80,6 +88,7 @@ export function startLaneExecutor(opts: LaneExecutorOpts): { stop: () => void } 
     if (running || stopped) return;
     running = true;
     try {
+      for (const v of sweepExpiredDeliveries(opts.home)) opts.log(`leg ${v} VOIDED (delivery deadline missed) — billing reversed`);
       const reqs = await pollLaneRequests(call, opts.contextGraphId);
       for (const r of reqs) {
         if (processed.has(r.id)) continue;

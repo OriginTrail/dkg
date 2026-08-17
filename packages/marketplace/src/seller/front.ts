@@ -28,7 +28,9 @@ import {
   recordInferenceLeg, recordReadLeg,
 } from "../core/ledger.js";
 import { buildInferenceEvidence } from "../core/inference-meter.js";
+import { modelKaFromBinding, modelKaUrn } from "./model-ka.js";
 import { verifyRequestAuth, bodyDigest } from "./auth.js";
+import { legState, markDelivered, sweepExpiredDeliveries, idempoLookup, idempoRecord, DELIVERY_DEADLINE_MS } from "./lifecycle.js";
 import { verifyDepositOnchain, openTab, tabById, txHashConsumed, tabQuantities } from "./tabs.js";
 import { completeLlamaCpp, type LlamaCppBinding } from "./connector-llamacpp.js";
 import { completeOpenAi, type OpenAiBinding, CHAT_TEMPLATE_CONSTANTS, templateConstantsDigest } from "./connector-openai.js";
@@ -94,7 +96,11 @@ function readLines(p: string): Array<Record<string, unknown>> {
   });
 }
 export function legById(home: string, legId: string): Record<string, unknown> | null {
-  const rows = readLines(legsPath(home)).filter((r) => r.legId === legId);
+  // v3.5: lifecycle EVENT rows (delivered/voided) share the legId but are not
+  // the leg — only type:"leg" rows carry the signed body + tabId. Returning
+  // the last matching row of ANY type made a voided leg 404 on decision
+  // attempts (found by drill A).
+  const rows = readLines(legsPath(home)).filter((r) => r.legId === legId && r.type === "leg");
   return rows.length ? rows[rows.length - 1] : null;
 }
 export function legStatus(home: string, legId: string): { status: string; code?: string } {
@@ -120,6 +126,12 @@ export function buildV3Quote(deps: FrontDeps): Record<string, unknown> {
       queryFlatMicroTrac: ob.offering.queryFlatMicroTrac,
       perReturnedQuadMicroTrac: ob.offering.perReturnedQuadMicroTrac,
       tokenizerBundleRef: ob.tokenizerBundleRef,
+      // v3.5: transports the offering serves + the canonical Model KA it
+      // references. The UI renders ENDPOINTS only from this signed quote —
+      // never from KA literals (CLAUDE.md §7; kills v3's stale-apiBase class).
+      transports: (deps.cfg as { transports?: string[] }).transports ?? ["direct", "lane"],
+      directUrl: deps.cfg.apiBase ?? null,
+      modelRef: modelKaUrn(modelKaFromBinding(ob)),
       servingSettings:
         ob.binding.kind === "llamacpp" ? ob.binding.settings :
         ob.binding.kind === "openai" ? { templateConstantsDigest: ob.binding.templateConstantsDigest } :
@@ -223,6 +235,24 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
     const body = await readBodyBuf(req);
     const auth = await requireAuth(body);
     if (!auth) return true;
+    // v3.5 lifecycle: sweep any pending-delivery legs past deadline (auto-void
+    // + billing reversal) before serving new work — the ledger never carries a
+    // stale provisional debit into a new serve.
+    for (const v of sweepExpiredDeliveries(deps.home)) deps.log(`leg ${v} VOIDED (delivery deadline missed) — billing reversed`);
+    // v3.5 idempotency: a retry with the same (tab, key) returns the SAME leg
+    // and response — at-most-once billing across retries.
+    const transport = String(req.headers["x-nsm-transport"] ?? "direct");
+    const idemKey = String(req.headers["x-nsm-idempotency"] ?? "");
+    if (idemKey) {
+      const prior = idempoLookup(deps.home, auth.tabId, idemKey);
+      if (prior) {
+        const stored = (prior as unknown as { responseB64?: string }).responseB64;
+        deps.log(`idempotent replay (tab=${auth.tabId} key=${idemKey.slice(0, 12)}…) → leg ${prior.legId}, no new billing`);
+        if (stored) { send(res, 200, { ...JSON.parse(Buffer.from(stored, "base64").toString("utf8")), nsmReplay: true }); return true; }
+        send(res, 200, { nsmReplay: true, legId: prior.legId, responseDigest: prior.responseDigest });
+        return true;
+      }
+    }
     let parsed: { model?: string; messages?: Array<{ role: string; content: string }>; max_tokens?: number };
     try { parsed = JSON.parse(body.toString("utf8")); } catch { send(res, 400, { error: "E_BODY" }); return true; }
     const ob = parsed.model ? deps.offerings.get(parsed.model) : undefined;
@@ -324,6 +354,7 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
       send(res, code === "E_INSUFFICIENT_FUNDS" ? 402 : 500, { error: code });
       return true;
     }
+    const deadlineMs = DELIVERY_DEADLINE_MS[transport] ?? DELIVERY_DEADLINE_MS.direct;
     const leg = signLeg(deps.home, {
       type: "leg", legType: "inference", tabId: auth.tabId, principal: auth.principal,
       offeringId: ob.offering.id, provenanceClass: ob.offering.provenanceClass,
@@ -331,16 +362,29 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
       pricing: { ...pricingPolicy, costMicroTrac: cost, policyDigest },
       evidence,
       tokenizerBundleRef: ob.tokenizerBundleRef,
+      transport, deliveryDeadline: new Date(Date.now() + deadlineMs).toISOString(),
       at: new Date().toISOString(),
     });
     appendLine(legsPath(deps.home), leg);
-    deps.log(`leg ${leg.legId} inference ${inputTokens}/${outputTokens} tok ${cost}µ tab=${auth.tabId}`);
-    send(res, 200, {
+    deps.log(`leg ${leg.legId} inference ${inputTokens}/${outputTokens} tok ${cost}µ tab=${auth.tabId} [pending-delivery, ${transport}]`);
+    const responseBody = {
       id: String(leg.legId), object: "chat.completion",
       choices: [{ index: 0, message: { role: "assistant", content: completion }, finish_reason: "stop" }],
       usage: { prompt_tokens: inputTokens, completion_tokens: outputTokens },
       nsm: { leg },
-    });
+    };
+    if (idemKey) {
+      idempoRecord(deps.home, { tabId: auth.tabId, key: idemKey, legId: String(leg.legId),
+        responseDigest: "sha256:" + createHash("sha256").update(JSON.stringify(responseBody)).digest("hex"),
+        at: new Date().toISOString(),
+        ...( { responseB64: Buffer.from(JSON.stringify(responseBody), "utf8").toString("base64") } as object ),
+      } as never);
+    }
+    send(res, 200, responseBody);
+    // DIRECT transport: the response is written — delivery is durable from the
+    // seller's side the moment the socket flushed. LANE: the executor marks
+    // delivered only after the response KA publish succeeds.
+    if (transport === "direct") markDelivered(deps.home, String(leg.legId), "direct");
     return true;
   }
 
@@ -377,9 +421,12 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
       send(res, code === "E_INSUFFICIENT_FUNDS" ? 402 : 500, { error: code });
       return true;
     }
+    const qTransport = String(req.headers["x-nsm-transport"] ?? "direct");
     const leg = signLeg(deps.home, {
       type: "leg", legType: "query", tabId: auth.tabId, principal: auth.principal,
       offeringId: ob.offering.id, provenanceClass: ob.offering.provenanceClass,
+      transport: qTransport,
+      deliveryDeadline: new Date(Date.now() + (DELIVERY_DEADLINE_MS[qTransport] ?? DELIVERY_DEADLINE_MS.direct)).toISOString(),
       meter: { returnedQuads: result.returnedQuads },
       pricing: {
         version: "nsm-pricing/v3",
@@ -397,6 +444,7 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
     appendLine(legsPath(deps.home), leg);
     deps.log(`leg ${leg.legId} query quads=${result.returnedQuads} ${cost}µ tab=${auth.tabId}`);
     send(res, 200, { result: JSON.parse(result.body), nsm: { leg } });
+    if (qTransport === "direct") markDelivered(deps.home, String(leg.legId), "direct");
     return true;
   }
 
@@ -409,8 +457,13 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
     const [, legId, action] = legAction;
     const leg = legById(deps.home, legId);
     if (!leg || leg.tabId !== auth.tabId) { send(res, 404, { error: "E_LEG_UNKNOWN" }); return true; }
-    const st = legStatus(deps.home, legId);
-    if (st.status !== "open") { send(res, 409, { error: "E_LEG_DECIDED", status: st }); return true; }
+    // v3.5 lifecycle: decisions are only legal FROM `delivered`. A pending leg
+    // cannot be countersigned OR withheld (v3's gray case), and a voided leg is
+    // final — its billing was already reversed.
+    const ls = legState(deps.home, legId);
+    if (ls.state === "pending-delivery") { send(res, 409, { error: "E_LEG_PENDING_DELIVERY", deadline: ls.deadline }); return true; }
+    if (ls.state === "voided") { send(res, 409, { error: "E_LEG_VOIDED" }); return true; }
+    if (ls.state !== "delivered") { send(res, 409, { error: "E_LEG_DECIDED", state: ls.state }); return true; }
     if (action === "withhold") {
       let parsed: { code?: string; detail?: string };
       try { parsed = JSON.parse(body.toString("utf8")); } catch { parsed = {}; }
@@ -432,16 +485,19 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
     const auth = await requireAuth(body);
     if (!auth) return true;
     const q = tabQuantities(deps.home, auth.principal);
+    // sweep first so a pending leg past deadline voids rather than blocking
+    for (const v of sweepExpiredDeliveries(deps.home)) deps.log(`leg ${v} VOIDED at close-sweep — billing reversed`);
     const rows = readLines(legsPath(deps.home)).filter((r) => r.tabId === auth.tabId && r.type === "leg");
-    const decided = rows.map((r) => ({ legId: r.legId, ...legStatus(deps.home, String(r.legId)) }));
-    const countersigned = decided.filter((d) => d.status === "countersigned");
-    const withheld = decided.filter((d) => d.status === "withheld");
-    const open = decided.filter((d) => d.status === "open");
+    const decided = rows.map((r) => ({ legId: r.legId, state: legState(deps.home, String(r.legId)).state }));
+    const countersigned = decided.filter((d) => d.state === "countersigned");
+    const withheld = decided.filter((d) => d.state === "withheld");
+    const voided = decided.filter((d) => d.state === "voided");
+    const open = decided.filter((d) => d.state === "pending-delivery" || d.state === "delivered");
     if (open.length) { send(res, 409, { error: "E_LEGS_UNDECIDED", open: open.map((o) => o.legId) }); return true; }
     const closeBody = {
       type: "close", tabId: auth.tabId, principal: auth.principal,
       billedMicroTrac: q.billed,
-      legsCountersigned: countersigned.length, legsWithheld: withheld.length,
+      legsCountersigned: countersigned.length, legsWithheld: withheld.length, legsVoided: voided.length,
       at: new Date().toISOString(),
     };
     const closeDigest = "sha256:" + createHash("sha256").update(canonicalize(closeBody)).digest("hex");
