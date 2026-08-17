@@ -171,7 +171,7 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     expect([held.failure.code, held.failure.retryable]).toEqual(['confirmation_mismatch', false]);
     expect(isHeldForChainProof(held)).toBe(true);
 
-    expect(publisher.describeJobRetryState(held))
+    expect(publisher.describeConfiguredRetryState(held))
       .toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
     expect(await publisher.retryDetailed())
       .toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
@@ -212,7 +212,7 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
 
       expect([message, hasBroadcastEvidence(proven), isHeldForChainProof(proven)])
         .toEqual([message, true, false]);
-      expect([message, publisher.describeJobRetryState(proven)])
+      expect([message, publisher.describeConfiguredRetryState(proven)])
         .toEqual([message, { autoRetryEligible: false }]);
       expect([message, await publisher.retryDetailed()])
         .toEqual([message, { retried: 0, blockedPendingRecovery: 0, skipped: 1 }]);
@@ -311,11 +311,11 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     expect((await publisher.getStats()).accepted).toBe(2);
   });
 
-  it('publishes anew when the lifecycle already FINISHED behind a held job', async () => {
-    // The case that isolates the sibling rule from "bind the newest": the newest record is
-    // finalized, so it binds nothing, and only the sibling rule stops admission from falling back
-    // to the older failed record — resurrecting a superseded job, or answering 503 for a KA whose
-    // publish demonstrably completed.
+  it('keeps holding a KA whose lifecycle FINISHED behind a job with an unaccounted transaction', async () => {
+    // A newer sibling is NOT chain proof. A finalized successor says a later publish completed; it
+    // says nothing about the transaction the held record may have sent, so that record keeps
+    // binding the lifecycle and a re-submit keeps getting the typed refusal. The exits are
+    // recovery proving the transaction's fate, or an operator clearing THAT job by id.
     const publisher = createPublisher();
     const request = kaVmPublishRequest();
     const held = await failAfterRecordedTxHash(publisher, request);
@@ -337,27 +337,74 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     } as unknown as LiftJob;
     await h.store.insert(serializeJob(finished, DEFAULT_CONTROL_GRAPH_URI));
 
-    const minted = await publisher.enqueueKnowledgeAssetVmPublish(request);
-
-    expect([minted === held.jobId, minted === 'finalized-1']).toEqual([false, false]);
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+      name: 'LiftJobPendingChainProofError',
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: held.jobId,
+    });
+    // No new job for the KA, and the held record is untouched.
     expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
+    expect((await publisher.getStats()).accepted).toBe(0);
+
+    // The documented exit: clear THAT job by id, and the KA is publishable again.
+    expect(await publisher.clearTerminalJob(held.jobId)).toEqual({ outcome: 'cleared' });
+    const minted = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    expect([minted === held.jobId, minted === 'finalized-1']).toEqual([false, false]);
     expect((await publisher.getStatus(minted))?.status).toBe('accepted');
   });
 
-  it('lets a newer sibling supersede even a job held for chain proof', async () => {
-    // The hold keeps a lifecycle's CURRENT record from being republished; it must not wedge a
-    // lifecycle that has already moved on. The held record is still never reaccepted itself — the
-    // writer guard owns that — but it no longer shadows the successor at admission.
+  it('answers for the held record even when a LIVE successor exists for the lifecycle', async () => {
+    // Same rule against the other kind of sibling: a successor that is still running is not proof
+    // about the held record's transaction either. Admission answers for the record that may have
+    // one outstanding — the successor keeps running regardless, and a client that wants its id
+    // reads the intent lookup, which reports both.
     const publisher = createPublisher();
     const request = kaVmPublishRequest();
     const held = await failAfterRecordedTxHash(publisher, request);
     expect(isHeldForChainProof(held)).toBe(true);
     const successorId = await seedSuccessorFor(held, held.timestamps.acceptedAt + 1_000);
 
-    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(successorId);
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: held.jobId,
+    });
     expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
-    // The hold is intact where it belongs: a retry pass still refuses to reaccept that record.
+    expect((await publisher.getStatus(successorId))?.status).toBe('accepted');
+    // The hold is intact everywhere else too: a retry pass still refuses to reaccept that record.
     expect(await publisher.retryDetailed())
       .toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
+  });
+
+  it('holds a TERMINAL tx-bearing failure behind a finalized sibling', async () => {
+    // The bot's exact regression: an older terminal failure that DID broadcast, with a newer
+    // finalized record for the same KA. The finalized record is a different publish; the older
+    // transaction is still unaccounted for, so the re-submit is refused rather than minting a job.
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const held = await failFromIncluded(publisher, request);
+    expect([held.failure.code, held.failure.retryable, isHeldForChainProof(held)])
+      .toEqual(['confirmation_mismatch', false, true]);
+    const finished = {
+      jobId: 'finalized-2',
+      jobSlug: 'finalized-2',
+      request: held.request,
+      status: 'finalized',
+      timestamps: {
+        acceptedAt: held.timestamps.acceptedAt + 1_000,
+        updatedAt: held.timestamps.acceptedAt + 1_000,
+      },
+      retries: { retryCount: 0, maxRetries: 10 },
+      claim: { walletId: 'wallet-finalized' },
+      validation: KA_VM_VALIDATION,
+      finalization: { mode: 'local' },
+      controlPlane: { jobRef: jobSubject('finalized-2') },
+    } as unknown as LiftJob;
+    await h.store.insert(serializeJob(finished, DEFAULT_CONTROL_GRAPH_URI));
+
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: held.jobId,
+    });
+    expect((await publisher.getStats()).accepted).toBe(0);
   });
 });

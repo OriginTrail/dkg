@@ -26,7 +26,7 @@ import { KA_VM_VALIDATION, kaVmPublishRequest } from './_helpers/ka-vm-publish.j
  * transaction evidence, when a job is held for chain proof, what a retry pass does with it, and
  * what the read-only projection tells an operator.
  *
- * The rows here drive the policy through the publisher (`retryDetailed`, `describeJobRetryState`)
+ * The rows here drive the policy through the publisher (`retryDetailed`, `describeConfiguredRetryState`)
  * and, where a single predicate is the point, call it directly. Admission and cleanup consequences
  * live in async-lift-admission-clear-2270; the scheduler itself in async-lift-auto-retry-2270.
  */
@@ -116,7 +116,7 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     // The counts and the per-job projection are ONE partition, not two opinions: retried ↔
     // backoff/operator, blocked ↔ recovery/pending_chain_proof, skipped ↔ exhausted/no reason.
-    expect([retryable, blocked, terminal].map((job) => publisher.describeJobRetryState(job))).toEqual([
+    expect([retryable, blocked, terminal].map((job) => publisher.describeConfiguredRetryState(job))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
       { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
       { autoRetryEligible: false },
@@ -154,7 +154,7 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     expect(await publisher.retryDetailed())
       .toEqual({ retried: 0, blockedPendingRecovery: 1, skipped: 0 });
-    expect(publisher.describeJobRetryState(recoveryOwned))
+    expect(publisher.describeConfiguredRetryState(recoveryOwned))
       .toEqual({ autoRetryEligible: false, waitingReason: 'recovery' });
     expect((await publisher.getStatus(exhausted.jobId))?.status).toBe('failed');
   });
@@ -250,25 +250,25 @@ describe('GH#2270 failed-job retry disposition', () => {
 
     expect([
       // The publisher's own lane owns it and will fire at nextRetryAt.
-      publisher.describeJobRetryState(scheduled),
+      publisher.describeConfiguredRetryState(scheduled),
       // A transaction may exist: never eligible, whatever the registry says about the code.
-      publisher.describeJobRetryState(evidenceBearing),
+      publisher.describeConfiguredRetryState(evidenceBearing),
       // Retryable, evidence-free, budget left — but nothing automatic moves a non-allow-listed
       // code; an operator or a client re-submit must.
-      publisher.describeJobRetryState({
+      publisher.describeConfiguredRetryState({
         ...evidenceBearing,
         broadcast: undefined,
         failure: { ...evidenceBearing.failure, failedFromState: 'validated' },
       } as unknown as LiftJob),
       // Budget spent: only a fresh client mandate re-arms it.
-      publisher.describeJobRetryState({ ...scheduled, retries: { ...scheduled.retries, retryCount: 2 } }),
+      publisher.describeConfiguredRetryState({ ...scheduled, retries: { ...scheduled.retries, retryCount: 2 } }),
       // A terminal failure is not waiting for anything.
-      publisher.describeJobRetryState({
+      publisher.describeConfiguredRetryState({
         ...scheduled,
         failure: { ...scheduled.failure, code: 'publish_intent_stale', retryable: false, resolution: 'fail_job' },
       }),
       // A job that has not failed has no retry projection at all.
-      publisher.describeJobRetryState((await publisher.getStatus(acceptedJobId))!),
+      publisher.describeConfiguredRetryState((await publisher.getStatus(acceptedJobId))!),
     ]).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
       { autoRetryEligible: false, waitingReason: 'pending_chain_proof' },
@@ -286,8 +286,8 @@ describe('GH#2270 failed-job retry disposition', () => {
     await enabled.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
     const failed = await failWithCorruptHead(enabled, 'wallet-1');
 
-    expect(enabled.describeJobRetryState(failed)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
-    expect(createCorruptHeadPublisher({ autoRetryEnabled: false }).describeJobRetryState(failed))
+    expect(enabled.describeConfiguredRetryState(failed)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
+    expect(createCorruptHeadPublisher({ autoRetryEnabled: false }).describeConfiguredRetryState(failed))
       .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
   });
 
@@ -312,7 +312,7 @@ describe('GH#2270 failed-job retry disposition', () => {
       .toEqual(['reaccept', 'blocked_pending_chain_proof', 'skip_terminal']);
     // The two consumers, on the same three jobs: one count per action, and the projection each
     // job reports is the one derived from the action the classifier assigned it.
-    expect([reaccept, blocked, skip].map((job) => publisher.describeJobRetryState(job)))
+    expect([reaccept, blocked, skip].map((job) => publisher.describeConfiguredRetryState(job)))
       .toEqual([reaccept, blocked, skip].map((job) => describeRetryProjection(job, options)));
     expect([reaccept, blocked, skip].map((job) => describeRetryProjection(job, options))).toEqual([
       { autoRetryEligible: true, waitingReason: 'backoff' },
