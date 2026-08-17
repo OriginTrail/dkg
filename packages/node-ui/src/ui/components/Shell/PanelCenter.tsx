@@ -2,7 +2,7 @@ import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
 import { MarketplaceV35View } from '../../views/MarketplaceV35View.js';
-import { MarketplaceOperateView } from '../../views/MarketplaceOperateView.js';
+import { OperateV35View } from '../../views/OperateV35View.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
 import { MemoryLayerView } from '../../views/MemoryLayerView.js';
@@ -284,7 +284,7 @@ function ViewContainer() {
 
   if (activeTabId === 'marketplace') return <MarketplaceV35View />;
 
-  if (activeTabId === 'marketplace-operate') return <MarketplaceOperateView />;
+  if (activeTabId === 'marketplace-operate') return <OperateV35View />;
 
   if (activeTabId === 'operations') {
     return (

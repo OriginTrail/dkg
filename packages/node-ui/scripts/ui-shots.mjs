@@ -32,6 +32,18 @@ const SHOTS = [
     await page.waitForFunction(() => !document.querySelector(".nsmx .skel"), { timeout: 120_000 }).catch(() => {});
     await page.waitForTimeout(500);
   } },
+  { name: "treasury", path: "/ui/?marketplace=1", actions: async (page) => {
+    await page.locator(".v10-tree-dashboard", { hasText: "Marketplace" }).first().click({ timeout: 15_000, force: true });
+    await page.waitForSelector(".nsmx .mnav", { timeout: 20_000 });
+    await page.locator(".nsmx .mnav button", { hasText: "Treasury" }).click({ timeout: 15_000, force: true });
+    await page.waitForTimeout(4000);
+  } },
+  { name: "access", path: "/ui/?marketplace=1", actions: async (page) => {
+    await page.locator(".v10-tree-dashboard", { hasText: "Marketplace" }).first().click({ timeout: 15_000, force: true });
+    await page.waitForSelector(".nsmx .mnav", { timeout: 20_000 });
+    await page.locator(".nsmx .mnav button", { hasText: "Access" }).click({ timeout: 15_000, force: true });
+    await page.waitForTimeout(4000);
+  } },
   { name: "operate", path: "/ui/?marketplace=1", actions: async (page) => {
     await page.locator(".v10-tree-dashboard", { hasText: "Operate" }).first().click({ timeout: 15_000, force: true });
     await page.waitForTimeout(4000);
