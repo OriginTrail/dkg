@@ -64,6 +64,7 @@ async function startStatusServer(query: () => Promise<unknown>): Promise<{
       agent: {
         peerId: 'peer-status-store-quads-test',
         multiaddrs: [],
+        getSyncContextGraphIds: () => [],
         store: { query },
         node: {
           libp2p: { getConnections: () => [] },
