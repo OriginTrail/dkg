@@ -558,6 +558,7 @@ export async function recoverContextGraphSwm(
   if (metaReplaceTargets.length > 0) {
     await deps.replaceMetaForGraphAssets?.(metaReplaceTargets);
   }
+  let insertedMetaQuads = 0;
   if (processed.verifiedMeta.length > 0) {
     // The raw payload gets the same head-row canonicalization the public lane
     // applies (the parser accepts equivalent two-id payloads, so an
@@ -577,6 +578,9 @@ export async function recoverContextGraphSwm(
     if (insertableMeta.length > 0) {
       await deps.store.insert([...insertableMeta]);
     }
+    // Canonicalization and withholding intentionally DROP rows; the reported
+    // count is what actually reached the store, not the payload size.
+    insertedMetaQuads = insertableMeta.length;
   }
 
   // R2 — hydrate the Rule-4 ownership cache for the recovered roots (parity with
@@ -599,14 +603,14 @@ export async function recoverContextGraphSwm(
     deps.ctx,
     `SWM recovery for "${deps.contextGraphId}" from ${deps.remotePeerId}: replaced ${applied.replacedRoots} roots, ` +
     `${replacedGraphs} exact graphs, ${applied.insertedQuads + insertedGraphQuads} data + ` +
-    `${processed.verifiedMeta.length} meta triples`,
+    `${insertedMetaQuads} meta triples`,
   );
 
   return {
     replacedRoots: applied.replacedRoots,
     replacedGraphs,
     insertedDataQuads: applied.insertedQuads + insertedGraphQuads,
-    insertedMetaQuads: processed.verifiedMeta.length,
+    insertedMetaQuads,
     droppedDataTriples: processed.droppedDataTriples,
     ...snapshotProgress,
     completed: true,

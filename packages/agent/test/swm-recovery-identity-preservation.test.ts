@@ -142,6 +142,39 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     // The curator's operation subject lands as immutable history (same
     // disposal as the public lane) — only its head-id row is withheld.
     expect(await opSubjectExists(store, curatorEquivalent.operationSubject)).toBe(true);
+    // The reported count is what actually reached the store: the payload
+    // minus the ONE withheld curator head-id row.
+    expect(result.insertedMetaQuads).toBe(curatorEquivalent.meta.length - 1);
+  });
+
+  it('a graph-backed REWRITE is meta-replaced, never preserved (rewrite marker)', async () => {
+    // The aggregate graph-backed path REWRITES the assertion graph from the
+    // fetched transport quads; a rewritten KA must go through meta
+    // replacement even when the local head is identity-equivalent — the
+    // graph content is now the curator's, and preserving the old identity
+    // would certify content the local operation never produced. Removing the
+    // rewrittenGraphKeys marker re-routes this KA into preservation and
+    // fails this row.
+    const snapshotGraph = `did:dkg:context-graph:${encodeURIComponent(CG)}/_shared_memory_snapshots/_/${encodeURIComponent('storage-ack-x')}/ka`;
+    const graphBackedMeta = curatorEquivalent.meta.map((quad) =>
+      quad.subject === curatorEquivalent.operationSubject && quad.predicate === `${DKG}publicSnapshotRef`
+        ? { subject: quad.subject, predicate: `${DKG}publicSnapshotGraph`, object: snapshotGraph, graph: quad.graph }
+        : { ...quad });
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store);
+    const deps = identityDeps(store, [...graphBackedMeta]);
+    const dataQuads = curatorEquivalent.payload.map((quad) => ({ ...quad, graph: snapshotGraph }));
+    const result = await recoverContextGraphSwm({
+      ...deps,
+      fetchSyncPages: async (
+        _c: OperationContext, _p: string, _cg: string, _inc: boolean,
+        phase: 'data' | 'meta',
+      ): Promise<SyncPageResult> => page(phase === 'meta' ? [...graphBackedMeta] : dataQuads),
+    });
+    expect(result.completed).toBe(true);
+    expect(await headIds(store)).toEqual(['"storage-ack-x"']);
+    expect(await opSubjectExists(store, localShare.operationSubject)).toBe(false);
   });
 
   it('same-id skipped assets are REPLACED, healing corrupt operation rows', async () => {
