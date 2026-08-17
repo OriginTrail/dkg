@@ -1098,10 +1098,9 @@ export function resolvePublisherRetryTuning(
   publisher?: DkgConfig['publisher'] | null,
   label = 'publisher',
 ): PublisherRetryTuning {
-  if (publisher != null && (typeof publisher !== 'object' || Array.isArray(publisher))) {
-    throw new Error(`${label} must be an object`);
-  }
-  return resolveAsyncLiftRetryTuning(publisher ?? undefined, label);
+  // Pure label adapter: the WHOLE validation boundary, object shape
+  // included, is the publisher-owned resolver.
+  return resolveAsyncLiftRetryTuning(publisher, label);
 }
 
 /** Resolve context graphs from network config. */

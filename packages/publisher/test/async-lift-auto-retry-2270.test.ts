@@ -4,6 +4,7 @@ import {
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
   type LiftJob,
+  resolveAsyncLiftRetryTuning,
 } from '../src/index.js';
 import {
   KA_VM_VALIDATION,
@@ -238,6 +239,13 @@ describe('GH#2270 async lift automatic retry lane', () => {
         'Async lift publisher.retryJitterRatio must be a number at least 0 and below 1',
       );
     }
+  });
+
+  it('the exported resolver rejects a non-object input directly', () => {
+    expect(() => resolveAsyncLiftRetryTuning('12000', 'publisher'))
+      .toThrow('publisher must be an object (received "12000")');
+    expect(() => resolveAsyncLiftRetryTuning([], 'publisher'))
+      .toThrow('publisher must be an object');
   });
 
   it('rejects a non-boolean autoRetryEnabled instead of silently enabling the lane', () => {

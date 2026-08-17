@@ -56,7 +56,7 @@ function requireOptionalPositiveMs(value: unknown, field: string): number | unde
  * caller ever re-implements the defaulting step.
  */
 export function resolveEffectiveAsyncLiftRetryTuning(
-  input: AsyncLiftRetryTuningInput | null | undefined,
+  input: unknown,
   label = 'retry tuning',
 ): Required<AsyncLiftRetryTuning> {
   const sparse = resolveAsyncLiftRetryTuning(input, label);
@@ -69,16 +69,22 @@ export function resolveEffectiveAsyncLiftRetryTuning(
 }
 
 export function resolveAsyncLiftRetryTuning(
-  input: AsyncLiftRetryTuningInput | null | undefined,
+  input: unknown,
   label = 'retry tuning',
 ): AsyncLiftRetryTuning {
-  const autoRetryEnabled = input?.autoRetryEnabled;
+  // The WHOLE boundary lives here, object-shape included: a caller of the
+  // exported resolver gets the same rejection a daemon config.json does.
+  if (input != null && (typeof input !== 'object' || Array.isArray(input))) {
+    throw new Error(`${label} must be an object (received ${JSON.stringify(input)})`);
+  }
+  const knobs = (input ?? {}) as AsyncLiftRetryTuningInput;
+  const autoRetryEnabled = knobs.autoRetryEnabled;
   if (autoRetryEnabled !== undefined && typeof autoRetryEnabled !== 'boolean') {
     throw new Error(
       `${label}.autoRetryEnabled must be a boolean (received ${JSON.stringify(autoRetryEnabled)})`,
     );
   }
-  const retryJitterRatio = input?.retryJitterRatio;
+  const retryJitterRatio = knobs.retryJitterRatio;
   if (retryJitterRatio !== undefined
     && (typeof retryJitterRatio !== 'number'
       || !Number.isFinite(retryJitterRatio)
@@ -90,10 +96,10 @@ export function resolveAsyncLiftRetryTuning(
     );
   }
   const retryBackoffBaseMs = requireOptionalPositiveMs(
-    input?.retryBackoffBaseMs, `${label}.retryBackoffBaseMs`,
+    knobs.retryBackoffBaseMs, `${label}.retryBackoffBaseMs`,
   );
   const retryBackoffMaxMs = requireOptionalPositiveMs(
-    input?.retryBackoffMaxMs, `${label}.retryBackoffMaxMs`,
+    knobs.retryBackoffMaxMs, `${label}.retryBackoffMaxMs`,
   );
   const effectiveBase = retryBackoffBaseMs ?? DEFAULT_RETRY_BACKOFF_BASE_MS;
   const effectiveMax = retryBackoffMaxMs ?? DEFAULT_RETRY_BACKOFF_MAX_MS;
