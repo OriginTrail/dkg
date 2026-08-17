@@ -595,7 +595,7 @@ function projectRfc64SelectedPublicSyncStatus(
   ])];
   return {
     defaultEnabled: true,
-    selectedContextGraphs: requestedContextGraphs,
+    requestedContextGraphs,
     catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
   };
 }

@@ -334,13 +334,14 @@ export interface DaemonStatusResponse {
   multiaddrs: string[];
   relay: RelayStatusResponse;
   /**
-   * RFC-64 scheduling for explicitly requested public Context Graphs. This is
-   * independent from signed-catalog activation: catalog authority is optional,
-   * while selected scheduling/continuation is the public-SWM default.
+   * RFC-64 scheduling input for explicitly requested Context Graphs. The
+   * requested scope is not a public classification; runtime classification
+   * still chooses the public or private synchronization lane.
    */
   rfc64SelectedPublicSync?: {
     defaultEnabled: boolean;
-    selectedContextGraphs: string[];
+    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    requestedContextGraphs: string[];
     catalogBackedContextGraphs: string[];
   };
   chain?: {

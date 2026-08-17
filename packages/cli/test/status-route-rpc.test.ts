@@ -421,23 +421,23 @@ describe('/api/status RFC-64 selected-public activation', () => {
     expect(response.status).toBe(200);
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
-      selectedContextGraphs: ['explicit-public-cg'],
+      requestedContextGraphs: ['explicit-public-cg'],
       catalogBackedContextGraphs: [],
     });
   });
 
-  it('includes network-default graphs in the effective requested sync scope', async () => {
+  it('reports mixed requested scopes without classifying a network-default graph as public', async () => {
     const response = await requestStatusWithAgent(
       { getSyncContextGraphIds: () => ['explicit-public-cg'] },
       {},
       '/api/status',
-      { defaultContextGraphs: ['network-default-cg', 'explicit-public-cg'] } as never,
+      { defaultContextGraphs: ['private-network-default-cg', 'explicit-public-cg'] } as never,
     );
 
     expect(response.status).toBe(200);
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
-      selectedContextGraphs: ['explicit-public-cg', 'network-default-cg'],
+      requestedContextGraphs: ['explicit-public-cg', 'private-network-default-cg'],
       catalogBackedContextGraphs: [],
     });
   });
@@ -521,7 +521,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
     });
     expect(response.body.rfc64SelectedPublicSync).toEqual({
       defaultEnabled: true,
-      selectedContextGraphs: ['selected-public-cg'],
+      requestedContextGraphs: ['selected-public-cg'],
       catalogBackedContextGraphs: ['selected-public-cg'],
     });
   });

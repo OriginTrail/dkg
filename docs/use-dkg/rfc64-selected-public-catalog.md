@@ -157,15 +157,16 @@ catalog is configured:
 {
   "rfc64SelectedPublicSync": {
     "defaultEnabled": true,
-    "selectedContextGraphs": ["0x.../selected-public-cg"],
+    "requestedContextGraphs": ["0x.../selected-public-cg"],
     "catalogBackedContextGraphs": []
   }
 }
 ```
 
-`selectedContextGraphs` is the agent's live explicit sync scope, not an
-all-public discovery result. The public-CG catch-up boundary applies selected
-scheduling; the private-CG boundary ignores it and retains curator recovery.
+`requestedContextGraphs` is the agent's live explicit scheduling scope. Entries
+are not classified as public merely by appearing there: the public-CG catch-up
+boundary applies selected scheduling, while the private-CG boundary ignores it
+and retains curator recovery.
 
 For a signed-catalog target gate, activation alone is not sufficient. Every
 intended target must report `outcome: "applied"`, a non-null
