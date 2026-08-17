@@ -129,6 +129,7 @@ import {
   resolveContextGraphs,
   resolveContextGraphSubscriptionRehydrationEnabled,
   resolveNetworkDefaultContextGraphs,
+  isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
   resolveRfc64PublicCatalogActivation,
   resolveRfc64PublicCatalogActivationChainIdentityV1,
@@ -1308,12 +1309,9 @@ export async function runDaemonInner(
   // construction error into `publisher_startup_failed`, so without this gate a
   // typo'd knob leaves a node that boots and serves but never publishes,
   // announced only by one deferred-startup log line.
-  // Truthiness, NOT `=== true`: the runner's own gates
-  // (`startPublisherRuntimeIfEnabled` and friends) start the runtime on a
-  // truthy `enabled`, so the validation must cover exactly the configs that
-  // will construct a publisher — a strict-boolean gate would skip validation
-  // for `enabled: 1` while the runtime still starts and crashes mid-boot.
-  if (config.publisher?.enabled) {
+  // Validate exactly the configs that will construct a publisher — the
+  // shared predicate is the same one the runner's start gates consult.
+  if (isPublisherRuntimeEnabled(config.publisher)) {
     resolvePublisherRetryTuning(config.publisher);
   }
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(

@@ -1095,6 +1095,16 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
  */
 export type PublisherRetryTuning = AsyncLiftRetryTuning;
 
+/**
+ * The ONE definition of "the publisher runtime will start": the runner's
+ * gates and the boot-time validation gate both call this, so the set of
+ * configs that construct a publisher and the set that get validated cannot
+ * drift (truthiness, matching the pre-existing runtime behavior).
+ */
+export function isPublisherRuntimeEnabled(publisher?: DkgConfig['publisher'] | null): boolean {
+  return Boolean(publisher?.enabled);
+}
+
 export function resolvePublisherRetryTuning(
   publisher?: DkgConfig['publisher'] | null,
   label = 'publisher',

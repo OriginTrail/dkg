@@ -1925,9 +1925,17 @@ export class TripleStoreAsyncLiftPublisher
 
   private scheduleRetryIfEligible(job: LiftJob): LiftJob {
     if (!isFailedJob(job) || !this.isAutomaticallyRetryable(job)) return job;
+    // Jitter the CAPPED value (then clamp back under the ceiling): jittering
+    // before the cap made every deep retry collapse to exactly
+    // retryBackoffMaxMs once the exponential passed it — zero spread in the
+    // long-retry regime where de-synchronizing a herd matters most. This
+    // way capped retries spread across [max·(1−r), max] while the ceiling
+    // stays hard.
     const delay = Math.min(
       this.retryBackoffMaxMs,
-      this.jitteredBackoff(this.retryBackoffBaseMs * 2 ** job.retries.retryCount),
+      this.jitteredBackoff(
+        Math.min(this.retryBackoffMaxMs, this.retryBackoffBaseMs * 2 ** job.retries.retryCount),
+      ),
     );
     const now = this.now();
     return {

@@ -44,6 +44,7 @@ import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-s
 import {
   loadNetworkConfig,
   loadResolvedNetworkConfig,
+  isPublisherRuntimeEnabled,
   resolvePublisherRetryTuning,
   resolveReadyChainConfig,
   type DkgConfig,
@@ -192,7 +193,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
 }): Promise<PublisherRuntime | null> {
-  if (!args.config.publisher?.enabled) {
+  if (!isPublisherRuntimeEnabled(args.config.publisher)) {
     return null;
   }
 
@@ -262,7 +263,7 @@ export type PublisherState =
  * disagree in a request context.
  */
 export function createInitialPublisherState(config: DkgConfig): PublisherState {
-  if (!config.publisher?.enabled) {
+  if (!isPublisherRuntimeEnabled(config.publisher)) {
     return {
       runtime: null,
       availability: unavailablePublisherAvailability('publisher_disabled'),
@@ -282,7 +283,7 @@ export function createInitialPublisherState(config: DkgConfig): PublisherState {
 export async function startPublisherRuntimeWithOutcome(
   args: Parameters<typeof startPublisherRuntimeIfEnabled>[0],
 ): Promise<PublisherStartupOutcome> {
-  if (!args.config.publisher?.enabled) {
+  if (!isPublisherRuntimeEnabled(args.config.publisher)) {
     return {
       runtime: null,
       availability: unavailablePublisherAvailability('publisher_disabled'),

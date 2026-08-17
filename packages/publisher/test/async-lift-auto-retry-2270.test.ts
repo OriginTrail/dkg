@@ -258,6 +258,29 @@ describe('GH#2270 async lift automatic retry lane', () => {
     }
   });
 
+  it('keeps jitter alive at the cap: deep retries spread below retryBackoffMaxMs', async () => {
+    // Jitter-before-cap collapsed every deep retry to exactly the cap —
+    // synchronized herds precisely where de-synchronization matters most.
+    // With the capped value jittered, rand()=0 lands at max·(1−r).
+    const publisher = createCorruptHeadPublisher({
+      retryBackoffBaseMs: 100,
+      retryBackoffMaxMs: 200,
+      retryJitterRatio: 0.2,
+      rand: () => 0,
+      maxRetries: 6,
+    });
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    let failed = await failWithCorruptHead(publisher, 'wallet-1');
+    // Drive retries until the exponential is far past the cap.
+    for (let i = 0; i < 3; i += 1) {
+      now += scheduledDelay(failed)! + 1;
+      failed = await failWithCorruptHead(publisher, 'wallet-1');
+    }
+    // exponential = 100·2^3 = 800 >> cap 200; jittered(200) at rand 0 = 160.
+    expect(failed.retries.retryCount).toBe(3);
+    expect(scheduledDelay(failed)).toBe(160);
+  });
+
   it('never schedules an immediate retry: jittered backoff is floored at 1ms', async () => {
     // A tiny base with strong downward jitter used to round to 0 — an
     // immediate reaccept that burns the budget in a tight loop.
