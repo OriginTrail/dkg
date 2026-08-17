@@ -193,6 +193,28 @@ describe('GH#2270 failed-job retry disposition', () => {
     });
   });
 
+  it('keeps a hash that only the recovery record carries, across a SECOND reset', async () => {
+    // The shape a reset itself produces: the job it rebuilds has NO broadcast metadata, so its
+    // recovery record is the only carrier left. Reading just `broadcast` dropped the hash exactly
+    // there — a job reset once, re-claimed and interrupted again came out of the second reset with
+    // no evidence at all, which is precisely the job that must stay held.
+    const publisher = createPublisher();
+    const failed = await failWithUnmetQuorum(publisher);
+    const carriedInRecoveryOnly = {
+      ...failed,
+      broadcast: undefined,
+      recovery: { action: 'reset_to_accepted', recoveredFromStatus: 'broadcast', txHashChecked: TX_HASH },
+    } as unknown as PersistedFailedJob;
+
+    expect(resetFailedLiftJobToAccepted(carriedInRecoveryOnly, 9_000).recovery).toEqual({
+      action: 'reset_to_accepted',
+      recoveredFromStatus: 'broadcast',
+      txHashChecked: TX_HASH,
+    });
+    // And that carrier is what keeps the job evidence-bearing at all — the reason to preserve it.
+    expect(hasBroadcastEvidence(carriedInRecoveryOnly)).toBe(true);
+  });
+
   it('drops the retry schedule by rebuilding the timestamps, never by clearing a field', async () => {
     const publisher = createCorruptHeadPublisher({ retryBackoffBaseMs: 100, retryBackoffMaxMs: 250, rand: () => 0.5 });
     await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());

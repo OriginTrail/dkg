@@ -18,7 +18,11 @@
  * persist, how is it rebuilt). Nothing here is persisted, and the persisted job shape
  * (`lift-job-types.ts`) stays free of derived fields.
  */
-import { isFailedJob, type PersistedFailedJob } from './async-lift-publisher-utils.js';
+import {
+  getLiftJobTransactionEvidence,
+  isFailedJob,
+  type PersistedFailedJob,
+} from './async-lift-publisher-utils.js';
 import { getLiftJobFailurePolicy, isTerminalLiftJobState } from './lift-job.js';
 import type { LiftJob, LiftJobFailureCode } from './lift-job.js';
 
@@ -38,32 +42,25 @@ import type { LiftJob, LiftJobFailureCode } from './lift-job.js';
  * every quorum failure as evidence-bearing and strand the GH#1620 lane. Pre-send-safe failures
  * persist no txHash, and that is what makes them safe to re-run.
  *
- * Reading those fields is structural; treating them as EVIDENCE is policy, which is why this
- * lives here rather than beside the field accessors.
+ * Which hash a job carries is structural ({@link getLiftJobTransactionEvidence}); what carrying one
+ * MEANS is policy, which is why this lives here rather than beside the field accessor.
  */
 export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
-  return Boolean(job.broadcast?.txHash ?? job.recovery?.txHashChecked)
+  return Boolean(getLiftJobTransactionEvidence(job))
     || job.failure.failedFromState === 'included';
 }
 
 /**
- * The failure codes that PROVE the transaction had no effect, so the evidence such a job carries
- * needs no further accounting. Deliberately NOT a field on the failure registry: this is the
- * publisher's own safety reading of a code, not wire-visible policy.
+ * Does this failure code PROVE the transaction had no effect, so the evidence such a job carries
+ * needs no further accounting?
  *
- *  - `tx_reverted` — assigned only for an actual revert, and a reverted transaction published
- *    nothing (the receipt exists; its status is not success). Chain-proven ineffective.
- *  - `insufficient_funds` — a DEFINITIVE pre-acceptance reject (see
- *    `isDefinitivePreAcceptanceSendFailure`): the node refused the transaction before it entered
- *    the mempool. The #1851 pre-send write-ahead may already have persisted a txHash for that
- *    attempt, and this exception is exactly what lets an operator top the wallet up and re-submit
- *    instead of being told to wait for proof that can never arrive.
- *
- * Everything else stays unproven — including the timeouts and `confirmation_mismatch`, whose whole
- * meaning is that the local view and the chain disagree.
+ * The decision itself lives in the failure registry (`provenIneffective`, required on every
+ * built-in entry), so a new code cannot be added without stating its chain effect — the same
+ * table-only strictness `autoRetry` uses. This function is just the reader; see the field's doc
+ * for the guarantee each `true` rests on.
  */
 export function isProvenIneffectiveLiftFailure(code: LiftJobFailureCode): boolean {
-  return code === 'tx_reverted' || code === 'insufficient_funds';
+  return getLiftJobFailurePolicy(code).provenIneffective === true;
 }
 
 /**

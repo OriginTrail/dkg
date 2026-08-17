@@ -183,41 +183,46 @@ describe('LiftJob failure classification', () => {
     );
   });
 
-  // GH#2270 — the allow-list INSTRUMENT for the automatic retry lane. Every expected value is
-  // written out per code instead of derived from the policy table, so a wrong policy cannot make
-  // this row agree with it; and because the actual map is built from LIFT_JOB_FAILURE_CODES, a
-  // 23rd code joining the enum fails here instead of silently inheriting a retry decision.
-  const EXPECTED_AUTO_RETRY: Record<LiftJobFailureCode, boolean> = {
-    workspace_unavailable: true,
-    workspace_slice_not_found: false,
-    publish_intent_stale: false,
-    canonicalization_failed: false,
-    authority_unavailable: false,
-    authority_forbidden: false,
-    validation_timeout: false,
-    wallet_claim_timeout: false,
-    wallet_unavailable: false,
-    quorum_unmet: true,
-    rpc_unavailable: false,
-    tx_submit_timeout: false,
-    tx_reverted: false,
-    insufficient_funds: false,
-    nonce_conflict: false,
-    inclusion_timeout: false,
-    finality_timeout: false,
-    confirmation_mismatch: false,
-    chain_reorg: false,
-    recovery_lookup_timeout: false,
-    recovery_chain_unavailable: false,
-    recovery_state_inconsistent: false,
+  // GH#2270 — the INSTRUMENT for both per-code policy decisions: `autoRetry` (does this node retry
+  // the job by itself?) and `provenIneffective` (did its transaction demonstrably do nothing, so
+  // the job is not held for chain proof?). Every expected value is written out per code instead of
+  // derived from the policy table, so a wrong policy cannot make this row agree with it; and
+  // because the actual map is built from LIFT_JOB_FAILURE_CODES, a 23rd code joining the enum fails
+  // here instead of silently inheriting either decision.
+  const EXPECTED_POLICY_FLAGS: Record<LiftJobFailureCode, { autoRetry: boolean; provenIneffective: boolean }> = {
+    workspace_unavailable: { autoRetry: true, provenIneffective: false },
+    workspace_slice_not_found: { autoRetry: false, provenIneffective: false },
+    publish_intent_stale: { autoRetry: false, provenIneffective: false },
+    canonicalization_failed: { autoRetry: false, provenIneffective: false },
+    authority_unavailable: { autoRetry: false, provenIneffective: false },
+    authority_forbidden: { autoRetry: false, provenIneffective: false },
+    validation_timeout: { autoRetry: false, provenIneffective: false },
+    wallet_claim_timeout: { autoRetry: false, provenIneffective: false },
+    wallet_unavailable: { autoRetry: false, provenIneffective: false },
+    quorum_unmet: { autoRetry: true, provenIneffective: false },
+    rpc_unavailable: { autoRetry: false, provenIneffective: false },
+    tx_submit_timeout: { autoRetry: false, provenIneffective: false },
+    tx_reverted: { autoRetry: false, provenIneffective: true },
+    insufficient_funds: { autoRetry: false, provenIneffective: true },
+    nonce_conflict: { autoRetry: false, provenIneffective: false },
+    inclusion_timeout: { autoRetry: false, provenIneffective: false },
+    finality_timeout: { autoRetry: false, provenIneffective: false },
+    confirmation_mismatch: { autoRetry: false, provenIneffective: false },
+    chain_reorg: { autoRetry: false, provenIneffective: false },
+    recovery_lookup_timeout: { autoRetry: false, provenIneffective: false },
+    recovery_chain_unavailable: { autoRetry: false, provenIneffective: false },
+    recovery_state_inconsistent: { autoRetry: false, provenIneffective: false },
   };
 
-  it('allow-lists autoRetry on exactly workspace_unavailable and quorum_unmet', () => {
+  it('allow-lists autoRetry on exactly workspace_unavailable and quorum_unmet, and proven-ineffective chain effect on exactly tx_reverted and insufficient_funds', () => {
     const actual = Object.fromEntries(
-      LIFT_JOB_FAILURE_CODES.map((code) => [code, getLiftJobFailurePolicy(code).autoRetry === true]),
+      LIFT_JOB_FAILURE_CODES.map((code) => [code, {
+        autoRetry: getLiftJobFailurePolicy(code).autoRetry === true,
+        provenIneffective: getLiftJobFailurePolicy(code).provenIneffective === true,
+      }]),
     );
 
-    expect(actual).toEqual(EXPECTED_AUTO_RETRY);
+    expect(actual).toEqual(EXPECTED_POLICY_FLAGS);
   });
 
   // Conditions 2 and 3 of the `autoRetry` qualification (see LiftJobFailurePolicy): an
