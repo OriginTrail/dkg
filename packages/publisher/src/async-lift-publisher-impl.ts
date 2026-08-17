@@ -7,6 +7,12 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
 import {
+  DEFAULT_RETRY_BACKOFF_BASE_MS,
+  DEFAULT_RETRY_BACKOFF_MAX_MS,
+  DEFAULT_RETRY_JITTER_RATIO,
+  resolveAsyncLiftRetryTuning,
+} from './async-lift-retry-tuning.js';
+import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
   createLiftJobFailureMetadata,
@@ -222,9 +228,9 @@ export class TripleStoreAsyncLiftPublisher
   private static readonly journalQueues = new Map<string, Promise<void>>();
   private static readonly DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS = 15 * 60 * 1000;
   private static readonly DEFAULT_MAX_RETRIES = 10;
-  private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
-  private static readonly DEFAULT_RETRY_BACKOFF_MAX_MS = 60_000;
-  private static readonly DEFAULT_RETRY_JITTER_RATIO = 0.2;
+  // Backoff/jitter defaults live in async-lift-retry-tuning.ts (the shared,
+  // exported owner) so the daemon config boundary validates against the SAME
+  // values this constructor applies.
   /**
    * GH#2270 — upper bound on reaccepts per claim-time sweep. The sweep runs INSIDE the claim
    * lock, so its cost is paid by every enqueue/claim/retry; and re-enabling `autoRetryEnabled`
@@ -287,19 +293,16 @@ export class TripleStoreAsyncLiftPublisher
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
-    this.retryBackoffBaseMs = config.retryBackoffBaseMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_BASE_MS;
-    this.retryBackoffMaxMs = config.retryBackoffMaxMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_BACKOFF_MAX_MS;
-    if (!Number.isFinite(this.retryBackoffBaseMs) || this.retryBackoffBaseMs <= 0) {
-      throw new Error('Async lift publisher retryBackoffBaseMs must be greater than zero');
-    }
-    if (!Number.isFinite(this.retryBackoffMaxMs) || this.retryBackoffMaxMs < this.retryBackoffBaseMs) {
-      throw new Error('Async lift publisher retryBackoffMaxMs must be at least retryBackoffBaseMs');
-    }
-    this.autoRetryEnabled = config.autoRetryEnabled ?? true;
-    this.retryJitterRatio = config.retryJitterRatio ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_JITTER_RATIO;
-    if (!Number.isFinite(this.retryJitterRatio) || this.retryJitterRatio < 0 || this.retryJitterRatio >= 1) {
-      throw new Error('Async lift publisher retryJitterRatio must be at least 0 and below 1');
-    }
+    // ONE validation owner for the retry knobs (shared with the daemon config
+    // boundary): ranges, the boolean kill-switch type, and the cross-field
+    // backoff invariant checked against the EFFECTIVE (explicit-or-default)
+    // pair. A non-boolean autoRetryEnabled (e.g. the string "false") throws
+    // here instead of silently enabling the lane.
+    const retryTuning = resolveAsyncLiftRetryTuning(config, 'Async lift publisher');
+    this.retryBackoffBaseMs = retryTuning.retryBackoffBaseMs ?? DEFAULT_RETRY_BACKOFF_BASE_MS;
+    this.retryBackoffMaxMs = retryTuning.retryBackoffMaxMs ?? DEFAULT_RETRY_BACKOFF_MAX_MS;
+    this.autoRetryEnabled = retryTuning.autoRetryEnabled ?? true;
+    this.retryJitterRatio = retryTuning.retryJitterRatio ?? DEFAULT_RETRY_JITTER_RATIO;
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
@@ -1919,7 +1922,10 @@ export class TripleStoreAsyncLiftPublisher
    * persisted as an xsd:integer.
    */
   private jitteredBackoff(delay: number): number {
-    return Math.round(delay * (1 + this.retryJitterRatio * (2 * this.rand() - 1)));
+    // Floor of 1ms: a tiny configured base with strong downward jitter can
+    // round to 0, which would schedule an IMMEDIATE reaccept and let a tight
+    // failure loop burn the whole retry budget with no backoff at all.
+    return Math.max(1, Math.round(delay * (1 + this.retryJitterRatio * (2 * this.rand() - 1))));
   }
 
   private scheduleRetryIfEligible(job: LiftJob): LiftJob {

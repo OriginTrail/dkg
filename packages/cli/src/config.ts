@@ -1,4 +1,5 @@
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
+import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -1082,46 +1083,17 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
  * The GH#2270 retry knobs, validated but NOT defaulted: an unset knob stays
  * `undefined` so the publisher library remains the single source of every
  * default (same contract `publisher.maxRetries` has had since #1836).
- */
-export interface PublisherRetryTuning {
-  autoRetryEnabled?: boolean;
-  retryJitterRatio?: number;
-  retryBackoffBaseMs?: number;
-  retryBackoffMaxMs?: number;
-}
-
-function requirePublisherBoolean(value: unknown, label: string): boolean | undefined {
-  if (value === undefined) return undefined;
-  if (typeof value !== 'boolean') {
-    throw new Error(`${label} must be a boolean (received ${JSON.stringify(value)})`);
-  }
-  return value;
-}
-
-function requirePublisherPositiveMs(value: unknown, label: string): number | undefined {
-  if (value === undefined) return undefined;
-  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
-    throw new Error(
-      `${label} must be a positive safe integer number of milliseconds ` +
-      `(received ${JSON.stringify(value)})`,
-    );
-  }
-  return value as number;
-}
-
-/**
- * Validate `config.publisher`'s retry knobs before anything constructs a
- * publisher. Every rule here mirrors one the `TripleStoreAsyncLiftPublisher`
- * constructor enforces by throwing, so an operator gets a message naming the
- * config key at config-validation time instead of a publisher that fails to
- * start halfway through daemon boot.
  *
- * `retryBackoffBaseMs`/`retryBackoffMaxMs` must be set TOGETHER: the library
- * requires `max >= base`, and with only one of them configured that invariant
- * can only be checked against the library's private defaults — which this
- * layer deliberately does not duplicate. Requiring the pair is the smallest
- * rule that keeps the invariant checkable here.
+ * Validation DELEGATES to the publisher package's `resolveAsyncLiftRetryTuning`
+ * — the same resolver the `TripleStoreAsyncLiftPublisher` constructor runs — so
+ * ranges, the kill-switch's boolean-only rule, and the cross-field backoff
+ * invariant have exactly ONE owner. Because that owner exports the real
+ * defaults, a half-configured backoff pair is validated against the EFFECTIVE
+ * values instead of being rejected outright (the earlier set-together rule is
+ * gone), and an operator error names the `config.json` key.
  */
+export type PublisherRetryTuning = AsyncLiftRetryTuning;
+
 export function resolvePublisherRetryTuning(
   publisher?: DkgConfig['publisher'] | null,
   label = 'publisher',
@@ -1129,45 +1101,7 @@ export function resolvePublisherRetryTuning(
   if (publisher != null && (typeof publisher !== 'object' || Array.isArray(publisher))) {
     throw new Error(`${label} must be an object`);
   }
-  const autoRetryEnabled = requirePublisherBoolean(
-    publisher?.autoRetryEnabled,
-    `${label}.autoRetryEnabled`,
-  );
-  const retryJitterRatio = publisher?.retryJitterRatio;
-  if (retryJitterRatio !== undefined
-    && (typeof retryJitterRatio !== 'number'
-      || !Number.isFinite(retryJitterRatio)
-      || retryJitterRatio < 0
-      || retryJitterRatio >= 1)) {
-    throw new Error(
-      `${label}.retryJitterRatio must be a number at least 0 and below 1 ` +
-      `(received ${JSON.stringify(retryJitterRatio)})`,
-    );
-  }
-  const retryBackoffBaseMs = requirePublisherPositiveMs(
-    publisher?.retryBackoffBaseMs,
-    `${label}.retryBackoffBaseMs`,
-  );
-  const retryBackoffMaxMs = requirePublisherPositiveMs(
-    publisher?.retryBackoffMaxMs,
-    `${label}.retryBackoffMaxMs`,
-  );
-  if ((retryBackoffBaseMs === undefined) !== (retryBackoffMaxMs === undefined)) {
-    throw new Error(
-      `${label}.retryBackoffBaseMs and ${label}.retryBackoffMaxMs must be set together ` +
-      '(the publisher requires retryBackoffMaxMs >= retryBackoffBaseMs, which cannot be ' +
-      'checked against a half-configured pair)',
-    );
-  }
-  if (retryBackoffBaseMs !== undefined
-    && retryBackoffMaxMs !== undefined
-    && retryBackoffMaxMs < retryBackoffBaseMs) {
-    throw new Error(
-      `${label}.retryBackoffMaxMs must be at least ${label}.retryBackoffBaseMs ` +
-      `(got retryBackoffBaseMs=${retryBackoffBaseMs}, retryBackoffMaxMs=${retryBackoffMaxMs})`,
-    );
-  }
-  return { autoRetryEnabled, retryJitterRatio, retryBackoffBaseMs, retryBackoffMaxMs };
+  return resolveAsyncLiftRetryTuning(publisher ?? undefined, label);
 }
 
 /** Resolve context graphs from network config. */

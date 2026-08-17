@@ -235,9 +235,55 @@ describe('GH#2270 async lift automatic retry lane', () => {
   it('rejects a retryJitterRatio outside [0, 1)', () => {
     for (const retryJitterRatio of [1, 1.5, -0.1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() => createPublisher({ retryJitterRatio })).toThrow(
-        'Async lift publisher retryJitterRatio must be at least 0 and below 1',
+        'Async lift publisher.retryJitterRatio must be a number at least 0 and below 1',
       );
     }
+  });
+
+  it('rejects a non-boolean autoRetryEnabled instead of silently enabling the lane', () => {
+    // The string "false" is truthy: trusting it would keep the automatic lane
+    // ON under a config that reads as disabled.
+    for (const autoRetryEnabled of ['false', 0, 1, 'true', null]) {
+      expect(() => createPublisher({ autoRetryEnabled: autoRetryEnabled as never })).toThrow(
+        'Async lift publisher.autoRetryEnabled must be a boolean',
+      );
+    }
+  });
+
+  it('never schedules an immediate retry: jittered backoff is floored at 1ms', async () => {
+    // A tiny base with strong downward jitter used to round to 0 — an
+    // immediate reaccept that burns the budget in a tight loop.
+    const publisher = createCorruptHeadPublisher({
+      retryBackoffBaseMs: 1,
+      retryBackoffMaxMs: 10,
+      retryJitterRatio: 0.9,
+      rand: () => 0,
+    });
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = await failWithCorruptHead(publisher, 'wallet-1');
+    expect(scheduledDelay(failed)).toBeGreaterThanOrEqual(1);
+  });
+
+  // (h) The kill-switch gates ONLY the automatic lane: with it off, the
+  // operator's retry() and a client's byte-identical re-submit both still
+  // reaccept the SAME job — the documented manual fallbacks stay available.
+  it('manual retry() and re-submit reaccept still work while autoRetryEnabled is false', async () => {
+    const publisher = createCorruptHeadPublisher({ autoRetryEnabled: false });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    await failWithCorruptHead(publisher, 'wallet-1');
+
+    const retried = await publisher.retry({ status: 'failed' });
+    expect(retried).toBe(1);
+    let job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('accepted');
+    expect(job?.retries.retryCount).toBe(1);
+
+    await failWithCorruptHead(publisher, 'wallet-1');
+    const resubmittedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    expect(resubmittedId).toBe(jobId);
+    job = await publisher.getStatus(jobId);
+    expect(job?.status).toBe('accepted');
+    expect(job?.retries.retryCount).toBe(2);
   });
 
   // (d) The kill-switch, at BOTH call sites and in both polarities.

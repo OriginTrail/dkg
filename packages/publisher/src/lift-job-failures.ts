@@ -97,7 +97,8 @@ export interface LiftJobFailurePolicy {
    *   3. `resolution` is 'reset_to_accepted' — the job is completable by re-running it from
    *      the start, with no chain evidence to reconcile first.
    * `quorum_unmet` (GH#1620) and `workspace_unavailable` (GH#2270) are the only codes that
-   * qualify today.
+   * qualify today. The field is REQUIRED on every entry: `autoRetry: false` is an explicit
+   * policy decision (manual-only), never an omission a reader must interpret.
    *
    * EXCLUDED, and why — `rpc_unavailable`/`nonce_conflict`/`wallet_unavailable` are allowed
    * from 'broadcast' with no pre-send producer guarantee, and `rpc_unavailable` is additionally
@@ -108,7 +109,7 @@ export interface LiftJobFailurePolicy {
    * production producer (annotated below) stay off regardless, since no end-to-end witness
    * could cover the flag.
    */
-  readonly autoRetry?: boolean;
+  readonly autoRetry: boolean;
   readonly timeoutHandling?: LiftJobTimeoutHandling;
 }
 
@@ -134,35 +135,35 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
   // transiently multi-valued or unreadable SWM head — is what sync repair heals, which is
   // exactly what a bounded backoff waits for.
   workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
-  workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
   // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
   // autoRetry is deliberately UNDECIDED until a producer exists: whether an authority outage is
   // transient depends on what raises it, and a flag no path can exercise cannot be witnessed.
-  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
-  authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
+  authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
   // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
-  validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
+  validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', autoRetry: false },
   // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
-  wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
+  wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', autoRetry: false },
   // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
-  wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
+  wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
   quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
-  rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
-  tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
-  tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
+  rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
+  tx_submit_timeout: { code: 'tx_submit_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', autoRetry: false },
+  tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: false },
   // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
-  inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
-  finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
-  confirmation_mismatch: { code: 'confirmation_mismatch', phase: 'confirmation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
-  chain_reorg: { code: 'chain_reorg', phase: 'confirmation', mode: 'retryable', retryable: true, resolution: 'check_chain_then_finalize_or_reset' },
-  recovery_lookup_timeout: { code: 'recovery_lookup_timeout', phase: 'recovery', mode: 'timeout', retryable: true, resolution: 'retry_recovery', timeoutHandling: 'retry_recovery' },
+  inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', autoRetry: false },
+  finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset', autoRetry: false },
+  confirmation_mismatch: { code: 'confirmation_mismatch', phase: 'confirmation', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
+  chain_reorg: { code: 'chain_reorg', phase: 'confirmation', mode: 'retryable', retryable: true, resolution: 'check_chain_then_finalize_or_reset', autoRetry: false },
+  recovery_lookup_timeout: { code: 'recovery_lookup_timeout', phase: 'recovery', mode: 'timeout', retryable: true, resolution: 'retry_recovery', timeoutHandling: 'retry_recovery', autoRetry: false },
   // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
-  recovery_chain_unavailable: { code: 'recovery_chain_unavailable', phase: 'recovery', mode: 'retryable', retryable: true, resolution: 'retry_recovery' },
-  recovery_state_inconsistent: { code: 'recovery_state_inconsistent', phase: 'recovery', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  recovery_chain_unavailable: { code: 'recovery_chain_unavailable', phase: 'recovery', mode: 'retryable', retryable: true, resolution: 'retry_recovery', autoRetry: false },
+  recovery_state_inconsistent: { code: 'recovery_state_inconsistent', phase: 'recovery', mode: 'terminal', retryable: false, resolution: 'fail_job', autoRetry: false },
 };
 
 const LIFT_JOB_FAILURE_ALLOWED_STATES: Record<LiftJobFailureCode, readonly LiftJobActiveState[]> = {

@@ -168,15 +168,23 @@ describe('resolvePublisherRetryTuning validation (#2270)', () => {
 
   it('rejects a max below base', () => {
     expect(() => resolvePublisherRetryTuning({ retryBackoffBaseMs: 10_000, retryBackoffMaxMs: 9_999 }))
-      .toThrow('publisher.retryBackoffMaxMs must be at least publisher.retryBackoffBaseMs '
-        + '(got retryBackoffBaseMs=10000, retryBackoffMaxMs=9999)');
+      .toThrow('publisher.retryBackoffMaxMs (9999) must be at least publisher.retryBackoffBaseMs (10000)');
   });
 
-  it('rejects a half-configured backoff pair in both directions', () => {
-    expect(() => resolvePublisherRetryTuning({ retryBackoffBaseMs: 10_000 }))
-      .toThrow(/must be set together/);
-    expect(() => resolvePublisherRetryTuning({ retryBackoffMaxMs: 10_000 }))
-      .toThrow(/must be set together/);
+  it('validates a half-configured backoff pair against the REAL library defaults', () => {
+    // The shared resolver exports the defaults, so base-only / max-only
+    // configs are legal exactly when the EFFECTIVE pair they induce is —
+    // the earlier "must be set together" rule is gone.
+    expect(resolvePublisherRetryTuning({ retryBackoffBaseMs: 10_000 }))
+      .toEqual({ retryBackoffBaseMs: 10_000 });
+    expect(resolvePublisherRetryTuning({ retryBackoffMaxMs: 10_000 }))
+      .toEqual({ retryBackoffMaxMs: 10_000 });
+    // Base above the DEFAULT max (60s) with no explicit max: invalid pair.
+    expect(() => resolvePublisherRetryTuning({ retryBackoffBaseMs: 120_000 }))
+      .toThrow('publisher.retryBackoffMaxMs (60000, the default) must be at least publisher.retryBackoffBaseMs (120000)');
+    // Max below the DEFAULT base (5s) with no explicit base: invalid pair.
+    expect(() => resolvePublisherRetryTuning({ retryBackoffMaxMs: 1_000 }))
+      .toThrow('publisher.retryBackoffMaxMs (1000) must be at least publisher.retryBackoffBaseMs (5000, the default)');
   });
 
   it('rejects a publisher block that is not an object', () => {
@@ -197,19 +205,19 @@ describe('resolvePublisherRetryTuning validation (#2270)', () => {
     const store = {} as TripleStore;
 
     expect(() => new TripleStoreAsyncLiftPublisher(store, { retryJitterRatio: 1.5 }))
-      .toThrow('Async lift publisher retryJitterRatio must be at least 0 and below 1');
+      .toThrow('Async lift publisher.retryJitterRatio must be a number at least 0 and below 1');
     expect(() => resolvePublisherRetryTuning({ retryJitterRatio: 1.5 })).toThrow(/retryJitterRatio/);
 
     expect(() => new TripleStoreAsyncLiftPublisher(store, { retryBackoffBaseMs: 0 }))
-      .toThrow('Async lift publisher retryBackoffBaseMs must be greater than zero');
+      .toThrow('Async lift publisher.retryBackoffBaseMs must be a positive safe integer number of milliseconds');
     expect(() => resolvePublisherRetryTuning({ retryBackoffBaseMs: 0, retryBackoffMaxMs: 10 }))
       .toThrow(/retryBackoffBaseMs/);
 
-    // base-only above the library's 60s default max: valid in isolation, fatal
-    // on construction — hence "must be set together".
+    // base-only above the library's 60s default max: the shared resolver
+    // rejects it IDENTICALLY at both boundaries — one owner, one message.
     expect(() => new TripleStoreAsyncLiftPublisher(store, { retryBackoffBaseMs: 120_000 }))
-      .toThrow('Async lift publisher retryBackoffMaxMs must be at least retryBackoffBaseMs');
+      .toThrow('Async lift publisher.retryBackoffMaxMs (60000, the default) must be at least Async lift publisher.retryBackoffBaseMs (120000)');
     expect(() => resolvePublisherRetryTuning({ retryBackoffBaseMs: 120_000 }))
-      .toThrow(/must be set together/);
+      .toThrow('publisher.retryBackoffMaxMs (60000, the default) must be at least publisher.retryBackoffBaseMs (120000)');
   });
 });

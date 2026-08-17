@@ -148,13 +148,13 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
 
   it('fails the boot on a backoff max below base', async () => {
     await expect(bootWith({ retryBackoffBaseMs: 30_000, retryBackoffMaxMs: 10_000 }))
-      .rejects.toThrow(/publisher\.retryBackoffMaxMs must be at least publisher\.retryBackoffBaseMs/);
+      .rejects.toThrow(/publisher\.retryBackoffMaxMs \(10000\) must be at least publisher\.retryBackoffBaseMs \(30000\)/);
     expect(mocks.agentCreate).not.toHaveBeenCalled();
   });
 
-  it('fails the boot on a half-configured backoff pair', async () => {
-    await expect(bootWith({ retryBackoffBaseMs: 30_000 }))
-      .rejects.toThrow(/must be set together/);
+  it('fails the boot when a lone base exceeds the default max', async () => {
+    await expect(bootWith({ retryBackoffBaseMs: 120_000 }))
+      .rejects.toThrow(/publisher\.retryBackoffMaxMs \(60000, the default\) must be at least/);
     expect(mocks.agentCreate).not.toHaveBeenCalled();
   });
 
