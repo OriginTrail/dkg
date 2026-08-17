@@ -6,10 +6,20 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { OnboardingCard } from '../nsm/OnboardingCard.js';
 import { CatalogView } from '../nsm/CatalogView.js';
 import { ModelPageView } from '../nsm/ModelPageView.js';
+import { PlaygroundView } from '../nsm/PlaygroundView.js';
 import { fetchOperateStatus, type NsmOperateStatus } from '../nsm/api.js';
 import { useCatalog } from '../nsm/useCatalog.js';
+import { copy } from '../nsm/copy.generated.js';
 
-type Pane = { k: 'models' } | { k: 'model'; groupKey: string };
+type Pane =
+  | { k: 'models' }
+  | { k: 'model'; groupKey: string }
+  | { k: 'playground'; initialModel?: string };
+
+const NAV: Array<{ label: string; pane: Pane }> = [
+  { label: copy('nav.models'), pane: { k: 'models' } },
+  { label: copy('nav.playground'), pane: { k: 'playground' } },
+];
 
 export function MarketplaceV35View(): React.ReactElement {
   const [status, setStatus] = useState<NsmOperateStatus | null | 'error'>(null);
@@ -21,15 +31,28 @@ export function MarketplaceV35View(): React.ReactElement {
   }, []);
   useEffect(() => { refresh(); }, [refresh]);
 
+  const navKey = pane.k === 'model' ? 'models' : pane.k;
+
   return (
     <div className="nsmx nsmx--page">
       <div className="frame">
         <OnboardingCard status={status} onDone={refresh} />
+        <div className="mnav">
+          {NAV.map((n) => (
+            <button key={n.label} className={navKey === n.pane.k ? 'is-active' : ''}
+              onClick={() => setPane(n.pane)}>{n.label}</button>
+          ))}
+        </div>
         {pane.k === 'models' && (
           <CatalogView cat={cat} onOpenModel={(groupKey) => setPane({ k: 'model', groupKey })} />
         )}
         {pane.k === 'model' && (
-          <ModelPageView cat={cat} groupKey={pane.groupKey} onBack={() => setPane({ k: 'models' })} />
+          <ModelPageView cat={cat} groupKey={pane.groupKey}
+            onBack={() => setPane({ k: 'models' })}
+            onTry={(groupKey) => setPane({ k: 'playground', initialModel: groupKey })} />
+        )}
+        {pane.k === 'playground' && (
+          <PlaygroundView cat={cat} initialModel={pane.initialModel} />
         )}
       </div>
     </div>

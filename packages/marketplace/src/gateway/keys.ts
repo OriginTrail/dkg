@@ -82,6 +82,34 @@ export function authorizeKey(home: string, a: {
   const rows = readLines(keysPath(home));
   const mint = rows.find((r) => r.type === "mint" && r.keyHash === hash(a.presented)) as (KeyRecord & { type: string }) | undefined;
   if (!mint) return { ok: false, status: 401, code: "E_KEY_UNKNOWN" };
+  return authorizeRecord(home, rows, mint, a);
+}
+
+/** v3.5 operator path: the node's own UI/console spends through the IMPLICIT
+ *  key (minted lazily, label node-operator). Same scope machinery — the
+ *  operator's spend is still booked to a sub-ledger, still rps-limited, and
+ *  bounded by the tab itself; the cap here only keeps sub-ledger math honest. */
+export const OPERATOR_IMPLICIT_CAP_MICROTRAC = 10_000_000;
+
+export function authorizeOperatorImplicit(home: string, a: {
+  model?: string; isQuery: boolean; estCostMicroTrac: number; now?: number;
+}): KeyVerdict {
+  const rows = readLines(keysPath(home));
+  let mint = rows.find((r) => r.type === "mint" && (r as unknown as KeyRecord).implicit
+    && !rows.some((r2) => r2.type === "revoke" && r2.keyId === r.keyId)) as (KeyRecord & { type: string }) | undefined;
+  if (!mint) {
+    const minted = mintKey(home, {
+      label: "node-operator", budgetMicroTrac: OPERATOR_IMPLICIT_CAP_MICROTRAC,
+      expiresAt: null, modelAllowlist: null, allowQuery: true, rps: 10,
+    }, true);
+    mint = { ...minted.record, type: "mint" };
+  }
+  return authorizeRecord(home, readLines(keysPath(home)), mint, a);
+}
+
+function authorizeRecord(home: string, rows: Array<Record<string, unknown>>, mint: KeyRecord, a: {
+  model?: string; isQuery: boolean; estCostMicroTrac: number; now?: number;
+}): KeyVerdict {
   if (rows.some((r) => r.type === "revoke" && r.keyId === mint.keyId)) return { ok: false, status: 401, code: "E_KEY_REVOKED" };
   const now = a.now ?? Date.now();
   const s = mint.scopes;

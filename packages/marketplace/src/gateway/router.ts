@@ -12,7 +12,7 @@
 //
 // Agent-visible failures: 401 revoked/unknown/expired/scope · 402 budget or
 // unfunded tab · 429 rps.
-import { authorizeKey, mintKey, revokeKey, listKeys, recordKeyUsage, type KeyScopes } from "./keys.js";
+import { authorizeKey, authorizeOperatorImplicit, mintKey, revokeKey, listKeys, recordKeyUsage, type KeyScopes, type KeyVerdict } from "./keys.js";
 import { verifyInferenceLegV3, verifyQueryLegV3, type OfferingExpectation } from "../buyer/recount.js";
 import type { BuyerClient } from "../buyer/client.js";
 import type { BpeEngine } from "../buyer/bpe.js";
@@ -31,6 +31,9 @@ export interface GatewayDeps {
   offerings: Map<string, GatewayOffering>;   // by modelId
   countQuads: (body: string) => number;
   log: (line: string) => void;
+  /** true when the caller is the node's operator (loopback / node token) —
+   *  routes their spend through the implicit key instead of an nsm_k_. */
+  isOperator?: (req: Req) => boolean;
 }
 
 type Req = { method?: string; url?: string; headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string } };
@@ -92,9 +95,12 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
 
   // ── consumer surface ──
   const presented = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+  const operatorCall = !presented.startsWith("nsm_k_") && (deps.isOperator?.(req) ?? false);
+  const authorize = (a: { model?: string; isQuery: boolean; estCostMicroTrac: number }): KeyVerdict =>
+    operatorCall ? authorizeOperatorImplicit(deps.home, a) : authorizeKey(deps.home, { presented, ...a });
 
   if (sub === "/models" && method === "GET") {
-    const auth = authorizeKey(deps.home, { presented, isQuery: false, estCostMicroTrac: 0 });
+    const auth = authorize({ isQuery: false, estCostMicroTrac: 0 });
     if (!auth.ok) { send(res, auth.status, { error: auth.code }); return true; }
     send(res, 200, {
       object: "list",
@@ -114,7 +120,7 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
     if (!off || !parsed.messages?.length) { send(res, 400, { error: "E_MODEL_UNKNOWN" }); return true; }
     // pre-authorize with a conservative estimate; final usage recorded at actual cost
     const est = 2048 * (off.expectation.perOutputTokenMicroTrac ?? 6) + 4096 * (off.expectation.perInputTokenMicroTrac ?? 2);
-    const auth = authorizeKey(deps.home, { presented, model: parsed.model, isQuery: false, estCostMicroTrac: est });
+    const auth = authorize({ model: parsed.model, isQuery: false, estCostMicroTrac: est });
     if (!auth.ok) { send(res, auth.status, { error: auth.code }); return true; }
 
     const upstream = await deps.client.chat(parsed.model!, parsed.messages, Math.min(Number(parsed.max_tokens ?? 256), 2048));
@@ -150,7 +156,7 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
     if (!parsed.sparql) { send(res, 400, { error: "E_SPARQL" }); return true; }
     const off = [...deps.offerings.values()][0];
     if (!off) { send(res, 400, { error: "E_OFFERING_UNKNOWN" }); return true; }
-    const auth = authorizeKey(deps.home, { presented, isQuery: true, estCostMicroTrac: (off.expectation.queryFlatMicroTrac ?? 0) + 1000 * (off.expectation.perReturnedQuadMicroTrac ?? 0) });
+    const auth = authorize({ isQuery: true, estCostMicroTrac: (off.expectation.queryFlatMicroTrac ?? 0) + 1000 * (off.expectation.perReturnedQuadMicroTrac ?? 0) });
     if (!auth.ok) { send(res, auth.status, { error: auth.code }); return true; }
 
     const upstream = await deps.client.query(parsed.sparql, parsed.offeringId);

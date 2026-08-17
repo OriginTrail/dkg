@@ -198,6 +198,8 @@ export function WithholdBody({ code }: { code: string }): React.ReactElement {
 
 export interface CatalogProvider {
   addr: string; label?: string; inMicro: number; outMicro: number;
+  /** raw offering modelId — what the gateway routes on */
+  modelId?: string;
   class: string; via: string; up: boolean;
   ttftMs?: number | null; tokS?: number | null;
   rep?: { verified: number; disputed: number };

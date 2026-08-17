@@ -226,6 +226,7 @@ export function useCatalog(): CatalogState {
         : undefined;
       const p: CatalogProvider & { quoteStatus: QuoteStatus } = {
         addr: o.provider,
+        modelId: o.modelId,
         inMicro: Number(quoteOff?.perInputTokenMicroTrac ?? NaN),
         outMicro: Number(quoteOff?.perOutputTokenMicroTrac ?? NaN),
         class: o.provenanceClass,

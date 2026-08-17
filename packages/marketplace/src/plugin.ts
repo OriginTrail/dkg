@@ -142,6 +142,14 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
       }
       gateway = {
         home, client, offerings: gos,
+        // operator path: the node's own UI spends through the implicit key —
+        // loopback or the node's own bearer, never a wire credential
+        isOperator: (req: { headers: Record<string, string | string[] | undefined>; socket: { remoteAddress?: string } }) => {
+          const remote = req.socket.remoteAddress ?? "";
+          if (remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1") return true;
+          const bearer = String(req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+          return !!bearer && ctx.validTokens.has(bearer);
+        },
         countQuads: (body: string) => {
           try { return ((JSON.parse(body) as { bindings?: unknown[] }).bindings ?? []).length; }
           catch { return -1; }
