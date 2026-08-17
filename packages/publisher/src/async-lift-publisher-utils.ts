@@ -12,8 +12,6 @@ import type {
   LiftJobAccepted,
   LiftJobHex,
   LiftJobRequest,
-  LiftJobRetryProjection,
-  LiftJobRetryWaitingReason,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
   RawLiftJobRequest,
@@ -124,35 +122,6 @@ export function isAutomaticallyRetryableLiftJob(
 }
 
 /**
- * GH#2270 — the retry projection the operator-facing status surfaces render. A pure derivation
- * over durable facts; nothing here is persisted.
- *
- * Ordering is the point: the tx-bearing reasons are decided FIRST, so a job that may carry a
- * transaction can never be reported as merely waiting on backoff or on a budget.
- */
-export function deriveLiftJobRetryProjection(
-  job: LiftJob,
-  options: { readonly autoRetryEnabled: boolean },
-): LiftJobRetryProjection {
-  if (!isFailedJob(job)) return { autoRetryEligible: false };
-  const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options);
-  return { autoRetryEligible, ...waitingReasonOf(job, autoRetryEligible) };
-}
-
-function waitingReasonOf(
-  job: PersistedFailedJob,
-  autoRetryEligible: boolean,
-): { waitingReason?: LiftJobRetryWaitingReason } {
-  // A terminal failure is not WAITING for anything — no lane, operator action or fresh mandate
-  // re-arms it (only an explicit clear removes it).
-  if (!job.failure.retryable) return {};
-  if (job.failure.resolution === 'retry_recovery') return { waitingReason: 'recovery' };
-  if (hasBroadcastEvidence(job)) return { waitingReason: 'pending_chain_proof' };
-  if (job.retries.retryCount >= job.retries.maxRetries) return { waitingReason: 'exhausted' };
-  return { waitingReason: autoRetryEligible ? 'backoff' : 'operator' };
-}
-
-/**
  * GH#2270 — the ONE reset-to-accepted builder for a FAILED job, shared by every reaccept path
  * (claim-time sweep, `retry()`, admission re-submit).
  *
@@ -195,13 +164,37 @@ export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: numbe
  * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk) and
  * `clearTerminalJob(jobId)` so they cannot drift. A job is clearable iff it is in a native
  * terminal state (finalized|failed) AND is not a `retry_recovery`-failed job — those may
- * still carry a pending on-chain tx that periodic recovery will finalize, so only explicit
- * cancel removes them. A `retry_recovery`-failed job is therefore treated as
- * NONTERMINAL-for-cleanup.
+ * still carry a pending on-chain tx that periodic recovery will finalize, so NEITHER clear lane
+ * removes them (they leave the queue when `recover()` finalizes them from chain). A
+ * `retry_recovery`-failed job is therefore treated as NONTERMINAL-for-cleanup.
  */
 export function isClearableTerminalLiftJob(job: LiftJob): boolean {
   return isTerminalLiftJobState(job.status)
     && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+}
+
+/**
+ * GH#2270 — what BULK `clear(status)` may delete: terminal-clearable, MINUS a failed job whose
+ * deletion would hand its lifecycle subject back to admission while a transaction may be
+ * unaccounted for. Bulk cleanup is safe by default; the by-jobId clear
+ * (`clearTerminalJob`) stays the operator's deliberate, targeted override — there the operator
+ * names the exact job and owns the consequence.
+ *
+ * Both conjuncts of the exclusion are load-bearing:
+ *  - `hasBroadcastEvidence` — a job with no persisted transaction has nothing to account for.
+ *  - `isOccupyingLifecycleJob` — only an OCCUPYING job is the one admission binds. Deleting a
+ *    superseded (non-retryable) failed job changes nothing admission would not already do with
+ *    it, so refusing there would strand terminal diagnoses in the queue forever without
+ *    preventing anything. The transaction hash also survives either way: the #1829 journal is
+ *    append-only and a clear never touches it.
+ *
+ * Deleting an OCCUPYING evidence-bearing job is the real regression this prevents: admission
+ * answers `LiftJobPendingChainProofError` while the job exists, and mints a fresh job for the
+ * same KA the moment it does not.
+ */
+export function isBulkClearableTerminalLiftJob(job: LiftJob): boolean {
+  return isClearableTerminalLiftJob(job)
+    && !(isFailedJob(job) && hasBroadcastEvidence(job) && isOccupyingLifecycleJob(job));
 }
 
 /**

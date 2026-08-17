@@ -826,7 +826,8 @@ Async publisher wallets need native gas plus PCA agent registration or TRAC for 
 | `GET`  | `/api/publisher/stats` | Queue statistics (running / pending / completed / failed). |
 | `POST` | `/api/publisher/cancel` | Cancel a job. Body: `{ jobId }`. |
 | `POST` | `/api/publisher/retry` | Reaccept every failed job that is safe to re-run. Body: `{ status: "failed" }`. Returns `200 { retried, blockedPendingRecovery, skipped }` — three counts that partition the failed jobs: reaccepted, left failed because a transaction may exist (awaiting chain proof or owned by recovery), and left failed with nothing to retry (terminal failure or spent retry budget). |
-| `POST` | `/api/publisher/clear` | Clear completed/failed jobs. |
+| `POST` | `/api/publisher/clear` | Clear completed/failed jobs in BULK (`dkg publisher clear <status>`). Safe by default: it skips a failed job that is still held for chain proof and still owns its KA's lifecycle — deleting that record is what would let the next re-submit publish the same KA a second time. |
+| `POST` | `/api/publisher/clear-job` | Clear ONE terminal job by id: `{ jobId }` → `{ outcome: "cleared" \| "already_absent" }`. The deliberate override for a job bulk clear skips — you name the job and take the decision. |
 
 #### Retry behaviour and its knobs (`config.publisher`)
 
@@ -834,7 +835,7 @@ A failed job is retried by the publisher itself only when the failure is one the
 
 An eligible job gets a `nextRetryAt` and is re-accepted with the **same `jobId`** when it comes due — the queue never mints a replacement job for a retry.
 
-No path — automatic, `POST /api/publisher/retry`, or re-submit — re-runs a job that persisted a transaction hash or failed from `included`: whatever its failure code says, that job may have a transaction on chain, so it stays `failed` and is counted as `blockedPendingRecovery` (a re-submit gets the `503 LIFT_JOB_PENDING_CHAIN_PROOF` above). Read `retryState` on `GET /api/publisher/job` for the per-job answer: `autoRetryEligible` tells you whether this node will retry the job by itself, and `waitingReason` — `backoff` (scheduled), `pending_chain_proof` (a transaction may exist), `recovery` (owned by the chain-recovery loop), `operator` (nothing automatic will move it), `exhausted` (budget spent) — tells you what it is waiting for. `waitingReason` is ABSENT when the job is not waiting on a retry at all: it is still running, finalized, or failed terminally with nothing left to re-arm it. Both fields are derived on read, never stored.
+No path — automatic, `POST /api/publisher/retry`, or re-submit — re-runs a job that persisted a transaction hash or failed from `included`: whatever its failure code says, that job may have a transaction on chain, so it stays `failed` and is counted as `blockedPendingRecovery` (a re-submit gets the `503 LIFT_JOB_PENDING_CHAIN_PROOF` above). Read `retryState` on `GET /api/publisher/job` for the per-job answer: `autoRetryEligible` tells you whether this node will retry the job by itself, and `waitingReason` — `backoff` (scheduled), `pending_chain_proof` (a transaction may exist), `recovery` (owned by the chain-recovery loop), `operator` (nothing automatic will move it), `exhausted` (budget spent) — tells you what it is waiting for. `waitingReason` is ABSENT when the job is not waiting on a retry at all: it is still running, finalized, or failed terminally with nothing left to re-arm it. Both fields are derived on read, never stored. A job in `pending_chain_proof` is also skipped by bulk clear, so cleaning up failed jobs cannot silently free its KA for a fresh publish; clear it by id only once you know its transaction's fate.
 
 | Key | Default | Meaning |
 |---|---|---|
