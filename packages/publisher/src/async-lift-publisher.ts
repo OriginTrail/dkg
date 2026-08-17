@@ -1,4 +1,7 @@
 export type {
+  AsyncLiftDetailedRetrier,
+  AsyncLiftRetryOutcome,
+  AsyncLiftRetryStateReader,
   AsyncKnowledgeAssetVmPublishExecutionInput,
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishPreflightInput,
@@ -21,6 +24,6 @@ export type {
   JournalReadInput,
   JournalReadResult,
 } from './async-lift-publisher-types.js';
-export { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
+export { AsyncLiftJobConflictError, LiftJobPendingChainProofError } from './async-lift-publisher-types.js';
 export type { TerminalJobClearOutcome } from './terminal-job-clear.js';
 export { TripleStoreAsyncLiftPublisher } from './async-lift-publisher-impl.js';

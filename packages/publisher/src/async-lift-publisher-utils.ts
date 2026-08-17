@@ -2,14 +2,18 @@ import type { QueryResult } from '@origintrail-official/dkg-storage';
 import {
   LIFT_AUTHORITY_TYPES,
   LIFT_TRANSITION_TYPES,
+  getLiftJobFailurePolicy,
   isTerminalLiftJobState,
 } from './lift-job.js';
 import type {
   KnowledgeAssetVmPublishJobRequest,
   KnowledgeAssetVmPublishRequest,
   LiftJob,
+  LiftJobAccepted,
   LiftJobHex,
   LiftJobRequest,
+  LiftJobRetryProjection,
+  LiftJobRetryWaitingReason,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
   RawLiftJobRequest,
@@ -73,6 +77,121 @@ export function isFailedJob(job: LiftJob): job is PersistedFailedJob {
 }
 
 /**
+ * GH#2270 — the ONE question every reaccept path must ask: might a transaction have been
+ * submitted for this job? Keyed on persisted EVIDENCE, never on the failure code's
+ * `resolution`: `rpc_unavailable` is the broadcast-phase catch-all and carries
+ * `reset_to_accepted`, yet a transaction that LANDED and merely failed to record locally
+ * arrives under exactly that code — resolution therefore cannot separate the two.
+ *
+ * Evidence is a persisted transaction hash from either carrier (the live `broadcast` metadata,
+ * or `recovery.txHashChecked` — which survives a reset that dropped the broadcast metadata),
+ * plus an `included` origin, which by definition had a transaction.
+ *
+ * It is deliberately NOT keyed on `failedFromState ∈ {broadcast, included}`: `quorum_unmet`'s
+ * only allowed state is 'broadcast' while its producer sits before the publish tx is signed
+ * (see the `autoRetry` qualification in lift-job-failures.ts), so a state-keyed predicate would
+ * classify every quorum failure as evidence-bearing and strand the GH#1620 lane. Pre-send-safe
+ * failures persist no txHash, and that is what makes them safe to re-run.
+ *
+ * Fail-safe direction: a job that carries a hash from an ATTEMPT whose transaction never
+ * entered the mempool also reads as evidence-bearing. That costs an operator/chain-proof step;
+ * the opposite error mints a second on-chain publish.
+ */
+export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
+  return Boolean(job.broadcast?.txHash ?? job.recovery?.txHashChecked)
+    || job.failure.failedFromState === 'included';
+}
+
+/**
+ * GH#2270 — the ONE gate of the automatic retry lane, shared by the scheduler
+ * (`scheduleRetryIfEligible`), the claim-time sweep (`reacceptDueFailedJobs`) and the read-only
+ * status projection, so what the projection reports and what the lane does cannot drift.
+ *
+ * `autoRetryEnabled` is the operator kill-switch; the rest is registry policy, the shared retry
+ * budget, and the evidence guard — a job that may have sent a transaction is never reaccepted
+ * automatically, whatever the registry says about its code.
+ */
+export function isAutomaticallyRetryableLiftJob(
+  job: PersistedFailedJob,
+  options: { readonly autoRetryEnabled: boolean },
+): boolean {
+  return options.autoRetryEnabled
+    && getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+    && job.failure.retryable
+    && job.failure.resolution === 'reset_to_accepted'
+    && job.retries.retryCount < job.retries.maxRetries
+    && !hasBroadcastEvidence(job);
+}
+
+/**
+ * GH#2270 — the retry projection the operator-facing status surfaces render. A pure derivation
+ * over durable facts; nothing here is persisted.
+ *
+ * Ordering is the point: the tx-bearing reasons are decided FIRST, so a job that may carry a
+ * transaction can never be reported as merely waiting on backoff or on a budget.
+ */
+export function deriveLiftJobRetryProjection(
+  job: LiftJob,
+  options: { readonly autoRetryEnabled: boolean },
+): LiftJobRetryProjection {
+  if (!isFailedJob(job)) return { autoRetryEligible: false };
+  const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options);
+  return { autoRetryEligible, ...waitingReasonOf(job, autoRetryEligible) };
+}
+
+function waitingReasonOf(
+  job: PersistedFailedJob,
+  autoRetryEligible: boolean,
+): { waitingReason?: LiftJobRetryWaitingReason } {
+  // A terminal failure is not WAITING for anything — no lane, operator action or fresh mandate
+  // re-arms it (only an explicit clear removes it).
+  if (!job.failure.retryable) return {};
+  if (job.failure.resolution === 'retry_recovery') return { waitingReason: 'recovery' };
+  if (hasBroadcastEvidence(job)) return { waitingReason: 'pending_chain_proof' };
+  if (job.retries.retryCount >= job.retries.maxRetries) return { waitingReason: 'exhausted' };
+  return { waitingReason: autoRetryEligible ? 'backoff' : 'operator' };
+}
+
+/**
+ * GH#2270 — the ONE reset-to-accepted builder for a FAILED job, shared by every reaccept path
+ * (claim-time sweep, `retry()`, admission re-submit).
+ *
+ * The recorded origin state is what carries the transaction hash forward
+ * (`recovery.txHashChecked`), so which origins are recorded IS the evidence-preservation rule.
+ * Every origin is recorded except 'accepted', which has no prior state to recover from — stated
+ * as that one exclusion rather than a list of the rest, so a new active state cannot silently go
+ * unrecorded (the compiler rejects one that is not a `LiftJobResettableState`). `included` used to
+ * be excluded, which dropped the recovery record and the hash with it. The origin is recorded even
+ * though every manual path refuses evidence-bearing jobs today: the reset must not be the step
+ * that loses the evidence when the proof-first dispatcher lands.
+ *
+ * Timestamps are rebuilt from scratch rather than merged, so `nextRetryAt` is dropped BY
+ * CONSTRUCTION — a reaccepted job carries no stale schedule for the sweep to re-fire on.
+ */
+export function resetFailedLiftJobToAccepted(job: PersistedFailedJob, now: number): LiftJobAccepted {
+  const recoveredFromStatus =
+    job.failure.failedFromState === 'accepted' ? undefined : job.failure.failedFromState;
+
+  return {
+    jobId: job.jobId,
+    jobSlug: job.jobSlug,
+    request: job.request,
+    status: 'accepted',
+    timestamps: {
+      acceptedAt: job.timestamps.acceptedAt,
+      lastRecoveredAt: now,
+      updatedAt: now,
+      lastRetriedAt: now,
+    },
+    retries: job.retries,
+    recovery: recoveredFromStatus
+      ? { action: 'reset_to_accepted', recoveredFromStatus, txHashChecked: getRecoveryTxHash(job) }
+      : undefined,
+    controlPlane: job.controlPlane,
+  };
+}
+
+/**
  * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk) and
  * `clearTerminalJob(jobId)` so they cannot drift. A job is clearable iff it is in a native
  * terminal state (finalized|failed) AND is not a `retry_recovery`-failed job — those may
@@ -86,16 +205,22 @@ export function isClearableTerminalLiftJob(job: LiftJob): boolean {
 }
 
 /**
- * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal
- * state, or a failed job admission would still reaccept (retryable with retries
- * remaining). Admission dedup (findActiveKnowledgeAssetVmPublishJob) and the
- * intent-recovery lookup MUST both partition on this so they cannot drift — an
- * occupying job is the live one to bind; everything else (finalized, exhausted
- * or non-retryable failed) is superseded.
+ * #1828 — whether a job still OCCUPIES its lifecycle subject: any non-terminal state, or a
+ * failed job admission would still bind rather than replace. Admission dedup
+ * (findActiveKnowledgeAssetVmPublishJob) and the intent-recovery lookup MUST both partition on
+ * this so they cannot drift — an occupying job is the live one to bind; everything else
+ * (finalized, non-retryable failed) is superseded.
+ *
+ * GH#2270 — the retry BUDGET no longer decides occupancy. A retryable failed job whose budget is
+ * spent is still the job for its subject: a fresh client re-submit re-arms one budget on the SAME
+ * jobId (admission's fresh-mandate reaccept), and an evidence-bearing one is answered with a
+ * retryable pending-chain-proof rejection. Letting the subject fall vacant instead would mint a
+ * REPLACEMENT job for a lifecycle that may already have a transaction in flight — the outcome
+ * GH#2270 exists to prevent.
  */
 export function isOccupyingLifecycleJob(job: LiftJob): boolean {
   if (!isTerminalLiftJobState(job.status)) return true;
-  return isFailedJob(job) && job.failure.retryable && job.retries.retryCount < job.retries.maxRetries;
+  return isFailedJob(job) && job.failure.retryable;
 }
 
 export function createKnowledgeAssetVmPublishSnapshotRequest(

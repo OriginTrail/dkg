@@ -254,9 +254,11 @@ describe('#1828 async lift intent lookup', () => {
     expect(recoverable.kind).toBe('active');
     if (recoverable.kind === 'active') expect(recoverable.job.jobId).toBe(jobId);
 
-    // Exhausted retries → genuinely superseded (admission would not reaccept it).
+    // GH#2270 — an exhausted budget no longer supersedes the job: admission reaccepts it on a
+    // fresh client mandate (same jobId, budget re-armed), so it still owns the subject. This row
+    // pinned 'superseded' while admission would instead have minted a REPLACEMENT job.
     await insertFailed(true, 10);
-    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('superseded');
+    expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
 
     // Non-retryable failure → superseded even with retries nominally remaining.
     await insertFailed(false, 0);
