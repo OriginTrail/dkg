@@ -38,6 +38,7 @@
 * [Publishing Conviction](use-dkg/publishing-conviction.md)
 * [Relays & Peers](use-dkg/relays-and-peers.md)
 * [Storage SPARQL HTTP](use-dkg/storage-sparql-http.md)
+* [SWM Public Snapshot Garbage Collection](use-dkg/swm-public-snapshot-gc.md)
 * [Host-Mode Manual Subscribe](use-dkg/host-mode-manual-subscribe.md)
 * [Updates & Rollback](use-dkg/updates-and-rollback.md)
 * [Migrate to npm](use-dkg/migrate-to-npm.md)
