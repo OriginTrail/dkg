@@ -1,3 +1,6 @@
+import type { Rfc64SelectedSwmGraphSyncStatus } from '@origintrail-official/dkg-agent';
+import type { CatchupJobResult } from './catchup-runner.js';
+
 export const CATCHUP_JOB_STATES = [
   'queued',
   'running',
@@ -23,6 +26,34 @@ export const LEGACY_CATCHUP_JOB_STATES = [
 ] as const;
 
 export type LegacyCatchupJobState = typeof LEGACY_CATCHUP_JOB_STATES[number];
+
+/** Explicit public response shape for the catch-up status endpoint. */
+export interface CatchupStatusResponse {
+  readonly jobId: string;
+  readonly contextGraphId: string;
+  /** Legacy request field retained on the wire. */
+  readonly includeWorkspace: boolean;
+  readonly includeSharedMemory: boolean;
+  /** Closed legacy status vocabulary for older clients. */
+  readonly status: LegacyCatchupJobState;
+  /** Precise bounded-job outcome for upgraded clients. */
+  readonly jobStatus: CatchupJobState;
+  readonly queuedAt: number;
+  readonly startedAt?: number;
+  readonly finishedAt?: number;
+  readonly result?: CatchupJobResult;
+  readonly error?: string;
+  readonly graphSync?: Rfc64SelectedSwmGraphSyncStatus;
+}
+
+/** Older daemons can omit newer aliases; the client normalizes them at the boundary. */
+export type CatchupStatusWireResponse = Omit<
+  CatchupStatusResponse,
+  'includeSharedMemory' | 'jobStatus'
+> & {
+  readonly includeSharedMemory?: boolean;
+  readonly jobStatus?: CatchupJobState;
+};
 
 /**
  * Keep the compatibility boundary exhaustive: adding a precise job state must

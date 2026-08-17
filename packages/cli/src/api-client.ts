@@ -4,7 +4,6 @@ import type {
   ContextGraphReconcileResult,
   ContextGraphSyncMode,
   RandomSamplingDisabledReason,
-  Rfc64SelectedSwmGraphSyncStatus,
 } from '@origintrail-official/dkg-agent';
 import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
@@ -15,7 +14,10 @@ import {
 } from './finalized-publish-options.js';
 import type { RegisterPcaAgentResult } from './pca-confirmation-wire.js';
 import { parseRegisterPcaAgentResult } from './pca-confirmation-wire.js';
-import type { CatchupJobState, LegacyCatchupJobState } from './catchup-status.js';
+import type {
+  CatchupStatusResponse,
+  CatchupStatusWireResponse,
+} from './catchup-status.js';
 
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 
@@ -1656,79 +1658,18 @@ export class ApiClient {
     });
   }
 
-  async catchupStatus(contextGraphId: string) {
-    const raw = await this.get<{
-    jobId: string;
-    contextGraphId: string;
-    includeWorkspace: boolean;
-    status: LegacyCatchupJobState;
-    /** Absent only when a newer client is connected to a pre-field daemon. */
-    jobStatus?: CatchupJobState;
-    graphSync?: Rfc64SelectedSwmGraphSyncStatus;
-    queuedAt: number;
-    startedAt?: number;
-    finishedAt?: number;
-    result?: {
-      connectedPeers: number;
-      totalPeers?: number;
-      selectedPeers?: number;
-      syncCapablePeers: number;
-      peersTried: number;
-      peersResponded: number;
-      peersSucceeded: number;
-      /** Sync-capable peers skipped because an earlier wave already proved every requested plane. */
-      peersNotAttempted?: number;
-      deferredBackpressure: number;
-      dataSynced: number;
-      sharedMemorySynced: number;
-      denied: boolean;
-      deniedPeers: number;
-      diagnostics?: {
-        noProtocolPeers: number;
-        durable: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          metaOnlyResponses: number;
-          verifiedPrivateOnlyResponses?: number;
-          dataRejectedMissingMeta: number;
-          rejectedKcs: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-        sharedMemory: {
-          fetchedMetaTriples: number;
-          fetchedDataTriples: number;
-          insertedMetaTriples: number;
-          insertedDataTriples: number;
-          bytesReceived: number;
-          resumedPhases: number;
-          timedOutPhases: number;
-          completedPhases: number;
-          checkpointAdvances: number;
-          emptyResponses: number;
-          droppedDataTriples: number;
-          failedPeers: number;
-          failedPhases: number;
-          deferredBackpressure: number;
-        };
-      };
-    };
-    error?: string;
-    }>(`/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`);
-    return {
+  async catchupStatus(contextGraphId: string): Promise<CatchupStatusResponse> {
+    const raw = await this.get<CatchupStatusWireResponse>(
+      `/api/sync/catchup-status?contextGraphId=${encodeURIComponent(contextGraphId)}`,
+    );
+    const normalized: CatchupStatusResponse = {
       ...raw,
+      /** Normalize the pre-alias workspace flag at the API boundary. */
+      includeSharedMemory: raw.includeSharedMemory ?? raw.includeWorkspace,
       /** Normalize pre-field daemon responses at the API boundary. */
       jobStatus: raw.jobStatus ?? raw.status,
     };
+    return normalized;
   }
 
   async connect(multiaddr: string): Promise<{ connected: boolean }> {

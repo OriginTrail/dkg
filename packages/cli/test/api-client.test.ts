@@ -127,6 +127,7 @@ describe('ApiClient', () => {
 
       expect(result.status).toBe('unreachable');
       expect(result.jobStatus).toBe('unreachable');
+      expect(result.includeSharedMemory).toBe(true);
     });
 
     it('preserves the precise catch-up jobStatus from an upgraded daemon', async () => {
