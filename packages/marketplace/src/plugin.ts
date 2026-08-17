@@ -18,6 +18,7 @@ import { handleFront, type FrontDeps, type OfferingBinding } from "./seller/fron
 import { handleGateway, type GatewayDeps, type GatewayOffering } from "./gateway/router.js";
 import { BuyerClient } from "./buyer/client.js";
 import { hfEngine, tiktokenEngine } from "./buyer/bpe.js";
+import { startLaneExecutor } from "./lane/executor.js";
 import { readFileSync, existsSync, statSync } from "node:fs";
 import { join } from "node:path";
 
@@ -39,6 +40,7 @@ interface Mounted {
   configDigestish: string;
 }
 let mounted: Mounted | null = null;
+let laneStarted = false;
 
 async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: string) => void): Promise<Mounted> {
   const home = marketplaceHome(dkgHome());
@@ -168,6 +170,23 @@ export const plugin: RoutePlugin = {
     const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null, cfg.apiBase ?? null, cfg.rpcUrl ?? null, buyerCfgStamp()]);
     if (!mounted || mounted.configDigestish !== digestish) {
       mounted = await mount(cfg, ctx, log);
+    }
+
+    // ── SWM lane executor (DKG-native transport): start once, on the first
+    // request, if a seller front is mounted and a lane CG is configured. Uses
+    // the node's own loopback + in-process token — no VPN, no secret embedded.
+    if (!laneStarted && mounted.front && cfg.laneContextGraphId) {
+      laneStarted = true;
+      const token = cfg.nodeToken ?? [...ctx.validTokens][0] ?? "";
+      startLaneExecutor({
+        home: marketplaceHome(dkgHome()),
+        nodeBase: `http://127.0.0.1:${ctx.apiPortRef.value}`,
+        nodeToken: token,
+        contextGraphId: cfg.laneContextGraphId,
+        basePath: BASE,
+        pollMs: 3000,
+        log,
+      });
     }
 
     const req = ctx.req as unknown as Parameters<typeof handleFront>[1];

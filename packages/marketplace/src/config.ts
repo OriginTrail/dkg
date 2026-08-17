@@ -70,6 +70,13 @@ export interface MarketplaceConfig {
   /** TRAC ERC-20 address on that chain. Defaults to the Base-mainnet contract;
    *  MUST be set on test chains (the devnet deploys its own token). */
   tracContract?: string;
+  /** DKG-native transport: when set, the seller runs the SWM lane executor over
+   *  this context graph (the reviewed HTTP front is unchanged; the lane tunnels
+   *  it over shared-memory gossip). Absent ⇒ HTTP-only, no lane. */
+  laneContextGraphId?: string;
+  /** the node's own loopback API base + token for lane self-calls (defaults
+   *  derived at mount from ctx). */
+  nodeToken?: string;
 }
 
 const DEFAULTS: MarketplaceConfig = { enabled: false, offerings: [] };
@@ -91,6 +98,8 @@ export function loadMarketplaceConfig(dkgHome: string): MarketplaceConfig {
       chainId: typeof raw.chainId === "number" ? raw.chainId : undefined,
       rpcUrl: typeof raw.rpcUrl === "string" ? raw.rpcUrl : undefined,
       tracContract: typeof raw.tracContract === "string" ? raw.tracContract : undefined,
+      laneContextGraphId: typeof raw.laneContextGraphId === "string" ? raw.laneContextGraphId : undefined,
+      nodeToken: typeof raw.nodeToken === "string" ? raw.nodeToken : undefined,
     };
   } catch {
     // malformed config ⇒ marketplace OFF, never a half-configured surface
