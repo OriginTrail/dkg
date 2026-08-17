@@ -122,6 +122,13 @@ export default defineConfig({
           // #1836 — config→construction wiring seam (runDaemonInner forwards
           // config.publisher.maxRetries into both admission constructors).
           'test/publisher-maxretries-wiring-1836.test.ts',
+          // #2270 — the four retry knobs must reach the publisher instance whose
+          // scheduler/sweep run (config→construction seam, #1836 class), the
+          // daemon must reject a bad knob at config validation instead of
+          // mid-boot construction, and `publisher enable` must not erase them.
+          'test/publisher-retry-tuning-wiring-2270.test.ts',
+          'test/publisher-retry-tuning-boot-validation-2270.test.ts',
+          'test/publisher-enable-preserves-keys-2270.test.ts',
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',

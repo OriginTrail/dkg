@@ -791,12 +791,44 @@ export interface DkgConfig {
      */
     provenanceEvents?: boolean;
   };
-  /** Async publisher runtime options. */
+  /**
+   * Async publisher runtime options. The retry knobs below are validated by
+   * `resolvePublisherRetryTuning()` at the config boundary: the publisher
+   * constructor THROWS on out-of-range values and it is constructed during
+   * daemon boot, so an unchecked typo would surface as a startup failure
+   * carrying a library message instead of a config error naming the key.
+   */
   publisher?: {
     enabled?: boolean;
     pollIntervalMs?: number;
     errorBackoffMs?: number;
+    /**
+     * Retry budget per job — ONE counter shared by the publisher's automatic
+     * retries and manual reaccepts, snapshot at admission. Default 10.
+     */
     maxRetries?: number;
+    /**
+     * GH#2270 — operator kill-switch for the publisher's OWN retry lane.
+     * `false` collapses it to pre-#2270 behaviour: nothing is scheduled and
+     * nothing already scheduled is swept (jobs scheduled while it was on
+     * strand until it is turned back on). Manual `dkg publisher retry` and
+     * admission reaccept are unaffected. Default `true`.
+     */
+    autoRetryEnabled?: boolean;
+    /**
+     * GH#2270 — symmetric jitter ratio `r` applied to the retry backoff as
+     * `delay · (1 + r·(2·rand()−1))`, i.e. the fraction of the delay the
+     * jitter may add or subtract. Must satisfy `0 <= r < 1`. Default 0.2.
+     */
+    retryJitterRatio?: number;
+    /**
+     * GH#2270 — first retry delay in ms; doubles per attempt up to
+     * `retryBackoffMaxMs`. Default 5000. Must be set together with
+     * `retryBackoffMaxMs`.
+     */
+    retryBackoffBaseMs?: number;
+    /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
+    retryBackoffMaxMs?: number;
   };
   /**
    * Async promote queue worker (WM → SWM). Unlike `publisher` which is
@@ -1044,6 +1076,98 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
     );
   }
   return configValue;
+}
+
+/**
+ * The GH#2270 retry knobs, validated but NOT defaulted: an unset knob stays
+ * `undefined` so the publisher library remains the single source of every
+ * default (same contract `publisher.maxRetries` has had since #1836).
+ */
+export interface PublisherRetryTuning {
+  autoRetryEnabled?: boolean;
+  retryJitterRatio?: number;
+  retryBackoffBaseMs?: number;
+  retryBackoffMaxMs?: number;
+}
+
+function requirePublisherBoolean(value: unknown, label: string): boolean | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== 'boolean') {
+    throw new Error(`${label} must be a boolean (received ${JSON.stringify(value)})`);
+  }
+  return value;
+}
+
+function requirePublisherPositiveMs(value: unknown, label: string): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || (value as number) <= 0) {
+    throw new Error(
+      `${label} must be a positive safe integer number of milliseconds ` +
+      `(received ${JSON.stringify(value)})`,
+    );
+  }
+  return value as number;
+}
+
+/**
+ * Validate `config.publisher`'s retry knobs before anything constructs a
+ * publisher. Every rule here mirrors one the `TripleStoreAsyncLiftPublisher`
+ * constructor enforces by throwing, so an operator gets a message naming the
+ * config key at config-validation time instead of a publisher that fails to
+ * start halfway through daemon boot.
+ *
+ * `retryBackoffBaseMs`/`retryBackoffMaxMs` must be set TOGETHER: the library
+ * requires `max >= base`, and with only one of them configured that invariant
+ * can only be checked against the library's private defaults — which this
+ * layer deliberately does not duplicate. Requiring the pair is the smallest
+ * rule that keeps the invariant checkable here.
+ */
+export function resolvePublisherRetryTuning(
+  publisher?: DkgConfig['publisher'] | null,
+  label = 'publisher',
+): PublisherRetryTuning {
+  if (publisher != null && (typeof publisher !== 'object' || Array.isArray(publisher))) {
+    throw new Error(`${label} must be an object`);
+  }
+  const autoRetryEnabled = requirePublisherBoolean(
+    publisher?.autoRetryEnabled,
+    `${label}.autoRetryEnabled`,
+  );
+  const retryJitterRatio = publisher?.retryJitterRatio;
+  if (retryJitterRatio !== undefined
+    && (typeof retryJitterRatio !== 'number'
+      || !Number.isFinite(retryJitterRatio)
+      || retryJitterRatio < 0
+      || retryJitterRatio >= 1)) {
+    throw new Error(
+      `${label}.retryJitterRatio must be a number at least 0 and below 1 ` +
+      `(received ${JSON.stringify(retryJitterRatio)})`,
+    );
+  }
+  const retryBackoffBaseMs = requirePublisherPositiveMs(
+    publisher?.retryBackoffBaseMs,
+    `${label}.retryBackoffBaseMs`,
+  );
+  const retryBackoffMaxMs = requirePublisherPositiveMs(
+    publisher?.retryBackoffMaxMs,
+    `${label}.retryBackoffMaxMs`,
+  );
+  if ((retryBackoffBaseMs === undefined) !== (retryBackoffMaxMs === undefined)) {
+    throw new Error(
+      `${label}.retryBackoffBaseMs and ${label}.retryBackoffMaxMs must be set together ` +
+      '(the publisher requires retryBackoffMaxMs >= retryBackoffBaseMs, which cannot be ' +
+      'checked against a half-configured pair)',
+    );
+  }
+  if (retryBackoffBaseMs !== undefined
+    && retryBackoffMaxMs !== undefined
+    && retryBackoffMaxMs < retryBackoffBaseMs) {
+    throw new Error(
+      `${label}.retryBackoffMaxMs must be at least ${label}.retryBackoffBaseMs ` +
+      `(got retryBackoffBaseMs=${retryBackoffBaseMs}, retryBackoffMaxMs=${retryBackoffMaxMs})`,
+    );
+  }
+  return { autoRetryEnabled, retryJitterRatio, retryBackoffBaseMs, retryBackoffMaxMs };
 }
 
 /** Resolve context graphs from network config. */

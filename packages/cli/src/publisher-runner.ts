@@ -41,7 +41,14 @@ import {
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
-import { loadNetworkConfig, loadResolvedNetworkConfig, resolveReadyChainConfig, type DkgConfig } from './config.js';
+import {
+  loadNetworkConfig,
+  loadResolvedNetworkConfig,
+  resolvePublisherRetryTuning,
+  resolveReadyChainConfig,
+  type DkgConfig,
+  type PublisherRetryTuning,
+} from './config.js';
 import {
   projectRuntimeEvmChainConfig,
   type RuntimeEvmChainConfig,
@@ -198,6 +205,10 @@ export async function startPublisherRuntimeIfEnabled(args: {
       pollIntervalMs: args.config.publisher.pollIntervalMs,
       errorBackoffMs: args.config.publisher.errorBackoffMs,
       maxRetries: args.config.publisher.maxRetries,
+      // GH#2270 — this is the ONE runtime whose retry scheduler and claim-time
+      // sweep actually run, so the kill-switch and backoff knobs are dead
+      // config unless they travel this hop (the #1836 bug class).
+      retryTuning: resolvePublisherRetryTuning(args.config.publisher),
       config: args.config,
       ackTransportFactory: args.ackTransportFactory,
       publishEncryptionFactory: args.publishEncryptionFactory,
@@ -304,6 +315,8 @@ interface PublisherRuntimeBaseArgs {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
+  /** GH#2270 — validated `config.publisher` retry knobs; unset knobs keep the library defaults. */
+  retryTuning?: PublisherRetryTuning;
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
   publishEncryptionFactory?: PublishEncryptionFactory;
@@ -345,6 +358,7 @@ export async function createPublisherRuntime(args: {
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     maxRetries: args.maxRetries ?? args.config.publisher?.maxRetries,
+    retryTuning: resolvePublisherRetryTuning(args.config.publisher),
     publicSnapshotStore,
     closeStoreOnStop: true,
   });
@@ -398,6 +412,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   pollIntervalMs?: number;
   errorBackoffMs?: number;
   maxRetries?: number;
+  retryTuning?: PublisherRetryTuning;
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>;
   ackTransportFactory?: ACKTransportFactory;
   v10ACKProviderFactory?: () => PublishOptions['v10ACKProvider'];
@@ -413,6 +428,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     pollIntervalMs: args.pollIntervalMs,
     errorBackoffMs: args.errorBackoffMs,
     maxRetries: args.maxRetries,
+    retryTuning: args.retryTuning,
     ackTransportFactory: args.ackTransportFactory,
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
@@ -498,6 +514,9 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       ? createKnowledgeAssetVmPublishRecoveryResolver(publishers)
       : undefined,
     maxRetries: args.maxRetries,
+    // GH#2270 — spread rather than four copied fields, so a knob added to
+    // PublisherRetryTuning reaches the constructor without a further edit here.
+    ...args.retryTuning,
     publicSnapshotStore: args.publicSnapshotStore,
     journalWrites: args.journalWrites ?? false,
     knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,

@@ -173,7 +173,12 @@ publisherCmd
   .action(async (opts: ActionOpts) => {
     try {
       const config = await loadConfig();
+      // Spread first so the keys this command does NOT manage survive — notably
+      // the GH#2270 retry knobs (autoRetryEnabled, retryJitterRatio,
+      // retryBackoffBaseMs/MaxMs), which a wholesale replace would erase on the
+      // next `dkg publisher enable`. Mirrors `publisher disable` below.
       config.publisher = {
+        ...(config.publisher ?? {}),
         enabled: true,
         pollIntervalMs: parsePositiveMsOption(String(opts.pollInterval ?? '12000'), '--poll-interval'),
         errorBackoffMs: parsePositiveMsOption(String(opts.errorBackoff ?? '5000'), '--error-backoff'),
