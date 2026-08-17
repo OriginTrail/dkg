@@ -46,13 +46,17 @@ export function MarketplaceView(): React.ReactElement {
   const [rep, setRep] = useState<Record<string, { signed: number; disputed: number; accepted: number; lastTx: string }>>({});
 
   useEffect(() => {
-    // Offerings: the viewer's OWN node, SWM/VM over subscribed CGs — free.
-    post<{ result?: { bindings?: Record<string, string>[] } }>('/api/query', {
-      // v3 compat: only the CORE offering shape is required; every
-      // Iteration-2-specific predicate is OPTIONAL so both vocabularies render
-      // (v3 KAs carry provenanceClass/apiBase/query pricing instead of
-      // firstSaleTx/chatTemplateDigest/etc.).
-      sparql: `PREFIX nsm: <${NSM}> SELECT ?g ?modelId ?provider ?inTok ?outTok ?quote ?tx ?w ?tk ?tpl ?be ?bd ?rc ?pc ?ab ?qf ?pq WHERE { GRAPH ?g {
+    // Offerings: the viewer's OWN node, SWM/VM over ALL SUBSCRIBED CGs — free.
+    // The graph list comes from the node's subscriptions (capped, per-graph
+    // failures swallowed) instead of a hardcoded id: the market can live on any
+    // graph the node subscribes to (v3 = `nsm-live`, Iteration 2 = `odysseus`),
+    // and hardcoding one silently blinded the view to the other — found live
+    // when Hermes's buyer node synced nsm-live and the view still showed
+    // nothing (2026-08-17).
+    //
+    // v3 compat: only the CORE offering shape is required; every
+    // Iteration-2-specific predicate is OPTIONAL so both vocabularies render.
+    const OFFERING_SPARQL = `PREFIX nsm: <${NSM}> SELECT ?g ?modelId ?provider ?inTok ?outTok ?quote ?tx ?w ?tk ?tpl ?be ?bd ?rc ?pc ?ab ?qf ?pq WHERE { GRAPH ?g {
         ?o a nsm:ModelOffering ; nsm:modelId ?modelId ; nsm:providerAddress ?provider ;
            nsm:perInputTokenMicroTrac ?inTok ; nsm:perOutputTokenMicroTrac ?outTok .
         OPTIONAL { ?o nsm:quoteEndpoint ?quote } OPTIONAL { ?o nsm:firstSaleTx ?tx }
@@ -61,10 +65,25 @@ export function MarketplaceView(): React.ReactElement {
         OPTIONAL { ?o nsm:backendManifestDigest ?be } OPTIONAL { ?o nsm:providerBuildDigest ?bd }
         OPTIONAL { ?o nsm:recountContract ?rc } OPTIONAL { ?o nsm:provenanceClass ?pc }
         OPTIONAL { ?o nsm:apiBase ?ab } OPTIONAL { ?o nsm:queryFlatMicroTrac ?qf }
-        OPTIONAL { ?o nsm:perReturnedQuadMicroTrac ?pq } } } LIMIT 50`,
-      contextGraphId: 'odysseus', includeSharedMemory: true, includeContextGraphPartitions: true,
-    }).then((r) => {
-      const rows = r?.result?.bindings ?? [];
+        OPTIONAL { ?o nsm:perReturnedQuadMicroTrac ?pq } } } LIMIT 50`;
+    getJson<{ subscriptions?: { contextGraphId: string; subscribed: boolean }[] }>('/api/context-graph/subscriptions')
+      .then(async (subs) => {
+        const cgs = (subs?.subscriptions ?? []).filter((x) => x.subscribed).map((x) => x.contextGraphId).slice(0, 16);
+        const perCg = await Promise.all(cgs.map((cg) =>
+          post<{ result?: { bindings?: Record<string, string>[] } }>('/api/query', {
+            sparql: OFFERING_SPARQL, contextGraphId: cg,
+            includeSharedMemory: true, includeContextGraphPartitions: true,
+          }).then((r) => r?.result?.bindings ?? []).catch(() => [] as Record<string, string>[]),
+        ));
+        // dedupe: the same offering may arrive via multiple graphs
+        const seen = new Set<string>();
+        return perCg.flat().filter((b) => {
+          const k = `${unq(b.modelId)}|${unq(b.provider)}|${unq(b.pc)}`;
+          if (seen.has(k)) return false;
+          seen.add(k);
+          return true;
+        });
+      }).then((rows) => {
       setOfferings(rows.map((b) => ({
         modelId: unq(b.modelId), provider: unq(b.provider),
         inTok: Number(unq(b.inTok)), outTok: Number(unq(b.outTok)),
