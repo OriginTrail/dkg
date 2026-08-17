@@ -32,10 +32,24 @@ export interface OpenAiConnectorConfig {
   tokenizerBundle: string;
 }
 
+export interface CodexOAuthConnectorConfig {
+  kind: "codex-oauth";
+  /** Codex CLI auth store written by `codex login`; read at call time only */
+  authFile: string;
+  baseUrl?: string;
+  /** model string the offering CLAIMS (upstream-claimed) */
+  model: string;
+  /** local path of the public counting bundle (.tiktoken) */
+  tokenizerFile: string;
+  /** declared public bundle name, e.g. o200k_base */
+  tokenizerBundle: string;
+  reasoningEffort?: "minimal" | "low" | "medium" | "high";
+}
+
 export interface OfferingConfig {
   id: string;                       // stable local id, e.g. "qwen25-14b"
   provenanceClass: "weights-pinned" | "upstream-claimed";
-  connector: LlamaCppConnectorConfig | OpenAiConnectorConfig;
+  connector: LlamaCppConnectorConfig | OpenAiConnectorConfig | CodexOAuthConnectorConfig;
   perInputTokenMicroTrac: number;
   perOutputTokenMicroTrac: number;
   queryFlatMicroTrac: number;

@@ -47,7 +47,12 @@ export function buildOfferingQuads(ob: OfferingBinding, a: {
     lit(OFFER, `${NSM}servingCtx`, ob.binding.settings.ctx);
   } else {
     lit(OFFER, `${NSM}upstreamModelClaim`, ob.binding.model);
-    lit(OFFER, `${NSM}chatTemplateConstantsDigest`, ob.binding.templateConstantsDigest);
+    if (ob.binding.kind === "openai") {
+      lit(OFFER, `${NSM}chatTemplateConstantsDigest`, ob.binding.templateConstantsDigest);
+    } else {
+      lit(OFFER, `${NSM}countingBasis`, "local-verifiable");
+      lit(OFFER, `${NSM}countingBundleSha256`, ob.binding.tokenizerFileSha256);
+    }
   }
   lit(OFFER, `${NSM}nodeRequirement`,
     "Both seats operate DKG nodes: the provider serves, meters, and settles through its node; the buyer resolves this offering node-to-node and recounts every charge locally.");

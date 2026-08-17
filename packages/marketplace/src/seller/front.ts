@@ -31,7 +31,9 @@ import { buildInferenceEvidence } from "../core/inference-meter.js";
 import { verifyRequestAuth, bodyDigest } from "./auth.js";
 import { verifyDepositOnchain, openTab, tabById, txHashConsumed, tabQuantities } from "./tabs.js";
 import { completeLlamaCpp, type LlamaCppBinding } from "./connector-llamacpp.js";
-import { completeOpenAi, type OpenAiBinding } from "./connector-openai.js";
+import { completeOpenAi, type OpenAiBinding, CHAT_TEMPLATE_CONSTANTS, templateConstantsDigest } from "./connector-openai.js";
+import { completeCodexOAuth, type CodexOAuthBinding } from "./connector-codex-oauth.js";
+import type { BpeEngine } from "../buyer/bpe.js";
 import type { MarketplaceConfig, OfferingConfig } from "../config.js";
 
 export const LEG_DOMAIN_V3 = "nsm:leg:v3";
@@ -43,9 +45,12 @@ export const WITHHOLD_CODES = new Set([
 
 export interface OfferingBinding {
   offering: OfferingConfig;
-  binding: LlamaCppBinding | OpenAiBinding;
+  binding: LlamaCppBinding | OpenAiBinding | CodexOAuthBinding;
   tokenizerBundleRef: string;   // KA UAL or content digest the offering pins
   offeringUal?: string;         // set once published
+  /** counting engine over the declared public bundle (☁ classes) — the SAME
+   *  algorithm the buyer recounts with, so honest legs match by construction */
+  countEngine?: BpeEngine;
 }
 
 export interface FrontDeps {
@@ -115,7 +120,11 @@ export function buildV3Quote(deps: FrontDeps): Record<string, unknown> {
       queryFlatMicroTrac: ob.offering.queryFlatMicroTrac,
       perReturnedQuadMicroTrac: ob.offering.perReturnedQuadMicroTrac,
       tokenizerBundleRef: ob.tokenizerBundleRef,
-      servingSettings: ob.binding.kind === "llamacpp" ? ob.binding.settings : { templateConstantsDigest: ob.binding.templateConstantsDigest },
+      servingSettings:
+        ob.binding.kind === "llamacpp" ? ob.binding.settings :
+        ob.binding.kind === "openai" ? { templateConstantsDigest: ob.binding.templateConstantsDigest } :
+        { templateConstantsDigest: templateConstantsDigest(), reasoningEffort: ob.binding.reasoningEffort,
+          countingBasis: "local-verifiable", countingBundleSha256: ob.binding.tokenizerFileSha256 },
     }));
   const quote = {
     quoteVersion: "nsm-quote/v3",
@@ -257,6 +266,33 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
         finishReason: served.finishReason,
         stopBoundary: { maxTokens } as never,
       }) as unknown as Record<string, unknown>;
+    } else if (ob.binding.kind === "codex-oauth") {
+      const outcome = await completeCodexOAuth(ob.binding, parsed.messages, maxTokens);
+      if (!outcome.ok) {
+        // upstream failure (incl. auth) ⇒ downstream error, NO LEG
+        send(res, outcome.status === 429 ? 429 : 502, { error: outcome.code });
+        return true;
+      }
+      completion = outcome.result.completion;
+      // ── bill on LOCALLY VERIFIABLE counts under the declared public bundle,
+      // never upstream usage (reasoning tokens are invisible in delivered
+      // bytes and would fail every honest buyer recount) ──
+      const eng = ob.countEngine;
+      if (!eng) { send(res, 500, { error: "E_COUNT_ENGINE_ABSENT" }); return true; }
+      const per = CHAT_TEMPLATE_CONSTANTS;
+      inputTokens = parsed.messages.reduce(
+        (s2, m) => s2 + eng.encodeCount(m.content) + eng.encodeCount(m.role) + per.perMessageTokens, 0,
+      ) + per.perReplyPrimerTokens;
+      outputTokens = eng.encodeCount(completion);
+      evidence = {
+        schemaVersion: "nsm-cloud-evidence/v3",
+        requestDigest: "sha256:" + createHash("sha256").update(canonicalize({ model: parsed.model, messages: parsed.messages, max_tokens: maxTokens })).digest("hex"),
+        deliveredResponseBytesDigest: "sha256:" + createHash("sha256").update(Buffer.from(completion, "utf8")).digest("hex"),
+        meteredCounts: { basis: "local-verifiable", bundle: ob.binding.tokenizerBundle, bundleSha256: ob.binding.tokenizerFileSha256 },
+        upstreamUsage: { informational: true, ...outcome.upstreamUsage },
+        tokenizerBundle: ob.binding.tokenizerBundle,
+        templateConstantsDigest: templateConstantsDigest(),
+      };
     } else {
       const outcome = await completeOpenAi(ob.binding, parsed.messages, maxTokens);
       if (!outcome.ok) {

@@ -13,6 +13,7 @@ import type { RoutePlugin, RequestContext } from "@origintrail-official/dkg/daem
 import { loadMarketplaceConfig, marketplaceHome, type MarketplaceConfig } from "./config.js";
 import { connectLlamaCpp, type LlamaCppBinding } from "./seller/connector-llamacpp.js";
 import { connectOpenAi, type OpenAiBinding } from "./seller/connector-openai.js";
+import { connectCodexOAuth, type CodexOAuthBinding } from "./seller/connector-codex-oauth.js";
 import { handleFront, type FrontDeps, type OfferingBinding } from "./seller/front.js";
 import { handleGateway, type GatewayDeps, type GatewayOffering } from "./gateway/router.js";
 import { BuyerClient } from "./buyer/client.js";
@@ -51,6 +52,16 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
         offerings.set(off.id, ob);
         offerings.set(binding.modelId, ob);
         log(`offering ${off.id} ⛓ ${binding.modelId} gguf=${binding.ggufSha256.slice(0, 18)}… tok=${binding.tokenizerBundleDigest.slice(0, 18)}…`);
+      } else if (off.connector.kind === "codex-oauth") {
+        const binding: CodexOAuthBinding = connectCodexOAuth(off.connector);
+        const ob: OfferingBinding = {
+          offering: off, binding,
+          tokenizerBundleRef: "public:" + binding.tokenizerBundle,
+          countEngine: tiktokenEngine(readFileSync(off.connector.tokenizerFile, "utf8")),
+        };
+        offerings.set(off.id, ob);
+        offerings.set(binding.model, ob);
+        log(`offering ${off.id} ☁ codex-oauth ${binding.model} bundle=${binding.tokenizerBundle}@${binding.tokenizerFileSha256.slice(0, 18)}… effort=${binding.reasoningEffort}`);
       } else {
         const binding: OpenAiBinding = connectOpenAi(off.connector);
         const ob: OfferingBinding = { offering: off, binding, tokenizerBundleRef: "public:" + binding.tokenizerBundle };
@@ -141,7 +152,7 @@ async function mount(cfg: MarketplaceConfig, ctx: RequestContext, log: (l: strin
     }
   }
 
-  return { front, gateway, loadedAt: Date.now(), configDigestish: JSON.stringify([cfg.enabled, cfg.offerings.length, providerAddress, buyerCfgStamp()]) };
+  return { front, gateway, loadedAt: Date.now(), configDigestish: JSON.stringify([cfg.enabled, cfg.offerings.length, providerAddress, cfg.apiBase ?? null, cfg.rpcUrl ?? null, buyerCfgStamp()]) };
 }
 
 export const plugin: RoutePlugin = {
@@ -154,7 +165,7 @@ export const plugin: RoutePlugin = {
     if (!path.startsWith(BASE + "/")) return;
 
     const log = (line: string) => console.log(`[marketplace] ${line}`);
-    const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null, buyerCfgStamp()]);
+    const digestish = JSON.stringify([cfg.enabled, cfg.offerings.length, cfg.providerAddress ?? null, cfg.apiBase ?? null, cfg.rpcUrl ?? null, buyerCfgStamp()]);
     if (!mounted || mounted.configDigestish !== digestish) {
       mounted = await mount(cfg, ctx, log);
     }
