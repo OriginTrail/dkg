@@ -111,6 +111,10 @@ class GraphScopedSnapshotCommitCoordinator {
     }
   }
 
+  suppressedRows(rows: readonly Quad[]): Quad[] {
+    return rows.filter((quad) => this.#suppressedKeys.has(metadataQuadKey(quad)));
+  }
+
   #suppress(descriptor: GraphScopedSwmRecoveryDescriptor): void {
     for (const quad of descriptor.metadataQuads) {
       const key = metadataQuadKey(quad);
@@ -281,7 +285,9 @@ export interface SharedMemorySnapshotWalkContinuation {
   /** Exact ordered manifest that owns every resolved ref below. */
   readonly orderedManifest: readonly PublicSnapshotMetadata[];
   readonly resolvedRefs: ReadonlySet<string>;
-  markResolved(ref: string): void;
+  /** Exact verified metadata rows withheld when this ref was resolved. */
+  suppressedMetadataRows(ref: string): readonly Quad[];
+  markResolved(ref: string, suppressedMetadataRows?: readonly Quad[]): void;
 }
 
 type PublicSnapshotWalkSource =
@@ -835,6 +841,16 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         processed.verifiedMeta,
         reconcileFinalizedTwin,
       );
+      // A selected continuation skips blob and assertion-graph work for its
+      // verified prefix, but the final bulk metadata append is owned by this
+      // round. Reapply the exact suppression decisions captured with each
+      // resolved ref so a later successful suffix cannot resurrect metadata
+      // that the prefix deliberately withheld.
+      if (snapshotWalk) {
+        for (const resolvedRef of snapshotWalk.resolvedRefs) {
+          snapshotCommit.suppressRows(snapshotWalk.suppressedMetadataRows(resolvedRef));
+        }
+      }
       let contextGraphEnsured = false;
       const ensureContextGraphOnce = async (): Promise<void> => {
         if (contextGraphEnsured) return;
@@ -1225,7 +1241,11 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // absent, so this costs nothing when there is genuinely no wiring.
         onSnapshotReady: async (snapshot: PublicSnapshotMetadata) => {
           await materializeReadySnapshot(snapshot.ref);
-          if (materializedRefs.has(snapshot.ref)) snapshotWalk?.markResolved(snapshot.ref);
+          if (materializedRefs.has(snapshot.ref)) {
+            const suppressedRows = (snapshotDescriptorsByRef.get(snapshot.ref) ?? [])
+              .flatMap((descriptor) => snapshotCommit.suppressedRows(descriptor.metadataQuads));
+            snapshotWalk?.markResolved(snapshot.ref, suppressedRows);
+          }
         },
       });
       if (materializedGraphs > 0) {

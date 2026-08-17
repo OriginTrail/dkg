@@ -24,6 +24,7 @@ interface SelectedSwmSnapshotWalkState {
   readonly orderedManifest: readonly PublicSnapshotMetadata[];
   readonly manifestTokens: readonly string[];
   readonly resolvedRefs: Set<string>;
+  readonly suppressedMetadataRowsByRef: Map<string, readonly Quad[]>;
   expiresAtMs: number;
 }
 
@@ -496,6 +497,7 @@ export function createSelectedSwmMetaFetcher(options: {
         return {
           orderedManifest,
           resolvedRefs: new Set<string>(),
+          suppressedMetadataRows: () => [],
           markResolved: () => {},
         };
       }
@@ -507,6 +509,7 @@ export function createSelectedSwmMetaFetcher(options: {
           orderedManifest: [...orderedManifest],
           manifestTokens: tokens,
           resolvedRefs: new Set<string>(),
+          suppressedMetadataRowsByRef: new Map<string, readonly Quad[]>(),
           expiresAtMs: 0,
         };
       state.snapshotWalk = walk;
@@ -517,12 +520,20 @@ export function createSelectedSwmMetaFetcher(options: {
       return {
         orderedManifest: walk.orderedManifest,
         resolvedRefs: walk.resolvedRefs,
-        markResolved(ref: string) {
+        suppressedMetadataRows(ref: string) {
+          return walk.suppressedMetadataRowsByRef.get(ref) ?? [];
+        },
+        markResolved(ref: string, suppressedMetadataRows: readonly Quad[] = []) {
           if (
             states.get(contextGraphId) !== state
             || state.snapshotWalk !== walk
             || !allowedRefs.has(ref)
+            || walk.resolvedRefs.has(ref)
           ) return;
+          walk.suppressedMetadataRowsByRef.set(
+            ref,
+            suppressedMetadataRows.map((quad) => ({ ...quad })),
+          );
           walk.resolvedRefs.add(ref);
           if (walk.resolvedRefs.size < walk.manifestTokens.length) {
             walk.expiresAtMs = now() + retentionTtlMs;

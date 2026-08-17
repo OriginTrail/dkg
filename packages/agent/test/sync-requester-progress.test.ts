@@ -132,6 +132,7 @@ describe('selected snapshot walk continuation', () => {
       snapshotWalk: {
         orderedManifest: snapshots,
         resolvedRefs: new Set([firstDigest]),
+        suppressedMetadataRows: () => [],
         markResolved: () => {},
       },
       publicSnapshotStore: {

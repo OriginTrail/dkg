@@ -74,12 +74,15 @@ describe('selected SWM metadata transfer ownership', () => {
       { ref: 'ref-b', digest: 'digest-b', count: 1 },
       { ref: 'ref-c', digest: 'digest-c', count: 1 },
     ];
+    const suppressedRow = {
+      subject: 'urn:suppressed', predicate: 'urn:p', object: '"o"', graph: 'urn:meta',
+    };
 
     try {
       await coordinator.run(peerId, createFetcher, async (fetcher) => {
         await fetcher.strategy.fetch(request);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
-        walk.markResolved('ref-a');
+        walk.markResolved('ref-a', [suppressedRow]);
         expect([...walk.resolvedRefs]).toEqual(['ref-a']);
       });
 
@@ -88,6 +91,9 @@ describe('selected SWM metadata transfer ownership', () => {
         expect(cached.result.bytesReceived).toBe(0);
         const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
         expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+        expect(walk.suppressedMetadataRows('ref-a')).toEqual([suppressedRow]);
+        walk.markResolved('ref-a');
+        expect(walk.suppressedMetadataRows('ref-a')).toEqual([suppressedRow]);
         walk.markResolved('ref-b');
         walk.markResolved('ref-c');
       });
