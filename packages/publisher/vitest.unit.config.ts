@@ -22,6 +22,8 @@ export default defineConfig({
       'test/async-lift-intent-lookup.test.ts',
       'test/async-lift-writejob-atomicity.test.ts',
       'test/async-lift-publish-options.test.ts',
+      'test/async-lift-auto-retry-2270.test.ts',
+      'test/lift-job-failure.test.ts',
       'test/async-promote-queue.test.ts',
       'test/async-promote-writejob-atomicity.test.ts',
       'test/query-source-coverage.test.ts',

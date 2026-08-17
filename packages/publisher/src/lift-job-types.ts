@@ -174,6 +174,13 @@ export interface LiftJobTimestamps {
 
 export interface LiftJobRetryMetadata {
   readonly retryCount: number;
+  /**
+   * ONE budget shared by every reaccept of this job — automatic (registry `autoRetry` codes,
+   * scheduled with jittered backoff) and manual (`retry()`, admission re-submit) alike. Snapshot
+   * from the publisher's `maxRetries` at admission and immutable thereafter, so raising the
+   * daemon setting does not re-arm jobs already queued. Once `retryCount` reaches it the job is
+   * terminal for the automatic lane: nothing further is scheduled and the sweep skips it.
+   */
   readonly maxRetries: number;
   readonly lastRetryReason?: string;
 }

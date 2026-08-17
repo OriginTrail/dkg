@@ -78,7 +78,36 @@ export interface LiftJobFailurePolicy {
   readonly mode: LiftJobFailureMode;
   readonly retryable: boolean;
   readonly resolution: LiftJobFailureResolution;
-  /** Safe to re-submit automatically because failure occurs before any transaction can be accepted. */
+  /**
+   * Opt-in to the publisher's own bounded, jittered retry lane
+   * (`isAutomaticallyRetryable` → `scheduleRetryIfEligible` + the claim-time sweep).
+   *
+   * QUALIFICATION — a code may set this only when ALL THREE hold:
+   *   1. NO transaction can have been accepted when the failure is recorded. For
+   *      `workspace_unavailable` this is STRUCTURAL: every state in
+   *      `LIFT_JOB_FAILURE_ALLOWED_STATES` is pre-send and `createLiftJobFailureMetadata`
+   *      throws on the others, so the guarantee is enforced, not documented. For
+   *      `quorum_unmet` it comes from the PRODUCER's position instead — its allowed state is
+   *      'broadcast', but ACK quorum is collected before the publish tx is signed, so the
+   *      error cannot follow a send. A code whose pre-send-ness rests on the producer must
+   *      have exactly one, narrowly-typed producer (`QuorumUnmetError`); a catch-all never
+   *      qualifies this way.
+   *   2. the cause is UNAMBIGUOUS — the failure cannot also be produced by a landed
+   *      transaction whose local recording failed, so a re-run can never double-publish.
+   *   3. `resolution` is 'reset_to_accepted' — the job is completable by re-running it from
+   *      the start, with no chain evidence to reconcile first.
+   * `quorum_unmet` (GH#1620) and `workspace_unavailable` (GH#2270) are the only codes that
+   * qualify today.
+   *
+   * EXCLUDED, and why — `rpc_unavailable`/`nonce_conflict`/`wallet_unavailable` are allowed
+   * from 'broadcast' with no pre-send producer guarantee, and `rpc_unavailable` is additionally
+   * the broadcast-phase CATCH-ALL, so a transaction that landed and merely failed to record
+   * locally arrives under that code (violates 1 and 2); `tx_submit_timeout`/`inclusion_timeout`/
+   * `finality_timeout`/`chain_reorg` resolve via `check_chain_then_finalize_or_reset`, which has
+   * no dispatcher yet (violates 3); terminal codes are not retryable at all; codes with no
+   * production producer (annotated below) stay off regardless, since no end-to-end witness
+   * could cover the flag.
+   */
   readonly autoRetry?: boolean;
   readonly timeoutHandling?: LiftJobTimeoutHandling;
 }
@@ -99,14 +128,25 @@ export interface LiftJobFailureMetadata {
 }
 
 export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailurePolicy> = {
-  workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
+  // GH#2270 — autoRetry: allowed states are pre-send only (see `LIFT_JOB_FAILURE_ALLOWED_STATES`)
+  // and both producers (the GH#2273 corrupt-head classifier and the pre-send keyword fallback)
+  // raise it from 'claimed'/'validated', so a re-run cannot double-publish. The cause — a
+  // transiently multi-valued or unreadable SWM head — is what sync repair heals, which is
+  // exactly what a bounded backoff waits for.
+  workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
   workspace_slice_not_found: { code: 'workspace_slice_not_found', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   publish_intent_stale: { code: 'publish_intent_stale', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   canonicalization_failed: { code: 'canonicalization_failed', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
+  // autoRetry is deliberately UNDECIDED until a producer exists: whether an authority outage is
+  // transient depends on what raises it, and a flag no path can exercise cannot be witnessed.
   authority_unavailable: { code: 'authority_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   authority_forbidden: { code: 'authority_forbidden', phase: 'validation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
+  // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
   validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
+  // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
   wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted' },
+  // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
   wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
   quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
   rpc_unavailable: { code: 'rpc_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
@@ -114,11 +154,13 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailur
   tx_reverted: { code: 'tx_reverted', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   insufficient_funds: { code: 'insufficient_funds', phase: 'broadcast', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   nonce_conflict: { code: 'nonce_conflict', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted' },
+  // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
   inclusion_timeout: { code: 'inclusion_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   finality_timeout: { code: 'finality_timeout', phase: 'confirmation', mode: 'timeout', retryable: true, resolution: 'check_chain_then_finalize_or_reset', timeoutHandling: 'check_chain_then_finalize_or_reset' },
   confirmation_mismatch: { code: 'confirmation_mismatch', phase: 'confirmation', mode: 'terminal', retryable: false, resolution: 'fail_job' },
   chain_reorg: { code: 'chain_reorg', phase: 'confirmation', mode: 'retryable', retryable: true, resolution: 'check_chain_then_finalize_or_reset' },
   recovery_lookup_timeout: { code: 'recovery_lookup_timeout', phase: 'recovery', mode: 'timeout', retryable: true, resolution: 'retry_recovery', timeoutHandling: 'retry_recovery' },
+  // DEAD CODE — no production producer as of 2026-08-17 (GH#2270 follow-up: dead-code sweep).
   recovery_chain_unavailable: { code: 'recovery_chain_unavailable', phase: 'recovery', mode: 'retryable', retryable: true, resolution: 'retry_recovery' },
   recovery_state_inconsistent: { code: 'recovery_state_inconsistent', phase: 'recovery', mode: 'terminal', retryable: false, resolution: 'fail_job' },
 };

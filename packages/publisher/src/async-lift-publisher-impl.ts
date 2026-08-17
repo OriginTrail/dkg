@@ -224,6 +224,15 @@ export class TripleStoreAsyncLiftPublisher
   private static readonly DEFAULT_MAX_RETRIES = 10;
   private static readonly DEFAULT_RETRY_BACKOFF_BASE_MS = 5_000;
   private static readonly DEFAULT_RETRY_BACKOFF_MAX_MS = 60_000;
+  private static readonly DEFAULT_RETRY_JITTER_RATIO = 0.2;
+  /**
+   * GH#2270 — upper bound on reaccepts per claim-time sweep. The sweep runs INSIDE the claim
+   * lock, so its cost is paid by every enqueue/claim/retry; and re-enabling `autoRetryEnabled`
+   * releases every job that accumulated a past-due `nextRetryAt` at once. Capping the burst
+   * loses no job: `nextRetryAt` stays in the past, so the remainder is reaccepted by the
+   * following sweeps.
+   */
+  private static readonly MAX_REACCEPTS_PER_SWEEP = 5;
 
   private readonly graphUri: string;
   private readonly walletLockGraphUri: string;
@@ -232,10 +241,13 @@ export class TripleStoreAsyncLiftPublisher
   private readonly maxRetries: number;
   private readonly retryBackoffBaseMs: number;
   private readonly retryBackoffMaxMs: number;
+  private readonly autoRetryEnabled: boolean;
+  private readonly retryJitterRatio: number;
   private readonly recoveryLookupTimeoutMs: number;
   private readonly lockLeaseMs: number;
   private readonly now: () => number;
   private readonly idGenerator: () => string;
+  private readonly rand: () => number;
   private readonly chainRecoveryResolver?: AsyncLiftPublisherRecoveryResolver;
   private readonly knowledgeAssetVmPublishRecoveryResolver?: AsyncKnowledgeAssetVmPublishRecoveryResolver;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
@@ -283,10 +295,16 @@ export class TripleStoreAsyncLiftPublisher
     if (!Number.isFinite(this.retryBackoffMaxMs) || this.retryBackoffMaxMs < this.retryBackoffBaseMs) {
       throw new Error('Async lift publisher retryBackoffMaxMs must be at least retryBackoffBaseMs');
     }
+    this.autoRetryEnabled = config.autoRetryEnabled ?? true;
+    this.retryJitterRatio = config.retryJitterRatio ?? TripleStoreAsyncLiftPublisher.DEFAULT_RETRY_JITTER_RATIO;
+    if (!Number.isFinite(this.retryJitterRatio) || this.retryJitterRatio < 0 || this.retryJitterRatio >= 1) {
+      throw new Error('Async lift publisher retryJitterRatio must be at least 0 and below 1');
+    }
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
+    this.rand = config.rand ?? (() => Math.random());
     this.chainRecoveryResolver = config.chainRecoveryResolver;
     this.knowledgeAssetVmPublishRecoveryResolver = config.knowledgeAssetVmPublishRecoveryResolver;
     this.publishExecutor = config.publishExecutor;
@@ -1865,8 +1883,19 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
+  /**
+   * The ONE gate of the automatic lane, read by BOTH the scheduler
+   * (`scheduleRetryIfEligible`, at failure-recording time) and the claim-time sweep
+   * (`reacceptDueFailedJobs`) — so `autoRetryEnabled` belongs here and nowhere else.
+   *
+   * Turning the switch OFF mid-flight therefore STRANDS jobs that were scheduled while it was
+   * on: their `nextRetryAt` passes without ever firing. They stay operator-actionable
+   * (`retry()`, re-submit), and turning it back on releases them, bounded per sweep by
+   * {@link MAX_REACCEPTS_PER_SWEEP}.
+   */
   private isAutomaticallyRetryable(job: PersistedFailedJob): boolean {
-    return getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+    return this.autoRetryEnabled
+      && getLiftJobFailurePolicy(job.failure.code).autoRetry === true
       && job.failure.retryable
       && job.failure.resolution === 'reset_to_accepted'
       && job.retries.retryCount < job.retries.maxRetries;
@@ -1875,6 +1904,7 @@ export class TripleStoreAsyncLiftPublisher
   private async reacceptDueFailedJobs(now: number): Promise<number> {
     let retried = 0;
     for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      if (retried >= TripleStoreAsyncLiftPublisher.MAX_REACCEPTS_PER_SWEEP) break;
       if (job.timestamps.nextRetryAt === undefined || job.timestamps.nextRetryAt > now) continue;
       if (!this.isAutomaticallyRetryable(job)) continue;
       await this.reacceptFailedJob(job);
@@ -1883,11 +1913,20 @@ export class TripleStoreAsyncLiftPublisher
     return retried;
   }
 
+  /**
+   * Symmetric multiplicative jitter, applied BEFORE the cap so `retryBackoffMaxMs` stays a hard
+   * ceiling (jittering the capped value would exceed it). Rounded because `nextRetryAt` is
+   * persisted as an xsd:integer.
+   */
+  private jitteredBackoff(delay: number): number {
+    return Math.round(delay * (1 + this.retryJitterRatio * (2 * this.rand() - 1)));
+  }
+
   private scheduleRetryIfEligible(job: LiftJob): LiftJob {
     if (!isFailedJob(job) || !this.isAutomaticallyRetryable(job)) return job;
     const delay = Math.min(
       this.retryBackoffMaxMs,
-      this.retryBackoffBaseMs * 2 ** job.retries.retryCount,
+      this.jitteredBackoff(this.retryBackoffBaseMs * 2 ** job.retries.retryCount),
     );
     const now = this.now();
     return {
