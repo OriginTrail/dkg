@@ -397,44 +397,155 @@ export function createSharedMemorySnapshotMaterializer(deps: {
     return subjects;
   };
 
-  const materializerSelf: SharedMemorySnapshotMaterializer = {
+  const readStoredHead: SharedMemorySnapshotMaterializer['readStoredHead'] = async (descriptor) => {
+    // Aggregates over ONE bound subject in the KA's meta graph: bounded by
+    // that subject's row count. COUNT(DISTINCT …) doubles as the duplicate
+    // detector — more than one version or operation value on the head is the
+    // union-insert residue that must be repaired.
+    const result = await deps.store.query(
+      `SELECT (MAX(?v) AS ?maxVersion) (COUNT(DISTINCT ?v) AS ?versions) `
+      + `(COUNT(DISTINCT ?op) AS ?operations) (SAMPLE(?op) AS ?anyOp) WHERE { `
+      + `GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> `
+      + `<${DKG}assertionVersion> ?v ; `
+      + `<${DKG}shareOperationId> ?op } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readStoredHead' },
+    );
+    if (result.type !== 'bindings' || result.bindings.length === 0) {
+      return { version: null, needsRepair: false, shareOperationId: null };
+    }
+    const row = result.bindings[0];
+    const version = literalValue(row?.['maxVersion']);
+    const versions = parseCount(row?.['versions']);
+    const operations = parseCount(row?.['operations']);
+    // SAMPLE is deterministic only when there is exactly one distinct id;
+    // with more, ANY pick would be arbitrary, so the id reads as null and
+    // `needsRepair` routes the decision through repair instead.
+    const sampledOperationId = literalValue(row?.['anyOp']);
+    return {
+      version: version && version.length > 0 ? version : null,
+      needsRepair: versions > 1 || operations > 1,
+      shareOperationId:
+        operations === 1 && sampledOperationId && sampledOperationId.length > 0
+          ? sampledOperationId
+          : null,
+    };
+  };
+
+  const selectRepairIdentity: SharedMemorySnapshotMaterializer['selectRepairIdentity'] = async (contextGraphId, descriptor) => {
+    const shareIds = await deps.store.query(
+      `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.selectRepairIdentity' },
+    );
+    if (shareIds.type !== 'bindings') return null;
+    const foreignIds = [...new Set(
+      shareIds.bindings
+        .map((row) => literalValue(row?.['op']))
+        .filter((id): id is string => Boolean(id && id.length > 0)),
+    )].filter((id) => id !== descriptor.shareOperationId).sort();
+    if (foreignIds.length === 0) return null;
+    const descriptorKey = operationIdentityKey(
+      descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
+    );
+    if (descriptorKey === null) return null;
+    // ONE bounded query loads every candidate operation's rows via the
+    // head join (mirrors the resolver's acquisition): candidate identity,
+    // ownership and rows are then validated over the in-memory model
+    // instead of a per-candidate ASK/read fan-out under the lock.
+    const candidateRows = await deps.store.query(
+      `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
+      + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
+      + `?op <${DKG}shareOperationId> ?id ; ?p ?o } }`,
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates' },
+    );
+    if (candidateRows.type !== 'bindings') return null;
+    const rowsBySubject = new Map<string, Quad[]>();
+    for (const row of candidateRows.bindings) {
+      const subject = row['op'] ?? '';
+      if (!subject) continue;
+      const list = rowsBySubject.get(subject) ?? [];
+      list.push({
+        subject,
+        predicate: row['p'] ?? '',
+        object: row['o'] ?? '',
+        graph: descriptor.metaGraph,
+      });
+      rowsBySubject.set(subject, list);
+    }
+    for (const foreignId of foreignIds) {
+      const operationSubject = `urn:dkg:share:${contextGraphId}:${foreignId}`;
+      const storedRows = rowsBySubject.get(operationSubject) ?? [];
+      if (storedRows.length === 0) return null;
+      // The preserved-winner contract, as NAMED validators (each pinned by
+      // its own polarity row): identity-equivalent under the allow-list,
+      // acceptable to the head resolver's decoder + stamp rule, carries
+      // the responder-join type row, and its snapshot locator (if graph-
+      // form) actually serves the committed content. Any failure routes to
+      // descriptor-wins — today's behavior, and the correct one both for a
+      // GENUINE change and for a winner some reader would reject (a
+      // preserved-but-unreadable winner is the wedge shape: preserved this
+      // round, corrupt to a reader, preserved again next round).
+      if (!operationIdentityMatches(storedRows, descriptorKey)) return null;
+      if (!storedWinnerIsDecodable(storedRows, descriptor, foreignId)) return null;
+      if (!storedWinnerHasResponderType(storedRows)) return null;
+      if (!storedWinnerHasUsableAccessEnvelope(storedRows)) return null;
+      if (!(await snapshotLocatorIsServeable(storedRows, descriptor))) return null;
+    }
+    return {
+      winnerShareOperationId: foreignIds[0]!,
+      withholdRows: descriptor.metadataQuads.filter((quad) =>
+        quad.subject === descriptor.headSubject
+        && quad.predicate === `${DKG}shareOperationId`),
+    };
+  };
+
+  const repairHeadPreservingIdentity: SharedMemorySnapshotMaterializer['repairHeadPreservingIdentity'] = async (contextGraphId, descriptor, winnerShareOperationId) => {
+    const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
+      seed: descriptor.shareOperationId !== winnerShareOperationId
+        ? [descriptor.operationSubject]
+        : [],
+      excludeShareOperationId: winnerShareOperationId,
+    });
+    // ORDER MATTERS: rewrite the head FIRST, delete the losers AFTER. A
+    // crash between the two then leaves a HEALTHY single-valued head plus
+    // stale loser operation subjects — benign residue (they are
+    // identity-equivalent by the selection above, and nothing references
+    // them). The reverse order would leave a still-multi-valued head naming
+    // operations whose rows are already gone: readers fail closed on a
+    // state that is only half repaired.
+    //
+    // Head rows: the descriptor's own four non-id rows are byte-identical to
+    // what the winner's head must carry (identity equivalence pins kaUal and
+    // assertionVersion; contentScopeVersion is constant; assertionGraph is
+    // derived from UAL + version), so only the operation-id row is swapped.
+    const headRows = descriptor.metadataQuads
+      .filter((quad) => quad.subject === descriptor.headSubject)
+      .map((quad) => quad.predicate === `${DKG}shareOperationId`
+        ? { ...quad, object: JSON.stringify(winnerShareOperationId) }
+        : { ...quad });
+    await deps.store.deleteByPattern(
+      { graph: descriptor.metaGraph, subject: descriptor.headSubject },
+      { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
+    );
+    await deps.store.insert(headRows, {
+      priority: 'background',
+      source: 'agent.sharedMemorySync.snapshotMaterializer.writePreservedHead',
+    });
+    for (const operationSubject of loserSubjects) {
+      await deps.store.deleteByPattern(
+        { graph: descriptor.metaGraph, subject: operationSubject },
+        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
+      );
+    }
+    deps.invalidateListContextGraphsCache();
+  };
+
+  const materializer: SharedMemorySnapshotMaterializer = {
     withKaWriteLock: (contextGraphId, subGraphName, kaUal, fn) =>
       withKeyedLocks(deps.writeLocks, [swmKaWriteLockKey(contextGraphId, subGraphName, kaUal)], fn),
 
-    readStoredHead: async (descriptor) => {
-      // Aggregates over ONE bound subject in the KA's meta graph: bounded by
-      // that subject's row count. COUNT(DISTINCT …) doubles as the duplicate
-      // detector — more than one version or operation value on the head is the
-      // union-insert residue that must be repaired.
-      const result = await deps.store.query(
-        `SELECT (MAX(?v) AS ?maxVersion) (COUNT(DISTINCT ?v) AS ?versions) `
-        + `(COUNT(DISTINCT ?op) AS ?operations) (SAMPLE(?op) AS ?anyOp) WHERE { `
-        + `GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-        + `<${assertSafeIri(descriptor.headSubject)}> `
-        + `<${DKG}assertionVersion> ?v ; `
-        + `<${DKG}shareOperationId> ?op } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.readStoredHead' },
-      );
-      if (result.type !== 'bindings' || result.bindings.length === 0) {
-        return { version: null, needsRepair: false, shareOperationId: null };
-      }
-      const row = result.bindings[0];
-      const version = literalValue(row?.['maxVersion']);
-      const versions = parseCount(row?.['versions']);
-      const operations = parseCount(row?.['operations']);
-      // SAMPLE is deterministic only when there is exactly one distinct id;
-      // with more, ANY pick would be arbitrary, so the id reads as null and
-      // `needsRepair` routes the decision through repair instead.
-      const sampledOperationId = literalValue(row?.['anyOp']);
-      return {
-        version: version && version.length > 0 ? version : null,
-        needsRepair: versions > 1 || operations > 1,
-        shareOperationId:
-          operations === 1 && sampledOperationId && sampledOperationId.length > 0
-            ? sampledOperationId
-            : null,
-      };
-    },
+    readStoredHead,
 
     isGraphAssetMaterialized: async (descriptor) => {
       const expected = descriptor.publicQuadsCount;
@@ -607,7 +718,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
         deps.writeLocks,
         [swmKaWriteLockKey(contextGraphId, descriptor.subGraphName, descriptor.kaUal)],
         async () => {
-          const stored = await materializerSelf.readStoredHead(descriptor);
+          const stored = await readStoredHead(descriptor);
           // Every conjunct applies to BOTH the same-id and foreign-id cases:
           // an id-equal head with a stale or corrupt version row is NOT
           // healthy, and preserving it would leave unrepaired metadata in
@@ -630,7 +741,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
             // the KA on rows the resolver fails closed on, forever.
             return { outcome: 'replace' as const };
           }
-          const selected = await materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
+          const selected = await selectRepairIdentity(contextGraphId, descriptor);
           if (selected === null) return { outcome: 'replace' as const };
           const { winnerShareOperationId, withholdRows } = selected;
           // ENACT while still holding the lock: rewrite the head from the
@@ -640,7 +751,7 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           // assertionGraph row survives the check but not the rewrite) and
           // what keeps 'preserved' at least as convergent as the bulk
           // replacement it suppresses.
-          await materializerSelf.repairHeadPreservingIdentity(
+          await repairHeadPreservingIdentity(
             contextGraphId,
             descriptor,
             winnerShareOperationId,
@@ -650,116 +761,11 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       );
     },
 
-    selectRepairIdentity: async (contextGraphId, descriptor) => {
-      const shareIds = await deps.store.query(
-        `SELECT DISTINCT ?op WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-        + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?op } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.selectRepairIdentity' },
-      );
-      if (shareIds.type !== 'bindings') return null;
-      const foreignIds = [...new Set(
-        shareIds.bindings
-          .map((row) => literalValue(row?.['op']))
-          .filter((id): id is string => Boolean(id && id.length > 0)),
-      )].filter((id) => id !== descriptor.shareOperationId).sort();
-      if (foreignIds.length === 0) return null;
-      const descriptorKey = operationIdentityKey(
-        descriptor.metadataQuads.filter((quad) => quad.subject === descriptor.operationSubject),
-      );
-      if (descriptorKey === null) return null;
-      // ONE bounded query loads every candidate operation's rows via the
-      // head join (mirrors the resolver's acquisition): candidate identity,
-      // ownership and rows are then validated over the in-memory model
-      // instead of a per-candidate ASK/read fan-out under the lock.
-      const candidateRows = await deps.store.query(
-        `SELECT ?op ?p ?o WHERE { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { `
-        + `<${assertSafeIri(descriptor.headSubject)}> <${DKG}shareOperationId> ?id . `
-        + `?op <${DKG}shareOperationId> ?id ; ?p ?o } }`,
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.loadCandidates' },
-      );
-      if (candidateRows.type !== 'bindings') return null;
-      const rowsBySubject = new Map<string, Quad[]>();
-      for (const row of candidateRows.bindings) {
-        const subject = row['op'] ?? '';
-        if (!subject) continue;
-        const list = rowsBySubject.get(subject) ?? [];
-        list.push({
-          subject,
-          predicate: row['p'] ?? '',
-          object: row['o'] ?? '',
-          graph: descriptor.metaGraph,
-        });
-        rowsBySubject.set(subject, list);
-      }
-      for (const foreignId of foreignIds) {
-        const operationSubject = `urn:dkg:share:${contextGraphId}:${foreignId}`;
-        const storedRows = rowsBySubject.get(operationSubject) ?? [];
-        if (storedRows.length === 0) return null;
-        // The preserved-winner contract, as NAMED validators (each pinned by
-        // its own polarity row): identity-equivalent under the allow-list,
-        // acceptable to the head resolver's decoder + stamp rule, carries
-        // the responder-join type row, and its snapshot locator (if graph-
-        // form) actually serves the committed content. Any failure routes to
-        // descriptor-wins — today's behavior, and the correct one both for a
-        // GENUINE change and for a winner some reader would reject (a
-        // preserved-but-unreadable winner is the wedge shape: preserved this
-        // round, corrupt to a reader, preserved again next round).
-        if (!operationIdentityMatches(storedRows, descriptorKey)) return null;
-        if (!storedWinnerIsDecodable(storedRows, descriptor, foreignId)) return null;
-        if (!storedWinnerHasResponderType(storedRows)) return null;
-        if (!storedWinnerHasUsableAccessEnvelope(storedRows)) return null;
-        if (!(await snapshotLocatorIsServeable(storedRows, descriptor))) return null;
-      }
-      return {
-        winnerShareOperationId: foreignIds[0]!,
-        withholdRows: descriptor.metadataQuads.filter((quad) =>
-          quad.subject === descriptor.headSubject
-          && quad.predicate === `${DKG}shareOperationId`),
-      };
-    },
+    selectRepairIdentity,
 
-    repairHeadPreservingIdentity: async (contextGraphId, descriptor, winnerShareOperationId) => {
-      const loserSubjects = await collectOwnedHeadOperationSubjects(descriptor, {
-        seed: descriptor.shareOperationId !== winnerShareOperationId
-          ? [descriptor.operationSubject]
-          : [],
-        excludeShareOperationId: winnerShareOperationId,
-      });
-      // ORDER MATTERS: rewrite the head FIRST, delete the losers AFTER. A
-      // crash between the two then leaves a HEALTHY single-valued head plus
-      // stale loser operation subjects — benign residue (they are
-      // identity-equivalent by the selection above, and nothing references
-      // them). The reverse order would leave a still-multi-valued head naming
-      // operations whose rows are already gone: readers fail closed on a
-      // state that is only half repaired.
-      //
-      // Head rows: the descriptor's own four non-id rows are byte-identical to
-      // what the winner's head must carry (identity equivalence pins kaUal and
-      // assertionVersion; contentScopeVersion is constant; assertionGraph is
-      // derived from UAL + version), so only the operation-id row is swapped.
-      const headRows = descriptor.metadataQuads
-        .filter((quad) => quad.subject === descriptor.headSubject)
-        .map((quad) => quad.predicate === `${DKG}shareOperationId`
-          ? { ...quad, object: JSON.stringify(winnerShareOperationId) }
-          : { ...quad });
-      await deps.store.deleteByPattern(
-        { graph: descriptor.metaGraph, subject: descriptor.headSubject },
-        { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteHead' },
-      );
-      await deps.store.insert(headRows, {
-        priority: 'background',
-        source: 'agent.sharedMemorySync.snapshotMaterializer.writePreservedHead',
-      });
-      for (const operationSubject of loserSubjects) {
-        await deps.store.deleteByPattern(
-          { graph: descriptor.metaGraph, subject: operationSubject },
-          { priority: 'background', source: 'agent.sharedMemorySync.snapshotMaterializer.deleteOperation' },
-        );
-      }
-      deps.invalidateListContextGraphsCache();
-    },
+    repairHeadPreservingIdentity,
   };
-  return materializerSelf;
+  return materializer;
 }
 
 /** Strip the lexical value out of an N-Triples-style literal binding. */
