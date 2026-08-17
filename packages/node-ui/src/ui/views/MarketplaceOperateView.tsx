@@ -8,6 +8,9 @@ import { getJson } from '../http.js';
 
 interface OperateStatus {
   enabled: boolean;
+  sellerActive?: boolean;
+  buyer?: { tabId: string | null; transport: string | null; keyCount: number;
+            totalBudgetMicroTrac: number; totalSpentMicroTrac: number } | null;
   offerings: Array<{
     id: string; provenanceClass: string; modelId: string; tokenizerBundleRef: string;
     pricing: { perInputTokenMicroTrac: number; perOutputTokenMicroTrac: number; queryFlatMicroTrac: number; perReturnedQuadMicroTrac: number };
@@ -67,7 +70,17 @@ export function MarketplaceOperateView(): React.ReactElement {
             <span className="nsm-mono">{o.offeringUal ? '✓ KA' : '— not yet'}</span>
           </div>
         ))}
-        {/* threshold meter — settlement election posture, live */}
+        {/* threshold meter — PROVIDER-LOCAL: unsettled earnings of THIS node's
+            seller tabs vs the gas/ε election threshold. On a buyer-only node
+            there are no local seller tabs, so the meter was rendering as a
+            misleading empty bar (Hermes, event 58c565ac) — hidden here unless
+            this node actually sells. */}
+        {st.sellerActive === false && (
+          <div className="nsm-detail" style={{ marginTop: 10 }}>
+            <span className="nsm-dim">Buyer-only node — the provider settlement meter is not applicable (no local offerings). Your spending appears under Buyer below.</span>
+          </div>
+        )}
+        {st.sellerActive !== false && (
         <div className="nsm-detail" style={{ marginTop: 10 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
             <span>Settlement election — unsettled earned vs gas/ε threshold</span>
@@ -82,6 +95,26 @@ export function MarketplaceOperateView(): React.ReactElement {
               : `Refused — settling now would burn more gas than ε permits. Carry accumulates (${pct}% of threshold).`}
           </div>
         </div>
+        )}
+
+        {/* buyer conservation card — ONLY locally-knowable numbers: this node's
+            tab id and its gateway-key accounting. The refundable balance lives
+            on the SELLER's ledger and is confirmed at close; the contract has
+            no public tab-status endpoint by design, so none is invented here. */}
+        {st.buyer && (
+          <div className="nsm-detail" style={{ marginTop: 10 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12 }}>
+              <span>Buyer — gateway spend vs key budget · tab <span className="nsm-mono">{st.buyer.tabId ?? '—'}</span></span>
+              <span className="nsm-mono">{µ(st.buyer.totalSpentMicroTrac)} / {µ(st.buyer.totalBudgetMicroTrac)}</span>
+            </div>
+            <div style={{ background: 'var(--bg-hover)', borderRadius: 4, height: 8, marginTop: 6 }}>
+              <div style={{ width: Math.min(100, Math.round((st.buyer.totalSpentMicroTrac / Math.max(1, st.buyer.totalBudgetMicroTrac)) * 100)) + '%', height: 8, borderRadius: 4, background: 'var(--accent-info, #5a5f8f)' }} />
+            </div>
+            <div className="nsm-dim" style={{ fontSize: 11.5, marginTop: 6 }}>
+              {st.buyer.keyCount} key(s) · spend is this node's countersigned gateway usage. The tab's refundable balance lives on the seller's ledger and is confirmed at close.
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Tabs & Usage ── */}

@@ -269,8 +269,35 @@ async function operateStatus(cfg: MarketplaceConfig, m: Mounted): Promise<Record
   const unsettledEarned = tabs.reduce((s, t) => s + t.quantities.billed - t.quantities.released, 0);
   const election = providerMaySettleV3({ unsettledEarnedMicroTrac: unsettledEarned, gasMicroTrac: SETTLE_GAS_MICROTRAC, epsilon: EPSILON });
 
+  // Buyer-side summary — ONLY what this node can know locally: its tab id and
+  // its gateway-key accounting. The refundable balance lives on the SELLER's
+  // ledger and is confirmed at close; the wire contract deliberately has no
+  // public tab-status endpoint, so the UI must not pretend to know it.
+  // (Hermes, #neurosymbolic-ai event 58c565ac: the provider settlement meter
+  // rendered as an empty bar on his buyer-only node — provider-local metric
+  // shown without a seller context.)
+  let buyer: Record<string, unknown> | null = null;
+  {
+    const bp = j(home, "buyer.json");
+    if (ex(bp)) {
+      try {
+        const b = JSON.parse(rf(bp, "utf8")) as { tabId?: string; sellerApiBase?: string };
+        const ks = listKeys(home);
+        buyer = {
+          tabId: b.tabId ?? null,
+          transport: b.sellerApiBase ?? null,
+          keyCount: ks.length,
+          totalBudgetMicroTrac: ks.reduce((s2, k) => s2 + Number(k.scopes.budgetMicroTrac ?? 0), 0),
+          totalSpentMicroTrac: ks.reduce((s2, k) => s2 + keySpent(home, k.keyId), 0),
+        };
+      } catch { buyer = null; }
+    }
+  }
+
   return {
     enabled: cfg.enabled,
+    sellerActive: !!m.front && [...m.front.offerings.values()].length > 0,
+    buyer,
     offerings: m.front ? [...m.front.offerings.values()]
       .filter((v, i, a) => a.findIndex((x) => x.offering.id === v.offering.id) === i)
       .map((ob) => ({
