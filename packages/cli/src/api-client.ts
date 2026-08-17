@@ -5,7 +5,7 @@ import type {
   ContextGraphSyncMode,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
-import type { JournalReadResult } from '@origintrail-official/dkg-publisher';
+import type { AsyncLiftRetryOutcome, JournalReadResult, LiftJobRetryProjection } from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -1275,11 +1275,15 @@ export class ApiClient {
     return this.get(`/api/publisher/jobs${qs}`);
   }
 
-  async publisherJob(jobId: string): Promise<{ job: any }> {
+  // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
+  // job by itself?", served beside the untouched `job`.
+  async publisherJob(jobId: string): Promise<{ job: any; retryState: LiftJobRetryProjection }> {
     return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
   }
 
-  async publisherJobPayload(jobId: string): Promise<{ job: any; payload: any }> {
+  async publisherJobPayload(
+    jobId: string,
+  ): Promise<{ job: any; payload: any; retryState: LiftJobRetryProjection }> {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 
@@ -1334,7 +1338,9 @@ export class ApiClient {
     return this.post('/api/publisher/cancel', { jobId });
   }
 
-  async publisherRetry(status: 'failed' = 'failed'): Promise<{ retried: number }> {
+  // GH#2270 — `retried` keeps its pre-#2270 meaning; the other two counts explain the
+  // failed jobs the pass left alone (see AsyncLiftRetryOutcome).
+  async publisherRetry(status: 'failed' = 'failed'): Promise<AsyncLiftRetryOutcome> {
     return this.post('/api/publisher/retry', { status });
   }
 

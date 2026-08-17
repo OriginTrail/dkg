@@ -2081,6 +2081,14 @@ export async function runDaemonInner(
     // budget; without it every API-admitted VM-publish job was stamped with the
     // built-in default (10) even when publisher.maxRetries was configured (incl. 0).
     maxRetries: config.publisher?.maxRetries,
+    // GH#2270 — the retry knobs must reach this instance too: it derives the `retryState`
+    // the job-detail routes serve. A DORMANT publisher block is deliberately not resolved
+    // (a typo there must not stop a node that publishes nothing — the boot gate above skips
+    // it for the same reason); with no runtime there is no automatic lane at all, which is
+    // exactly what `autoRetryEnabled: false` makes the projection report.
+    retryTuning: isPublisherRuntimeEnabled(config.publisher)
+      ? resolvePublisherRetryTuning(config.publisher)
+      : { autoRetryEnabled: false },
   });
   // #1828 — one-time idempotent backfill of the durable-admission intent index
   // for VM-publish jobs admitted before it existed. Additive-only (RDF set

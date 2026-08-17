@@ -32,6 +32,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
   createKnowledgeAssetVmPublishSnapshotMetadata,
   createKnowledgeAssetVmPublishSnapshotRequest,
   resolveLiftWorkspaceSlice,
@@ -475,6 +476,50 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.retryable).toBe(true);
     expect(String(res.body.error)).toContain('shareOperationId');
     expect(enqueueCalls).toBe(0);
+  });
+
+  it('vm/publish-async: LIFT_JOB_PENDING_CHAIN_PROOF → 503 { code, error, retryable, existingJobId }', async () => {
+    // GH#2270 — a re-submit of a job that failed after a transaction may have been sent is
+    // refused by admission: republishing it could double-publish. That is neither a client
+    // mistake (the 409 conflict above would tell them to re-share for nothing) nor a node
+    // bug — pre-fix this code matched no catch branch and surfaced as a generic 500. The
+    // 503 + retryable + existingJobId says: the SAME job is held for chain proof, retry the
+    // same enqueue later, do not spin up a new intent.
+    await startWith({}, {
+      resolveFinalizedAssertionVmPublishIntent: async () => ({
+        contextGraphId: CG_ID,
+        name: ASSERTION_NAME,
+        shareOperationId: 'pending-proof-op',
+        roots: ['urn:test:root'],
+        seal: {
+          merkleRoot: `0x${'12'.repeat(32)}`,
+          authorAddress: '0x1111111111111111111111111111111111111111',
+          signature: { r: `0x${'34'.repeat(32)}`, vs: `0x${'56'.repeat(32)}` },
+          schemeVersion: 1,
+        },
+        sealChainId: '31337',
+        sealKav10Address: '0x2222222222222222222222222222222222222222',
+        sealFinalizedAtIso: '2026-01-01T00:00:00.000Z',
+        sealMerkleRoot: `0x${'12'.repeat(32)}`,
+        intentKey: `sha256:${'ab'.repeat(32)}`,
+      }),
+      preflightKnowledgeAssetVmPublishSnapshot: async () => {},
+    }, {}, {
+      enqueueKnowledgeAssetVmPublish: async () => {
+        throw new LiftJobPendingChainProofError(
+          'LiftJob job-7 failed as rpc_unavailable after a transaction may have been submitted; '
+            + 'it cannot be republished until chain recovery proves the transaction absent',
+          'job-7',
+        );
+      },
+    });
+
+    const res = await post('vm/publish-async', { contextGraphId: CG_ID });
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('LIFT_JOB_PENDING_CHAIN_PROOF');
+    expect(res.body.retryable).toBe(true);
+    expect(res.body.existingJobId).toBe('job-7');
+    expect(String(res.body.error)).toContain('chain recovery');
   });
 
   // GH#1778 — the disambiguation error surfaces as a 409 with the candidate

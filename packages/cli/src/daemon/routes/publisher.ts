@@ -450,7 +450,11 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
-    return jsonResponse(res, 200, { job });
+    // GH#2270 — `retryState` is DERIVED (never persisted), so it sits beside the job
+    // instead of inside it: `job` stays byte-identical to what the store holds, and a
+    // caller can tell "this node will retry it" from the durable retry facts it reads.
+    // The publisher owns the derivation because it knows the effective kill-switch.
+    return jsonResponse(res, 200, { job, retryState: publisherControl.describeJobRetryState(job) });
   }
 
   // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
@@ -463,7 +467,11 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         error: `Publisher job not found: ${jobId}`,
       });
     const payload = await publisherControl.inspectPreparedPayload(jobId);
-    return jsonResponse(res, 200, { job, payload });
+    return jsonResponse(res, 200, {
+      job,
+      payload,
+      retryState: publisherControl.describeJobRetryState(job),
+    });
   }
 
   // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
@@ -504,11 +512,15 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
+    // GH#2270 — this legacy shape spreads the job at the top level, so `retryState` joins
+    // it there (as `payload` already does). Every job field keeps its value; the derived
+    // projection is the only addition.
+    const retryState = publisherControl.describeJobRetryState(job);
     if (segments[1] === "payload") {
       const payload = await publisherControl.inspectPreparedPayload(jobId);
-      return jsonResponse(res, 200, { ...job, payload });
+      return jsonResponse(res, 200, { ...job, payload, retryState });
     }
-    return jsonResponse(res, 200, job);
+    return jsonResponse(res, 200, { ...job, retryState });
   }
 
   // GET /api/publisher/stats -- returns the raw status map directly for backward compat
@@ -536,8 +548,16 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 400, {
         error: "Only status=failed is supported",
       });
-    const count = await publisherControl.retry({ status: "failed" });
-    return jsonResponse(res, 200, { retried: count });
+    // GH#2270 — `retried` keeps its exact pre-#2270 meaning (jobs reaccepted), so an
+    // operator script reading it is unaffected; the two additive counts explain the jobs
+    // left failed instead of leaving them invisible: `blockedPendingRecovery` may carry an
+    // on-chain transaction and needs chain proof, `skipped` has nothing left to reaccept.
+    const outcome = await publisherControl.retryDetailed({ status: "failed" });
+    return jsonResponse(res, 200, {
+      retried: outcome.retried,
+      blockedPendingRecovery: outcome.blockedPendingRecovery,
+      skipped: outcome.skipped,
+    });
   }
 
   // POST /api/publisher/clear
