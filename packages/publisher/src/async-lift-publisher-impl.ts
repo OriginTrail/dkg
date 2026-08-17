@@ -11,7 +11,6 @@ import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
   createLiftJobFailureMetadata,
-  getLiftJobFailurePolicy,
   type LiftJob,
   type LiftJobFailureCode,
   type LiftJobAccepted,
@@ -23,6 +22,7 @@ import {
   type LiftJobFinalizationMetadata,
   type LiftJobRecoveryMetadata,
   type LiftJobRequest,
+  type LiftJobRetryProjection,
   type LiftJobState,
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
@@ -33,8 +33,11 @@ import {
 import type {
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishRecoveryResolver,
+  AsyncLiftDetailedRetrier,
   AsyncLiftPublisherConfig,
   AsyncLiftPublisherRecoveryResolver,
+  AsyncLiftRetryOutcome,
+  AsyncLiftRetryStateReader,
   IntentLookupInput,
   IntentLookupResult,
   JournalReadInput,
@@ -44,7 +47,7 @@ import type {
   VmPublishAdmissionJournalReader,
   VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
-import { AsyncLiftJobConflictError } from './async-lift-publisher-types.js';
+import { AsyncLiftJobConflictError, LiftJobPendingChainProofError } from './async-lift-publisher-types.js';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
@@ -84,13 +87,17 @@ import {
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
   createJobSlug,
+  deriveLiftJobRetryProjection,
   expectBindings,
   getRecoveryTxHash,
+  hasBroadcastEvidence,
+  isAutomaticallyRetryableLiftJob,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
   isClearableTerminalLiftJob,
   isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
+  resetFailedLiftJobToAccepted,
   rawLiftRequestFromJobRequest,
   jobSubject,
   literal,
@@ -215,7 +222,7 @@ function resolveKnowledgeAssetVmPublishHandler(
 }
 
 export class TripleStoreAsyncLiftPublisher
-  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer {
+  implements VmPublishIntentRecoveryPublisher, VmPublishIntentIndexBackfiller, VmPublishAdmissionJournalReader, VmPublishTerminalJobClearer, AsyncLiftDetailedRetrier, AsyncLiftRetryStateReader {
   private static readonly claimQueues = new Map<string, Promise<void>>();
   // #1829 — dedicated per-lineageKey journal mutex, SEPARATE from claimQueues, so the
   // read-modify-write seq allocation is atomic without touching the claim lock (lock
@@ -843,14 +850,28 @@ export class TripleStoreAsyncLiftPublisher
     return null;
   }
 
+  /**
+   * Admission's reaccept of a byte-identical re-submit. GH#2270 — the budget no longer gates it:
+   * a client re-submit is a FRESH MANDATE, so an exhausted (but evidence-free) job is reaccepted
+   * on the SAME jobId with the budget re-armed, never replaced by a second job for the same
+   * lifecycle subject. `isOccupyingLifecycleJob` keeps such a job bound to its subject so
+   * admission finds it here at all. Automatic retries and client mandates deliberately share the
+   * one counter (matching `quorum_unmet`'s pre-existing semantics); the fresh mandate is the only
+   * thing that re-arms it.
+   *
+   * An evidence-bearing job is refused by `reacceptFailedJob` with
+   * {@link LiftJobPendingChainProofError} — a transient, retryable condition, not a conflict.
+   */
   private async reacceptRetryableFailedKnowledgeAssetVmPublishJob(job: PersistedFailedJob): Promise<LiftJobAccepted> {
     if (!isKnowledgeAssetVmPublishJobRequest(job.request)) {
       throw new Error(`LiftJob ${job.jobId} is not a knowledge asset VM publish job`);
     }
-    if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) {
+    if (!job.failure.retryable) {
       throw new Error(`Knowledge asset VM publish job ${job.jobId} is not retryable`);
     }
-    return this.reacceptFailedJob(job);
+    return this.reacceptFailedJob(job, {
+      freshMandate: job.retries.retryCount >= job.retries.maxRetries,
+    });
   }
 
   /**
@@ -1077,9 +1098,24 @@ export class TripleStoreAsyncLiftPublisher
     await this.deleteJob(jobId);
   }
 
+  /** Operator bulk retry. Wire-stable count of reaccepted jobs; see {@link retryDetailed}. */
   async retry(filter: { status?: 'failed' } = {}): Promise<number> {
+    return (await this.retryDetailed(filter)).retried;
+  }
+
+  /**
+   * GH#2270 — the ONE implementation behind both retry entry points, so an operator cannot pick a
+   * less safe one. Jobs that may carry a transaction are counted, not reaccepted: `retry_recovery`
+   * resolutions belong to `recover()`, and evidence-bearing jobs (a persisted txHash, or an
+   * `included` origin) need chain proof first — the landed-transaction-recorded-locally-as-failed
+   * case arrives under `rpc_unavailable`, whose `reset_to_accepted` resolution used to be taken at
+   * face value here and blind-republished.
+   */
+  async retryDetailed(filter: { status?: 'failed' } = {}): Promise<AsyncLiftRetryOutcome> {
     await this.ensureGraph();
-    if (filter.status && filter.status !== 'failed') return 0;
+    if (filter.status && filter.status !== 'failed') {
+      return { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
+    }
 
     // #1837 — reaccept (failed→accepted) is a terminal→active transition; it MUST be
     // serialized with claimNext/enqueue AND with clearTerminalJob (which also runs under
@@ -1088,16 +1124,31 @@ export class TripleStoreAsyncLiftPublisher
     // swept" guarantee does not hold.
     return this.withClaimLock(async () => {
       let retried = 0;
+      let blockedPendingRecovery = 0;
+      let skipped = 0;
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
-        if (!job.failure.retryable || job.retries.retryCount >= job.retries.maxRetries) continue;
-        // Jobs that failed with a recovery-phase resolution must go through recover(),
-        // not retry(), to avoid double-publishing if the original tx eventually lands.
-        if (job.failure.resolution === 'retry_recovery') continue;
+        // Same precedence as the read-only projection's `waitingReason` (see
+        // `deriveLiftJobRetryProjection`), so the counts an operator gets from a retry and the
+        // reason shown per job are one partition rather than two opinions.
+        if (!job.failure.retryable) {
+          skipped += 1;
+          continue;
+        }
+        // Chain safety before the budget: a job that may have sent a transaction stays failed and
+        // belongs in the pending-proof bucket whether or not its budget is spent.
+        if (job.failure.resolution === 'retry_recovery' || hasBroadcastEvidence(job)) {
+          blockedPendingRecovery += 1;
+          continue;
+        }
+        if (job.retries.retryCount >= job.retries.maxRetries) {
+          skipped += 1;
+          continue;
+        }
 
         await this.reacceptFailedJob(job);
         retried += 1;
       }
-      return retried;
+      return { retried, blockedPendingRecovery, skipped };
     });
   }
 
@@ -1575,7 +1626,10 @@ export class TripleStoreAsyncLiftPublisher
           ? {
               timeoutMs: 0,
               timeoutAt: this.now(),
-              handling: failedFromState === 'included' ? 'check_chain_then_finalize_or_reset' : 'check_chain_then_finalize_or_reset',
+              // Both carriers a timeout can land on here (`tx_submit_timeout` from 'broadcast',
+              // `finality_timeout` from 'included') declare this same `timeoutHandling` in the
+              // registry, which validates the value — so the state cannot change it.
+              handling: 'check_chain_then_finalize_or_reset',
             }
           : undefined,
     });
@@ -1855,36 +1909,12 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
-  private resetFailedJobToAccepted(job: PersistedFailedJob): LiftJobAccepted {
-    const now = this.now();
-    const recoveredFromStatus =
-      job.failure.failedFromState === 'claimed' || job.failure.failedFromState === 'validated' || job.failure.failedFromState === 'broadcast'
-        ? job.failure.failedFromState
-        : undefined;
-
-    return {
-      jobId: job.jobId,
-      jobSlug: job.jobSlug,
-      request: job.request,
-      status: 'accepted',
-      timestamps: {
-        acceptedAt: job.timestamps.acceptedAt,
-        lastRecoveredAt: now,
-        updatedAt: now,
-        lastRetriedAt: now,
-      },
-      retries: job.retries,
-      recovery: recoveredFromStatus
-        ? { action: 'reset_to_accepted', recoveredFromStatus, txHashChecked: getRecoveryTxHash(job) }
-        : undefined,
-      controlPlane: job.controlPlane,
-    };
-  }
-
   /**
    * The ONE gate of the automatic lane, read by BOTH the scheduler
    * (`scheduleRetryIfEligible`, at failure-recording time) and the claim-time sweep
-   * (`reacceptDueFailedJobs`) — so `autoRetryEnabled` belongs here and nowhere else.
+   * (`reacceptDueFailedJobs`) — so `autoRetryEnabled` belongs here and nowhere else. The
+   * predicate itself is shared with the read-only status projection
+   * ({@link describeJobRetryState}), which is why it lives in the utils module.
    *
    * Turning the switch OFF mid-flight therefore STRANDS jobs that were scheduled while it was
    * on: their `nextRetryAt` passes without ever firing. They stay operator-actionable
@@ -1892,11 +1922,16 @@ export class TripleStoreAsyncLiftPublisher
    * {@link MAX_REACCEPTS_PER_SWEEP}.
    */
   private isAutomaticallyRetryable(job: PersistedFailedJob): boolean {
-    return this.autoRetryEnabled
-      && getLiftJobFailurePolicy(job.failure.code).autoRetry === true
-      && job.failure.retryable
-      && job.failure.resolution === 'reset_to_accepted'
-      && job.retries.retryCount < job.retries.maxRetries;
+    return isAutomaticallyRetryableLiftJob(job, { autoRetryEnabled: this.autoRetryEnabled });
+  }
+
+  /**
+   * GH#2270 — read-only retry projection for a job the caller already holds. Derived from the
+   * SAME predicate the lane runs on, so the reported eligibility cannot disagree with what this
+   * instance will actually do.
+   */
+  describeJobRetryState(job: LiftJob): LiftJobRetryProjection {
+    return deriveLiftJobRetryProjection(job, { autoRetryEnabled: this.autoRetryEnabled });
   }
 
   private async reacceptDueFailedJobs(now: number): Promise<number> {
@@ -1949,14 +1984,36 @@ export class TripleStoreAsyncLiftPublisher
     };
   }
 
-  private async reacceptFailedJob(job: PersistedFailedJob): Promise<LiftJobAccepted> {
-    const reset = this.resetFailedJobToAccepted(job);
+  /**
+   * The ONE writer that turns a failed job back into an accepted one (claim-time sweep,
+   * `retry()`, admission re-submit) — so GH#2270's evidence guard is enforced HERE rather than
+   * trusted to each caller: a job that may have submitted a transaction is never reaccepted, and
+   * a future caller cannot reintroduce the blind re-publish. Callers that report counts
+   * (`retryDetailed`) or skip silently (the sweep) ask `hasBroadcastEvidence` first; admission's
+   * disposition IS this rejection, which the HTTP boundary maps to a retryable 503.
+   *
+   * `freshMandate` re-arms the shared retry budget instead of consuming it: a client re-submitting
+   * a byte-identical request is a NEW mandate, and the alternative — minting a replacement job for
+   * a subject whose budget is spent — is the durability violation GH#2270 forbids.
+   */
+  private async reacceptFailedJob(
+    job: PersistedFailedJob,
+    options: { readonly freshMandate?: boolean } = {},
+  ): Promise<LiftJobAccepted> {
+    if (hasBroadcastEvidence(job)) {
+      throw new LiftJobPendingChainProofError(
+        `LiftJob ${job.jobId} failed as ${job.failure.code} after a transaction may have been submitted; `
+          + 'it cannot be republished until chain recovery proves the transaction absent',
+        job.jobId,
+      );
+    }
+    const reset = resetFailedLiftJobToAccepted(job, this.now());
     const retriedAt = this.now();
     const reaccepted: LiftJobAccepted = {
       ...reset,
       retries: {
         ...reset.retries,
-        retryCount: job.retries.retryCount + 1,
+        retryCount: options.freshMandate ? 0 : job.retries.retryCount + 1,
         lastRetryReason: job.failure.code,
       },
       timestamps: {

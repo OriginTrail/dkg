@@ -211,6 +211,8 @@ export {
   type LiftRequestAuthorSeal,
   type LiftJobTimestamps,
   type LiftJobRetryMetadata,
+  type LiftJobRetryProjection,
+  type LiftJobRetryWaitingReason,
   type LiftJobRecoveryMetadata,
   type LiftJobRecoveryResetToAccepted,
   type LiftJobRecoveryFinalizedFromChain,
@@ -268,9 +270,13 @@ export {
 } from './async-lift-retry-tuning.js';
 export {
   AsyncLiftJobConflictError,
+  LiftJobPendingChainProofError,
   TripleStoreAsyncLiftPublisher,
+  type AsyncLiftDetailedRetrier,
   type AsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
+  type AsyncLiftRetryOutcome,
+  type AsyncLiftRetryStateReader,
   type AsyncKnowledgeAssetVmPublishExecutionInput,
   type AsyncKnowledgeAssetVmPublishJobHandler,
   type AsyncKnowledgeAssetVmPublishPreflightInput,

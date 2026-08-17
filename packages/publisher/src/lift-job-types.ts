@@ -185,6 +185,35 @@ export interface LiftJobRetryMetadata {
   readonly lastRetryReason?: string;
 }
 
+/**
+ * GH#2270 — why a job is not moving, when it is not moving. Derived on read from the durable
+ * facts (`nextRetryAt`, the failure code's registry policy, the retry budget, persisted chain
+ * evidence) and never persisted:
+ *  - `backoff` — the publisher's own lane owns it; it fires at `nextRetryAt`.
+ *  - `pending_chain_proof` — a transaction may exist; no path may republish it until chain
+ *    proof says otherwise (GH#2270 PR-3 dispatches on that proof).
+ *  - `recovery` — `retry_recovery` resolution: `recover()` re-checks it forever, off-budget.
+ *  - `operator` — retryable and evidence-free, but nothing automatic will move it: the code is
+ *    not allow-listed, or the operator switched the lane off.
+ *  - `exhausted` — the shared retry budget is spent; a fresh client mandate re-arms exactly one.
+ */
+export type LiftJobRetryWaitingReason =
+  | 'backoff'
+  | 'pending_chain_proof'
+  | 'recovery'
+  | 'operator'
+  | 'exhausted';
+
+/**
+ * GH#2270 — read-only retry projection of a job. `autoRetryEligible` answers "will this node
+ * retry this job by itself?"; `waitingReason` is absent when the job is not waiting on a retry
+ * at all (it is still running, finalized, or failed terminally with nothing left to re-arm it).
+ */
+export interface LiftJobRetryProjection {
+  readonly autoRetryEligible: boolean;
+  readonly waitingReason?: LiftJobRetryWaitingReason;
+}
+
 export interface LiftJobRecoveryResetToAccepted {
   readonly action: 'reset_to_accepted';
   readonly recoveredFromStatus: LiftJobResettableState;

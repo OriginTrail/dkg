@@ -143,9 +143,14 @@ describe('#1837 lift publisher clearTerminalJob', () => {
     // BOTH clearable (terminal failed, not retry_recovery) AND reacceptable by retry().
     // clearTerminalJob and retry() both run under withClaimLock, so they serialize:
     // whichever wins, an ACTIVE job is never swept.
+    //
+    // GH#2270 — the job must carry NO transaction hash for the race to exist at all: with
+    // broadcast metadata persisted, retry() refuses it pending chain proof, clear always wins,
+    // and the second branch below silently stops being reachable. The failure is therefore
+    // recorded from 'validated' (no `bx` write-ahead), which is exactly the rpc_unavailable
+    // shape where the transaction was never signed.
     const p = createPublisher({ maxRetries: 1 });
     const jobId = await driveToValidated(p, { name: 'race' });
-    await p.update(jobId, 'broadcast', { broadcast: bx });
     await p.recordPublishFailure(jobId, { error: new Error('rpc temporarily down'), failedFromState: 'broadcast', errorPayloadRef: 'urn:err:2' });
     const failed = await p.getStatus(jobId);
     expect(failed?.status).toBe('failed');
