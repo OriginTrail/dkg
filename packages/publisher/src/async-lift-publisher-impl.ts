@@ -129,6 +129,16 @@ import {
  */
 type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send';
 
+/**
+ * GH#2270 — why a failed job is being reaccepted, stated by the caller rather than inferred.
+ *  - `retry` CONSUMES one attempt of the shared budget: the automatic sweep and the operator's
+ *    `retry()` are both bounded by it, which is what stops a failing job looping forever.
+ *  - `freshClientMandate` RE-ARMS it: a client re-submitting a byte-identical request is new
+ *    authority to publish, and the alternative — minting a replacement job for a subject whose
+ *    budget is spent — is the durability violation GH#2270 forbids.
+ */
+type ReacceptIntent = { readonly kind: 'retry' } | { readonly kind: 'freshClientMandate' };
+
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
   readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
@@ -879,9 +889,12 @@ export class TripleStoreAsyncLiftPublisher
     if (!job.failure.retryable && !isHeldForChainProof(job)) {
       throw new Error(`Knowledge asset VM publish job ${job.jobId} is not retryable`);
     }
-    return this.reacceptFailedJob(job, {
-      freshMandate: job.retries.retryCount >= job.retries.maxRetries,
-    });
+    // A client re-submit spends the budget like any retry until the budget is gone; only THEN is
+    // it a fresh mandate, which re-arms exactly one attempt on the same jobId rather than letting
+    // a replacement job be minted for the subject.
+    return this.reacceptFailedJob(job, job.retries.retryCount >= job.retries.maxRetries
+      ? { kind: 'freshClientMandate' }
+      : { kind: 'retry' });
   }
 
   /**
@@ -1145,7 +1158,7 @@ export class TripleStoreAsyncLiftPublisher
         // Reaccept is opted INTO explicitly; the count it lands in comes from the mapping declared
         // beside the action union, so a future action fails the BUILD until its bucket is chosen
         // rather than inheriting one from the shape of this loop.
-        if (action === 'reaccept') await this.reacceptFailedJob(job);
+        if (action === 'reaccept') await this.reacceptFailedJob(job, { kind: 'retry' });
         counts[FAILED_JOB_RETRY_ACTION_COUNT[action]] += 1;
       }
       return counts;
@@ -1946,7 +1959,7 @@ export class TripleStoreAsyncLiftPublisher
       if (retried >= TripleStoreAsyncLiftPublisher.MAX_REACCEPTS_PER_SWEEP) break;
       if (job.timestamps.nextRetryAt === undefined || job.timestamps.nextRetryAt > now) continue;
       if (!this.isAutomaticallyRetryable(job)) continue;
-      await this.reacceptFailedJob(job);
+      await this.reacceptFailedJob(job, { kind: 'retry' });
       retried += 1;
     }
     return retried;
@@ -1998,13 +2011,13 @@ export class TripleStoreAsyncLiftPublisher
    * (`retryDetailed`) or skip silently (the sweep) classify the job first; admission's
    * disposition IS this rejection, which the HTTP boundary maps to a retryable 503.
    *
-   * `freshMandate` re-arms the shared retry budget instead of consuming it: a client re-submitting
-   * a byte-identical request is a NEW mandate, and the alternative — minting a replacement job for
-   * a subject whose budget is spent — is the durability violation GH#2270 forbids.
+   * Every caller STATES its {@link ReacceptIntent} — there is no default, because the two
+   * intents spend the shared retry budget in opposite directions and a caller that forgot to
+   * think about it would silently take whichever one this signature happened to prefer.
    */
   private async reacceptFailedJob(
     job: PersistedFailedJob,
-    options: { readonly freshMandate?: boolean } = {},
+    intent: ReacceptIntent,
   ): Promise<LiftJobAccepted> {
     if (isHeldForChainProof(job)) {
       throw new LiftJobPendingChainProofError(
@@ -2019,7 +2032,7 @@ export class TripleStoreAsyncLiftPublisher
       ...reset,
       retries: {
         ...reset.retries,
-        retryCount: options.freshMandate ? 0 : job.retries.retryCount + 1,
+        retryCount: intent.kind === 'freshClientMandate' ? 0 : job.retries.retryCount + 1,
         lastRetryReason: job.failure.code,
       },
       timestamps: {
