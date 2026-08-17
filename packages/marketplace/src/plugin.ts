@@ -192,6 +192,30 @@ export const plugin: RoutePlugin = {
     const req = ctx.req as unknown as Parameters<typeof handleFront>[1];
     const res = ctx.res as unknown as Parameters<typeof handleFront>[2];
 
+    // ── node-native upstream OAuth (CP3 as a node capability). Operator-only:
+    // loopback or node token. The node returns the authorize URL for the HUMAN
+    // to open in a browser; tokens land in the node's secret store and are
+    // NEVER returned over HTTP.
+    if (path === BASE + "/operate/upstream-auth/start" || path === BASE + "/operate/upstream-auth/status") {
+      const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const remote = ctx.req.socket.remoteAddress ?? "";
+      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+      if (!local && !ctx.validTokens.has(auth)) {
+        ctx.res.writeHead(401, { "content-type": "application/json" });
+        ctx.res.end('{"error":"E_TOKEN"}');
+        return;
+      }
+      const { startCodexAuthFlow, flowStatus } = await import("./seller/oauth-flow.js");
+      const secretPath = join(marketplaceHome(dkgHome()), ".secrets", "codex-auth.json");
+      const state = path.endsWith("/start") && (ctx.req.method ?? "").toUpperCase() === "POST"
+        ? startCodexAuthFlow(secretPath)
+        : flowStatus();
+      const body = JSON.stringify({ ...state, secretPath: path.endsWith("/start") ? secretPath : undefined });
+      ctx.res.writeHead(200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      ctx.res.end(body);
+      return;
+    }
+
     // ── operator status (drives the node-UI Offerings/Tabs/Access views).
     // Gated on the node's own Bearer token or loopback — never part of the
     // public wire contract.

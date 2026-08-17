@@ -166,7 +166,10 @@ export async function completeCodexOAuth(
         })),
         store: false,
         stream: true,
-        max_output_tokens: maxTokens,
+        // NOTE: the chatgpt-account codex backend rejects max_output_tokens
+        // (2026-08 protocol). Output bounding is advisory upstream; billing is
+        // on DELIVERED bytes, so an over-long completion only raises the leg's
+        // verifiable cost — the buyer recount still matches exactly.
         reasoning: { effort: b.reasoningEffort },
       }),
       signal: AbortSignal.timeout(180_000),
