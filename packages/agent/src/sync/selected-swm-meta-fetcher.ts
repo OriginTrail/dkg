@@ -513,7 +513,15 @@ export function createSelectedSwmMetaFetcher(options: {
         };
       state.snapshotWalk = walk;
       const allowedRefs = new Set(walk.orderedManifest.map((snapshot) => snapshot.ref));
-      if (walk.orderedManifest.length > 0 && walk.resolvedRefs.size < walk.orderedManifest.length) {
+      // Opening an unchanged walk is not progress. Sliding this deadline on
+      // every retry could retain stale completed metadata forever and prevent
+      // a corrected remote manifest from ever being observed. Creation starts
+      // the window; markResolved is the only operation allowed to extend it.
+      if (
+        walk.expiresAtMs === 0
+        && walk.orderedManifest.length > 0
+        && walk.resolvedRefs.size < walk.orderedManifest.length
+      ) {
         walk.expiresAtMs = now() + retentionTtlMs;
       }
       return {

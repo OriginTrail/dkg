@@ -114,6 +114,90 @@ describe('selected SWM metadata transfer ownership', () => {
     }
   });
 
+  it('does not extend completed-manifest retention on no-progress retries', async () => {
+    const peerId = 'peer-snapshot-no-progress-expiry';
+    const contextGraphId = 'cg-snapshot-no-progress-expiry';
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    const firstManifest = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-stale', digest: 'digest-stale', count: 1 },
+    ];
+    const correctedManifest = [
+      firstManifest[0]!,
+      { ref: 'ref-fixed', digest: 'digest-fixed', count: 1 },
+    ];
+    let fetchGeneration = 0;
+    const fetchPage = vi.fn(async () => {
+      fetchGeneration += 1;
+      return {
+        quads: [{
+          subject: `urn:manifest:${fetchGeneration}`,
+          predicate: 'urn:p',
+          object: '"o"',
+          graph: 'urn:meta',
+        }],
+        bytesReceived: 1,
+        resumedFromOffset: 0,
+        nextOffset: 1,
+        checkpointKey: `no-progress-expiry-${fetchGeneration}`,
+        completed: true,
+        timedOut: false,
+      };
+    });
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:no-progress-expiry',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+      now: clock,
+      retentionTtlMs: 10_000,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: clock() + 60_000,
+    };
+
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
+        walk.markResolved('ref-a');
+      });
+
+      for (const retryAtMs of [4_000, 9_000]) {
+        elapsedMs = retryAtMs;
+        await coordinator.run(peerId, createFetcher, async (fetcher) => {
+          const cached = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
+          expect(cached.result.bytesReceived).toBe(0);
+          const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
+          expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+          // Deliberately make no progress.
+        });
+      }
+
+      elapsedMs = 10_001;
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const refreshed = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
+        expect(refreshed.result.bytesReceived).toBe(1);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, correctedManifest);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
+        expect(walk.orderedManifestSnapshot()).toEqual(correctedManifest);
+      });
+
+      expect(fetchPage).toHaveBeenCalledTimes(2);
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
   it('releases completed metadata when no snapshot walk remains active', async () => {
     const peerId = 'peer-complete-without-walk';
     const contextGraphId = 'cg-complete-without-walk';
