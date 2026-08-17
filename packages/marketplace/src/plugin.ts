@@ -216,6 +216,40 @@ export const plugin: RoutePlugin = {
       return;
     }
 
+    // ── buyer actions (v3.5: the UI's Fund step runs node-side — the browser
+    // never holds keys or talks to an RPC). Operator-only: loopback or token.
+    if (path === BASE + "/buyer/wallet" || path === BASE + "/buyer/fund" || path === BASE + "/buyer/fund/status") {
+      const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const remote = ctx.req.socket.remoteAddress ?? "";
+      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+      if (!local && !ctx.validTokens.has(auth)) {
+        ctx.res.writeHead(401, { "content-type": "application/json" });
+        ctx.res.end('{"error":"E_TOKEN"}');
+        return;
+      }
+      const { walletStatus, fundTab, fundStatus } = await import("./buyer/actions.js");
+      const home = marketplaceHome(dkgHome());
+      const method = (ctx.req.method ?? "GET").toUpperCase();
+      let out: Record<string, unknown>;
+      try {
+        if (path.endsWith("/buyer/wallet")) out = await walletStatus(home);
+        else if (path.endsWith("/fund/status")) out = await fundStatus(home);
+        else if (method === "POST") {
+          const chunks: Buffer[] = [];
+          for await (const c of ctx.req as unknown as AsyncIterable<Buffer>) chunks.push(c);
+          const parsed = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}") as { amountMicroTrac?: number };
+          out = await fundTab(home, Number(parsed.amountMicroTrac ?? 0));
+          log(`buyer-fund ${JSON.stringify(out).slice(0, 140)}`);
+        } else out = { error: "E_METHOD" };
+      } catch (e) {
+        out = { error: "E_BUYER_ACTION", detail: String((e as Error).message).slice(0, 160) };
+      }
+      const body = JSON.stringify(out);
+      ctx.res.writeHead(out.error ? 400 : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      ctx.res.end(body);
+      return;
+    }
+
     // ── operator status (drives the node-UI Offerings/Tabs/Access views).
     // Gated on the node's own Bearer token or loopback — never part of the
     // public wire contract.
@@ -283,8 +317,12 @@ async function operateStatus(cfg: MarketplaceConfig, m: Mounted): Promise<Record
       try {
         const b = JSON.parse(rf(bp, "utf8")) as { tabId?: string; sellerApiBase?: string };
         const ks = listKeys(home);
+        // wallet address is derivable locally (never the key itself)
+        let address: string | null = null;
+        try { address = m.gateway?.client.address() ?? null; } catch { address = null; }
         buyer = {
           tabId: b.tabId ?? null,
+          address,
           transport: b.sellerApiBase ?? null,
           keyCount: ks.length,
           totalBudgetMicroTrac: ks.reduce((s2, k) => s2 + Number(k.scopes.budgetMicroTrac ?? 0), 0),

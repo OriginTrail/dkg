@@ -27,12 +27,12 @@ mkdirSync(out, { recursive: true });
 const SHOTS = [
   { name: "gallery", path: "/ui/dev/gallery" },
   { name: "marketplace", path: "/ui/?marketplace=1", actions: async (page) => {
-    await page.getByText("Marketplace", { exact: true }).first().click();
-    await page.waitForTimeout(400);
+    await page.locator(".v10-tree-dashboard", { hasText: "Marketplace" }).first().click({ timeout: 15_000, force: true });
+    await page.waitForTimeout(600);
   } },
   { name: "operate", path: "/ui/?marketplace=1", actions: async (page) => {
-    await page.getByText("Operate", { exact: true }).first().click();
-    await page.waitForTimeout(400);
+    await page.locator(".v10-tree-dashboard", { hasText: "Operate" }).first().click({ timeout: 15_000, force: true });
+    await page.waitForTimeout(600);
   } },
 ];
 
@@ -59,7 +59,8 @@ try {
     const page = await ctx.newPage();
     for (const shot of SHOTS) {
       try {
-        await page.goto(`http://localhost:${PORT}${shot.path}`, { waitUntil: "networkidle", timeout: 20_000 }).catch(() => {});
+        await page.goto(`http://localhost:${PORT}${shot.path}`, { waitUntil: "domcontentloaded", timeout: 20_000 });
+        await page.waitForTimeout(1500);
         if (shot.actions) await shot.actions(page);
         await page.waitForTimeout(250);
         // the shell locks body scroll; unlock so fullPage captures everything

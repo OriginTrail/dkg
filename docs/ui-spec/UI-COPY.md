@@ -141,10 +141,10 @@ never hidden.
 | empty.keys | No keys yet — mint one to let an agent spend here |
 | empty.activity | Nothing spent yet |
 
-## Proposed additions — v3.5 Phase 2 M-gate (per the header rule: proposed here first, used only after this lands)
+## Additions — landed (operator-approved at the M-gate, 2026-08-18)
 
-Rationale: strings the surface specs require structurally (controls, confirm
-flows, diagnostics) that had no key yet. Same tone rules.
+Strings the surface specs require structurally (controls, confirm flows,
+diagnostics) that had no key yet. Same tone rules.
 
 | key | string |
 |---|---|
@@ -156,6 +156,12 @@ flows, diagnostics) that had no key yet. Same tone rules.
 | ctl.done | Done |
 | ctl.clear-filters | Clear filters |
 | onboard.fund.watch | Balance refreshes automatically once funds arrive. |
+| onboard.fund.label | Budget |
+| key.name.label | Name |
+| key.cap.label | budget cap |
+| onboard.fund.pending | Budget {amount} TRAC (~{usd}) will open your first tab when confirmed. |
+| onboard.disabled | Marketplace is switched off on this node. Enable it in the node's marketplace config and restart. |
+| onboard.unconfigured | No buyer seat configured yet — this node needs a seller address and wallet before it can buy. |
 | chain.confirming | Confirming on Base… |
 | chain.confirmations | {n} of {m} confirmations |
 | catalog.search | Search models… |

@@ -1,7 +1,7 @@
 import React, { Suspense, useState, useEffect } from 'react';
 import { useTabsStore } from '../../stores/tabs.js';
 import { DashboardView } from '../../views/DashboardView.js';
-import { MarketplaceView } from '../../views/MarketplaceView.js';
+import { MarketplaceV35View } from '../../views/MarketplaceV35View.js';
 import { MarketplaceOperateView } from '../../views/MarketplaceOperateView.js';
 import { ProjectView } from '../../views/ProjectView.js';
 import { ContextGraphPrimerView } from '../../views/ContextGraphPrimerView.js';
@@ -282,7 +282,7 @@ function ViewContainer() {
 
   if (activeTabId === 'dashboard') return <DashboardView />;
 
-  if (activeTabId === 'marketplace') return <MarketplaceView />;
+  if (activeTabId === 'marketplace') return <MarketplaceV35View />;
 
   if (activeTabId === 'marketplace-operate') return <MarketplaceOperateView />;
 

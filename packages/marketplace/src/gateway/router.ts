@@ -63,6 +63,7 @@ export async function handleGateway(deps: GatewayDeps, req: Req & AsyncIterable<
     try {
       const p = JSON.parse(body.toString("utf8")) as Partial<KeyScopes>;
       scopes = {
+        ...(typeof p.label === "string" && p.label ? { label: p.label.slice(0, 64) } : {}),
         budgetMicroTrac: Number(p.budgetMicroTrac ?? 0),
         expiresAt: p.expiresAt ?? null,
         modelAllowlist: p.modelAllowlist ?? null,

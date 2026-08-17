@@ -11,6 +11,8 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 export interface KeyScopes {
+  /** operator-facing label ("openclaw-main") — display only, never auth */
+  label?: string;
   budgetMicroTrac: number;
   expiresAt: string | null;        // ISO or null = no expiry
   modelAllowlist: string[] | null; // null = all funded offerings
