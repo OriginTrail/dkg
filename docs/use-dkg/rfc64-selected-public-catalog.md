@@ -16,8 +16,18 @@ CG IDs in that manifest are the single source for:
 - optional graph-complete-provider native SWM recovery.
 
 There is no `sync all public CGs` mode in this release. Existing `contextGraphs`
-selection continues to work normally, and CGs outside the RFC-64 manifest stay
-on the existing publication and synchronization paths.
+selection continues to work normally. A foreground subscription that requests
+SWM now uses RFC-64 selected scheduling and bounded continuation by default for
+its explicit public CG, including across multiple candidate peers. This changes
+how the requested work is scheduled; it does not turn those peers into catalog
+authorities and does not select any additional CG.
+
+Signed-catalog activation remains the stronger, separate control plane described
+below. Only an operator-pinned `completeSwmProviders` peer may prove the whole
+selected SWM scope terminal. Without that assertion, the receiver retains
+multi-peer union convergence and never treats one ordinary peer's local manifest
+as graph-complete. Private CGs retain curator recovery, and VM remains
+chain/curator driven.
 
 ## Configuration
 
@@ -139,6 +149,24 @@ Restart the daemon and inspect `GET /api/status`:
   }
 }
 ```
+
+The independent scheduling-default projection is visible even when no signed
+catalog is configured:
+
+```json
+{
+  "rfc64SelectedPublicSync": {
+    "defaultEnabled": true,
+    "requestedContextGraphs": ["0x.../selected-public-cg"],
+    "catalogBackedContextGraphs": []
+  }
+}
+```
+
+`requestedContextGraphs` is the agent's live explicit scheduling scope. Entries
+are not classified as public merely by appearing there: the public-CG catch-up
+boundary applies selected scheduling, while the private-CG boundary ignores it
+and retains curator recovery.
 
 For a signed-catalog target gate, activation alone is not sufficient. Every
 intended target must report `outcome: "applied"`, a non-null
