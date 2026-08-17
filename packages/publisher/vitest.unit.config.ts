@@ -52,6 +52,7 @@ export default defineConfig({
       'test/storage-ack-priority-lane.test.ts',
       'test/swm-slice-ack-unbounded.test.ts',
       'test/workspace-snapshot-store.test.ts',
+      'test/workspace-head-cardinality.test.ts',
     ],
     testTimeout: 60_000,
     maxWorkers: 1,

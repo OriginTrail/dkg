@@ -12,6 +12,7 @@ import {
   createLiftJobFailureMetadata,
   getLiftJobFailurePolicy,
   type LiftJob,
+  type LiftJobFailureCode,
   type LiftJobAccepted,
   type LiftJobBroadcast,
   type LiftJobBroadcastMetadata,
@@ -57,7 +58,7 @@ import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type Lift
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
 import { subtractFinalizedExactQuads } from './async-lift-subtraction.js';
-import { resolveLiftWorkspaceSlice } from './workspace-resolution.js';
+import { isKnowledgeAssetWorkspaceHeadCorruptError, resolveLiftWorkspaceSlice } from './workspace-resolution.js';
 import {
   CONTROL_CLAIM_TOKEN,
   CONTROL_LOCKED_JOB,
@@ -836,22 +837,50 @@ export class TripleStoreAsyncLiftPublisher
     return this.reacceptFailedJob(job);
   }
 
-  private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
-    const anyError = error as { code?: unknown; message?: unknown };
-    if (
-      anyError?.code === 'PUBLISH_NOT_FULL_SHARE' ||
-      anyError?.code === 'PUBLISH_INTENT_STALE' ||
-      anyError?.code === 'CG_NOT_REGISTERED'
-    ) {
-      return true;
+  /**
+   * The ONE registration point for STRUCTURED (typed) KA VM-publish
+   * precondition failures: a non-null result simultaneously (a) forces the
+   * failure to be recorded from the pre-send 'validated' state — from
+   * 'broadcast' the publish-side classifier's message sniffing lands e.g.
+   * corrupt-head text containing 'mismatch' on terminal `confirmation_mismatch`,
+   * and codes like `workspace_unavailable` are not even recordable there — and
+   * (b) IS the persisted failure code. Registering a future structured
+   * preflight error here cannot desynchronize state and code, which was
+   * previously possible because the two decisions lived in independent
+   * condition chains. Message-keyed legacy failures still flow through the
+   * message chains below and in `recordExecutionFailure` (their consolidation
+   * is #1974's scope).
+   */
+  private classifyKnowledgeAssetVmPublishPreconditionCode(error: unknown): LiftJobFailureCode | null {
+    // GH#1786 — permanent author-capability refusal; no transaction was ever sent.
+    if (isPermanentAuthorCapabilityFailure(error)) return 'authority_forbidden';
+    let structuredCode: unknown;
+    try {
+      structuredCode = (error as { code?: unknown } | null | undefined)?.code;
+    } catch {
+      structuredCode = undefined;
     }
-    // GH#1786 — the node cannot re-sign the selected author's UpdateAuthorAttestation.
-    // Raised while BUILDING the attestation, strictly before onPhase reaches
-    // recordDurableBroadcastBeforeSend, so no transaction was ever sent: the job is still
-    // 'validated' and recording 'broadcast' would publish a false claim that a broadcast
-    // occurred (and mislabel the phase with it). Shared predicate — the same one decides the
-    // failure CODE on both the validated and broadcast paths.
-    if (isPermanentAuthorCapabilityFailure(error)) return true;
+    if (structuredCode === 'PUBLISH_INTENT_STALE') return 'publish_intent_stale';
+    // GH#2273 — multi-valued SWM head: transient local corruption the sync
+    // repair heals, NOT a stale intent; the queued request may still be
+    // byte-identical to what the head certified at admission.
+    if (isKnowledgeAssetWorkspaceHeadCorruptError(error)) return 'workspace_unavailable';
+    // Structured admission/registration preconditions. Their persisted code
+    // PRESERVES the pre-existing effective mapping: neither message ("is not
+    // registered on-chain", "not a complete full share") matches any keyword
+    // in the legacy chain, so both always fell through to
+    // `canonicalization_failed`. Re-taxonomizing them is #1974's call — what
+    // this helper guarantees is only that the code that ROUTES the failure to
+    // the pre-send state is also the code that decides what gets persisted.
+    if (structuredCode === 'PUBLISH_NOT_FULL_SHARE' || structuredCode === 'CG_NOT_REGISTERED') {
+      return 'canonicalization_failed';
+    }
+    return null;
+  }
+
+  private isKnowledgeAssetPublishPreconditionFailure(error: unknown): boolean {
+    if (this.classifyKnowledgeAssetVmPublishPreconditionCode(error) !== null) return true;
+    const anyError = error as { code?: unknown; message?: unknown };
     const message = String(anyError?.message ?? error);
     return /is not finalized/i.test(message)
       || /No quads in shared memory/i.test(message)
@@ -1491,25 +1520,19 @@ export class TripleStoreAsyncLiftPublisher
     if (failedFromState === 'claimed' || failedFromState === 'validated') {
       const message = error instanceof Error ? error.message : String(error);
       const lower = message.toLowerCase();
-      const errorCode = (error as { code?: unknown })?.code;
       const code =
-        // GH#1786 — a no-send author-capability refusal, recognized by CODE (with the shared
-        // marker fallback for a re-wrap that lost it) BEFORE the message chain below. That
-        // chain would otherwise reach `canonicalization_failed`: this message contains none
-        // of its keywords, and not even 'authority' — "UpdateAuthorAttestation" carries
-        // "author", not "authority". Terminal either way, but the code is what clients
-        // branch on and what tells an operator the publish is unfixable by retrying.
-        isPermanentAuthorCapabilityFailure(error)
-          ? 'authority_forbidden'
-        : errorCode === 'PUBLISH_INTENT_STALE'
-          ? 'publish_intent_stale'
-          : lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
+        // Structured precondition failures (author capability / stale intent /
+        // corrupt head) come from the SAME classifier that routed the failure
+        // to this pre-send branch, so their state and code cannot drift apart.
+        // Everything message-keyed stays in the legacy chain below (#1974).
+        this.classifyKnowledgeAssetVmPublishPreconditionCode(error)
+          ?? (lower.includes('timeout') || lower.includes('timed out') || lower.includes('unavailable') || lower.includes('query') || lower.includes('store')
           ? 'workspace_unavailable'
           : lower.includes('authority')
           ? 'authority_forbidden'
           : lower.includes('workspace') || lower.includes('root')
             ? 'workspace_slice_not_found'
-            : 'canonicalization_failed';
+            : 'canonicalization_failed');
       const failure = createLiftJobFailureMetadata({
         failedFromState,
         code,
