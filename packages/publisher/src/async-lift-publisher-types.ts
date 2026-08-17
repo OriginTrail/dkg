@@ -137,7 +137,7 @@ export interface AsyncLiftDetailedRetrier {
  * that will never fire.
  */
 export interface AsyncLiftRetryStateReader {
-  describeJobRetryState(job: LiftJob): LiftJobRetryProjection;
+  describeConfiguredRetryState(job: LiftJob): LiftJobRetryProjection;
 }
 
 /**

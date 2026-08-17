@@ -139,6 +139,21 @@ type PreSendOutcome = 'not-reached' | 'recorded-durable' | 'rolled-back-pre-send
  */
 type ReacceptIntent = { readonly kind: 'retry' } | { readonly kind: 'freshClientMandate' };
 
+/**
+ * #1828 / GH#2270 — the lifecycle key a persisted job belongs to, or null when it has none: a
+ * non-VM-publish request, or a malformed legacy one (a pre-guard admission whose name carries
+ * U+001F). A malformed PERSISTED job must never abort a scan and block an unrelated admission,
+ * so it simply drops out of every group.
+ */
+function lifecycleKeyOfJob(job: LiftJob): string | null {
+  if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
+  try {
+    return knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
+  } catch {
+    return null;
+  }
+}
+
 type AsyncLiftJobHandler = {
   readonly inspectPreparedPayload: (job: LiftJob) => Promise<AsyncPreparedPublishPayload | null>;
   readonly process: (claimed: LiftJob, walletId: string) => Promise<LiftJob>;
@@ -456,7 +471,7 @@ export class TripleStoreAsyncLiftPublisher
     // construction: a binding job is the live one for the subject; everything else is superseded.
     // GH#2270 — the selector is sibling-aware, so a failed job that a NEWER record for this key
     // has moved past reports as superseded here instead of shadowing that newer record.
-    const active = selectLifecycleBindingJobs(jobs);
+    const active = selectLifecycleBindingJobs(jobs, lifecycleKeyOfJob).get(key) ?? [];
     const superseded = jobs.filter((job) => !active.includes(job));
     const intentKeyOf = (job: LiftJob): string | undefined =>
       isKnowledgeAssetVmPublishJobRequest(job.request)
@@ -844,22 +859,13 @@ export class TripleStoreAsyncLiftPublisher
     // whose name carries U+001F) must NOT abort this scan and block an unrelated
     // admission, so each persisted job's key is built defensively.
     const requestKey = knowledgeAssetVmPublishLifecycleKey(request);
-    // GH#2270 — the whole GROUP for this lifecycle key is collected before anything is decided:
-    // whether a record binds depends on the others (a failed job behind a newer sibling is
-    // history, not the live job), so a per-job early return cannot answer it.
-    const group = (await this.list()).filter((job) => {
-      if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return false;
-      try {
-        return knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish) === requestKey;
-      } catch {
-        return false; // skip a malformed legacy job rather than failing this admission
-      }
-    });
-    // #1828 — occupancy + lifecycle subject via the SHARED selector, so admission dedup and the
-    // intent-recovery lookup partition jobs identically. `list()` is oldest-first, so the LAST
-    // binding record is the newest: admission binds the lifecycle's current job, never a
-    // superseded predecessor that the widened occupancy made look live again.
-    const job = selectLifecycleBindingJobs(group).at(-1);
+    // #1828 — occupancy and lifecycle grouping via the SHARED selector, so admission dedup and the
+    // intent-recovery lookup partition jobs identically. GH#2270 — whether a record binds depends
+    // on its SIBLINGS (an ordinary failed job behind a newer record is history; a HELD one is not,
+    // since a sibling is not chain proof), so the selector groups the queue by lifecycle key and
+    // admission reads its own group. The first entry is the record admission must answer for: a
+    // held job before anything else, then the lifecycle's newest.
+    const job = selectLifecycleBindingJobs(await this.list(), lifecycleKeyOfJob).get(requestKey)?.at(0);
     if (!job || !isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
     return {
       job,
@@ -1135,7 +1141,7 @@ export class TripleStoreAsyncLiftPublisher
    * face value here and blind-republished.
    *
    * The disposition comes from {@link classifyRetryAction}, the same action
-   * {@link describeJobRetryState} projects its reason from, so the counts an operator gets and
+   * {@link describeConfiguredRetryState} projects its reason from, so the counts an operator gets and
    * the reason shown per job are ONE partition rather than two orderings kept in step by hand.
    */
   async retryDetailed(filter: { status?: 'failed' } = {}): Promise<AsyncLiftRetryOutcome> {
@@ -1933,7 +1939,7 @@ export class TripleStoreAsyncLiftPublisher
    * (`scheduleRetryIfEligible`, at failure-recording time) and the claim-time sweep
    * (`reacceptDueFailedJobs`) — so `autoRetryEnabled` belongs here and nowhere else. The
    * predicate itself is shared with the read-only status projection
-   * ({@link describeJobRetryState}), which is why it lives in the utils module.
+   * ({@link describeConfiguredRetryState}), which is why it lives in the utils module.
    *
    * Turning the switch OFF mid-flight therefore STRANDS jobs that were scheduled while it was
    * on: their `nextRetryAt` passes without ever firing. They stay operator-actionable
@@ -1945,11 +1951,13 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   /**
-   * GH#2270 — read-only retry projection for a job the caller already holds. Derived from the
-   * SAME predicate the lane runs on, so the reported eligibility cannot disagree with what this
-   * instance will actually do.
+   * GH#2270 — read-only retry projection for a job the caller already holds, derived from the SAME
+   * predicate the lane runs on, so the reported eligibility cannot disagree with what this instance
+   * would do. CONFIGURED is in the name because that is its whole scope: it answers from the retry
+   * knobs and the job, and cannot see whether a publisher runtime exists to run the lane (a host
+   * that knows must narrow it — see {@link AsyncLiftRetryStateReader}).
    */
-  describeJobRetryState(job: LiftJob): LiftJobRetryProjection {
+  describeConfiguredRetryState(job: LiftJob): LiftJobRetryProjection {
     return deriveLiftJobRetryProjection(job, { autoRetryEnabled: this.autoRetryEnabled });
   }
 

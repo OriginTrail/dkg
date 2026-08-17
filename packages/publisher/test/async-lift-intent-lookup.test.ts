@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import {
+  QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
@@ -56,6 +57,24 @@ describe('#1828 async lift intent lookup', () => {
     await publisher.recover();
     const job = await publisher.getStatus(jobId);
     expect(job?.status).toBe('failed');
+    return jobId;
+  }
+
+  /**
+   * A RETRYABLE failure with no transaction to account for (ACK quorum is collected before the
+   * publish tx is signed): it occupies its subject, and nothing holds it — the shape the
+   * sibling-supersession rule still applies to.
+   */
+  async function driveToRetryableFailed(request: ReturnType<typeof kaVmPublishRequest>): Promise<string> {
+    const publisher = createPublisher();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.recordPublishFailure(jobId, {
+      error: new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
     return jobId;
   }
 
@@ -306,12 +325,13 @@ describe('#1828 async lift intent lookup', () => {
       .toEqual([jobId, 'recovery_state_inconsistent', false]);
   });
 
-  it('reports a failed job with a NEWER sibling as superseded, not as a second active job (GH#2270)', async () => {
+  it('reports an ordinary failed job with a NEWER sibling as superseded, not as a second active job (GH#2270)', async () => {
     // The upgrade shape: a pre-GH#2270 store let a failed job's subject fall vacant and minted a
     // successor. Both records survive, and the widened occupancy makes the old one look live — so
     // without sibling awareness this lookup answers `conflict` (two active jobs, the broken #1828
-    // invariant) for a lifecycle that is simply one job followed by another.
-    const failedId = await driveToFailed(kaVmPublishRequest());
+    // invariant) for a lifecycle that is simply one job followed by another. This is the ORDINARY
+    // failure; one whose transaction is unaccounted for is exempt (see the row below).
+    const failedId = await driveToRetryableFailed(kaVmPublishRequest());
     const failed = (await createPublisher().getStatus(failedId))!;
     const successor: LiftJob = {
       jobId: 'successor-1',
@@ -333,6 +353,35 @@ describe('#1828 async lift intent lookup', () => {
     if (result.kind !== 'active') return;
     expect(result.job.jobId).toBe('successor-1');
     expect(result.superseded.map((j) => j.jobId)).toEqual([failedId]);
+  });
+
+  it('reports BOTH records when a held job has a live successor (GH#2270)', async () => {
+    // A newer sibling is not chain proof, so the held record is never demoted — and a lifecycle
+    // with two records both claiming it is exactly the conflict #1828 exists to surface. A
+    // recovering client sees both: the successor that is running, and the predecessor whose
+    // transaction nobody has accounted for.
+    const heldId = await driveToFailed(kaVmPublishRequest());
+    const held = (await createPublisher().getStatus(heldId))!;
+    const successor: LiftJob = {
+      jobId: 'successor-1',
+      jobSlug: 'successor-1',
+      request: held.request,
+      status: 'accepted',
+      timestamps: {
+        acceptedAt: held.timestamps.acceptedAt + 1_000,
+        updatedAt: held.timestamps.acceptedAt + 1_000,
+      },
+      retries: { retryCount: 0, maxRetries: 10 },
+      controlPlane: { jobRef: jobSubject('successor-1') },
+    };
+    await store.insert(serializeJob(successor, DEFAULT_CONTROL_GRAPH_URI));
+
+    const result = await createPublisher().lookupKnowledgeAssetVmPublishJobByIntent(facts);
+
+    expect(result.kind).toBe('conflict');
+    if (result.kind !== 'conflict') return;
+    // Held first: it is the record admission answers for.
+    expect(result.jobs.map((j) => j.jobId)).toEqual([heldId, 'successor-1']);
   });
 
   it('partitions the recovery identity by subGraphName (Chunk 1)', async () => {

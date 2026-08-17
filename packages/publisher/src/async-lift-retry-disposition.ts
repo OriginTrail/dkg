@@ -123,27 +123,53 @@ export function isOccupyingLifecycleJob(job: LiftJob): boolean {
 }
 
 /**
- * GH#2270 — which records sharing ONE lifecycle key may BIND it, once several exist.
- * {@link isOccupyingLifecycleJob} answers "could this job bind a subject" from the job alone, and
- * that is not enough for a key with history: a FAILED job records what already happened, so a
- * strictly NEWER record for the same key means the lifecycle moved on without it.
+ * GH#2270 — which records may BIND each lifecycle, grouped BY that lifecycle.
  *
- * The rule is therefore: a failed job never binds while a newer record exists for its key.
+ * {@link isOccupyingLifecycleJob} answers "could this job bind a subject" from the job alone, which
+ * is not enough once a key has history: an ordinary FAILED job records what already happened, so a
+ * strictly NEWER record for the same key means the lifecycle moved on without it. Without that
+ * rule the widened occupancy resurrects history — a store written before this PR could let an
+ * exhausted failed job's subject fall vacant and mint a successor, and afterwards BOTH records read
+ * as occupying, so admission would fresh-mandate a superseded job back to life beside its own
+ * successor.
  *
- * Without it, the widened occupancy resurrects history. A store written before this PR could let an
- * exhausted failed job's subject fall vacant and mint a successor; afterwards BOTH records read as
- * occupying, and admission — which scans oldest-first — would bind the OLD one. That is a
- * fresh-mandate re-arm bringing a superseded job back to life beside its own successor, or a held
- * old job answering `LiftJobPendingChainProofError` for a lifecycle that has since moved on.
+ * A job {@link isHeldForChainProof} is EXEMPT from that demotion, and this is the sharp edge: a
+ * newer sibling is not chain proof. Whatever else happened on this lifecycle afterwards, that
+ * record's transaction is still unaccounted for, and the only things that may release it are
+ * recovery proving the transaction's fate or an operator clearing that exact job by id. So a held
+ * record keeps binding its lifecycle and keeps answering `LiftJobPendingChainProofError` — even
+ * behind a finalized successor, which is a completed publish, not evidence about the held one.
  *
- * Non-terminal jobs are deliberately NOT demoted this way: two live jobs on one key is the broken
- * invariant #1828 exists to surface as a conflict, never something to silently pick a winner from.
+ * Non-terminal jobs are never demoted either: two live jobs on one key is the broken invariant
+ * #1828 exists to surface as a conflict, not something to silently pick a winner from.
+ *
+ * The lifecycle KEY is the caller's to define, and it is a PARAMETER rather than a precondition in
+ * prose: a caller handing this a mixed list cannot make one lifecycle demote a record of another.
+ * `lifecycleKeyOf` returns null for a job that has no key (a non-VM or malformed request), which
+ * drops it from every group. Within a group the binding jobs are ordered so the FIRST is the one
+ * admission must answer for: held records first (they block), then the newest.
  */
-export function selectLifecycleBindingJobs(jobs: readonly LiftJob[]): LiftJob[] {
-  if (jobs.length === 0) return [];
-  const newest = jobs.reduce((a, b) => (compareAcceptedJobs(a, b) >= 0 ? a : b));
-  return jobs.filter((job) => isOccupyingLifecycleJob(job)
-    && !(isFailedJob(job) && compareAcceptedJobs(job, newest) < 0));
+export function selectLifecycleBindingJobs(
+  jobs: readonly LiftJob[],
+  lifecycleKeyOf: (job: LiftJob) => string | null,
+): Map<string, LiftJob[]> {
+  const groups = new Map<string, LiftJob[]>();
+  for (const job of jobs) {
+    const key = lifecycleKeyOf(job);
+    if (key === null) continue;
+    groups.set(key, [...(groups.get(key) ?? []), job]);
+  }
+
+  const binding = new Map<string, LiftJob[]>();
+  for (const [key, group] of groups) {
+    const newest = group.reduce((a, b) => (compareAcceptedJobs(a, b) >= 0 ? a : b));
+    const held = (job: LiftJob): boolean => isFailedJob(job) && isHeldForChainProof(job);
+    binding.set(key, group
+      .filter((job) => isOccupyingLifecycleJob(job)
+        && !(isFailedJob(job) && !held(job) && compareAcceptedJobs(job, newest) < 0))
+      .sort((a, b) => (held(a) === held(b) ? compareAcceptedJobs(b, a) : (held(a) ? -1 : 1))));
+  }
+  return binding;
 }
 
 /**

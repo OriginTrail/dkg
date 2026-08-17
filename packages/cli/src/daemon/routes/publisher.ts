@@ -376,33 +376,52 @@ function parsePublisherLifecycleFactsFromQuery(
 }
 
 /**
- * GH#2270 — the ONE builder of a job-detail response body, for all four job-detail surfaces
- * (`/job`, `/job-payload`, and the two legacy `/jobs/:id[/payload]` shapes).
+ * GH#2270 — the job-detail response bodies, one typed builder per route generation, both over the
+ * same {@link runtimeRetryState}. Two builders rather than one with a mode flag: the shapes differ
+ * in KIND, not in a boolean, and a route that picks the wrong one should be a type error rather
+ * than a body that silently nests (or spreads) the job the other way round. Building them here at
+ * all is what keeps a fifth surface from shipping without `retryState`.
  *
  * `retryState` is DERIVED (never persisted), so it sits BESIDE the job rather than inside it: the
- * job stays byte-identical to what the store holds, and a caller can still tell "will this node
- * retry it" from the durable facts it reads. The publisher owns the derivation because it knows
- * the effective kill-switch. Building the body here rather than per route is what keeps a fifth
- * surface from shipping without the field.
+ * job stays byte-identical to what the store holds.
  *
- * `wrapped` is the shape difference the two route generations carry: the newer routes nest the job
- * under `job`, the legacy ones spread it at the top level (where `payload` already lives).
- * `payload` is included only when passed — `undefined` omits the key, while `null` is a REAL value
+ * `payload` is included only when passed — omitting it drops the key, while `null` is a REAL value
  * (a named lifecycle publish job has no raw prepared payload).
  */
-function jobDetailBody(
-  ctx: Pick<RequestContext, 'publisherControl' | 'publisherState'>,
+function wrappedJobDetailBody(
+  ctx: JobDetailContext,
   job: LiftJob,
-  options: { readonly wrapped: boolean; readonly payload?: AsyncPreparedPublishPayload | null },
-): Record<string, unknown> {
+  payload?: AsyncPreparedPublishPayload | null,
+): { job: LiftJob; payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
   return {
-    ...(options.wrapped ? { job } : { ...job }),
-    ...(options.payload === undefined ? {} : { payload: options.payload }),
-    retryState: narrowRetryStateToRuntime(
-      ctx.publisherControl.describeJobRetryState(job),
-      ctx.publisherState.availability,
-    ),
+    job,
+    ...(payload === undefined ? {} : { payload }),
+    retryState: runtimeRetryState(ctx, job),
   };
+}
+
+/** The legacy shape: the job spread at the top level, where `payload` already lives. */
+function legacyJobDetailBody(
+  ctx: JobDetailContext,
+  job: LiftJob,
+  payload?: AsyncPreparedPublishPayload | null,
+): LiftJob & { payload?: AsyncPreparedPublishPayload | null; retryState: LiftJobRetryProjection } {
+  return {
+    ...job,
+    ...(payload === undefined ? {} : { payload }),
+    retryState: runtimeRetryState(ctx, job),
+  };
+}
+
+type JobDetailContext = Pick<RequestContext, 'publisherControl' | 'publisherState'>;
+
+/** The ONE place the operator-facing retry answer is derived: the publisher's configured view, */
+/** narrowed by this daemon's runtime availability. */
+function runtimeRetryState(ctx: JobDetailContext, job: LiftJob): LiftJobRetryProjection {
+  return narrowRetryStateToRuntime(
+    ctx.publisherControl.describeConfiguredRetryState(job),
+    ctx.publisherState.availability,
+  );
 }
 
 /**
@@ -505,7 +524,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
-    return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: true }));
+    return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job));
   }
 
   // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
@@ -518,7 +537,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         error: `Publisher job not found: ${jobId}`,
       });
     const payload = await publisherControl.inspectPreparedPayload(jobId);
-    return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: true, payload }));
+    return jsonResponse(res, 200, wrappedJobDetailBody(ctx, job, payload));
   }
 
   // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
@@ -563,9 +582,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
       const payload = await publisherControl.inspectPreparedPayload(jobId);
-      return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: false, payload }));
+      return jsonResponse(res, 200, legacyJobDetailBody(ctx, job, payload));
     }
-    return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: false }));
+    return jsonResponse(res, 200, legacyJobDetailBody(ctx, job));
   }
 
   // GET /api/publisher/stats -- returns the raw status map directly for backward compat
