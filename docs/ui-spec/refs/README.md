@@ -29,3 +29,23 @@ Mobile variants welcome as `*-mobile.png`.
   colors may be lifted from them into the build.
 - If a needed reference is missing, Claude Code asks at CP0 rather than
   improvising the layout from memory.
+
+---
+
+## Capture record (2026-08-17, Phase 0 — supersedes "operator supplies these")
+
+Per the v3.5 prompt (which wins on conflict), the reference set was
+**self-captured** with Playwright, public pages only:
+
+| File | Source | Viewports |
+|---|---|---|
+| `or-models(.png/-mobile.png)` | openrouter.ai/models | 1440×900 · 390×844 |
+| `or-model-detail(-mobile)` | openrouter.ai/openai/gpt-4o | 1440×900 · 390×844 |
+| `or-chat(-mobile)` | openrouter.ai/chat | 1440×900 · 390×844 |
+| `or-rankings(-mobile)` | openrouter.ai/rankings | 1440×900 · 390×844 |
+| `node-ui-current-{dashboard,marketplace,operate}.jpg` | live okf-mainnet UI, real funded-run data (2026-08-17) | ~1538×784 |
+
+Not captured: `or-credits.png` (login-gated — optional per prompt; operator may
+supply). Known blemish: a cookie banner overlays the lower-right of
+`or-models.png`; structure above it is fully legible. Operator annotations
+(red = copy structure, blue = ignore) remain welcome on any of these.
