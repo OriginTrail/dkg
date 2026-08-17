@@ -52,10 +52,27 @@ export function startLaneExecutor(opts: LaneExecutorOpts): { stop: () => void } 
       signal: AbortSignal.timeout(300_000),
     });
     const resBody = Buffer.from(await res.arrayBuffer());
-    await publishLaneMessage(call, opts.contextGraphId, {
-      kind: "response",
-      res: { correlation: req.id, status: res.status, bodyB64: resBody.toString("base64"), at: new Date().toISOString() },
-    });
+    // The response publish is the step that must NOT fail silently: the front
+    // has already served AND billed by now, so a lost response orphans a real
+    // leg (found live 2026-08-17: store backpressure 503'd the wm/write and
+    // leg_27796e2b was billed-but-undelivered; the buyer correctly refused to
+    // countersign what he never received). Retry with backoff — the store
+    // saturation that causes this is transient by construction.
+    let published = false;
+    for (let attempt = 1; attempt <= 6; attempt++) {
+      try {
+        await publishLaneMessage(call, opts.contextGraphId, {
+          kind: "response",
+          res: { correlation: req.id, status: res.status, bodyB64: resBody.toString("base64"), at: new Date().toISOString() },
+        });
+        published = true;
+        break;
+      } catch (e) {
+        opts.log(`lane response publish attempt ${attempt}/6 failed for ${req.id}: ${String((e as Error).message).slice(0, 80)}`);
+        await new Promise((r) => setTimeout(r, attempt * 10_000));
+      }
+    }
+    if (!published) throw new Error(`response publish exhausted retries (id ${req.id})`);
     opts.log(`lane served ${req.method} ${req.path} → ${res.status} (id ${req.id})`);
   };
 
