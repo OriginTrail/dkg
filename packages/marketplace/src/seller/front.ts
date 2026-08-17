@@ -494,10 +494,19 @@ export async function handleFront(deps: FrontDeps, req: Req & AsyncIterable<Buff
     const voided = decided.filter((d) => d.state === "voided");
     const open = decided.filter((d) => d.state === "pending-delivery" || d.state === "delivered");
     if (open.length) { send(res, 409, { error: "E_LEGS_UNDECIDED", open: open.map((o) => o.legId) }); return true; }
+    // v3.5: the close attests the TOKEN volume it settles — catalog "settled
+    // volume" renders ONLY from these countersigned, close-attested sums
+    // (never self-reported traffic; catalog.volume.tip is literal truth)
+    const csIds = new Set(countersigned.map((d) => String(d.legId)));
+    const settledTokens = rows.filter((r) => csIds.has(String(r.legId))).reduce((s, r) => {
+      const m = r.meter as { inputTokens?: number; outputTokens?: number } | undefined;
+      return s + Number(m?.inputTokens ?? 0) + Number(m?.outputTokens ?? 0);
+    }, 0);
     const closeBody = {
       type: "close", tabId: auth.tabId, principal: auth.principal,
       billedMicroTrac: q.billed,
       legsCountersigned: countersigned.length, legsWithheld: withheld.length, legsVoided: voided.length,
+      settledTokens,
       at: new Date().toISOString(),
     };
     const closeDigest = "sha256:" + createHash("sha256").update(canonicalize(closeBody)).digest("hex");

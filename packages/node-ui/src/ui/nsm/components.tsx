@@ -210,23 +210,26 @@ export interface CatalogModel {
 }
 
 export function ModelCard({ model, fxRate, onOpen }: { model: CatalogModel; fxRate: number; onOpen?: () => void }): React.ReactElement {
-  const usd = model.providers.map((p) => usdPer1M(p.inMicro, p.outMicro, fxRate));
+  // price renders ONLY from providers with a verified live quote (finite µ)
+  const priced = model.providers.filter((p) => Number.isFinite(p.inMicro) && Number.isFinite(p.outMicro));
+  const usd = priced.map((p) => usdPer1M(p.inMicro, p.outMicro, fxRate));
   const classes = [...new Set(model.providers.map((p) => p.class))];
-  const ins = [...new Set(model.providers.map((p) => p.inMicro))];
-  const outs = [...new Set(model.providers.map((p) => p.outMicro))];
+  const ins = [...new Set(priced.map((p) => p.inMicro))];
+  const outs = [...new Set(priced.map((p) => p.outMicro))];
   const rng = (v: number[]) => (Math.min(...v) === Math.max(...v) ? `${v[0]}` : `${Math.min(...v)}–${Math.max(...v)}`);
   return (
     <div className="card mcard" onClick={onOpen} role={onOpen ? 'button' : undefined} tabIndex={onOpen ? 0 : undefined}
       onKeyDown={onOpen ? (e) => { if (e.key === 'Enter') onOpen(); } : undefined}>
       <div className="name"><ModelLogo family={model.family} displayName={model.displayName} size="md" /> {model.displayName}</div>
-      <div className="fam">{cap(model.family)} · {model.modality} · {fmtCompact(model.contextLength)} context</div>
+      <div className="fam">{cap(model.family)} · {model.modality}{model.contextLength > 0 ? ` · ${fmtCompact(model.contextLength)} context` : ''}</div>
       <div className="provline">
         {model.providers.length === 1 ? copy('catalog.provider.one') : copy('catalog.providers', { n: model.providers.length })}
         {classes.map((c) => <ProvBadge key={c} cls={c} withText />)}
       </div>
       <div className="price">
-        {fmtUsdRange(usd)} / 1M tokens{' '}
-        <span className="micro mono">{rng(ins)} µ / {rng(outs)} µ per token</span>
+        {priced.length > 0
+          ? <>{fmtUsdRange(usd)} / 1M tokens <span className="micro mono">{rng(ins)} µ / {rng(outs)} µ per token</span></>
+          : <span className="muted">— <span className="micro">{copy('model.quote.unverifiable')}</span></span>}
       </div>
       <div className="vol" title={copy('catalog.volume.tip')}>
         {copy('catalog.volume', { n: fmtCompact(model.settledTokens) })}
@@ -240,9 +243,9 @@ export function ModelCard({ model, fxRate, onOpen }: { model: CatalogModel; fxRa
 
 export type QuoteStatus = 'live' | 'loading' | 'unverifiable' | 'unreachable';
 
-export function ProviderRow({ p, fxRate, quoteStatus, onTry, onBuy }: {
+export function ProviderRow({ p, fxRate, quoteStatus, onTry, onBuy, onRepClick }: {
   p: CatalogProvider; fxRate: number; quoteStatus: QuoteStatus;
-  onTry?: () => void; onBuy?: () => void;
+  onTry?: () => void; onBuy?: () => void; onRepClick?: () => void;
 }): React.ReactElement {
   const disabled = quoteStatus !== 'live';
   const rowClass = quoteStatus === 'unverifiable' ? 'unverif' : quoteStatus === 'unreachable' ? 'tr--dim' : '';
@@ -255,7 +258,8 @@ export function ProviderRow({ p, fxRate, quoteStatus, onTry, onBuy }: {
           ? <span className="warnline">{copy('model.quote.unverifiable')}</span>
           : quoteStatus === 'unreachable'
             ? <span className="rep">{copy('model.uptime.down', { t: '12m' })}</span>
-            : p.rep && <span className="rep" title={copy('model.rep.tip')}>{copy('model.rep', { a: p.rep.verified, d: p.rep.disputed })}</span>}
+            : p.rep && <span className="rep" title={copy('model.rep.tip')} onClick={onRepClick}
+                role={onRepClick ? 'button' : undefined}>{copy('model.rep', { a: p.rep.verified, d: p.rep.disputed })}</span>}
       </td>
       <td className="num price-cell">
         {quoteStatus === 'unverifiable'

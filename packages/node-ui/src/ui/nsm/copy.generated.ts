@@ -97,6 +97,7 @@ export const COPY: Record<string, string> = {
   "catalog.metered": "This view cost {n} µ · why?",
   "catalog.filter.zero": "No models match these filters",
   "catalog.asof": "as of {t} — refreshing…",
+  "catalog.free": "Browsing is free — this page reads only your own node's subscribed graphs",
   "model.quote.unverifiable": "Terms couldn't be verified",
   "model.telemetry.none": "no data yet",
   "model.quote.provenance": "Price and endpoint on every row come from a live signed quote fetched just now — never from the listing itself.",

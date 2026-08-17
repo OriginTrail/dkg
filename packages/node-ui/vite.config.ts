@@ -34,8 +34,11 @@ function readDkgConfig() {
     return { port, token };
   }
 
-  // Fall back to ~/.dkg (testnet / production node)
-  const dkgDir = join(homedir(), '.dkg');
+  // DKG_UI_HOME: point the dev UI at a node whose home isn't ~/.dkg
+  // (e.g. okf-mainnet runs from ~/.dkg-mainnet). Same file contract.
+  const dkgDir = process.env.DKG_UI_HOME
+    ? resolve(process.env.DKG_UI_HOME.replace(/^~(?=\/)/, homedir()))
+    : join(homedir(), '.dkg');
   let port = 9200;
   let token = '';
   try {
@@ -70,8 +73,11 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      '/api': `http://127.0.0.1:${port}`,
-      '/marketplace': `http://127.0.0.1:${port}`,
+      // changeOrigin: the daemon stalls requests whose Host header isn't its
+      // own (~2-5s each) — forwarding the dev-server Host made every proxied
+      // call crawl and the marketplace discovery sweep never settled.
+      '/api': { target: `http://127.0.0.1:${port}`, changeOrigin: true },
+      '/marketplace': { target: `http://127.0.0.1:${port}`, changeOrigin: true },
     },
   },
 });

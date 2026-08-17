@@ -4,14 +4,17 @@
 // one per commit as they pass integration.
 import React, { useCallback, useEffect, useState } from 'react';
 import { OnboardingCard } from '../nsm/OnboardingCard.js';
+import { CatalogView } from '../nsm/CatalogView.js';
+import { ModelPageView } from '../nsm/ModelPageView.js';
 import { fetchOperateStatus, type NsmOperateStatus } from '../nsm/api.js';
-import { copy } from '../nsm/copy.generated.js';
+import { useCatalog } from '../nsm/useCatalog.js';
 
-type Pane = 'models';
+type Pane = { k: 'models' } | { k: 'model'; groupKey: string };
 
 export function MarketplaceV35View(): React.ReactElement {
   const [status, setStatus] = useState<NsmOperateStatus | null | 'error'>(null);
-  const [pane] = useState<Pane>('models');
+  const [pane, setPane] = useState<Pane>({ k: 'models' });
+  const cat = useCatalog();
 
   const refresh = useCallback(() => {
     fetchOperateStatus().then(setStatus).catch(() => setStatus('error'));
@@ -22,12 +25,11 @@ export function MarketplaceV35View(): React.ReactElement {
     <div className="nsmx nsmx--page">
       <div className="frame">
         <OnboardingCard status={status} onDone={refresh} />
-        {/* Surface 02 (catalog) integrates next — until then the pane states
-            the honest truth about what this node can see. */}
-        {pane === 'models' && status !== null && status !== 'error' && (
-          <div className="card card--pad" style={{ textAlign: 'center' }}>
-            <span className="sec">{copy('empty.catalog')}</span>
-          </div>
+        {pane.k === 'models' && (
+          <CatalogView cat={cat} onOpenModel={(groupKey) => setPane({ k: 'model', groupKey })} />
+        )}
+        {pane.k === 'model' && (
+          <ModelPageView cat={cat} groupKey={pane.groupKey} onBack={() => setPane({ k: 'models' })} />
         )}
       </div>
     </div>

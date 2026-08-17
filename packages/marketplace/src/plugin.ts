@@ -218,6 +218,40 @@ export const plugin: RoutePlugin = {
 
     // ── buyer actions (v3.5: the UI's Fund step runs node-side — the browser
     // never holds keys or talks to an RPC). Operator-only: loopback or token.
+    // ── verified-quote proxy (v3.5 rule 7's enforcement point): the UI never
+    // reads terms from a KA literal or fetches a seller cross-origin; this
+    // node fetches + VERIFIES the signed quote with the same BuyerClient the
+    // funded run uses, and returns the verdict. Unverifiable ≠ pass.
+    if (path === BASE + "/buyer/quote") {
+      const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const remote = ctx.req.socket.remoteAddress ?? "";
+      const local = remote === "127.0.0.1" || remote === "::1" || remote === "::ffff:127.0.0.1";
+      if (!local && !ctx.validTokens.has(auth)) {
+        ctx.res.writeHead(401, { "content-type": "application/json" });
+        ctx.res.end('{"error":"E_TOKEN"}');
+        return;
+      }
+      const apiBase = new URL(ctx.req.url ?? "", "http://x").searchParams.get("apiBase") ?? "";
+      let out: Record<string, unknown>;
+      if (!/^https?:\/\//.test(apiBase)) out = { error: "E_APIBASE" };
+      else {
+        try {
+          const { readBuyerCfg } = await import("./buyer/actions.js");
+          const bcfg = readBuyerCfg(marketplaceHome(dkgHome()));
+          const client = new BuyerClient(apiBase.replace(/\/$/, ""), bcfg?.walletEnvFile ?? "/dev/null", null);
+          const v = await client.fetchAndVerifyTerms();
+          const verified = v.checks.every((c) => c.pass);
+          out = { verified, checks: v.checks.filter((c) => !c.pass), quote: verified ? v.quote : null, quoteDigest: v.quoteDigest };
+        } catch (e) {
+          out = { error: "E_QUOTE_UNREACHABLE", detail: String((e as Error).message).slice(0, 160) };
+        }
+      }
+      const body = JSON.stringify(out);
+      ctx.res.writeHead(out.error ? 502 : 200, { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) });
+      ctx.res.end(body);
+      return;
+    }
+
     if (path === BASE + "/buyer/wallet" || path === BASE + "/buyer/fund" || path === BASE + "/buyer/fund/status") {
       const auth = String(ctx.req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
       const remote = ctx.req.socket.remoteAddress ?? "";

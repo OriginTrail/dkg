@@ -28,11 +28,13 @@ const SHOTS = [
   { name: "gallery", path: "/ui/dev/gallery" },
   { name: "marketplace", path: "/ui/?marketplace=1", actions: async (page) => {
     await page.locator(".v10-tree-dashboard", { hasText: "Marketplace" }).first().click({ timeout: 15_000, force: true });
-    await page.waitForTimeout(600);
+    // wait until discovery settles (skeletons gone) — slow graphs are real
+    await page.waitForFunction(() => !document.querySelector(".nsmx .skel"), { timeout: 120_000 }).catch(() => {});
+    await page.waitForTimeout(500);
   } },
   { name: "operate", path: "/ui/?marketplace=1", actions: async (page) => {
     await page.locator(".v10-tree-dashboard", { hasText: "Operate" }).first().click({ timeout: 15_000, force: true });
-    await page.waitForTimeout(600);
+    await page.waitForTimeout(4000);
   } },
 ];
 
@@ -44,6 +46,7 @@ const viewports = [
 // ── boot vite ──
 const vite = spawn("npx", ["vite", "--port", String(PORT), "--strictPort"], {
   cwd: pkg, stdio: ["ignore", "pipe", "pipe"],
+  env: { ...process.env, DKG_UI_HOME: process.env.DKG_UI_HOME ?? "" },
 });
 await new Promise((resolve, reject) => {
   const t = setTimeout(() => reject(new Error("vite didn't start in 30s")), 30_000);
