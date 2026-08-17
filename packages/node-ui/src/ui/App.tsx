@@ -232,6 +232,10 @@ const NetworkDebugPage = React.lazy(() =>
   import('./pages/Network.js').then((m) => ({ default: m.NetworkPage }))
 );
 
+const NsmGalleryRoute = React.lazy(() =>
+  import('./nsm/GalleryView.js').then((m) => ({ default: m.NsmGalleryView }))
+);
+
 function ContextGraphPrimerRoute() {
   const openTab = useTabsStore((s) => s.openTab);
 
@@ -258,6 +262,12 @@ export function App() {
           Redirect stale bookmarks for /ui/apps/... back to the dashboard so upgraded
           nodes don't silently render AppShell under a dead URL. */}
       <Route path="/apps/*" element={<Navigate to="/" replace />} />
+      {/* NSM v3.5 §Loop: fixture-fed component gallery (never live data) */}
+      <Route path="/dev/gallery" element={
+        <React.Suspense fallback={<div className="lazy-spinner">Loading...</div>}>
+          <NsmGalleryRoute />
+        </React.Suspense>
+      } />
       <Route path="*" element={<AppShell />} />
     </Routes>
   );
