@@ -60,6 +60,7 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
+import type { AsyncPreparedPublishPayload, LiftJob } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -374,6 +375,33 @@ function parsePublisherLifecycleFactsFromQuery(
   return { contextGraphId, name, subGraphName, agentAddress, intentKey };
 }
 
+/**
+ * GH#2270 — the ONE builder of a job-detail response body, for all four job-detail surfaces
+ * (`/job`, `/job-payload`, and the two legacy `/jobs/:id[/payload]` shapes).
+ *
+ * `retryState` is DERIVED (never persisted), so it sits BESIDE the job rather than inside it: the
+ * job stays byte-identical to what the store holds, and a caller can still tell "will this node
+ * retry it" from the durable facts it reads. The publisher owns the derivation because it knows
+ * the effective kill-switch. Building the body here rather than per route is what keeps a fifth
+ * surface from shipping without the field.
+ *
+ * `wrapped` is the shape difference the two route generations carry: the newer routes nest the job
+ * under `job`, the legacy ones spread it at the top level (where `payload` already lives).
+ * `payload` is included only when passed — `undefined` omits the key, while `null` is a REAL value
+ * (a named lifecycle publish job has no raw prepared payload).
+ */
+function jobDetailBody(
+  publisherControl: RequestContext['publisherControl'],
+  job: LiftJob,
+  options: { readonly wrapped: boolean; readonly payload?: AsyncPreparedPublishPayload | null },
+): Record<string, unknown> {
+  return {
+    ...(options.wrapped ? { job } : { ...job }),
+    ...(options.payload === undefined ? {} : { payload: options.payload }),
+    retryState: publisherControl.describeJobRetryState(job),
+  };
+}
+
 // #1890 — one request-body boundary for the publisher admin POST routes (cancel / retry /
 // clear / clear-job). Reads the small JSON body, applies the shared invalid-JSON mapping
 // (400 `{ error: 'Invalid JSON body' }`), and normalizes a missing / `null` / primitive /
@@ -450,11 +478,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
-    // GH#2270 — `retryState` is DERIVED (never persisted), so it sits beside the job
-    // instead of inside it: `job` stays byte-identical to what the store holds, and a
-    // caller can tell "this node will retry it" from the durable retry facts it reads.
-    // The publisher owns the derivation because it knows the effective kill-switch.
-    return jsonResponse(res, 200, { job, retryState: publisherControl.describeJobRetryState(job) });
+    return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: true }));
   }
 
   // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
@@ -467,11 +491,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         error: `Publisher job not found: ${jobId}`,
       });
     const payload = await publisherControl.inspectPreparedPayload(jobId);
-    return jsonResponse(res, 200, {
-      job,
-      payload,
-      retryState: publisherControl.describeJobRetryState(job),
-    });
+    return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: true, payload }));
   }
 
   // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
@@ -512,15 +532,13 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
-    // GH#2270 — this legacy shape spreads the job at the top level, so `retryState` joins
-    // it there (as `payload` already does). Every job field keeps its value; the derived
-    // projection is the only addition.
-    const retryState = publisherControl.describeJobRetryState(job);
+    // GH#2270 — this legacy shape spreads the job at the top level, so `retryState` joins it
+    // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
       const payload = await publisherControl.inspectPreparedPayload(jobId);
-      return jsonResponse(res, 200, { ...job, payload, retryState });
+      return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: false, payload }));
     }
-    return jsonResponse(res, 200, { ...job, retryState });
+    return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: false }));
   }
 
   // GET /api/publisher/stats -- returns the raw status map directly for backward compat

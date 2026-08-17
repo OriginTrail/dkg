@@ -48,13 +48,14 @@ import type {
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError, LiftJobPendingChainProofError } from './async-lift-publisher-types.js';
 import {
+  FAILED_JOB_RETRY_ACTION_COUNT,
   classifyRetryAction,
   deriveLiftJobRetryProjection,
   isAutomaticallyRetryableLiftJob,
   isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
   isHeldForChainProof,
-  isOccupyingLifecycleJob,
+  selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
@@ -440,13 +441,13 @@ export class TripleStoreAsyncLiftPublisher
       .map((row) => this.parseJobPayload(row['payload']))
       .filter((job): job is LiftJob => job !== null);
     if (jobs.length === 0) return { kind: 'none' };
-    // Partition on lifecycle-subject occupancy via the SHARED predicate that
-    // admission dedup (findActiveKnowledgeAssetVmPublishJob) also uses, so the two
-    // partitions are identical by construction: an occupying job (non-terminal, or
-    // a retryable failed job with retries remaining that admission would reaccept)
-    // is the live job to bind; everything else is superseded.
-    const active = jobs.filter(isOccupyingLifecycleJob);
-    const superseded = jobs.filter((job) => !isOccupyingLifecycleJob(job));
+    // Partition via the SHARED selector that admission dedup
+    // (findActiveKnowledgeAssetVmPublishJob) also uses, so the two partitions are identical by
+    // construction: a binding job is the live one for the subject; everything else is superseded.
+    // GH#2270 — the selector is sibling-aware, so a failed job that a NEWER record for this key
+    // has moved past reports as superseded here instead of shadowing that newer record.
+    const active = selectLifecycleBindingJobs(jobs);
+    const superseded = jobs.filter((job) => !active.includes(job));
     const intentKeyOf = (job: LiftJob): string | undefined =>
       isKnowledgeAssetVmPublishJobRequest(job.request)
         ? job.request.knowledgeAssetVmPublish.intentKey
@@ -833,25 +834,27 @@ export class TripleStoreAsyncLiftPublisher
     // whose name carries U+001F) must NOT abort this scan and block an unrelated
     // admission, so each persisted job's key is built defensively.
     const requestKey = knowledgeAssetVmPublishLifecycleKey(request);
-    const jobs = await this.list();
-    for (const job of jobs) {
-      if (!isKnowledgeAssetVmPublishJobRequest(job.request)) continue;
-      // #1828 — occupancy + lifecycle subject via the SHARED helpers so admission
-      // dedup and the intent-recovery lookup partition jobs identically (a job that
-      // still occupies the subject is the live one; finalized/exhausted/non-retryable
-      // are superseded).
-      if (!isOccupyingLifecycleJob(job)) continue;
-      const publish = job.request.knowledgeAssetVmPublish;
-      let jobKey: string;
+    // GH#2270 — the whole GROUP for this lifecycle key is collected before anything is decided:
+    // whether a record binds depends on the others (a failed job behind a newer sibling is
+    // history, not the live job), so a per-job early return cannot answer it.
+    const group = (await this.list()).filter((job) => {
+      if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return false;
       try {
-        jobKey = knowledgeAssetVmPublishLifecycleKey(publish);
+        return knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish) === requestKey;
       } catch {
-        continue; // skip a malformed legacy job rather than failing this admission
+        return false; // skip a malformed legacy job rather than failing this admission
       }
-      if (jobKey !== requestKey) continue;
-      return { job, compatible: publish.intentKey === request.intentKey };
-    }
-    return null;
+    });
+    // #1828 — occupancy + lifecycle subject via the SHARED selector, so admission dedup and the
+    // intent-recovery lookup partition jobs identically. `list()` is oldest-first, so the LAST
+    // binding record is the newest: admission binds the lifecycle's current job, never a
+    // superseded predecessor that the widened occupancy made look live again.
+    const job = selectLifecycleBindingJobs(group).at(-1);
+    if (!job || !isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
+    return {
+      job,
+      compatible: job.request.knowledgeAssetVmPublish.intentKey === request.intentKey,
+    };
   }
 
   /**
@@ -1134,27 +1137,18 @@ export class TripleStoreAsyncLiftPublisher
     // after retry() flips it active. Without this lock the "a transitioning job cannot be
     // swept" guarantee does not hold.
     return this.withClaimLock(async () => {
-      let retried = 0;
-      let blockedPendingRecovery = 0;
-      let skipped = 0;
+      const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
         // The WRITE decision, taken over the job alone — the operator's kill-switch is not an
         // input here and the signature cannot accept one.
         const action = classifyRetryAction(job);
-        // Reaccept is opted INTO explicitly: an action this build does not know falls through to
-        // `skipped`, which leaves the job exactly as it is rather than republishing it.
-        if (action === 'reaccept') {
-          await this.reacceptFailedJob(job);
-          retried += 1;
-          continue;
-        }
-        if (action === 'blocked_recovery' || action === 'blocked_pending_chain_proof') {
-          blockedPendingRecovery += 1;
-          continue;
-        }
-        skipped += 1;
+        // Reaccept is opted INTO explicitly; the count it lands in comes from the mapping declared
+        // beside the action union, so a future action fails the BUILD until its bucket is chosen
+        // rather than inheriting one from the shape of this loop.
+        if (action === 'reaccept') await this.reacceptFailedJob(job);
+        counts[FAILED_JOB_RETRY_ACTION_COUNT[action]] += 1;
       }
-      return { retried, blockedPendingRecovery, skipped };
+      return counts;
     });
   }
 

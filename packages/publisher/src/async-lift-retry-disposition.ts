@@ -19,6 +19,7 @@
  * (`lift-job-types.ts`) stays free of derived fields.
  */
 import {
+  compareAcceptedJobs,
   getLiftJobTransactionEvidence,
   isFailedJob,
   type PersistedFailedJob,
@@ -122,6 +123,30 @@ export function isOccupyingLifecycleJob(job: LiftJob): boolean {
 }
 
 /**
+ * GH#2270 — which records sharing ONE lifecycle key may BIND it, once several exist.
+ * {@link isOccupyingLifecycleJob} answers "could this job bind a subject" from the job alone, and
+ * that is not enough for a key with history: a FAILED job records what already happened, so a
+ * strictly NEWER record for the same key means the lifecycle moved on without it.
+ *
+ * The rule is therefore: a failed job never binds while a newer record exists for its key.
+ *
+ * Without it, the widened occupancy resurrects history. A store written before this PR could let an
+ * exhausted failed job's subject fall vacant and mint a successor; afterwards BOTH records read as
+ * occupying, and admission — which scans oldest-first — would bind the OLD one. That is a
+ * fresh-mandate re-arm bringing a superseded job back to life beside its own successor, or a held
+ * old job answering `LiftJobPendingChainProofError` for a lifecycle that has since moved on.
+ *
+ * Non-terminal jobs are deliberately NOT demoted this way: two live jobs on one key is the broken
+ * invariant #1828 exists to surface as a conflict, never something to silently pick a winner from.
+ */
+export function selectLifecycleBindingJobs(jobs: readonly LiftJob[]): LiftJob[] {
+  if (jobs.length === 0) return [];
+  const newest = jobs.reduce((a, b) => (compareAcceptedJobs(a, b) >= 0 ? a : b));
+  return jobs.filter((job) => isOccupyingLifecycleJob(job)
+    && !(isFailedJob(job) && compareAcceptedJobs(job, newest) < 0));
+}
+
+/**
  * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk, through
  * {@link isBulkClearableTerminalLiftJob}) and `clearTerminalJob(jobId)` so they cannot drift. A job
  * is clearable iff it is in a native terminal state (finalized|failed) AND is not a
@@ -189,6 +214,23 @@ export type FailedJobRetryAction =
   | 'blocked_pending_chain_proof'
   | 'skip_terminal'
   | 'skip_exhausted';
+
+/**
+ * Which count of one retry pass each action contributes to, co-located with the action it
+ * aggregates. A `Record` over the union is exhaustive at COMPILE time: a sixth action cannot be
+ * added without choosing its bucket here, where a reader can see the collapse, instead of falling
+ * into whatever the aggregation loop happened to do last.
+ */
+export const FAILED_JOB_RETRY_ACTION_COUNT: Record<
+  FailedJobRetryAction,
+  'retried' | 'blockedPendingRecovery' | 'skipped'
+> = {
+  reaccept: 'retried',
+  blocked_recovery: 'blockedPendingRecovery',
+  blocked_pending_chain_proof: 'blockedPendingRecovery',
+  skip_terminal: 'skipped',
+  skip_exhausted: 'skipped',
+};
 
 /**
  * The WRITE decision, over the job alone: what a retry pass does with it. The operator's
