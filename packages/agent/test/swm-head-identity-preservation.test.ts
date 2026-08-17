@@ -1,0 +1,933 @@
+/**
+ * GH#2273 operation identity preservation — the catch-up rows split from
+ * `swm-snapshot-materializer.test.ts` (which pins the materializer's own
+ * store-backed primitives) so each file stays scannable. Same real-store,
+ * real-`runSharedMemorySync` methodology; the small harness copies here are
+ * deliberate — consolidating the shared sync fixture is queued with the
+ * post-chain test-structure pass.
+ */
+import { afterEach, describe, expect, it } from 'vitest';
+import {
+  type OperationContext,
+} from '@origintrail-official/dkg-core';
+import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
+import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { operationIdentityKey, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
+import { makeSwmSyncHarness } from './_helpers/swm-sync-harness.js';
+import { swmFixtures } from './swm-descriptor-fixtures.js';
+
+const CG = 'ws00-materializer-real-store';
+const WS_META = `did:dkg:context-graph:${CG}/_shared_memory_meta`;
+const DKG = 'http://dkg.io/ontology/';
+const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
+const UAL = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/9';
+const ctx: OperationContext = { operationId: 'test', operationName: 'sync' } as never;
+
+const swmFx = swmFixtures(CG);
+function share(version: number, operationId: string, marker: string, ual: string = UAL, payloadCount = 2) {
+  return swmFx.share({ version, operationId, marker, ual, payloadCount });
+}
+const v1 = share(1, 'op-v1', 'version-one');
+const v2 = share(2, 'op-v2', 'version-two');
+
+function descriptorFor(fixture: typeof v1) {
+  const descriptors = parseGraphScopedSwmRecoveryDescriptors({
+    contextGraphId: CG,
+    metaQuads: fixture.meta,
+  });
+  expect(descriptors).toHaveLength(1);
+  return descriptors[0]!;
+}
+
+function materializerFor(store: TripleStore) {
+  const materializer = createSharedMemorySnapshotMaterializer({
+    store,
+    writeLocks: new Map<string, Promise<void>>(),
+    invalidateListContextGraphsCache: () => {},
+  });
+  return { materializer };
+}
+
+function inGraph(quads: readonly Quad[], graph: string): Quad[] {
+  return quads.map((quad) => ({ ...quad, graph }));
+}
+
+async function distinctObjects(store: TripleStore, graph: string, subject: string, predicate: string): Promise<string[]> {
+  const result = await store.query(
+    `SELECT DISTINCT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
+  );
+  if (result.type !== 'bindings') throw new Error(`unexpected ${result.type}`);
+  return result.bindings.map((row) => String(row['o'])).sort();
+}
+
+/**
+ * GH#2273 — catch-up must not change the operation identity of a semantically
+ * identical head. The failure this block reproduces killed queued VM-publish
+ * jobs terminally: a job freezes the head's shareOperationId at admission; a
+ * peer (typically a storage-ACKing core) legitimately holds the SAME share
+ * under a DIFFERENT deterministic id; stage 1 — the round's bulk verified-meta
+ * union-insert stacked the peer's head-id row beside the local one; stage 2 —
+ * the next round's needsRepair deleted the head AND the local operation
+ * subject, re-inserting only the remote identity, after which the preflight's
+ * `liveHead.shareOperationId !== request.shareOperationId` failed the job as
+ * terminal `publish_intent_stale` for content that never changed.
+ */
+describe('operation identity preservation (GH#2273)', () => {
+  const stores: OxigraphStore[] = [];
+  afterEach(async () => { await Promise.all(stores.splice(0).map((s) => s.close().catch(() => {}))); });
+
+  // The storage-ACK-shaped twin of `v1`: same marker => byte-identical payload,
+  // digest and operation rows (the fixture stamps a constant timestamp and
+  // publisherPeerId), differing ONLY in the operation id — the exact residue
+  // `resolveEquivalentHeadOperation`'s docstring names as legitimate.
+  const remoteEquivalent = share(1, 'storage-ack-2273b', 'version-one');
+  // Same version, different content => different digest => NOT equivalent.
+  const remoteChanged = share(1, 'storage-ack-2273c', 'version-one-changed');
+
+  function opRowsOf(fixture: typeof v1): Quad[] {
+    return fixture.meta.filter((quad) => quad.subject === fixture.operationSubject);
+  }
+
+  async function seedMaterializedLocal(store: OxigraphStore): Promise<void> {
+    // BOTH halves matter. Meta alone is the pre-fix broken state: without the
+    // assertion-graph content the per-KA path takes the MATERIALIZE branch and
+    // rewrites the head in round 1, so the two-stage shape under test would
+    // never form and the rows below would fail for the wrong reason.
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    await store.insert([...v1.meta]);
+  }
+
+  it('operationIdentityKey survives the Oxigraph round-trip (wire rows vs stored rows)', async () => {
+    // The prefer-local decision compares WIRE quads (descriptor metadata)
+    // against rows READ BACK from the store. If any allow-list object term
+    // re-serializes differently (typed integers, bare-IRI kaUal, datatype
+    // rendering), the keys never match, no suppression ever fires, and the
+    // whole fix silently degrades to a no-op in production while
+    // descriptor-vs-descriptor unit rows stay green. This row pins the
+    // round-trip byte-compatibility the comparison rests on.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([...v1.meta]);
+    const readBack = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <${WS_META}> { <${v1.operationSubject}> ?p ?o } }`,
+    );
+    expect(readBack.type).toBe('bindings');
+    if (readBack.type !== 'bindings') throw new Error('expected bindings');
+    const storedRows: Quad[] = readBack.bindings.map((row) => ({
+      subject: v1.operationSubject,
+      predicate: String(row['p'] ?? ''),
+      object: String(row['o'] ?? ''),
+      graph: WS_META,
+    }));
+    const wireKey = operationIdentityKey(opRowsOf(v1));
+    const storedKey = operationIdentityKey(storedRows);
+    expect(wireKey).not.toBeNull();
+    expect(storedKey).toBe(wireKey);
+    // And the relation itself discriminates: the equivalent twin keys equal,
+    // the changed share keys different — on the WIRE side, so a false-positive
+    // in the normalizer cannot hide behind store canonicalization.
+    expect(operationIdentityKey(opRowsOf(remoteEquivalent))).toBe(wireKey);
+    expect(operationIdentityKey(opRowsOf(remoteChanged))).not.toBe(wireKey);
+  });
+
+  it('selectRepairIdentity prefers the stored equivalent id and refuses a changed share', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    // Stage-1 residue, fabricated the way sync produces it: bare union insert.
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+      .toMatchObject({ winnerShareOperationId: 'op-v1' });
+    // Solo-removal for the equivalence conjunct: same shape, but the stored
+    // operation genuinely differs from what the descriptor offers => the
+    // decision MUST fall back to descriptor-wins (null), or a real content
+    // change could be silently masked by identity preservation.
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteChanged)))
+      .toBeNull();
+  });
+
+  it('refuses preservation for policy-envelope, author, and unresolvable-winner differences', async () => {
+    // The security-relevant HALF of the allow-list: same content digest, but
+    // the DESCRIPTOR carries a different access envelope or author. Treating
+    // those as identity-equivalent would preserve a stale local id across a
+    // real policy change — the exact protection the queued-publish preflight
+    // exists to give. And a winner that is key-equal but UNRESOLVABLE
+    // (missing publisherPeerId) must also refuse: preserving it would write a
+    // head the resolver permanently fails as corrupt, and the next round
+    // would preserve it again — a wedged KA.
+    const withRows = (base: typeof v1, extra: Quad[]): Quad[] => [...base.meta, ...extra];
+
+    // (a) descriptor adds an allowList envelope the stored operation lacks.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await seedMaterializedLocal(store);
+      const envelopeMeta = [
+        ...remoteEquivalent.meta.filter((quad) =>
+          !(quad.subject === remoteEquivalent.operationSubject && quad.predicate === `${DKG}accessPolicy`)),
+        { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+        { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
+      ];
+      await store.insert(envelopeMeta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(envelopeMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
+      const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: envelopeMeta });
+      expect(descriptors).toHaveLength(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+    }
+
+    // (b) descriptor carries a different author (prov:wasAttributedTo).
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await seedMaterializedLocal(store);
+      const authorMeta = withRows(remoteEquivalent, [
+        {
+          subject: remoteEquivalent.operationSubject,
+          predicate: 'http://www.w3.org/ns/prov#wasAttributedTo',
+          object: 'did:dkg:agent:0x9999999999999999999999999999999999999999',
+          graph: WS_META,
+        },
+      ]);
+      await store.insert(authorMeta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(authorMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
+      const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: authorMeta });
+      expect(descriptors).toHaveLength(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+    }
+
+    // (d) stored winner carries a corrupt publishedAt — also outside the key
+    // (per-node clocks), also resolver-fatal; preserving it would wedge the
+    // KA in the same preserve/corrupt/preserve loop.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(v1.meta.map((quad) =>
+        quad.subject === v1.operationSubject && quad.predicate === `${DKG}publishedAt`
+          ? { ...quad, object: '"not-a-date"' }
+          : quad));
+      await store.insert(remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(opRowsOf(remoteEquivalent));
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (e) stored winner has NO publishedAt row at all — the plain resolver
+    // tolerates it, but the published-head wrapper (RFC64 inventory) fails it
+    // as corrupt and every production writer stamps one; descriptor-wins
+    // installs a canonically stamped operation instead of preserving the
+    // anomaly forever.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(v1.meta.filter((quad) =>
+        !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publishedAt`)));
+      await store.insert(remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(opRowsOf(remoteEquivalent));
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (f) private commitment differs: same PUBLIC digest and counts, but the
+    // stored operation carries a different privateMerkleRoot than the
+    // descriptor. The private commitment is inside the identity key — a
+    // regression that drops or mis-normalizes it would silently treat a
+    // private-content change as identity-equivalent.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      const privateRow = (subject: string, root: string): Quad[] => [
+        { subject, predicate: `${DKG}privateMerkleRoot`, object: `"${root}"`, graph: WS_META },
+      ];
+      const privatize = (meta: Quad[], subject: string, root: string): Quad[] => [
+        ...meta.map((quad) =>
+          quad.subject === subject && quad.predicate === `${DKG}privateTripleCount`
+            ? { ...quad, object: `"1"^^<${XSD_INTEGER}>` }
+            : quad),
+        ...privateRow(subject, root),
+      ];
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(privatize([...v1.meta], v1.operationSubject, `0x${'aa'.repeat(32)}`));
+      const remotePrivateMeta = privatize([...remoteEquivalent.meta], remoteEquivalent.operationSubject, `0x${'bb'.repeat(32)}`);
+      await store.insert(remotePrivateMeta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(remotePrivateMeta.filter((quad) => quad.subject === remoteEquivalent.operationSubject));
+      const descriptors = parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: remotePrivateMeta });
+      expect(descriptors).toHaveLength(1);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptors[0]!)).toBeNull();
+    }
+
+    // (c) stored winner is key-equal but missing publisherPeerId — the key
+    // excludes per-node rows, so ONLY the resolvability check can catch it.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(v1.meta.filter((quad) =>
+        !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publisherPeerId`)));
+      await store.insert(remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+      await store.insert(opRowsOf(remoteEquivalent));
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+  });
+
+  it('repairHeadPreservingIdentity heals a two-valued head to the stored identity', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-v1');
+    // Head certifies exactly the local identity again, the winner's operation
+    // rows were NEVER deleted (they may be the only durable copy a queued job
+    // references), and the loser's operation subject is gone.
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, remoteEquivalent.operationSubject, `${DKG}shareOperationId`))
+      .toEqual([]);
+    // The full production reader agrees end-to-end — the same resolver the
+    // queued-publish preflight consults.
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('catch-up preserves the local identity for identical content across both stages', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+
+    // Round 1 — pre-fix: the per-KA path skipped (content identical, head
+    // healthy) and the bulk insert unioned the peer's head-id row in, leaving
+    // TWO ids under a LIMIT-1-style reader.
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    // The remote operation subject IS retained as immutable history — only the
+    // head-id row is suppressed. This also proves the bulk insert is not
+    // blanket-filtered (see the graph-backed row below for the head side).
+    expect(await distinctObjects(store, WS_META, remoteEquivalent.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"storage-ack-2273b"']);
+
+    // Round 2 — idempotent convergence: the post-fix round-1 head is already
+    // clean, so this round must simply hold the state (the DIRTY-head repair
+    // branch of the sync lane is exercised by the dedicated row below, which
+    // pre-seeds the two-valued residue).
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('kept-head preservation purges residue head rows (rewrite, not skip)', async () => {
+    // One clean version row + one clean id row is ALL the kept-head branch
+    // can see, but the resolver validates more: an extra stale assertionGraph
+    // row makes the head corrupt to readers while staying invisible to the
+    // cardinality check. A suppress-only preserve freezes that residue
+    // forever (every future round takes this same branch). Preserving must
+    // REWRITE the head from descriptor rows + the stored winner id.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert([{
+      subject: v1.headSubject,
+      predicate: `${DKG}assertionGraph`,
+      object: `${v1.assertionGraph}-stale`,
+      graph: WS_META,
+    }]);
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}assertionGraph`))
+      .toEqual([v1.assertionGraph]);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('withholds EVERY lexical form of the losing descriptor id (value-complete plan)', async () => {
+    // RDF 1.1 lets the same id arrive as a plain literal AND an
+    // xsd:string-typed literal. The parser collapses them to one descriptor
+    // id, but a withhold plan built from a single selected row misses the
+    // variant — it passes the value-based insert canonicalization and
+    // re-stacks the losing id beside the just-preserved winner.
+    const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+    const typedVariant: Quad = {
+      subject: remoteEquivalent.headSubject,
+      predicate: `${DKG}shareOperationId`,
+      object: `"storage-ack-2273b"^^<${XSD_STRING}>`,
+      graph: WS_META,
+    };
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await makeSwmSyncHarness({
+      ctx,
+      contextGraphId: CG,
+      store,
+      served: remoteEquivalent,
+      servedMeta: [...remoteEquivalent.meta, typedVariant],
+    }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+  });
+
+  it('allowedPeer rows participate in identity independently of the policy row', async () => {
+    // Two allowList operations with the SAME policy but different peer sets
+    // are DIFFERENT envelopes — preserving across an allow-list change would
+    // silently keep stale access state.
+    const base = opRowsOf(v1).filter((quad) => quad.predicate !== `${DKG}accessPolicy`);
+    const withPeers = (peers: string[]): Quad[] => [
+      ...base.map((quad) => ({ ...quad })),
+      { subject: v1.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+      ...peers.map((peer) => ({
+        subject: v1.operationSubject,
+        predicate: `${DKG}allowedPeer`,
+        object: `"${peer}"`,
+        graph: WS_META,
+      })),
+    ];
+    const keyA = operationIdentityKey(withPeers(['peer-1', 'peer-2']));
+    const keyB = operationIdentityKey(withPeers(['peer-1', 'peer-3']));
+    expect(keyA).not.toBeNull();
+    expect(keyB).not.toBeNull();
+    expect(keyA).not.toBe(keyB);
+    // Same peers => same key (set semantics, order-independent).
+    expect(operationIdentityKey(withPeers(['peer-2', 'peer-1']))).toBe(keyA);
+  });
+
+  it('refuses to preserve a winner with NO explicit accessPolicy row (usable-envelope gate)', async () => {
+    // The identity KEY treats absent-vs-explicit-default as the same share
+    // (old-metadata interop), but the VM-publish preflight requires the LIVE
+    // head's accessPolicy to be defined — preserving a policy-less winner
+    // parks the KA on an operation queued publishes cannot use, where
+    // descriptor-wins would converge to the peer's explicit-policy op. The
+    // envelope gate keeps key-equality AND usability separate concerns.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    // Stored winner: v1's rows WITHOUT the accessPolicy row.
+    await store.insert(v1.meta.filter((quad) =>
+      !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}accessPolicy`)));
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+  });
+
+  it('string-valued identity rows compare across plain and xsd:string forms', async () => {
+    // RDF 1.1: a plain literal IS an xsd:string literal. Stores may
+    // reserialize either way; if the key compared lexical forms raw,
+    // preservation would silently disable for such stores.
+    const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+    const base = opRowsOf(v1);
+    const key = operationIdentityKey(base);
+    expect(key).not.toBeNull();
+    const typed = base.map((quad) =>
+      quad.predicate === `${DKG}publicQuadsDigest` || quad.predicate === `${DKG}contextGraphId`
+        ? { ...quad, object: `${quad.object}^^<${XSD_STRING}>` }
+        : { ...quad });
+    expect(typed.some((quad) => quad.object.endsWith(`^^<${XSD_STRING}>`))).toBe(true);
+    expect(operationIdentityKey(typed)).toBe(key);
+  });
+
+  it('private content defaults to ownerOnly: absent row equals explicit ownerOnly', async () => {
+    const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
+    const privateBase = opRowsOf(v1)
+      .filter((quad) => quad.predicate !== `${DKG}accessPolicy`)
+      .map((quad) => quad.predicate === `${DKG}privateTripleCount`
+        ? { ...quad, object: `"1"^^<${XSD_INT}>` }
+        : { ...quad });
+    const explicitOwnerOnly = [...privateBase.map((quad) => ({ ...quad })),
+      { subject: v1.operationSubject, predicate: `${DKG}accessPolicy`, object: '"ownerOnly"', graph: WS_META }];
+    const key = operationIdentityKey(privateBase);
+    expect(key).not.toBeNull();
+    expect(operationIdentityKey(explicitOwnerOnly)).toBe(key);
+    // Polarity: explicit "public" on private content is a DIFFERENT envelope.
+    const explicitPublic = [...privateBase.map((quad) => ({ ...quad })),
+      { subject: v1.operationSubject, predicate: `${DKG}accessPolicy`, object: '"public"', graph: WS_META }];
+    expect(operationIdentityKey(explicitPublic)).not.toBe(key);
+  });
+
+  it('sync repairs a pre-dirtied two-valued head preserving the stored identity', async () => {
+    // The pre-upgrade residue shape: a node that ran the OLD code already has
+    // BOTH ids stacked on the head. This row drives the FULL sync lane (not a
+    // direct materializer call) against that state, so a regression that
+    // bypasses identity preservation only inside the storedHead.needsRepair
+    // branch of runSharedMemorySync cannot stay green behind the clean-head
+    // rows above.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"', '"storage-ack-2273b"']);
+
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager: new GraphManager(store),
+      contextGraphId: CG,
+      kaUal: UAL,
+    });
+    expect(head?.shareOperationId).toBe('op-v1');
+  });
+
+  it('an absent accessPolicy row and the explicit default are the SAME identity', async () => {
+    // The publisher's own effective-default rule: absent =>
+    // privateTripleCount > 0 ? ownerOnly : public. Older stored operations
+    // legitimately omit the row; a peer re-serving the same share stamps the
+    // explicit default. Key-level raw-presence comparison refused this pair
+    // and re-opened the stale-intent rotation for old-metadata interop.
+    const explicitDefault: Quad = {
+      subject: v1.operationSubject,
+      predicate: `${DKG}accessPolicy`,
+      object: '"public"',
+      graph: WS_META,
+    };
+    const localRows = opRowsOf(v1).filter((quad) => quad.predicate !== `${DKG}accessPolicy`);
+    expect(localRows.some((quad) => quad.predicate === `${DKG}accessPolicy`)).toBe(false);
+    const remoteRows = [...localRows.map((quad) => ({ ...quad })), explicitDefault];
+    const localKey = operationIdentityKey(localRows);
+    expect(localKey).not.toBeNull();
+    expect(operationIdentityKey(remoteRows)).toBe(localKey);
+    // Polarity: a NON-default explicit policy is still a genuine change.
+    const ownerOnly = [...localRows.map((quad) => ({ ...quad })),
+      { ...explicitDefault, object: '"ownerOnly"' }];
+    expect(operationIdentityKey(ownerOnly)).not.toBe(localKey);
+  });
+
+  it('preserves the local identity when catch-up MATERIALIZES absent content (r26 state)', async () => {
+    // Head and local operation exist but the assertion graph is empty — the
+    // #2050 r26 residual. Catch-up must fill the graph from the equivalent
+    // peer snapshot AND keep certifying the local identity: this exercises
+    // the materialize-path repairOrReplaceHead call site through the real
+    // sync loop, which the direct repair rows above cannot reach. A
+    // regression that reverts that call site to replaceHeadMetadata leaves
+    // every other GH#2273 row green and only fails here.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert([...v1.meta]);
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteEquivalent }).run();
+    // Content materialized from the peer snapshot...
+    const content = await store.query(
+      `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${v1.assertionGraph}> { ?s ?p ?o } }`,
+    );
+    expect(content.type).toBe('bindings');
+    if (content.type !== 'bindings') throw new Error('expected bindings');
+    expect(String(content.bindings[0]?.['c'] ?? '')).toContain('2');
+    // ...and the identity queued jobs reference survived the head rewrite.
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+  });
+
+  it('does not suppress a same-digest descriptor whose envelope differs (sync-level polarity)', async () => {
+    // The negative half of the healthy-skip branch, exercised through the
+    // REAL sync loop rather than the decision API: same content digest, but
+    // the peer's operation adds an allowList envelope. The decision must
+    // refuse preservation and — critically for the LEDGER — must NOT
+    // suppress the descriptor's head-id row: the union lands it beside the
+    // local id, and the next round's repair converges to remote authority,
+    // exactly today's behavior for a genuine policy change. A regression
+    // that suppresses whenever ids differ would pass every decision-level
+    // row and mask the policy change here.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    const envelopeMeta = [
+      ...remoteEquivalent.meta.filter((quad) =>
+        !(quad.subject === remoteEquivalent.operationSubject && quad.predicate === `${DKG}accessPolicy`)),
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}accessPolicy`, object: '"allowList"', graph: WS_META },
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}allowedPeer`, object: '"peer-b"', graph: WS_META },
+    ];
+    await makeSwmSyncHarness({
+      ctx,
+      contextGraphId: CG,
+      store,
+      served: { digest: remoteEquivalent.digest, payload: remoteEquivalent.payload, meta: envelopeMeta },
+    }).run();
+    expect((await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`)).length).toBe(2);
+  });
+
+  it('a genuinely changed share still adopts the remote identity (discriminator polarity)', async () => {
+    // Same version, different digest: the materialized guard sees foreign
+    // content, the graph is replaced from the peer snapshot, and the repair
+    // decision must NOT preserve the local id — the share really changed, and
+    // the preflight rejecting a queued job against it is the CORRECT outcome
+    // (issue #2273's own negative acceptance test).
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: remoteChanged }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"storage-ack-2273c"']);
+    expect(await distinctObjects(store, WS_META, v1.operationSubject, `${DKG}shareOperationId`))
+      .toEqual([]);
+  });
+
+  it('an older version\'s head rows never union onto the live head', async () => {
+    // The version-superseded exit used to return WITHOUT withholding the stale
+    // descriptor's head rows from the bulk append, so a peer still serving v1
+    // stacked a second assertionVersion (and operation id) onto a v2 head —
+    // the overwrite-with-older hazard arriving via the metadata side, and a
+    // state the phased resolver now fails closed on.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v2.payload, v2.assertionGraph));
+    await store.insert([...v2.meta]);
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: v1 }).run();
+    expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}assertionVersion`))
+      .toEqual([`"2"^^<${XSD_INTEGER}>`]);
+    expect(await distinctObjects(store, WS_META, v2.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v2"']);
+  });
+
+  it('refuses a stored winner missing its WorkspaceOperation type row (responder-join gate)', async () => {
+    // The sync responder's serving join requires rdf:type WorkspaceOperation
+    // on the operation subject — outside both the identity key and the head
+    // decoder. A typeless preserved winner would resolve locally but be
+    // unservable to peers.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    await store.insert(v1.meta.filter((quad) =>
+      !(quad.subject === v1.operationSubject
+        && quad.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type')));
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+  });
+
+  it('refuses a stored winner whose snapshot-graph locator is stale, wrong or ambiguous', async () => {
+    // The locator is outside the identity key (its graph form embeds the
+    // operation id) and outside the head decoder (which never consumes
+    // snapshot pointers) — so ONLY this gate keeps a preserved head from
+    // advertising an id whose public quads the sync responder cannot serve.
+    const winnerSnapshotGraph = `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/op-v1/ka`;
+    const localWithLocator = (extra: Quad[]): Quad[] => [
+      ...v1.meta.filter((quad) =>
+        !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publicSnapshotRef`)),
+      { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotGraph`, object: winnerSnapshotGraph, graph: WS_META },
+      ...extra,
+    ];
+    const remoteRows = [
+      ...remoteEquivalent.meta.filter((quad) =>
+        quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`),
+      ...opRowsOf(remoteEquivalent),
+    ];
+
+    // (a) graph-form locator whose snapshot graph is EMPTY => refuse.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(localWithLocator([]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (b) same locator with the snapshot graph fully populated => preserve.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(inGraph(v1.payload, winnerSnapshotGraph));
+      await store.insert(localWithLocator([]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+        .toMatchObject({ winnerShareOperationId: 'op-v1' });
+    }
+
+    // (b2) SAME-COUNT but WRONG content in the snapshot graph => refuse.
+    // Count equality is only the cheap pre-gate: a stale snapshot of equal
+    // size is the risky integrity shape, and only the content-digest
+    // comparison catches it (remoteChanged.payload deliberately has the same
+    // quad count as the committed content).
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      expect(remoteChanged.payload.length).toBe(v1.payload.length);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(inGraph(remoteChanged.payload, winnerSnapshotGraph));
+      await store.insert(localWithLocator([]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (c) BOTH locator forms on the stored winner => ambiguous => refuse.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(inGraph(v1.payload, winnerSnapshotGraph));
+      await store.insert(localWithLocator([
+        { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"${v1.digest}"`, graph: WS_META },
+      ]));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (c2) MALFORMED graph locator (a literal, not an IRI term — the shape a
+    // store can actually hold: Oxigraph refuses schemeless IRI terms at
+    // insert) => refuse WITHOUT throwing.
+    // `resolveKnowledgeAssetOperationPublicQuads` only follows locators that
+    // pass `isSafeIri`, so readers would reject this winner — and pre-fix the
+    // gate THREW out of `assertSafeIri` on the malformed value, stalling the
+    // sync round on exactly the corrupt rows descriptor-wins repair exists
+    // for. The decision must be a clean null.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert(localWithLocator([]).map((quad) =>
+        quad.predicate === `${DKG}publicSnapshotGraph`
+          ? { ...quad, object: '"snapshot-local"' }
+          : quad));
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      await expect(materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent)))
+        .resolves.toBeNull();
+    }
+
+    // (d) REF-form locator that is NOT the committed digest => refuse.
+    // The resolver's read-both rule makes an explicit publicSnapshotRef row
+    // WIN over the digest fallback, so preserving this winner would leave a
+    // head whose readers follow the stale ref to missing or wrong content —
+    // while the identity key (locators excluded) still matches. The default
+    // fixture rows (ref === digest, pinned preserving in the rows above) are
+    // the polarity partner.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([
+        ...v1.meta.filter((quad) =>
+          !(quad.subject === v1.operationSubject && quad.predicate === `${DKG}publicSnapshotRef`)),
+        { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"sha256:${'b'.repeat(64)}"`, graph: WS_META },
+      ]);
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+
+    // (e) MULTI-VALUED ref rows (one canonical, one stale) => refuse: the
+    // reader picks one arbitrarily, so serveability cannot be certified.
+    {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      await store.insert([
+        ...v1.meta,
+        { subject: v1.operationSubject, predicate: `${DKG}publicSnapshotRef`, object: `"sha256:${'b'.repeat(64)}"`, graph: WS_META },
+      ]);
+      await store.insert(remoteRows);
+      const { materializer } = materializerFor(store);
+      expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+    }
+  });
+
+  it('selects the deterministic sorted winner among multiple equivalent stored ids', async () => {
+    // Repeated catch-up rounds can stack MORE than one equivalent stored id
+    // on a dirty head. The contract breaks ties lexicographically (sorted
+    // foreign ids, first wins) so every node converges on the SAME winner; a
+    // regression to insertion-order or an arbitrary store sample would keep
+    // single-id rows green while nodes diverge. Both stored twins are
+    // byte-identical shares, so the all-candidates-must-match gate passes and
+    // ONLY the tie-break decides.
+    const twinA = share(1, 'op-aa', 'version-one');
+    const twinB = share(1, 'op-ab', 'version-one');
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    // Insertion order deliberately REVERSED from the expected winner order.
+    await store.insert([...twinB.meta]);
+    await store.insert([...twinA.meta]);
+    const { materializer } = materializerFor(store);
+    const preserved = await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent));
+    expect(preserved).toMatchObject({ winnerShareOperationId: 'op-aa' });
+    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-aa');
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-aa"']);
+  });
+
+  it('integer lexical forms compare by numeric value in the identity key', async () => {
+    // The wire and store sides of the comparison may canonicalize integer
+    // lexical forms differently; the key must compare by VALUE or equivalent
+    // shares silently stop preserving. "02" vs "2" is the focused mismatch.
+    const XSD_INT = 'http://www.w3.org/2001/XMLSchema#integer';
+    const padded = opRowsOf(v1).map((quad) =>
+      quad.predicate === `${DKG}publicQuadsCount`
+        ? { ...quad, object: `"0${quad.object.replace(/^"|"\^\^.*$/g, '')}"^^<${XSD_INT}>` }
+        : quad);
+    expect(operationIdentityKey(padded)).toBe(operationIdentityKey(opRowsOf(v1)));
+    // And the value still discriminates: a genuinely different count differs.
+    const bumped = opRowsOf(v1).map((quad) =>
+      quad.predicate === `${DKG}publicQuadsCount`
+        ? { ...quad, object: `"7"^^<${XSD_INT}>` }
+        : quad);
+    expect(operationIdentityKey(bumped)).not.toBe(operationIdentityKey(opRowsOf(v1)));
+  });
+
+  it('subGraphName participates in operation identity (key-level pin)', async () => {
+    // Identity must not cross subgraph lanes: two otherwise byte-equivalent
+    // operations in different lanes are DIFFERENT shares. Pinned at the key
+    // level — the preservation machinery turns any key inequality into
+    // descriptor-wins, so this is the predicate-membership row the sync
+    // fixtures (default-lane) cannot express.
+    const alpha = opRowsOf(v1).concat([
+      { subject: v1.operationSubject, predicate: `${DKG}subGraphName`, object: '"alpha"', graph: WS_META },
+    ]);
+    const alphaTwin = opRowsOf(remoteEquivalent).concat([
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}subGraphName`, object: '"alpha"', graph: WS_META },
+    ]);
+    const beta = opRowsOf(remoteEquivalent).concat([
+      { subject: remoteEquivalent.operationSubject, predicate: `${DKG}subGraphName`, object: '"beta"', graph: WS_META },
+    ]);
+    expect(operationIdentityKey(alpha)).toBe(operationIdentityKey(alphaTwin));
+    expect(operationIdentityKey(alpha)).not.toBe(operationIdentityKey(beta));
+    // And one-sided presence (lane row on one operation only) also differs.
+    expect(operationIdentityKey(alpha)).not.toBe(operationIdentityKey(opRowsOf(remoteEquivalent)));
+  });
+
+  it('refuses a stored winner whose own id row does not echo the head reference (echo guard)', async () => {
+    // The head references op-v1, the operation SUBJECT exists, but its own
+    // shareOperationId row says something else — the resolver's id-echo rule
+    // rejects that operation, so preservation must refuse it too. This is the
+    // one resolvability conjunct the other unresolvable-winner sub-rows do
+    // not isolate.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.insert(inGraph(v1.payload, v1.assertionGraph));
+    await store.insert(v1.meta.map((quad) =>
+      quad.subject === v1.operationSubject && quad.predicate === `${DKG}shareOperationId`
+        ? { ...quad, object: '"wrong-id"' }
+        : quad));
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+  });
+
+  it('spares another KA\'s operation when repairing with a preserved winner (ownership guard)', async () => {
+    // A corrupted head can reference an operation subject that belongs to a
+    // DIFFERENT KA. The preserving repair deletes loser operation subjects,
+    // and its kaUal ownership guard is what keeps that deletion from
+    // destroying the other KA's metadata — the same guard the older
+    // replaceHeadMetadata rows pin, re-proven here on the NEW method.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    // Foreign KA's operation, referenced by OUR corrupted head.
+    const FOREIGN_UAL = 'did:dkg:hardhat:31337/0xdddddddddddddddddddddddddddddddddddddddd/4';
+    const foreignOpSubject = `urn:dkg:share:${CG}:foreign-ka-op`;
+    await store.insert([
+      { subject: v1.headSubject, predicate: `${DKG}shareOperationId`, object: '"foreign-ka-op"', graph: WS_META },
+      { subject: foreignOpSubject, predicate: `${DKG}shareOperationId`, object: '"foreign-ka-op"', graph: WS_META },
+      { subject: foreignOpSubject, predicate: `${DKG}kaUal`, object: FOREIGN_UAL, graph: WS_META },
+    ]);
+    const { materializer } = materializerFor(store);
+    await materializer.repairHeadPreservingIdentity(CG, descriptorFor(remoteEquivalent), 'op-v1');
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+    // The foreign KA's operation rows survived the loser sweep.
+    expect(await distinctObjects(store, WS_META, foreignOpSubject, `${DKG}shareOperationId`))
+      .toEqual(['"foreign-ka-op"']);
+  });
+
+  it('refuses preservation when ANY stored identity on a dirty head is non-equivalent (mixed ids)', async () => {
+    // The contract quantifies over EVERY stored operation the head
+    // references: preserving because ONE foreign id matched, while another
+    // carries a different digest or policy, would mask a real change hiding
+    // on a dirty head. A regression that returns at the first match passes
+    // the single-id rows and only fails here.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedMaterializedLocal(store);
+    await store.insert(remoteEquivalent.meta.filter((quad) =>
+      quad.subject === remoteEquivalent.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteEquivalent));
+    await store.insert(remoteChanged.meta.filter((quad) =>
+      quad.subject === remoteChanged.headSubject && quad.predicate === `${DKG}shareOperationId`));
+    await store.insert(opRowsOf(remoteChanged));
+    const { materializer } = materializerFor(store);
+    expect(await materializer.selectRepairIdentity(CG, descriptorFor(remoteEquivalent))).toBeNull();
+  });
+
+  it('a graph-backed KA still gets its head from the bulk insert (suppression is decision-driven)', async () => {
+    // Graph-backed descriptors (publicSnapshotGraph, no publicSnapshotRef)
+    // never enter the per-KA loop — the round's bulk insert is their ONLY head
+    // writer. A blanket head-row filter instead of decision-driven suppression
+    // would leave them permanently headless (the #2050 G7 invisibility class).
+    const store = new OxigraphStore();
+    stores.push(store);
+    const graphBacked = {
+      ...v1,
+      meta: [
+        ...v1.meta.filter((quad) => quad.predicate !== `${DKG}publicSnapshotRef`),
+        {
+          subject: v1.operationSubject,
+          predicate: `${DKG}publicSnapshotGraph`,
+          object: `did:dkg:context-graph:${CG}/_shared_memory_snapshots/_/${v1.operationId}/ka`,
+          graph: WS_META,
+        },
+      ],
+    };
+    await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, served: graphBacked as typeof v1 }).run();
+    expect(await distinctObjects(store, WS_META, v1.headSubject, `${DKG}shareOperationId`))
+      .toEqual(['"op-v1"']);
+  });
+});
