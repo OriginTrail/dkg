@@ -824,8 +824,9 @@ export interface DkgConfig {
     retryJitterRatio?: number;
     /**
      * GH#2270 — first retry delay in ms; doubles per attempt up to
-     * `retryBackoffMaxMs`. Default 5000. Must be set together with
-     * `retryBackoffMaxMs`.
+     * `retryBackoffMaxMs`. Default 5000. May be set independently: the
+     * EFFECTIVE pair (explicit value + default for the unset knob) is
+     * validated as `max >= base` at the shared resolver.
      */
     retryBackoffBaseMs?: number;
     /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */

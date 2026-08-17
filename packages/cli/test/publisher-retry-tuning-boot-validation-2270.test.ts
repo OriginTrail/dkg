@@ -161,6 +161,16 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     expect(mocks.agentCreate).not.toHaveBeenCalled();
   });
 
+  it('validates for ANY truthy enabled value, matching the runtime gate', async () => {
+    // The runner starts the publisher on a TRUTHY enabled, so the boot gate
+    // must cover exactly that set — a strict-boolean gate would skip
+    // validation for enabled: 1 while the runtime still constructs and
+    // crashes mid-boot.
+    await expect(bootWith({ retryJitterRatio: '0.2' as never }, { enabled: 1 as never }))
+      .rejects.toThrow(/publisher\.retryJitterRatio must be a number/);
+    expect(mocks.agentCreate).not.toHaveBeenCalled();
+  });
+
   it('boots past the boundary when the publisher is DISABLED, even with an invalid knob', async () => {
     // A typo in a dormant publisher block must not take the node down: no
     // retry scheduler is constructed while enabled is false, so nothing
