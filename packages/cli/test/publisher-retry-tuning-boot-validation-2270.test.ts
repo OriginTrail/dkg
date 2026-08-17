@@ -115,13 +115,16 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     tempHome = undefined;
   });
 
-  function bootWith(publisher: Record<string, unknown>): Promise<unknown> {
+  function bootWith(
+    publisher: Record<string, unknown>,
+    overrides: Record<string, unknown> = {},
+  ): Promise<unknown> {
     return runDaemonInner(true, {
       name: 'retry-tuning-boot-test',
       networkConfig: 'mainnet-gnosis',
       listenPort: 0,
       nodeRole: 'core',
-      publisher: { enabled: true, ...publisher },
+      publisher: { enabled: true, ...publisher, ...overrides },
       chain: {
         type: 'evm',
         rpcUrl: 'https://private-rpc.example',
@@ -156,6 +159,20 @@ describe('runDaemonInner publisher retry-knob config validation (#2270)', () => 
     await expect(bootWith({ retryBackoffBaseMs: 120_000 }))
       .rejects.toThrow(/publisher\.retryBackoffMaxMs \(60000, the default\) must be at least/);
     expect(mocks.agentCreate).not.toHaveBeenCalled();
+  });
+
+  it('boots past the boundary when the publisher is DISABLED, even with an invalid knob', async () => {
+    // A typo in a dormant publisher block must not take the node down: no
+    // retry scheduler is constructed while enabled is false, so nothing
+    // consumes the bad value. Operators disable the publisher precisely to
+    // keep the node serving while they fix its config.
+    await expect(bootWith({ retryJitterRatio: '0.2' as never }, { enabled: false }))
+      .rejects.toThrow('after-agent-create');
+    expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
+    const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
+    const db = createArg?.chainEventCursorStore?.cursors?.db
+      ?? createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
+    db?.close?.();
   });
 
   it('boots past the boundary with a fully valid retry-knob block', async () => {

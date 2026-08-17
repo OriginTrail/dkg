@@ -49,6 +49,25 @@ function requireOptionalPositiveMs(value: unknown, field: string): number | unde
  * checked against the EFFECTIVE values (explicit or default), so a base-only
  * or max-only configuration is legal exactly when the pair it induces is.
  */
+/**
+ * Fully-defaulted runtime values — what the publisher actually applies. The
+ * sparse `resolveAsyncLiftRetryTuning` is the CONFIG-projection contract
+ * (unset stays unset, the #1836 rule); this is the RUNTIME contract, so no
+ * caller ever re-implements the defaulting step.
+ */
+export function resolveEffectiveAsyncLiftRetryTuning(
+  input: AsyncLiftRetryTuningInput | null | undefined,
+  label = 'retry tuning',
+): Required<AsyncLiftRetryTuning> {
+  const sparse = resolveAsyncLiftRetryTuning(input, label);
+  return {
+    autoRetryEnabled: sparse.autoRetryEnabled ?? true,
+    retryJitterRatio: sparse.retryJitterRatio ?? DEFAULT_RETRY_JITTER_RATIO,
+    retryBackoffBaseMs: sparse.retryBackoffBaseMs ?? DEFAULT_RETRY_BACKOFF_BASE_MS,
+    retryBackoffMaxMs: sparse.retryBackoffMaxMs ?? DEFAULT_RETRY_BACKOFF_MAX_MS,
+  };
+}
+
 export function resolveAsyncLiftRetryTuning(
   input: AsyncLiftRetryTuningInput | null | undefined,
   label = 'retry tuning',

@@ -253,15 +253,19 @@ export {
   isRetryableLiftJobFailure,
   isTerminalLiftJobFailure,
   isTimeoutLiftJobFailure,
-  // GH#2270 — the ONE retry-tuning validation/defaults owner, consumed by the
-  // daemon config boundary so ranges and defaults cannot drift cross-package.
+} from './lift-job.js';
+// GH#2270 — publisher RUNTIME configuration (not lift-job domain model): the
+// ONE retry-tuning validation/defaults owner, consumed by the daemon config
+// boundary so ranges and defaults cannot drift cross-package.
+export {
   DEFAULT_RETRY_BACKOFF_BASE_MS,
   DEFAULT_RETRY_BACKOFF_MAX_MS,
   DEFAULT_RETRY_JITTER_RATIO,
   resolveAsyncLiftRetryTuning,
+  resolveEffectiveAsyncLiftRetryTuning,
   type AsyncLiftRetryTuning,
   type AsyncLiftRetryTuningInput,
-} from './lift-job.js';
+} from './async-lift-retry-tuning.js';
 export {
   AsyncLiftJobConflictError,
   TripleStoreAsyncLiftPublisher,

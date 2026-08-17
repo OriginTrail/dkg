@@ -6,12 +6,7 @@ import {
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
 import type { PhaseCallback, PublishResult } from './publisher.js';
-import {
-  DEFAULT_RETRY_BACKOFF_BASE_MS,
-  DEFAULT_RETRY_BACKOFF_MAX_MS,
-  DEFAULT_RETRY_JITTER_RATIO,
-  resolveAsyncLiftRetryTuning,
-} from './async-lift-retry-tuning.js';
+import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
 import {
   LIFT_JOB_STATES,
   assertLiftJobTransition,
@@ -298,11 +293,11 @@ export class TripleStoreAsyncLiftPublisher
     // backoff invariant checked against the EFFECTIVE (explicit-or-default)
     // pair. A non-boolean autoRetryEnabled (e.g. the string "false") throws
     // here instead of silently enabling the lane.
-    const retryTuning = resolveAsyncLiftRetryTuning(config, 'Async lift publisher');
-    this.retryBackoffBaseMs = retryTuning.retryBackoffBaseMs ?? DEFAULT_RETRY_BACKOFF_BASE_MS;
-    this.retryBackoffMaxMs = retryTuning.retryBackoffMaxMs ?? DEFAULT_RETRY_BACKOFF_MAX_MS;
-    this.autoRetryEnabled = retryTuning.autoRetryEnabled ?? true;
-    this.retryJitterRatio = retryTuning.retryJitterRatio ?? DEFAULT_RETRY_JITTER_RATIO;
+    const retryTuning = resolveEffectiveAsyncLiftRetryTuning(config, 'Async lift publisher');
+    this.retryBackoffBaseMs = retryTuning.retryBackoffBaseMs;
+    this.retryBackoffMaxMs = retryTuning.retryBackoffMaxMs;
+    this.autoRetryEnabled = retryTuning.autoRetryEnabled;
+    this.retryJitterRatio = retryTuning.retryJitterRatio;
     this.recoveryLookupTimeoutMs = config.recoveryLookupTimeoutMs ?? TripleStoreAsyncLiftPublisher.DEFAULT_RECOVERY_LOOKUP_TIMEOUT_MS;
     this.lockLeaseMs = 5 * 60 * 1000;
     this.now = config.now ?? (() => Date.now());

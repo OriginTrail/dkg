@@ -1300,12 +1300,17 @@ export async function runDaemonInner(
 
   const storageAckTiming = resolveStorageAckTiming(config.storageAck);
   // GH#2270 — fail the boot here, at the same boundary as StorageACK timing, on
-  // a bad publisher retry knob. The publisher runtime starts deferred and folds
-  // its construction error into `publisher_startup_failed`, so without this a
+  // a bad publisher retry knob — but ONLY when the publisher will actually run:
+  // with `publisher.enabled` false no retry scheduler is constructed, and a
+  // typo in a dormant block must not stop the node from serving (operators
+  // disable the publisher precisely to keep the node up while fixing its
+  // config). When enabled, the publisher runtime starts deferred and folds its
+  // construction error into `publisher_startup_failed`, so without this gate a
   // typo'd knob leaves a node that boots and serves but never publishes,
-  // announced only by one deferred-startup log line. `resolvePublisherRetryTuning`
-  // is pure; `startPublisherRuntimeIfEnabled` re-resolves it to project the knobs.
-  resolvePublisherRetryTuning(config.publisher);
+  // announced only by one deferred-startup log line.
+  if (config.publisher?.enabled === true) {
+    resolvePublisherRetryTuning(config.publisher);
+  }
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
