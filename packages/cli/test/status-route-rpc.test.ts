@@ -584,6 +584,7 @@ describe('/api/status selected overlay details', () => {
         agent: {
           peerId: 'peer-status-test',
           multiaddrs: [],
+          getSyncContextGraphIds: () => [],
           node: {
             libp2p: { getConnections: () => [] },
             getRelayStats: () => null,
@@ -656,6 +657,7 @@ describe('/api/status selected overlay details', () => {
           agent: {
             peerId: 'peer-status-test',
             multiaddrs: [],
+            getSyncContextGraphIds: () => [],
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
           },
