@@ -83,8 +83,6 @@ export {
   type SharedMemoryFreshnessSummary,
 } from './sync/shared-memory-freshness.js';
 export {
-  projectRfc64SelectedSwmGraphSyncStatus,
-  type ProjectRfc64SelectedSwmGraphSyncStatusInput,
   type Rfc64SelectedSwmGraphSyncStatus,
 } from './sync/selected-swm-graph-sync-status.js';
 export {
