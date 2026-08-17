@@ -241,18 +241,20 @@ export interface SharedMemorySnapshotMaterializer {
    * preserve ONE capability over ONE store and lock map.
    */
   hasGraphAssetMarker(descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean>;
+  /**
+   * Canonical graph-asset meta replacement (delete head + kaUal-owned linked
+   * operation subjects) over THIS materializer's store — the one cleanup
+   * implementation shared by the lifecycle wiring and the recovery suites.
+   */
+  replaceMetaForGraphAssets(assets: readonly GraphScopedSwmRecoveryDescriptor[]): Promise<void>;
 }
 
 /**
- * Canonical graph-asset meta replacement for the private curator-recovery
- * lane: delete the head subject plus every kaUal-owned operation subject
- * linked through the head's current shareOperationId(s), making room for the
- * descriptor's rows in the subsequent raw insert. ONE implementation shared
- * by the lifecycle wiring and the recovery suites — a test-local shadow copy
- * could silently drift from the ownership guard or deletion set it claims to
- * exercise.
+ * Implementation of {@link SharedMemorySnapshotMaterializer.replaceMetaForGraphAssets}
+ * — consume it through the materializer, which binds it to one store; the
+ * bare-function form exists only for that binding.
  */
-export async function replaceWorkspaceMetaForGraphAssets(
+async function replaceWorkspaceMetaForGraphAssets(
   store: TripleStore,
   assets: readonly GraphScopedSwmRecoveryDescriptor[],
 ): Promise<void> {
@@ -605,6 +607,9 @@ export function createSharedMemorySnapshotMaterializer(deps: {
       }
     },
 
+    replaceMetaForGraphAssets: (assets) =>
+      replaceWorkspaceMetaForGraphAssets(deps.store, assets),
+
     hasGraphAssetMarker: async (descriptor) => {
       const result = await deps.store.query(
         `ASK { GRAPH <${assertSafeIri(descriptor.metaGraph)}> { ` +
@@ -639,19 +644,17 @@ export function createSharedMemorySnapshotMaterializer(deps: {
           } catch {
             return { outcome: 'replace' as const };
           }
-          let winnerShareOperationId: string;
-          let withholdRows: readonly Quad[];
           if (stored.shareOperationId === descriptor.shareOperationId) {
-            // Identical healthy identity: the descriptor's id row is
-            // byte-identical, so there is nothing to withhold.
-            winnerShareOperationId = stored.shareOperationId;
-            withholdRows = [];
-          } else {
-            const selected = await materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
-            if (selected === null) return { outcome: 'replace' as const };
-            winnerShareOperationId = selected.winnerShareOperationId;
-            withholdRows = selected.withholdRows;
+            // Identical id: replacement IS identity-preserving by
+            // construction (the descriptor reinstalls the same id), and it
+            // is the only healer for op-subject corruption — a duplicate
+            // singleton row survives any union insert, and a skip would park
+            // the KA on rows the resolver fails closed on, forever.
+            return { outcome: 'replace' as const };
           }
+          const selected = await materializerSelf.selectRepairIdentity(contextGraphId, descriptor);
+          if (selected === null) return { outcome: 'replace' as const };
+          const { winnerShareOperationId, withholdRows } = selected;
           // ENACT while still holding the lock: rewrite the head from the
           // descriptor's rows with the id swapped to the winner. The health
           // check above models only version/id cardinality; the rewrite is

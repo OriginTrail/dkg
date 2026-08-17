@@ -315,7 +315,7 @@ import {
   createSelectedSwmMetaFetcher,
   type SelectedSwmMetaFetcher,
 } from './sync/selected-swm-meta-fetcher.js';
-import { createSharedMemorySnapshotMaterializer, replaceWorkspaceMetaForGraphAssets } from './sync/requester/swm-snapshot-materializer.js';
+import { createSharedMemorySnapshotMaterializer } from './sync/requester/swm-snapshot-materializer.js';
 import {
   runOrderedContextGraphSyncs,
   type ContextGraphSyncWork,
@@ -10155,7 +10155,7 @@ async function runRecoverContextGraphSwmFromPeer(
       }
     },
     replaceMetaForGraphAssets: (assets) =>
-      replaceWorkspaceMetaForGraphAssets(dependencies.store, assets),
+      dependencies.snapshotMaterializer.replaceMetaForGraphAssets(assets),
     ensureContextGraph: async (cgId) => {
       const graphManager = new GraphManager(dependencies.store);
       await graphManager.ensureContextGraph(cgId);

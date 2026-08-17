@@ -15,10 +15,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
-import {
-  createSharedMemorySnapshotMaterializer,
-  replaceWorkspaceMetaForGraphAssets,
-} from '../src/sync/requester/swm-snapshot-materializer.js';
+import { createSharedMemorySnapshotMaterializer } from '../src/sync/requester/swm-snapshot-materializer.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../src/sync/graph-scoped-swm-recovery.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
 
@@ -39,11 +36,10 @@ function page(quads: Quad[], completed = true): SyncPageResult {
  * member-author's head + operation subject and installed the curator's
  * identity for content that never changed — the single-step form of the
  * rotation that terminally kills queued VM-publish jobs frozen on the local
- * id. These rows wire the REAL meta replacement (shared
- * `replaceWorkspaceMetaForGraphAssets`) and the real materializer (owner of
- * both the marker-only skip predicate and the preserve decision), OPT-IN per
- * row — the legacy suites deliberately run without them and pin the lane's
- * other behaviors unchanged.
+ * id. These rows wire ONE real materializer per store as the owner of skip,
+ * preserve AND canonical meta replacement — the same boundary the lifecycle
+ * wires, OPT-IN per row; the legacy suites deliberately run without it and
+ * pin the lane's other behaviors unchanged.
  */
 describe('recoverContextGraphSwm preserves operation identity for skipped KAs (GH#2273)', () => {
   const stores: OxigraphStore[] = [];
@@ -97,19 +93,19 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
   }
 
   function identityDeps(store: OxigraphStore, curatorMeta: Quad[]) {
+    // ONE materializer instance owns skip, preserve AND canonical meta
+    // replacement — the same single boundary the lifecycle wires; no
+    // test-local shadow copies to drift from the code this suite exercises.
+    const snapshotMaterializer = createSharedMemorySnapshotMaterializer({
+      store,
+      writeLocks: new Map<string, Promise<void>>(),
+      invalidateListContextGraphsCache: () => {},
+    });
     return {
       ...makeIdentityBaseDeps(store, curatorMeta),
-      // The CANONICAL production implementations (shared with the lifecycle
-      // wiring): the meta replacement, and — via the materializer — both the
-      // marker-only skip predicate and the preserve decision. No test-local
-      // shadow copies to drift from the code this suite claims to exercise.
       replaceMetaForGraphAssets: (assets: readonly GraphScopedSwmRecoveryDescriptor[]) =>
-        replaceWorkspaceMetaForGraphAssets(store, assets),
-      snapshotMaterializer: createSharedMemorySnapshotMaterializer({
-        store,
-        writeLocks: new Map<string, Promise<void>>(),
-        invalidateListContextGraphsCache: () => {},
-      }),
+        snapshotMaterializer.replaceMetaForGraphAssets(assets),
+      snapshotMaterializer,
     };
   }
 
@@ -146,6 +142,59 @@ describe('recoverContextGraphSwm preserves operation identity for skipped KAs (G
     // The curator's operation subject lands as immutable history (same
     // disposal as the public lane) — only its head-id row is withheld.
     expect(await opSubjectExists(store, curatorEquivalent.operationSubject)).toBe(true);
+  });
+
+  it('same-id skipped assets are REPLACED, healing corrupt operation rows', async () => {
+    // When the stored id equals the descriptor's, replacement IS
+    // identity-preserving by construction — and it is also the only healer
+    // for op-subject corruption: a duplicate singleton row (two accessPolicy
+    // values, say) cannot be removed by the union insert, and a preserve
+    // that skips replacement parks the KA on rows the resolver fails
+    // closed on, round after round.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store);
+    await store.insert([{
+      subject: localShare.operationSubject,
+      predicate: `${DKG}accessPolicy`,
+      object: '"ownerOnly"',
+      graph: WS_META,
+    }]);
+    const sameId = swmFx.share({ version: 1, operationId: 'op-local', marker: 'identity', ual: UAL3 });
+    const result = await recoverContextGraphSwm(identityDeps(store, [...sameId.meta]));
+    expect(result.completed).toBe(true);
+    expect(await headIds(store)).toEqual(['"op-local"']);
+    const policies = await store.query(
+      `SELECT ?o WHERE { GRAPH <${WS_META}> { <${localShare.operationSubject}> <${DKG}accessPolicy> ?o } }`,
+    );
+    expect(policies.type).toBe('bindings');
+    if (policies.type === 'bindings') {
+      expect(policies.bindings.map((row) => String(row['o'])).sort()).toEqual(['"public"']);
+    }
+  });
+
+  it('withholds every lexical form of the losing id in the PRIVATE lane', async () => {
+    // Mirror of the public-lane row: the curator serves its head id as BOTH
+    // a plain and an xsd:string-typed literal; the recovery insert filter
+    // consumes the materializer's withhold plan, and a regression that
+    // withheld only one form would re-stack the losing id beside the
+    // preserved local identity.
+    const XSD_STRING = 'http://www.w3.org/2001/XMLSchema#string';
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedLocal(store);
+    const servedMeta = [
+      ...curatorEquivalent.meta,
+      {
+        subject: curatorEquivalent.headSubject,
+        predicate: `${DKG}shareOperationId`,
+        object: `"storage-ack-x"^^<${XSD_STRING}>`,
+        graph: WS_META,
+      },
+    ];
+    const result = await recoverContextGraphSwm(identityDeps(store, servedMeta));
+    expect(result.completed).toBe(true);
+    expect(await headIds(store)).toEqual(['"op-local"']);
   });
 
   it('replaces a same-id head whose stored version row is stale (version certification)', async () => {
