@@ -97,7 +97,9 @@ export interface LiftJobFailurePolicy {
    *   3. `resolution` is 'reset_to_accepted' — the job is completable by re-running it from
    *      the start, with no chain evidence to reconcile first.
    * `quorum_unmet` (GH#1620) and `workspace_unavailable` (GH#2270) are the only codes that
-   * qualify today. The field is REQUIRED on every entry: `autoRetry: false` is an explicit
+   * qualify today. The field is optional on this PUBLIC interface (external
+   * constructors keep compiling) but REQUIRED on every built-in table entry
+   * via `BuiltInLiftJobFailurePolicy`: `autoRetry: false` is an explicit
    * policy decision (manual-only), never an omission a reader must interpret.
    *
    * EXCLUDED, and why — `rpc_unavailable`/`nonce_conflict`/`wallet_unavailable` are allowed
@@ -109,7 +111,7 @@ export interface LiftJobFailurePolicy {
    * production producer (annotated below) stay off regardless, since no end-to-end witness
    * could cover the flag.
    */
-  readonly autoRetry: boolean;
+  readonly autoRetry?: boolean;
   readonly timeoutHandling?: LiftJobTimeoutHandling;
 }
 
@@ -128,7 +130,16 @@ export interface LiftJobFailureMetadata {
   readonly timeout?: LiftJobTimeoutMetadata;
 }
 
-export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, LiftJobFailurePolicy> = {
+/**
+ * Table-only strictness: the PUBLIC interface keeps `autoRetry` optional (a
+ * required field would source-break external constructors of
+ * `LiftJobFailurePolicy`), while every BUILT-IN entry must still declare the
+ * decision explicitly — `autoRetry: false` is a policy statement, never an
+ * omission.
+ */
+type BuiltInLiftJobFailurePolicy = LiftJobFailurePolicy & { readonly autoRetry: boolean };
+
+export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJobFailurePolicy> = {
   // autoRetry: pre-send by allowed-states (enforced), transient by cause (a
   // corrupt/unreadable SWM head that sync repair heals) — see the field doc.
   workspace_unavailable: { code: 'workspace_unavailable', phase: 'validation', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', autoRetry: true },
