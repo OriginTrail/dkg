@@ -125,20 +125,18 @@ export class SelectedSwmBootstrapAdmission {
 
   /**
    * Summarize one selected graph without exposing which providers own the
-   * admission records. When `providerPeerIds` is supplied, stale records for
-   * providers that are no longer designated for the graph are ignored.
+   * admission records. The explicit provider scope excludes stale records for
+   * peers that are no longer designated for the graph.
    */
   summarizeContextGraph(
     contextGraphId: string,
-    providerPeerIds?: readonly string[],
+    providerPeerIds: readonly string[],
   ): SelectedSwmBootstrapContextGraphSummary {
-    const providerFilter = providerPeerIds === undefined
-      ? undefined
-      : new Set(providerPeerIds);
+    const providerFilter = new Set(providerPeerIds);
     let retryRequiredProviders = 0;
     let terminalProviders = 0;
     for (const [remotePeer, state] of this.#byPeer) {
-      if (providerFilter !== undefined && !providerFilter.has(remotePeer)) continue;
+      if (!providerFilter.has(remotePeer)) continue;
       if (!state.contextGraphIds.includes(contextGraphId)) continue;
       if (state.phase === 'retry-required') retryRequiredProviders += 1;
       else terminalProviders += 1;
