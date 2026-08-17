@@ -3,7 +3,7 @@ import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { QuorumUnmetError, type LiftJob } from '@origintrail-official/dkg-publisher';
-import { createPublisherControlFromStore } from '../src/publisher-runner.js';
+import { createPublisherControlFromStore, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 
@@ -200,6 +200,51 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
   });
 
+  // The publisher's projection answers what the CONFIGURED lane would do; it cannot see whether a
+  // runtime exists to run that lane. On a node with no funded publisher wallet, or one whose
+  // publisher failed to start, `backoff` promises a retry that will never fire — so the route,
+  // which knows the runtime state, has to say so.
+  it.each([
+    ['no_publisher_wallets'],
+    ['publisher_startup_failed'],
+  ] as const)('reports no automatic retry when the publisher runtime is unavailable (%s)', async (reason) => {
+    const control = newControl();
+    const jobId = await failWithUnmetQuorum(control);
+    // Same job, same config: with a runtime running, this is a scheduled retry.
+    const running = await request(control, 'GET', `/api/publisher/job?id=${jobId}`);
+    expect(running.body.retryState).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
+
+    const res = await request(control, 'GET', `/api/publisher/job?id=${jobId}`, '', {
+      available: false,
+      reason,
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    // Not eligible, and waiting on the OPERATOR — which is what the availability reason served
+    // beside it tells them to go and fix. The job itself is untouched: this is a read.
+    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+    expect(res.body.job.status).toBe('failed');
+  });
+
+  it('leaves a chain-proof hold alone when the publisher runtime is unavailable', async () => {
+    // The narrowing speaks only for what this node's LANE will do, so it must not repaint reasons
+    // that have nothing to do with a runtime: a job whose transaction is unaccounted for waits on
+    // chain proof whether or not a publisher is running, and calling that "operator" would point
+    // an operator at the wrong problem.
+    const control = newControl();
+    const jobId = await failAfterRecordedTxHash(control);
+
+    const res = await request(control, 'GET', `/api/publisher/job?id=${jobId}`, '', {
+      available: false,
+      reason: 'no_publisher_wallets',
+      retryable: false,
+      operatorActionRequired: true,
+    });
+
+    expect(res.body.retryState).toEqual({ autoRetryEligible: false, waitingReason: 'pending_chain_proof' });
+  });
+
   it('reports a TERMINAL failure that broadcast a transaction as waiting on chain proof', async () => {
     // The gap the retry surfacing hid: a `confirmation_mismatch` is terminal, so it read as
     // "nothing is waiting on this" while its transaction was unaccounted for — and admission
@@ -236,11 +281,17 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
     expect(legacyPayload.body).toEqual({ ...job, payload: null, retryState: expected });
   });
 
+  /**
+   * GH#2270 — `availability` defaults to a RUNNING publisher, because that is the node these rows
+   * describe. The job-detail routes narrow `retryState` when no runtime exists, so the rows that
+   * exercise that narrowing pass an unavailable state explicitly.
+   */
   async function request(
     publisherControl: Control,
     method: 'GET' | 'POST',
     path: string,
     rawBody = '',
+    availability: AsyncPublisherAvailability = { available: true },
   ): Promise<{ status: number; body: any }> {
     const url = new URL(`http://127.0.0.1${path}`);
     const req = Readable.from([]);
@@ -260,7 +311,7 @@ describe('GH#2270 publisher retry surfacing (routes over a real publisher)', () 
       res: res as unknown as ServerResponse,
       agent: {} as RequestContext['agent'],
       publisherControl,
-      publisherState: { runtime: null, availability: { available: false, reason: 'publisher_disabled', retryable: false, operatorActionRequired: true } },
+      publisherState: { runtime: null, availability },
       config: {} as RequestContext['config'],
       startedAt: 0,
       dashDb: {} as RequestContext['dashDb'],

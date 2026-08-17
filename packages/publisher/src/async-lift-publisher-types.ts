@@ -128,6 +128,13 @@ export interface AsyncLiftDetailedRetrier {
  * the publisher (not on the caller) because the derivation reads the effective `autoRetryEnabled`
  * this instance resolved: a route that re-derived it from config would be free to disagree with
  * the lane that actually runs (the #1836 bug class). Synchronous — no store access, no writes.
+ *
+ * SCOPE, and the boundary a host must respect: this answers what the CONFIGURED lane would do with
+ * this job. The queue cannot see whether a publisher RUNTIME exists to run that lane — no funded
+ * wallet, a failed startup and a healthy node all look identical from in here — so a host that
+ * knows its runtime state must narrow the answer before serving it (the daemon does exactly that
+ * in its job-detail route). Reporting `backoff` on a node with nothing running promises a retry
+ * that will never fire.
  */
 export interface AsyncLiftRetryStateReader {
   describeJobRetryState(job: LiftJob): LiftJobRetryProjection;

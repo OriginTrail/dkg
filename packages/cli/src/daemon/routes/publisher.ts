@@ -60,7 +60,7 @@ import { enrichEvmError, MockChainAdapter } from '@origintrail-official/dkg-chai
 import { DKGAgent, loadOpWallets } from '@origintrail-official/dkg-agent';
 import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
-import type { AsyncPreparedPublishPayload, LiftJob } from '@origintrail-official/dkg-publisher';
+import type { AsyncPreparedPublishPayload, LiftJob, LiftJobRetryProjection } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
   MetricsCollector,
@@ -105,7 +105,7 @@ import {
   slotEntryPoint,
   CLI_NPM_PACKAGE,
 } from '../../config.js';
-import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
+import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type AsyncPublisherAvailability, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -391,14 +391,41 @@ function parsePublisherLifecycleFactsFromQuery(
  * (a named lifecycle publish job has no raw prepared payload).
  */
 function jobDetailBody(
-  publisherControl: RequestContext['publisherControl'],
+  ctx: Pick<RequestContext, 'publisherControl' | 'publisherState'>,
   job: LiftJob,
   options: { readonly wrapped: boolean; readonly payload?: AsyncPreparedPublishPayload | null },
 ): Record<string, unknown> {
   return {
     ...(options.wrapped ? { job } : { ...job }),
     ...(options.payload === undefined ? {} : { payload: options.payload }),
-    retryState: publisherControl.describeJobRetryState(job),
+    retryState: narrowRetryStateToRuntime(
+      ctx.publisherControl.describeJobRetryState(job),
+      ctx.publisherState.availability,
+    ),
+  };
+}
+
+/**
+ * GH#2270 — the publisher's projection answers "does this node's CONFIGURATION retry this job",
+ * because that is all the queue can see: it derives from the job and the retry knobs and has no
+ * idea whether a publisher RUNTIME is actually running. The daemon does know, so the honesty is
+ * restored HERE — the one layer where both facts are in scope.
+ *
+ * With no runtime (no funded publisher wallet, a startup failure, still starting, or the publisher
+ * switched off) nothing will fire a scheduled retry, so `autoRetryEligible` is false and a job that
+ * would have reported `backoff` reports `operator` instead — which is what the availability reason
+ * beside it tells the operator to go and fix. Every other reason is untouched: a job held for chain
+ * proof, owned by recovery, or out of budget is waiting on that whatever the runtime does.
+ */
+function narrowRetryStateToRuntime(
+  projection: LiftJobRetryProjection,
+  availability: AsyncPublisherAvailability,
+): LiftJobRetryProjection {
+  if (availability.available) return projection;
+  return {
+    ...projection,
+    autoRetryEligible: false,
+    ...(projection.waitingReason === 'backoff' ? { waitingReason: 'operator' as const } : {}),
   };
 }
 
@@ -478,7 +505,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
       return jsonResponse(res, 404, {
         error: `Publisher job not found: ${jobId}`,
       });
-    return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: true }));
+    return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: true }));
   }
 
   // GET /api/publisher/job-payload?id=...  (new route, wrapped response)
@@ -491,7 +518,7 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
         error: `Publisher job not found: ${jobId}`,
       });
     const payload = await publisherControl.inspectPreparedPayload(jobId);
-    return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: true, payload }));
+    return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: true, payload }));
   }
 
   // GET /api/publisher/job-by-intent?contextGraphId=&name=&subGraphName=&agentAddress=&intentKey=
@@ -536,9 +563,9 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
     // there (as `payload` already does); the shared builder keeps every job field's value.
     if (segments[1] === "payload") {
       const payload = await publisherControl.inspectPreparedPayload(jobId);
-      return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: false, payload }));
+      return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: false, payload }));
     }
-    return jsonResponse(res, 200, jobDetailBody(publisherControl, job, { wrapped: false }));
+    return jsonResponse(res, 200, jobDetailBody(ctx, job, { wrapped: false }));
   }
 
   // GET /api/publisher/stats -- returns the raw status map directly for backward compat
