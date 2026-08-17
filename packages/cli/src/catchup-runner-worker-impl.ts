@@ -116,9 +116,16 @@ interface CatchupSharedMemoryPlane {
   readonly deferredBackpressure?: number;
 }
 
+interface CatchupSharedMemoryPolicy {
+  /** Request the selected scheduler/continuation lane for this explicit public CG. */
+  readonly selectedSchedulingRequested: boolean;
+  /** Require a graph-complete provider's typed terminal boundary. */
+  readonly terminalBoundaryRequired: boolean;
+}
+
 function normalizeCatchupSharedMemoryResult(
   result: CatchupSharedMemoryRpcResult,
-  terminalBoundaryRequired: boolean,
+  policy: CatchupSharedMemoryPolicy,
 ): CatchupSharedMemoryPlane {
   const selected = selectedSharedMemoryResult(result);
   const payload = selected?.shared ?? result as SharedMemorySyncResult;
@@ -128,16 +135,18 @@ function normalizeCatchupSharedMemoryResult(
   // terminal verdict describes only that peer's local manifest and must not
   // replace multi-peer union convergence. A complete-provider request that
   // receives an older/raw host response remains fail-closed.
-  const progress = terminalBoundaryRequired
+  const progress = policy.selectedSchedulingRequested
     ? classifySharedMemoryFreshness(payload, {
-      complete: selected?.selectedScopeComplete ?? false,
+      complete: policy.terminalBoundaryRequired
+        ? selected?.selectedScopeComplete === true
+        : true,
     })
     : classifyDurableProgress(payload);
   return {
     payload,
     progress,
-    terminalBoundaryRequired,
-    selectedScopeProven: terminalBoundaryRequired
+    terminalBoundaryRequired: policy.terminalBoundaryRequired,
+    selectedScopeProven: policy.terminalBoundaryRequired
       && selected?.selectedScopeComplete === true
       && progress.completedWithoutFailure,
     deferredBackpressure: payload.deferredBackpressure,
@@ -476,19 +485,21 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       // default on every candidate peer. This does NOT make every candidate an
       // authority: only a pinned complete provider may furnish the terminal
       // whole-scope proof consumed below.
-      const selectedSchedulingRequested = request.includeSharedMemory
-        && !prepared.isPrivateContextGraph;
-      const terminalBoundaryRequired = authoritativeSharedMemoryPeerIds.has(peerId);
+      const policy: CatchupSharedMemoryPolicy = {
+        selectedSchedulingRequested: request.includeSharedMemory
+          && !prepared.isPrivateContextGraph,
+        terminalBoundaryRequired: authoritativeSharedMemoryPeerIds.has(peerId),
+      };
       return invoke<CatchupSharedMemoryRpcResult>(
         'syncSharedMemory',
         peerId,
         request.contextGraphId,
         priority,
         source,
-        selectedSchedulingRequested,
+        policy.selectedSchedulingRequested,
       )
-        .then((result) => normalizeCatchupSharedMemoryResult(result, terminalBoundaryRequired))
-        .catch(() => normalizeCatchupSharedMemoryResult(emptyShared(), terminalBoundaryRequired));
+        .then((result) => normalizeCatchupSharedMemoryResult(result, policy))
+        .catch(() => normalizeCatchupSharedMemoryResult(emptyShared(), policy));
     };
 
     // Narrow each fallback peer to the planes the AUTHORITY has not already

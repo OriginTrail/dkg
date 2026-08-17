@@ -64,6 +64,7 @@ async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
   requestPath = '/api/status',
+  networkOverride: RequestContext['network'] = null,
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -79,7 +80,7 @@ async function requestStatusWithAgent(
       publisherState: DISABLED_PUBLISHER_STATE,
       path: url.pathname,
       url,
-      network: null,
+      network: networkOverride,
       config,
       rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
         config as never,
@@ -94,6 +95,7 @@ async function requestStatusWithAgent(
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        getSyncContextGraphIds: () => [],
         ...agentOverrides,
       },
       nodeVersion: '0.0.0-test',
@@ -424,6 +426,22 @@ describe('/api/status RFC-64 selected-public activation', () => {
     });
   });
 
+  it('includes network-default graphs in the effective requested sync scope', async () => {
+    const response = await requestStatusWithAgent(
+      { getSyncContextGraphIds: () => ['explicit-public-cg'] },
+      {},
+      '/api/status',
+      { defaultContextGraphs: ['network-default-cg', 'explicit-public-cg'] } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      selectedContextGraphs: ['explicit-public-cg', 'network-default-cg'],
+      catalogBackedContextGraphs: [],
+    });
+  });
+
   it('reports the fail-closed disabled state without invoking catalog controls', async () => {
     const catalogStats = vi.fn(() => {
       throw new Error('disabled status must not read catalog service state');
@@ -470,6 +488,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       {
         rfc64PublicCatalogStatsV1: () => service,
         readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+        getSyncContextGraphIds: () => ['selected-public-cg'],
       },
       {
         rfc64PublicCatalog: {
@@ -499,6 +518,11 @@ describe('/api/status RFC-64 selected-public activation', () => {
       }],
       service,
       bootstrap,
+    });
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      selectedContextGraphs: ['selected-public-cg'],
+      catalogBackedContextGraphs: ['selected-public-cg'],
     });
   });
 

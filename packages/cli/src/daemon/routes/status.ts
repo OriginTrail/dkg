@@ -98,6 +98,7 @@ import {
   type LocalAgentIntegrationStatus,
   type LocalAgentIntegrationTransport,
   resolveContextGraphs,
+  resolveNetworkDefaultContextGraphs,
   resolveNetworkConfigName,
   resolveSharedMemoryTtlMs,
   repoDir,
@@ -580,6 +581,25 @@ function summarizeRegistryEntry(e: IntegrationEntry) {
   };
 }
 
+function projectRfc64SelectedPublicSyncStatus(
+  agent: DKGAgent,
+  networkDefaultContextGraphs: readonly string[],
+  catalogBackedContextGraphs: readonly string[],
+) {
+  // This is the effective requested sync scope, not proof that every listed
+  // graph is public. Runtime classification still decides whether a graph uses
+  // the RFC-64 selected-public lane or the private curator-recovery lane.
+  const requestedContextGraphs = [...new Set([
+    ...agent.getSyncContextGraphIds(),
+    ...networkDefaultContextGraphs,
+  ])];
+  return {
+    defaultEnabled: true,
+    selectedContextGraphs: requestedContextGraphs,
+    catalogBackedContextGraphs: [...new Set(catalogBackedContextGraphs)],
+  };
+}
+
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
   const {
     req,
@@ -771,12 +791,11 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
           providers: accepted.completeSwmProviders,
         }))
       : [];
-    const rfc64SelectedPublicSyncContextGraphs = typeof agent.getSyncContextGraphIds === 'function'
-      ? agent.getSyncContextGraphIds()
-      : [
-        ...resolveContextGraphs(config),
-        ...rfc64PublicCatalogActivation.selectedContextGraphs,
-      ];
+    const rfc64SelectedPublicSync = projectRfc64SelectedPublicSyncStatus(
+      agent,
+      resolveNetworkDefaultContextGraphs(network),
+      rfc64PublicCatalogActivation.selectedContextGraphs,
+    );
     const unavailableFinalizationRecovery = (reason: string) => ({
       available: false,
       closed: false,
@@ -900,11 +919,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
       // curator recovery, and only `completeSwmProviders` may prove a whole
       // public SWM scope terminal. The harness knows its generated CG is public
       // and uses this exact requested-scope projection as its no-spend preflight.
-      rfc64SelectedPublicSync: {
-        defaultEnabled: true,
-        selectedContextGraphs: [...new Set(rfc64SelectedPublicSyncContextGraphs)],
-        catalogBackedContextGraphs: rfc64PublicCatalogActivation.selectedContextGraphs,
-      },
+      rfc64SelectedPublicSync,
       hasOpenClawChannel: hasConfiguredLocalAgentChat(config, 'openclaw'),
       localAgentIntegrations,
       connectedLocalAgentIds: localAgentIntegrations.filter((integration) => integration.enabled).map((integration) => integration.id),
