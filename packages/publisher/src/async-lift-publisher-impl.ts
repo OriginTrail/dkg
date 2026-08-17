@@ -102,6 +102,7 @@ import {
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
   normalizePersistedLiftJobRequest,
+  buildLiftJobAcceptedReset,
   resetFailedLiftJobToAccepted,
   rawLiftRequestFromJobRequest,
   jobSubject,
@@ -771,7 +772,7 @@ export class TripleStoreAsyncLiftPublisher
     if (!this.chainRecoveryResolver) {
       if (job.status === 'broadcast') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', 'broadcast', getLiftJobTransactionEvidence(job)), 'recover-reset');
+        await this.writeJob(this.resetJobToAccepted(job, 'broadcast', getLiftJobTransactionEvidence(job)), 'recover-reset');
         return true;
       }
       return false;
@@ -1065,7 +1066,7 @@ export class TripleStoreAsyncLiftPublisher
     for (const job of interrupted) {
       if (job.status === 'claimed' || job.status === 'validated') {
         await this.releaseWalletLockForJob(job);
-        await this.writeJob(this.resetJobToAccepted(job, 'reset_to_accepted', job.status, getLiftJobTransactionEvidence(job)), 'recover-reset');
+        await this.writeJob(this.resetJobToAccepted(job, job.status, getLiftJobTransactionEvidence(job)), 'recover-reset');
         recovered += 1;
         continue;
       }
@@ -1915,23 +1916,23 @@ export class TripleStoreAsyncLiftPublisher
     } as LiftJob;
   }
 
+  /**
+   * The interrupted-recovery reset: `recover()` found the job mid-flight and puts it back on the
+   * queue. Same rebuilt shape as a reaccept (see {@link buildLiftJobAcceptedReset}), minus the
+   * retry stamp — nothing was re-ATTEMPTED here, the job was interrupted — and the origin is
+   * always recorded, because a recovery reset always knows which state it came from.
+   */
   private resetJobToAccepted(
     job: LiftJob,
-    action: Extract<LiftJobRecoveryMetadata['action'], 'reset_to_accepted'>,
     recoveredFromStatus: 'claimed' | 'validated' | 'broadcast',
     txHashChecked?: LiftJobHex,
   ): LiftJobAccepted {
-    const now = this.now();
-    return {
-      jobId: job.jobId,
-      jobSlug: job.jobSlug,
-      request: job.request,
-      status: 'accepted',
-      timestamps: { acceptedAt: job.timestamps.acceptedAt, lastRecoveredAt: now, updatedAt: now },
-      retries: job.retries,
-      recovery: { action, recoveredFromStatus, txHashChecked },
-      controlPlane: job.controlPlane,
-    };
+    return buildLiftJobAcceptedReset(job, {
+      now: this.now(),
+      recoveredFrom: recoveredFromStatus,
+      txHashChecked,
+      stampRetriedAt: false,
+    });
   }
 
   /**

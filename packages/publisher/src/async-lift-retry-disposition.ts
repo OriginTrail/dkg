@@ -277,12 +277,31 @@ export function classifyRetryAction(job: PersistedFailedJob): FailedJobRetryActi
   return 'reaccept';
 }
 
-/** The read view of {@link classifyRetryAction}: the same action, plus the operator's knob. */
+/**
+ * The read view of {@link classifyRetryAction}: the same action, plus the operator's knob and the
+ * job's actual SCHEDULE.
+ *
+ * Being allow-listed is not the same as being scheduled. The claim-time sweep only reaccepts a job
+ * whose `nextRetryAt` is set and due, and that timestamp is assigned when the failure is RECORDED —
+ * so a job that failed while the kill-switch was off, or one persisted by a build that predates the
+ * lane, stays allow-listed forever and is never picked up. Reporting `backoff` there promises a
+ * retry no sweep will run.
+ *
+ * The check belongs HERE and not in {@link isAutomaticallyRetryableLiftJob}: that predicate runs at
+ * recording time, BEFORE the schedule exists, so requiring a schedule there would stop anything
+ * from ever being scheduled at all.
+ *
+ * An unscheduled job therefore reads `{autoRetryEligible: false, waitingReason: 'operator'}` — the
+ * honest answer, since nothing automatic will move it and `POST /api/publisher/retry` or a
+ * re-submit re-arms it. The manual paths are untouched: {@link classifyRetryAction} never consults
+ * the schedule, so a bulk retry still reaccepts such a job.
+ */
 export function describeRetryProjection(
   job: PersistedFailedJob,
   options: { readonly autoRetryEnabled: boolean },
 ): LiftJobRetryProjection {
-  const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options);
+  const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options)
+    && job.timestamps.nextRetryAt !== undefined;
   return { autoRetryEligible, ...waitingReasonOf(classifyRetryAction(job), autoRetryEligible) };
 }
 
