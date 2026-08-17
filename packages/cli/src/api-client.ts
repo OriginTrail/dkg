@@ -333,6 +333,17 @@ export interface DaemonStatusResponse {
   relayConnected: boolean;
   multiaddrs: string[];
   relay: RelayStatusResponse;
+  /**
+   * RFC-64 scheduling input for explicitly requested Context Graphs. The
+   * requested scope is not a public classification; runtime classification
+   * still chooses the public or private synchronization lane.
+   */
+  rfc64SelectedPublicSync?: {
+    defaultEnabled: boolean;
+    /** Requested scheduling scope; runtime classification still chooses the lane. */
+    requestedContextGraphs: string[];
+    catalogBackedContextGraphs: string[];
+  };
   chain?: {
     chainId: string | null;
     configured: boolean;

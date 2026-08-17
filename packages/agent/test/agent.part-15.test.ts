@@ -77,10 +77,16 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       try {
         await agent.start();
         expect((agent as any).config.syncContextGraphs ?? []).not.toContain('runtime-contextGraph');
+        expect(agent.getSyncContextGraphIds()).not.toContain('runtime-contextGraph');
 
         agent.subscribeToContextGraph('runtime-contextGraph');
 
         expect((agent as any).config.syncContextGraphs ?? []).toContain('runtime-contextGraph');
+        const projectedScope = agent.getSyncContextGraphIds();
+        expect(projectedScope).toContain('runtime-contextGraph');
+        expect(Object.isFrozen(projectedScope)).toBe(true);
+        expect(() => (projectedScope as string[]).push('status-reader-mutation')).toThrow();
+        expect(agent.getSyncContextGraphIds()).not.toContain('status-reader-mutation');
       } finally {
         await agent.stop().catch(() => {});
       }

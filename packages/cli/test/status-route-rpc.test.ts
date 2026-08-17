@@ -64,6 +64,7 @@ async function requestStatusWithAgent(
   agentOverrides: Record<string, unknown>,
   configOverrides: Record<string, unknown> = {},
   requestPath = '/api/status',
+  networkOverride: RequestContext['network'] = null,
 ): Promise<{ status: number; body: any }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
@@ -79,7 +80,7 @@ async function requestStatusWithAgent(
       publisherState: DISABLED_PUBLISHER_STATE,
       path: url.pathname,
       url,
-      network: null,
+      network: networkOverride,
       config,
       rfc64PublicCatalog: resolveRfc64PublicCatalogActivation(
         config as never,
@@ -94,6 +95,7 @@ async function requestStatusWithAgent(
           getRelayStats: () => null,
         },
         publisher: { getIdentityId: () => 0n },
+        getSyncContextGraphIds: () => [],
         ...agentOverrides,
       },
       nodeVersion: '0.0.0-test',
@@ -410,6 +412,36 @@ describe('/api/status finalization recovery health', () => {
 });
 
 describe('/api/status RFC-64 selected-public activation', () => {
+  it('reports RFC-64 selected public scheduling as the default for explicit subscriptions', async () => {
+    const response = await requestStatusWithAgent({
+      // Runtime subscribe mutates the agent scope, not the startup CLI config.
+      getSyncContextGraphIds: () => ['explicit-public-cg'],
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['explicit-public-cg'],
+      catalogBackedContextGraphs: [],
+    });
+  });
+
+  it('reports mixed requested scopes without classifying a network-default graph as public', async () => {
+    const response = await requestStatusWithAgent(
+      { getSyncContextGraphIds: () => ['explicit-public-cg'] },
+      {},
+      '/api/status',
+      { defaultContextGraphs: ['private-network-default-cg', 'explicit-public-cg'] } as never,
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['explicit-public-cg', 'private-network-default-cg'],
+      catalogBackedContextGraphs: [],
+    });
+  });
+
   it('reports the fail-closed disabled state without invoking catalog controls', async () => {
     const catalogStats = vi.fn(() => {
       throw new Error('disabled status must not read catalog service state');
@@ -456,6 +488,7 @@ describe('/api/status RFC-64 selected-public activation', () => {
       {
         rfc64PublicCatalogStatsV1: () => service,
         readRfc64PublicCatalogBootstrapStatusV1: () => bootstrap,
+        getSyncContextGraphIds: () => ['selected-public-cg'],
       },
       {
         rfc64PublicCatalog: {
@@ -485,6 +518,11 @@ describe('/api/status RFC-64 selected-public activation', () => {
       }],
       service,
       bootstrap,
+    });
+    expect(response.body.rfc64SelectedPublicSync).toEqual({
+      defaultEnabled: true,
+      requestedContextGraphs: ['selected-public-cg'],
+      catalogBackedContextGraphs: ['selected-public-cg'],
     });
   });
 
@@ -546,6 +584,7 @@ describe('/api/status selected overlay details', () => {
         agent: {
           peerId: 'peer-status-test',
           multiaddrs: [],
+          getSyncContextGraphIds: () => [],
           node: {
             libp2p: { getConnections: () => [] },
             getRelayStats: () => null,
@@ -618,6 +657,7 @@ describe('/api/status selected overlay details', () => {
           agent: {
             peerId: 'peer-status-test',
             multiaddrs: [],
+            getSyncContextGraphIds: () => [],
             node: { libp2p: { getConnections: () => [] }, getRelayStats: () => null },
             publisher: { getIdentityId: () => 0n },
           },
