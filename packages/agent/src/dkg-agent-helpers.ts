@@ -296,7 +296,11 @@ export function createPublicSnapshotStore(
   config: SharedMemoryPublicSnapshotStorageConfig | undefined,
 ): WorkspacePublicSnapshotStore | undefined {
   if (!dataDir || config?.enabled === false) return undefined;
-  return new FileWorkspacePublicSnapshotStore(config?.directory ?? join(dataDir, 'swm-public-snapshots'));
+  return new FileWorkspacePublicSnapshotStore(
+    config?.directory ?? join(dataDir, 'swm-public-snapshots'),
+    undefined,
+    { gc: config?.gc },
+  );
 }
 
 export function applyDefaultLargeLiteralStorage(

@@ -1,11 +1,22 @@
 import { createHash } from 'node:crypto';
-import { mkdtemp, readdir, rename, rm, stat, utimes } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  stat,
+  statfs,
+  utimes,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { describe, expect, it, vi } from 'vitest';
 import {
   FileWorkspacePublicSnapshotStore,
+  SnapshotStorageCapacityError,
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
   workspacePublicQuadsDigest,
@@ -498,5 +509,324 @@ describe('FileWorkspacePublicSnapshotStore paging', () => {
     } finally {
       await rm(directory, { recursive: true, force: true });
     }
+  });
+});
+
+describe('FileWorkspacePublicSnapshotStore GC v1', () => {
+  it('does not rewrite an immutable snapshot that is already present', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-'));
+    const pageIndexes = new MemoryPageIndexStore();
+    const store = new FileWorkspacePublicSnapshotStore(directory, pageIndexes);
+    const quads = makeQuads(3, 'deduplicated');
+
+    try {
+      const first = await store.putSnapshot({ digest: DIGEST, quads });
+      const oldTime = new Date(Date.now() - 10_000);
+      await utimes(snapshotPath(directory), oldTime, oldTime);
+
+      const second = await store.putSnapshot({ digest: DIGEST, quads });
+
+      expect(second).toEqual(first);
+      expect((await stat(snapshotPath(directory))).mtimeMs).toBeCloseTo(oldTime.getTime(), -2);
+      expect(pageIndexes.writes).toBe(1);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('deletes oldest eligible snapshots under pressure until the target is reached', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-'));
+    const writer = new FileWorkspacePublicSnapshotStore(directory);
+    const oldestDigest = digestFor(101);
+    const olderDigest = digestFor(102);
+    const youngDigest = digestFor(103);
+    const quads = makeQuads(4, 'pressure');
+    const now = Date.now();
+    let store: FileWorkspacePublicSnapshotStore | undefined;
+
+    try {
+      await writer.putSnapshot({ digest: oldestDigest, quads });
+      await writer.putSnapshot({ digest: olderDigest, quads });
+      await writer.putSnapshot({ digest: youngDigest, quads });
+      await utimes(snapshotPath(directory, oldestDigest), new Date(now - 30_000), new Date(now - 30_000));
+      await utimes(snapshotPath(directory, olderDigest), new Date(now - 20_000), new Date(now - 20_000));
+      const oldestSize = (await stat(snapshotPath(directory, oldestDigest))).size;
+
+      store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: {
+          enabled: true,
+          intervalMs: 60_000,
+          triggerFreeBytes: 1,
+          targetFreeBytes: oldestSize,
+          hardReserveBytes: 0,
+          minAgeMs: 10_000,
+          staleTempAgeMs: 1_000,
+        },
+        getAvailableBytes: async () => 0,
+        now: () => now,
+      });
+      const result = await store.collectGarbage();
+
+      expect(result).toMatchObject({
+        triggered: true,
+        deletedSnapshots: 1,
+        deletedSnapshotBytes: oldestSize,
+        availableBytesAfter: oldestSize,
+      });
+      await expect(stat(snapshotPath(directory, oldestDigest))).rejects.toMatchObject({ code: 'ENOENT' });
+      await expect(stat(snapshotPath(directory, olderDigest))).resolves.toBeTruthy();
+      await expect(stat(snapshotPath(directory, youngDigest))).resolves.toBeTruthy();
+    } finally {
+      store?.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('removes stale temp files even when free space is above the pressure trigger', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-'));
+    const hash = DIGEST.slice('sha256:'.length);
+    const tempDirectory = snapshotDirectory(directory);
+    const tempPath = join(tempDirectory, `${hash}.nq.123.456.tmp`);
+    const now = Date.now();
+    let store: FileWorkspacePublicSnapshotStore | undefined;
+
+    try {
+      await mkdir(tempDirectory, { recursive: true });
+      await writeFile(tempPath, 'abandoned temp file');
+      await utimes(tempPath, new Date(now - 10_000), new Date(now - 10_000));
+      store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: {
+          enabled: true,
+          intervalMs: 60_000,
+          triggerFreeBytes: 20,
+          targetFreeBytes: 30,
+          hardReserveBytes: 10,
+          minAgeMs: 10_000,
+          staleTempAgeMs: 5_000,
+        },
+        getAvailableBytes: async () => 100,
+        now: () => now,
+      });
+
+      const result = await store.collectGarbage();
+
+      expect(result).toMatchObject({
+        triggered: false,
+        deletedTempFiles: 1,
+        deletedSnapshots: 0,
+      });
+      await expect(stat(tempPath)).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      store?.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('runs the pressure collector periodically', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-'));
+    const quads = makeQuads(2, 'periodic');
+    const now = Date.now();
+    let resolveCollected!: () => void;
+    const collected = new Promise<void>((resolve) => { resolveCollected = resolve; });
+    let store: FileWorkspacePublicSnapshotStore | undefined;
+
+    try {
+      await new FileWorkspacePublicSnapshotStore(directory)
+        .putSnapshot({ digest: DIGEST, quads });
+      await utimes(snapshotPath(directory), new Date(now - 20_000), new Date(now - 20_000));
+      const snapshotSize = (await stat(snapshotPath(directory))).size;
+      store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: {
+          enabled: true,
+          intervalMs: 10,
+          triggerFreeBytes: 1,
+          targetFreeBytes: snapshotSize,
+          hardReserveBytes: 0,
+          minAgeMs: 10_000,
+          staleTempAgeMs: 1_000,
+        },
+        getAvailableBytes: async () => 0,
+        now: () => now,
+        log: (message) => {
+          if (message.includes('snapshots=1')) resolveCollected();
+        },
+      });
+
+      await Promise.race([
+        collected,
+        new Promise<never>((_, reject) => {
+          setTimeout(() => reject(new Error('periodic snapshot GC did not run')), 1_000).unref();
+        }),
+      ]);
+
+      await expect(stat(snapshotPath(directory))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      store?.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('protects snapshots participating in an active paged read', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-'));
+    const quads = makeQuads(3, 'active');
+    const now = Date.now();
+    let indexReadStarted = false;
+    let releaseIndexRead!: () => void;
+    const indexReadBlocked = new Promise<void>((resolve) => { releaseIndexRead = resolve; });
+    let store: FileWorkspacePublicSnapshotStore | undefined;
+    const blockingPageIndexes: SnapshotPageIndexStore = {
+      get: async () => {
+        indexReadStarted = true;
+        await indexReadBlocked;
+        return null;
+      },
+      upsert: async () => {},
+    };
+
+    try {
+      await new FileWorkspacePublicSnapshotStore(directory)
+        .putSnapshot({ digest: DIGEST, quads });
+      await utimes(snapshotPath(directory), new Date(now - 20_000), new Date(now - 20_000));
+      store = new FileWorkspacePublicSnapshotStore(directory, blockingPageIndexes, {
+        gc: {
+          enabled: true,
+          intervalMs: 60_000,
+          triggerFreeBytes: 1,
+          targetFreeBytes: 1,
+          hardReserveBytes: 0,
+          minAgeMs: 10_000,
+          staleTempAgeMs: 1_000,
+        },
+        getAvailableBytes: async () => 0,
+        now: () => now,
+      });
+      const pageRead = store.getSnapshotPage(DIGEST, 1, 1);
+      await vi.waitFor(() => expect(indexReadStarted).toBe(true));
+
+      const result = await store.collectGarbage();
+      releaseIndexRead();
+
+      expect(result).toMatchObject({ deletedSnapshots: 0, skippedActiveFiles: 1 });
+      await expect(pageRead).resolves.toEqual(quads.slice(1, 2));
+      await expect(stat(snapshotPath(directory))).resolves.toBeTruthy();
+    } finally {
+      releaseIndexRead?.();
+      store?.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a new snapshot before violating the hard reserve', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-'));
+    const now = Date.now();
+    const store = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+      gc: {
+        enabled: true,
+        intervalMs: 60_000,
+        triggerFreeBytes: 20,
+        targetFreeBytes: 30,
+        hardReserveBytes: 10,
+        minAgeMs: 10_000,
+        staleTempAgeMs: 1_000,
+      },
+      getAvailableBytes: async () => 15,
+      now: () => now,
+    });
+
+    try {
+      const write = store.putSnapshot({ digest: DIGEST, quads: makeQuads(3, 'capacity') });
+      await expect(write).rejects.toBeInstanceOf(SnapshotStorageCapacityError);
+      await expect(write).rejects.toMatchObject({
+        code: 'SNAPSHOT_STORAGE_CAPACITY',
+        availableBytes: 15,
+        hardReserveBytes: 10,
+      });
+      await expect(stat(snapshotPath(directory))).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      store.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('uses real filesystem availability for collection and capacity admission', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'dkg-snapshot-gc-statfs-'));
+    const oldDigest = digestFor(201);
+    const rejectedDigest = digestFor(202);
+    const now = Date.now();
+    let gcStore: FileWorkspacePublicSnapshotStore | undefined;
+    let capacityStore: FileWorkspacePublicSnapshotStore | undefined;
+
+    try {
+      await new FileWorkspacePublicSnapshotStore(directory).putSnapshot({
+        digest: oldDigest,
+        quads: makeQuads(4, 'real-statfs-old'),
+      });
+      await utimes(
+        snapshotPath(directory, oldDigest),
+        new Date(now - 20_000),
+        new Date(now - 20_000),
+      );
+      gcStore = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: {
+          enabled: true,
+          intervalMs: 60_000,
+          triggerFreeBytes: Number.MAX_SAFE_INTEGER - 1,
+          targetFreeBytes: Number.MAX_SAFE_INTEGER,
+          hardReserveBytes: 0,
+          minAgeMs: 10_000,
+          staleTempAgeMs: 1_000,
+        },
+        now: () => now,
+      });
+
+      const result = await gcStore.collectGarbage();
+
+      expect(result.triggered).toBe(true);
+      expect(result.deletedSnapshots).toBe(1);
+      expect(result.availableBytesBefore).toBeGreaterThan(0);
+      await expect(stat(snapshotPath(directory, oldDigest)))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+
+      const filesystem = await statfs(directory);
+      const availableBytes = filesystem.bavail * filesystem.bsize;
+      const hardReserveBytes = availableBytes + 1024 ** 3;
+      capacityStore = new FileWorkspacePublicSnapshotStore(directory, undefined, {
+        gc: {
+          enabled: true,
+          intervalMs: 60_000,
+          triggerFreeBytes: hardReserveBytes + 1,
+          targetFreeBytes: hardReserveBytes + 1,
+          hardReserveBytes,
+          minAgeMs: Number.MAX_SAFE_INTEGER,
+          staleTempAgeMs: 1_000,
+        },
+        now: () => now,
+      });
+
+      await expect(capacityStore.putSnapshot({
+        digest: rejectedDigest,
+        quads: makeQuads(4, 'real-statfs-capacity'),
+      })).rejects.toMatchObject({
+        code: 'SNAPSHOT_STORAGE_CAPACITY',
+        hardReserveBytes,
+      });
+      await expect(stat(snapshotPath(directory, rejectedDigest)))
+        .rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      gcStore?.stopGarbageCollection();
+      capacityStore?.stopGarbageCollection();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects inconsistent watermarks at construction time', () => {
+    expect(() => new FileWorkspacePublicSnapshotStore('/tmp/dkg-invalid-gc', undefined, {
+      gc: {
+        enabled: true,
+        triggerFreeBytes: 20,
+        targetFreeBytes: 10,
+        hardReserveBytes: 5,
+      },
+    })).toThrow('targetFreeBytes must be greater than or equal to triggerFreeBytes');
   });
 });

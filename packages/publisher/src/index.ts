@@ -343,10 +343,14 @@ export {
 export { SharedMemoryHandler, WorkspaceHandler } from './workspace-handler.js';
 export {
   FileWorkspacePublicSnapshotStore,
+  SnapshotStorageCapacityError,
   parseWorkspacePublicSnapshotNQuads,
   serializeWorkspacePublicSnapshotQuads,
   workspacePublicQuadsDigest,
+  type FileWorkspacePublicSnapshotStoreOptions,
+  type SharedMemoryPublicSnapshotGarbageCollectionConfig,
   type SharedMemoryPublicSnapshotStorageConfig,
+  type SnapshotGarbageCollectionResult,
   type SnapshotPageIndexRecord,
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,

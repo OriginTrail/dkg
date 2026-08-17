@@ -958,6 +958,7 @@ export function createPublicSnapshotStore(
   dataDir: string,
   config?: Pick<DkgConfig, 'sharedMemoryPublicSnapshotStorage'>,
   pageIndexStore?: SnapshotPageIndexStore,
+  log?: (message: string) => void,
 ): WorkspacePublicSnapshotStore | undefined {
   const snapshotConfig = config?.sharedMemoryPublicSnapshotStorage;
   if (snapshotConfig?.enabled === false) {
@@ -966,6 +967,7 @@ export function createPublicSnapshotStore(
   return new FileWorkspacePublicSnapshotStore(
     snapshotConfig?.directory ?? join(dataDir, 'swm-public-snapshots'),
     pageIndexStore,
+    { gc: snapshotConfig?.gc, log },
   );
 }
 
