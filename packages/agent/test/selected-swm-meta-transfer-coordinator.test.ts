@@ -154,7 +154,7 @@ describe('selected SWM metadata transfer ownership', () => {
     }
   });
 
-  it('invalidates resolved refs when the exact manifest changes digest or order', async () => {
+  it('invalidates resolved refs when the exact manifest changes digest, count, or order', async () => {
     const peerId = 'peer-manifest-invalidation';
     const contextGraphId = 'cg-manifest-invalidation';
     const coordinator = new SelectedSwmMetaTransferCoordinator();
@@ -189,7 +189,11 @@ describe('selected SWM metadata transfer ownership', () => {
       { ref: 'ref-a', digest: 'digest-a-v2', count: 1 },
       { ref: 'ref-b', digest: 'digest-b', count: 1 },
     ];
-    const reordered = [changedDigest[1]!, changedDigest[0]!];
+    const changedCount = [
+      { ...changedDigest[0]!, count: 2 },
+      changedDigest[1]!,
+    ];
+    const reordered = [changedCount[1]!, changedCount[0]!];
     const requestedRefs: string[] = [];
 
     try {
@@ -239,6 +243,13 @@ describe('selected SWM metadata transfer ownership', () => {
           setCheckpoint: () => {},
         });
         expect(requestedRefs).toEqual(['ref-a']);
+        walk.markResolved('ref-a');
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedCount);
+        expect([...walk.resolvedRefs]).toEqual([]);
         walk.markResolved('ref-a');
       });
 

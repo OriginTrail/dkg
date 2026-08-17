@@ -22,7 +22,6 @@ import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
 /** Post-metadata continuation bound to one exact ordered manifest. */
 interface SelectedSwmSnapshotWalkState {
   readonly orderedManifest: readonly PublicSnapshotMetadata[];
-  readonly manifestTokens: readonly string[];
   readonly resolvedRefs: Set<string>;
   readonly suppressedMetadataRowsByRef: Map<string, readonly Quad[]>;
   expiresAtMs: number;
@@ -315,8 +314,8 @@ export function createSelectedSwmMetaFetcher(options: {
     const walk = state.snapshotWalk;
     return state.completed
       && walk !== undefined
-      && walk.manifestTokens.length > 0
-      && walk.resolvedRefs.size < walk.manifestTokens.length;
+      && walk.orderedManifest.length > 0
+      && walk.resolvedRefs.size < walk.orderedManifest.length;
   };
 
   const hasRetainedContinuation = (state: SelectedSwmMetaContinuationState): boolean => (
@@ -501,20 +500,18 @@ export function createSelectedSwmMetaFetcher(options: {
           markResolved: () => {},
         };
       }
-      const tokens = orderedManifest.map(snapshotManifestToken);
       const retainedWalk = state.snapshotWalk;
-      const walk = retainedWalk && manifestTokensEqual(retainedWalk.manifestTokens, tokens)
+      const walk = retainedWalk && manifestsEqual(retainedWalk.orderedManifest, orderedManifest)
         ? retainedWalk
         : {
           orderedManifest: [...orderedManifest],
-          manifestTokens: tokens,
           resolvedRefs: new Set<string>(),
           suppressedMetadataRowsByRef: new Map<string, readonly Quad[]>(),
           expiresAtMs: 0,
         };
       state.snapshotWalk = walk;
       const allowedRefs = new Set(walk.orderedManifest.map((snapshot) => snapshot.ref));
-      if (walk.manifestTokens.length > 0 && walk.resolvedRefs.size < walk.manifestTokens.length) {
+      if (walk.orderedManifest.length > 0 && walk.resolvedRefs.size < walk.orderedManifest.length) {
         walk.expiresAtMs = now() + retentionTtlMs;
       }
       return {
@@ -535,7 +532,7 @@ export function createSelectedSwmMetaFetcher(options: {
             suppressedMetadataRows.map((quad) => ({ ...quad })),
           );
           walk.resolvedRefs.add(ref);
-          if (walk.resolvedRefs.size < walk.manifestTokens.length) {
+          if (walk.resolvedRefs.size < walk.orderedManifest.length) {
             walk.expiresAtMs = now() + retentionTtlMs;
           }
         },
@@ -582,14 +579,15 @@ export function createSelectedSwmMetaFetcher(options: {
   return fetcher;
 }
 
-function snapshotManifestToken(snapshot: PublicSnapshotMetadata): string {
-  return `${snapshot.ref}\0${snapshot.digest}\0${snapshot.count}`;
-}
-
-function manifestTokensEqual(
-  left: readonly string[],
-  right: readonly string[],
+function manifestsEqual(
+  left: readonly PublicSnapshotMetadata[],
+  right: readonly PublicSnapshotMetadata[],
 ): boolean {
   return left.length === right.length
-    && left.every((token, index) => token === right[index]);
+    && left.every((snapshot, index) => {
+      const candidate = right[index];
+      return snapshot.ref === candidate.ref
+        && snapshot.digest === candidate.digest
+        && snapshot.count === candidate.count;
+    });
 }
