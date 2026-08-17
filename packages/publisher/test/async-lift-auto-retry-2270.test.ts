@@ -14,6 +14,7 @@ import {
   resetFailedLiftJobToAccepted,
   type PersistedFailedJob,
 } from '../src/async-lift-publisher-utils.js';
+import { classifyFailedJobRetryDisposition } from '../src/async-lift-retry-disposition.js';
 import {
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
@@ -515,6 +516,29 @@ describe('GH#2270 async lift automatic retry lane', () => {
     }));
   }
 
+  /**
+   * A TERMINAL (non-retryable) broadcast-phase failure. `recordTxHash` decides whether it carries
+   * transaction evidence — the only difference that matters to the bulk-clear guard.
+   */
+  async function failWithRevert(
+    publisher: TripleStoreAsyncLiftPublisher,
+    request: KnowledgeAssetVmPublishRequest,
+    options: { readonly recordTxHash: boolean },
+  ): Promise<PersistedFailedJob> {
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const walletId = `wallet-revert-${jobId}`;
+    await publisher.claimNext(walletId);
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    if (options.recordTxHash) {
+      await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId } });
+    }
+    return expectFailed(await publisher.recordPublishFailure(jobId, {
+      error: new Error('execution reverted'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    }));
+  }
+
   /** A confirmation-phase failure recorded from 'included' — a job that certainly sent a tx. */
   async function failFromIncluded(
     publisher: TripleStoreAsyncLiftPublisher,
@@ -804,5 +828,100 @@ describe('GH#2270 async lift automatic retry lane', () => {
     expect(enabled.describeJobRetryState(failed)).toEqual({ autoRetryEligible: true, waitingReason: 'backoff' });
     expect(createCorruptHeadPublisher({ autoRetryEnabled: false }).describeJobRetryState(failed))
       .toEqual({ autoRetryEligible: false, waitingReason: 'operator' });
+  });
+
+  // Bulk cleanup must not undo the admission guard. While an evidence-bearing job EXISTS,
+  // admission answers pending-chain-proof; delete it and the very next re-submit mints a fresh
+  // job for the same KA — a second publish for a transaction nobody has accounted for.
+  it('refuses to bulk-clear a failed job that still holds its subject pending chain proof', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const failed = await failAfterRecordedTxHash(publisher, request);
+
+    expect(await publisher.clear('failed')).toBe(0);
+    expect((await publisher.getStatus(failed.jobId))?.status).toBe('failed');
+    // The property the guard exists for: the subject is still bound, so admission still refuses.
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: failed.jobId,
+    });
+
+    // Bulk is safe by DEFAULT, not locked: naming the exact job still clears it, and that
+    // targeted call is where an operator takes the decision knowingly.
+    expect(await publisher.clearTerminalJob(failed.jobId)).toEqual({ outcome: 'cleared' });
+    expect(await publisher.getStatus(failed.jobId)).toBeNull();
+  });
+
+  it('still bulk-clears failed jobs with no transaction to account for', async () => {
+    const publisher = createPublisher();
+    await failWithUnmetQuorum(publisher);
+    await failWithRevert(publisher, kaVmPublishRequest({
+      name: 'revert-album',
+      shareOperationId: 'revert-op',
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    }), { recordTxHash: false });
+
+    expect(await publisher.clear('failed')).toBe(2);
+    expect((await publisher.getStats()).failed).toBe(0);
+  });
+
+  it('still bulk-clears a tx-bearing failed job whose subject is already superseded', async () => {
+    // The occupancy conjunct of the guard, isolated: a NON-retryable failure no longer holds its
+    // lifecycle subject, so refusing to clear it would prevent nothing — admission already mints
+    // a new job for that KA — while leaving terminal diagnoses in the queue forever. The
+    // transaction hash is not lost either way: the #1829 journal is append-only.
+    const publisher = createPublisher({ journalWrites: true });
+    const superseded = await failWithRevert(publisher, kaVmPublishRequest(), { recordTxHash: true });
+    expect([superseded.failure.code, superseded.failure.retryable]).toEqual(['tx_reverted', false]);
+    expect(hasBroadcastEvidence(superseded)).toBe(true);
+
+    expect(await publisher.clear('failed')).toBe(1);
+    expect(await publisher.getStatus(superseded.jobId)).toBeNull();
+    const journal = await publisher.readJournalByJob(superseded.jobId);
+    expect(journal.txHashes).toContain(TX_HASH);
+  });
+
+  // The classifier IS the partition: both consumers read this one function, so a divergence
+  // between the counts a retry reports and the reason a job shows is not expressible.
+  it('classifies each disposition once, for both the retry counts and the projection', async () => {
+    const publisher = createPublisher();
+    const reaccept = await failWithUnmetQuorum(publisher);
+    const blocked = await failAfterRecordedTxHash(publisher, kaVmPublishRequest({
+      name: 'blocked-album',
+      shareOperationId: 'blocked-op',
+      intentKey: `sha256:${'cd'.repeat(32)}`,
+    }));
+    const skip = await failWithRevert(publisher, kaVmPublishRequest({
+      name: 'skip-album',
+      shareOperationId: 'skip-op',
+      intentKey: `sha256:${'ef'.repeat(32)}`,
+    }), { recordTxHash: false });
+    const options = { autoRetryEnabled: true };
+
+    expect([reaccept, blocked, skip].map((job) => classifyFailedJobRetryDisposition(job, options)))
+      .toEqual([
+        { action: 'reaccept', projection: { autoRetryEligible: true, waitingReason: 'backoff' } },
+        { action: 'blocked_pending_recovery', projection: { autoRetryEligible: false, waitingReason: 'pending_chain_proof' } },
+        { action: 'skip', projection: { autoRetryEligible: false } },
+      ]);
+    // The two consumers, on the same three jobs: one count per action, and the projection each
+    // job reports is the projection the classifier assigned it.
+    expect([reaccept, blocked, skip].map((job) => publisher.describeJobRetryState(job)))
+      .toEqual([reaccept, blocked, skip].map((job) => classifyFailedJobRetryDisposition(job, options).projection));
+    expect(await publisher.retryDetailed())
+      .toEqual({ retried: 1, blockedPendingRecovery: 1, skipped: 1 });
+  });
+
+  it('reaccepts the same jobs by hand whether or not the automatic lane is switched on', async () => {
+    // The ACTION is independent of `autoRetryEnabled` by construction (both 'backoff' and
+    // 'operator' reaccept), so the kill-switch can never change what an operator's retry does.
+    for (const autoRetryEnabled of [true, false]) {
+      store = new OxigraphStore();
+      const publisher = createPublisher({ autoRetryEnabled });
+      await failWithUnmetQuorum(publisher);
+
+      expect([autoRetryEnabled, await publisher.retryDetailed()])
+        .toEqual([autoRetryEnabled, { retried: 1, blockedPendingRecovery: 0, skipped: 0 }]);
+    }
   });
 });

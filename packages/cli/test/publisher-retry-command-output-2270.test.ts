@@ -46,6 +46,40 @@ describe('dkg publisher retry output (#2270)', () => {
     expect(out).toMatch(/4 with nothing to retry/);
   });
 
+  // The SAME contract over the offline fallback. `dkg publisher retry` runs against a stopped
+  // daemon too, and that path builds its own publisher: a fallback still calling the old
+  // `retry()` — or an inspector instance that never gained `retryDetailed` — would print a
+  // truncated (or crashing) report while every daemon-path row above stayed green.
+  it('prints the same disposition over the local inspector when the daemon is unreachable', async () => {
+    const logs: string[] = [];
+    vi.spyOn(console, 'log').mockImplementation((...a: unknown[]) => {
+      logs.push(a.map(String).join(' '));
+    });
+    vi.spyOn(ApiClient, 'connect').mockRejectedValue(new Error('Daemon is not running'));
+    const stop = vi.fn(async () => {});
+    const retryDetailed = vi.fn(async () => ({ retried: 5, blockedPendingRecovery: 6, skipped: 7 }));
+    vi.doMock('../src/publisher-runner.js', () => ({
+      createPublisherInspector: async () => ({ publisher: { retryDetailed }, stop }),
+    }));
+
+    try {
+      const program = new Command();
+      program.exitOverride();
+      registerPublisherCommand(program);
+      await program.parseAsync(['publisher', 'retry'], { from: 'user' });
+    } finally {
+      vi.doUnmock('../src/publisher-runner.js');
+    }
+
+    expect(retryDetailed).toHaveBeenCalledWith({ status: 'failed' });
+    // The inspector opens a store of its own, so the command must close it whatever it printed.
+    expect(stop).toHaveBeenCalledTimes(1);
+    const out = logs.join('\n');
+    expect(out).toContain('Retried 5 publisher job(s).');
+    expect(out).toMatch(/6 awaiting chain proof/);
+    expect(out).toMatch(/7 with nothing to retry/);
+  });
+
   it('still reports the blocked and skipped jobs when nothing was retried', async () => {
     // The case the old output was actively misleading in: "Retried 0" alone reads as
     // "no failed jobs", when in fact a job may be sitting on an unproven transaction.

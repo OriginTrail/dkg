@@ -22,7 +22,6 @@ import {
   type LiftJobFinalizationMetadata,
   type LiftJobRecoveryMetadata,
   type LiftJobRequest,
-  type LiftJobRetryProjection,
   type LiftJobState,
   type KnowledgeAssetVmPublishRequest,
   type LiftPublishRequestMetadata,
@@ -48,6 +47,11 @@ import type {
   VmPublishTerminalJobClearer,
 } from './async-lift-publisher-types.js';
 import { AsyncLiftJobConflictError, LiftJobPendingChainProofError } from './async-lift-publisher-types.js';
+import {
+  classifyFailedJobRetryDisposition,
+  deriveLiftJobRetryProjection,
+  type LiftJobRetryProjection,
+} from './async-lift-retry-disposition.js';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
@@ -87,13 +91,13 @@ import {
   createKnowledgeAssetVmPublishSnapshotRequest,
   createKnowledgeAssetVmPublishJobRequest,
   createJobSlug,
-  deriveLiftJobRetryProjection,
   expectBindings,
   getRecoveryTxHash,
   hasBroadcastEvidence,
   isAutomaticallyRetryableLiftJob,
   isKnowledgeAssetVmPublishJobRequest,
   isFailedJob,
+  isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
   isOccupyingLifecycleJob,
   normalizePersistedLiftJobRequest,
@@ -1110,6 +1114,10 @@ export class TripleStoreAsyncLiftPublisher
    * `included` origin) need chain proof first — the landed-transaction-recorded-locally-as-failed
    * case arrives under `rpc_unavailable`, whose `reset_to_accepted` resolution used to be taken at
    * face value here and blind-republished.
+   *
+   * The disposition comes from {@link classifyFailedJobRetryDisposition}, the same classifier
+   * {@link describeJobRetryState} projects, so the counts an operator gets and the reason shown
+   * per job are ONE partition rather than two orderings that must be kept in step by hand.
    */
   async retryDetailed(filter: { status?: 'failed' } = {}): Promise<AsyncLiftRetryOutcome> {
     await this.ensureGraph();
@@ -1127,40 +1135,41 @@ export class TripleStoreAsyncLiftPublisher
       let blockedPendingRecovery = 0;
       let skipped = 0;
       for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
-        // Same precedence as the read-only projection's `waitingReason` (see
-        // `deriveLiftJobRetryProjection`), so the counts an operator gets from a retry and the
-        // reason shown per job are one partition rather than two opinions.
-        if (!job.failure.retryable) {
-          skipped += 1;
+        const { action } = classifyFailedJobRetryDisposition(job, {
+          autoRetryEnabled: this.autoRetryEnabled,
+        });
+        // Reaccept is opted INTO explicitly: a disposition this build does not know falls through
+        // to `skipped`, which leaves the job exactly as it is rather than republishing it.
+        if (action === 'reaccept') {
+          await this.reacceptFailedJob(job);
+          retried += 1;
           continue;
         }
-        // Chain safety before the budget: a job that may have sent a transaction stays failed and
-        // belongs in the pending-proof bucket whether or not its budget is spent.
-        if (job.failure.resolution === 'retry_recovery' || hasBroadcastEvidence(job)) {
+        if (action === 'blocked_pending_recovery') {
           blockedPendingRecovery += 1;
           continue;
         }
-        if (job.retries.retryCount >= job.retries.maxRetries) {
-          skipped += 1;
-          continue;
-        }
-
-        await this.reacceptFailedJob(job);
-        retried += 1;
+        skipped += 1;
       }
       return { retried, blockedPendingRecovery, skipped };
     });
   }
 
+  /**
+   * Bulk terminal cleanup. GH#2270 — the BULK lane is safe by default: it never deletes a failed
+   * job that still holds its lifecycle subject while a transaction may be unaccounted for, since
+   * that deletion is what turns admission's `LiftJobPendingChainProofError` back into a fresh job
+   * for the same KA. `clearTerminalJob(jobId)` remains the deliberate targeted override.
+   */
   async clear(status: 'finalized' | 'failed'): Promise<number> {
     await this.ensureGraph();
     const jobs = await this.list({ status });
     let cleared = 0;
     for (const job of jobs) {
-      // #1837 — single terminal-clear authority shared with clearTerminalJob: skips
-      // retry_recovery-failed jobs (a pending on-chain tx may still land). Behavior is
-      // identical to the prior inline `resolution === 'retry_recovery'` guard.
-      if (!isClearableTerminalLiftJob(job)) continue;
+      // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose
+      // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
+      // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
+      if (!isBulkClearableTerminalLiftJob(job)) continue;
       await this.releaseWalletLockForJob(job);
       await this.deleteJob(job.jobId);
       cleared += 1;

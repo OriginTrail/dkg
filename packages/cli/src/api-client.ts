@@ -5,7 +5,13 @@ import type {
   ContextGraphSyncMode,
   RandomSamplingDisabledReason,
 } from '@origintrail-official/dkg-agent';
-import type { AsyncLiftRetryOutcome, JournalReadResult, LiftJobRetryProjection } from '@origintrail-official/dkg-publisher';
+import type {
+  AsyncLiftRetryOutcome,
+  AsyncPreparedPublishPayload,
+  JournalReadResult,
+  LiftJob,
+  LiftJobRetryProjection,
+} from '@origintrail-official/dkg-publisher';
 import { readApiPort, readPid, isProcessRunning, configExists, loadConfig } from './config.js';
 import { loadTokens } from './auth.js';
 import {
@@ -1261,14 +1267,22 @@ export class ApiClient {
   }
 
   // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this
-  // job by itself?", served beside the untouched `job`.
-  async publisherJob(jobId: string): Promise<{ job: any; retryState: LiftJobRetryProjection }> {
+  // job by itself?", served beside the untouched `job`. `job` and `payload` carry the
+  // publisher's own exported types rather than `any`: these two routes serialize the queue's
+  // persisted job and prepared-payload shapes verbatim, so a drift there should break the
+  // build here instead of surfacing as an undefined field at runtime.
+  async publisherJob(jobId: string): Promise<{ job: LiftJob; retryState: LiftJobRetryProjection }> {
     return this.get(`/api/publisher/job?id=${encodeURIComponent(jobId)}`);
   }
 
   async publisherJobPayload(
     jobId: string,
-  ): Promise<{ job: any; payload: any; retryState: LiftJobRetryProjection }> {
+  ): Promise<{
+    // Named lifecycle publish jobs have no raw prepared payload; the route serves null there.
+    job: LiftJob;
+    payload: AsyncPreparedPublishPayload | null;
+    retryState: LiftJobRetryProjection;
+  }> {
     return this.get(`/api/publisher/job-payload?id=${encodeURIComponent(jobId)}`);
   }
 

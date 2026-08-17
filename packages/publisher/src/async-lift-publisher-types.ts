@@ -7,12 +7,12 @@ import type {
   LiftJobIncluded,
   LiftJobInclusionMetadata,
   LiftJobHex,
-  LiftJobRetryProjection,
   LiftJobState,
   LiftJobValidationMetadata,
   LiftPublishRequestMetadata,
   LiftPublishSnapshotRequest,
 } from './lift-job.js';
+import type { LiftJobRetryProjection } from './async-lift-retry-disposition.js';
 import type { DKGPublisher } from './dkg-publisher.js';
 import type { PublishOptions, PublishResult } from './publisher.js';
 import type { AsyncLiftPublishFailureInput } from './async-lift-publish-result.js';
