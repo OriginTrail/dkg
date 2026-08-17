@@ -1,0 +1,92 @@
+/* NSM v3.5 design tokens — THE LAW.
+   No color, spacing, radius, shadow, or duration literals anywhere else.
+   Layer 1 (primitives) may be re-based against the node UI's existing theme
+   at integration time; Layer 2 (semantic) names must not change — all
+   components bind to Layer 2 only. Dark-first; light theme = re-map Layer 1. */
+
+:root {
+  /* ---------- Layer 1 · primitives ---------- */
+  --gray-0:#0b0d10; --gray-1:#12151a; --gray-2:#1a1e25; --gray-3:#242a33;
+  --gray-4:#39414d; --gray-5:#5b6572; --gray-6:#8b95a3; --gray-7:#c3cad4;
+  --gray-8:#e8ecf1; --gray-9:#f7f9fb;
+  --accent-500:#4f7cff;            /* re-base to node-UI brand at integration */
+  --accent-600:#3b63d9;
+  --green-500:#2fbf71;  --green-700:#1f7a4b;
+  --amber-500:#e6a23c;  --amber-700:#9c6a1e;
+  --red-500:#e5534b;    --red-700:#a03530;
+  --teal-500:#2ec4b6;              /* provenance ⛓ */
+  --sky-500:#6ea8fe;               /* provenance ☁ */
+
+  /* ---------- Layer 2 · semantic ---------- */
+  --surface-0:var(--gray-0);       /* app background */
+  --surface-1:var(--gray-1);       /* cards */
+  --surface-2:var(--gray-2);       /* nested / hover */
+  --surface-3:var(--gray-3);       /* drawers, popovers */
+  --border-subtle:var(--gray-3);
+  --border-strong:var(--gray-4);
+  --text-primary:var(--gray-8);
+  --text-secondary:var(--gray-6);
+  --text-muted:var(--gray-5);
+  --text-on-accent:#ffffff;
+  --interactive:var(--accent-500);
+  --interactive-hover:var(--accent-600);
+
+  /* verification lifecycle — the chips the whole UX hangs on */
+  --state-verified:var(--green-500);      /* ✓ recounted-exact, countersigned */
+  --state-checking:var(--gray-6);         /* recount in progress */
+  --state-pending:var(--amber-500);       /* ◷ waiting for delivery */
+  --state-blocked:var(--red-500);         /* ⚠ withheld — payment blocked */
+  --state-voided:var(--gray-5);           /* bill canceled (never delivered) */
+
+  /* provenance badges */
+  --prov-pinned:var(--teal-500);          /* ⛓ weights-pinned */
+  --prov-claimed:var(--sky-500);          /* ☁ upstream-claimed */
+
+  /* gauges */
+  --gauge-track:var(--gray-3);
+  --gauge-low:var(--gray-5);              /* < 25% — not yet meaningful */
+  --gauge-mid:var(--amber-500);           /* accumulating */
+  --gauge-ready:var(--green-500);         /* ≥ 100% — action unlocked */
+  --gauge-over:var(--red-500);            /* budget exceeded / cap hit */
+
+  /* type — system stack; sizes are a fixed scale, no ad-hoc px */
+  --font-ui:-apple-system,'Segoe UI',Roboto,'Helvetica Neue',sans-serif;
+  --font-mono:'SF Mono',ui-monospace,Menlo,monospace; /* digests, keys, µ values */
+  --fs-xs:12px; --fs-sm:13px; --fs-md:14px; --fs-lg:16px;
+  --fs-xl:20px; --fs-2xl:24px; --fs-3xl:32px;
+  --lh-tight:1.25; --lh-normal:1.5;
+  --fw-regular:400; --fw-medium:500; --fw-semibold:600;
+
+  /* spacing — 4px base scale only */
+  --sp-1:4px; --sp-2:8px; --sp-3:12px; --sp-4:16px;
+  --sp-5:20px; --sp-6:24px; --sp-8:32px; --sp-10:40px; --sp-12:48px;
+
+  /* radii · shadows · motion */
+  --r-sm:6px; --r-md:10px; --r-lg:14px; --r-full:999px;
+  --shadow-1:0 1px 2px rgba(0,0,0,.4);
+  --shadow-2:0 4px 16px rgba(0,0,0,.45);
+  --dur-fast:120ms; --dur-med:200ms; --dur-slow:320ms;
+  --ease:cubic-bezier(.2,.7,.3,1);
+
+  /* component geometry */
+  --logo-sm:20px; --logo-md:28px; --logo-lg:40px;   /* model logos */
+  --gauge-radial-size:120px; --gauge-radial-arc:270deg;
+  --chip-h:22px; --row-h:44px; --card-min-w:280px;
+}
+
+/* Chips — one class per lifecycle state; components never restyle these */
+.chip{height:var(--chip-h);border-radius:var(--r-full);padding:0 var(--sp-2);
+  font-size:var(--fs-xs);font-weight:var(--fw-medium);display:inline-flex;
+  align-items:center;gap:var(--sp-1)}
+.chip--verified{color:var(--state-verified);background:color-mix(in srgb,var(--state-verified) 12%,transparent)}
+.chip--checking{color:var(--state-checking);background:color-mix(in srgb,var(--state-checking) 12%,transparent)}
+.chip--pending {color:var(--state-pending); background:color-mix(in srgb,var(--state-pending) 12%,transparent)}
+.chip--blocked {color:var(--state-blocked); background:color-mix(in srgb,var(--state-blocked) 12%,transparent)}
+.chip--voided  {color:var(--state-voided);  background:color-mix(in srgb,var(--state-voided) 12%,transparent)}
+.badge--pinned {color:var(--prov-pinned)}   /* ⛓ */
+.badge--claimed{color:var(--prov-claimed)}  /* ☁ */
+
+/* Monogram fallback when no licensed logo asset exists for a model family */
+.logo-monogram{display:inline-grid;place-items:center;border-radius:var(--r-sm);
+  background:var(--surface-3);color:var(--text-secondary);
+  font-family:var(--font-mono);font-weight:var(--fw-semibold)}
