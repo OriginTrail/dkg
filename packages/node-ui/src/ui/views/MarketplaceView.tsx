@@ -28,6 +28,7 @@ interface Offering {
   quoteEndpoint: string; firstSaleTx: string; graph: string;
   weights: string; tokenizer: string; template: string; backend: string; build: string;
   contract: string; nodeClass: string;
+  provenanceClass?: string; apiBase?: string; queryFlat?: string; perQuad?: string;
 }
 interface KRow { id: string; name: string; type: string; entities: string; role: string }
 
@@ -47,12 +48,20 @@ export function MarketplaceView(): React.ReactElement {
   useEffect(() => {
     // Offerings: the viewer's OWN node, SWM/VM over subscribed CGs — free.
     post<{ result?: { bindings?: Record<string, string>[] } }>('/api/query', {
-      sparql: `PREFIX nsm: <${NSM}> SELECT ?g ?modelId ?provider ?inTok ?outTok ?quote ?tx ?w ?tk ?tpl ?be ?bd ?rc WHERE { GRAPH ?g {
+      // v3 compat: only the CORE offering shape is required; every
+      // Iteration-2-specific predicate is OPTIONAL so both vocabularies render
+      // (v3 KAs carry provenanceClass/apiBase/query pricing instead of
+      // firstSaleTx/chatTemplateDigest/etc.).
+      sparql: `PREFIX nsm: <${NSM}> SELECT ?g ?modelId ?provider ?inTok ?outTok ?quote ?tx ?w ?tk ?tpl ?be ?bd ?rc ?pc ?ab ?qf ?pq WHERE { GRAPH ?g {
         ?o a nsm:ModelOffering ; nsm:modelId ?modelId ; nsm:providerAddress ?provider ;
-           nsm:perInputTokenMicroTrac ?inTok ; nsm:perOutputTokenMicroTrac ?outTok ;
-           nsm:quoteEndpoint ?quote ; nsm:firstSaleTx ?tx ;
-           nsm:weightsDigest ?w ; nsm:tokenizerBundleDigest ?tk ; nsm:chatTemplateDigest ?tpl ;
-           nsm:backendManifestDigest ?be ; nsm:providerBuildDigest ?bd ; nsm:recountContract ?rc } } LIMIT 50`,
+           nsm:perInputTokenMicroTrac ?inTok ; nsm:perOutputTokenMicroTrac ?outTok .
+        OPTIONAL { ?o nsm:quoteEndpoint ?quote } OPTIONAL { ?o nsm:firstSaleTx ?tx }
+        OPTIONAL { ?o nsm:weightsDigest ?w } OPTIONAL { ?o nsm:tokenizerBundleDigest ?tk }
+        OPTIONAL { ?o nsm:tokenizerBundleRef ?tk } OPTIONAL { ?o nsm:chatTemplateDigest ?tpl }
+        OPTIONAL { ?o nsm:backendManifestDigest ?be } OPTIONAL { ?o nsm:providerBuildDigest ?bd }
+        OPTIONAL { ?o nsm:recountContract ?rc } OPTIONAL { ?o nsm:provenanceClass ?pc }
+        OPTIONAL { ?o nsm:apiBase ?ab } OPTIONAL { ?o nsm:queryFlatMicroTrac ?qf }
+        OPTIONAL { ?o nsm:perReturnedQuadMicroTrac ?pq } } } LIMIT 50`,
       contextGraphId: 'odysseus', includeSharedMemory: true, includeContextGraphPartitions: true,
     }).then((r) => {
       const rows = r?.result?.bindings ?? [];
@@ -66,6 +75,8 @@ export function MarketplaceView(): React.ReactElement {
         graph: (unq(b.g).match(/context-graph:([^/]+)/)?.[1]) ?? unq(b.g),
         weights: unq(b.w), tokenizer: unq(b.tk), template: unq(b.tpl),
         backend: unq(b.be), build: unq(b.bd), contract: unq(b.rc), nodeClass: 'EDGE',
+        provenanceClass: unq(b.pc), apiBase: unq(b.ab),
+        queryFlat: unq(b.qf), perQuad: unq(b.pq),
       })));
     }).catch((e) => setErr(String(e).slice(0, 160)));
 
@@ -151,7 +162,7 @@ export function MarketplaceView(): React.ReactElement {
         {offerings.map((o) => (
           <React.Fragment key={o.modelId}>
             <div className="nsm-row nsm-grid-m" onClick={() => { setOpenDetail(openDetail === o.modelId ? null : o.modelId); setQuote(null); }}>
-              <span className="nsm-name">{o.modelId} <span className="nsm-dim">· {o.provider.slice(0, 6)}…{o.provider.slice(-4)}</span></span>
+              <span className="nsm-name">{o.provenanceClass === 'weights-pinned' ? '⛓ ' : o.provenanceClass === 'upstream-claimed' ? '☁ ' : ''}{o.modelId} <span className="nsm-dim">· {o.provider.slice(0, 6)}…{o.provider.slice(-4)}</span></span>
               <span><span className="verify-badge pending">{o.nodeClass}</span></span>
               <span className="nsm-mono">{o.inTok} in · {o.outTok} out µTRAC</span>
               <span className="nsm-mono">{(() => { const r = rep[o.provider.toLowerCase()]; return r ? `${r.signed} signed · ${r.disputed} disputed` : '—'; })()}</span>
