@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 04 Playground</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  .play { display: grid; grid-template-columns: auto 1fr auto; gap: var(--sp-4); align-items: start; }
+  .rail { width: calc(var(--card-min-w) * 0.65); }
+  .rail--right { width: calc(var(--card-min-w) * 1.1); }
+  .rail .item { display: flex; align-items: center; gap: var(--sp-2); padding: var(--sp-2) var(--sp-3); border-radius: var(--r-sm); font-size: var(--fs-sm); cursor: pointer; }
+  .rail .item.is-active { background: var(--surface-2); font-weight: var(--fw-medium); }
+  .chat { display: flex; flex-direction: column; gap: var(--sp-3); }
+  .play .chat { min-height: calc(var(--gauge-radial-size) * 2.4); }
+  .stream-note { font-size: var(--fs-xs); color: var(--text-muted); display: flex; align-items: center; gap: var(--sp-2); }
+  .cost-chip { font-family: var(--font-mono); font-size: var(--fs-xs); color: var(--text-secondary); }
+  .countdown { font-variant-numeric: tabular-nums; }
+  .composer { display: flex; gap: var(--sp-2); margin-top: var(--sp-2); }
+  .composer .input { flex: 1; }
+  .compare { display: grid; grid-template-columns: 1fr 1fr; gap: var(--sp-4); }
+  .withhold-body { border-left: 2px solid var(--state-blocked); padding-left: var(--sp-3); margin-top: var(--sp-2); font-size: var(--fs-sm); color: var(--text-secondary); }
+  @media (max-width: 480px) { .play { grid-template-columns: 1fr; } .rail, .rail--right { width: auto; } .compare { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/04-playground.md — chips/receipts show REPORT-v3 real numbers (258 µ, 42/29)</span></div>
+<div class="frame">
+
+  <div class="state-label">state: verified — the flagship frame (models · chat · receipt rail)</div>
+  <div class="play">
+    <div class="card rail" style="padding:var(--sp-2)">
+      <div class="item is-active"><span class="logo-monogram logo--sm">Qw</span> Qwen2.5 14B <span class="badge--pinned">⛓</span></div>
+      <div class="item"><span class="logo-monogram logo--sm">G5</span> GPT-5.4 Codex <span class="badge--claimed">☁</span></div>
+      <div class="item sec">+ Compare side by side</div>
+    </div>
+    <div class="card card--pad chat">
+      <div class="bubble bubble--user">Explain recounting in one paragraph.</div>
+      <div class="bubble bubble--model">
+        <div class="row sm sec" style="margin-bottom:var(--sp-2)"><span class="logo-monogram logo--sm">Qw</span> Qwen2.5 14B</div>
+        <div>Recounting means this node re-derives the seller's token bill from the delivered bytes with the model's own pinned tokenizer, and only pays when its own count matches the claim.</div>
+        <div class="msg-footer">
+          <span class="cost-chip" title="258 µTRAC · ~$0.00007 — tap for the full receipt">258 µ</span>
+          <span class="chip chip--verified">✓ Verified — we re-counted it ourselves</span>
+        </div>
+      </div>
+      <div class="composer"><input class="input" placeholder="Message…"><button class="btn btn--primary">Send</button></div>
+    </div>
+    <div class="card card--pad rail--right stack" style="gap:var(--sp-2)">
+      <h2 style="font-size:var(--fs-md)">Receipt</h2>
+      <div class="mono xs sec">leg_e1552c0a</div>
+      <span class="chip chip--verified">Verified ✓</span>
+      <div class="drawer" style="padding:var(--sp-3)">
+        <div class="drow"><span>Tokens — claimed 42/29 · our count 42/29</span></div>
+        <div class="drow"><span>Price applied</span><span class="v">2 µ in · 6 µ out</span></div>
+        <div class="drow"><span>Delivered content fingerprint</span><span class="v">sha256:7f3a91c2…</span></div>
+        <div class="drow"><span>Seller signature</span><span class="v">0x8c41ab09… ✓</span></div>
+        <div class="drow"><span>Our agreement to pay</span><span class="v">0x1e77d3f2…</span></div>
+        <div class="drow"><span>Included in close sha256:99488cff…</span></div>
+        <div class="drow"><span><a href="#basescan">View on Basescan ↗</a></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="state-label">state: streaming → checking</div>
+  <div class="card card--pad chat" style="max-width:calc(var(--card-min-w)*2.2)">
+    <div class="bubble bubble--user">Explain recounting in one paragraph.</div>
+    <div class="bubble bubble--model">
+      <div>Recounting means this node re-derives the seller's token bill from the delivered bytes with the model's own pinned tok<span class="muted">▍</span></div>
+      <div class="stream-note">▁▂▃ Verifying as it streams… final check on completion</div>
+      <div class="msg-footer">
+        <span class="chip chip--checking">◌ Checking this bill…</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="state-label">state: pending-delivery — the v3-incident drill, countdown live, resolves unattended</div>
+  <div class="card card--pad chat" style="max-width:calc(var(--card-min-w)*2.2)">
+    <div class="bubble bubble--model">
+      <div class="muted">Waiting for the response to arrive over the lane…</div>
+      <div class="msg-footer">
+        <span class="cost-chip">258 µ</span>
+        <span class="chip chip--pending">◷ Waiting for delivery</span>
+        <span class="xs muted countdown">Delivery due in 04:12 — the bill cancels automatically if it doesn't arrive</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="state-label">state: blocked — plain words first, code one reveal deeper</div>
+  <div class="card card--pad chat" style="max-width:calc(var(--card-min-w)*2.2)">
+    <div class="bubble bubble--model">
+      <div>Recounting means this node re-derives the seller's token bill…</div>
+      <div class="msg-footer">
+        <span class="chip chip--blocked">⚠ Payment blocked</span>
+      </div>
+      <div class="withhold-body">
+        Charged above the agreed price — payment blocked
+        <div class="xs muted" style="margin-top:var(--sp-1)">Blocking payment is the system working: charges are only paid after this node re-checks them</div>
+      </div>
+    </div>
+    <div class="drawer" style="max-width:calc(var(--card-min-w)*1.4)">
+      <div class="drow"><span>Reason</span><span class="v">E_OVERBILL</span></div>
+      <div class="drow"><span>Tokens — claimed 42/41 · our count 42/29</span></div>
+      <div class="drow"><span>Claimed</span><span class="v">310 µTRAC</span></div>
+      <div class="drow"><span>Our recount</span><span class="v">258 µTRAC</span></div>
+    </div>
+  </div>
+
+  <div class="state-label">state: voided</div>
+  <div class="card card--pad" style="max-width:calc(var(--card-min-w)*2.2)">
+    <div class="msg-footer">
+      <span class="cost-chip" style="text-decoration:line-through">258 µ</span>
+      <span class="chip chip--voided">Never delivered — bill canceled automatically</span>
+    </div>
+  </div>
+
+  <div class="state-label">state: rerouted</div>
+  <div class="toast"><span class="chip chip--checking">↷</span> Rerouted to <span class="mono">0x633E5a7C…</span> — the failed try cost nothing</div>
+
+  <div class="state-label">state: 402-unfunded</div>
+  <div class="card card--pad row row--between row--wrap-mobile" style="max-width:calc(var(--card-min-w)*2.2)">
+    <span class="sec">No funded tab covers this model — fund it in Treasury</span>
+    <a class="btn btn--primary btn--sm" href="#treasury">Open Treasury</a>
+  </div>
+
+  <div class="state-label">state: compare mode — one prompt, two independent receipts</div>
+  <div class="compare">
+    <div class="card card--pad chat">
+      <div class="row sm sec"><span class="logo-monogram logo--sm">Qw</span> Qwen2.5 14B <span class="badge--pinned">⛓</span></div>
+      <div class="bubble bubble--model">
+        <div>Recounting means this node re-derives the bill from delivered bytes…</div>
+        <div class="msg-footer"><span class="cost-chip">258 µ</span><span class="chip chip--verified">Verified ✓</span></div>
+      </div>
+    </div>
+    <div class="card card--pad chat">
+      <div class="row sm sec"><span class="logo-monogram logo--sm">G5</span> GPT-5.4 Codex <span class="badge--claimed">☁</span></div>
+      <div class="bubble bubble--model">
+        <div>Recounting is the buyer-side audit of a metered bill…</div>
+        <div class="msg-footer"><span class="cost-chip">1,940 µ</span><span class="chip chip--verified">Verified ✓</span></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>

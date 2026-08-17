@@ -1,0 +1,152 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 07 Operate (seller)</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  .cols { display: grid; grid-template-columns: 1.2fr 1fr; gap: var(--sp-4); align-items: start; }
+  .cols > *, .cols .card { min-width: 0; }
+  @media (max-width: 480px) { .cols { grid-template-columns: 1fr; } }
+  .offering-row { display: flex; align-items: center; gap: var(--sp-3); padding: var(--sp-2) 0; border-bottom: 1px solid var(--border-subtle); font-size: var(--fs-sm); flex-wrap: wrap; }
+  .offering-row:last-child { border-bottom: none; }
+  .live-tag { font-size: var(--fs-xs); color: var(--state-verified); }
+  .paused-tag { font-size: var(--fs-xs); color: var(--text-muted); }
+  .wmix { display: flex; height: var(--sp-2); border-radius: var(--r-full); overflow: hidden; max-width: var(--card-min-w); }
+  .wizard { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-sm); flex-wrap: wrap; }
+  .wizard .wstep { padding: var(--sp-1) var(--sp-3); border-radius: var(--r-full); border: 1px solid var(--border-subtle); color: var(--text-muted); }
+  .wizard .wstep.is-active { border-color: var(--interactive); color: var(--text-primary); background: var(--surface-2); }
+  .wizard .wstep.is-done { color: var(--state-verified); }
+  .preview-frame { border: 1px dashed var(--border-strong); border-radius: var(--r-md); padding: var(--sp-4); }
+  .mcard-mini { display: flex; flex-direction: column; gap: var(--sp-2); max-width: var(--card-min-w); }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/07-operate-seller.md — gauge shows the real 761 / 2,941,000 (~0.03%)</span></div>
+<div class="frame">
+
+  <div class="state-label">state: below-threshold (the honest default) — earnings · offerings · legs · margin</div>
+  <div class="cols">
+    <div class="stack">
+      <div class="card card--pad row" style="gap:var(--sp-5)">
+        <div class="gauge-wrap" title="Earned 761 µ of the 2,941,000 µ needed for an economic payout">
+          <!-- 0.03% would be invisible; a minimum 2° tick keeps it honest-but-visible -->
+          <div class="gauge-radial" style="--pct:0.75; --fill:var(--gauge-low)"></div>
+          <div class="readout"><div><div class="mono" style="font-size:var(--fs-lg);font-weight:var(--fw-semibold)">0.03%</div><div class="xs muted">to payout</div></div></div>
+        </div>
+        <div class="stack" style="gap:var(--sp-1)">
+          <h2>Earnings → payout</h2>
+          <div class="mono sm">761 µ of 2,941,000 µ</div>
+          <div class="sec sm">Not yet worth settling — network fees would exceed earnings</div>
+          <div><button class="btn" disabled>Settle</button></div>
+        </div>
+      </div>
+      <div class="card card--pad stack" style="gap:var(--sp-2)">
+        <h2>Legs</h2>
+        <div class="scroll-x">
+          <table class="table">
+            <tbody>
+              <tr>
+                <td class="mono">leg_27796e2b</td>
+                <td><span class="chip chip--pending">◷ Waiting for delivery</span></td>
+                <td class="num mono countdown">due in 04:12</td>
+                <td class="num mono">258 µ</td>
+              </tr>
+              <tr>
+                <td class="mono">leg_e1552c0a</td>
+                <td><span class="chip chip--verified">Verified ✓</span></td>
+                <td></td>
+                <td class="num mono">258 µ</td>
+              </tr>
+              <tr>
+                <td class="mono">leg_b90d411a</td>
+                <td><span class="chip chip--blocked">⚠ Payment blocked</span></td>
+                <td class="sec xs">Charged above the agreed price</td>
+                <td class="num mono">0 µ</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="xs muted">1 bill waiting on delivery — oldest due in 04:12</div>
+        <div class="stack" style="gap:var(--sp-1)">
+          <div class="xs muted">Blocked payments by reason</div>
+          <div class="wmix">
+            <span style="flex:3;background:var(--state-blocked)" title="Charged above the agreed price — 3"></span>
+            <span style="flex:1;background:var(--state-pending)" title="The token count doesn't add up — 1"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="stack">
+      <div class="card card--pad stack" style="gap:var(--sp-2)">
+        <h2>Offerings</h2>
+        <div class="offering-row"><span class="logo-monogram logo--sm">Qw</span> Qwen2.5 14B <span class="badge--pinned">⛓</span> <span class="live-tag">live</span>
+          <span style="margin-left:auto"><button class="btn btn--ghost btn--sm">Edit</button> <button class="btn btn--ghost btn--sm">Pause</button></span></div>
+        <div class="offering-row"><span class="logo-monogram logo--sm">G5</span> GPT-5.4 Codex <span class="badge--claimed">☁</span> <span class="live-tag">live</span>
+          <span style="margin-left:auto"><button class="btn btn--ghost btn--sm">Edit</button> <button class="btn btn--ghost btn--sm">Pause</button></span></div>
+      </div>
+      <div class="card card--pad stack" style="gap:var(--sp-2)">
+        <h2>☁ margin <span class="xs muted">(operator-only)</span></h2>
+        <div class="sm">upstream est <span class="mono">$0.41</span> · billed <span class="mono">$0.38</span></div>
+        <div class="sm sec">Upstream tokens you pay for but can't bill (reasoning): 9%</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="state-label">state: ready-to-settle (devnet-forced ≥100%)</div>
+  <div class="card card--pad row" style="gap:var(--sp-5);max-width:calc(var(--card-min-w)*2)">
+    <div class="gauge-wrap" title="Earned 3,120,000 µ of the 2,941,000 µ needed for an economic payout">
+      <div class="gauge-radial" style="--pct:100; --fill:var(--gauge-ready)"></div>
+      <div class="readout"><div><div class="mono" style="font-size:var(--fs-lg);font-weight:var(--fw-semibold)">106%</div><div class="xs muted">to payout</div></div></div>
+    </div>
+    <div class="stack" style="gap:var(--sp-1)">
+      <div class="mono sm">3,120,000 µ of 2,941,000 µ</div>
+      <div class="sm" style="color:var(--state-verified)">Ready to settle</div>
+      <div><button class="btn btn--primary">Settle</button></div>
+      <div class="xs muted">Settlement runs from this node only — there is no public settle route.</div>
+    </div>
+  </div>
+
+  <div class="state-label">state: accumulating (25–99%)</div>
+  <div class="card card--pad row" style="gap:var(--sp-5);max-width:calc(var(--card-min-w)*2)">
+    <div class="gauge-wrap"><div class="gauge-radial" style="--pct:52; --fill:var(--gauge-mid)"></div>
+      <div class="readout"><div><div class="mono" style="font-size:var(--fs-lg);font-weight:var(--fw-semibold)">52%</div><div class="xs muted">to payout</div></div></div></div>
+    <div class="stack" style="gap:var(--sp-1)">
+      <div class="mono sm">1,529,320 µ of 2,941,000 µ</div>
+      <div class="sec sm">Accumulating toward payout</div>
+    </div>
+  </div>
+
+  <div class="state-label">state: offering paused · upstream unhealthy</div>
+  <div class="card card--pad stack" style="gap:var(--sp-2);max-width:calc(var(--card-min-w)*2)">
+    <div class="offering-row"><span class="logo-monogram logo--sm">Qw</span> Qwen2.5 14B <span class="badge--pinned">⛓</span> <span class="paused-tag">paused</span>
+      <span style="margin-left:auto"><button class="btn btn--ghost btn--sm">Resume</button></span></div>
+    <div class="offering-row"><span class="logo-monogram logo--sm">G5</span> GPT-5.4 Codex <span class="badge--claimed">☁</span>
+      <span class="xs" style="color:var(--state-pending)">⚠ upstream unreachable — serving halted; failed calls create no bills</span></div>
+  </div>
+
+  <div class="state-label">publish wizard — preview IS the buyer's card (same components)</div>
+  <div class="card card--pad stack">
+    <div class="wizard">
+      <span class="wstep is-done">✓ Connect</span>
+      <span class="wstep is-done">✓ Price</span>
+      <span class="wstep is-active">Preview</span>
+      <span class="wstep">Publish</span>
+    </div>
+    <div class="xs muted">Exactly how buyers will see this listing</div>
+    <div class="preview-frame">
+      <div class="card mcard-mini card--pad">
+        <div class="row" style="font-size:var(--fs-lg);font-weight:var(--fw-semibold)"><span class="logo-monogram logo--md">Qw</span> Qwen2.5 14B Instruct</div>
+        <div class="sec sm">Qwen · text · 32k context</div>
+        <div class="sm sec">1 provider <span class="badge--pinned">⛓ Weights verified</span></div>
+        <div style="font-weight:var(--fw-medium)">~$0.91 / 1M tokens <span class="xs muted mono">2 µ / 7 µ per token</span></div>
+      </div>
+    </div>
+    <div class="row" style="justify-content:flex-end"><button class="btn btn--ghost btn--sm">Back</button> <button class="btn btn--primary btn--sm">Publish</button></div>
+  </div>
+
+</div>
+</body>
+</html>

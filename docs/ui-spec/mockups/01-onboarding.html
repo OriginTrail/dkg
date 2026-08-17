@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 01 Onboarding</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  /* surface-local layout only; all values are tokens */
+  .steps { display: flex; align-items: center; gap: var(--sp-3); margin-bottom: var(--sp-6); }
+  .step { display: flex; align-items: center; gap: var(--sp-2); font-size: var(--fs-sm); font-weight: var(--fw-medium); }
+  .step .n { width: var(--sp-6); height: var(--sp-6); border-radius: var(--r-full); display: grid; place-items: center; font-size: var(--fs-xs); border: 1px solid var(--border-strong); color: var(--text-muted); }
+  .step.is-active .n { background: var(--interactive); border-color: var(--interactive); color: var(--text-on-accent); }
+  .step.is-done .n { background: var(--state-verified); border-color: var(--state-verified); color: var(--text-on-accent); }
+  .step.is-idle { color: var(--text-muted); }
+  .steps .bar { flex: 1; height: 1px; background: var(--border-subtle); }
+  .budget-row { display: flex; gap: var(--sp-3); align-items: baseline; flex-wrap: wrap; }
+  .snippet { background: var(--surface-0); border: 1px solid var(--border-strong); border-radius: var(--r-sm); padding: var(--sp-3); font-family: var(--font-mono); font-size: var(--fs-xs); display: flex; justify-content: space-between; gap: var(--sp-3); align-items: center; overflow-wrap: anywhere; }
+  .warn-once { color: var(--state-pending); font-size: var(--fs-sm); display: flex; gap: var(--sp-2); align-items: center; }
+  .addr-box { display: flex; gap: var(--sp-3); align-items: center; flex-wrap: wrap; }
+  .qr { width: var(--gauge-radial-size); height: var(--gauge-radial-size); border-radius: var(--r-sm); background: repeating-conic-gradient(var(--surface-3) 0 25%, var(--surface-2) 0 50%) 0 0 / var(--sp-4) var(--sp-4); display: grid; place-items: center; color: var(--text-muted); font-size: var(--fs-xs); }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/01-onboarding.md — nothing here is wired</span></div>
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: ready (step 1)</div>
+  <div class="card card--pad stack">
+    <h1 style="font-size:var(--fs-xl)">Two steps to your first verified completion</h1>
+    <div class="steps">
+      <div class="step is-active"><span class="n">1</span> Fund</div>
+      <div class="bar"></div>
+      <div class="step is-idle"><span class="n">2</span> Get your key</div>
+    </div>
+    <div class="budget-row">
+      <label class="sec sm" for="budget">Budget</label>
+      <input id="budget" class="input mono" value="1.0 TRAC" size="10" title="1 TRAC = $0.28 · reference rate, refreshed hourly">
+      <span class="sec">~$0.28</span>
+    </div>
+    <div class="sm muted">wallet: <span class="mono">1.2500 TRAC</span> <span class="sec">($0.35)</span> · <span class="mono">0.0031 ETH</span> for fees</div>
+    <div><button class="btn btn--primary">Set budget</button></div>
+    <div class="sec sm">This node opens and manages provider tabs for you.</div>
+  </div>
+
+  <div class="state-label">state: step 2 — key minted, shown once</div>
+  <div class="card card--pad stack">
+    <h1 style="font-size:var(--fs-xl)">Two steps to your first verified completion</h1>
+    <div class="steps">
+      <div class="step is-done"><span class="n">✓</span> Fund</div>
+      <div class="bar"></div>
+      <div class="step is-active"><span class="n">2</span> Get your key</div>
+    </div>
+    <div class="sec">Works with anything that speaks the OpenAI API — paste the two lines below.</div>
+    <div class="budget-row">
+      <label class="sec sm" for="kname">Name</label>
+      <input id="kname" class="input mono" value="openclaw-main" size="14">
+      <label class="sec sm" for="kcap">budget cap</label>
+      <input id="kcap" class="input mono" value="250,000 µ" size="10">
+    </div>
+    <div class="snippet"><span>OPENAI_BASE_URL=https://buyer-node.local:9301/marketplace/gateway/v1</span><button class="btn btn--ghost btn--sm">Copy</button></div>
+    <div class="snippet"><span>OPENAI_API_KEY=nsm_k_9f3ab6e01d5c47f2b8a9</span><button class="btn btn--ghost btn--sm">Copy</button></div>
+    <div class="warn-once">⚠ Shown once. Store it now.</div>
+  </div>
+
+  <div class="state-label">state: empty-wallet</div>
+  <div class="card card--pad stack">
+    <h1 style="font-size:var(--fs-xl)">Two steps to your first verified completion</h1>
+    <div class="steps">
+      <div class="step is-active"><span class="n">1</span> Fund</div>
+      <div class="bar"></div>
+      <div class="step is-idle"><span class="n">2</span> Get your key</div>
+    </div>
+    <div class="sec">This node's wallet is empty. Send TRAC (and a little ETH for fees on Base) to <span class="mono">0x1B7a44F2…</span>.</div>
+    <div class="addr-box">
+      <div class="qr">QR</div>
+      <div class="stack" style="gap:var(--sp-2)">
+        <div class="snippet"><span>0x1B7a44F2c9d0E83aa51c6b02D9CE33F14a09b2E4</span><button class="btn btn--ghost btn--sm">Copy</button></div>
+        <div class="xs muted">Balance refreshes automatically once funds arrive.</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="state-label">state: funding-pending</div>
+  <div class="card card--pad stack">
+    <div class="row">
+      <span class="chip chip--checking">◌ Confirming on Base…</span>
+      <span class="sm sec">2 of 3 confirmations</span>
+    </div>
+    <div class="sm muted">Budget <span class="mono">1.0 TRAC</span> (~$0.28) will open your first tab when confirmed.</div>
+  </div>
+
+  <div class="state-label">state: done — card collapses to the KPI toast</div>
+  <div class="toast"><span class="chip chip--verified">✓</span> First verified completion in <span class="mono">07:41</span></div>
+
+  <div class="state-label">state: error — wallet API unreachable</div>
+  <div class="card card--pad row row--between row--wrap-mobile">
+    <span class="sec">Can't reach the provider right now. Nothing was charged.</span>
+    <button class="btn">Retry</button>
+  </div>
+
+</div>
+</body>
+</html>

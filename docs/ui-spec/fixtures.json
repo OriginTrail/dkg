@@ -1,0 +1,84 @@
+{
+  "_": "NSM v3.5 UI fixtures — real numbers from docs/REPORT-v3.md where mandated by ui-spec/README §Loop; plausible fixture values elsewhere. Drives /dev/gallery and the M-gate mockups. Mockups rendering this data are ALWAYS labeled as mockups (CLAUDE.md rule 9).",
+  "fx": { "tracUsd": 0.28, "note": "1 TRAC = $0.28 reference rate; 1 µTRAC = 1e-6 TRAC" },
+  "chain": { "id": 8453, "name": "Base", "explorer": "https://basescan.org" },
+  "wallets": {
+    "buyer": { "address": "0x1B7a44F2c9d0E83aa51c6b02D9CE33F14a09b2E4", "trac": 1.25, "eth": 0.0031 },
+    "sellerOkf": { "address": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab", "label": "okf-mainnet" },
+    "sellerHermes": { "address": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B", "label": "hermes" }
+  },
+  "conservation": { "lhs": 1000000, "billed": 761, "refundable": 999239, "ok": true },
+  "conservationBroken": { "lhs": 1000000, "billed": 761, "refundable": 999237, "ok": false },
+  "tab": {
+    "tabId": "tab_1dfe28cb", "provider": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B",
+    "fundedMicro": 1000000, "billedMicro": 761, "refundableMicro": 999239,
+    "openTx": "0x62a51d56"
+  },
+  "treasury": {
+    "ringTrac": 1.9992, "ringUsd": 0.56,
+    "walletTrac": 1.0, "refundableTrac": 0.999239
+  },
+  "threshold": { "earnedMicro": 761, "thresholdMicro": 2941000, "pct": 0.03 },
+  "legs": {
+    "verified": {
+      "legId": "leg_e1552c0a", "state": "verified", "costMicro": 258, "usd": 0.00007,
+      "counts": { "claimedIn": 42, "claimedOut": 29, "ourIn": 42, "ourOut": 29 },
+      "bytesDigest": "sha256:7f3a91c2", "sellerSig": "0x8c41ab09", "countersig": "0x1e77d3f2",
+      "closeDigest": "sha256:99488cff"
+    },
+    "pending": {
+      "legId": "leg_27796e2b", "state": "pending-delivery", "costMicro": 258,
+      "transport": "lane", "deadlineIn": "04:12"
+    },
+    "voided": {
+      "legId": "leg_27796e2b", "state": "voided", "costMicro": 258,
+      "reason": "delivery-deadline-missed"
+    },
+    "blocked": {
+      "legId": "leg_b90d411a", "state": "blocked", "code": "E_OVERBILL",
+      "claimedMicro": 310, "recountMicro": 258,
+      "counts": { "claimedIn": 42, "claimedOut": 41, "ourIn": 42, "ourOut": 29 }
+    },
+    "checking": { "legId": "leg_4de07c31", "state": "checking", "costMicro": 194 }
+  },
+  "withholdCodes": ["E_BYTES_DIGEST", "E_RECOUNT_MISMATCH", "E_TOKENIZER_DRIFT", "E_OVERBILL", "E_LEG_SIGNATURE"],
+  "models": [
+    {
+      "modelRef": "urn:nsm:model:sha256:3f66aa10c2b944d1",
+      "displayName": "Qwen2.5 14B Instruct", "family": "qwen", "modality": "text",
+      "contextLength": 32768, "quantization": "Q4_K_M", "provenance": ["weights-pinned", "weights-pinned"],
+      "logo": "monogram:Qw",
+      "providers": [
+        { "addr": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab", "label": "okf", "inMicro": 2, "outMicro": 6, "usdPer1M": 0.84, "class": "weights-pinned", "ttftMs": 380, "tokS": 42, "via": "direct", "up": true, "rep": { "verified": 4, "disputed": 0 } },
+        { "addr": "0x9A21fCe082B41C3E7dA5B9a4bE0dD1685A33C90B", "label": "hermes", "inMicro": 2, "outMicro": 7, "usdPer1M": 0.91, "class": "weights-pinned", "ttftMs": 510, "tokS": 35, "via": "lane", "up": true, "rep": { "verified": 4, "disputed": 0 } }
+      ],
+      "settledTokens": 1200000, "trend": "up"
+    },
+    {
+      "modelRef": "urn:nsm:model:gpt-5.4-codex",
+      "displayName": "GPT-5.4 Codex", "family": "openai", "modality": "text",
+      "contextLength": 128000, "provenance": ["upstream-claimed"],
+      "logo": "monogram:G5",
+      "providers": [
+        { "addr": "0x633E5a7C5e612d9981538F60D824cC03be97e2Ab", "label": "okf", "inMicro": 9, "outMicro": 36, "usdPer1M": 4.2, "class": "upstream-claimed", "ttftMs": null, "tokS": null, "via": "direct", "up": true, "rep": { "verified": 2, "disputed": 1 } }
+      ],
+      "settledTokens": 240000, "trend": "flat"
+    }
+  ],
+  "keys": [
+    {
+      "name": "openclaw-main", "prefix": "nsm_k_9f", "capMicro": 250000, "spentMicro": 152500,
+      "pct": 61, "models": ["Qwen2.5 14B ⛓"], "query": true, "rps": 2, "lastUsed": "2m ago",
+      "state": "active", "expiryDays": 30, "sumOk": true
+    },
+    { "name": "hermes-probe", "prefix": "nsm_k_c4", "capMicro": 50000, "spentMicro": 50000, "pct": 100, "models": ["Qwen2.5 14B ⛓"], "query": false, "rps": 1, "lastUsed": "1h ago", "state": "exhausted", "expiryDays": 30, "sumOk": true },
+    { "name": "old-demo", "prefix": "nsm_k_a1", "capMicro": 10000, "spentMicro": 1200, "pct": 12, "models": ["any"], "query": true, "rps": 1, "lastUsed": "6d ago", "state": "revoked", "expiryDays": 30, "sumOk": true }
+  ],
+  "mintedKeyPlaintextOnce": "nsm_k_9f3ab6e01d5c47f2b8a9",
+  "gatewaySnippet": {
+    "baseUrl": "https://buyer-node.local:9301/marketplace/gateway/v1",
+    "note": "mockup placeholder — real value renders from the node's own config, never hardcoded"
+  },
+  "margin": { "upstreamEstUsd": 0.41, "billedUsd": 0.38, "reasoningOverheadPct": 9 },
+  "kpi": { "firstVerifiedMmss": "07:41" }
+}

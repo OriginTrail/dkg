@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 06 Access (keys for agents)</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  .keyrow .gauge-linear { min-width: calc(var(--card-min-w) * 0.45); }
+  .scopes { display: flex; gap: var(--sp-1); flex-wrap: wrap; }
+  .scopes .chip { color: var(--text-secondary); background: var(--surface-2); }
+  .tr--revoked td { color: var(--text-muted); }
+  .spark { display: flex; align-items: flex-end; gap: var(--sp-1); height: var(--sp-10); }
+  .spark i { width: var(--sp-2); background: var(--interactive); border-radius: var(--r-sm) var(--r-sm) 0 0; display: block; opacity: 0.75; }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/06-access-keys.md — key-conservation check per key, red on fixture break</span></div>
+<div class="frame">
+
+  <div class="state-label">state: loaded — active · exhausted · revoked rows</div>
+  <div class="row row--between" style="margin-bottom:var(--sp-3)">
+    <h1 style="font-size:var(--fs-xl)">Access</h1>
+    <button class="btn btn--primary">+ Mint key</button>
+  </div>
+  <div class="card scroll-x">
+    <table class="table">
+      <thead><tr><th>Name</th><th>Key</th><th>Budget</th><th>Models</th><th>Q</th><th class="num">rps</th><th>Last used</th><th></th></tr></thead>
+      <tbody>
+        <tr class="keyrow">
+          <td>openclaw-main</td>
+          <td class="mono">nsm_k_9f…</td>
+          <td>
+            <div class="gauge-linear"><i style="width:61%"></i></div>
+            <div class="xs muted" style="margin-top:var(--sp-1)"><span class="mono">152,500 µ</span> of <span class="mono">250,000 µ</span> used</div>
+          </td>
+          <td><div class="scopes"><span class="chip">Qwen2.5 14B <span class="badge--pinned">⛓</span></span></div></td>
+          <td><span class="badge--pinned">✓</span></td>
+          <td class="num mono">2</td>
+          <td class="sec">2m ago</td>
+          <td class="num"><button class="btn btn--danger btn--sm">Revoke</button></td>
+        </tr>
+        <tr class="keyrow">
+          <td>hermes-probe</td>
+          <td class="mono">nsm_k_c4…</td>
+          <td>
+            <div class="gauge-linear is-over"><i style="width:100%"></i></div>
+            <div class="xs" style="margin-top:var(--sp-1);color:var(--gauge-over)">This key hit its budget cap. Raise the cap or top up to continue.</div>
+          </td>
+          <td><div class="scopes"><span class="chip">Qwen2.5 14B <span class="badge--pinned">⛓</span></span></div></td>
+          <td><span class="muted">—</span></td>
+          <td class="num mono">1</td>
+          <td class="sec">1h ago</td>
+          <td class="num"><button class="btn btn--sm">Raise cap</button></td>
+        </tr>
+        <tr class="keyrow tr--revoked">
+          <td>old-demo</td>
+          <td class="mono">nsm_k_a1…</td>
+          <td>
+            <div class="gauge-linear is-low"><i style="width:12%"></i></div>
+            <div class="xs muted" style="margin-top:var(--sp-1)">Revoked — stops at the next call</div>
+          </td>
+          <td><div class="scopes"><span class="chip">any</span></div></td>
+          <td><span class="muted">✓</span></td>
+          <td class="num mono">1</td>
+          <td class="sec">6d ago</td>
+          <td class="num"></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="state-label">key detail — spend chart + sub-ledger conservation</div>
+  <div class="card card--pad stack" style="max-width:calc(var(--card-min-w)*2)">
+    <div class="row row--between">
+      <div><span class="mono">nsm_k_9f…</span> <span class="sec">openclaw-main</span></div>
+      <div class="xs muted">expires in 30d</div>
+    </div>
+    <div class="spark" aria-label="spend, last 14 days">
+      <i style="height:20%"></i><i style="height:35%"></i><i style="height:15%"></i><i style="height:60%"></i>
+      <i style="height:45%"></i><i style="height:80%"></i><i style="height:30%"></i><i style="height:55%"></i>
+      <i style="height:70%"></i><i style="height:40%"></i><i style="height:90%"></i><i style="height:65%"></i>
+      <i style="height:50%"></i><i style="height:75%"></i>
+    </div>
+    <div class="sm"><span class="badge--pinned">✓</span> This key's charges add up ✓ <span class="xs muted">— Σ per-key charges equals the tab's billed total</span></div>
+  </div>
+
+  <div class="state-label">key detail — key-conservation broken (fixture break, gallery-only)</div>
+  <div class="card card--pad" style="max-width:calc(var(--card-min-w)*2)">
+    <div class="sm" style="color:var(--state-blocked)">⚠ This key's charges don't add up — <span class="mono">Σ 152,502 µ ≠ tab billed 152,500 µ</span> · <a href="#diagnostic">open diagnostic ↗</a></div>
+  </div>
+
+  <div class="state-label">mint modal — plaintext exactly once (reuses onboarding KeyMintForm)</div>
+  <div class="drawer" style="max-width:calc(var(--card-min-w)*1.6)">
+    <div class="sm" style="margin-bottom:var(--sp-3)">Mint a key</div>
+    <div class="row row--wrap-mobile" style="margin-bottom:var(--sp-3)">
+      <input class="input mono" value="openclaw-main" size="14" aria-label="Key name">
+      <input class="input mono" value="250,000 µ" size="10" aria-label="Budget cap">
+    </div>
+    <div class="mono xs" style="background:var(--surface-0);border:1px solid var(--border-strong);border-radius:var(--r-sm);padding:var(--sp-3);overflow-wrap:anywhere">nsm_k_9f3ab6e01d5c47f2b8a9</div>
+    <div class="sm" style="color:var(--state-pending);margin-top:var(--sp-2)">⚠ Shown once. Store it now.</div>
+    <div class="row" style="justify-content:flex-end;margin-top:var(--sp-3)"><button class="btn btn--primary btn--sm">Done</button></div>
+  </div>
+
+  <div class="state-label">revoke confirm</div>
+  <div class="drawer" style="max-width:calc(var(--card-min-w)*1.5)">
+    <div class="sm" style="margin-bottom:var(--sp-2)">Revoke <span class="mono">nsm_k_9f…</span>?</div>
+    <div class="xs muted" style="margin-bottom:var(--sp-3)">Revoked — stops at the next call</div>
+    <div class="row" style="justify-content:flex-end">
+      <button class="btn btn--ghost btn--sm">Cancel</button>
+      <button class="btn btn--danger btn--sm">Revoke</button>
+    </div>
+  </div>
+
+  <div class="state-label">state: empty</div>
+  <div class="card card--pad" style="text-align:center">
+    <div class="sec">No keys yet — mint one to let an agent spend here</div>
+  </div>
+
+</div>
+</body>
+</html>

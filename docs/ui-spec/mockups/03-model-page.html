@@ -1,0 +1,145 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 03 Model page</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  .mhead { display: flex; align-items: center; gap: var(--sp-4); margin-bottom: var(--sp-5); flex-wrap: wrap; }
+  .mhead h1 { font-size: var(--fs-2xl); }
+  .mhead .chips { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+  .mhead .chip { color: var(--text-secondary); background: var(--surface-2); }
+  .provider-cell { display: flex; flex-direction: column; gap: var(--sp-1); }
+  .rep { font-size: var(--fs-xs); color: var(--text-muted); }
+  .price-cell .usd { font-weight: var(--fw-medium); }
+  .price-cell .micro { color: var(--text-muted); font-size: var(--fs-xs); }
+  .via { font-size: var(--fs-xs); color: var(--text-secondary); background: var(--surface-2); border-radius: var(--r-full); padding: 0 var(--sp-2); }
+  .sortable::after { content: " ⇅"; color: var(--text-muted); }
+  .popover { max-width: calc(var(--card-min-w) + var(--sp-10)); margin-top: var(--sp-3); }
+  .unverif td { color: var(--text-muted); }
+  .unverif .warnline { color: var(--state-pending); font-size: var(--fs-xs); }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/03-model-page.md — prices shown as if fetched from live signed quotes</span></div>
+<div class="frame">
+
+  <div class="state-label">state: loaded — okf + hermes as two rows of one sortable table</div>
+  <div class="mhead">
+    <span class="logo-monogram logo--lg">Qw</span>
+    <h1>Qwen2.5 14B Instruct</h1>
+    <div class="chips">
+      <span class="chip">Qwen</span><span class="chip">text</span>
+      <span class="chip">32k context</span><span class="chip mono">Q4_K_M</span>
+    </div>
+  </div>
+  <div class="card scroll-x">
+    <table class="table">
+      <thead><tr>
+        <th>Provider</th><th class="num sortable">Price / 1M</th><th>Class</th>
+        <th class="num sortable">TTFT</th><th class="num sortable">tok/s</th>
+        <th>Via</th><th>Up</th><th></th>
+      </tr></thead>
+      <tbody>
+        <tr>
+          <td class="provider-cell">
+            <span class="mono">0x633E5a7C… <span class="sec">(okf)</span></span>
+            <span class="rep" title="Disputes prove the auditing is real. A long history with zero disputes is either flawless or unaudited — and you can't tell which.">4 verified · 0 disputed</span>
+          </td>
+          <td class="num price-cell"><div class="usd">~$0.84</div><div class="micro mono">2 µ / 6 µ per token</div></td>
+          <td><span class="badge--pinned" title="The exact model file is fingerprinted; every bill is re-counted against its own tokenizer">⛓</span></td>
+          <td class="num mono">380ms</td>
+          <td class="num mono">42</td>
+          <td><span class="via">direct</span></td>
+          <td><span class="dot dot--ok" title="Responding"></span></td>
+          <td class="num"><button class="btn btn--sm">Try in playground</button> <button class="btn btn--primary btn--sm">Use this model</button></td>
+        </tr>
+        <tr>
+          <td class="provider-cell">
+            <span class="mono">0x9A21fCe0… <span class="sec">(hermes)</span></span>
+            <span class="rep">4 verified · 0 disputed</span>
+          </td>
+          <td class="num price-cell"><div class="usd">~$0.91</div><div class="micro mono">2 µ / 7 µ per token</div></td>
+          <td><span class="badge--pinned">⛓</span></td>
+          <td class="num mono">510ms</td>
+          <td class="num mono">35</td>
+          <td><span class="via">lane</span></td>
+          <td><span class="dot dot--ok" title="Responding"></span></td>
+          <td class="num"><button class="btn btn--sm">Try in playground</button> <button class="btn btn--primary btn--sm">Use this model</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="xs muted" style="margin-top:var(--sp-2)">Price and endpoint on every row come from a live signed quote fetched just now — never from the listing itself.</div>
+
+  <div class="state-label">rep popover (open state)</div>
+  <div class="drawer popover">
+    <div class="sm" style="margin-bottom:var(--sp-2)"><span class="mono">0x633E5a7C…</span> · 4 verified · 0 disputed</div>
+    <div class="sm sec">Disputes prove the auditing is real. A long history with zero disputes is either flawless or unaudited — and you can't tell which.</div>
+  </div>
+
+  <div class="state-label">state: quote-unverifiable — unverifiable ≠ pass</div>
+  <div class="card scroll-x">
+    <table class="table">
+      <tbody>
+        <tr class="unverif">
+          <td class="provider-cell">
+            <span class="mono">0x9A21fCe0… <span class="sec">(hermes)</span></span>
+            <span class="warnline">Terms couldn't be verified</span>
+          </td>
+          <td class="num price-cell"><div class="usd">—</div></td>
+          <td><span class="badge--pinned">⛓</span></td>
+          <td class="num mono">—</td>
+          <td class="num mono">—</td>
+          <td><span class="via">lane</span></td>
+          <td><span class="dot dot--ok"></span></td>
+          <td class="num"><button class="btn btn--sm" disabled>Try in playground</button> <button class="btn btn--primary btn--sm" disabled>Use this model</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="state-label">state: provider-unreachable + no-telemetry-yet</div>
+  <div class="card scroll-x">
+    <table class="table">
+      <tbody>
+        <tr class="tr--dim">
+          <td class="provider-cell">
+            <span class="mono">0x633E5a7C… <span class="sec">(okf)</span></span>
+            <span class="rep">Unreachable (12m ago)</span>
+          </td>
+          <td class="num price-cell"><div class="usd">~$0.84</div><div class="micro mono">2 µ / 6 µ per token</div></td>
+          <td><span class="badge--pinned">⛓</span></td>
+          <td class="num mono">— <span class="xs">no data yet</span></td>
+          <td class="num mono">— <span class="xs">no data yet</span></td>
+          <td><span class="via">direct</span></td>
+          <td><span class="dot dot--down" title="Unreachable (12m ago)"></span></td>
+          <td class="num"><button class="btn btn--sm" disabled>Try in playground</button> <button class="btn btn--primary btn--sm" disabled>Use this model</button></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="state-label">state: loading</div>
+  <div class="card scroll-x">
+    <table class="table">
+      <tbody>
+        <tr aria-hidden="true">
+          <td><span class="skel">provider address line</span></td>
+          <td class="num"><span class="skel">$0.00</span></td>
+          <td><span class="skel">⛓</span></td>
+          <td class="num"><span class="skel">000ms</span></td>
+          <td class="num"><span class="skel">00</span></td>
+          <td><span class="skel">via</span></td>
+          <td><span class="skel">●</span></td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+
+</div>
+</body>
+</html>

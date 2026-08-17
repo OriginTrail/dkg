@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 02 Catalog</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  .filters { display: flex; gap: var(--sp-2); align-items: center; flex-wrap: wrap; margin-bottom: var(--sp-5); }
+  .filters .input { flex: 1; min-width: calc(var(--card-min-w) / 2); }
+  .filters .sort { margin-left: auto; }
+  .mcard { padding: var(--sp-5); display: flex; flex-direction: column; gap: var(--sp-2); transition: background var(--dur-fast) var(--ease); cursor: pointer; }
+  .mcard:hover { background: var(--surface-2); }
+  .mcard .name { font-size: var(--fs-lg); font-weight: var(--fw-semibold); display: flex; align-items: center; gap: var(--sp-3); }
+  .mcard .fam { color: var(--text-secondary); font-size: var(--fs-sm); }
+  .mcard .provline { display: flex; gap: var(--sp-2); align-items: center; font-size: var(--fs-sm); color: var(--text-secondary); }
+  .mcard .price { font-size: var(--fs-md); font-weight: var(--fw-medium); }
+  .mcard .price .micro { color: var(--text-muted); font-size: var(--fs-xs); font-weight: var(--fw-regular); }
+  .mcard .vol { font-size: var(--fs-sm); color: var(--text-secondary); display: flex; gap: var(--sp-2); align-items: center; }
+  .trend-up { color: var(--state-verified); }
+  .footnote { margin-top: var(--sp-6); font-size: var(--fs-xs); color: var(--text-muted); text-align: right; }
+  .asof { font-size: var(--fs-xs); color: var(--text-muted); }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/02-catalog.md — logos are monogram fallback until the CP3 licensed pack lands</span></div>
+<div class="frame">
+
+  <div class="state-label">state: loaded — grouped by Model KA (2 cards; Qwen card = okf + hermes joined)</div>
+  <div class="filters">
+    <input class="input" placeholder="Search models…" aria-label="Search models">
+    <button class="btn btn--ghost btn--sm">Modality ▾</button>
+    <button class="btn btn--ghost btn--sm">Context ▾</button>
+    <button class="btn btn--ghost btn--sm">Price ▾</button>
+    <button class="btn btn--ghost btn--sm">Provenance ▾</button>
+    <button class="btn btn--ghost btn--sm">Transport ▾</button>
+    <button class="btn btn--sm sort">Sort: Settled ▾</button>
+  </div>
+  <div class="grid-cards">
+    <div class="card mcard">
+      <div class="name"><span class="logo-monogram logo--md">Qw</span> Qwen2.5 14B Instruct</div>
+      <div class="fam">Qwen · text · 32k context</div>
+      <div class="provline">2 providers
+        <span class="badge--pinned" title="The exact model file is fingerprinted; every bill is re-counted against its own tokenizer">⛓ Weights verified</span>
+      </div>
+      <div class="price">~$0.84–0.91 / 1M tokens <span class="micro mono">2 µ / 6–7 µ per token</span></div>
+      <div class="vol" title="Counted only from countersigned, settled usage — not self-reported traffic">1.2M tokens settled <span class="trend-up">↗</span></div>
+    </div>
+    <div class="card mcard">
+      <div class="name"><span class="logo-monogram logo--md">G5</span> GPT-5.4 Codex</div>
+      <div class="fam">OpenAI · text · 128k context</div>
+      <div class="provline">1 provider
+        <span class="badge--claimed" title="Bills are fully re-checked; the model's identity is the provider's claim">☁ Provider-reported model</span>
+      </div>
+      <div class="price">~$4.20 / 1M tokens <span class="micro mono">9 µ / 36 µ per token</span></div>
+      <div class="vol" title="Counted only from countersigned, settled usage — not self-reported traffic">240k tokens settled <span class="muted">—</span></div>
+    </div>
+  </div>
+  <div class="footnote">This view cost <span class="mono">1 µ</span> · <a href="#why">why?</a></div>
+
+  <div class="state-label">state: loading — skeleton cards</div>
+  <div class="grid-cards">
+    <div class="card mcard" aria-hidden="true">
+      <div class="name"><span class="logo-monogram logo--md skel">··</span> <span class="skel">Model name loading</span></div>
+      <div class="fam skel" style="width:60%">family line</div>
+      <div class="provline skel" style="width:40%">providers</div>
+      <div class="price skel" style="width:50%">price line</div>
+    </div>
+    <div class="card mcard" aria-hidden="true">
+      <div class="name"><span class="logo-monogram logo--md skel">··</span> <span class="skel">Model name loading</span></div>
+      <div class="fam skel" style="width:55%">family line</div>
+      <div class="provline skel" style="width:45%">providers</div>
+      <div class="price skel" style="width:40%">price line</div>
+    </div>
+  </div>
+
+  <div class="state-label">state: empty</div>
+  <div class="card card--pad" style="text-align:center">
+    <div class="sec">No offerings found on the graphs this node can see</div>
+  </div>
+
+  <div class="state-label">state: single-provider network — never fake counts</div>
+  <div class="grid-cards">
+    <div class="card mcard" style="max-width:var(--card-min-w)">
+      <div class="name"><span class="logo-monogram logo--md">Qw</span> Qwen2.5 14B Instruct</div>
+      <div class="fam">Qwen · text · 32k context</div>
+      <div class="provline">1 provider <span class="badge--pinned">⛓ Weights verified</span></div>
+      <div class="price">~$0.84 / 1M tokens <span class="micro mono">2 µ / 6 µ per token</span></div>
+      <div class="vol">1.2M tokens settled <span class="trend-up">↗</span></div>
+    </div>
+  </div>
+
+  <div class="state-label">state: stale-cache</div>
+  <div class="row row--between">
+    <span class="asof">as of 14:02 — refreshing…</span>
+  </div>
+
+  <div class="state-label">state: filter-produces-zero</div>
+  <div class="card card--pad row row--between row--wrap-mobile">
+    <span class="sec">No models match these filters</span>
+    <button class="btn btn--ghost btn--sm">Clear filters</button>
+  </div>
+
+</div>
+</body>
+</html>

@@ -140,3 +140,69 @@ never hidden.
 | empty.tabs | No open tabs — fund a model from the catalog to start |
 | empty.keys | No keys yet — mint one to let an agent spend here |
 | empty.activity | Nothing spent yet |
+
+## Proposed additions — v3.5 Phase 2 M-gate (per the header rule: proposed here first, used only after this lands)
+
+Rationale: strings the surface specs require structurally (controls, confirm
+flows, diagnostics) that had no key yet. Same tone rules.
+
+| key | string |
+|---|---|
+| ctl.copy | Copy |
+| ctl.retry | Retry |
+| ctl.send | Send |
+| ctl.cancel | Cancel |
+| ctl.back | Back |
+| ctl.done | Done |
+| ctl.clear-filters | Clear filters |
+| onboard.fund.watch | Balance refreshes automatically once funds arrive. |
+| chain.confirming | Confirming on Base… |
+| chain.confirmations | {n} of {m} confirmations |
+| catalog.search | Search models… |
+| catalog.metered | This view cost {n} µ · why? |
+| catalog.filter.zero | No models match these filters |
+| catalog.asof | as of {t} — refreshing… |
+| model.quote.unverifiable | Terms couldn't be verified |
+| model.telemetry.none | no data yet |
+| model.quote.provenance | Price and endpoint on every row come from a live signed quote fetched just now — never from the listing itself. |
+| play.composer | Message… |
+| play.lane.waiting | Waiting for the response to arrive over the lane… |
+| play.open.treasury | Open Treasury |
+| receipt.reason | Reason |
+| receipt.claimed | Claimed |
+| receipt.recount | Our recount |
+| treasury.ring.parts | wallet {a} + refundable {b} |
+| treasury.confirm.title | Confirm this on-chain transfer |
+| treasury.confirm.amount | Amount |
+| treasury.confirm.from | From |
+| treasury.confirm.to | To |
+| treasury.confirm.cta | Confirm transfer |
+| treasury.refund.pending | Refund in flight |
+| treasury.refund.done | Refunded ✓ |
+| treasury.diag | {n} µ unaccounted — open the ledger diagnostic |
+| key.mint | + Mint key |
+| key.mint.title | Mint a key |
+| key.raise | Raise cap |
+| key.revoke | Revoke |
+| key.expiry | expires in {n}d |
+| key.sum.gloss | Σ per-key charges equals the tab's billed total |
+| key.sum.broken | This key's charges don't add up — Σ {sum} µ ≠ tab billed {billed} µ |
+| operate.pending.aging.one | 1 bill waiting on delivery — oldest due in {t} |
+| operate.earnings.title | Earnings → payout |
+| operate.gauge.sub | to payout |
+| operate.legs.title | Legs |
+| operate.offerings.title | Offerings |
+| operate.offering.live | live |
+| operate.offering.paused | paused |
+| operate.offering.edit | Edit |
+| operate.offering.pause | Pause |
+| operate.offering.resume | Resume |
+| operate.settle | Settle |
+| operate.settle.local | Settlement runs from this node only — there is no public settle route. |
+| operate.withhold.mix | Blocked payments by reason |
+| operate.margin.line | upstream est {a} · billed {b} |
+| operate.upstream.down | upstream unreachable — serving halted; failed calls create no bills |
+| wizard.connect | Connect |
+| wizard.price | Price |
+| wizard.preview | Preview |
+| wizard.publish | Publish |

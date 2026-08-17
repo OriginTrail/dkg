@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>M-gate mockup — Surface 05 Treasury</title>
+<link rel="stylesheet" href="../tokens.css">
+<link rel="stylesheet" href="mock.css">
+<style>
+  .hero { display: flex; gap: var(--sp-6); align-items: center; flex-wrap: wrap; }
+  .hero .big { font-size: var(--fs-3xl); font-weight: var(--fw-semibold); font-variant-numeric: tabular-nums; }
+  .hero .usd { color: var(--text-secondary); font-size: var(--fs-lg); }
+  .tabrow .minibar { width: calc(var(--card-min-w) * 0.5); }
+  .diag { font-size: var(--fs-xs); }
+</style>
+</head>
+<body>
+<div class="mock-banner">Static mockup · fixture data · M-gate <span class="spec">surfaces/05-treasury.md — conservation line uses the REPORT-v3 identity verbatim</span></div>
+<div class="frame frame--narrow">
+
+  <div class="state-label">state: loaded — one balance over one open tab</div>
+  <div class="card card--pad stack">
+    <div class="hero">
+      <div class="gauge-wrap">
+        <div class="gauge-radial" style="--pct:100; --fill:var(--gauge-ready)"></div>
+        <div class="readout"><div><div class="mono" style="font-size:var(--fs-xl);font-weight:var(--fw-semibold)">1.9992</div><div class="xs muted">TRAC</div></div></div>
+      </div>
+      <div class="stack" style="gap:var(--sp-1)">
+        <div class="sec sm" title="Wallet plus everything refundable from open tabs — it's all still yours until work is delivered and verified">Available to spend</div>
+        <div class="big">1.9992 <span class="usd">$0.56</span></div>
+        <div class="xs muted">wallet 1.0000 + refundable 0.9992</div>
+        <div><button class="btn btn--primary">Top up</button></div>
+      </div>
+    </div>
+    <div class="conservation-line">Every µ accounted for: <span class="mono">1,000,000 = 761 + 999,239</span> <span class="badge--pinned">✓</span></div>
+    <div class="scroll-x">
+      <table class="table">
+        <thead><tr><th>Tab</th><th>Provider</th><th class="num">Refundable</th><th class="num">Billed</th><th></th></tr></thead>
+        <tbody>
+          <tr class="tabrow">
+            <td class="mono">tab_1dfe28cb</td>
+            <td class="mono">0x9A21fCe0…</td>
+            <td class="num mono">999,239 µ</td>
+            <td class="num mono">761 µ</td>
+            <td class="num">
+              <div class="stack" style="gap:var(--sp-2);align-items:flex-end">
+                <div class="minibar" title="761 µ billed of 1,000,000 µ funded"><span class="billed" style="width:1%"></span><span class="refundable" style="flex:1"></span></div>
+                <div class="row" style="justify-content:flex-end">
+                  <button class="btn btn--ghost btn--sm">Close tab</button>
+                  <button class="btn btn--sm">Take money back</button>
+                </div>
+              </div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="state-label">state: top-up flow — human gate restates amount / from / to</div>
+  <div class="drawer" style="max-width:calc(var(--card-min-w)*1.5)">
+    <div class="sm" style="margin-bottom:var(--sp-3)">Confirm this on-chain transfer</div>
+    <div class="drow"><span>Amount</span><span class="v">1.0 TRAC (~$0.28)</span></div>
+    <div class="drow"><span>From</span><span class="v">0x1B7a44F2… (this node)</span></div>
+    <div class="drow"><span>To</span><span class="v">tab escrow · 0x9A21fCe0…</span></div>
+    <div class="row" style="margin-top:var(--sp-3);justify-content:flex-end">
+      <button class="btn btn--ghost btn--sm">Cancel</button>
+      <button class="btn btn--primary btn--sm">Confirm transfer</button>
+    </div>
+  </div>
+
+  <div class="state-label">state: topup-pending</div>
+  <div class="card card--pad row">
+    <span class="chip chip--checking">◌ Confirming on Base…</span>
+    <span class="sm sec">1 of 3 confirmations · <span class="mono">0x62a51d56…</span></span>
+  </div>
+
+  <div class="state-label">state: refund-pending → completed with Basescan link</div>
+  <div class="card card--pad stack" style="gap:var(--sp-2)">
+    <div class="row"><span class="chip chip--checking">◌ Refund in flight</span><span class="sm sec mono">999,239 µ → 0x1B7a44F2…</span></div>
+    <div class="row"><span class="chip chip--verified">Refunded ✓</span><a class="sm" href="#basescan">View on Basescan ↗</a></div>
+  </div>
+
+  <div class="state-label">state: conservation-broken — never hide a break (gallery-only; must never occur live)</div>
+  <div class="card card--pad stack" style="gap:var(--sp-2)">
+    <div class="conservation-line is-broken">Every µ accounted for: <span class="mono">1,000,000 ≠ 761 + 999,237</span> ⚠</div>
+    <div class="diag"><a href="#diagnostic">2 µ unaccounted — open the ledger diagnostic ↗</a></div>
+  </div>
+
+  <div class="state-label">state: empty</div>
+  <div class="card card--pad" style="text-align:center">
+    <div class="sec">No open tabs — fund a model from the catalog to start</div>
+  </div>
+
+</div>
+</body>
+</html>
