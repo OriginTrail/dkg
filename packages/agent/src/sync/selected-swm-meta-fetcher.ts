@@ -12,6 +12,7 @@ import {
   type SyncPageResult,
 } from './requester/page-fetch.js';
 import type {
+  PublicSnapshotMetadata,
   SharedMemoryMetadataFetchRequest,
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
@@ -28,6 +29,10 @@ interface SelectedSwmMetaContinuationState {
   /** Incremented whenever the responder restarts this prefix from offset zero. */
   generation: number;
   completed: boolean;
+  /** Exact ordered manifest whose locally materialized refs may be skipped. */
+  snapshotManifestTokens?: readonly string[];
+  /** Refs proven materialized while the exact manifest above was current. */
+  resolvedSnapshotRefs: Set<string>;
   expiresAtMs: number;
   retentionLease: SelectedSwmMetaRetentionLease;
 }
@@ -285,12 +290,29 @@ export function createSelectedSwmMetaFetcher(options: {
       requesterScope: options.requesterScope,
       generation: 0,
       completed: false,
+      resolvedSnapshotRefs: new Set(),
       expiresAtMs: 0,
       retentionLease: options.retentionBudget.lease(),
     };
     states.set(contextGraphId, state);
     return state;
   };
+
+  const hasRetainedMetadataPrefix = (state: SelectedSwmMetaContinuationState): boolean => (
+    !state.completed
+    && state.nextOffset > 0
+    && state.quads.length > 0
+  );
+
+  const hasIncompleteSnapshotWalk = (state: SelectedSwmMetaContinuationState): boolean => (
+    state.completed
+    && (state.snapshotManifestTokens?.length ?? 0) > 0
+    && state.resolvedSnapshotRefs.size < state.snapshotManifestTokens!.length
+  );
+
+  const hasRetainedContinuation = (state: SelectedSwmMetaContinuationState): boolean => (
+    hasRetainedMetadataPrefix(state) || hasIncompleteSnapshotWalk(state)
+  );
 
   const pruneExpiredStates = (): void => {
     for (const [contextGraphId, state] of states) {
@@ -300,9 +322,7 @@ export function createSelectedSwmMetaFetcher(options: {
       // Completed/empty state keeps its existing outer-invocation lifecycle.
       if (
         !activeContextGraphs.has(contextGraphId)
-        && !state.completed
-        && state.nextOffset > 0
-        && state.quads.length > 0
+        && hasRetainedContinuation(state)
         && state.expiresAtMs <= now()
       ) {
         release(contextGraphId, state);
@@ -315,9 +335,7 @@ export function createSelectedSwmMetaFetcher(options: {
     const expiringInactiveStates = [...states.entries()]
       .filter(([contextGraphId, state]) => (
         !activeContextGraphs.has(contextGraphId)
-        && !state.completed
-        && state.nextOffset > 0
-        && state.quads.length > 0
+        && hasRetainedContinuation(state)
       ));
     return {
       retained: states.size > 0,
@@ -451,6 +469,35 @@ export function createSelectedSwmMetaFetcher(options: {
       }
     },
     release,
+    snapshotWalk(contextGraphId, orderedManifest) {
+      const state = states.get(contextGraphId);
+      if (!state?.completed) {
+        return { resolvedRefs: new Set<string>(), markResolved: () => {} };
+      }
+      const tokens = orderedManifest.map(snapshotManifestToken);
+      const sameManifest = manifestTokensEqual(state.snapshotManifestTokens, tokens);
+      if (!sameManifest) {
+        state.snapshotManifestTokens = tokens;
+        state.resolvedSnapshotRefs.clear();
+      }
+      const allowedRefs = new Set(orderedManifest.map((snapshot) => snapshot.ref));
+      for (const ref of state.resolvedSnapshotRefs) {
+        if (!allowedRefs.has(ref)) state.resolvedSnapshotRefs.delete(ref);
+      }
+      if (tokens.length > 0 && state.resolvedSnapshotRefs.size < tokens.length) {
+        state.expiresAtMs = now() + retentionTtlMs;
+      }
+      return {
+        resolvedRefs: state.resolvedSnapshotRefs,
+        markResolved(ref: string) {
+          if (states.get(contextGraphId) !== state || !allowedRefs.has(ref)) return;
+          state.resolvedSnapshotRefs.add(ref);
+          if (state.resolvedSnapshotRefs.size < tokens.length) {
+            state.expiresAtMs = now() + retentionTtlMs;
+          }
+        },
+      };
+    },
   };
 
   const fetcher: SelectedSwmMetaFetcher = {
@@ -472,14 +519,12 @@ export function createSelectedSwmMetaFetcher(options: {
     settleOuterInvocation() {
       pruneExpiredStates();
       for (const [contextGraphId, state] of states) {
-        // Completed manifests may be reused by continuation passes in the same
-        // outer invocation, but never become a cross-invocation cache. Empty
-        // state has no validated prefix to justify a non-zero cursor lifetime.
-        if (
-          state.completed
-          || state.nextOffset <= 0
-          || state.quads.length === 0
-        ) {
+        // A completed manifest remains useful only while its exact snapshot
+        // walk is incomplete. That lets later bounded reconciler invocations
+        // skip refs already materialized instead of spending every slice
+        // re-reading the same prefix. Full walks, zero-ref manifests and empty
+        // metadata state have no resumable work and are released immediately.
+        if (!hasRetainedContinuation(state)) {
           release(contextGraphId, state);
           completedContextGraphs.delete(contextGraphId);
         }
@@ -492,4 +537,17 @@ export function createSelectedSwmMetaFetcher(options: {
     },
   });
   return fetcher;
+}
+
+function snapshotManifestToken(snapshot: PublicSnapshotMetadata): string {
+  return `${snapshot.ref}\0${snapshot.digest}\0${snapshot.count}`;
+}
+
+function manifestTokensEqual(
+  left: readonly string[] | undefined,
+  right: readonly string[],
+): boolean {
+  return left !== undefined
+    && left.length === right.length
+    && left.every((token, index) => token === right[index]);
 }

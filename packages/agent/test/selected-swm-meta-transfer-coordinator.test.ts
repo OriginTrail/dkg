@@ -41,6 +41,71 @@ describe('selected SWM metadata transfer ownership', () => {
     await coordinator.close();
   });
 
+  it('retains a completed manifest only while its exact snapshot walk is incomplete', async () => {
+    const peerId = 'peer-snapshot-resume';
+    const contextGraphId = 'cg-snapshot-resume';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:manifest', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'snapshot-resume-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:snapshot-resume',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 1_000,
+    };
+    const manifest = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+      { ref: 'ref-c', digest: 'digest-c', count: 1 },
+    ];
+
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
+        walk.markResolved('ref-a');
+        expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const cached = await fetcher.strategy.fetch(request);
+        expect(cached.result.bytesReceived).toBe(0);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
+        expect([...walk.resolvedRefs]).toEqual(['ref-a']);
+        walk.markResolved('ref-b');
+        walk.markResolved('ref-c');
+      });
+
+      expect(fetchPage).toHaveBeenCalledOnce();
+      expect(createFetcher).toHaveBeenCalledOnce();
+
+      // A fully resolved walk is terminal owner state. The next outer
+      // invocation must start from a new fetcher rather than retaining trust.
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+      });
+      expect(fetchPage).toHaveBeenCalledTimes(2);
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
   it('notifies its registry after timer-driven final-prefix expiry', async () => {
     const baseNow = Date.now();
     let elapsedMs = 0;

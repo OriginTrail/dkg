@@ -20,6 +20,7 @@ import {
   collectPublicSnapshotMetadata,
   runSharedMemorySync,
   selectSwmSnapshotCoverage,
+  syncPublicSnapshotsForMeta,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SwmSnapshotCoverage } from '../src/dkg-agent-types.js';
 import {
@@ -108,6 +109,66 @@ function sharedMemoryProcessResult() {
     entityCreators: [],
   };
 }
+
+describe('selected snapshot walk continuation', () => {
+  it('skips an exact resolved prefix and spends the next slice on unresolved snapshots', async () => {
+    const first = [quad('resolved-prefix')].map((row) => ({ ...row, graph: '' }));
+    const second = [quad('next-unresolved')].map((row) => ({ ...row, graph: '' }));
+    const firstDigest = workspacePublicQuadsDigest(first);
+    const secondDigest = workspacePublicQuadsDigest(second);
+    const snapshots = [
+      { ref: firstDigest, digest: firstDigest, count: first.length },
+      { ref: secondDigest, digest: secondDigest, count: second.length },
+    ];
+    const cacheReads: string[] = [];
+    const fetchedRefs: string[] = [];
+    const readyRefs: string[] = [];
+
+    const result = await syncPublicSnapshotsForMeta({
+      ctx,
+      remotePeerId: 'peer-resume-prefix',
+      contextGraphId: 'cg-resume-prefix',
+      deadline: Date.now() + 60_000,
+      metaQuads: [],
+      orderedSnapshots: snapshots,
+      resolvedSnapshotRefs: new Set([firstDigest]),
+      publicSnapshotStore: {
+        getSnapshot: async (ref) => {
+          cacheReads.push(ref);
+          return null;
+        },
+        putSnapshot: async ({ digest }) => ({ ref: digest, byteLength: 1 }),
+      },
+      fetchSyncPages: async (
+        _ctx,
+        _peer,
+        contextGraphId,
+        _includeSharedMemory,
+        phase,
+        _graph,
+        _deadline,
+        options,
+      ) => {
+        expect(phase).toBe('snapshot');
+        fetchedRefs.push(options!.snapshotRef!);
+        return pageResult(contextGraphId, phase, { quads: second });
+      },
+      deleteCheckpoint: () => {},
+      setCheckpoint: () => {},
+      onSnapshotReady: async (snapshot) => { readyRefs.push(snapshot.ref); },
+    });
+
+    expect(cacheReads).toEqual([secondDigest]);
+    expect(fetchedRefs).toEqual([secondDigest]);
+    expect(readyRefs).toEqual([secondDigest]);
+    expect(result).toMatchObject({
+      readySnapshots: 2,
+      totalSnapshots: 2,
+      completed: true,
+      missingCount: 0,
+    });
+  });
+});
 
 describe('sync requester progress accounting', () => {
   it('does not count a denied durable graph but counts the subsequent clean-empty graph', async () => {

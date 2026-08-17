@@ -271,6 +271,18 @@ export interface SharedMemoryMetadataFetchOutcome {
 }
 
 /**
+ * Selected-provider snapshot progress bound to one exact, ordered manifest.
+ *
+ * The owner keeps only refs whose content was already materialized locally.
+ * A changed manifest replaces the owner, and a process restart drops it, so a
+ * skipped ref can never outlive the evidence that justified the skip.
+ */
+export interface SharedMemorySnapshotWalkContinuation {
+  readonly resolvedRefs: ReadonlySet<string>;
+  markResolved(ref: string): void;
+}
+
+/**
  * Strategy boundary for metadata retrieval.
  *
  * The default requester performs one ordinary page fetch. Selected RFC-64 SWM
@@ -280,6 +292,10 @@ export interface SharedMemoryMetadataFetchOutcome {
 export interface SharedMemoryMetadataFetcher {
   fetch(request: SharedMemoryMetadataFetchRequest): Promise<SharedMemoryMetadataFetchOutcome>;
   release(contextGraphId: string): void;
+  snapshotWalk?(
+    contextGraphId: string,
+    orderedManifest: readonly PublicSnapshotMetadata[],
+  ): SharedMemorySnapshotWalkContinuation;
 }
 
 /**
@@ -772,9 +788,15 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
       let materializedGraphs = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
+      const manifestSnapshots = collectPublicSnapshotMetadata(processed.verifiedMeta);
+      const orderedManifestSnapshots = snapshotRecoveryOrder === 'recent-balanced'
+        ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
+        : manifestSnapshots;
+      const snapshotWalk = metadataFetcher?.snapshotWalk?.(pid, orderedManifestSnapshots);
       const materializedKeys = new Set<string>();
       /** Snapshot refs whose every descriptor is locally present. */
-      const materializedRefs = new Set<string>();
+      const materializedRefs = new Set<string>(snapshotWalk?.resolvedRefs ?? []);
+      materializedRefsForCg = materializedRefs.size;
       /** Refs that fetched but could not be written; named in the shortfall. */
       const unresolvedRefSample: string[] = [];
 
@@ -1143,6 +1165,8 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         deadline,
         metaQuads: processed.verifiedMeta,
         recoveryOrder: snapshotRecoveryOrder,
+        orderedSnapshots: orderedManifestSnapshots,
+        resolvedSnapshotRefs: snapshotWalk?.resolvedRefs,
         publicSnapshotStore,
         fetchSyncPages,
         deleteCheckpoint,
@@ -1176,7 +1200,10 @@ export async function runSharedMemorySync(context: SharedMemorySyncContext): Pro
         // vacuity decision — and its `manifestComplete` guard — actually lives.
         // The hook still early-returns when the materializer or the store is
         // absent, so this costs nothing when there is genuinely no wiring.
-        onSnapshotReady: (snapshot: PublicSnapshotMetadata) => materializeReadySnapshot(snapshot.ref),
+        onSnapshotReady: async (snapshot: PublicSnapshotMetadata) => {
+          await materializeReadySnapshot(snapshot.ref);
+          if (materializedRefs.has(snapshot.ref)) snapshotWalk?.markResolved(snapshot.ref);
+        },
       });
       if (materializedGraphs > 0) {
         // Reporting only — the counters were already added per KA, inside the
@@ -1443,6 +1470,10 @@ export async function syncPublicSnapshotsForMeta(params: {
   deadline: number;
   metaQuads: readonly Quad[];
   recoveryOrder?: 'manifest' | 'recent-balanced';
+  /** Precomputed by the selected lane so its continuation binds this exact order. */
+  orderedSnapshots?: readonly PublicSnapshotMetadata[];
+  /** Refs already materialized under the exact ordered manifest above. */
+  resolvedSnapshotRefs?: ReadonlySet<string>;
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   fetchSyncPages: SharedMemorySyncContext['fetchSyncPages'];
   deleteCheckpoint: (key: string) => void;
@@ -1483,9 +1514,11 @@ export async function syncPublicSnapshotsForMeta(params: {
   yieldedAtDeadline: boolean;
 }> {
   const manifestSnapshots = collectPublicSnapshotMetadata(params.metaQuads);
-  const snapshots = params.recoveryOrder === 'recent-balanced'
-    ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
-    : manifestSnapshots;
+  const snapshots = params.orderedSnapshots
+    ? [...params.orderedSnapshots]
+    : params.recoveryOrder === 'recent-balanced'
+      ? orderPublicSnapshotsForBalancedRecency(manifestSnapshots)
+      : manifestSnapshots;
   if (snapshots.length === 0) {
     return {
       bytesReceived: 0,
@@ -1548,6 +1581,16 @@ export async function syncPublicSnapshotsForMeta(params: {
   };
 
   for (const [index, snapshot] of snapshots.entries()) {
+    // A selected transfer owner may carry exact, manifest-bound evidence from
+    // an earlier bounded slice. Skipping these refs is intentionally cheaper
+    // than re-reading and re-hashing every snapshot blob and assertion graph:
+    // that O(prefix) replay eventually consumed the whole slice and fixed the
+    // continuation at N/N+K forever. The owner is in-memory and resets on any
+    // manifest change, expiry, release or process restart.
+    if (params.resolvedSnapshotRefs?.has(snapshot.ref)) {
+      readySnapshots += 1;
+      continue;
+    }
     // Yield BETWEEN Knowledge Assets, and check the clock BEFORE doing any work
     // for this one. Both halves matter:
     //
