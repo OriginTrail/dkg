@@ -41,6 +41,286 @@ describe('selected SWM metadata transfer ownership', () => {
     await coordinator.close();
   });
 
+  it('retains a completed manifest only while its exact snapshot walk is incomplete', async () => {
+    const peerId = 'peer-snapshot-resume';
+    const contextGraphId = 'cg-snapshot-resume';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:manifest', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'snapshot-resume-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:snapshot-resume',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 1_000,
+    };
+    const manifest = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+      { ref: 'ref-c', digest: 'digest-c', count: 1 },
+    ];
+    const suppressedRow = {
+      subject: 'urn:suppressed', predicate: 'urn:p', object: '"o"', graph: 'urn:meta',
+    };
+
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
+        walk.markResolved('ref-a', [suppressedRow]);
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+        expect(walk.isResolved('ref-a')).toBe(true);
+        expect(walk.resolvedCount()).toBe(1);
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const cached = await fetcher.strategy.fetch(request);
+        expect(cached.result.bytesReceived).toBe(0);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, manifest);
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+        expect(walk.suppressedMetadataRows('ref-a')).toEqual([suppressedRow]);
+        walk.markResolved('ref-a');
+        expect(walk.suppressedMetadataRows('ref-a')).toEqual([suppressedRow]);
+        walk.markResolved('ref-b');
+        walk.markResolved('ref-c');
+      });
+
+      expect(fetchPage).toHaveBeenCalledOnce();
+      expect(createFetcher).toHaveBeenCalledOnce();
+
+      // A fully resolved walk is terminal owner state. The next outer
+      // invocation must start from a new fetcher rather than retaining trust.
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+      });
+      expect(fetchPage).toHaveBeenCalledTimes(2);
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('does not extend completed-manifest retention on no-progress retries', async () => {
+    const peerId = 'peer-snapshot-no-progress-expiry';
+    const contextGraphId = 'cg-snapshot-no-progress-expiry';
+    const baseNow = Date.now();
+    let elapsedMs = 0;
+    const clock = () => baseNow + elapsedMs;
+    const coordinator = new SelectedSwmMetaTransferCoordinator({ now: clock });
+    const firstManifest = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-stale', digest: 'digest-stale', count: 1 },
+    ];
+    const correctedManifest = [
+      firstManifest[0]!,
+      { ref: 'ref-fixed', digest: 'digest-fixed', count: 1 },
+    ];
+    let fetchGeneration = 0;
+    const fetchPage = vi.fn(async () => {
+      fetchGeneration += 1;
+      return {
+        quads: [{
+          subject: `urn:manifest:${fetchGeneration}`,
+          predicate: 'urn:p',
+          object: '"o"',
+          graph: 'urn:meta',
+        }],
+        bytesReceived: 1,
+        resumedFromOffset: 0,
+        nextOffset: 1,
+        checkpointKey: `no-progress-expiry-${fetchGeneration}`,
+        completed: true,
+        timedOut: false,
+      };
+    });
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:no-progress-expiry',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+      now: clock,
+      retentionTtlMs: 10_000,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: clock() + 60_000,
+    };
+
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
+        walk.markResolved('ref-a');
+      });
+
+      for (const retryAtMs of [4_000, 9_000]) {
+        elapsedMs = retryAtMs;
+        await coordinator.run(peerId, createFetcher, async (fetcher) => {
+          const cached = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
+          expect(cached.result.bytesReceived).toBe(0);
+          const walk = fetcher.strategy.snapshotWalk!(contextGraphId, firstManifest);
+          expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+          // Deliberately make no progress.
+        });
+      }
+
+      elapsedMs = 10_001;
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        const refreshed = await fetcher.strategy.fetch({ ...request, deadline: clock() + 60_000 });
+        expect(refreshed.result.bytesReceived).toBe(1);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, correctedManifest);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
+        expect(walk.orderedManifestSnapshot()).toEqual(correctedManifest);
+      });
+
+      expect(fetchPage).toHaveBeenCalledTimes(2);
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('releases completed metadata when no snapshot walk remains active', async () => {
+    const peerId = 'peer-complete-without-walk';
+    const contextGraphId = 'cg-complete-without-walk';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:terminal-meta', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'terminal-meta-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:terminal-without-walk',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 1_000,
+    };
+
+    try {
+      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
+      await coordinator.run(peerId, createFetcher, (fetcher) => fetcher.strategy.fetch(request));
+
+      // Terminal metadata without a post-metadata walk carries no resumable
+      // work into the next outer invocation.
+      expect(fetchPage).toHaveBeenCalledTimes(2);
+      expect(createFetcher).toHaveBeenCalledTimes(2);
+    } finally {
+      await coordinator.close();
+    }
+  });
+
+  it('invalidates resolved refs when the exact manifest changes digest, count, or order', async () => {
+    const peerId = 'peer-manifest-invalidation';
+    const contextGraphId = 'cg-manifest-invalidation';
+    const coordinator = new SelectedSwmMetaTransferCoordinator();
+    const fetchPage = vi.fn(async () => ({
+      quads: [{ subject: 'urn:manifest', predicate: 'urn:p', object: '"o"', graph: 'urn:meta' }],
+      bytesReceived: 1,
+      resumedFromOffset: 0,
+      nextOffset: 1,
+      checkpointKey: 'manifest-invalidation-checkpoint',
+      completed: true,
+      timedOut: false,
+    }));
+    const createFetcher = vi.fn(() => createSelectedSwmMetaFetcher({
+      remotePeerId: peerId,
+      requesterScope: 'selected-swm-meta:retained:manifest-invalidation',
+      retentionBudget: retentionBudget(),
+      deleteCheckpoint: () => {},
+      fetchPage,
+    }));
+    const request = {
+      ctx: testContext,
+      remotePeerId: peerId,
+      contextGraphId,
+      graphUri: 'urn:meta',
+      deadline: Date.now() + 1_000,
+    };
+    const original = [
+      { ref: 'ref-a', digest: 'digest-a', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+    ];
+    const changedDigest = [
+      { ref: 'ref-a', digest: 'digest-a-v2', count: 1 },
+      { ref: 'ref-b', digest: 'digest-b', count: 1 },
+    ];
+    const changedCount = [
+      { ...changedDigest[0]!, count: 2 },
+      changedDigest[1]!,
+    ];
+    const reordered = [changedCount[1]!, changedCount[0]!];
+    try {
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, original);
+        walk.markResolved('ref-a');
+        expect(walk.resolvedRefsSnapshot()).toEqual(['ref-a']);
+        const exposed = walk.orderedManifestSnapshot();
+        expect(() => {
+          (exposed as unknown as Array<{ ref: string }>)[0]!.ref = 'mutated-ref';
+        }).toThrow();
+        expect(walk.orderedManifestSnapshot()).toEqual(original);
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedDigest);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
+        walk.markResolved('ref-a');
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, changedCount);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
+        walk.markResolved('ref-a');
+      });
+
+      await coordinator.run(peerId, createFetcher, async (fetcher) => {
+        await fetcher.strategy.fetch(request);
+        const walk = fetcher.strategy.snapshotWalk!(contextGraphId, reordered);
+        expect(walk.resolvedRefsSnapshot()).toEqual([]);
+        walk.markResolved('ref-a');
+        walk.markResolved('ref-b');
+      });
+
+      expect(fetchPage).toHaveBeenCalledOnce();
+      expect(createFetcher).toHaveBeenCalledOnce();
+    } finally {
+      await coordinator.close();
+    }
+  });
+
   it('notifies its registry after timer-driven final-prefix expiry', async () => {
     const baseNow = Date.now();
     let elapsedMs = 0;

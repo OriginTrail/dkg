@@ -12,13 +12,22 @@ import {
   type SyncPageResult,
 } from './requester/page-fetch.js';
 import type {
+  PublicSnapshotMetadata,
   SharedMemoryMetadataFetchRequest,
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
 import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
 
-/** Exact prefix retained only by one selected-provider transfer owner. */
+/** Post-metadata continuation bound to one exact ordered manifest. */
+interface SelectedSwmSnapshotWalkState {
+  readonly orderedManifest: readonly PublicSnapshotMetadata[];
+  readonly resolvedRefs: Set<string>;
+  readonly suppressedMetadataRowsByRef: Map<string, readonly Quad[]>;
+  expiresAtMs: number;
+}
+
+/** Exact metadata prefix retained only by one selected-provider transfer owner. */
 interface SelectedSwmMetaContinuationState {
   quads: Quad[];
   bytesEstimate: number;
@@ -28,7 +37,10 @@ interface SelectedSwmMetaContinuationState {
   /** Incremented whenever the responder restarts this prefix from offset zero. */
   generation: number;
   completed: boolean;
-  expiresAtMs: number;
+  /** Prefix expiry; terminal metadata has no prefix retention clock. */
+  metadataExpiresAtMs: number;
+  /** Independent continuation created only after metadata is complete. */
+  snapshotWalk?: SelectedSwmSnapshotWalkState;
   retentionLease: SelectedSwmMetaRetentionLease;
 }
 
@@ -285,11 +297,37 @@ export function createSelectedSwmMetaFetcher(options: {
       requesterScope: options.requesterScope,
       generation: 0,
       completed: false,
-      expiresAtMs: 0,
+      metadataExpiresAtMs: 0,
       retentionLease: options.retentionBudget.lease(),
     };
     states.set(contextGraphId, state);
     return state;
+  };
+
+  const hasRetainedMetadataPrefix = (state: SelectedSwmMetaContinuationState): boolean => (
+    !state.completed
+    && state.nextOffset > 0
+    && state.quads.length > 0
+  );
+
+  const hasIncompleteSnapshotWalk = (state: SelectedSwmMetaContinuationState): boolean => {
+    const walk = state.snapshotWalk;
+    return state.completed
+      && walk !== undefined
+      && walk.orderedManifest.length > 0
+      && walk.resolvedRefs.size < walk.orderedManifest.length;
+  };
+
+  const hasRetainedContinuation = (state: SelectedSwmMetaContinuationState): boolean => (
+    hasRetainedMetadataPrefix(state) || hasIncompleteSnapshotWalk(state)
+  );
+
+  const retainedContinuationExpiry = (
+    state: SelectedSwmMetaContinuationState,
+  ): number | undefined => {
+    if (hasRetainedMetadataPrefix(state)) return state.metadataExpiresAtMs;
+    if (hasIncompleteSnapshotWalk(state)) return state.snapshotWalk?.expiresAtMs;
+    return undefined;
   };
 
   const pruneExpiredStates = (): void => {
@@ -298,12 +336,11 @@ export function createSelectedSwmMetaFetcher(options: {
       // coordinator's timer is intentionally peer-wide, so enforce each CG's
       // independent TTL at every serialized fetch boundary and timer tick.
       // Completed/empty state keeps its existing outer-invocation lifecycle.
+      const expiryAtMs = retainedContinuationExpiry(state);
       if (
         !activeContextGraphs.has(contextGraphId)
-        && !state.completed
-        && state.nextOffset > 0
-        && state.quads.length > 0
-        && state.expiresAtMs <= now()
+        && expiryAtMs !== undefined
+        && expiryAtMs <= now()
       ) {
         release(contextGraphId, state);
         completedContextGraphs.delete(contextGraphId);
@@ -315,14 +352,15 @@ export function createSelectedSwmMetaFetcher(options: {
     const expiringInactiveStates = [...states.entries()]
       .filter(([contextGraphId, state]) => (
         !activeContextGraphs.has(contextGraphId)
-        && !state.completed
-        && state.nextOffset > 0
-        && state.quads.length > 0
+        && hasRetainedContinuation(state)
       ));
     return {
       retained: states.size > 0,
       nextExpiryAtMs: expiringInactiveStates.length > 0
-        ? Math.min(...expiringInactiveStates.map(([, state]) => state.expiresAtMs))
+        ? Math.min(...expiringInactiveStates.flatMap(([, state]) => {
+          const expiryAtMs = retainedContinuationExpiry(state);
+          return expiryAtMs === undefined ? [] : [expiryAtMs];
+        }))
         : undefined,
     };
   };
@@ -390,7 +428,7 @@ export function createSelectedSwmMetaFetcher(options: {
       ) {
         // Each Context Graph owns an independent sliding expiry. Progress on a
         // sibling CG cannot keep an abandoned prefix resident.
-        state.expiresAtMs = now() + retentionTtlMs;
+        state.metadataExpiresAtMs = now() + retentionTtlMs;
       }
       if (state.completed) completedContextGraphs.add(request.contextGraphId);
       return { ...fetched, quads: state.quads };
@@ -410,7 +448,8 @@ export function createSelectedSwmMetaFetcher(options: {
         state.bytesEstimate = 0;
         state.nextOffset = 0;
         state.completed = false;
-        state.expiresAtMs = 0;
+        state.metadataExpiresAtMs = 0;
+        state.snapshotWalk = undefined;
         state.generation += 1;
         completedContextGraphs.delete(request.contextGraphId);
         return fetchRetained(request, state, false);
@@ -451,6 +490,74 @@ export function createSelectedSwmMetaFetcher(options: {
       }
     },
     release,
+    snapshotWalk(contextGraphId, orderedManifest) {
+      const state = states.get(contextGraphId);
+      if (!state?.completed) {
+        return {
+          orderedManifestSnapshot: () => immutableManifestSnapshot(orderedManifest),
+          isResolved: () => false,
+          resolvedCount: () => 0,
+          resolvedRefsSnapshot: () => [],
+          suppressedMetadataRows: () => [],
+          markResolved: () => {},
+        };
+      }
+      const retainedWalk = state.snapshotWalk;
+      const walk = retainedWalk && manifestsEqual(retainedWalk.orderedManifest, orderedManifest)
+        ? retainedWalk
+        : {
+          orderedManifest: immutableManifestSnapshot(orderedManifest),
+          resolvedRefs: new Set<string>(),
+          suppressedMetadataRowsByRef: new Map<string, readonly Quad[]>(),
+          expiresAtMs: 0,
+        };
+      state.snapshotWalk = walk;
+      const allowedRefs = new Set(walk.orderedManifest.map((snapshot) => snapshot.ref));
+      // Opening an unchanged walk is not progress. Sliding this deadline on
+      // every retry could retain stale completed metadata forever and prevent
+      // a corrected remote manifest from ever being observed. Creation starts
+      // the window; markResolved is the only operation allowed to extend it.
+      if (
+        walk.expiresAtMs === 0
+        && walk.orderedManifest.length > 0
+        && walk.resolvedRefs.size < walk.orderedManifest.length
+      ) {
+        walk.expiresAtMs = now() + retentionTtlMs;
+      }
+      return {
+        orderedManifestSnapshot() {
+          return immutableManifestSnapshot(walk.orderedManifest);
+        },
+        isResolved(ref: string) {
+          return walk.resolvedRefs.has(ref);
+        },
+        resolvedCount() {
+          return walk.resolvedRefs.size;
+        },
+        resolvedRefsSnapshot() {
+          return Object.freeze([...walk.resolvedRefs]);
+        },
+        suppressedMetadataRows(ref: string) {
+          return immutableQuadSnapshot(walk.suppressedMetadataRowsByRef.get(ref) ?? []);
+        },
+        markResolved(ref: string, suppressedMetadataRows: readonly Quad[] = []) {
+          if (
+            states.get(contextGraphId) !== state
+            || state.snapshotWalk !== walk
+            || !allowedRefs.has(ref)
+            || walk.resolvedRefs.has(ref)
+          ) return;
+          walk.suppressedMetadataRowsByRef.set(
+            ref,
+            immutableQuadSnapshot(suppressedMetadataRows),
+          );
+          walk.resolvedRefs.add(ref);
+          if (walk.resolvedRefs.size < walk.orderedManifest.length) {
+            walk.expiresAtMs = now() + retentionTtlMs;
+          }
+        },
+      };
+    },
   };
 
   const fetcher: SelectedSwmMetaFetcher = {
@@ -472,14 +579,12 @@ export function createSelectedSwmMetaFetcher(options: {
     settleOuterInvocation() {
       pruneExpiredStates();
       for (const [contextGraphId, state] of states) {
-        // Completed manifests may be reused by continuation passes in the same
-        // outer invocation, but never become a cross-invocation cache. Empty
-        // state has no validated prefix to justify a non-zero cursor lifetime.
-        if (
-          state.completed
-          || state.nextOffset <= 0
-          || state.quads.length === 0
-        ) {
+        // A completed manifest remains useful only while its exact snapshot
+        // walk is incomplete. That lets later bounded reconciler invocations
+        // skip refs already materialized instead of spending every slice
+        // re-reading the same prefix. Full walks, zero-ref manifests and empty
+        // metadata state have no resumable work and are released immediately.
+        if (!hasRetainedContinuation(state)) {
           release(contextGraphId, state);
           completedContextGraphs.delete(contextGraphId);
         }
@@ -492,4 +597,27 @@ export function createSelectedSwmMetaFetcher(options: {
     },
   });
   return fetcher;
+}
+
+function manifestsEqual(
+  left: readonly PublicSnapshotMetadata[],
+  right: readonly PublicSnapshotMetadata[],
+): boolean {
+  return left.length === right.length
+    && left.every((snapshot, index) => {
+      const candidate = right[index];
+      return snapshot.ref === candidate.ref
+        && snapshot.digest === candidate.digest
+        && snapshot.count === candidate.count;
+    });
+}
+
+function immutableManifestSnapshot(
+  manifest: readonly PublicSnapshotMetadata[],
+): readonly PublicSnapshotMetadata[] {
+  return Object.freeze(manifest.map((snapshot) => Object.freeze({ ...snapshot })));
+}
+
+function immutableQuadSnapshot(quads: readonly Quad[]): readonly Quad[] {
+  return Object.freeze(quads.map((quad) => Object.freeze({ ...quad })));
 }

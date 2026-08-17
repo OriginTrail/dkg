@@ -50,7 +50,11 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
-import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
+import {
+  runSharedMemorySync,
+  type SharedMemoryMetadataFetcher,
+  type SharedMemorySnapshotWalkContinuation,
+} from '../src/sync/requester/shared-memory-sync.js';
 import type { SharedMemorySnapshotMaterializer, StoredWorkspaceHeadState } from '../src/sync/requester/swm-snapshot-materializer.js';
 
 const CG = 'ws00-snapshot-materialization';
@@ -129,6 +133,7 @@ interface HarnessOverrides {
   reconcileDisposition?: 'preserve' | 'suppress-metadata';
   publisherPeerId?: string;
   additionalVerifiedMeta?: Quad[];
+  metadataFetcher?: SharedMemoryMetadataFetcher;
 }
 
 function harness(overrides: HarnessOverrides = {}) {
@@ -174,6 +179,7 @@ function harness(overrides: HarnessOverrides = {}) {
         emptyResponses: 0,
         entityCreators: [],
       }),
+      ...(overrides.metadataFetcher ? { metadataFetcher: overrides.metadataFetcher } : {}),
       ...(overrides.subGraphName
         ? {
             getRegisteredSubGraphNames: async () => [overrides.subGraphName!],
@@ -319,6 +325,60 @@ describe('public SWM snapshot materialization', () => {
     const reconciliation = h.events.indexOf('finalized-twin-reconciled');
     expect(reconciliation).toBeGreaterThan(h.events.indexOf('lock-released'));
     expect(h.events.slice(reconciliation + 1)).not.toContain('meta-inserted');
+  });
+
+  it('captures first-round suppression and reapplies it before a resumed bulk metadata insert', async () => {
+    const fx = fixture();
+    const manifest = [{ ref: fx.digest, digest: fx.digest, count: fx.payload.length }];
+    const resolved = new Set<string>();
+    const suppressedByRef = new Map<string, readonly Quad[]>();
+    const walk: SharedMemorySnapshotWalkContinuation = {
+      orderedManifestSnapshot: () => manifest.map((snapshot) => ({ ...snapshot })),
+      isResolved: (ref) => resolved.has(ref),
+      resolvedCount: () => resolved.size,
+      resolvedRefsSnapshot: () => [...resolved],
+      suppressedMetadataRows: (ref) => suppressedByRef.get(ref) ?? [],
+      markResolved: (ref, suppressedRows = []) => {
+        suppressedByRef.set(ref, suppressedRows.map((quad) => ({ ...quad })));
+        resolved.add(ref);
+      },
+    };
+    const metadataFetcher: SharedMemoryMetadataFetcher = {
+      fetch: async () => ({ result: page(fx.meta), continuationYielded: false }),
+      release: () => {},
+      snapshotWalk: () => walk,
+    };
+    const first = harness({
+      reconcileDisposition: 'suppress-metadata',
+      metadataFetcher,
+    });
+
+    const firstSummary = await first.run();
+
+    expect(firstSummary.failedPhases).toBe(0);
+    expect(first.replaced).toHaveLength(1);
+    expect(resolved).toEqual(new Set([fx.digest]));
+    const retiredSubjects = new Set([
+      `${UAL}#dkg-swm-head`,
+      `urn:dkg:share:${CG}:snapshot-materialization-op`,
+    ]);
+    const capturedRows = suppressedByRef.get(fx.digest) ?? [];
+    expect(capturedRows.filter((quad) => retiredSubjects.has(quad.subject)).length)
+      .toBeGreaterThan(0);
+
+    const resumed = harness({
+      metadataFetcher: {
+        ...metadataFetcher,
+      },
+    });
+
+    const resumedSummary = await resumed.run();
+
+    expect(resumedSummary.failedPhases).toBe(0);
+    expect(resumed.replaced).toHaveLength(0);
+    expect(resumed.events).not.toContain('finalized-twin-reconciled');
+    expect(resumed.inserted.flat().filter((quad) => retiredSubjects.has(quad.subject)))
+      .toHaveLength(0);
   });
 
   it('does not alias delimiter-like RDF terms in the suppression ledger', async () => {

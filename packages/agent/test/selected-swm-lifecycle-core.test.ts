@@ -673,6 +673,66 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
+  it('resumes an exact snapshot walk across bounded outer reconciler invocations', async () => {
+    const publicCg = 'selected-cross-outer-snapshots';
+    const manifest = snapshotManifest(publicCg, 10);
+    let wallNow = 1_000;
+    const readsByAdmission = new Map<number, number>();
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg },
+      manifest,
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      onSnapshotRead: ({ publicAdmission }) => {
+        const reads = (readsByAdmission.get(publicAdmission) ?? 0) + 1;
+        readsByAdmission.set(publicAdmission, reads);
+        if (reads === 2) wallNow += 120_000;
+      },
+    });
+    const plan = {
+      publicContextGraphIds: [publicCg],
+      privateRecoverFromCurator: [],
+      eligibleContextGraphIds: [publicCg],
+    };
+
+    try {
+      const first = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+      );
+      expect(first.selectedScopeComplete).toBe(false);
+      expect(first.shared.swmCoverage).toMatchObject({
+        contextGraphId: publicCg,
+        snapshotsResolved: 8,
+        snapshotsTotal: 10,
+        missingCount: 2,
+      });
+      expect(first.shared.continuationPasses).toBe(3);
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(harness.probes.snapshotReads()).toBe(8);
+
+      const second = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg],
+        { selectedSwmPriority: true, priority: 2_000, sharedMemorySyncPlan: plan },
+      );
+      expect(second.selectedScopeComplete).toBe(true);
+      expect(second.shared.swmCoverage).toMatchObject({
+        contextGraphId: publicCg,
+        snapshotsResolved: 10,
+        snapshotsTotal: 10,
+        missingCount: 0,
+      });
+      // The completed manifest and eight proven refs survived the outer
+      // boundary. No metadata refetch and no re-read of the old prefix.
+      expect(harness.probes.metaFetches()).toBe(1);
+      expect(harness.probes.snapshotReads()).toBe(10);
+      expect(harness.probes.publicAdmissions()).toBe(5);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('expires a cross-invocation prefix and starts a fresh responder scope', async () => {
     const publicCg = 'selected-cross-outer-expiry';
     const manifest = snapshotManifest(publicCg, 2);
