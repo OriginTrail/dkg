@@ -301,6 +301,11 @@ export const plugin: RoutePlugin = {
               `http://127.0.0.1:${ctx.apiPortRef.value}`, cfg.nodeToken ?? [...ctx.validTokens][0] ?? "",
               laneCg, bcfg?.walletEnvFile ?? "/dev/null", null, 60_000, 2_000, laneTo || null);
             const res = await lc.terms();
+            if (res.status === 0 || !(res.body as { quote?: unknown }).quote) {
+              // lane timeout / malformed — surface it, don't let the verifier
+              // throw on a missing quote and mask the real cause
+              throw new Error(`lane terms unanswered (status ${res.status}, ${String((res.body as { error?: string }).error ?? "no quote")})`);
+            }
             v = verifyTermsBody(res.status, res.body as never);
           } else {
             const client = new BuyerClient(apiBase.replace(/\/$/, ""), bcfg?.walletEnvFile ?? "/dev/null", null);
