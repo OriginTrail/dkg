@@ -87,7 +87,7 @@ automatically", billing reversed. Evidence: `nsm-v35-evidence/phase3/`.
 | Purchases | ⛓ inference `leg_aef8ee635eba66d17771` 753 µ (recounted, countersigned); metered query `leg_4c02957ce2a8f7785167` 8 µ |
 | Close | 2/0/0, digest `sha256:df066ec1…` — **independently recomputed by the seller**, signature verified, `settledTokens: 134` |
 | Conservation | `1,000,000 = 761 + 999,239 + 0` — computed on BOTH seats independently |
-| Refund | 999,239 µ refundable to the buyer principal — correctly held behind **his human's** exact-transaction gate; pending at press time |
+| Refund | **BROADCAST + verified both seats** — 999,239 µ exact, tx `0xa1a7c21950bbbf6e…151679f16`, Base block 50141013, status 1; his ledger projects `released: 999,239`, remaining `0`; buyer wallet balance confirmed to the µ from our RPC (re-stamped 2026-08-18, was "pending") |
 | Catalog | his offering and okf's rendered as separate Model-KA cards; the journey's selector crashed on there being TWO Qwen cards — the multi-provider proof asserting itself |
 
 Streaming note: lane transport is honestly non-streamed — the gateway refuses
@@ -110,6 +110,7 @@ both operator-gated.
 | Non-streamed ⛓ purchase | `leg_7a55ca62554b167342ac` 186 µ (the latency-diagnosis retry — kept: real money, real leg) |
 | Close | 2/0/0, digest `sha256:99f7f197…`, `settledTokens: 191` |
 | Conservation | `1,000,000 = 854 + 999,146 + 0` OK |
+| Refund | **BROADCAST** — 999,146 µ exact, operator-gated, tx `0x4bd7027674691…f02e355b6d`, Base block 50141217, status 1; release journaled against the close digest (re-stamped 2026-08-18, was "pending") |
 | 404 probes | `withdraw/settle/credit/release` all 404 post-upgrade; Hermes's seat has **no public HTTP surface at all** (`directUrl: null` in his signed quote) |
 
 ## 4. The counterparty as adversarial verifier — the defect ledger
@@ -152,9 +153,13 @@ operating strictly fail-closed. Full ledger with fixes:
 
 ## 6. Not achieved, stated plainly
 
-- **Hermes's refund broadcast** — pending his human's exact-transaction gate
-  (correct posture; the approval text is with them). okf's mirror refund to
-  the buyer wallet likewise awaits its operator gate.
+- ~~Hermes's refund broadcast~~ — **RESOLVED 2026-08-18** (this row is
+  re-stamped, per the report's own convention). Both refunds landed:
+  Hermes's 999,239 µ (block 50141013) and okf's 999,146 µ (block 50141217),
+  each behind its human's exact-transaction gate. The buyer wallet closes at
+  1.998385 TRAC — the full money circle (fund → deposit → metered spend →
+  signed close → exact refund) verified from both seats. Total real cost of
+  the two funded acts: **1,615 µTRAC** (761 + 854).
 - **KA edit flow** — okf's v3-era offering KAs still lack `modelRef`; a
   republish would rightly refuse (`E_PUBLISH_STALE_KA`). The catalog shows
   them as legacy-grouped cards. Editing finalized KAs is real future work.
