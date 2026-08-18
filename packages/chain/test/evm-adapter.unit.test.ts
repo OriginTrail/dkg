@@ -5035,3 +5035,96 @@ describe('EVMChainAdapter.getFinalizedAccountNonce [GH#2270]', () => {
     await expect(a.getFinalizedAccountNonce(WALLET)).resolves.toBeNull();
   });
 });
+
+/**
+ * GH#2270 PR-3 r2 — the pre-broadcast signal must come from the REAL signing path.
+ *
+ * The recovery lane releases a held job for a re-run when its recorded nonce is proven consumed,
+ * so a nonce that was never the one actually signed is worse than no nonce at all. Every other row
+ * in this chain hands the recorder a signal it made up; these two sign a real transaction with a
+ * known nonce and assert that production code extracts that exact `{txHash, nonce}` and hands it
+ * to `onBeforeBroadcast` before anything is sent.
+ */
+describe('pre-broadcast signal comes from the signed transaction [GH#2270]', () => {
+  const SIGNER_PK = '0x' + '7'.repeat(63) + '1';
+  const KNOWN_NONCE = 27;
+
+  it('delivers the signed tx hash AND its nonce, extracted by production code', async () => {
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => {};
+    const wallet = new ethers.Wallet(SIGNER_PK);
+
+    // A REAL signed transaction, produced by ethers from a fully prefilled request so it signs
+    // offline. The nonce is the one fact this row is about, and it lives in the signed BYTES —
+    // the adapter has to read it back out of them, which is exactly what production does.
+    const signedTx = await wallet.signTransaction({
+      to: '0x0000000000000000000000000000000000000002',
+      value: 0n,
+      nonce: KNOWN_NONCE,
+      gasLimit: 21_000n,
+      chainId: 31337,
+      type: 2,
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 1_000_000_000n,
+    });
+    // Independent decode of the same bytes: the nonce the adapter must surface, and the hash
+    // production derives the same way.
+    const decoded = ethers.Transaction.from(signedTx);
+    expect(decoded.nonce).toBe(KNOWN_NONCE);
+    const txHash = decoded.hash!;
+
+    const received: any[] = [];
+    let sentAfterSignal = false;
+    a.sendSignedTransactionAndWait = async () => {
+      sentAfterSignal = received.length === 1;
+      return { hash: txHash, blockNumber: 1, status: 1, logs: [] };
+    };
+
+    await a.dispatchSerializedV10Write(
+      wallet,
+      'publish',
+      async (signal: any) => { received.push(signal); },
+      async () => ({ signedTx, txHash }),
+      () => { throw new Error('unreachable'); },
+    );
+
+    expect(received).toHaveLength(1);
+    expect(received[0]).toEqual({ txHash, nonce: KNOWN_NONCE });
+    // ...and it arrived BEFORE the send, which is what makes it a write-ahead.
+    expect(sentAfterSignal).toBe(true);
+  });
+
+  it('aborts the send when the signal handler throws', async () => {
+    // Fail-closed: a caller that could not persist the signal must not end up with a transaction
+    // on the wire it does not know about.
+    const a: any = new EVMChainAdapter(minimalConfig());
+    a.initialized = true;
+    a.init = async () => {};
+    const wallet = new ethers.Wallet(SIGNER_PK);
+    const signedTx = await wallet.signTransaction({
+      to: '0x0000000000000000000000000000000000000002',
+      value: 0n,
+      nonce: KNOWN_NONCE,
+      gasLimit: 21_000n,
+      chainId: 31337,
+      type: 2,
+      maxFeePerGas: 1_000_000_000n,
+      maxPriorityFeePerGas: 1_000_000_000n,
+    });
+    const txHash = ethers.Transaction.from(signedTx).hash!;
+
+    let sent = false;
+    a.sendSignedTransactionAndWait = async () => { sent = true; return { hash: txHash }; };
+
+    await expect(a.dispatchSerializedV10Write(
+      wallet,
+      'publish',
+      async () => { throw new Error('could not persist the write-ahead'); },
+      async () => ({ signedTx, txHash }),
+      () => { throw new Error('unreachable'); },
+    )).rejects.toThrow(/chain:writeahead hook failed before publish broadcast/);
+
+    expect(sent).toBe(false);
+  });
+});

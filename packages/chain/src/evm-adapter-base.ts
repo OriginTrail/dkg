@@ -21,6 +21,7 @@ import type {
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
+  PreBroadcastSignal,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
 import { KeyedSerializer } from './keyed-mutex.js';
@@ -1712,7 +1713,7 @@ export class EVMChainAdapterBase {
   protected async dispatchSerializedV10Write(
     signer: Wallet,
     label: 'publish' | 'update',
-    onBroadcast: ((info: { txHash: string; nonce?: number }) => Promise<void> | void) | undefined,
+    onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<{ signedTx: string; txHash: string }>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
   ): Promise<ethers.TransactionReceipt> {

@@ -40,6 +40,7 @@ import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import {
   KA_VM_KA_UAL,
+  KA_VM_VALIDATION,
   kaVmPublishRequest,
   stageKnowledgeAssetShareSnapshot,
 } from './_helpers/ka-vm-publish.js';
@@ -98,10 +99,10 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
   function dispatcher(
     verdict: AsyncLiftChainProofResolution,
-    config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainRecoveryResolver'> = {},
+    config: Omit<AsyncLiftPublisherConfig, 'now' | 'idGenerator' | 'chainProofResolver'> = {},
   ) {
     return createPublisher({
-      chainRecoveryResolver: async () => verdict,
+      chainProofResolver: async () => verdict,
       knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async () => {
@@ -334,7 +335,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     // lifecycle. While that repair is blocked the job must stay exactly as it was — tx-bearing and
     // held — rather than being reset, which would resend a transaction the chain just confirmed.
     const publisher = createPublisher({
-      chainRecoveryResolver: async () => RECOVERED,
+      chainProofResolver: async () => RECOVERED,
       knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
       knowledgeAssetVmPublishHandler: {
         execute: async () => {
@@ -400,7 +401,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       // held predicate does not.
       const publisher = dispatcher({ status: 'not-found' }, {
         publishExecutor: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           throw new Error('ETIMEDOUT: request timed out');
         },
       });
@@ -417,7 +418,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     it('keeps that same raw job held on an inconclusive verdict', async () => {
       const publisher = dispatcher({ status: 'inconclusive' }, {
         publishExecutor: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           throw new Error('ETIMEDOUT: request timed out');
         },
       });
@@ -454,8 +455,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     const publisher = createPublisher({
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
-          await input.publishOptions.onPhase?.('chain:txsigned:nonce-41', 'start');
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH, nonce: 41 });
           throw new Error('stop after the durable write-ahead');
         },
       },
@@ -476,7 +476,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     const publisher = createPublisher({
       knowledgeAssetVmPublishHandler: {
         execute: async (input) => {
-          await input.publishOptions.onPhase?.(`chain:txsigned:tx-${TX_HASH}`, 'start');
+          await input.publishOptions.onBeforeBroadcast?.({ txHash: TX_HASH });
           throw new Error('stop after the durable write-ahead');
         },
       },
@@ -497,7 +497,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     // whole queue is exactly how a held job goes unnoticed for hours.
     let asked = 0;
     const publisher = createPublisher({
-      chainRecoveryResolver: async () => {
+      chainProofResolver: async () => {
         asked += 1;
         if (asked === 1) throw new Error('RPC endpoint exploded');
         return { status: 'not-found' as const };
@@ -517,6 +517,70 @@ describe('GH#2270 proof-first chain dispatcher', () => {
     expect((await publisher.getStatus(second.jobId))?.status).toBe('accepted');
     // The one that threw keeps its hold and is asked again next tick.
     expect(isHeldForChainProof(expectFailed(await publisher.getStatus(first.jobId)))).toBe(true);
+  });
+
+  it('carries the recorded nonce through the publish result into a later held failure', async () => {
+    // The nonce is only ever known pre-send, and every transition after it REPLACES the broadcast
+    // metadata wholesale. Without preservation the job reaches 'included' with a hash and no way
+    // to prove its absence, so a later failure would be held forever with nothing to resolve it.
+    const publisher = dispatcher({ status: 'not-found' });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const walletId = 'wallet-nonce-carry';
+    await publisher.claimNext(walletId);
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', {
+      broadcast: { txHash: TX_HASH, walletId, nonce: 41 },
+    });
+
+    // A tentative result: the executor returned and the job moves to 'included'.
+    await publisher.recordPublishResult(jobId, {
+      kaId: 11n,
+      ual: 'did:dkg:mock:31337/0xdef/11',
+      merkleRoot: new Uint8Array([0xde, 0xf0]),
+      kaManifest: [],
+      status: 'tentative' as const,
+      onChainResult: {
+        batchId: 11n, startKAId: 11n, endKAId: 11n,
+        txHash: TX_HASH, blockNumber: 77, blockTimestamp: 1_700_000_077,
+        publisherAddress: '0x2222222222222222222222222222222222222222',
+      },
+    } as never);
+
+    const included = await publisher.getStatus(jobId);
+    expect(included?.status).toBe('included');
+    expect(included?.broadcast?.nonce).toBe(41);
+
+    // Now fail it from 'included' and confirm the resolver is handed the nonce.
+    const seen: Array<number | undefined> = [];
+    const resolving = createPublisher({
+      chainProofResolver: async (lookup) => {
+        seen.push(lookup.nonce);
+        return { status: 'not-found' as const };
+      },
+      knowledgeAssetVmPublishRecoveryResolver: async () => kaVmRecoveryEvidence(),
+    });
+    await resolving.recordPublishFailure(jobId, {
+      error: new Error('on-chain confirmation mismatch'),
+      failedFromState: 'included',
+      errorPayloadRef: `urn:dkg:test:error:${jobId}`,
+    });
+
+    expect(await resolving.recover()).toBe(1);
+    expect(seen).toEqual([41]);
+    expect((await resolving.getStatus(jobId))?.status).toBe('accepted');
+  });
+
+  it('rejects a config that still carries the pre-rename resolver key', async () => {
+    // The rename is invisible to JavaScript and BOTH halves changed — the key and the callback's
+    // signature — so a consumer that missed it would construct a publisher with no resolver and
+    // lose chain recovery in silence. It fails at construction instead, naming the replacement.
+    expect(() => createPublisher({
+      chainRecoveryResolver: async () => ({ status: 'not-found' as const }),
+    } as never)).toThrow(/chainRecoveryResolver was removed in GH#2270 PR-3.*chainProofResolver/s);
+
+    // The new key constructs normally — so the row above cannot pass by rejecting everything.
+    expect(() => createPublisher({ chainProofResolver: async () => ({ status: 'inconclusive' as const }) }))
+      .not.toThrow();
   });
 
   it('never touches a failed job that is not held', async () => {

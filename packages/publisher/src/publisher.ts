@@ -1,5 +1,5 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
+import type { OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { TrustedCatalogTripleKeys } from './catalog-trust.js';
 
@@ -238,8 +238,23 @@ export interface PublishOptions {
    * revealing others). Off by default — the flat hash is simpler and cheaper.
    */
   entityProofs?: boolean;
-  /** Optional callback invoked at each phase boundary for instrumentation. */
+  /**
+   * Optional callback invoked at each phase boundary for INSTRUMENTATION ONLY.
+   *
+   * GH#2270 PR-3 r2 — nothing durable may hang off this. Phases are strings on a 2-argument
+   * callback with no schema, so a listener that needed a fact had to parse it back out of a
+   * name and depend on emission order; `onBeforeBroadcast` below is where a durability hook
+   * belongs.
+   */
   onPhase?: PhaseCallback;
+  /**
+   * GH#2270 PR-3 r2 — the durable pre-send write-ahead boundary, typed and awaited.
+   *
+   * Invoked with the SIGNED transaction's identity strictly before it goes on the wire, and
+   * fail-closed: a throw aborts the broadcast with the transaction still local. A caller that
+   * cannot persist the signal therefore never has one on chain it does not know about.
+   */
+  onBeforeBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /**
    * Skip the publisher-level context-graph graph creation/ensure step.
    * Only callers that already validated the target context graph should set

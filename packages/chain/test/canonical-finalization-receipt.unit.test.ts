@@ -220,4 +220,40 @@ describe('canonical finalization receipt capability', () => {
     expect(chain.parseV10PublishReceipt).not.toHaveBeenCalled();
     expect(chain.getBlockTimestamp).toHaveBeenCalledWith(123, {});
   });
+
+  it('resolvePublishTransaction projects the SAME read, V9 fallback included [GH#2270]', async () => {
+    // The three publish-resolution surfaces are projections of one receipt read, and this is the
+    // row that holds them to it: `resolveCanonicalFinalizationReceipt` above already proves the V9
+    // fallback works, so a `resolvePublishTransaction` that quietly grew its own receipt walk
+    // would answer `unrecognized` for the very same receipt this one calls `confirmed`.
+    const storageInterface = new ethers.Interface(loadAbi('KnowledgeAssetsStorage'));
+    const storageAddress = '0x3333333333333333333333333333333333333333';
+    const legacyBatchId = 19n;
+    const encodedBatch = storageInterface.encodeEventLog(
+      storageInterface.getEvent('KnowledgeBatchCreated')!,
+      [legacyBatchId, PUBLISHER, ethers.hexlify(MERKLE_ROOT), 1024n, 1n, legacyBatchId, legacyBatchId, 1n, 2n, 100n, false],
+    );
+    const receipt = {
+      hash: TX_HASH,
+      status: 1,
+      blockNumber: 123,
+      blockHash: BLOCK_HASH,
+      index: 4,
+      logs: [{ address: storageAddress, topics: encodedBatch.topics, data: encodedBatch.data }],
+    };
+    const chain = adapter({
+      contracts: {
+        knowledgeAssetsStorage: { interface: storageInterface, target: storageAddress },
+      },
+      getTransactionReceiptWithFailover: vi.fn(async () => receipt),
+    });
+
+    const resolution = await chain.resolvePublishTransaction(TX_HASH);
+
+    expect(resolution.status).toBe('confirmed');
+    expect(resolution.status).not.toBe('unrecognized');
+    expect(resolution.status === 'confirmed' ? resolution.publish.batchId : null).toBe(legacyBatchId);
+    // And the cheaper legacy surface projects the same read to the same publish.
+    expect(await chain.resolvePublishByTxHash(TX_HASH)).toMatchObject({ batchId: legacyBatchId });
+  });
 });

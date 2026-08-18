@@ -1,5 +1,5 @@
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
 import type { AssertionSeal } from '@origintrail-official/dkg-core';
@@ -2038,6 +2038,7 @@ export class DKGPublisher implements Publisher {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       onPhase?: PhaseCallback;
+      onBeforeBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
       publishContextGraphId?: string;
       /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
@@ -2238,6 +2239,7 @@ export class DKGPublisher implements Publisher {
       ...(graphPublish ? { privateQuads } : {}),
       operationCtx: ctx,
       onPhase: options?.onPhase,
+      onBeforeBroadcast: options?.onBeforeBroadcast,
       publisherPeerId: options?.publisherPeerId,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
@@ -2583,6 +2585,7 @@ export class DKGPublisher implements Publisher {
       operationCtx,
       entityProofs = false,
       onPhase,
+      onBeforeBroadcast,
     } = options;
     // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
     // namespace subjects. The bypass is keyed on a module-private
@@ -3810,16 +3813,14 @@ export class DKGPublisher implements Publisher {
           // already bracketed by `chain:writeahead`), and keeping
           // starts balanced by ends preserves the "every start has a
           // matching end" golden-sequence invariant.
-          // GH#2270 PR-3 r1 — the NONCE breadcrumb goes first, so the write-ahead listener has it
-          // in hand when the hash phase triggers its single durable write. It rides the same
-          // `chain:txsigned:` family on purpose: every existing consumer already ignores that
-          // family wholesale (the golden phase-sequence tests strip it by prefix) and the hash
-          // parser is anchored on `tx-`, so this cannot be mistaken for a second transaction.
-          if (info?.nonce !== undefined) {
-            const noncePhase = `chain:txsigned:nonce-${info.nonce}`;
-            await emitPhase(noncePhase, 'start');
-            await emitPhase(noncePhase, 'end');
+          // GH#2270 PR-3 r2 — the DURABLE boundary, first and awaited. A throw here propagates out
+          // of the adapter's onBroadcast hook and aborts the send with the transaction still
+          // local, so a caller that could not persist the signal never has one on the wire.
+          if (info?.txHash) {
+            await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
           }
+          // Everything below is instrumentation: the same breadcrumb WAL listeners have had since
+          // PR #241, now carrying nothing anyone depends on.
           if (info?.txHash) {
             const phase = `chain:txsigned:tx-${info.txHash}`;
             await emitPhase(phase, 'start');
@@ -4509,6 +4510,7 @@ export class DKGPublisher implements Publisher {
   }
 
   async update(kaId: bigint, options: PublishOptions): Promise<PublishResult> {
+    const onBeforeBroadcast = options.onBeforeBroadcast;
     const { contextGraphId, quads, privateQuads = [], operationCtx, onPhase } = options;
     const graphUpdate = resolveGraphScopedPublishDescriptor(options);
     if (graphUpdate) {
@@ -5199,11 +5201,9 @@ export class DKGPublisher implements Publisher {
       // phase first so WAL listeners record the signed-but-not-yet-
       // broadcast update tx identity, then the generic
       // `chain:writeahead:start` for legacy consumers.
-      // GH#2270 PR-3 r1 — nonce breadcrumb first, exactly as the publish path above.
-      if (info?.nonce !== undefined) {
-        const noncePhase = `chain:txsigned:nonce-${info.nonce}`;
-        await emitPhase(noncePhase, 'start');
-        await emitPhase(noncePhase, 'end');
+      // GH#2270 PR-3 r2 — durable boundary first and awaited, exactly as the publish path above.
+      if (info?.txHash) {
+        await onBeforeBroadcast?.({ txHash: info.txHash, nonce: info.nonce });
       }
       if (info?.txHash) {
         const phase = `chain:txsigned:tx-${info.txHash}`;
