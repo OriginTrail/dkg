@@ -6,6 +6,7 @@ import type {
   BatchMintResult,
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
+  ChainReadOptions,
   CreateKCParams,
   UpdateKCParams,
   TxResult,
@@ -30,6 +31,7 @@ import type {
   ShardingTableNode,
   PcaContracts,
   PcaRpcMethod,
+  PublishTransactionResolution,
   VerifyACKIdentityResult,
   KnowledgeAssetUpdateContext,
 } from './chain-adapter.js';
@@ -54,6 +56,16 @@ interface MockBatch {
   kaCount: number;
   publisherAddress: string;
 }
+
+/**
+ * GH#2270 — the states a transaction can be in that the mock's publish event
+ * log cannot express on its own.
+ *
+ * - `pending`  the node accepted it; no receipt yet.
+ * - `reverted` mined with a failure receipt.
+ * - `mined`    mined and successful, but carrying no publish event.
+ */
+type MockTransactionState = 'pending' | 'reverted' | 'mined';
 
 interface MockKnowledgeCollection {
   merkleRoot: Uint8Array;
@@ -169,6 +181,15 @@ export class MockChainAdapter implements ChainAdapter {
   private collections = new Map<bigint, MockKnowledgeCollection>();
   private contextGraphRegistry = new Map<string, Record<string, string>>();
   private events: ChainEvent[] = [];
+  /**
+   * GH#2270 — transactions this mock knows about that its event log does NOT
+   * represent as a publish. Without it the mock can only say "confirmed
+   * publish" or "never heard of it", so every test of the recovery path would
+   * read a mid-flight transaction as proven absent — the exact fabrication the
+   * tri-state exists to prevent. Populated only through
+   * {@link __setTransactionState}.
+   */
+  private transactionStates = new Map<string, MockTransactionState>();
   /** Reserved UAL ranges per publisher address for verifyPublisherOwnsRange */
   private reservedRangesByPublisher = new Map<string, Array<{ startId: bigint; endId: bigint }>>();
   /** Publisher addresses this mock is explicitly allowed to attribute V10 publishes to. */
@@ -381,6 +402,38 @@ export class MockChainAdapter implements ChainAdapter {
     };
   }
 
+  async resolvePublishTransaction(
+    txHash: string,
+    _options: ChainReadOptions = {},
+  ): Promise<PublishTransactionResolution> {
+    const publish = await this.resolvePublishByTxHash(txHash);
+    if (publish) return { status: 'confirmed', publish };
+
+    switch (this.transactionStates.get(txHash)) {
+      case 'pending': return { status: 'pending' };
+      case 'reverted': return { status: 'reverted' };
+      case 'mined': return { status: 'unrecognized' };
+      // Nothing in the event log, nothing declared: the mock genuinely does not
+      // have this transaction, which is what `not-found` asserts.
+      default: return { status: 'not-found' };
+    }
+  }
+
+  /**
+   * Test seam (double-underscore convention, off the ChainAdapter interface) —
+   * declare a transaction the mock knows about but did not mine as a publish.
+   * A hash left undeclared and absent from the event log reads as `not-found`,
+   * the mock's only proven absence.
+   */
+  __setTransactionState(txHash: string, state: MockTransactionState): void {
+    this.transactionStates.set(txHash, state);
+  }
+
+  /** Test seam — undo {@link __setTransactionState} for one hash. */
+  __clearTransactionState(txHash: string): void {
+    this.transactionStates.delete(txHash);
+  }
+
   async resolveCanonicalFinalizationReceipt(
     txHash: string,
     options: CanonicalFinalizationReceiptReadOptions = {},
@@ -393,7 +446,16 @@ export class MockChainAdapter implements ChainAdapter {
       || !Number.isSafeInteger(txIndex)
       || Number(txIndex) < 0
     ) {
-      return { status: 'not-found' };
+      // GH#2270 — the same seam `resolvePublishTransaction` reads, mapped onto
+      // this surface's vocabulary. `rejected` covers both a failure receipt and
+      // a mined tx carrying no parseable publish, exactly as the EVM adapter
+      // fuses them here.
+      switch (this.transactionStates.get(txHash)) {
+        case 'pending': return { status: 'pending' };
+        case 'reverted':
+        case 'mined': return { status: 'rejected' };
+        default: return { status: 'not-found' };
+      }
     }
     const blockHash = mockBlockHash(publish.blockNumber);
     if (

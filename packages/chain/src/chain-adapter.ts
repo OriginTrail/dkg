@@ -257,6 +257,35 @@ export type CanonicalFinalizationReceiptResolution =
   | { status: 'rejected' }
   | { status: 'not-found' };
 
+/**
+ * GH#2270 — what the chain says about a publish transaction, without fusing
+ * "we have no proof" into "it did not happen".
+ *
+ * `resolvePublishByTxHash` answers `OnChainPublishResult | null`, and that one
+ * `null` stands for five different chain facts: a mined-but-reverted tx, a
+ * mined tx carrying no publish this adapter can parse, a broadcast tx still
+ * waiting to be mined, a tx the node has never heard of, and an adapter whose
+ * publish contracts are not wired up. Recovery must never resend on the
+ * strength of that `null`. Only `not-found` — the node was asked for the
+ * TRANSACTION, not merely its receipt, and does not have it — is evidence of
+ * absence.
+ */
+export type PublishTransactionResolution =
+  /** Mined, successful, and carries a publish this adapter parsed. */
+  | { status: 'confirmed'; publish: OnChainPublishResult }
+  /** Mined with a failure receipt: proven ineffective, and permanently so. */
+  | { status: 'reverted' }
+  /**
+   * Mined and successful, but carrying no publish event this adapter
+   * recognizes. NOT proof that no publish happened — an adapter with unwired
+   * publish contracts lands here too.
+   */
+  | { status: 'unrecognized' }
+  /** The node holds the transaction and has not mined it yet. Never absence. */
+  | { status: 'pending' }
+  /** The node has neither the receipt nor the transaction: the only proven absence. */
+  | { status: 'not-found' };
+
 export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
   /** Persisted block identity supplied during replay canonicality checks. */
   expectedBlockHash?: string;
@@ -1052,6 +1081,28 @@ export interface ChainAdapter {
     txHash: string,
     options?: ChainReadOptions,
   ): Promise<OnChainPublishResult | null>;
+
+  /**
+   * GH#2270 — the same lookup as {@link resolvePublishByTxHash}, answering with
+   * the chain fact rather than with `null`. Recovery uses this one: it is the
+   * only surface on which "the node does not have this transaction" can be told
+   * apart from "the node has it and has not mined it yet", and a resend is safe
+   * on the first but a double-publish on the second.
+   *
+   * It is a SECOND entry point rather than a widened `resolvePublishByTxHash`
+   * because that method has a consumer outside recovery — durable-sync
+   * graph-scoped materialization, which wants the publish or nothing and has no
+   * use for the other four states. Widening it would push a five-way switch into
+   * a subsystem that does not have the question, for no gain. The two are not
+   * duplicates: `resolvePublishByTxHash` stays receipt-only (one RPC round trip,
+   * which is all it needs), and the extra `eth_getTransaction` that makes
+   * `not-found` mean something is paid only here. `resolveCanonicalFinalizationReceipt`
+   * already draws the same line for the named-KA lane.
+   */
+  resolvePublishTransaction?(
+    txHash: string,
+    options?: ChainReadOptions,
+  ): Promise<PublishTransactionResolution>;
 
   /**
    * Recovery-only receipt capability with mandatory canonical ordering.

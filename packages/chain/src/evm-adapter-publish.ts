@@ -21,6 +21,7 @@ import type {
   OnChainPublishResult,
   PublisherPublishPlan,
   PublisherPublishPlanRequest,
+  PublishTransactionResolution,
   ReservedRange,
   TxResult,
   V10UpdateKAParams,
@@ -457,20 +458,8 @@ export class PublishMethods extends EVMChainAdapterBase {
     await this.init();
 
     try {
-      const receipt = await this.getTransactionReceiptWithFailover(txHash, {
-        signal: options.signal,
-      });
-      if (!receipt || receipt.status !== 1) return null;
-
-      const v10 = this.contracts.knowledgeAssetStorage
-        ? await this.parseV10PublishReceipt(receipt, options)
-        : null;
-      if (v10) return v10;
-
-      const v9 = this.contracts.knowledgeAssetsStorage
-        ? await this.parseV9PublishReceipt(receipt, options)
-        : null;
-      return v9;
+      const state = await this.resolvePublishReceiptState(txHash, options);
+      return state.status === 'confirmed' ? state.publish : null;
     } catch (err: any) {
       const msg = err?.message ?? '';
       if (msg.includes('could not find') || msg.includes('not found') || msg.includes('unknown transaction')) {
@@ -478,6 +467,59 @@ export class PublishMethods extends EVMChainAdapterBase {
       }
       throw err;
     }
+  }
+
+  /**
+   * GH#2270 — the un-collapsed form of {@link resolvePublishByTxHash}.
+   *
+   * The extra `eth_getTransaction` round trip fires ONLY when there is no
+   * receipt, and it is what makes `not-found` mean something: without it a
+   * missing receipt is indistinguishable from a transaction sitting in the
+   * mempool, and recovery would resend a publish that is about to be mined.
+   * `resolvePublishByTxHash` keeps its cheaper receipt-only path (it discards
+   * every non-confirmed state anyway).
+   *
+   * A lookup failure throws rather than resolving to a status: an RPC error is
+   * an absence of information, never information about an absence.
+   */
+  async resolvePublishTransaction(
+    txHash: string,
+    options: ChainReadOptions = {},
+  ): Promise<PublishTransactionResolution> {
+    await this.init();
+
+    const state = await this.resolvePublishReceiptState(txHash, options);
+    if (state.status !== 'no-receipt') return state;
+
+    const transaction = await this.getTransactionWithFailover(txHash, options);
+    return transaction ? { status: 'pending' } : { status: 'not-found' };
+  }
+
+  /**
+   * Everything the RECEIPT alone can settle. `no-receipt` is deliberately not a
+   * `PublishTransactionResolution` member: on its own it is not a chain fact
+   * about the publish, and only the caller that follows it with a transaction
+   * lookup may turn it into `pending` or `not-found`.
+   */
+  private async resolvePublishReceiptState(
+    txHash: string,
+    options: ChainReadOptions,
+  ): Promise<PublishTransactionResolution | { status: 'no-receipt' }> {
+    const receipt = await this.getTransactionReceiptWithFailover(txHash, {
+      signal: options.signal,
+    });
+    if (!receipt) return { status: 'no-receipt' };
+    if (receipt.status !== 1) return { status: 'reverted' };
+
+    const v10 = this.contracts.knowledgeAssetStorage
+      ? await this.parseV10PublishReceipt(receipt, options)
+      : null;
+    if (v10) return { status: 'confirmed', publish: v10 };
+
+    const v9 = this.contracts.knowledgeAssetsStorage
+      ? await this.parseV9PublishReceipt(receipt, options)
+      : null;
+    return v9 ? { status: 'confirmed', publish: v9 } : { status: 'unrecognized' };
   }
 
   async resolveCanonicalFinalizationReceipt(
