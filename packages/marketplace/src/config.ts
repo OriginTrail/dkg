@@ -74,6 +74,12 @@ export interface MarketplaceConfig {
    *  this context graph (the reviewed HTTP front is unchanged; the lane tunnels
    *  it over shared-memory gossip). Absent ⇒ HTTP-only, no lane. */
   laneContextGraphId?: string;
+  /** transports the signed quote ADVERTISES (["direct"], ["lane"], or both).
+   *  Absent ⇒ ["direct","lane"] (the historical default). Found by Hermes
+   *  (event 833d6ef0): this field was silently dropped at load, so a
+   *  lane-only seller could not produce an honest quote — the quote claimed
+   *  a direct endpoint that was deliberately not exposed. */
+  transports?: Array<"direct" | "lane">;
   /** the node's own loopback API base + token for lane self-calls (defaults
    *  derived at mount from ctx). */
   nodeToken?: string;
@@ -99,6 +105,14 @@ export function loadMarketplaceConfig(dkgHome: string): MarketplaceConfig {
       rpcUrl: typeof raw.rpcUrl === "string" ? raw.rpcUrl : undefined,
       tracContract: typeof raw.tracContract === "string" ? raw.tracContract : undefined,
       laneContextGraphId: typeof raw.laneContextGraphId === "string" ? raw.laneContextGraphId : undefined,
+      // only known transport names survive; an empty/invalid list ⇒ field
+      // absent ⇒ historical default (never a quote advertising nothing)
+      transports: Array.isArray(raw.transports)
+        ? (() => {
+            const t = raw.transports.filter((x): x is "direct" | "lane" => x === "direct" || x === "lane");
+            return t.length > 0 ? t : undefined;
+          })()
+        : undefined,
       nodeToken: typeof raw.nodeToken === "string" ? raw.nodeToken : undefined,
     };
   } catch {

@@ -130,7 +130,7 @@ export function buildV3Quote(deps: FrontDeps): Record<string, unknown> {
       // v3.5: transports the offering serves + the canonical Model KA it
       // references. The UI renders ENDPOINTS only from this signed quote —
       // never from KA literals (CLAUDE.md §7; kills v3's stale-apiBase class).
-      transports: (deps.cfg as { transports?: string[] }).transports ?? ["direct", "lane"],
+      transports: deps.cfg.transports ?? ["direct", "lane"],
       directUrl: deps.cfg.apiBase ?? null,
       modelRef: modelKaUrn(modelKaFromBinding(ob)),
       servingSettings:

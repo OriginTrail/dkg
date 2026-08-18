@@ -170,6 +170,34 @@ console.log("═══ E. wire-SSE streaming drill (signed leg binds the exact f
   await client.countersign(leg.legId);
 }
 
+console.log("═══ F. lane-only quote honesty (Hermes 833d6ef0: transports dropped at load) ═══");
+{
+  const { loadMarketplaceConfig } = await import(join(DIST, "config.js"));
+  // config load preserves transports and filters junk
+  const cfgHome = mkdtempSync(join(tmpdir(), "v35-cfg-"));
+  mkdirSync(join(cfgHome, "marketplace"), { recursive: true });
+  writeFileSync(join(cfgHome, "marketplace/config.json"), JSON.stringify({
+    enabled: true, offerings: [], transports: ["lane", "bogus", 42],
+  }));
+  const loaded = loadMarketplaceConfig(cfgHome);
+  ok("loadMarketplaceConfig preserves transports (junk filtered)", JSON.stringify(loaded.transports) === '["lane"]', JSON.stringify(loaded.transports));
+  const cfgHome2 = mkdtempSync(join(tmpdir(), "v35-cfg-"));
+  mkdirSync(join(cfgHome2, "marketplace"), { recursive: true });
+  writeFileSync(join(cfgHome2, "marketplace/config.json"), JSON.stringify({ enabled: true, offerings: [] }));
+  ok("absent transports stays absent (historical default applies at quote)", loadMarketplaceConfig(cfgHome2).transports === undefined);
+
+  // a lane-only seller's SIGNED quote advertises exactly ["lane"]
+  deps.cfg.transports = ["lane"];
+  const tRes = await fetch(base + "/terms");
+  const tBody = await tRes.json();
+  const adv = tBody.quote.offerings[0].transports;
+  ok("lane-only cfg → quote advertises exactly [\"lane\"]", tRes.status === 402 && JSON.stringify(adv) === '["lane"]', JSON.stringify(adv));
+  delete deps.cfg.transports;
+  const tRes2 = await fetch(base + "/terms");
+  const adv2 = (await tRes2.json()).quote.offerings[0].transports;
+  ok("no transports cfg → historical default [\"direct\",\"lane\"]", JSON.stringify(adv2) === '["direct","lane"]', JSON.stringify(adv2));
+}
+
 llama.close(); srv.close();
 console.log(`\n${pass}/${pass + fail} v3.5 drills pass`);
 process.exit(fail ? 1 : 0);
